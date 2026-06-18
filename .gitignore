@@ -3,3 +3,8 @@
 !/README.md
 !/skills/
 !/skills/**
+!/view/
+!/view/**
+
+/skills/**/__pycache__/
+/view/**/__pycache__/
