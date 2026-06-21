@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import ssl
@@ -72,6 +73,52 @@ def load_metadata(review_root: Path) -> dict[str, dict[str, Any]]:
     return papers
 
 
+STRUCTURED_TAG_KEYS = [
+    "product",
+    "substrate",
+    "catalyst_or_method",
+    "organometallic_partner",
+    "ligand_or_chiral_source",
+    "leaving_group",
+    "reaction_type",
+    "document_scope",
+]
+
+
+def load_classification_rules(review_root: Path) -> dict[str, dict[str, list[str]]]:
+    labels = {key: {} for key in STRUCTURED_TAG_KEYS}
+    path = review_root / "allene_classification_rules.py"
+    if not path.exists():
+        return labels
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    rules_node = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "rules":
+                    rules_node = node.value
+                    break
+        if rules_node is not None:
+            break
+    if rules_node is None:
+        return labels
+    for item in ast.literal_eval(rules_node):
+        if not isinstance(item, tuple) or len(item) < 3:
+            continue
+        label, category, aliases = str(item[0]).strip(), str(item[1]).strip(), item[2]
+        if category in labels and label:
+            labels[category][label] = [str(alias).strip() for alias in aliases if str(alias).strip()]
+    return labels
+
+
+def markdown_signal(meta: dict[str, Any], max_chars: int = 12000) -> str:
+    source_paths = meta.get("source_paths") or {}
+    path = Path(str(source_paths.get("markdown") or ""))
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8", errors="ignore")[:max_chars]
+
+
 def tokenize(text: str) -> list[str]:
     return dedupe([w.lower() for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9'′\\-]*", text or "") if len(w) >= 3])
 
@@ -83,16 +130,16 @@ def infer_keywords(topic: str, user_keywords: list[str]) -> list[dict[str, Any]]
         ("allenes", "product", ["allene", "allenes"]),
         ("allene synthesis", "reaction_type", ["allene synthesis", "synthesis of allene"]),
         ("propargylic alcohols", "substrate", ["propargylic alcohol"]),
-        ("propargylic derivatives", "substrate", ["propargylic derivative", "propargyl"]),
+        ("propargylic halides", "substrate", ["propargylic derivative", "propargyl halide", "propargyl bromide", "propargylic bromide"]),
         ("propargylic acetates", "substrate", ["acetate"]),
         ("propargylic carbonates", "substrate", ["carbonate"]),
         ("propargylic phosphates", "substrate", ["phosphate"]),
-        ("propargyl bromides", "substrate", ["bromide"]),
-        ("propargyl sulfides", "substrate", ["sulfide"]),
-        ("propargyl gem-dichlorides", "substrate", ["dichloride", "gem-dichloride"]),
-        ("SN2' substitution", "reaction_type", ["sn2", "substitution"]),
-        ("allenylation", "reaction_type", ["allenylation"]),
-        ("copper catalysis or mediation", "catalyst_or_method", ["copper", "cu", "cu(i)", "cu(iii)", "cubr", "cui", "cuoac", "cucl2", "icycucl", "organocopper", "cuprate"]),
+        ("propargylic halides", "substrate", ["bromide"]),
+        ("propargylic sulfinates and sulfonates", "substrate", ["sulfide", "sulfinate", "sulfonate", "tosylate"]),
+        ("propargylic dichlorides", "substrate", ["dichloride", "gem-dichloride"]),
+        ("propargylic substitution and cross-coupling", "reaction_type", ["sn2", "substitution"]),
+        ("propargylic substitution and cross-coupling", "reaction_type", ["allenylation"]),
+        ("copper catalysis", "catalyst_or_method", ["copper", "cu", "cu(i)", "cu(iii)", "cubr", "cui", "cuoac", "cucl2", "icycucl", "organocopper", "cuprate"]),
         ("palladium catalysis", "catalyst_or_method", ["palladium", "pd", "pd(0)", "pd(ii)", "palladium species", "propargylpalladium", "allenylpalladium"]),
         ("zinc-mediated methods", "catalyst_or_method", ["zinc", "zn", "zn(ii)", "zni2", "znbr2", "zncl2", "organozinc"]),
         ("cadmium-mediated methods", "catalyst_or_method", ["cadmium", "cd", "cd(ii)", "cdi2"]),
@@ -103,7 +150,7 @@ def infer_keywords(topic: str, user_keywords: list[str]) -> list[dict[str, Any]]
         ("copper-zinc bimetallic catalysis", "catalyst_or_method", ["copper-zinc", "copper/zinc", "cu/zn", "cu+/zn2+", "cubr/znbr2", "bimetallic approach", "bimetallic catalysis"]),
         ("photoredox catalysis", "catalyst_or_method", ["photoredox", "visible-light"]),
         ("asymmetric synthesis", "reaction_type", ["asymmetric", "enantioselective", "enantiospecific"]),
-        ("radical pathway", "mechanism", ["radical"]),
+        ("radical and single-electron allene synthesis", "reaction_type", ["radical"]),
         ("Meyer-Schuster rearrangement", "reaction_type", ["meyer-schuster"]),
     ]
     candidates: list[dict[str, Any]] = []
@@ -114,7 +161,7 @@ def infer_keywords(topic: str, user_keywords: list[str]) -> list[dict[str, Any]]
         if token in {"propargylic", "allene", "allenes", "synthesis", "derivatives"}:
             continue
         if len(token) > 6:
-            candidates.append({"keyword": token, "category": "core_topic", "reason": "topic token"})
+            candidates.append({"keyword": token, "category": "reaction_type", "reason": "topic token"})
     return unique_keyword_dicts(candidates)
 
 
@@ -162,30 +209,30 @@ def classify_keyword(keyword: str) -> str:
         return "catalyst_or_method"
     if any(x in low for x in ["sn2", "rearrangement", "allenylation", "synthesis"]):
         return "reaction_type"
-    return "core_topic"
+    return "reaction_type"
 
 
-FIELD_WEIGHTS = {
-    "title": 7.0,
-    "human_tags": 6.0,
-    "keywords": 5.0,
-    "llm_tags": 4.2,
-    "topic_category": 4.0,
-    "reaction_category": 3.8,
-    "mechanism_category": 3.0,
-    "abstract": 2.7,
-    "journal": 0.5,
+STRUCTURED_TAG_WEIGHTS = {
+    "product": 5.0,
+    "substrate": 5.0,
+    "catalyst_or_method": 4.4,
+    "organometallic_partner": 4.0,
+    "ligand_or_chiral_source": 3.8,
+    "leaving_group": 3.8,
+    "reaction_type": 4.8,
+    "document_scope": 1.5,
 }
 
 
-def collect_text(meta: dict[str, Any], field: str) -> str:
-    if field == "human_tags":
-        value = meta.get("human_tags") or []
-    else:
-        value = field_value(meta.get(field), "")
-    if isinstance(value, list):
-        return " ".join(str(v) for v in value)
-    return str(value or "")
+def structured_tag_text(meta: dict[str, Any], tag_key: str, classification_rules: dict[str, dict[str, list[str]]]) -> str:
+    structured = field_value(meta.get("structured_tags"), {})
+    if not isinstance(structured, dict):
+        return ""
+    value = str(structured.get(tag_key) or "")
+    if value.strip().lower() == "not specified":
+        return ""
+    aliases = classification_rules.get(tag_key, {}).get(value, [])
+    return " ".join([value] + aliases)
 
 
 def match_score(term: str, text: str) -> float:
@@ -209,14 +256,19 @@ def match_score(term: str, text: str) -> float:
     return 0.0
 
 
-def score_local_paper(meta: dict[str, Any], keyword: str, topic_terms: list[str]) -> dict[str, Any]:
+def score_local_paper(
+    meta: dict[str, Any],
+    keyword: str,
+    topic_terms: list[str],
+    classification_rules: dict[str, dict[str, list[str]]],
+) -> dict[str, Any]:
     matched_fields: list[str] = []
     matched_terms: list[str] = []
     reasons: list[str] = []
     raw = 0.0
     direct_raw = 0.0
-    for field, weight in FIELD_WEIGHTS.items():
-        text = collect_text(meta, field)
+    for field, weight in STRUCTURED_TAG_WEIGHTS.items():
+        text = structured_tag_text(meta, field, classification_rules)
         s = match_score(keyword, text)
         if s > 0:
             contribution = s * weight
@@ -224,17 +276,23 @@ def score_local_paper(meta: dict[str, Any], keyword: str, topic_terms: list[str]
             direct_raw += contribution
             matched_fields.append(field)
             matched_terms.append(keyword)
-            reasons.append(f"{field} matched keyword")
+            reasons.append(f"structured_tags.{field} matched keyword")
         topic_hits = sum(1 for term in topic_terms if match_score(term, text) > 0)
         if topic_hits and s > 0:
             raw += min(topic_hits * 0.15, 0.9)
+    source_text = " ".join(
+        [
+            str(field_value(meta.get("title"), "")),
+            markdown_signal(meta),
+        ]
+    )
+    source_signal = match_score(keyword, source_text)
+    if source_signal > 0 and direct_raw > 0:
+        raw += min(source_signal * 0.8, 0.8)
+        reasons.append("source text confirms keyword")
     year = field_value(meta.get("year"))
-    if isinstance(year, int) and year >= 2020:
-        raw += 0.6
     source_paths = meta.get("source_paths") or {}
-    if source_paths.get("pdf") and source_paths.get("markdown"):
-        raw += 0.5
-    normalized = min(round(raw / 13.0, 4), 1.0)
+    normalized = min(round(raw / 8.0, 4), 1.0)
     if normalized >= 0.65:
         role = "core_candidate"
     elif normalized >= 0.35:
@@ -262,14 +320,19 @@ def score_local_paper(meta: dict[str, Any], keyword: str, topic_terms: list[str]
     }
 
 
-def local_search_by_keyword(papers: dict[str, dict[str, Any]], keywords: list[dict[str, Any]], topic: str) -> list[dict[str, Any]]:
+def local_search_by_keyword(
+    papers: dict[str, dict[str, Any]],
+    keywords: list[dict[str, Any]],
+    topic: str,
+    classification_rules: dict[str, dict[str, list[str]]],
+) -> list[dict[str, Any]]:
     topic_terms = tokenize(topic)
     grouped: list[dict[str, Any]] = []
     for kw in keywords:
         if not kw.get("keep", True):
             continue
         keyword = kw["keyword"]
-        results = [score_local_paper(meta, keyword, topic_terms) for meta in papers.values()]
+        results = [score_local_paper(meta, keyword, topic_terms, classification_rules) for meta in papers.values()]
         results = [r for r in results if r["direct_raw_score"] >= 1.4 and r["score"] >= 0.12]
         results.sort(key=lambda r: (r["score"], r["raw_score"], r.get("year") or 0), reverse=True)
         grouped.append({"keyword": keyword, "category": kw.get("category"), "keep": True, "local_results": results})
@@ -385,6 +448,7 @@ def selected_from_combined(combined: list[dict[str, Any]]) -> dict[str, Any]:
                 selected["web_papers"].append({**result, "matched_keyword": group["keyword"]})
     selected["local_papers"] = list(selected["local_papers"].values())
     selected["local_papers"].sort(key=lambda r: (r["best_score"], r.get("year") or 0), reverse=True)
+    selected["local_papers"] = selected["local_papers"][:30]
     return selected
 
 
@@ -427,7 +491,8 @@ def run(args: argparse.Namespace) -> int:
     keyword_set = build_keyword_set(args.topic, user_keywords)
     write_json(out_dir / "keyword_set.draft.json", keyword_set)
     papers = load_metadata(review_root)
-    local_grouped = local_search_by_keyword(papers, keyword_set["merged_keywords"], args.topic)
+    classification_rules = load_classification_rules(review_root)
+    local_grouped = local_search_by_keyword(papers, keyword_set["merged_keywords"], args.topic, classification_rules)
     write_json(out_dir / "local_results_by_keyword.json", {"project_id": project_id, "results": local_grouped})
     web_grouped = []
     if args.web_search:

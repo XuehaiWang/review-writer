@@ -1,6 +1,6 @@
 ---
 name: review-metadata-prep
-description: Prepare a MinerU-parsed review-writing paper library for metadata review. Use when Codex needs to extract or validate paper metadata, keywords, abstracts, topic tags, and review-ready JSON files from PDF/Markdown/content_list outputs.
+description: Prepare a MinerU-parsed review-writing paper library for metadata review. Use when Codex needs to extract or validate required paper metadata and eight fixed LLM classification tags from PDF/Markdown/content_list outputs.
 ---
 
 # Review Metadata Prep
@@ -49,7 +49,22 @@ http://127.0.0.1:8765/library
 
 ## LLM Mode
 
-By default, `prepare_metadata.py` uses deterministic rules so the pipeline can run without API credentials.
+By default, `prepare_metadata.py` uses deterministic fallback rules so the pipeline can run without API credentials.
+
+For useful classification tags, use LLM mode. The LLM extracts required bibliographic fields and exactly eight structured tags:
+
+```text
+product
+substrate
+catalyst_or_method
+organometallic_partner
+ligand_or_chiral_source
+leaving_group
+reaction_type
+document_scope
+```
+
+Each tag value must be selected from `/home/ps/review-writer/allene_classification_rules.py` under the matching category, or `not specified`.
 
 To enable LLM enhancement, set:
 
@@ -64,11 +79,68 @@ python /home/ps/review-writer/skills/review-metadata-prep/scripts/prepare_metada
   --review-root /home/ps/review-writer \
   --mineru-output /home/ps/review-writer/mineru-outputs \
   --pdf-root /home/ps/review-writer/source-paper/Progargylic \
+  --discover-from-pdf-root \
+  --append-registry \
   --use-llm \
-  --model gpt-4.1-mini
+  --base-url https://naiccc.com \
+  --model gpt-5.4 \
+  --reasoning-effort high
 ```
 
 LLM extraction is constrained to the first-page blocks, title/author/abstract candidates, and early Markdown context. Do not send full papers unless explicitly needed.
+
+To refresh only the eight LLM tags on an existing library without rebuilding paper IDs or paths:
+
+```bash
+python /home/ps/review-writer/skills/review-metadata-prep/scripts/llm_retag_metadata.py \
+  --review-root /home/ps/review-writer \
+  --model gpt-5.4 \
+  --base-url https://naiccc.com \
+  --reasoning-effort high \
+  --api-key "$OPENAI_API_KEY"
+```
+
+For a full-library refresh, prefer the resumable batch runner. It processes three papers per round by default, skips already successful LLM-tagged papers, writes progress after every paper, and retries failures:
+
+```bash
+python /home/ps/review-writer/skills/review-metadata-prep/scripts/batch_llm_retag_metadata.py \
+  --review-root /home/ps/review-writer \
+  --batch-size 3 \
+  --max-attempts 5 \
+  --retry-delay 30 \
+  --sleep-seconds 0.5
+```
+
+Use `--force` only when existing successful LLM tags should be overwritten. Use `--retry-forever` only when the API failures are known to be transient.
+
+Useful options:
+
+```text
+--paper-id P001
+--limit 5
+--base-url <openai-compatible-base-url>
+--api-key <key>
+--reasoning-effort high
+--sleep-seconds 0.5
+```
+
+Outputs:
+
+```text
+review-library/metadata/llm_retag_report.json
+review-library/metadata/llm_retag_report.md
+review-library/metadata/llm_retag_batch_report.json
+review-library/metadata/llm_retag_batch_report.md
+```
+
+If old metadata files need the new `structured_tags` field before LLM retagging:
+
+```bash
+python /home/ps/review-writer/skills/review-metadata-prep/scripts/backfill_structured_tags.py \
+  --review-root /home/ps/review-writer
+```
+
+This only writes `not specified` placeholders for schema compatibility. It does not replace LLM tagging.
 
 ## Outputs
 
@@ -100,13 +172,7 @@ year
 journal
 doi
 abstract
-keywords
-llm_tags
-human_tags
-topic_category
-reaction_category
-mechanism_category
-application_category
+structured_tags
 source_paths
 extraction
 human_review
@@ -122,7 +188,7 @@ confidence
 human_checked
 ```
 
-Use `human_tags` and `human_review` for human edits. Do not overwrite human-confirmed values automatically.
+Use `human_review` for audit status and notes. Local paper retrieval uses only the eight values inside `structured_tags`; do not generate or rely on legacy `keywords`, `llm_tags`, `human_tags`, or category compatibility fields.
 
 ## Human Audit Dashboard
 
@@ -154,6 +220,11 @@ Run validation after extraction and after manual edits. Treat these as blocking 
 ```text
 missing paper_id
 missing title
+missing authors
+missing year
+missing abstract
+missing structured_tags
+missing any of the eight structured tag keys
 missing source PDF
 missing Markdown
 missing metadata JSON
@@ -163,13 +234,10 @@ invalid JSON
 Treat these as review warnings:
 
 ```text
-missing abstract
-missing authors
-missing year
 missing journal
 missing DOI
-empty keywords
-empty tags
+missing structured_tags
+structured tag value is not specified
 low confidence title
 low confidence abstract
 not human reviewed

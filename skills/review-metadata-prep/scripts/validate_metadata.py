@@ -2,14 +2,50 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import sys
 from pathlib import Path
 from typing import Any
 
 
-BLOCKING_FIELDS = ["paper_id", "slug", "title", "source_paths"]
-WARNING_FIELDS = ["authors", "year", "journal", "doi", "abstract", "keywords", "llm_tags"]
+BLOCKING_FIELDS = ["paper_id", "slug", "title", "authors", "year", "abstract", "source_paths", "structured_tags"]
+WARNING_FIELDS = ["journal", "doi"]
+STRUCTURED_TAG_KEYS = [
+    "product",
+    "substrate",
+    "catalyst_or_method",
+    "organometallic_partner",
+    "ligand_or_chiral_source",
+    "leaving_group",
+    "reaction_type",
+    "document_scope",
+]
+
+
+def load_allowed_labels(review_root: Path) -> dict[str, set[str]]:
+    labels = {key: {"not specified"} for key in STRUCTURED_TAG_KEYS}
+    path = review_root / "allene_classification_rules.py"
+    if not path.exists():
+        return labels
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    rules_node = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "rules":
+                    rules_node = node.value
+                    break
+        if rules_node is not None:
+            break
+    if rules_node is None:
+        return labels
+    for item in ast.literal_eval(rules_node):
+        if isinstance(item, tuple) and len(item) >= 2:
+            label, category = str(item[0]).strip(), str(item[1]).strip()
+            if category in labels and label:
+                labels[category].add(label)
+    return labels
 
 
 def read_json(path: Path) -> Any:
@@ -34,7 +70,7 @@ def field_value(meta: dict[str, Any], key: str) -> Any:
     return value
 
 
-def validate_one(path: Path) -> dict[str, Any]:
+def validate_one(path: Path, allowed_labels: dict[str, set[str]]) -> dict[str, Any]:
     issues: list[str] = []
     warnings: list[str] = []
     try:
@@ -61,6 +97,18 @@ def validate_one(path: Path) -> dict[str, Any]:
     title = meta.get("title")
     if not isinstance(title, dict) or not has_value(title.get("value")):
         issues.append("missing_title_value")
+    structured = meta.get("structured_tags")
+    structured_value = structured.get("value") if isinstance(structured, dict) else None
+    if not isinstance(structured_value, dict):
+        issues.append("missing_structured_tags_value")
+    else:
+        for key in STRUCTURED_TAG_KEYS:
+            if not has_value(structured_value.get(key)):
+                issues.append(f"missing_structured_tag_{key}")
+            elif str(structured_value.get(key)).strip().lower() == "not specified":
+                warnings.append(f"structured_tag_not_specified_{key}")
+            elif str(structured_value.get(key)).strip() not in allowed_labels.get(key, set()):
+                issues.append(f"invalid_structured_tag_{key}")
     source_paths = meta.get("source_paths") or {}
     if not isinstance(source_paths, dict):
         issues.append("invalid_source_paths")
@@ -137,7 +185,8 @@ def run(args: argparse.Namespace) -> int:
         print(f"ERROR: metadata directory not found: {meta_dir}", file=sys.stderr)
         return 2
     paths = sorted(meta_dir.glob("*.metadata.json"))
-    reports = [validate_one(path) for path in paths]
+    allowed_labels = load_allowed_labels(review_root)
+    reports = [validate_one(path, allowed_labels) for path in paths]
     write_reports(review_root, reports)
     failed = sum(1 for r in reports if r["status"] != "ok")
     print(f"Validated {len(reports)} metadata files; failed={failed}")

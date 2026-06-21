@@ -1,24 +1,13 @@
 ---
 name: review-writing-orchestrator
-description: Orchestrate the implemented review-writing workflow by inspecting a review project, deciding the next required skill, checking stage outputs, and pausing at human review nodes. Use when Codex needs to start, resume, or explain the current state of a review project under /home/ps/review-writer/review-projects.
+description: Orchestrate the concise review-writing workflow: discovery, fixed-field literature matrix, outline/blueprint, section-file drafting, figure redraw, merge, and final audit.
 ---
 
 # Review Writing Orchestrator
 
-Use this as the main entry skill for the review-writing workflow after the paper library has already been prepared.
+Use after the paper library metadata has been prepared.
 
-Writing-preparation skills are separate:
-
-```text
-mineru-precise-parse-review-writer
-review-metadata-prep
-```
-
-Run those only when PDFs still need MinerU parsing or metadata still needs preparation.
-
-## Main Workflow
-
-Route the project through these stage skills:
+## Workflow
 
 ```text
 1. review-topic-paper-discovery
@@ -28,13 +17,21 @@ Route the project through these stage skills:
 5. review-figure-style-redraw
 6. review-draft-merge-polish
 7. review-final-audit-release
+8. review-export-docx
 ```
 
-The workflow stops after final content/format audit and final draft release.
+## Core Contract
 
-## Status First
+```text
+Discovery: user topic -> extracted keywords -> search 8 LLM tag categories -> 20-30 papers.
+Matrix: one row per paper with title, authors, keywords, abstract, ~1000-word main_content, most_relevant_figure.
+Outline: use topic + matrix + writing-rule skill to create selected_outline.md.
+Blueprint: convert outline into section_blueprint.json with section, paragraph, paper, and figure mapping.
+Drafting: one section file per section; each paragraph normally maps to one paper and one figure/scheme/table.
+Merge: combine section files into one polished first draft.
+```
 
-For an existing project, always inspect status first:
+## Status
 
 ```bash
 python /home/ps/review-writer/skills/review-writing-orchestrator/scripts/project_status.py \
@@ -42,83 +39,19 @@ python /home/ps/review-writer/skills/review-writing-orchestrator/scripts/project
   --project-id <project_id>
 ```
 
-Use JSON output when another script or a concise machine-readable summary is useful:
+## Human Check Points
 
-```bash
-python /home/ps/review-writer/skills/review-writing-orchestrator/scripts/project_status.py \
-  --review-root /home/ps/review-writer \
-  --project-id <project_id> \
-  --json
-```
-
-Then report:
+Pause after:
 
 ```text
-completed stage
-blocking human check, if any
-next skill
-missing files that explain why the next skill is needed
+00_discovery: confirm 20-30 papers.
+01_matrix_outline: confirm literature matrix and selected_outline.md.
+01_matrix_outline/section_blueprint: confirm section/paragraph/paper/figure mapping.
+02_section_drafting: confirm section files and figure candidates.
+03_figure_redraw: confirm redrawn figures.
+04_first_draft: confirm merged first draft.
+05_final_audit: confirm final draft.
+05_final_audit (docx): download final_draft.docx and verify styling in Word.
 ```
 
-## New Project
-
-For a new review task, require:
-
-```text
-review topic
-seed keywords
-optional project_id
-```
-
-Then invoke:
-
-```text
-review-topic-paper-discovery
-```
-
-That stage creates:
-
-```text
-review-projects/<project_id>/00_discovery/
-```
-
-## Human Check Rules
-
-Pause after each major stage when the workflow is interactive:
-
-```text
-00_discovery: check keywords and selected papers at http://127.0.0.1:8765/discovery
-01_matrix_outline: choose or edit the outline, preferably by creating selected_outline.md
-01_matrix_outline/section_blueprint: check section theses, claims, paper roles, comparison logic, and wording constraints
-02_section_drafting: check section drafts and figure_candidates.json
-03_figure_redraw: compare redrawn figures with original sources
-04_first_draft: check first_draft.md at http://127.0.0.1:8765/draft
-05_final_audit: check final_draft.md and release_report.md before export
-```
-
-Do not silently move past these checks unless the user explicitly says to continue.
-
-Accept short continuation messages such as:
-
-```text
-已确认 discovery，继续
-已确认大纲，继续
-已确认章节草稿和图表候选，继续
-已确认重绘图片，继续
-已确认初稿，继续
-已确认终稿，完成
-```
-
-## Routing Rules
-
-Use the next skill reported by `project_status.py` unless the user explicitly asks to rerun a stage.
-
-If a required upstream file is missing, run the earlier missing stage instead of improvising.
-
-After `selected_outline.md` exists, run `review-section-blueprint` before section drafting. Do not derive `section_tasks.json` directly from the outline when `section_blueprint.json` is missing, unless the user explicitly asks to skip the blueprint stage.
-
-If figure redraw is intentionally skipped, say so clearly before moving to draft merge.
-
-In the normal full workflow, do not skip figures. If `figure_candidates.json` is empty, source images cannot be resolved, or `redrawn_figure_manifest.json` contains no successful redrawn figures, return to `review-section-drafting-figure-picking` or `review-figure-style-redraw` instead of producing a text-only review.
-
-Never claim a stage is complete unless its required output files exist.
+Do not skip a human check unless the user explicitly says to continue.

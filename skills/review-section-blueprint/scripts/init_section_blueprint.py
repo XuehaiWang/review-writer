@@ -68,6 +68,27 @@ def value_text(value: Any) -> str:
     return str(value)
 
 
+def paper_value(paper: dict[str, Any], key: str) -> str:
+    aliases = {
+        "product": ["product", "product_class"],
+        "substrate": ["substrate", "substrate_class"],
+        "catalyst_or_method": ["catalyst_or_method", "catalyst_logic", "activation_mode"],
+        "reaction_type": ["reaction_type", "activation_mode"],
+        "limitation": ["limitation", "main_limitation"],
+        "selectivity": ["selectivity", "selectivity_mode"],
+    }
+    for candidate in aliases.get(key, [key]):
+        value = paper.get(candidate)
+        if value:
+            return str(value)
+    structured = paper.get("structured_tags")
+    if isinstance(structured, dict):
+        value = structured.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
 def parse_outline_sections(text: str) -> list[dict[str, str]]:
     sections: list[dict[str, str]] = []
     in_outline = False
@@ -144,17 +165,16 @@ def select_rule_pack(skill_root: Path, topic: str) -> tuple[str, str]:
 def paper_blob(paper: dict[str, Any], note: dict[str, Any] | None) -> str:
     fields = [
         "title",
-        "substrate_class",
-        "activation_mode",
-        "product_class",
-        "catalyst_logic",
-        "selectivity_mode",
-        "scope_strength",
-        "main_limitation",
+        "substrate",
+        "reaction_type",
+        "product",
+        "catalyst_or_method",
+        "selectivity",
+        "limitation",
         "role_after_reading",
         "review_topic_relevance",
     ]
-    blob = " ".join(value_text(paper.get(k)) for k in fields)
+    blob = " ".join(paper_value(paper, k) or value_text(paper.get(k)) for k in fields)
     if note:
         blob += " " + value_text(note.get("why_relevant"))
         blob += " " + value_text(note.get("key_evidence"))
@@ -210,7 +230,18 @@ def infer_logic(title: str) -> str:
         return "application"
     if any(w in low for w in ["outlook", "challenge", "conclusion"]):
         return "outlook"
-    return "activation_mode"
+    return "reaction_type"
+
+
+def target_depth(title: str, selected_count: int) -> tuple[int, str]:
+    low = title.lower()
+    if any(word in low for word in ["introduction", "background"]):
+        return 3, "500-800"
+    if any(word in low for word in ["conclusion", "outlook", "future"]):
+        return 3, "500-900"
+    if selected_count >= 6:
+        return 5, "1000-1500"
+    return 4, "800-1200"
 
 
 def infer_claim_type(title: str, index: int) -> str:
@@ -229,7 +260,7 @@ def infer_claim_type(title: str, index: int) -> str:
 def common_values(papers: list[dict[str, Any]], key: str, limit: int = 3) -> list[str]:
     values: list[str] = []
     for paper in papers:
-        raw = str(paper.get(key) or "").strip()
+        raw = paper_value(paper, key).strip()
         if raw:
             values.append(raw)
     counts = Counter(values)
@@ -245,9 +276,9 @@ def join_values(values: list[str], fallback: str) -> str:
 
 
 def section_thesis(title: str, selected: list[dict[str, Any]], dominant_logic: str) -> str:
-    substrates = join_values(common_values(selected, "substrate_class"), "the assigned precursor classes")
-    activations = join_values(common_values(selected, "activation_mode"), "the assigned activation modes")
-    products = join_values(common_values(selected, "product_class"), "the target allene classes")
+    substrates = join_values(common_values(selected, "substrate"), "the assigned precursor classes")
+    activations = join_values(common_values(selected, "reaction_type"), "the assigned reaction types")
+    products = join_values(common_values(selected, "product"), "the target allene classes")
     low = title.lower()
     if "introduction" in low:
         return f"Frame the review around how propargylic alcohols and derivatives access {products}, emphasizing why precursor activation mode and substitution pattern define the field."
@@ -291,10 +322,10 @@ def claim_from_papers(section_id: str, title: str, idx: int, papers: list[dict[s
         pid = str(paper.get("paper_id"))
         use_for = [
             k.replace("_", " ")
-            for k in ["substrate_class", "activation_mode", "product_class", "selectivity_mode", "main_limitation"]
-            if paper.get(k)
+            for k in ["substrate", "reaction_type", "product", "selectivity", "limitation"]
+            if paper_value(paper, k)
         ][:3]
-        caveat = str(paper.get("main_limitation") or "")
+        caveat = paper_value(paper, "limitation")
         paper_refs.append(
             {
                 "paper_id": pid,
@@ -304,12 +335,12 @@ def claim_from_papers(section_id: str, title: str, idx: int, papers: list[dict[s
             }
         )
     axis_values = [a.replace("_", " ") for a in axes[:3]] or ["substrate class", "activation mode", "scope boundary"]
-    substrates = join_values(common_values(papers, "substrate_class", 2), "the assigned substrate classes")
-    activations = join_values(common_values(papers, "activation_mode", 2), "the assigned activation modes")
-    products = join_values(common_values(papers, "product_class", 2), "the assigned allene products")
-    limitations = common_values(papers, "main_limitation", 2)
+    substrates = join_values(common_values(papers, "substrate", 2), "the assigned substrate classes")
+    activations = join_values(common_values(papers, "reaction_type", 2), "the assigned reaction types")
+    products = join_values(common_values(papers, "product", 2), "the assigned allene products")
+    limitations = common_values(papers, "limitation", 2)
     limitation_text = join_values(limitations, "the stated substrate and condition boundaries")
-    selectivity = join_values(common_values(papers, "selectivity_mode", 2), "the reported selectivity pattern")
+    selectivity = join_values(common_values(papers, "selectivity", 2), "the reported selectivity pattern")
     if claim_type == "foundation":
         claim = f"Establish {activations} of {substrates} as the baseline logic for accessing {products}, while naming the selectivity problem that makes the section review-relevant."
     elif claim_type == "extension":
@@ -357,11 +388,14 @@ def build_section(section: dict[str, str], papers: list[dict[str, Any]], axes: l
         claim_papers = selected[idx * 2 : idx * 2 + 4] or selected[:4]
         claims.append(claim_from_papers(section["section_id"], title, idx, claim_papers, axes))
     dominant_logic = infer_logic(title)
+    target_paragraphs, target_words = target_depth(title, len(selected))
     return {
         "section_id": section["section_id"],
         "title": title,
         "section_thesis": section_thesis(title, selected, dominant_logic),
         "review_problem": review_problem(title, selected, dominant_logic),
+        "target_paragraphs": target_paragraphs,
+        "target_words": target_words,
         "dominant_logic": dominant_logic,
         "major_papers": paper_ids,
         "review_claims": claims,
@@ -371,6 +405,11 @@ def build_section(section: dict[str, str], papers: list[dict[str, Any]], axes: l
                 "purpose": "Show the reaction logic, representative precursor/product classes, or comparison axis that anchors this section.",
                 "candidate_papers": paper_ids[:3],
             }
+        ],
+        "depth_requirements": [
+            "Draft fully developed review prose, not a compact example or annotated bibliography.",
+            "Use the approved matrix as a guide, but reopen Markdown/PDF evidence for section-level details.",
+            "Each substantive paragraph should contain a claim, source-grounded chemical detail, and a review-level interpretation.",
         ],
         "section_transition": {
             "from_previous": f"Connect from {prev_title}." if prev_title else "Open the review scope and organizing logic.",

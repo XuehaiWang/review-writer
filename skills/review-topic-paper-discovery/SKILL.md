@@ -1,116 +1,65 @@
 ---
 name: review-topic-paper-discovery
-description: Create the first-stage review discovery workflow from a user topic and keywords. Use when Codex needs to expand/merge keywords, search local and optional web literature per keyword, rank papers by explainable relevance, and generate discovery JSON files for human deletion/confirmation of keywords and papers.
+description: Start a review project from a user topic, extract/search keywords against the 8 LLM allene classification tags, and produce 20-30 candidate papers for human check.
 ---
 
 # Review Topic Paper Discovery
 
-Use this skill for the first three steps of the review-writing workflow:
+Goal: from the user review topic, select `20-30` local candidate papers.
+
+## Hard Rules
 
 ```text
-1. User provides topic + keywords.
-2. Codex expands and merges keywords.
-3. Search local and optional web papers per keyword, rank by relevance.
-4. Human checks keywords and paper relevance in a dashboard.
+Use only the 8 LLM structured tag categories for local retrieval:
+product
+substrate
+catalyst_or_method
+organometallic_partner
+ligand_or_chiral_source
+leaving_group
+reaction_type
+document_scope
 ```
 
-This skill replaces the old separate `review-topic-init`, `review-local-retrieval`, and `review-paper-selection` skills.
+Use `/home/ps/review-writer/allene_classification_rules.py` as the tag vocabulary and synonym source.
 
-## Run Discovery
+Do not rank local papers by metadata abstract.
 
-Local-only:
+## Run
 
 ```bash
 python /home/ps/review-writer/skills/review-topic-paper-discovery/scripts/discover.py \
   --review-root /home/ps/review-writer \
-  --topic "Synthesis of polysubstituted allenes from propargylic alcohols and their derivatives" \
-  --keywords "polysubstituted allenes, propargylic alcohols, propargylic acetates" \
-  --project-id <optional-project-id>
+  --topic "<review topic>" \
+  --keywords "<optional user keywords>" \
+  --project-id <project_id>
 ```
 
-With web search:
+If the user gives no keywords, Codex must extract concise keywords from the topic first.
 
-```bash
-python /home/ps/review-writer/skills/review-topic-paper-discovery/scripts/discover.py \
-  --review-root /home/ps/review-writer \
-  --topic "..." \
-  --keywords "..." \
-  --web-search
-```
+`keyword_set.draft.json` must not introduce extra local-retrieval categories. Every keyword category should be one of the eight structured tag categories above. If a topic token does not fit cleanly, classify it as `reaction_type` and let human check remove it if needed.
 
-## Launch Unified Dashboard
+## Required Output
 
-```bash
-python /home/ps/review-writer/view/serve_review_dashboard.py \
-  --review-root /home/ps/review-writer \
-  --host 127.0.0.1 \
-  --port 8765
-```
-
-Open:
-
-```text
-http://127.0.0.1:8765/discovery
-```
-
-The same server also provides the library-preparation audit page:
-
-```text
-http://127.0.0.1:8765/library
-```
-
-The root URL redirects to `/library`. Use the top navigation bar to switch between `Library Audit` and `Topic Discovery`.
-
-The dashboard code lives in `/home/ps/review-writer/view/`, not inside this skill. This skill is responsible for discovery data generation; the view module is responsible for human check UI.
-
-## Outputs
-
-The skill writes:
+Write under:
 
 ```text
 review-projects/<project_id>/00_discovery/
-  topic_input.md
-  keyword_set.draft.json
-  local_results_by_keyword.json
-  web_results_by_keyword.json
-  combined_results_by_keyword.json
-  selected_discovery_results.json
-  human_check_state.json
-  discovery_report.md
 ```
 
-The dashboard edits `combined_results_by_keyword.json`, `selected_discovery_results.json`, and `human_check_state.json`.
-
-## Ranking Principles
-
-Local relevance ranking is explainable and deterministic:
+Required files:
 
 ```text
-title match > human_tags > keywords > auto/llm tags > abstract > journal/year
+topic_input.md
+keyword_set.draft.json
+combined_results_by_keyword.json
+selected_discovery_results.json
+discovery_report.md
+human_check_state.json
 ```
 
-The score is not only keyword frequency. It also rewards:
-
-```text
-topic terms co-occurring with the keyword
-matches in high-value fields
-recent papers
-local parsed paper availability
-```
-
-Web search ranking uses title/snippet/topic overlap, year hints, DOI presence, and deduplication against local papers where possible.
+`selected_discovery_results.json` should contain `20-30` kept local papers when enough matches exist. If fewer than 20 are found, record why in `discovery_report.md`.
 
 ## Human Check
 
-The human should:
-
-```text
-delete irrelevant keywords
-delete irrelevant papers under each keyword
-open local PDF/Markdown/metadata for checking
-open web result links
-mark local papers as core_candidate, supporting_candidate, background, excluded, or uncertain
-confirm discovery when keyword-paper mapping is acceptable
-```
-
-After confirmation, continue the review process from `selected_discovery_results.json`.
+Stop after discovery. The human checks `/discovery`, deletes irrelevant keywords/papers, and confirms the candidate set.

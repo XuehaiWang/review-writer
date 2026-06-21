@@ -113,6 +113,17 @@ STAGES: list[dict[str, Any]] = [
         "human_check": "Check final_draft.md and release_report.md before export.",
         "confirmed_by": [],
     },
+    {
+        "id": "docx_export",
+        "name": "DOCX export",
+        "dir": "05_final_audit",
+        "skill": "review-export-docx",
+        "required": [
+            "final_draft.docx",
+        ],
+        "human_check": "Download final_draft.docx from /final and open it in Word to confirm styling.",
+        "confirmed_by": [],
+    },
 ]
 
 

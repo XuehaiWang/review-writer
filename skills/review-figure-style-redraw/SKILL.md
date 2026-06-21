@@ -64,7 +64,7 @@ model: gpt-image-2
 endpoint: /v1/images/edits
 ```
 
-`responses` is supported by the script but should be used only when the relay reliably supports `/v1/responses` image generation.
+Use `wire_api: images` for real source-image editing. Do not use `responses` for chemistry-preserving redraw unless the relay demonstrably supports image input and image editing through `/v1/responses`; otherwise it can generate a new figure without faithfully editing the source.
 
 ## Run
 

@@ -38,7 +38,7 @@
     }
     .nav-title { font-weight: 700; font-size: 18px; }
     .nav-center { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; justify-content: center; }
-    .nav-right { display: flex; align-items: center; gap: 8px; }
+    .nav-right { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
     .nav a {
       display: inline-block;
       text-decoration: none;
@@ -46,8 +46,9 @@
       border: 1px solid var(--line);
       border-radius: 999px;
       padding: 8px 12px;
-      margin-left: 8px;
       background: #fffdf7;
+      white-space: nowrap;
+      font-size: 14px;
     }
     .nav a.active {
       background: var(--accent);
@@ -277,6 +278,7 @@
     }
     .message.show { display: block; }
   </style>
+  <link rel="stylesheet" href="/assets/dashboard/review-ui.css">
 </head>
 <body>
   <nav class="nav">
@@ -285,9 +287,14 @@
       <select id="globalProjectSelect" class="project-select"></select>
     </div>
     <div class="nav-right">
-      <a class="active" href="/library">Library Audit</a>
-      <a href="/discovery">Topic Discovery</a>
-      <a href="/draft">First Draft</a>
+      <a class="active" href="/library">Library</a>
+      <a href="/discovery">Discovery</a>
+      <a href="/matrix">Matrix</a>
+      <a href="/blueprint">Blueprint</a>
+      <a href="/sections">Sections</a>
+      <a href="/figures">Figures</a>
+      <a href="/draft">Draft</a>
+      <a href="/final">Final</a>
     </div>
   </nav>
   <main class="app">
@@ -326,6 +333,7 @@
     </section>
   </main>
   <div id="message" class="message"></div>
+  <script src="/assets/dashboard/review-ui.js"></script>
   <script>
     let papers = [];
     let selected = null;
@@ -436,7 +444,7 @@
     }
     function renderList() {
       const q = els.search.value.trim().toLowerCase();
-      const filtered = papers.filter(p => [p.paper_id, p.title, p.year, p.journal, ...(p.authors||[]), ...(p.keywords||[]), ...(p.tags||[])].join(' ').toLowerCase().includes(q));
+      const filtered = papers.filter(p => [p.paper_id, ...(p.tags||[])].join(' ').toLowerCase().includes(q));
       els.papers.innerHTML = filtered.map(p => {
         const active = selected === p.paper_id ? ' active' : '';
         const statusClass = p.human_review_status === 'reviewed' ? 'reviewed' : (p.needs_human_check ? 'warn' : '');
@@ -450,12 +458,15 @@
       }).join('');
     }
     function renderSummary(meta) {
-      const tags = [...(field(meta,'keywords',[])||[]), ...(field(meta,'llm_tags',[])||[]), ...(meta.human_tags||[])];
+      const structured = field(meta, 'structured_tags', {}) || {};
+      const structuredHtml = Object.entries(structured).map(([k,v]) => `
+        <div class="field"><div class="label">${escapeHtml(k.replaceAll('_', ' '))}</div><div class="value">${escapeHtml(v || '')}</div></div>
+      `).join('');
       els.metaSummary.innerHTML = `
         <div class="field"><div class="label">Title</div><div class="value">${escapeHtml(field(meta,'title'))}</div></div>
         <div class="field"><div class="label">Authors</div><div class="value">${escapeHtml((field(meta,'authors',[])||[]).join(', '))}</div></div>
         <div class="field"><div class="label">Journal / Year / DOI</div><div class="value">${escapeHtml([field(meta,'journal'), field(meta,'year'), field(meta,'doi')].filter(Boolean).join(' · '))}</div></div>
-        <div class="field"><div class="label">Keywords and Tags</div><div class="value">${tags.map(t=>`<span class="tag">${escapeHtml(t)}</span>`).join('')}</div></div>
+        <div class="field"><div class="label">8 Structured Tags</div><div class="value">${structuredHtml || 'Not extracted yet'}</div></div>
         <div class="field"><div class="label">Abstract</div><div class="value">${escapeHtml(field(meta,'abstract')).slice(0,900)}</div></div>
         <div class="field"><div class="label">Quality</div><div class="value">${escapeHtml(JSON.stringify(meta.quality || {}, null, 0))}</div></div>`;
     }

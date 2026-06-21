@@ -6,5 +6,8 @@
 !/view/
 !/view/**
 
+/.env
+/.env.*
+
 /skills/**/__pycache__/
 /view/**/__pycache__/

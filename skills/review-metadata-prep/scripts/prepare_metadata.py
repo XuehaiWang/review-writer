@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -35,6 +36,19 @@ JOURNAL_HINTS = [
     "Chemical Science",
 ]
 
+STRUCTURED_TAG_KEYS = [
+    "product",
+    "substrate",
+    "catalyst_or_method",
+    "organometallic_partner",
+    "ligand_or_chiral_source",
+    "leaving_group",
+    "reaction_type",
+    "document_scope",
+]
+
+DEFAULT_CLASSIFICATION_LABELS = {key: ["not specified"] for key in STRUCTURED_TAG_KEYS}
+
 CHEM_TAG_RULES = {
     "propargylic alcohols": ["propargylic alcohol", "propargylic alcohols"],
     "propargylic derivatives": ["propargylic derivative", "propargylic derivatives", "propargyl"],
@@ -66,6 +80,57 @@ def clean_text(text: str) -> str:
     text = re.sub(r"\s+", " ", text)
     text = text.replace(" .", ".").replace(" ,", ",").strip()
     return text
+
+
+def load_dotenv(path: Path) -> None:
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def load_classification_rules(path: Path) -> dict[str, list[str]]:
+    labels = {key: ["not specified"] for key in STRUCTURED_TAG_KEYS}
+    if not path.exists():
+        return labels
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    rules_node = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "rules":
+                    rules_node = node.value
+                    break
+        if rules_node is not None:
+            break
+    if rules_node is None:
+        return labels
+    for item in ast.literal_eval(rules_node):
+        if not isinstance(item, tuple) or len(item) < 2:
+            continue
+        label, category = str(item[0]).strip(), str(item[1]).strip()
+        if category in labels and label:
+            labels[category].append(label)
+    return {key: dedupe(value) for key, value in labels.items()}
+
+
+def classification_rules_prompt(labels: dict[str, list[str]]) -> str:
+    lines = [
+        "Allowed allene classification labels. For each category, output exactly one label from its list.",
+        "Use `not specified` only when no listed label is supported by the supplied paper evidence.",
+    ]
+    for key in STRUCTURED_TAG_KEYS:
+        lines.append(f"\n{key}:")
+        for label in labels.get(key, ["not specified"]):
+            lines.append(f"- {label}")
+    return "\n".join(lines)
 
 
 def slugify(value: str) -> str:
@@ -498,7 +563,10 @@ def build_llm_payload(
     md_head: str,
     system_prompt: str,
     model: str,
+    reasoning_effort: str = "",
+    classification_labels: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
+    classification_labels = classification_labels or DEFAULT_CLASSIFICATION_LABELS
     front_blocks = []
     for i, block in enumerate(blocks[:80]):
         text = clean_text(str(block.get("text") or block.get("content") or ""))
@@ -519,7 +587,7 @@ def build_llm_payload(
             "markdown": base["source_paths"]["markdown"],
         },
         "rule_extracted_initial_metadata": {
-            k: base[k]
+            k: base.get(k)
             for k in [
                 "title",
                 "authors",
@@ -527,14 +595,10 @@ def build_llm_payload(
                 "journal",
                 "doi",
                 "abstract",
-                "keywords",
-                "llm_tags",
-                "topic_category",
-                "reaction_category",
-                "mechanism_category",
-                "application_category",
+                "structured_tags",
             ]
         },
+        "classification_rules": classification_rules_prompt(classification_labels),
         "front_blocks": front_blocks,
         "markdown_head": md_head[:9000],
     }
@@ -545,34 +609,20 @@ def build_llm_payload(
             "title",
             "authors",
             "year",
-            "journal",
-            "doi",
             "abstract",
-            "keywords",
-            "llm_tags",
-            "topic_category",
-            "reaction_category",
-            "mechanism_category",
-            "application_category",
+            "structured_tags",
             "warnings",
         ],
         "properties": {
             "title": field_schema("string"),
             "authors": field_schema("array"),
             "year": field_schema("integer_or_null"),
-            "journal": field_schema("string_or_null"),
-            "doi": field_schema("string_or_null"),
             "abstract": field_schema("string"),
-            "keywords": field_schema("array"),
-            "llm_tags": field_schema("array"),
-            "topic_category": field_schema("array"),
-            "reaction_category": field_schema("array"),
-            "mechanism_category": field_schema("array"),
-            "application_category": field_schema("array"),
+            "structured_tags": structured_tags_schema(classification_labels),
             "warnings": {"type": "array", "items": {"type": "string"}},
         },
     }
-    return {
+    payload = {
         "model": model,
         "input": [
             {"role": "system", "content": system_prompt},
@@ -587,6 +637,9 @@ def build_llm_payload(
             }
         },
     }
+    if reasoning_effort and reasoning_effort.lower() != "none":
+        payload["reasoning"] = {"effort": reasoning_effort}
+    return payload
 
 
 def field_schema(kind: str) -> dict[str, Any]:
@@ -611,14 +664,39 @@ def field_schema(kind: str) -> dict[str, Any]:
     }
 
 
-def call_openai_responses(payload: dict[str, Any], api_key: str) -> dict[str, Any]:
+def structured_tags_schema(classification_labels: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    classification_labels = classification_labels or DEFAULT_CLASSIFICATION_LABELS
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["value", "source", "confidence", "human_checked"],
+        "properties": {
+            "value": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": STRUCTURED_TAG_KEYS,
+                "properties": {
+                    key: {"type": "string", "enum": classification_labels.get(key, ["not specified"])}
+                    for key in STRUCTURED_TAG_KEYS
+                },
+            },
+            "source": {"type": "string"},
+            "confidence": {"type": "number"},
+            "human_checked": {"type": "boolean"},
+        },
+    }
+
+
+def call_openai_responses(payload: dict[str, Any], api_key: str, base_url: str = "https://api.openai.com") -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        "https://api.openai.com/v1/responses",
+        f"{base_url.rstrip('/')}/v1/responses",
         data=body,
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "review-writer-metadata-prep/1.0",
         },
         method="POST",
     )
@@ -643,15 +721,8 @@ def merge_llm(base: dict[str, Any], llm: dict[str, Any]) -> dict[str, Any]:
         "title",
         "authors",
         "year",
-        "journal",
-        "doi",
         "abstract",
-        "keywords",
-        "llm_tags",
-        "topic_category",
-        "reaction_category",
-        "mechanism_category",
-        "application_category",
+        "structured_tags",
     ]:
         if not isinstance(llm.get(key), dict):
             continue
@@ -661,17 +732,79 @@ def merge_llm(base: dict[str, Any], llm: dict[str, Any]) -> dict[str, Any]:
         new_value = llm[key].get("value")
         new_conf = float(llm[key].get("confidence") or 0)
         old_conf = float(current.get("confidence") or 0)
-        if has_value(new_value) and (new_conf >= old_conf or not has_value(current.get("value"))):
+        current_value = current.get("value") if isinstance(current, dict) else None
+        schema_changed = key == "structured_tags" and (
+            not isinstance(current_value, dict) or set(current_value) != set(STRUCTURED_TAG_KEYS)
+        )
+        if has_value(new_value) and (schema_changed or new_conf >= old_conf or not has_value(current_value)):
             base[key] = {
                 "value": new_value,
                 "source": llm[key].get("source") or "llm",
                 "confidence": round(new_conf, 3),
                 "human_checked": bool(llm[key].get("human_checked", False)),
             }
+    if isinstance(base.get("structured_tags"), dict):
+        apply_structured_tags_to_compat_fields(base)
     warnings = llm.get("warnings") or []
     if isinstance(warnings, list):
         base["quality"]["warnings"].extend(str(w) for w in warnings if str(w).strip())
     return base
+
+
+def normalize_structured_tags(value: Any) -> dict[str, str]:
+    tags: dict[str, str] = {}
+    if isinstance(value, dict):
+        for key in STRUCTURED_TAG_KEYS:
+            raw = clean_text(str(value.get(key) or "not specified"))
+            tags[key] = raw or "not specified"
+    else:
+        tags = {key: "not specified" for key in STRUCTURED_TAG_KEYS}
+    return tags
+
+
+def structured_tags_from_legacy(
+    topic: list[str],
+    reaction: list[str],
+    mechanism: list[str],
+    application: list[str],
+) -> dict[str, str]:
+    return {
+        "product": first_or_not_specified([x for x in topic if "allene" in x]),
+        "substrate": first_or_not_specified([x for x in topic if "proparg" in x]),
+        "catalyst_or_method": first_or_not_specified([x for x in reaction if "catalysis" in x]),
+        "organometallic_partner": "not specified",
+        "ligand_or_chiral_source": first_or_not_specified([x for x in application if "enantio" in x]),
+        "leaving_group": "not specified",
+        "reaction_type": first_or_not_specified(reaction),
+        "document_scope": "primary research article",
+    }
+
+
+def first_or_not_specified(items: list[str]) -> str:
+    for item in items:
+        item = clean_text(str(item))
+        if item:
+            return item
+    return "not specified"
+
+
+def structured_tag_values(meta: dict[str, Any]) -> dict[str, str]:
+    field = meta.get("structured_tags")
+    value = field.get("value") if isinstance(field, dict) else None
+    return normalize_structured_tags(value)
+
+
+def apply_structured_tags_to_compat_fields(meta: dict[str, Any]) -> None:
+    for key in [
+        "keywords",
+        "llm_tags",
+        "human_tags",
+        "topic_category",
+        "reaction_category",
+        "mechanism_category",
+        "application_category",
+    ]:
+        meta.pop(key, None)
 
 
 def has_value(value: Any) -> bool:
@@ -690,12 +823,19 @@ def update_quality(meta: dict[str, Any]) -> None:
     for key in ["title", "abstract"]:
         if not has_value(meta.get(key, {}).get("value")):
             missing.append(key)
-    for key in ["authors", "keywords", "llm_tags"]:
+    for key in ["authors"]:
         if not has_value(meta.get(key, {}).get("value")):
             warnings.append(f"empty_{key}")
-    for key in ["year", "journal", "doi"]:
+    for key in ["year"]:
+        if not has_value(meta.get(key, {}).get("value")):
+            missing.append(key)
+    for key in ["journal", "doi"]:
         if not has_value(meta.get(key, {}).get("value")):
             warnings.append(f"missing_{key}")
+    structured = structured_tag_values(meta)
+    for key, value in structured.items():
+        if not value or value.lower() == "not specified":
+            warnings.append(f"structured_tag_not_specified_{key}")
     confidences = []
     for key in [
         "title",
@@ -704,12 +844,7 @@ def update_quality(meta: dict[str, Any]) -> None:
         "journal",
         "doi",
         "abstract",
-        "keywords",
-        "llm_tags",
-        "topic_category",
-        "reaction_category",
-        "mechanism_category",
-        "application_category",
+        "structured_tags",
     ]:
         field = meta.get(key)
         if isinstance(field, dict):
@@ -766,6 +901,7 @@ def build_metadata(
     )
     tags = infer_tags(text_for_tags)
     topic, reaction, mechanism, application = classify_tags(tags)
+    structured_tags = structured_tags_from_legacy(topic, reaction, mechanism, application)
     pdf_hash = sha256_file(pdf_path)
     meta: dict[str, Any] = {
         "paper_id": paper_id,
@@ -776,13 +912,7 @@ def build_metadata(
         "journal": journal,
         "doi": doi,
         "abstract": abstract,
-        "keywords": keywords,
-        "llm_tags": scored(tags, "rule_keyword_inference", 0.58 if tags else 0.0),
-        "human_tags": existing.get("human_tags", []) if existing else [],
-        "topic_category": scored(topic, "rule_tag_classifier", 0.58 if topic else 0.0),
-        "reaction_category": scored(reaction, "rule_tag_classifier", 0.58 if reaction else 0.0),
-        "mechanism_category": scored(mechanism, "rule_tag_classifier", 0.58 if mechanism else 0.0),
-        "application_category": scored(application, "rule_tag_classifier", 0.58 if application else 0.0),
+        "structured_tags": scored(structured_tags, "rule_keyword_inference_8_category_fallback", 0.45 if tags else 0.0),
         "source_paths": {
             "pdf": str(pdf_path) if pdf_path else None,
             "markdown": str(md_path) if md_path else None,
@@ -820,6 +950,7 @@ def build_metadata(
             "needs_human_check": True,
         },
     }
+    apply_structured_tags_to_compat_fields(meta)
     if existing:
         preserve_human_checked_fields(meta, existing)
     update_quality(meta)
@@ -846,9 +977,6 @@ def preserve_human_checked_fields(meta: dict[str, Any], existing: dict[str, Any]
     for key, old in existing.items():
         if key in {"paper_id", "slug", "source_paths", "source_file", "extraction", "quality"}:
             continue
-        if key == "human_tags":
-            meta[key] = old
-            continue
         if isinstance(old, dict) and old.get("human_checked") is True:
             meta[key] = old
 
@@ -864,6 +992,7 @@ def copy_references(skill_root: Path, review_root: Path) -> None:
 
 def run(args: argparse.Namespace) -> int:
     review_root = Path(args.review_root).resolve()
+    load_dotenv(review_root / ".env")
     mineru_output = Path(args.mineru_output).resolve()
     pdf_root = Path(args.pdf_root).resolve() if args.pdf_root else None
     skill_root = Path(__file__).resolve().parents[1]
@@ -886,7 +1015,11 @@ def run(args: argparse.Namespace) -> int:
         jobs = iter_jobs(manifest)
 
     system_prompt = (skill_root / "references" / "metadata_extraction_system.md").read_text(encoding="utf-8")
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = args.api_key or os.environ.get("OPENAI_API_KEY")
+    model = args.model or os.environ.get("REVIEW_METADATA_MODEL", "gpt-5.4")
+    base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+    reasoning_effort = args.reasoning_effort or os.environ.get("REVIEW_METADATA_REASONING_EFFORT", "high")
+    classification_labels = load_classification_rules(review_root / "allene_classification_rules.py")
     use_llm = bool(args.use_llm)
     if use_llm and not api_key:
         print("WARN: --use-llm was set but OPENAI_API_KEY is missing; using rules only.", file=sys.stderr)
@@ -925,11 +1058,11 @@ def run(args: argparse.Namespace) -> int:
         meta, blocks, md, reg_rows = build_metadata(paper_id, job, pdf_path, md_path, cpath, existing, review_root)
         if use_llm:
             try:
-                payload = build_llm_payload(meta, blocks, md, system_prompt, args.model)
-                llm_data = call_openai_responses(payload, api_key or "")
+                payload = build_llm_payload(meta, blocks, md, system_prompt, model, reasoning_effort, classification_labels)
+                llm_data = call_openai_responses(payload, api_key or "", base_url)
                 merge_llm(meta, llm_data)
                 meta["extraction"]["mode"] = "rules+llm"
-                meta["extraction"]["model"] = args.model
+                meta["extraction"]["model"] = model
                 meta["extraction"]["notes"].append("llm_enhanced_metadata")
                 update_quality(meta)
                 if args.sleep_seconds:
@@ -980,7 +1113,10 @@ def parse_args() -> argparse.Namespace:
         help="Append or update papers in the existing registry instead of replacing papers.jsonl.",
     )
     parser.add_argument("--use-llm", action="store_true")
-    parser.add_argument("--model", default="gpt-4.1-mini")
+    parser.add_argument("--model", default="")
+    parser.add_argument("--base-url", default="")
+    parser.add_argument("--api-key", default="")
+    parser.add_argument("--reasoning-effort", default="", choices=["", "none", "low", "medium", "high"])
     parser.add_argument("--sleep-seconds", type=float, default=0.0)
     return parser.parse_args()
 

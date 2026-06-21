@@ -39,7 +39,7 @@
     }
     .nav-title { font-weight: 700; font-size: 18px; white-space: nowrap; }
     .nav-center { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; justify-content: center; }
-    .nav-right { display: flex; align-items: center; gap: 8px; }
+    .nav-right { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
     .nav a {
       display: inline-block;
       text-decoration: none;
@@ -227,6 +227,7 @@
     }
     .message.show { display: block; }
   </style>
+  <link rel="stylesheet" href="/assets/dashboard/review-ui.css">
 </head>
 <body>
   <nav class="nav">
@@ -235,9 +236,14 @@
       <select id="projectSelect" class="project-select"></select>
     </div>
     <div class="nav-right">
-      <a href="/library">Library Audit</a>
-      <a href="/discovery">Topic Discovery</a>
-      <a class="active" href="/draft">First Draft</a>
+      <a href="/library">Library</a>
+      <a href="/discovery">Discovery</a>
+      <a href="/matrix">Matrix</a>
+      <a href="/blueprint">Blueprint</a>
+      <a href="/sections">Sections</a>
+      <a href="/figures">Figures</a>
+      <a class="active" href="/draft">Draft</a>
+      <a href="/final">Final</a>
     </div>
   </nav>
   <main class="app">
@@ -283,6 +289,7 @@
     </section>
   </main>
   <div id="message" class="message"></div>
+  <script src="/assets/dashboard/review-ui.js"></script>
   <script>
     let projects = [];
     let selectedProject = '';

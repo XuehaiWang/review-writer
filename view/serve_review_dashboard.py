@@ -6,6 +6,7 @@ import json
 import mimetypes
 import posixpath
 import shutil
+import subprocess
 import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,7 +18,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
     review_root: Path
     library_app_path: Path
     discovery_app_path: Path
+    matrix_app_path: Path
+    blueprint_app_path: Path
+    sections_app_path: Path
+    figures_app_path: Path
     draft_app_path: Path
+    final_app_path: Path
 
     def log_message(self, fmt: str, *args: object) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -40,8 +46,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_file(self.library_app_path, "text/html; charset=utf-8")
         elif parsed.path == "/discovery":
             self.send_file(self.discovery_app_path, "text/html; charset=utf-8")
+        elif parsed.path == "/matrix":
+            self.send_file(self.matrix_app_path, "text/html; charset=utf-8")
+        elif parsed.path == "/blueprint":
+            self.send_file(self.blueprint_app_path, "text/html; charset=utf-8")
+        elif parsed.path == "/sections":
+            self.send_file(self.sections_app_path, "text/html; charset=utf-8")
+        elif parsed.path == "/figures":
+            self.send_file(self.figures_app_path, "text/html; charset=utf-8")
         elif parsed.path == "/draft":
             self.send_file(self.draft_app_path, "text/html; charset=utf-8")
+        elif parsed.path == "/final":
+            self.send_file(self.final_app_path, "text/html; charset=utf-8")
+        elif parsed.path.startswith("/assets/"):
+            self.handle_static_asset(parsed.path)
         elif parsed.path == "/api/projects":
             self.handle_projects()
         elif parsed.path == "/api/papers":
@@ -51,6 +69,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif parsed.path.startswith("/api/project/") and parsed.path.endswith("/draft"):
             project_id = unquote(parsed.path.split("/")[3])
             self.handle_project_draft_get(project_id)
+        elif parsed.path.startswith("/api/project/"):
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) == 4:
+                project_id = unquote(parts[2])
+                stage = unquote(parts[3])
+                self.handle_project_stage_get(project_id, stage)
+            else:
+                self.send_error(HTTPStatus.NOT_FOUND, "project stage not found")
         elif parsed.path.startswith("/api/discovery/"):
             project_id = unquote(parsed.path.rsplit("/", 1)[-1])
             self.handle_discovery_get(project_id)
@@ -91,6 +117,50 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/project/") and parsed.path.endswith("/export-docx"):
+            project_id = unquote(parsed.path.split("/")[3])
+            self.handle_project_export_docx(project_id)
+            return
+        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
+    def handle_project_export_docx(self, project_id: str) -> None:
+        project = self.review_root / "review-projects" / project_id
+        stage = project / "05_final_audit"
+        md_path = stage / "final_draft.md"
+        if not md_path.exists():
+            self.send_error(HTTPStatus.BAD_REQUEST, "final_draft.md not found")
+            return
+        docx_path = stage / "final_draft.docx"
+        script = Path("/home/ps/review-writer/skills/review-export-docx/scripts/md2docx.py")
+        if not script.exists():
+            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "md2docx.py not found")
+            return
+        try:
+            result = subprocess.run(
+                [sys.executable, str(script), "--input", str(md_path), "--output", str(docx_path)],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        except subprocess.TimeoutExpired:
+            self.send_error(HTTPStatus.GATEWAY_TIMEOUT, "docx export timeout")
+            return
+        if result.returncode != 0 or not docx_path.exists():
+            tail = (result.stderr or result.stdout or "").strip().splitlines()[-20:]
+            self.send_json({
+                "ok": False,
+                "returncode": result.returncode,
+                "error": "\n".join(tail) or "md2docx.py failed",
+            })
+            return
+        self.send_json({
+            "ok": True,
+            "path": str(docx_path),
+            "size": docx_path.stat().st_size,
+        })
+
     def handle_projects(self) -> None:
         self.send_json(list_review_projects(self.review_root))
 
@@ -101,6 +171,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 meta = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
                 continue
+            structured_tags = value_of(meta.get("structured_tags")) or {}
+            structured_values = list(structured_tags.values()) if isinstance(structured_tags, dict) else []
             papers.append(
                 {
                     "paper_id": meta.get("paper_id"),
@@ -109,8 +181,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "year": value_of(meta.get("year")),
                     "journal": value_of(meta.get("journal")),
                     "doi": value_of(meta.get("doi")),
-                    "keywords": value_of(meta.get("keywords")) or [],
-                    "tags": (value_of(meta.get("llm_tags")) or []) + (meta.get("human_tags") or []),
+                    "structured_tags": structured_tags,
+                    "tags": structured_values,
                     "human_review_status": (meta.get("human_review") or {}).get("status"),
                     "needs_human_check": (meta.get("quality") or {}).get("needs_human_check"),
                 }
@@ -166,6 +238,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "project not found")
             return
         self.send_json(project_draft_payload(self.review_root, project_id))
+
+    def handle_project_stage_get(self, project_id: str, stage: str) -> None:
+        project = self.review_root / "review-projects" / project_id
+        if not project.exists():
+            self.send_error(HTTPStatus.NOT_FOUND, "project not found")
+            return
+        payloads = {
+            "matrix": project_matrix_payload,
+            "blueprint": project_blueprint_payload,
+            "sections": project_sections_payload,
+            "figures": project_figures_payload,
+            "final": project_final_payload,
+        }
+        builder = payloads.get(stage)
+        if not builder:
+            self.send_error(HTTPStatus.NOT_FOUND, "unknown stage")
+            return
+        self.send_json(builder(self.review_root, project_id))
+
+    def handle_static_asset(self, path: str) -> None:
+        assets_root = Path(__file__).resolve().parent / "assets"
+        rel = posixpath.normpath(unquote(path.removeprefix("/assets/"))).lstrip("/")
+        candidate = (assets_root / rel).resolve()
+        try:
+            candidate.relative_to(assets_root.resolve())
+        except ValueError:
+            self.send_error(HTTPStatus.FORBIDDEN, "asset path outside assets root")
+            return
+        if not candidate.exists() or not candidate.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND, "asset not found")
+            return
+        mime = mimetypes.guess_type(str(candidate))[0] or "application/octet-stream"
+        self.send_file(candidate, mime)
 
     def handle_project_draft_put(self, project_id: str) -> None:
         project = self.review_root / "review-projects" / project_id
@@ -372,7 +477,10 @@ def selected_from_combined(groups: list[dict], project_id: str) -> dict:
         for row in group.get("web_results", []):
             if row.get("keep") is not False:
                 selected["web_papers"].append({**row, "matched_keyword": group.get("keyword")})
-    selected["local_papers"] = sorted(selected["local_papers"].values(), key=lambda x: x.get("best_score", 0), reverse=True)
+    selected["local_papers"] = sorted(
+        selected["local_papers"].values(), key=lambda x: x.get("best_score", 0), reverse=True
+    )[:30]
+    selected["web_papers"] = selected["web_papers"][:30]
     return selected
 
 
@@ -421,12 +529,104 @@ def list_review_projects(review_root: Path) -> list[dict[str, Any]]:
                 "has_discovery": (project / "00_discovery" / "combined_results_by_keyword.json").exists(),
                 "discovery_status": discovery_state.get("status") or "pending",
                 "has_matrix_outline": (project / "01_matrix_outline" / "literature_matrix.json").exists(),
+                "has_blueprint": (project / "01_matrix_outline" / "section_blueprint.json").exists(),
                 "has_section_drafting": (project / "02_section_drafting" / "section_drafts.md").exists(),
                 "has_figure_redraw": (project / "03_figure_redraw" / "redrawn_figure_manifest.json").exists(),
                 "has_first_draft": (project / "04_first_draft" / "first_draft.md").exists(),
+                "has_final_audit": (project / "05_final_audit" / "final_draft.md").exists(),
             }
         )
     return projects
+
+
+def project_summary(review_root: Path, project_id: str) -> dict[str, Any] | None:
+    return next((p for p in list_review_projects(review_root) if p["project_id"] == project_id), None)
+
+
+def project_matrix_payload(review_root: Path, project_id: str) -> dict[str, Any]:
+    project = review_root / "review-projects" / project_id
+    stage = project / "01_matrix_outline"
+    return {
+        "project_id": project_id,
+        "topic": infer_project_topic(project),
+        "summary": project_summary(review_root, project_id),
+        "paper_reading_notes": read_json_if_exists(stage / "paper_reading_notes.json"),
+        "literature_matrix": read_json_if_exists(stage / "literature_matrix.json"),
+        "literature_matrix_csv": read_text_if_exists(stage / "literature_matrix.csv"),
+        "outline_options_md": read_text_if_exists(stage / "outline_options.md"),
+        "selected_outline_md": read_text_if_exists(stage / "selected_outline.md"),
+        "matrix_outline_report_md": read_text_if_exists(stage / "matrix_outline_report.md"),
+        "paths": {"stage_dir": str(stage)},
+    }
+
+
+def project_blueprint_payload(review_root: Path, project_id: str) -> dict[str, Any]:
+    project = review_root / "review-projects" / project_id
+    stage = project / "01_matrix_outline"
+    return {
+        "project_id": project_id,
+        "topic": infer_project_topic(project),
+        "summary": project_summary(review_root, project_id),
+        "section_blueprint": read_json_if_exists(stage / "section_blueprint.json"),
+        "section_writing_plan_md": read_text_if_exists(stage / "section_writing_plan.md"),
+        "selected_outline_md": read_text_if_exists(stage / "selected_outline.md"),
+        "paths": {"stage_dir": str(stage)},
+    }
+
+
+def project_sections_payload(review_root: Path, project_id: str) -> dict[str, Any]:
+    project = review_root / "review-projects" / project_id
+    stage = project / "02_section_drafting"
+    section_files = []
+    sections_dir = stage / "sections"
+    if sections_dir.exists():
+        for path in sorted(sections_dir.glob("*.md")):
+            section_files.append({"name": path.name, "path": str(path), "content": read_text_if_exists(path)})
+    return {
+        "project_id": project_id,
+        "topic": infer_project_topic(project),
+        "summary": project_summary(review_root, project_id),
+        "section_tasks": read_json_if_exists(stage / "section_tasks.json"),
+        "section_drafts": read_json_if_exists(stage / "section_drafts.json"),
+        "section_drafts_md": read_text_if_exists(stage / "section_drafts.md"),
+        "section_files": section_files,
+        "paper_figure_candidates": read_json_if_exists(stage / "paper_figure_candidates.json"),
+        "figure_candidates": read_json_if_exists(stage / "figure_candidates.json"),
+        "section_drafting_report_md": read_text_if_exists(stage / "section_drafting_report.md"),
+        "paths": {"stage_dir": str(stage), "sections_dir": str(sections_dir)},
+    }
+
+
+def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any]:
+    project = review_root / "review-projects" / project_id
+    draft_stage = project / "02_section_drafting"
+    stage = project / "03_figure_redraw"
+    return {
+        "project_id": project_id,
+        "topic": infer_project_topic(project),
+        "summary": project_summary(review_root, project_id),
+        "figure_candidates": read_json_if_exists(draft_stage / "figure_candidates.json"),
+        "redrawn_manifest": read_json_if_exists(stage / "redrawn_figure_manifest.json"),
+        "figure_redraw_report_md": read_text_if_exists(stage / "figure_redraw_report.md"),
+        "paths": {"stage_dir": str(stage), "draft_stage_dir": str(draft_stage)},
+    }
+
+
+def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
+    project = review_root / "review-projects" / project_id
+    stage = project / "05_final_audit"
+    docx_path = stage / "final_draft.docx"
+    return {
+        "project_id": project_id,
+        "topic": infer_project_topic(project),
+        "summary": project_summary(review_root, project_id),
+        "final_draft_md": read_text_if_exists(stage / "final_draft.md"),
+        "final_audit_report_md": read_text_if_exists(stage / "final_audit_report.md"),
+        "release_report_md": read_text_if_exists(stage / "release_report.md"),
+        "final_draft_docx_path": str(docx_path),
+        "final_draft_docx_exists": docx_path.exists(),
+        "paths": {"stage_dir": str(stage)},
+    }
 
 
 def project_draft_payload(review_root: Path, project_id: str) -> dict[str, Any]:
@@ -459,26 +659,47 @@ def project_draft_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     }
 
 
-def dashboard_assets(view_root: Path) -> tuple[Path, Path, Path]:
-    library_path = view_root / "assets" / "dashboard" / "library.html"
-    discovery_path = view_root / "assets" / "dashboard" / "discovery.html"
-    draft_path = view_root / "assets" / "dashboard" / "draft.html"
-    if not library_path.exists() or not discovery_path.exists() or not draft_path.exists():
+def dashboard_assets(view_root: Path) -> tuple[Path, ...]:
+    dashboard = view_root / "assets" / "dashboard"
+    library_path = dashboard / "library.html"
+    discovery_path = dashboard / "discovery.html"
+    matrix_path = dashboard / "matrix.html"
+    blueprint_path = dashboard / "blueprint.html"
+    sections_path = dashboard / "sections.html"
+    figures_path = dashboard / "figures.html"
+    draft_path = dashboard / "draft.html"
+    final_path = dashboard / "final.html"
+    paths = [library_path, discovery_path, matrix_path, blueprint_path, sections_path, figures_path, draft_path, final_path]
+    if any(not path.exists() for path in paths):
         raise FileNotFoundError(f"dashboard assets not found under {view_root / 'assets' / 'dashboard'}")
-    return library_path, discovery_path, draft_path
+    return tuple(paths)
 
 
 def run(args: argparse.Namespace) -> int:
     review_root = Path(args.review_root).resolve()
     view_root = Path(__file__).resolve().parent
-    library_app_path, discovery_app_path, draft_app_path = dashboard_assets(view_root)
+    (
+        library_app_path,
+        discovery_app_path,
+        matrix_app_path,
+        blueprint_app_path,
+        sections_app_path,
+        figures_app_path,
+        draft_app_path,
+        final_app_path,
+    ) = dashboard_assets(view_root)
     if not (review_root / "review-library" / "metadata" / "papers").exists():
         print("ERROR: metadata files not found. Run prepare_metadata.py first.", file=sys.stderr)
         return 2
     DashboardHandler.review_root = review_root
     DashboardHandler.library_app_path = library_app_path
     DashboardHandler.discovery_app_path = discovery_app_path
+    DashboardHandler.matrix_app_path = matrix_app_path
+    DashboardHandler.blueprint_app_path = blueprint_app_path
+    DashboardHandler.sections_app_path = sections_app_path
+    DashboardHandler.figures_app_path = figures_app_path
     DashboardHandler.draft_app_path = draft_app_path
+    DashboardHandler.final_app_path = final_app_path
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     print(f"Serving dashboard at http://{args.host}:{args.port}")
     print("Press Ctrl+C to stop.")
