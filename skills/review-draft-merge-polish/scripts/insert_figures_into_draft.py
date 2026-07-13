@@ -23,7 +23,7 @@ def write_text(path: Path, text: str) -> None:
 
 
 def load_available_figures(project: Path) -> tuple[str, list[dict[str, Any]]]:
-    redrawn_path = project / "03_figure_redraw" / "redrawn_figure_manifest.json"
+    redrawn_path = project / "04_figure_redraw" / "redrawn_figure_manifest.json"
     if redrawn_path.exists():
         data = read_json(redrawn_path)
         figures = data.get("figures") if isinstance(data, dict) else None
@@ -31,7 +31,7 @@ def load_available_figures(project: Path) -> tuple[str, list[dict[str, Any]]]:
             redrawn = [f for f in figures if isinstance(f, dict) and f.get("status") == "redrawn" and f.get("redrawn_image")]
             if redrawn:
                 return "redrawn", redrawn
-    candidates_path = project / "02_section_drafting" / "figure_candidates.json"
+    candidates_path = project / "03_section_drafting" / "figure_candidates.json"
     data = read_json(candidates_path)
     figures = data.get("figures") if isinstance(data, dict) else data
     source = [f for f in figures if isinstance(f, dict) and f.get("source_image_path")]
@@ -50,12 +50,13 @@ def copy_figure(project: Path, figure: dict[str, Any], index: int, mode: str) ->
     src_path = Path(str(src))
     if not src_path.exists():
         return None
-    out_dir = project / "04_first_draft" / "figures"
+    out_dir = project / "05_first_draft" / "figures"
     out_dir.mkdir(parents=True, exist_ok=True)
     suffix = src_path.suffix.lower() or ".png"
     out_path = out_dir / f"figure_{index:02d}{suffix}"
     shutil.copy2(src_path, out_path)
-    return str(Path("figures") / out_path.name)
+    # Markdown image paths must use forward slashes regardless of host OS.
+    return f"figures/{out_path.name}"
 
 
 def figure_markdown(figure: dict[str, Any], rel_path: str, index: int, mode: str) -> str:
@@ -70,29 +71,13 @@ def figure_markdown(figure: dict[str, Any], rel_path: str, index: int, mode: str
 
 
 def heading_aliases(section_id: str, section_heading: str) -> list[str]:
-    aliases = [str(section_heading or "").strip()]
-    fallback = {
-        "sec1": ["Introduction"],
-        "sec2": ["Foundational methods", "activated propargylic", "Copper-catalyzed substitution"],
-        "sec3": ["Carbonates", "esters"],
-        "sec4": ["Radical", "one-electron", "photoredox"],
-        "sec5": ["Direct transformations", "free propargylic alcohols"],
-        "sec6": ["Organoboron", "organosilicon", "Stereochemical control", "mechanistic comparison"],
-    }
-    aliases.extend(fallback.get(str(section_id or ""), []))
-    return [a for a in aliases if a]
+    # section_id is intentionally unused for alias lookup: there is no fixed
+    # section skeleton to assume across topics. Matching relies solely on the
+    # actual section_heading text (from figure_candidates.json); if it can't be
+    # found in the draft, insert_after_section() falls back to appending the
+    # figure at the end of the document rather than guessing a wrong heading.
+    return [a for a in [str(section_heading or "").strip()] if a]
 
-
-PARAGRAPH_ID_RE = re.compile(r"<!--\s*paragraph_id:\s*([A-Za-z0-9_\-:.]+)\s*-->")
-
-def insert_after_paragraph(text: str, paragraph_id: str, block: str) -> tuple[str, bool]:
-    if not paragraph_id:
-        return text, False
-    for match in PARAGRAPH_ID_RE.finditer(text):
-        if match.group(1) == paragraph_id:
-            insert_at = match.end()
-            return text[:insert_at] + block + text[insert_at:], True
-    return text, False
 
 def insert_after_section(text: str, section_id: str, section_heading: str, block: str) -> tuple[str, bool]:
     for alias in heading_aliases(section_id, section_heading):
@@ -118,7 +103,7 @@ def insert_after_section(text: str, section_id: str, section_heading: str, block
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Insert available figures into the first draft.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=str(Path.cwd()))
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--max-per-section", type=int, default=1)
     return parser.parse_args()
@@ -127,7 +112,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     project = Path(args.review_root).resolve() / "review-projects" / args.project_id
-    draft_path = project / "04_first_draft" / "first_draft.md"
+    draft_path = project / "05_first_draft" / "first_draft.md"
     if not draft_path.exists():
         raise SystemExit(f"Missing first draft: {draft_path}")
     mode, figures = load_available_figures(project)
@@ -149,11 +134,7 @@ def main() -> int:
             continue
         heading = figure.get("section_heading") or ""
         block = figure_markdown(figure, rel, index, mode)
-        target_pid = str(figure.get("target_paragraph_id") or "")
-        text, matched = insert_after_paragraph(text, target_pid, block)
-        anchor_mode = "paragraph" if matched else "section"
-        if not matched:
-            text, matched = insert_after_section(text, str(figure.get("section_id") or ""), heading, block)
+        text, matched = insert_after_section(text, str(figure.get("section_id") or ""), heading, block)
         inserted.append(
             {
                 "figure_number": index,
@@ -162,8 +143,6 @@ def main() -> int:
                 "source_label": figure.get("source_label"),
                 "inserted_path": rel,
                 "mode": mode,
-                "anchor_mode": anchor_mode,
-                "target_paragraph_id": target_pid,
                 "matched_heading": matched,
             }
         )
@@ -175,7 +154,7 @@ def main() -> int:
         "inserted": inserted,
         "note": "source_candidates mode means source images were inserted as placeholders and should be redrawn/permission-checked before final release.",
     }
-    (project / "04_first_draft" / "figure_insertion_report.json").write_text(
+    (project / "05_first_draft" / "figure_insertion_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )

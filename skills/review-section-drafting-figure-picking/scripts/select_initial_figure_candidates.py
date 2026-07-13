@@ -25,30 +25,36 @@ def lower(text: Any) -> str:
     return norm(text).lower()
 
 
+STOPWORDS = {"and", "the", "from", "with", "for", "into", "via", "section", "review", "this"}
+
+
+def tokens(text: str) -> set[str]:
+    return {t for t in re.findall(r"[a-z0-9][a-z0-9'-]{2,}", lower(text)) if t not in STOPWORDS}
+
+
 def figure_score(candidate: dict[str, Any], section: dict[str, Any] | None = None) -> int:
     caption = lower(candidate.get("source_caption_text"))
     label = lower(candidate.get("source_label"))
     score = int(candidate.get("inventory_score") or 0)
-    if "scheme" in label or "scheme" in caption:
+    if "scheme" in label or "scheme" in caption or "overview" in caption:
         score += 8
-    if "mechanism" in caption or "catalytic cycle" in caption:
+    if "mechanism" in caption:
         score += 10
     if "scope" in caption:
         score += 4
     if "optimization" in caption:
         score -= 5
-    if "gram-scale" in caption or "control experiment" in caption:
+    if "control experiment" in caption:
         score -= 2
     if section:
-        section_text = lower(" ".join([section.get("heading", ""), section.get("core_argument", "")]))
-        if "radical" in section_text and ("radical" in caption or "photoredox" in caption):
-            score += 6
-        if "stereo" in section_text and ("stereo" in caption or "enantio" in caption or "chiral" in caption):
-            score += 5
-        if "carbonates" in section_text and "carbonate" in caption:
-            score += 4
-        if "mechan" in section_text and "mechanism" in caption:
-            score += 4
+        # Generic keyword-overlap bonus: no fixed subject-matter vocabulary —
+        # reward captions that share substantive terms with this section's own
+        # heading/argument, whatever those terms happen to be for this topic.
+        section_tokens = tokens(" ".join([section.get("heading", ""), section.get("core_argument", "")]))
+        caption_tokens = tokens(caption)
+        overlap = len(section_tokens & caption_tokens)
+        if overlap:
+            score += min(overlap * 2, 6)
     if candidate.get("source_image_path"):
         score += 4
     return score
@@ -76,7 +82,7 @@ def best_candidate_for_paper(paper: dict[str, Any]) -> dict[str, Any]:
     best.update(
         {
             "status": "selected_best_paper_level_candidate",
-            "why_selected": "Highest-ranked overview, mechanism, scope, or reaction scheme candidate from the MinerU inventory.",
+            "why_selected": "Highest-ranked overview, mechanism, scope, or diagram/scheme candidate from the MinerU inventory.",
             "manuscript_selected": False,
             "resolution_status": "ready" if best.get("source_image_path") else "needs_source_resolution",
             "needs_human_check": True,
@@ -86,8 +92,8 @@ def best_candidate_for_paper(paper: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_outputs(project: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    inventory = read_json(project / "02_section_drafting" / "paper_figure_inventory.json")
-    tasks = read_json(project / "02_section_drafting" / "section_tasks.json")
+    inventory = read_json(project / "03_section_drafting" / "paper_figure_inventory.json")
+    tasks = read_json(project / "03_section_drafting" / "section_tasks.json")
     by_paper = inventory_by_paper(inventory)
 
     paper_level: list[dict[str, Any]] = []
@@ -147,7 +153,7 @@ def build_outputs(project: Path) -> tuple[list[dict[str, Any]], list[dict[str, A
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Select initial paper-level and manuscript figure candidates.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=str(Path.cwd()))
     parser.add_argument("--project-id", required=True)
     return parser.parse_args()
 
@@ -158,7 +164,7 @@ def main() -> int:
     if not project.exists():
         raise SystemExit(f"Project not found: {project}")
     paper_level, manuscript = build_outputs(project)
-    out_dir = project / "02_section_drafting"
+    out_dir = project / "03_section_drafting"
     write_json(out_dir / "paper_figure_candidates.json", paper_level)
     write_json(out_dir / "figure_candidates.json", manuscript)
     print(f"Wrote {out_dir / 'paper_figure_candidates.json'} ({len(paper_level)} records)")

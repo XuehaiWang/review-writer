@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from llm_retag_metadata import retag_one, write_markdown_report
-from prepare_metadata import STRUCTURED_TAG_KEYS, load_classification_rules, load_dotenv, read_json, write_json
+from prepare_metadata import STRUCTURED_TAG_KEYS, load_dotenv, read_json, write_json
 
 
 def field_value(meta: dict[str, Any], key: str) -> Any:
@@ -32,7 +32,7 @@ def has_complete_llm_tags(meta: dict[str, Any]) -> bool:
         if not value:
             return False
     extraction = meta.get("extraction") or {}
-    if extraction.get("mode") == "llm_8_category_retag":
+    if extraction.get("mode") == "llm_7_category_retag":
         return True
     source = str(structured.get("source") or "").lower()
     return source.startswith("llm")
@@ -96,9 +96,9 @@ def write_progress(out_dir: Path, reports: list[dict[str, Any]], attempts: dict[
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Batch-refresh metadata with LLM-extracted eight-category tags, three papers per round by default."
+        description="Batch-refresh metadata with LLM-extracted seven-category tags, three papers per round by default."
     )
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=str(Path.cwd()))
     parser.add_argument("--model", default="")
     parser.add_argument("--base-url", default="")
     parser.add_argument("--api-key", default="")
@@ -132,7 +132,6 @@ def main() -> int:
 
     skill_root = Path(__file__).resolve().parents[1]
     system_prompt = (skill_root / "references" / "metadata_extraction_system.md").read_text(encoding="utf-8")
-    classification_labels = load_classification_rules(review_root / "allene_classification_rules.py")
     meta_dir = review_root / "review-library" / "metadata" / "papers"
     out_dir = review_root / "review-library" / "metadata"
     paths = selected_paths(meta_dir, args.paper_id)
@@ -175,7 +174,6 @@ def main() -> int:
                     model,
                     args.timeout,
                     reasoning_effort,
-                    classification_labels,
                 )
                 report["attempt"] = attempts[pid]
                 reports.append(report)

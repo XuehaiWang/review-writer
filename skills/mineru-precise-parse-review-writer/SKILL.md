@@ -1,6 +1,6 @@
 ---
 name: mineru-precise-parse-review-writer
-description: Parse local literature PDFs under /home/ps/review-writer into Markdown with the MinerU precise parsing batch API. Use when Codex needs to batch-convert a review paper library, preserve full MinerU zip sidecars, keep extracted images and JSON outputs, and skip files that were already parsed unless a force rerun is explicitly requested.
+description: Parse local literature PDFs under <review-root> into Markdown with the MinerU precise parsing batch API. Use when Codex needs to batch-convert a review paper library, preserve full MinerU zip sidecars, keep extracted images and JSON outputs, and skip files that were already parsed unless a force rerun is explicitly requested.
 ---
 
 # MinerU Precise Parse For Review Writer
@@ -11,9 +11,9 @@ This skill is for batch parsing only. It uploads local PDFs to MinerU, waits for
 
 ## Default Paths
 
-- input root: `/home/ps/review-writer`
-- skill root: `/home/ps/review-writer/skills/mineru-precise-parse-review-writer`
-- output root: `/home/ps/review-writer/mineru-outputs`
+- input root: `<review-root>` (current working directory by default)
+- skill root: `<review-root>/skills/mineru-precise-parse-review-writer`
+- output root: `<review-root>/mineru-outputs`
 
 The parser scans the input root recursively for `*.pdf` files and ignores the skill directory and output directory.
 
@@ -57,13 +57,13 @@ python3 scripts/parse_review_writer_pdfs.py --force
 Parse a specific subtree:
 
 ```bash
-python3 scripts/parse_review_writer_pdfs.py --input-dir /home/ps/review-writer/source-paper/Progargylic
+python3 scripts/parse_review_writer_pdfs.py --input-dir <review-root>/source-paper/<topic>
 ```
 
 Parse one specific PDF:
 
 ```bash
-python3 scripts/parse_review_writer_pdfs.py --pdf /home/ps/review-writer/source-paper/Progargylic/1-s2.0-S004040202400526X-main.pdf
+python3 scripts/parse_review_writer_pdfs.py --pdf <review-root>/source-paper/<topic>/<filename>.pdf
 ```
 
 ## Outputs

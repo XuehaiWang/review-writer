@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import sys
 from pathlib import Path
@@ -10,42 +9,16 @@ from typing import Any
 
 
 BLOCKING_FIELDS = ["paper_id", "slug", "title", "authors", "year", "abstract", "source_paths", "structured_tags"]
-WARNING_FIELDS = ["journal", "doi"]
+WARNING_FIELDS = ["journal", "volume", "pages", "doi"]
 STRUCTURED_TAG_KEYS = [
-    "product",
-    "substrate",
-    "catalyst_or_method",
-    "organometallic_partner",
-    "ligand_or_chiral_source",
-    "leaving_group",
-    "reaction_type",
+    "output",
+    "input",
+    "method",
+    "co_input",
+    "modifier",
+    "process_type",
     "document_scope",
 ]
-
-
-def load_allowed_labels(review_root: Path) -> dict[str, set[str]]:
-    labels = {key: {"not specified"} for key in STRUCTURED_TAG_KEYS}
-    path = review_root / "allene_classification_rules.py"
-    if not path.exists():
-        return labels
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    rules_node = None
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "rules":
-                    rules_node = node.value
-                    break
-        if rules_node is not None:
-            break
-    if rules_node is None:
-        return labels
-    for item in ast.literal_eval(rules_node):
-        if isinstance(item, tuple) and len(item) >= 2:
-            label, category = str(item[0]).strip(), str(item[1]).strip()
-            if category in labels and label:
-                labels[category].add(label)
-    return labels
 
 
 def read_json(path: Path) -> Any:
@@ -70,7 +43,7 @@ def field_value(meta: dict[str, Any], key: str) -> Any:
     return value
 
 
-def validate_one(path: Path, allowed_labels: dict[str, set[str]]) -> dict[str, Any]:
+def validate_one(path: Path) -> dict[str, Any]:
     issues: list[str] = []
     warnings: list[str] = []
     try:
@@ -107,8 +80,9 @@ def validate_one(path: Path, allowed_labels: dict[str, set[str]]) -> dict[str, A
                 issues.append(f"missing_structured_tag_{key}")
             elif str(structured_value.get(key)).strip().lower() == "not specified":
                 warnings.append(f"structured_tag_not_specified_{key}")
-            elif str(structured_value.get(key)).strip() not in allowed_labels.get(key, set()):
-                issues.append(f"invalid_structured_tag_{key}")
+            # Open-vocabulary tags: any non-empty label is accepted. There is no
+            # fixed allowed-value list, so tag values are not validated against
+            # an enum — only presence and "not specified" are checked above.
     source_paths = meta.get("source_paths") or {}
     if not isinstance(source_paths, dict):
         issues.append("invalid_source_paths")
@@ -185,8 +159,7 @@ def run(args: argparse.Namespace) -> int:
         print(f"ERROR: metadata directory not found: {meta_dir}", file=sys.stderr)
         return 2
     paths = sorted(meta_dir.glob("*.metadata.json"))
-    allowed_labels = load_allowed_labels(review_root)
-    reports = [validate_one(path, allowed_labels) for path in paths]
+    reports = [validate_one(path) for path in paths]
     write_reports(review_root, reports)
     failed = sum(1 for r in reports if r["status"] != "ok")
     print(f"Validated {len(reports)} metadata files; failed={failed}")
@@ -195,7 +168,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate review metadata JSON files.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=str(Path.cwd()))
     return parser.parse_args()
 
 

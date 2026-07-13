@@ -1,23 +1,15 @@
 {
-  "default_rule_pack": "allenation",
+  "default_rule_pack": "general",
   "rule_packs": {
-    "allenation": {
-      "description": "Rules for organic chemistry reviews centered on allenation, allene synthesis, propargylic alcohols, and propargylic derivatives.",
-      "path": "references/rule_packs/allenation",
+    "general": {
+      "description": "Subject-agnostic academic review writing rules: voice, evidence handling, scope compression, and paragraph structure. Applies to any review topic.",
+      "path": "references/rule_packs/general",
       "files": [
         "source-to-review-rules.md",
         "rewrite-rubric.md",
-        "organic-review-style.md"
+        "writing-style.md"
       ],
-      "topic_signals": [
-        "allene",
-        "allenation",
-        "propargylic",
-        "propargyl",
-        "SN2'",
-        "allenylidene",
-        "axial chirality"
-      ]
+      "topic_signals": []
     }
   }
 }

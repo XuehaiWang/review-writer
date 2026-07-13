@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sciatlas_client import SciAtlasClient, load_config, papers_from_response
+from sciatlas_client import SciAtlasClient, load_config as load_sciatlas_config, papers_from_response
 
 
 def utc_now() -> str:
@@ -77,21 +77,24 @@ def load_metadata(review_root: Path) -> dict[str, dict[str, Any]]:
 
 
 STRUCTURED_TAG_KEYS = [
-    "product",
-    "substrate",
-    "catalyst_or_method",
-    "organometallic_partner",
-    "ligand_or_chiral_source",
-    "leaving_group",
-    "reaction_type",
+    "output",
+    "input",
+    "method",
+    "co_input",
+    "modifier",
+    "process_type",
     "document_scope",
 ]
 
 
-def load_classification_rules(review_root: Path) -> dict[str, dict[str, list[str]]]:
+def load_classification_rules(path: Path | None) -> dict[str, dict[str, list[str]]]:
+    """Load an optional label-alias table used to widen keyword matching against
+    structured_tags values (see SKILL.md). Purely an enrichment: if no file is
+    given, or it doesn't exist, matching falls back to exact tag-value text only —
+    scoring still works, just with slightly lower recall for phrasing variants.
+    """
     labels = {key: {} for key in STRUCTURED_TAG_KEYS}
-    path = review_root / "allene_classification_rules.py"
-    if not path.exists():
+    if not path or not path.exists():
         return labels
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     rules_node = None
@@ -116,8 +119,11 @@ def load_classification_rules(review_root: Path) -> dict[str, dict[str, list[str
 
 def markdown_signal(meta: dict[str, Any], max_chars: int = 12000) -> str:
     source_paths = meta.get("source_paths") or {}
-    path = Path(str(source_paths.get("markdown") or ""))
-    if not path.exists():
+    raw = source_paths.get("markdown") or ""
+    if not raw:
+        return ""
+    path = Path(str(raw))
+    if not path.is_file():
         return ""
     return path.read_text(encoding="utf-8", errors="ignore")[:max_chars]
 
@@ -126,46 +132,35 @@ def tokenize(text: str) -> list[str]:
     return dedupe([w.lower() for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9'′\\-]*", text or "") if len(w) >= 3])
 
 
-def infer_keywords(topic: str, user_keywords: list[str]) -> list[dict[str, Any]]:
-    text = " ".join([topic] + user_keywords).lower()
-    rules = [
-        ("polysubstituted allenes", "product", ["polysubstituted allene", "substituted allene"]),
-        ("allenes", "product", ["allene", "allenes"]),
-        ("allene synthesis", "reaction_type", ["allene synthesis", "synthesis of allene"]),
-        ("propargylic alcohols", "substrate", ["propargylic alcohol"]),
-        ("propargylic halides", "substrate", ["propargylic derivative", "propargyl halide", "propargyl bromide", "propargylic bromide"]),
-        ("propargylic acetates", "substrate", ["acetate"]),
-        ("propargylic carbonates", "substrate", ["carbonate"]),
-        ("propargylic phosphates", "substrate", ["phosphate"]),
-        ("propargylic halides", "substrate", ["bromide"]),
-        ("propargylic sulfinates and sulfonates", "substrate", ["sulfide", "sulfinate", "sulfonate", "tosylate"]),
-        ("propargylic dichlorides", "substrate", ["dichloride", "gem-dichloride"]),
-        ("propargylic substitution and cross-coupling", "reaction_type", ["sn2", "substitution"]),
-        ("propargylic substitution and cross-coupling", "reaction_type", ["allenylation"]),
-        ("copper catalysis", "catalyst_or_method", ["copper", "cu", "cu(i)", "cu(iii)", "cubr", "cui", "cuoac", "cucl2", "icycucl", "organocopper", "cuprate"]),
-        ("palladium catalysis", "catalyst_or_method", ["palladium", "pd", "pd(0)", "pd(ii)", "palladium species", "propargylpalladium", "allenylpalladium"]),
-        ("zinc-mediated methods", "catalyst_or_method", ["zinc", "zn", "zn(ii)", "zni2", "znbr2", "zncl2", "organozinc"]),
-        ("cadmium-mediated methods", "catalyst_or_method", ["cadmium", "cd", "cd(ii)", "cdi2"]),
-        ("gold catalysis", "catalyst_or_method", ["gold", "au", "au(i)", "au(iii)", "kaucl4", "gold salen complex"]),
-        ("silver-mediated methods", "catalyst_or_method", ["silver", "ag", "ag(i)", "agno3"]),
-        ("rhodium catalysis", "catalyst_or_method", ["rhodium", "rh", "rh(i)", "rhodium complex", "rh/chiral diene complex"]),
-        ("iron catalysis", "catalyst_or_method", ["iron", "fe", "iron-porphyrin", "iron porphyrin", "fe-porphyrin"]),
-        ("copper-zinc bimetallic catalysis", "catalyst_or_method", ["copper-zinc", "copper/zinc", "cu/zn", "cu+/zn2+", "cubr/znbr2", "bimetallic approach", "bimetallic catalysis"]),
-        ("photoredox catalysis", "catalyst_or_method", ["photoredox", "visible-light"]),
-        ("asymmetric synthesis", "reaction_type", ["asymmetric", "enantioselective", "enantiospecific"]),
-        ("radical and single-electron allene synthesis", "reaction_type", ["radical"]),
-        ("Meyer-Schuster rearrangement", "reaction_type", ["meyer-schuster"]),
-    ]
-    candidates: list[dict[str, Any]] = []
-    for kw, category, needles in rules:
-        if any(n in text for n in needles) or any(n in kw.lower() for n in tokenize(topic)):
-            candidates.append({"keyword": kw, "category": category, "reason": "rule expansion from topic/user keywords"})
-    for token in tokenize(topic):
-        if token in {"propargylic", "allene", "allenes", "synthesis", "derivatives"}:
-            continue
-        if len(token) > 6:
-            candidates.append({"keyword": token, "category": "reaction_type", "reason": "topic token"})
-    return unique_keyword_dicts(candidates)
+def load_agent_keywords(path: Path | None) -> list[dict[str, Any]]:
+    """Load LLM-authored keyword expansion. See SKILL.md for the required schema.
+
+    Expected JSON: a list of {"keyword": str, "category": str, "reason": str}.
+    This file must be written by the LLM before running this script — no
+    keyword expansion rules are hardcoded here, since expansion depends on
+    the review topic's subject matter, which is not known ahead of time.
+    """
+    if not path:
+        return []
+    if not path.exists():
+        raise SystemExit(
+            f"--agent-keywords file not found: {path}\n"
+            "Expand the topic into search keywords first (see SKILL.md) and write them to this path."
+        )
+    data = read_json(path)
+    if not isinstance(data, list):
+        raise SystemExit(f"--agent-keywords file must contain a JSON list: {path}")
+    out = []
+    for item in data:
+        if isinstance(item, dict) and item.get("keyword"):
+            out.append(
+                {
+                    "keyword": str(item["keyword"]),
+                    "category": str(item.get("category") or "").strip(),
+                    "reason": str(item.get("reason") or "llm keyword expansion"),
+                }
+            )
+    return unique_keyword_dicts(out)
 
 
 def unique_keyword_dicts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -179,12 +174,11 @@ def unique_keyword_dicts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def build_keyword_set(topic: str, user_keywords: list[str]) -> dict[str, Any]:
-    agent = infer_keywords(topic, user_keywords)
+def build_keyword_set(topic: str, user_keywords: list[str], agent_keywords: list[dict[str, Any]]) -> dict[str, Any]:
     merged: dict[str, dict[str, Any]] = {}
     for kw in user_keywords:
-        merged[kw.lower()] = {"keyword": kw, "category": classify_keyword(kw), "source": ["user"], "keep": True}
-    for item in agent:
+        merged[kw.lower()] = {"keyword": kw, "category": "", "source": ["user"], "keep": True}
+    for item in agent_keywords:
         key = item["keyword"].lower()
         if key in merged:
             if "agent" not in merged[key]["source"]:
@@ -196,33 +190,19 @@ def build_keyword_set(topic: str, user_keywords: list[str]) -> dict[str, Any]:
     return {
         "user_topic": topic,
         "user_keywords": user_keywords,
-        "agent_keywords": agent,
+        "agent_keywords": agent_keywords,
         "merged_keywords": list(merged.values()),
         "created_at": utc_now(),
     }
 
 
-def classify_keyword(keyword: str) -> str:
-    low = keyword.lower()
-    if any(x in low for x in ["alcohol", "acetate", "carbonate", "phosphate", "sulfide", "bromide", "derivative", "dichloride"]):
-        return "substrate"
-    if "allene" in low:
-        return "product"
-    if any(x in low for x in ["catalysis", "copper", "nickel", "palladium", "photoredox"]):
-        return "catalyst_or_method"
-    if any(x in low for x in ["sn2", "rearrangement", "allenylation", "synthesis"]):
-        return "reaction_type"
-    return "reaction_type"
-
-
 STRUCTURED_TAG_WEIGHTS = {
-    "product": 5.0,
-    "substrate": 5.0,
-    "catalyst_or_method": 4.4,
-    "organometallic_partner": 4.0,
-    "ligand_or_chiral_source": 3.8,
-    "leaving_group": 3.8,
-    "reaction_type": 4.8,
+    "output": 5.0,
+    "input": 5.0,
+    "method": 4.4,
+    "co_input": 4.0,
+    "modifier": 3.8,
+    "process_type": 4.8,
     "document_scope": 1.5,
 }
 
@@ -254,9 +234,25 @@ def match_score(term: str, text: str) -> float:
         return 0.65 if hits else 0.0
     if ratio == 1.0:
         return 0.72
-    if ratio >= 0.67 and len(tokens) >= 3:
+    # 0.66 not 0.67: a 2-of-3 token match is ratio 0.6667, and the intent is to
+    # accept it — with 0.67 it silently scores zero (float comparison off-by-epsilon).
+    if ratio >= 0.66 and len(tokens) >= 3:
         return 0.38
     return 0.0
+
+
+def has_structured_tags(meta: dict[str, Any]) -> bool:
+    structured = field_value(meta.get("structured_tags"), {})
+    if not isinstance(structured, dict):
+        return False
+    return any(str(v).strip().lower() not in ("", "not specified") for v in structured.values())
+
+
+# Weight for title/abstract/markdown matching when a paper has no structured
+# tags yet (rule-only or stub metadata). Comparable to the mid-range tag
+# weights so untagged papers can still be shortlisted — this enables the
+# two-pass "tag after discovery" flow for large libraries (see SKILL.md).
+UNTAGGED_SOURCE_WEIGHT = 4.5
 
 
 def score_local_paper(
@@ -270,6 +266,7 @@ def score_local_paper(
     reasons: list[str] = []
     raw = 0.0
     direct_raw = 0.0
+    tags_available = has_structured_tags(meta)
     for field, weight in STRUCTURED_TAG_WEIGHTS.items():
         text = structured_tag_text(meta, field, classification_rules)
         s = match_score(keyword, text)
@@ -286,6 +283,7 @@ def score_local_paper(
     source_text = " ".join(
         [
             str(field_value(meta.get("title"), "")),
+            str(field_value(meta.get("abstract"), "") or ""),
             markdown_signal(meta),
         ]
     )
@@ -293,6 +291,13 @@ def score_local_paper(
     if source_signal > 0 and direct_raw > 0:
         raw += min(source_signal * 0.8, 0.8)
         reasons.append("source text confirms keyword")
+    elif source_signal > 0 and not tags_available:
+        contribution = source_signal * UNTAGGED_SOURCE_WEIGHT
+        raw += contribution
+        direct_raw += contribution
+        matched_fields.append("source_text")
+        matched_terms.append(keyword)
+        reasons.append("no structured tags yet; scored on title/abstract/markdown")
     year = field_value(meta.get("year"))
     source_paths = meta.get("source_paths") or {}
     normalized = min(round(raw / 8.0, 4), 1.0)
@@ -323,6 +328,16 @@ def score_local_paper(
     }
 
 
+# Selection thresholds for local scoring, and the near-miss band beneath them.
+# A paper falling below the selection cut but at or above the near-miss floor is
+# not silently dropped: it is surfaced as a borderline paper for agent/human
+# review, since phrasing drift between topic keywords and paper metadata is the
+# most common cause of on-topic papers scoring low.
+SELECT_DIRECT_RAW = 1.4
+SELECT_SCORE = 0.12
+NEAR_MISS_DIRECT_RAW = 0.6
+
+
 def local_search_by_keyword(
     papers: dict[str, dict[str, Any]],
     keywords: list[dict[str, Any]],
@@ -335,17 +350,33 @@ def local_search_by_keyword(
         if not kw.get("keep", True):
             continue
         keyword = kw["keyword"]
-        results = [score_local_paper(meta, keyword, topic_terms, classification_rules) for meta in papers.values()]
-        results = [r for r in results if r["direct_raw_score"] >= 1.4 and r["score"] >= 0.12]
+        scored = [score_local_paper(meta, keyword, topic_terms, classification_rules) for meta in papers.values()]
+        results = [r for r in scored if r["direct_raw_score"] >= SELECT_DIRECT_RAW and r["score"] >= SELECT_SCORE]
+        selected_ids = {r["paper_id"] for r in results}
+        near_miss = [
+            r
+            for r in scored
+            if r["paper_id"] not in selected_ids and r["direct_raw_score"] >= NEAR_MISS_DIRECT_RAW
+        ]
         results.sort(key=lambda r: (r["score"], r["raw_score"], r.get("year") or 0), reverse=True)
-        grouped.append({"keyword": keyword, "category": kw.get("category"), "keep": True, "local_results": results})
+        near_miss.sort(key=lambda r: (r["direct_raw_score"], r["score"]), reverse=True)
+        grouped.append(
+            {
+                "keyword": keyword,
+                "category": kw.get("category"),
+                "keep": True,
+                "local_results": results,
+                "near_miss_results": near_miss,
+            }
+        )
     return grouped
 
 
-def web_search(keyword: str, topic: str, limit: int = 8) -> list[dict[str, Any]]:
+def web_search(keyword: str, topic: str, limit: int = 8, mailto: str = "") -> list[dict[str, Any]]:
     query = f"{keyword} {topic} review paper DOI"
     url = "https://api.crossref.org/works?" + urllib.parse.urlencode({"query.bibliographic": query, "rows": str(limit)})
-    req = urllib.request.Request(url, headers={"User-Agent": "review-writer-discovery/0.1 (mailto:example@example.com)"})
+    contact = mailto or "anonymous@example.com"
+    req = urllib.request.Request(url, headers={"User-Agent": f"review-writer-discovery/0.1 (mailto:{contact})"})
     ctx = ssl.create_default_context()
     try:
         with urllib.request.urlopen(req, context=ctx, timeout=20) as resp:
@@ -379,6 +410,8 @@ def web_search(keyword: str, topic: str, limit: int = 8) -> list[dict[str, Any]]
                 "authors": format_crossref_authors(item.get("author", [])),
                 "year": year,
                 "journal": container,
+                "volume": item.get("volume") or "",
+                "pages": item.get("page") or "",
                 "doi": doi,
                 "url": link,
                 "score": round(min(score, 1.0), 4),
@@ -400,18 +433,18 @@ def format_crossref_authors(authors: list[dict[str, Any]]) -> list[str]:
     return out
 
 
-
-
 def normalize_sciatlas_paper(item: dict[str, Any]) -> dict[str, Any]:
     # SciAtlas /v1/search nests the canonical record in `paper`; fall back to top-level keys.
     nested = item.get("paper") if isinstance(item.get("paper"), dict) else {}
-    def first(*keys):
+
+    def first(*keys: str) -> Any:
         for src in (item, nested):
             for k in keys:
                 v = src.get(k)
                 if v not in (None, "", []):
                     return v
         return None
+
     title = first("title", "paper_title") or "(untitled)"
     if isinstance(title, str):
         title = title.replace("\n", " ").strip()
@@ -439,6 +472,8 @@ def normalize_sciatlas_paper(item: dict[str, Any]) -> dict[str, Any]:
     paper_url = first("paper_url", "pdf_url", "url", "html_url")
     url = paper_url or (f"https://doi.org/{doi}" if doi else "")
     abstract = first("abstract") or ""
+    volume = first("volume") or ""
+    pages = first("pages", "page") or ""
     raw_score = item.get("score") or item.get("relevance_score") or item.get("graph_score") or 0.0
     try:
         raw_score = float(raw_score)
@@ -451,6 +486,8 @@ def normalize_sciatlas_paper(item: dict[str, Any]) -> dict[str, Any]:
         "authors": authors,
         "year": year,
         "journal": journal,
+        "volume": volume,
+        "pages": pages,
         "doi": doi,
         "url": url,
         "abstract": abstract[:600],
@@ -486,7 +523,6 @@ def sciatlas_search(
     return results
 
 
-
 def _result_dedupe_key(row: dict[str, Any]) -> str:
     doi = (row.get("doi") or "").strip().lower()
     if doi:
@@ -499,6 +535,12 @@ def _result_dedupe_key(row: dict[str, Any]) -> str:
 
 
 def merge_external_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Dedupe and merge result rows from multiple external sources (SciAtlas, Crossref).
+
+    A paper found by more than one source is kept once, with `sources` recording
+    every source that returned it and `source` collapsing to a single display
+    value (kept for backward compatibility with code that reads `source`).
+    """
     merged: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for row in rows:
@@ -516,7 +558,7 @@ def merge_external_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if src not in existing.get("sources", []):
             existing.setdefault("sources", []).append(src)
         if (row.get("score") or 0) > (existing.get("score") or 0):
-            # Promote the higher-scoring record while keeping merged source list.
+            # Promote the higher-scoring record while keeping the merged source list.
             sources = existing.get("sources", [])
             merged[key] = {**row, "sources": sources}
         if not existing.get("doi") and row.get("doi"):
@@ -529,12 +571,29 @@ def merge_external_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for key in order:
         row = merged[key]
         sources = row.get("sources") or [row.get("source", "external")]
-        # Keep `source` as the primary (highest-scoring) one for backward compat.
         row["source"] = sources[0] if len(sources) == 1 else "+".join(sources)
         row["sources"] = sources
         out.append(row)
     out.sort(key=lambda r: (r.get("score") or 0, r.get("year") or 0), reverse=True)
     return out
+
+
+def _load_dotenv_if_present(review_root: Path) -> None:
+    env_path = review_root / ".env"
+    if not env_path.exists():
+        return
+    try:
+        for raw in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            os.environ.setdefault(key, value)
+    except Exception:
+        pass
+
 
 def combine_results(local_grouped: list[dict[str, Any]], web_grouped: list[dict[str, Any]]) -> list[dict[str, Any]]:
     web_map = {g["keyword"]: g for g in web_grouped}
@@ -547,6 +606,7 @@ def combine_results(local_grouped: list[dict[str, Any]], web_grouped: list[dict[
                 "category": group.get("category"),
                 "keep": group.get("keep", True),
                 "local_results": group.get("local_results", []),
+                "near_miss_results": group.get("near_miss_results", []),
                 "web_results": web_map.get(keyword, {}).get("web_results", []),
             }
         )
@@ -588,6 +648,36 @@ def selected_from_combined(combined: list[dict[str, Any]]) -> dict[str, Any]:
     selected["local_papers"] = list(selected["local_papers"].values())
     selected["local_papers"].sort(key=lambda r: (r["best_score"], r.get("year") or 0), reverse=True)
     selected["local_papers"] = selected["local_papers"][:30]
+    selected_ids = {p["paper_id"] for p in selected["local_papers"]}
+    borderline: dict[str, dict[str, Any]] = {}
+    for group in combined:
+        if not group.get("keep", True):
+            continue
+        for result in group.get("near_miss_results", []):
+            pid = result.get("paper_id")
+            if not pid or pid in selected_ids:
+                continue
+            entry = borderline.setdefault(
+                pid,
+                {
+                    "paper_id": pid,
+                    "title": result.get("title"),
+                    "year": result.get("year"),
+                    "journal": result.get("journal"),
+                    "matched_keywords": [],
+                    "best_direct_raw_score": 0.0,
+                    "best_score": 0.0,
+                    "note": "near-miss: scored below the selection cut; review title/abstract and promote manually if on-topic",
+                },
+            )
+            entry["matched_keywords"].append(group["keyword"])
+            entry["best_direct_raw_score"] = max(entry["best_direct_raw_score"], result.get("direct_raw_score", 0.0))
+            entry["best_score"] = max(entry["best_score"], result.get("score", 0.0))
+    borderline_list = list(borderline.values())
+    for entry in borderline_list:
+        entry["matched_keywords"] = dedupe(entry["matched_keywords"])
+    borderline_list.sort(key=lambda r: (r["best_direct_raw_score"], r["best_score"]), reverse=True)
+    selected["borderline_papers"] = borderline_list
     return selected
 
 
@@ -596,10 +686,30 @@ def role_rank(role: str | None) -> int:
     return order.get(role or "uncertain", 3)
 
 
-def write_report(out_dir: Path, topic: str, keyword_set: dict[str, Any], combined: list[dict[str, Any]]) -> None:
+def write_report(
+    out_dir: Path,
+    topic: str,
+    keyword_set: dict[str, Any],
+    combined: list[dict[str, Any]],
+    borderline_papers: list[dict[str, Any]] | None = None,
+) -> None:
     lines = ["# Topic Paper Discovery Report", "", f"Topic: {topic}", "", "## Keywords", ""]
     for kw in keyword_set["merged_keywords"]:
         lines.append(f"- {kw['keyword']} ({kw.get('category')}, source={'+'.join(kw.get('source', []))})")
+    if borderline_papers:
+        lines += ["", "## Borderline Papers — review required", ""]
+        lines.append(
+            "These papers scored below the selection cut but above the near-miss floor. "
+            "Do NOT treat them as rejected: read each title (and abstract if needed) and "
+            "promote the on-topic ones into the candidate set manually."
+        )
+        lines.append("")
+        for entry in borderline_papers:
+            kws = ", ".join(entry.get("matched_keywords", [])[:4])
+            lines.append(
+                f"- `{entry['paper_id']}` direct_raw={entry['best_direct_raw_score']:.2f} "
+                f"score={entry['best_score']:.3f} ({kws}) {entry.get('title')}"
+            )
     lines += ["", "## Results by Keyword", ""]
     for group in combined:
         lines.append(f"### {group['keyword']}")
@@ -616,55 +726,183 @@ def write_report(out_dir: Path, topic: str, keyword_set: dict[str, Any], combine
     (out_dir / "discovery_report.md").write_text("\n".join(lines), encoding="utf-8")
 
 
-def _load_dotenv_if_present(review_root: Path) -> None:
-    env_path = review_root / ".env"
-    if not env_path.exists():
-        return
-    try:
-        for raw in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            os.environ.setdefault(key, value)
-    except Exception:
-        pass
+# Must produce the IDENTICAL slug for a given filename+mineru_output as
+# mineru-precise-parse-review-writer/scripts/parse_review_writer_pdfs.py's
+# slugify_text/slug_budget and review-metadata-prep/scripts/prepare_metadata.py's
+# slugify_mineru/slug_budget. All three scripts independently derive a slug
+# from the same PDF filename and must agree, or downstream matching between
+# MinerU markdown, metadata, and registry entries silently breaks.
+WINDOWS_MAX_PATH = 260
+_IMAGE_SUFFIX_RESERVE = len("\\images\\") + 64 + 5 + 8
+
+
+def slug_budget(mineru_output: Path) -> int:
+    extracted_root = str((mineru_output / "extracted").resolve())
+    reserved = len(extracted_root) + 1 + _IMAGE_SUFFIX_RESERVE
+    return max(24, WINDOWS_MAX_PATH - reserved)
+
+
+def cap_slug_length(slug: str, max_len: int) -> str:
+    if len(slug) <= max_len:
+        return slug
+    import hashlib
+
+    digest = hashlib.sha1(slug.encode("utf-8")).hexdigest()[:8]
+    return f"{slug[: max_len - len(digest) - 1]}-{digest}"
+
+
+def slugify_for_registration(value: str, mineru_output: Path) -> str:
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKD", value)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    cleaned = re.sub(r"[^A-Za-z0-9._/-]+", "-", ascii_text).strip("-._/")
+    cleaned = cleaned.replace("/", "__")
+    cleaned = re.sub(r"-{2,}", "-", cleaned)
+    cleaned = cleaned.lower() or "document"
+    return cap_slug_length(cleaned, slug_budget(mineru_output))
+
+
+def registered_pdf_paths(review_root: Path) -> set[str]:
+    """Resolved absolute PDF paths already present in the library.
+
+    Sourced from metadata files' source_paths.pdf (the field every registration
+    path -- prepare_metadata.py and this script -- writes), not from slug
+    matching. Different scripts have historically computed different slugs for
+    the same filename (see slugify_for_registration's docstring), which made
+    slug-based dedup silently re-register already-known PDFs as duplicates.
+    A real filesystem path is unambiguous regardless of slug scheme.
+    """
+    meta_dir = review_root / "review-library" / "metadata" / "papers"
+    paths: set[str] = set()
+    if not meta_dir.is_dir():
+        return paths
+    for meta_path in meta_dir.glob("*.metadata.json"):
+        try:
+            meta = read_json(meta_path)
+        except Exception:
+            continue
+        pdf_path = (meta.get("source_paths") or {}).get("pdf")
+        if pdf_path:
+            try:
+                paths.add(str(Path(pdf_path).resolve()))
+            except Exception:
+                paths.add(str(pdf_path))
+    return paths
+
+
+def auto_register_papers(review_root: Path, paper_dir: Path) -> list[str]:
+    """Scan paper_dir for PDF files not yet in the registry and register stubs."""
+    if not paper_dir.exists():
+        print(f"[auto-register] paper_dir not found: {paper_dir}", file=sys.stderr)
+        return []
+    meta_dir = review_root / "review-library" / "metadata" / "papers"
+    registry_path = review_root / "review-library" / "registry" / "papers.jsonl"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    mineru_output = review_root / "mineru-outputs"
+    known_paths = registered_pdf_paths(review_root)
+    existing_ids = {
+        int(re.search(r"\d+", p.stem.split(".")[0]).group())
+        for p in meta_dir.glob("P*.metadata.json")
+        if re.search(r"\d+", p.stem.split(".")[0])
+    }
+    next_id = max(existing_ids, default=0) + 1
+    registered: list[str] = []
+    for pdf in sorted(paper_dir.rglob("*.pdf")):
+        if str(pdf.resolve()) in known_paths:
+            continue
+        relative_stem = str(pdf.relative_to(paper_dir).with_suffix(""))
+        slug = slugify_for_registration(relative_stem, mineru_output)
+        paper_id = f"P{next_id:03d}"
+        next_id += 1
+        md_path = review_root / "mineru-outputs" / "markdown" / f"{slug}.md"
+        content_list_dir = review_root / "mineru-outputs" / "extracted" / slug
+        content_list_candidates = list(content_list_dir.glob("*_content_list.json")) if content_list_dir.exists() else []
+        meta: dict[str, Any] = {
+            "paper_id": paper_id,
+            "slug": slug,
+            "title": {"value": slug, "source": "filename", "confidence": 0.1, "human_checked": False},
+            "authors": {"value": [], "source": "pending", "confidence": 0.0, "human_checked": False},
+            "year": {"value": None, "source": "pending", "confidence": 0.0, "human_checked": False},
+            "journal": {"value": None, "source": "pending", "confidence": 0.0, "human_checked": False},
+            "doi": {"value": None, "source": "pending", "confidence": 0.0, "human_checked": False},
+            "abstract": {"value": "", "source": "pending", "confidence": 0.0, "human_checked": False},
+            "structured_tags": {
+                "value": {k: "not specified" for k in STRUCTURED_TAG_KEYS},
+                "source": "pending",
+                "confidence": 0.0,
+                "human_checked": False,
+            },
+            "source_paths": {
+                "pdf": str(pdf),
+                "markdown": str(md_path) if md_path.exists() else "",
+                "content_list": str(content_list_candidates[0]) if content_list_candidates else "",
+                "extracted_dir": str(content_list_dir) if content_list_dir.exists() else "",
+            },
+            "source_file": {"pdf_name": pdf.name, "relative_pdf_path": str(pdf.relative_to(paper_dir))},
+            "extraction": {"mode": "stub", "model": None, "created_at": utc_now(), "notes": ["auto-registered by discover.py; run review-metadata-prep for full extraction"]},
+            "human_review": {"status": "not_reviewed", "reviewed_at": None, "reviewer": None, "notes": []},
+            "quality": {"missing_fields": ["title", "authors", "year", "abstract", "structured_tags"], "warnings": [], "overall_confidence": 0.0, "needs_human_check": True},
+        }
+        write_json(meta_dir / f"{paper_id}.metadata.json", meta)
+        with registry_path.open("a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {"paper_id": paper_id, "slug": slug, "pdf": str(pdf), "source_pdf": str(pdf.resolve())},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+        registered.append(paper_id)
+        print(f"[auto-register] {paper_id} ← {pdf.name}")
+    return registered
 
 
 def run(args: argparse.Namespace) -> int:
     review_root = Path(args.review_root).resolve()
     _load_dotenv_if_present(review_root)
+    if args.paper_dir:
+        paper_dir = Path(args.paper_dir).resolve()
+        new_ids = auto_register_papers(review_root, paper_dir)
+        if new_ids:
+            print(f"[auto-register] registered {len(new_ids)} new paper(s): {', '.join(new_ids)}")
+            print("[auto-register] run review-metadata-prep to extract full metadata (title, authors, tags)")
     user_keywords = split_keywords(args.keywords)
     project_id = args.project_id or slugify(args.topic)
-    project = review_root / "review-projects" / project_id
-    out_dir = project / "00_discovery"
+    if args.output_dir:
+        out_dir = Path(args.output_dir).resolve()
+    else:
+        out_dir = review_root / "review-projects" / project_id / "00_discovery"
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "topic_input.md").write_text(
         f"# {args.topic}\n\nUser keywords:\n\n" + "\n".join(f"- {kw}" for kw in user_keywords) + "\n",
         encoding="utf-8",
     )
-    keyword_set = build_keyword_set(args.topic, user_keywords)
+    agent_keywords_path = Path(args.agent_keywords).resolve() if args.agent_keywords else None
+    agent_keywords = load_agent_keywords(agent_keywords_path)
+    keyword_set = build_keyword_set(args.topic, user_keywords, agent_keywords)
     write_json(out_dir / "keyword_set.draft.json", keyword_set)
     papers = load_metadata(review_root)
-    classification_rules = load_classification_rules(review_root)
+    classification_rules_path = Path(args.classification_rules).resolve() if args.classification_rules else None
+    classification_rules = load_classification_rules(classification_rules_path)
     local_grouped = local_search_by_keyword(papers, keyword_set["merged_keywords"], args.topic, classification_rules)
     write_json(out_dir / "local_results_by_keyword.json", {"project_id": project_id, "results": local_grouped})
+
     sciatlas_requested = bool(args.sciatlas_search)
     crossref_requested = bool(args.web_search)
     sciatlas_client: SciAtlasClient | None = None
     sciatlas_status = "disabled"
     if sciatlas_requested:
-        config = load_config(
+        sciatlas_config = load_sciatlas_config(
             base_url=args.sciatlas_base_url or None,
             api_key=args.sciatlas_api_key or None,
             timeout=args.sciatlas_timeout or None,
         )
-        if not config.configured:
+        if not sciatlas_config.configured:
             sciatlas_status = "missing_api_key"
         else:
-            sciatlas_client = SciAtlasClient(config=config)
+            sciatlas_client = SciAtlasClient(config=sciatlas_config)
             try:
                 sciatlas_client.health()
                 sciatlas_status = "ok"
@@ -672,34 +910,33 @@ def run(args: argparse.Namespace) -> int:
                 sciatlas_status = f"health_failed: {exc}"
                 sciatlas_client = None
 
-    external_grouped: list[dict[str, Any]] = []
+    web_grouped = []
     sources_used: list[str] = []
-    for group in local_grouped:
-        rows: list[dict[str, Any]] = []
-        if sciatlas_client is not None:
-            sciatlas_rows = sciatlas_search(
-                sciatlas_client,
-                group["keyword"],
-                args.topic,
-                args.sciatlas_limit,
-                args.sciatlas_time_range or None,
-                args.sciatlas_domain or None,
-            )
-            rows.extend(sciatlas_rows)
-            if sciatlas_rows and "sciatlas" not in sources_used:
-                sources_used.append("sciatlas")
-            if args.web_delay:
-                time.sleep(args.web_delay)
-        if crossref_requested:
-            crossref_rows = web_search(group["keyword"], args.topic, args.web_limit)
-            rows.extend(crossref_rows)
-            if crossref_rows and "crossref" not in sources_used:
-                sources_used.append("crossref")
-            if args.web_delay:
-                time.sleep(args.web_delay)
-        merged = merge_external_results(rows)
-        if merged:
-            external_grouped.append({"keyword": group["keyword"], "web_results": merged})
+    if sciatlas_requested or crossref_requested:
+        for group in local_grouped:
+            rows: list[dict[str, Any]] = []
+            if sciatlas_client is not None:
+                sciatlas_rows = sciatlas_search(
+                    sciatlas_client,
+                    group["keyword"],
+                    args.topic,
+                    args.sciatlas_limit,
+                    args.sciatlas_time_range or None,
+                    args.sciatlas_domain or None,
+                )
+                rows.extend(sciatlas_rows)
+                if sciatlas_rows and "sciatlas" not in sources_used:
+                    sources_used.append("sciatlas")
+                if args.web_delay:
+                    time.sleep(args.web_delay)
+            if crossref_requested:
+                crossref_rows = web_search(group["keyword"], args.topic, args.web_limit, args.mailto)
+                rows.extend(crossref_rows)
+                if crossref_rows and "crossref" not in sources_used:
+                    sources_used.append("crossref")
+                if args.web_delay:
+                    time.sleep(args.web_delay)
+            web_grouped.append({"keyword": group["keyword"], "web_results": merge_external_results(rows)})
 
     if sciatlas_requested and sciatlas_client is None and not crossref_requested:
         external_status = sciatlas_status
@@ -714,22 +951,17 @@ def run(args: argparse.Namespace) -> int:
     else:
         external_status = "disabled"
 
-    if not sources_used:
-        external_source = "none"
-    elif len(sources_used) == 1:
-        external_source = sources_used[0]
-    else:
-        external_source = "+".join(sources_used)
-
-    write_json(out_dir / "web_results_by_keyword.json", {
-        "project_id": project_id,
-        "enabled": bool(external_grouped),
-        "source": external_source,
-        "status": external_status,
-        "sources": sources_used,
-        "results": external_grouped,
-    })
-    web_grouped = external_grouped
+    write_json(
+        out_dir / "web_results_by_keyword.json",
+        {
+            "project_id": project_id,
+            "enabled": bool(web_grouped),
+            "source": "+".join(sources_used) if sources_used else "none",
+            "status": external_status,
+            "sources": sources_used,
+            "results": web_grouped,
+        },
+    )
     combined = combine_results(local_grouped, web_grouped)
     write_json(out_dir / "combined_results_by_keyword.json", {"project_id": project_id, "topic": args.topic, "results": combined})
     selected = selected_from_combined(combined)
@@ -745,8 +977,13 @@ def run(args: argparse.Namespace) -> int:
             "instructions": "Use the dashboard to delete irrelevant keywords/results, then mark discovery confirmed.",
         },
     )
-    write_report(out_dir, args.topic, keyword_set, combined)
-    print(f"Discovery project: {project}")
+    write_report(out_dir, args.topic, keyword_set, combined, selected.get("borderline_papers"))
+    if selected.get("borderline_papers"):
+        print(
+            f"[borderline] {len(selected['borderline_papers'])} paper(s) scored in the near-miss band -- "
+            "see 'Borderline Papers' in discovery_report.md and review them before confirming the candidate set"
+        )
+    print(f"Output directory: {out_dir}")
     print(f"Keyword set: {out_dir / 'keyword_set.draft.json'}")
     print(f"Human dashboard data: {out_dir / 'combined_results_by_keyword.json'}")
     return 0
@@ -754,22 +991,34 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Discover local and web papers by expanded topic keywords.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=str(Path.cwd()))
+    parser.add_argument("--output-dir", default="", help="Override output folder. Defaults to <review-root>/review-projects/<project-id>/00_discovery/")
     parser.add_argument("--project-id", default="")
     parser.add_argument("--topic", required=True)
     parser.add_argument("--keywords", default="")
-    parser.add_argument("--web-search", action="store_true", help="Fallback: query Crossref when SciAtlas is unavailable.")
+    parser.add_argument("--web-search", action="store_true", help="Query Crossref per keyword. Independent of --sciatlas-search; use both, either, or neither.")
     parser.add_argument("--web-limit", type=int, default=8)
     parser.add_argument("--web-delay", type=float, default=0.2)
-    parser.add_argument("--sciatlas-search", action="store_true", help="Query the hosted SciAtlas KG /v1/search per keyword.")
+    parser.add_argument("--mailto", default="", help="Contact email for Crossref polite pool.")
+    parser.add_argument("--sciatlas-search", action="store_true", help="Query the hosted SciAtlas KG /v1/search per keyword. Requires SCIATLAS_API_KEY (env, .env, or --sciatlas-api-key).")
     parser.add_argument("--sciatlas-limit", type=int, default=8)
     parser.add_argument("--sciatlas-api-key", default="", help="Overrides SCIATLAS_API_KEY env var.")
     parser.add_argument("--sciatlas-base-url", default="", help="Overrides SCIATLAS_API_BASE_URL env var.")
     parser.add_argument("--sciatlas-timeout", type=int, default=0, help="HTTP timeout in seconds. 0 = use env/default.")
     parser.add_argument("--sciatlas-time-range", default="", help="Optional year range like 2018-2025.")
-    parser.add_argument("--sciatlas-domain", default="", help="Optional domain hint, e.g. 'organic chemistry'.")
+    parser.add_argument("--sciatlas-domain", default="", help="Optional domain hint, e.g. 'organic chemistry' or 'urban climate'.")
+    parser.add_argument("--paper-dir", default="", help="Path to local paper storage directory. When provided, unregistered PDFs are auto-registered before discovery.")
+    parser.add_argument("--agent-keywords", default="", help="Path to a JSON file of LLM-expanded keywords (see SKILL.md). Required for keyword expansion beyond --keywords.")
+    parser.add_argument("--classification-rules", default="", help="Optional path to a Python file defining a 'rules' list of (label, category, aliases) tuples, used to widen structured-tag matching. Safe to omit.")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    raise SystemExit(run(parse_args()))
+    import traceback
+    try:
+        raise SystemExit(run(parse_args()))
+    except SystemExit:
+        raise
+    except Exception:
+        traceback.print_exc()
+        raise SystemExit(1)

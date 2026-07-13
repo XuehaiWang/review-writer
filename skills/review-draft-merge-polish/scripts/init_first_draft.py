@@ -26,8 +26,8 @@ def read_text(path: Path) -> str:
 
 
 def load_figures(project: Path) -> dict[str, Any] | None:
-    redrawn_path = project / "03_figure_redraw" / "redrawn_figure_manifest.json"
-    candidates_path = project / "02_section_drafting" / "figure_candidates.json"
+    redrawn_path = project / "04_figure_redraw" / "redrawn_figure_manifest.json"
+    candidates_path = project / "03_section_drafting" / "figure_candidates.json"
     redrawn = read_json(redrawn_path) if redrawn_path.exists() else None
     if isinstance(redrawn, dict):
         figures = redrawn.get("figures")
@@ -64,23 +64,23 @@ def run(args: argparse.Namespace) -> int:
     project = review_root / "review-projects" / args.project_id
     if not project.exists():
         raise SystemExit(f"Project not found: {project}")
-    section_json = project / "02_section_drafting" / "section_drafts.json"
+    section_json = project / "03_section_drafting" / "section_drafts.json"
     if not section_json.exists():
         raise SystemExit(f"Missing section drafts: {section_json}")
-    out_dir = project / "04_first_draft"
+    out_dir = project / "05_first_draft"
     out_dir.mkdir(parents=True, exist_ok=True)
     bundle = {
         "project_id": args.project_id,
         "topic": infer_topic(project),
         "selected_outline_md": read_text(project / "01_matrix_outline" / "selected_outline.md"),
         "matrix_outline_report_md": read_text(project / "01_matrix_outline" / "matrix_outline_report.md"),
-        "section_tasks": read_json(project / "02_section_drafting" / "section_tasks.json") if (project / "02_section_drafting" / "section_tasks.json").exists() else None,
+        "section_tasks": read_json(project / "03_section_drafting" / "section_tasks.json") if (project / "03_section_drafting" / "section_tasks.json").exists() else None,
         "section_drafts": read_json(section_json),
-        "section_drafts_md": read_text(project / "02_section_drafting" / "section_drafts.md"),
-        "section_drafting_report_md": read_text(project / "02_section_drafting" / "section_drafting_report.md"),
-        "redrawn_figure_manifest": read_json(project / "03_figure_redraw" / "redrawn_figure_manifest.json") if (project / "03_figure_redraw" / "redrawn_figure_manifest.json").exists() else None,
+        "section_drafts_md": read_text(project / "03_section_drafting" / "section_drafts.md"),
+        "section_drafting_report_md": read_text(project / "03_section_drafting" / "section_drafting_report.md"),
+        "redrawn_figure_manifest": read_json(project / "04_figure_redraw" / "redrawn_figure_manifest.json") if (project / "04_figure_redraw" / "redrawn_figure_manifest.json").exists() else None,
         "available_figures": load_figures(project),
-        "figure_redraw_report_md": read_text(project / "03_figure_redraw" / "figure_redraw_report.md"),
+        "figure_redraw_report_md": read_text(project / "04_figure_redraw" / "figure_redraw_report.md"),
     }
     write_json(out_dir / "draft_bundle.json", bundle)
     for name in ["first_draft.md", "merge_report.md", "remaining_issues.md"]:
@@ -93,7 +93,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Initialize first-draft merge bundle for a review project.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=str(Path.cwd()))
     parser.add_argument("--project-id", required=True)
     return parser.parse_args()
 

@@ -5,57 +5,30 @@ description: Perform final content audit and format audit on a merged review dra
 
 # Review Final Audit Release
 
-Use this skill after `review-draft-merge-polish` has produced `04_first_draft/first_draft.md` and the human has approved the draft structure.
+Use this skill after `review-draft-merge-polish` has produced `05_first_draft/first_draft.md` and the human has approved the draft structure.
 
 This is the final quality gate. It should not create new arguments casually. Its job is to check, correct, and release a defensible final manuscript.
-
-## Hard Gate
-
-`final_draft.md` is rejected if any of these are missing. The status script
-will not let the project advance past this stage when a blocker exists:
-
-```text
-draft_has_no_figures               at least one ![](path) figure or scheme is required;
-                                   to override, write 03_figure_redraw/skip_reason.md
-                                   with a one-line justification before re-running.
-draft_has_no_citation_callouts     at least one inline `[n]` citation callout is required.
-missing_references_section         the draft must end with a heading named "References",
-                                   "Reference List", "Bibliography", "Cited Literature",
-                                   or "参考文献".
-empty_references_section           the References section must list at least one item
-                                   formatted as "1. Author ..." or "[1] Author ...".
-reference_callouts_missing_from_reference_list
-                                   every `[n]` referenced inline must appear in the list.
-broken_markdown_image_paths        every image path must resolve to a real file.
-citations_reference_unknown_papers any cited_paper_id in citations.json must be present
-                                   in literature_matrix.json.
-source_figure_placeholders_need_redraw_or_permission_check
-                                   source-paper placeholders must be redrawn or removed.
-```
-
-Run `final_audit_scan.py` first; resolve every entry in `blocking_issues`
-before declaring the audit complete.
 
 ## Required Inputs
 
 Read:
 
 ```text
-review-projects/<project_id>/04_first_draft/first_draft.md
-review-projects/<project_id>/04_first_draft/merge_report.md
-review-projects/<project_id>/04_first_draft/remaining_issues.md
+review-projects/<project_id>/05_first_draft/first_draft.md
+review-projects/<project_id>/05_first_draft/merge_report.md
+review-projects/<project_id>/05_first_draft/remaining_issues.md
 review-projects/<project_id>/01_matrix_outline/literature_matrix.json
 review-projects/<project_id>/01_matrix_outline/selected_outline.md
-review-projects/<project_id>/02_section_drafting/section_tasks.json
-review-projects/<project_id>/02_section_drafting/section_drafts.json
-review-projects/<project_id>/02_section_drafting/figure_candidates.json
+review-projects/<project_id>/03_section_drafting/section_tasks.json
+review-projects/<project_id>/03_section_drafting/section_drafts.json
+review-projects/<project_id>/03_section_drafting/figure_candidates.json
 ```
 
 If figures were redrawn, also read:
 
 ```text
-review-projects/<project_id>/03_figure_redraw/redrawn_figure_manifest.json
-review-projects/<project_id>/03_figure_redraw/figure_redraw_report.md
+review-projects/<project_id>/04_figure_redraw/redrawn_figure_manifest.json
+review-projects/<project_id>/04_figure_redraw/figure_redraw_report.md
 ```
 
 For high-risk claims, reopen the relevant local paper metadata and Markdown/PDF listed in the matrix or section outputs.
@@ -66,16 +39,30 @@ Follow this order:
 
 ```text
 1. Run the deterministic format scan script.
-2. Read the first draft and upstream evidence files.
-3. Audit content: evidence support, citation fit, chemistry accuracy, overclaiming, missing caveats, outline fit.
-4. Audit review quality: synthesis vs paper listing, comparison axes, scheme/table integration, organic-review style.
-5. Audit format: headings, references, figure/table callouts, abbreviations, placeholders, unresolved notes.
-6. Revise the manuscript into a final draft.
-7. Write content and format audit reports.
-8. Write a release report with remaining risks.
+2. Audit content and review quality per section (see "Audit Per Section" below), one section at a time.
+3. Do one lightweight whole-document pass for cross-cutting format checks only (headings, citation numbering consistency, reference list formatting) -- this does not require re-reading paper content, only the merged draft's own text.
+4. Revise the manuscript into a final draft.
+5. Write content and format audit reports.
+6. Write a release report with remaining risks.
 ```
 
 Do not hide unresolved problems. If a claim cannot be verified from local evidence, either weaken it, remove it, or list it in `final_remaining_issues.md`.
+
+## Audit Per Section (cost control)
+
+Loading the entire merged manuscript plus every upstream evidence file into one continuous audit pass is the second-largest token cost in this pipeline (after section drafting). Bound it by auditing one section at a time instead:
+
+```text
+For each section in first_draft.md (identified by its ## heading), read only:
+  - that section's own text (not the whole manuscript)
+  - its section_tasks.json entry (core_argument, allowed_papers, must_cover_points, avoid_points)
+  - its section_drafts.json entry
+  - the literature_matrix.json rows for only the papers in that section's allowed_papers/major_papers -- not the full matrix
+Run the Content Audit Rules and the review-quality checks (synthesis vs paper listing, comparison axes, figure/table integration) against that section alone, then move to the next section.
+Only reopen a cited paper's full metadata/Markdown/PDF for a specific claim when the section's own evidence (matrix row, section draft) doesn't resolve it -- the same fallback rule review-section-drafting-figure-picking uses for paper_content_cache.json.
+```
+
+Aggregate each section's findings into one `content_audit_report.md` at the end. The cross-cutting format checks (citation numbering, reference list, headings) still need one pass over the whole merged document, but that pass only reads the document's own text — not upstream per-paper evidence — so it stays cheap regardless of paper count.
 
 ## Content Audit Rules
 
@@ -83,25 +70,16 @@ Check for:
 
 ```text
 claim has support from the cited paper or matrix entry
-citation number or paper_id matches the claim
-reaction class, catalyst, substrate, product, regioselectivity, stereoselectivity, and mechanism are not distorted
-non-comparable yields or conditions are not directly ranked
-speculative mechanisms are described as tentative
+bracket citation number (e.g. [3]) resolves to the correct paper via draft_bundle.json's citation_map
+the paper's key technical details (method, subject, result, and any measured/qualitative outcome) are not distorted
+non-comparable results or conditions are not directly ranked as if they were
+speculative or proposed conclusions are described as tentative, not established
 paragraphs synthesize patterns rather than listing one paper after another
 each major section follows the approved outline purpose
-figures or schemes support the surrounding claims
+figures or tables support the surrounding claims
 ```
 
-For organic synthesis reviews, give special attention to:
-
-```text
-named reaction type and activation mode
-substrate scope boundaries
-leaving group and propargylic/allenyl regioselectivity
-metal catalyst and ligand identity
-enantioselectivity or stereospecificity claims
-mechanistic evidence vs author proposal
-```
+Identify which specific technical details matter most for this review's subject area (e.g. for a synthesis-chemistry review: reaction type, catalyst, substrate scope, regio-/stereoselectivity, mechanism; for a different field: whatever the equivalent core technical claims are) and give those special attention — do not assume the review is about organic chemistry. Base this on the actual review topic and the terminology already used in the literature matrix and section drafts.
 
 ## Format Audit Rules
 
@@ -110,14 +88,16 @@ Check for:
 ```text
 heading hierarchy
 duplicate or empty headings
-reference callouts and reference list consistency
+bracket citation numbering is sequential from [1], has no gaps, and every [N] used in the body has a matching ## References entry (and vice versa)
+a bracket number in the body actually points at the review's own reference list, not a source paper's own citation number quoted verbatim inside a figure/table caption (a common leak — check any caption text copied from source material for stray [N]-style numbers that were never reworded during merge)
+reference list entries follow the ACS journal-article format exactly: "Last, F.; Last, F." authors ending in a period, plain-text title ending in a period, *Journal* italic with no comma before the year, **Year** bold, comma, *Volume* italic, comma, Pages plain with an en dash (–) not a hyphen (see review-draft-merge-polish's Reference List Format)
 figure/table numbering and callouts
 caption completeness
 source figure placeholders that still need redraw or permission review
 undefined abbreviations
 placeholder text such as TODO, verification needed, citation needed
 broken Markdown links or image paths
-front matter style inappropriate for a chemistry review
+front matter style inappropriate for the review's subject area
 ```
 
 ## Script
@@ -125,10 +105,10 @@ front matter style inappropriate for a chemistry review
 Run:
 
 ```bash
-python /home/ps/review-writer/skills/review-final-audit-release/scripts/final_audit_scan.py \
-  --review-root /home/ps/review-writer \
-  --project-id <project_id>
+python3 <skill-root>/scripts/final_audit_scan.py --project-id <project_id>
 ```
+
+`--review-root` defaults to the current working directory. `<skill-root>` is the directory containing this `SKILL.md`.
 
 The script writes `format_scan.json` and `format_scan.md`. Codex must then perform the semantic content audit and final revision.
 
@@ -137,7 +117,7 @@ The script writes `format_scan.json` and `format_scan.md`. Codex must then perfo
 Write outputs under:
 
 ```text
-review-projects/<project_id>/05_final_audit/
+review-projects/<project_id>/06_final_audit/
 ```
 
 Create:
@@ -161,7 +141,7 @@ major content fixes made
 claims weakened or removed
 citation or paper_id mismatches found
 sections still weak in evidence
-chemistry-specific risks
+subject-specific risks
 ```
 
 `format_audit_report.md` must include:

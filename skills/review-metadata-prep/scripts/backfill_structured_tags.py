@@ -15,8 +15,8 @@ from prepare_metadata import (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Backfill empty eight-category structured_tags into existing metadata files.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser = argparse.ArgumentParser(description="Backfill empty seven-category structured_tags into existing metadata files.")
+    parser.add_argument("--review-root", default=str(Path.cwd()))
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing structured_tags.")
     return parser.parse_args()
 

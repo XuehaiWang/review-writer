@@ -1,18 +1,27 @@
 ---
 name: review-export-docx
-description: Convert a finalized review Markdown draft into a Word DOCX that matches the bundled ACS-style review_template.docx. Use after the review writing pipeline has produced a stable first_draft.md or final_draft.md and the user wants a deliverable .docx with proper section styles, captions, tables, and math.
+description: Convert a finalized review Markdown draft into a Word DOCX matching a manuscript template. Use after the review writing pipeline has produced a stable first_draft.md or final_draft.md and the user wants a deliverable .docx with proper section styles, captions, tables, and math.
 ---
 
 # Review Export DOCX
 
-Convert a finalized review Markdown into Word DOCX using the bundled ACS-style template.
+Convert a finalized review Markdown into a Word DOCX using a manuscript template.
+
+## Template Selection (LLM step, required before running the script)
+
+This skill does not assume any specific publisher, journal, or subject area. Before running, determine which template is appropriate:
+
+1. If the user has specified a target journal/publisher or provided their own `.docx` template, use it via `--template`.
+2. If the user hasn't specified one, ask them whether a specific manuscript template is required.
+3. If no specific template is required, fall back to the bundled `review_template.docx`. This bundled template is a plain, neutral academic manuscript layout (Times New Roman, standard section styles) — it is not tied to any specific publisher's branding or a specific subject area's conventions. Treat it as a reasonable default, not a fixed requirement.
+
+Any template used (bundled or custom) must define the named paragraph styles listed under "Style Mapping" below, since `md2docx.py` applies content to those named styles. If a custom template doesn't define them, either add the missing styles to that template first or fall back to the bundled default.
 
 ## When To Use
 
 ```text
 final delivery of a review draft as .docx
 the source markdown is stable (first_draft.md or final_draft.md)
-the document must match the bundled ACS-style template
 the markdown may contain pipe tables, images, and LaTeX math
 ```
 
@@ -21,9 +30,17 @@ Do not use this skill to revise content, fix citations, or validate evidence.
 ## Inputs
 
 ```text
-review-projects/<project_id>/04_first_draft/first_draft.md
+review-projects/<project_id>/05_first_draft/first_draft.md
 or
-review-projects/<project_id>/05_final_audit/final_draft.md
+review-projects/<project_id>/06_final_audit/final_draft.md
+```
+
+## Output
+
+DOCX files are written to their own stage folder, not next to the source Markdown:
+
+```text
+review-projects/<project_id>/07_docx_export/
 ```
 
 ## Dependencies
@@ -39,29 +56,29 @@ If `latex2word` is missing, math is rendered as italic plain text and a warning 
 Default (final draft):
 
 ```bash
-python3 /home/ps/review-writer/skills/review-export-docx/scripts/md2docx.py \
-  --input  /home/ps/review-writer/review-projects/<project_id>/05_final_audit/final_draft.md \
-  --output /home/ps/review-writer/review-projects/<project_id>/05_final_audit/final_draft.docx
+python3 <skill-root>/scripts/md2docx.py \
+  --input  <review-root>/review-projects/<project_id>/06_final_audit/final_draft.md \
+  --output <review-root>/review-projects/<project_id>/07_docx_export/final_draft.docx
 ```
 
 First draft:
 
 ```bash
-python3 /home/ps/review-writer/skills/review-export-docx/scripts/md2docx.py \
-  --input  /home/ps/review-writer/review-projects/<project_id>/04_first_draft/first_draft.md \
-  --output /home/ps/review-writer/review-projects/<project_id>/04_first_draft/first_draft.docx
+python3 <skill-root>/scripts/md2docx.py \
+  --input  <review-root>/review-projects/<project_id>/05_first_draft/first_draft.md \
+  --output <review-root>/review-projects/<project_id>/07_docx_export/first_draft.docx
 ```
 
-Custom template:
+Custom template (see Template Selection above):
 
 ```bash
-python3 /home/ps/review-writer/skills/review-export-docx/scripts/md2docx.py \
+python3 <skill-root>/scripts/md2docx.py \
   --input    /abs/path/review.md \
   --output   /abs/path/review.docx \
   --template /abs/path/custom_template.docx
 ```
 
-The default template is `/home/ps/review-writer/skills/review-export-docx/review_template.docx`.
+`<skill-root>` is the directory containing this `SKILL.md`. The default template (used when `--template` is omitted) is `<skill-root>/review_template.docx`.
 
 ## Style Mapping
 
@@ -83,6 +100,8 @@ Chart N.  ...     -> VB_Chart_Title
 table cell        -> TC_Table_Body
 $...$  / $$...$$  -> OMML via latex2word (or italic plain text fallback)
 ```
+
+`Scheme N.` and `Chart N.` are optional caption types recognized only if the Markdown actually uses that numbering (common in some subject areas' procedural/process diagrams and data charts). If the review's Markdown never produces `Scheme N.` or `Chart N.` captions, those styles simply go unused — no action needed.
 
 ## Supported Markdown
 
@@ -107,7 +126,7 @@ Relative image paths in the Markdown are resolved against the Markdown file's di
 ```text
 use only after review content is stable
 do not rewrite, polish, or revise content
-do not modify or polish manuscript content
+do not use this skill to read or normalize MinerU output
 do not run this skill in place of the final audit skill
 ```
 

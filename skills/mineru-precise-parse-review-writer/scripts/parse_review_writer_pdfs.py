@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
 import shutil
+import sys
 import time
 import unicodedata
 import zipfile
@@ -16,19 +18,34 @@ from typing import Any, Dict, Iterable, List
 
 import requests
 
+# Windows consoles commonly default to a legacy code page (e.g. cp936/gbk) that
+# cannot encode arbitrary Unicode filenames (accented letters, CJK, en-dashes,
+# etc.), which are routine in paper-library filenames copied from publishers.
+# Wrap stdout/stderr so a print() never crashes the whole batch run over a
+# console-encoding mismatch; unencodable characters are replaced, not raised.
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name)
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(errors="replace")
+        except Exception:
+            pass
+    elif hasattr(_stream, "buffer"):
+        setattr(sys, _stream_name, io.TextIOWrapper(_stream.buffer, encoding=_stream.encoding, errors="replace"))
+
 
 MINERU_BASE_URL = "https://mineru.net"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 
 
 def default_review_root() -> Path:
-    if SKILL_ROOT.parent.name == "skills":
+    if SKILL_ROOT.parent.name in {"skills", "skills_versa"}:
         return SKILL_ROOT.parent.parent
     return SKILL_ROOT.parent
 
 
 REVIEW_ROOT = default_review_root()
-DEFAULT_INPUT_DIR = REVIEW_ROOT / "Progargylic"
+DEFAULT_INPUT_DIR = REVIEW_ROOT
 DEFAULT_OUTPUT_DIR = REVIEW_ROOT / "mineru-outputs"
 DEFAULT_TOKEN_FILE = SKILL_ROOT / "config" / "mineru_api_token.txt"
 DEFAULT_TIMEOUT_MINUTES = 30
@@ -168,13 +185,57 @@ def resolve_token(args: argparse.Namespace) -> str:
     )
 
 
-def slugify_text(value: str) -> str:
+# Windows' legacy MAX_PATH (260 chars) is hit deterministically for long,
+# purely descriptive PDF filenames (no DOI/arXiv-style short ID): the deepest
+# path this tool creates is <output_dir>/extracted/<slug>/images/<hash>.<ext>,
+# where <hash> is a 64-hex-char content hash. zipfile.extractall then raises
+# FileNotFoundError on the first image entry it tries to write, aborting the
+# whole extraction. The safe slug length depends on how deep output_dir itself
+# is (which varies per machine/checkout), so it is computed from output_dir
+# rather than hardcoded -- a fixed constant would either be too tight for
+# shallow checkouts (needlessly re-slugging, and thus re-parsing, papers whose
+# original slug was already safely short enough) or too loose for deep ones.
+WINDOWS_MAX_PATH = 260
+_IMAGE_SUFFIX_RESERVE = len("\\images\\") + 64 + 5 + 8  # sep+dir, hash, ext headroom, safety margin
+
+
+def slug_budget(output_dir: Path) -> int:
+    """Max slug length that keeps `<output_dir>/extracted/<slug>/images/<hash>.ext`
+    safely under Windows' MAX_PATH for this specific output_dir's path depth.
+    Must use the IDENTICAL formula to review-metadata-prep/scripts/
+    prepare_metadata.py's slug_budget -- both scripts independently derive the
+    same slug from the same filename (given the same mineru output directory)
+    and must agree, or metadata prep will not find the Markdown this parser
+    already wrote for a given paper.
+    """
+    extracted_root = str((output_dir / "extracted").resolve())
+    reserved = len(extracted_root) + 1 + _IMAGE_SUFFIX_RESERVE
+    return max(24, WINDOWS_MAX_PATH - reserved)
+
+
+def cap_slug_length(slug: str, max_len: int) -> str:
+    """Truncate slug to max_len, appending a short stable hash of the full
+    original slug so uniqueness across similarly-prefixed filenames survives
+    truncation. No-op when slug is already within budget.
+    """
+    if len(slug) <= max_len:
+        return slug
+    import hashlib
+
+    digest = hashlib.sha1(slug.encode("utf-8")).hexdigest()[:8]
+    return f"{slug[: max_len - len(digest) - 1]}-{digest}"
+
+
+def slugify_text(value: str, output_dir: Path | None = None) -> str:
     normalized = unicodedata.normalize("NFKD", value)
     ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
     cleaned = re.sub(r"[^A-Za-z0-9._/-]+", "-", ascii_text).strip("-._/")
     cleaned = cleaned.replace("/", "__")
     cleaned = re.sub(r"-{2,}", "-", cleaned)
-    return cleaned.lower() or "document"
+    cleaned = cleaned.lower() or "document"
+    if output_dir is None:
+        return cleaned
+    return cap_slug_length(cleaned, slug_budget(output_dir))
 
 
 def chunked(items: List[ParseJob], size: int) -> Iterable[List[ParseJob]]:
@@ -203,7 +264,7 @@ def discover_jobs(input_dir: Path, output_dir: Path, limit: int, force: bool) ->
     seen: Dict[str, int] = {}
     for index, pdf_path in enumerate(pdfs, start=1):
         relative_stem = str(pdf_path.relative_to(input_dir).with_suffix(""))
-        base_slug = slugify_text(relative_stem)
+        base_slug = slugify_text(relative_stem, output_dir)
         seen[base_slug] = seen.get(base_slug, 0) + 1
         slug = base_slug if seen[base_slug] == 1 else f"{base_slug}-{seen[base_slug]:02d}"
         data_id = f"{index:03d}-{slug}"[:96]
@@ -238,7 +299,7 @@ def discover_single_job(pdf_path: Path, input_dir: Path, output_dir: Path, force
     except ValueError:
         relative_stem = resolved_pdf.stem
 
-    slug = slugify_text(relative_stem)
+    slug = slugify_text(relative_stem, output_dir)
     markdown_path = output_dir / "markdown" / f"{slug}.md"
     if markdown_path.is_file() and not force:
         print(f"[skip] {resolved_pdf} -> existing {markdown_path.name}")
@@ -394,17 +455,34 @@ def rewrite_image_paths(markdown: str, slug: str) -> str:
     return text
 
 
-def materialize_markdown(output_dir: Path, job: ParseJob, zip_url: str, force: bool) -> Dict[str, Any]:
+def materialize_markdown(
+    output_dir: Path, job: ParseJob, zip_url: str, force: bool, max_attempts: int = 2, retry_delay: float = 2.0
+) -> Dict[str, Any]:
     raw_zip = output_dir / "raw_zips" / f"{job.slug}.zip"
     extracted_dir = output_dir / "extracted" / job.slug
     markdown_path = output_dir / "markdown" / f"{job.slug}.md"
 
-    prepare_target(raw_zip, force)
-    prepare_target(extracted_dir, force)
-
-    download_binary(zip_url, raw_zip)
-    with zipfile.ZipFile(raw_zip) as archive:
-        archive.extractall(extracted_dir)
+    # Downloading and extracting many files back-to-back on Windows occasionally hits
+    # a transient failure (antivirus real-time scan briefly locking a just-written
+    # file, a flaky chunked download) even though the zip itself is perfectly valid
+    # moments later. Retry the download+extract once with a short delay before
+    # giving up, rather than losing the whole paper to a one-off timing glitch.
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            prepare_target(raw_zip, force or attempt > 1)
+            prepare_target(extracted_dir, force or attempt > 1)
+            download_binary(zip_url, raw_zip)
+            with zipfile.ZipFile(raw_zip) as archive:
+                archive.extractall(extracted_dir)
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_attempts:
+                time.sleep(retry_delay)
+    if last_exc is not None:
+        raise last_exc
 
     full_md = extracted_dir / "full.md"
     if not full_md.is_file():
@@ -435,6 +513,23 @@ def summarize_batch_states(results: Dict[str, Dict[str, Any]]) -> Dict[str, int]
         state = str(item.get("state") or "unknown")
         counts[state] = counts.get(state, 0) + 1
     return counts
+
+
+def save_manifest_progress(output_dir: Path, manifest: Dict[str, Any]) -> None:
+    """Persist manifest.json after every batch, not just at the end of the run.
+
+    A single unhandled exception (network error, an unencodable filename in a
+    print(), an API timeout on one batch of many) previously lost every
+    already-completed batch's record, even though those PDFs were already
+    uploaded to and parsed by MinerU and their Markdown/images already written
+    to disk -- only the manifest bookkeeping was gone. Writing after each
+    batch means a crash loses at most the in-flight batch's manifest entries.
+    """
+    snapshot = dict(manifest)
+    snapshot["completed_count"] = len(manifest["completed"])
+    snapshot["failed_count"] = len(manifest["failed"])
+    snapshot["status"] = "in_progress"
+    write_json(output_dir / "manifest.json", snapshot)
 
 
 def run_batch(
@@ -488,12 +583,20 @@ def run_batch(
                 manifest["failed"].append(job_record)
                 batch_record["jobs"].append(job_record)
                 continue
-            output_record = materialize_markdown(output_dir, job, zip_url, force=args.force)
+            try:
+                output_record = materialize_markdown(output_dir, job, zip_url, force=args.force)
+            except Exception as exc:  # one bad zip/download must not abort the rest of the batch
+                job_record["state"] = "failed"
+                job_record["err_msg"] = f"materialize_markdown failed: {type(exc).__name__}: {exc}"
+                manifest["failed"].append(job_record)
+                batch_record["jobs"].append(job_record)
+                continue
             job_record.update(output_record)
             manifest["completed"].append(job_record)
         else:
             manifest["failed"].append(job_record)
         batch_record["jobs"].append(job_record)
+    save_manifest_progress(output_dir, manifest)
 
 
 def main() -> int:
@@ -537,15 +640,40 @@ def main() -> int:
     }
 
     session = requests.Session()
+    batch_errors: List[str] = []
     try:
         for batch_jobs in chunked(jobs, max(1, args.batch_size)):
-            run_batch(session, token, batch_jobs, args, output_dir, manifest)
+            try:
+                run_batch(session, token, batch_jobs, args, output_dir, manifest)
+            except Exception as exc:
+                # A whole-batch failure (upload/network/timeout) must not abort
+                # subsequent batches, and whatever prior batches already
+                # completed must not be lost -- save_manifest_progress inside
+                # run_batch already persisted everything up to this point.
+                msg = f"{type(exc).__name__}: {exc}"
+                batch_errors.append(msg)
+                for job in batch_jobs:
+                    manifest["failed"].append(
+                        {
+                            "pdf_name": job.file_name,
+                            "relative_pdf_path": job.relative_pdf_path,
+                            "slug": job.slug,
+                            "data_id": job.data_id,
+                            "state": "batch_failed",
+                            "err_msg": msg,
+                        }
+                    )
+                save_manifest_progress(output_dir, manifest)
+                print(f"[batch-error] {msg} -- continuing with remaining batches")
     finally:
         session.close()
 
     manifest["finished_at"] = now_utc()
     manifest["completed_count"] = len(manifest["completed"])
     manifest["failed_count"] = len(manifest["failed"])
+    manifest["status"] = "finished"
+    if batch_errors:
+        manifest["batch_errors"] = batch_errors
     write_json(output_dir / "manifest.json", manifest)
 
     print(

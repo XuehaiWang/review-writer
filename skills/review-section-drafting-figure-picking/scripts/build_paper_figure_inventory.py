@@ -118,17 +118,17 @@ def build_inventory(review_root: Path, project_id: str) -> dict[str, Any]:
             papers.append({"paper_id": paper_id, "status": "missing_metadata", "candidates": []})
             continue
         source_paths = meta.get("source_paths") or {}
-        content_path = Path(str(source_paths.get("content_list") or ""))
-        extracted_dir = Path(str(source_paths.get("extracted_dir") or ""))
+        content_path = Path(str(source_paths.get("content_list") or "")) if source_paths.get("content_list") else None
+        extracted_dir = Path(str(source_paths.get("extracted_dir") or "")) if source_paths.get("extracted_dir") else None
         candidates = []
-        if content_path.exists():
+        if content_path is not None and content_path.is_file():
             blocks = read_json(content_path)
             if isinstance(blocks, list):
                 for idx, block in enumerate(blocks, start=1):
                     if not isinstance(block, dict) or block.get("type") not in FIGURE_TYPES:
                         continue
                     img_rel = block.get("img_path") or block.get("image_path") or block.get("path")
-                    source_image_path = str((extracted_dir / str(img_rel)).resolve()) if img_rel and extracted_dir.exists() else ""
+                    source_image_path = str((extracted_dir / str(img_rel)).resolve()) if img_rel and extracted_dir is not None and extracted_dir.is_dir() else ""
                     caption = block_caption(block)
                     source_type = str(block.get("type") or "")
                     candidates.append(
@@ -163,7 +163,7 @@ def build_inventory(review_root: Path, project_id: str) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a MinerU figure/table inventory for selected review papers.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=str(Path.cwd()))
     parser.add_argument("--project-id", required=True)
     return parser.parse_args()
 
@@ -174,7 +174,7 @@ def main() -> int:
     project = review_root / "review-projects" / args.project_id
     if not project.exists():
         raise SystemExit(f"Project not found: {project}")
-    out = project / "02_section_drafting" / "paper_figure_inventory.json"
+    out = project / "03_section_drafting" / "paper_figure_inventory.json"
     inventory = build_inventory(review_root, args.project_id)
     write_json(out, inventory)
     print(f"Wrote {out}")

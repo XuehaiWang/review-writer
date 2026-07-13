@@ -1,6 +1,6 @@
 ---
 name: review-figure-style-redraw
-description: Redraw selected source figures or schemes into a unified organic review style while preserving chemistry and content, using approved figure candidates and a configurable OpenAI-compatible image edit API. Use after section drafting has produced figure_candidates.json and before manuscript merge.
+description: Redraw selected source figures into a unified review style while preserving all technical content, using approved figure candidates and a configurable OpenAI-compatible image edit API. Use after section drafting has produced figure_candidates.json and before manuscript merge.
 ---
 
 # Review Figure Style Redraw
@@ -16,8 +16,8 @@ In the normal full review workflow, do not silently skip this stage. A no-image 
 Read:
 
 ```text
-review-projects/<project_id>/02_section_drafting/figure_candidates.json
-review-projects/<project_id>/02_section_drafting/section_drafting_report.md
+review-projects/<project_id>/03_section_drafting/figure_candidates.json
+review-projects/<project_id>/03_section_drafting/section_drafting_report.md
 ```
 
 Each useful candidate should include:
@@ -42,14 +42,14 @@ Change visual style only.
 Preserve:
 
 ```text
-chemical structures
-bond connectivity
-stereochemistry
-atom and substituent labels
-reagents, catalysts, solvents, temperatures, times, yields
-reaction arrows and panel order
+every structural/diagrammatic element and connector or relationship line
+labels and symbols
+quantitative values (parameters, conditions, units, results)
+directional arrows and panel order
 table values and figure labels
 ```
+
+What counts as a "structural element" depends on the subject matter of the figure (e.g. reaction schemes and molecular structures for a chemistry review, block/flow diagrams for a systems review, plots or charts for a data-heavy review). Identify what the source figure actually shows before redrawing it, and preserve that content faithfully — do not assume any specific subject matter.
 
 Every redrawn figure requires human verification against the source.
 
@@ -64,19 +64,20 @@ model: gpt-image-2
 endpoint: /v1/images/edits
 ```
 
-Use `wire_api: images` for real source-image editing. Do not use `responses` for chemistry-preserving redraw unless the relay demonstrably supports image input and image editing through `/v1/responses`; otherwise it can generate a new figure without faithfully editing the source.
+Use `wire_api: images` for real source-image editing. Do not use `responses` for content-preserving redraw unless the relay demonstrably supports image input and image editing through `/v1/responses`; otherwise it can generate a new figure without faithfully editing the source.
 
 ## Run
 
 ```bash
-python /home/ps/review-writer/skills/review-figure-style-redraw/scripts/redraw_figures.py \
-  --review-root /home/ps/review-writer \
+python3 <skill-root>/scripts/redraw_figures.py \
   --project-id <project_id> \
   --base-url https://naiccc.com \
   --wire-api images \
   --api-key <key> \
   --require-redrawn
 ```
+
+`--review-root` defaults to the current working directory. `<skill-root>` is the directory containing this `SKILL.md`.
 
 Useful options:
 
@@ -97,10 +98,7 @@ If `--api-key` is omitted, the script uses `OPENAI_API_KEY`.
 Validate source resolution first when needed:
 
 ```bash
-python /home/ps/review-writer/skills/review-figure-style-redraw/scripts/redraw_figures.py \
-  --review-root /home/ps/review-writer \
-  --project-id <project_id> \
-  --dry-run
+python3 <skill-root>/scripts/redraw_figures.py --project-id <project_id> --dry-run
 ```
 
 ## Outputs
@@ -108,7 +106,7 @@ python /home/ps/review-writer/skills/review-figure-style-redraw/scripts/redraw_f
 Write under:
 
 ```text
-review-projects/<project_id>/03_figure_redraw/
+review-projects/<project_id>/04_figure_redraw/
 ```
 
 Create:
@@ -124,15 +122,15 @@ redrawn/
 
 `redrawn_figure_manifest.json` must keep `needs_human_check: true` for redrawn images.
 
-If no figure is redrawn successfully, return to `review-section-drafting-figure-picking` and fix `source_image_path`, `source_caption_text`, or the selected candidate list instead of moving to draft merge. To intentionally produce a no-figure manuscript (only when the user explicitly approves), create `03_figure_redraw/skip_reason.md` with a one-line justification. The orchestrator and final audit treat this file as the only valid opt-out; without it, drafts with zero figures fail the hard gate.
+If no figure is redrawn successfully, return to `review-section-drafting-figure-picking` and fix `source_image_path`, `source_caption_text`, or the selected candidate list instead of moving to draft merge.
 
 ## Human Check
 
 The human must compare every redrawn image with the original source and verify:
 
 ```text
-all structures, labels, conditions, panels, and table values are unchanged
-no chemistry meaning changed
+all structures/diagrams, labels, values, panels, and table entries are unchanged
+no technical or factual meaning changed
 ```
 
 Suggested continuation message:

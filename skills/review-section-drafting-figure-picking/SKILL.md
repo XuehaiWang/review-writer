@@ -9,21 +9,31 @@ Goal: write each section as a separate file, with figures tied to paragraphs.
 
 ## Inputs
 
+All paths are relative to `<review-root>` (the folder containing `skills/`, `review-projects/`, and `review-library/`).
+
 ```text
 review-projects/<project_id>/01_matrix_outline/selected_outline.md
 review-projects/<project_id>/01_matrix_outline/literature_matrix.json
-review-projects/<project_id>/01_matrix_outline/section_blueprint.json
-review-projects/<project_id>/01_matrix_outline/section_writing_plan.md
-/home/ps/review-writer/skills/review-section-blueprint/references/rule_packs.json
-/home/ps/review-writer/template/综述模板写作方式与风格总结.md
+review-projects/<project_id>/02_section_blueprint/section_blueprint.json
+review-projects/<project_id>/02_section_blueprint/section_writing_plan.md
+skills/review-section-blueprint/references/rule_packs.json
 ```
 
-For every assigned paper, reopen:
+## Paper Content Cache (cost control -- build before drafting)
+
+Papers are commonly assigned to more than one section. Without a shared cache, each section subagent reopens the same paper's full Markdown/PDF from scratch, and that cost multiplies once per section a paper appears in. Build the cache once, before any section subagent starts:
+
+```bash
+python3 <skill-root>/scripts/build_paper_content_cache.py --project-id <project_id>
+```
+
+This projects each paper's already-compressed `literature_matrix.json` fields (`main_content`, `most_relevant_figure`, structured-tag fields) into `paper_content_cache.json`, one entry per paper_id.
+
+Every section subagent should read `paper_content_cache.json` for its assigned papers **instead of** reopening each paper's metadata JSON / full Markdown / PDF by default. Only fall back to the paper's actual metadata/Markdown/PDF (via the cache entry's `paper_id`, looked up in `review-library/metadata/papers/<paper_id>.metadata.json` for the real source paths) when:
 
 ```text
-metadata JSON
-linked Markdown
-PDF when checking figures/schemes/tables
+the cached main_content genuinely lacks a technical detail the paragraph needs, or
+a figure/scheme/table's exact caption or image needs verification before citing it.
 ```
 
 ## Writing Rules
@@ -35,9 +45,11 @@ Use one subagent per section when parallel execution is available.
 Each paragraph normally corresponds to one paper's work.
 Each paragraph must have one figure/scheme/table tied to that paper.
 If no useful figure exists, write an explicit no_figure_reason.
-Use the literature matrix main_content as the starting evidence, but verify against Markdown/PDF.
+Use paper_content_cache.json as the starting evidence for every paragraph; only reopen a paper's full Markdown/PDF for the fallback cases described above, not as a default verification step for every paragraph.
 Do not write short examples; write complete review prose.
 ```
+
+Read `<review-root>/skills/template/综述模板写作方式与风格总结.md` for the reference writing style and paragraph structure before drafting.
 
 Follow the template review paragraph mode:
 
@@ -49,59 +61,39 @@ Follow the template review paragraph mode:
 5. close with a review-level judgment or transition
 ```
 
-Each paragraph must carry a stable `paragraph_id` and explicit citation IDs.
-This is the anchor the merge stage uses to bind figures and aggregate citations.
+Paragraph must include:
 
 ```text
-paragraph_id           e.g. sec3-p2, unique inside section_drafts.json
-paper_id               primary paper for that paragraph
-cited_paper_ids        list of every paper_id the paragraph relies on
+paper_id
 claim or topic sentence
 main work of the paper
 why it matters to the review topic
 figure reference or no_figure_reason
-inline citation callout `[n]` keyed to the section reference list
 ```
-
-## Paragraph ID Markers
-
-Every paragraph in `sections/<section_id>.md` must end with an HTML comment
-that exposes its `paragraph_id`, for example:
-
-```markdown
-... last sentence of the paragraph. [3]
-
-<!-- paragraph_id: sec3-p2 -->
-```
-
-The merge stage uses these markers (not free-text matching) to anchor
-figures. Missing markers will silently fall back to heading-level placement.
-
-## Hard Output Requirements
-
-Every section Markdown file must satisfy all of:
-
-```text
-at least one image reference using ![](...) when figure_need is not explicitly "none"
-every paragraph that cites a paper carries an inline `[n]` callout
-the section file ends with (or is accompanied by) a numbered reference list
-  so that downstream merge can collect callouts and assemble the global
-  References section.
-```
-
-Without these the merge stage will produce a draft that fails the final
-audit's hard gate (`draft_has_no_figures`,
-`draft_has_no_citation_callouts`, `missing_references_section`).
 
 ## Figure Rules
 
-Before writing, run:
+Figure selection has three ordered steps. Do not run step 3 before step 2 exists — it reads `section_tasks.json` and will fail if that file is missing.
+
+1. Build the figure inventory (before writing):
 
 ```bash
-python /home/ps/review-writer/skills/review-section-drafting-figure-picking/scripts/build_paper_figure_inventory.py \
-  --review-root /home/ps/review-writer \
-  --project-id <project_id>
+python3 <skill-root>/scripts/build_paper_figure_inventory.py --project-id <project_id>
 ```
+
+This writes `paper_figure_inventory.json`.
+
+2. Write `section_tasks.json` (LLM output, see Outputs below — one item per section with `section_id`, `heading`, `core_argument`, `allowed_papers`, `must_cover_points`, `avoid_points`, `figure_need`).
+
+3. After `section_tasks.json` exists, select initial figure candidates:
+
+```bash
+python3 <skill-root>/scripts/select_initial_figure_candidates.py --project-id <project_id>
+```
+
+This reads both `paper_figure_inventory.json` and `section_tasks.json`, and writes `paper_figure_candidates.json` and `figure_candidates.json`. Use these candidates when drafting `sections/<section_id>.md`.
+
+`--review-root` defaults to the current working directory. `<skill-root>` is the directory containing this `SKILL.md`.
 
 Use real source figures/schemes/tables from MinerU/PDF. Do not invent figures.
 
@@ -110,12 +102,13 @@ Use real source figures/schemes/tables from MinerU/PDF. Do not invent figures.
 Write under:
 
 ```text
-review-projects/<project_id>/02_section_drafting/
+review-projects/<project_id>/03_section_drafting/
 ```
 
 Required files:
 
 ```text
+paper_content_cache.json
 section_tasks.json
 sections/<section_id>.md
 section_drafts.json
@@ -125,10 +118,6 @@ paper_figure_candidates.json
 figure_candidates.json
 section_drafting_report.md
 ```
-
-`section_drafts.json` must contain, for every section, a `paragraphs` list. Each paragraph item carries `paragraph_id`, `paper_id`, `cited_paper_ids`, and (when applicable) `figure_candidate_id`. The aggregated `draft_md` is still kept for preview.
-
-`figure_candidates.json` items must carry `target_paragraph_id` (the paragraph_id this figure should attach to). Free-text `fits_paragraph_or_claim` stays optional and human-readable.
 
 `section_tasks.json` must be a list. Each item must contain:
 

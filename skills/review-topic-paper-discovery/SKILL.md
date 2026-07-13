@@ -1,143 +1,177 @@
 ---
 name: review-topic-paper-discovery
-description: Start a review project from a user topic, expand keywords against the eight LLM allene classification tags, retrieve local candidates from the metadata library, and optionally enrich with the hosted SciAtlas knowledge-graph search; produce 20-30 candidate papers for human check.
+description: Start a review project from a user topic, expand keywords, search local and web papers, and produce 20-30 candidate papers for human check.
 ---
 
 # Review Topic Paper Discovery
 
-Goal: from the user review topic, select `20-30` local candidate papers and
-keep an external evidence pool from SciAtlas for the matrix stage.
+Goal: from the user review topic, select `20-30` local candidate papers.
 
-## Hard Rules
+## Translate topic first
+
+If the user's topic is not in English, translate it to English before running anything. All keyword inference, structured-tag matching, and web search (Crossref) in `discover.py` operate on English text — a non-English `--topic` will score near zero against local metadata and return no web results.
+
+Pass the English translation as `--topic`. Keep the original topic wording available for the human-facing report/dashboard if useful, but the value passed to `discover.py` must be English.
+
+## Project folder naming
+
+Derive `--project-id` from the English-translated topic, slugified (lowercase, spaces/punctuation replaced with `-`). This becomes the project's folder name under `review-projects/<project_id>/`.
+
+Prefer a short, readable slug (a handful of the topic's key words) over slugifying the entire topic sentence verbatim — use your own judgment to pick the words that best identify the project at a glance.
+
+Before running, check whether `review-projects/<project_id>/` already exists:
 
 ```text
-Use only the 8 LLM structured tag categories for local retrieval:
-product
-substrate
-catalyst_or_method
-organometallic_partner
-ligand_or_chiral_source
-leaving_group
-reaction_type
+if review-projects/<project_id>/ does not exist:
+    use <project_id> as-is
+else:
+    append _2, then _3, _4, ... until an unused folder name is found
+    e.g. urban-heat-island-mitigation-strategies -> ..._2 -> ..._3
+```
+
+Never overwrite or reuse an existing project folder for a new topic.
+
+## Keyword expansion (LLM step, required before running the script)
+
+`discover.py` does not contain any hardcoded keyword-expansion rules — it has no built-in knowledge of any subject matter. Before running the script, the LLM must expand the (English) topic into a broader set of search keywords itself, using its own domain knowledge of whatever field the topic belongs to.
+
+### Vocabulary-aware expansion (do this first)
+
+Topic-side keywords and paper-side metadata are written at different times, so their phrasings drift ("silyl ethers oxidation" vs a paper tagged "silyl ethers"; "PMB ether" vs "p-methoxybenzyl"). Token-overlap scoring then misses on-topic papers. Close the gap by grounding the expansion in the library's actual vocabulary:
+
+```bash
+python3 <skill-root>/scripts/dump_library_vocabulary.py --review-root <review-root>
+```
+
+This writes `review-library/metadata/library_vocabulary.json` containing every distinct structured-tag value per category plus all paper titles. Read it before writing `agent_keywords.json`, and for every library phrasing that is semantically on-topic, add a keyword entry using the library's exact wording (reason: `"library vocabulary alias"`). Keep your own domain-knowledge expansions too — the library phrasings guarantee recall on papers already in the library; your expansions cover web search and future additions.
+
+If the library has no metadata yet (fresh setup), skip this step and rely on domain-knowledge expansion alone.
+
+Write the expansion to a JSON file as a flat list:
+
+```json
+[
+  {"keyword": "<expanded keyword or phrase>", "category": "<one of the 8 categories below>", "reason": "<why this keyword is relevant to the topic>"}
+]
+```
+
+Categories (fixed by the current metadata schema — see `review-metadata-prep`):
+
+```text
+output
+input
+method
+co_input
+modifier
+process_type
 document_scope
 ```
 
-Use `/home/ps/review-writer/allene_classification_rules.py` as the tag
-vocabulary and synonym source. Do not rank local papers by metadata abstract.
+If the topic's subject matter does not map naturally onto these categories (e.g. a non-chemistry review), use your best judgment to assign the closest category, or `document_scope` as a neutral fallback — do not invent new category names, since scoring in `discover.py` only recognizes these eight.
 
-External retrieval (both run in parallel when requested):
+Aim for 10-25 expanded keywords covering synonyms, subtopics, and adjacent terminology a domain expert would search for. Save the file, e.g. to `<review-root>/review-projects/<project_id>/00_discovery/agent_keywords.json`, and pass its path via `--agent-keywords`.
 
-```text
-SciAtlas /v1/search    enabled by --sciatlas-search (KG-grounded)
-Crossref title search  enabled by --web-search       (open metadata)
-none                   default when no flag is passed
+If `--agent-keywords` is omitted, discovery runs on `--keywords` alone (no expansion), which will likely under-populate the candidate set.
+
+## Untagged papers and the two-pass flow (large libraries)
+
+Papers whose structured tags are all `not specified` (rule-only or stub metadata) are NOT invisible to scoring: `discover.py` falls back to matching keywords against their title, abstract, and Markdown head with a weight comparable to tag matching. This enables the recommended large-library order — rule-only metadata first (free), discovery shortlist, then LLM-tag only the shortlist (see "Post-confirmation shortlist tagging" below and `review-metadata-prep` SKILL.md, "Two-Pass Tagging for Large Libraries").
+
+## Post-confirmation shortlist tagging (automatic, agent-run — never ask the user to run anything)
+
+After the human confirms the candidate set, check whether any selected (or promoted-from-borderline) papers still have all structured tags as `not specified`. If so, tag them now — automatically, as part of this skill's wrap-up, without asking the user to invoke anything:
+
+```bash
+python3 <review-root>/skills/review-metadata-prep/scripts/llm_retag_metadata.py \
+  --review-root <review-root> \
+  --paper-ids-from <review-root>/review-projects/<project_id>/00_discovery/selected_discovery_results.json \
+  --model <model> --base-url <base-url> --reasoning-effort high
 ```
 
-When both flags are set, results are merged per keyword and de-duplicated by
-DOI / URL / normalized title. Each merged record carries `sources` (e.g.
-`['sciatlas']`, `['crossref']`, or `['sciatlas','crossref']`) and `source` is
-the joined label for quick reading.
+`--paper-ids-from` restricts tagging to the confirmed `local_papers` (plus `borderline_papers`) — already-tagged papers are simply refreshed, unselected papers are never touched, so this is safe to run unconditionally after confirmation. If no API key is available, fill the shortlisted papers' tags yourself by reading each paper's front matter (agent-authored tags), as `review-metadata-prep` describes. Optionally re-run `discover.py` afterward for a tag-informed final cut; downstream stages (`review-literature-matrix-outline` onward) assume the selected papers are tagged.
+
+## Classification rules (optional, safe to omit)
+
+`--classification-rules` optionally points to a Python file defining a `rules` list of `(label, category, aliases)` tuples — synonyms for structured-tag values already present in the paper library's metadata (set during `review-metadata-prep`). This only widens keyword matching recall; it does not assign or validate tags itself.
+
+There is no default file and none is required. If omitted, matching falls back to exact tag-value text, which works fine for most topics. Only create this file if you notice discovery missing local papers due to phrasing mismatches between search keywords and existing tag values (e.g. papers tagged with a formal term but searched with a colloquial synonym).
+
+## Script location
+
+```text
+<skill-root>/scripts/discover.py
+<skill-root>/scripts/sciatlas_client.py   (imported by discover.py; not run directly)
+```
+
+where `<skill-root>` is the directory containing this `SKILL.md` file.
 
 ## Run
 
-Local-only (default):
-
 ```bash
-python /home/ps/review-writer/skills/review-topic-paper-discovery/scripts/discover.py \
-  --review-root /home/ps/review-writer \
-  --topic "<review topic>" \
-  --keywords "<optional user keywords>" \
-  --project-id <project_id>
-```
-
-Local + SciAtlas KG:
-
-```bash
-export SCIATLAS_API_BASE_URL=http://sciatlas.openkg.cn
-export SCIATLAS_API_KEY=sciatlas_xxx     # required for /v1/search
-
-python /home/ps/review-writer/skills/review-topic-paper-discovery/scripts/discover.py \
-  --review-root /home/ps/review-writer \
+python3 <skill-root>/scripts/discover.py \
   --topic "<review topic>" \
   --keywords "<optional user keywords>" \
   --project-id <project_id> \
-  --sciatlas-search \
-  --sciatlas-limit 8 \
-  --sciatlas-time-range 2015-2025 \
-  --sciatlas-domain "organic chemistry"
-```
-
-Both SciAtlas and Crossref together (results merged per keyword):
-
-```bash
-python /home/ps/review-writer/skills/review-topic-paper-discovery/scripts/discover.py \
-  --review-root /home/ps/review-writer \
-  --topic "<review topic>" \
-  --project-id <project_id> \
+  --paper-dir <path/to/paper/storage> \
+  --agent-keywords <path/to/agent_keywords.json> \
   --sciatlas-search \
   --web-search
 ```
 
-Crossref only (no SciAtlas token available):
+Always include at least one external source (`--sciatlas-search`, `--web-search`, or both). Without either, only local papers are searched and `web_papers` will be empty. See "External paper search" below for how the two sources combine.
+
+Always include `--agent-keywords` pointing to the file produced in the keyword-expansion step above.
+
+`--review-root` defaults to the current working directory. Output goes to `<review-root>/review-projects/<project_id>/00_discovery/` unless overridden with `--output-dir`.
+
+## External paper search
+
+`discover.py` supports two independent, combinable external sources for `web_papers` — use either, both, or neither:
+
+```text
+--sciatlas-search   hosted SciAtlas knowledge-graph search (/v1/search), hybrid retrieval
+--web-search         Crossref bibliographic search
+```
+
+Both can run together: results are merged and deduplicated by DOI (falling back to URL, then title) via `merge_external_results()`. A paper found by both sources is kept once, with `sources` recording every source that returned it.
+
+**SciAtlas** requires `SCIATLAS_API_KEY` (env var, `<review-root>/.env`, or `--sciatlas-api-key`). If the key is missing or the `/healthz` check fails, `discover.py` does not error — it records the reason in `web_results_by_keyword.json`'s `status` field (e.g. `missing_api_key`, `health_failed: ...`) and falls back to whatever other source is active. Useful flags:
+
+```text
+--sciatlas-limit        results per keyword (default 8)
+--sciatlas-time-range    optional year range, e.g. "2018-2025"
+--sciatlas-domain        optional domain hint, e.g. "organic chemistry" or "urban climate" -- helps SciAtlas's ranking, not required
+--sciatlas-base-url      overrides SCIATLAS_API_BASE_URL
+--sciatlas-timeout       HTTP timeout in seconds
+```
+
+**Crossref** (`--web-search`) needs no credentials and is a reasonable default when SciAtlas is not configured. `web_results_by_keyword.json`'s `source`/`sources`/`status` fields report exactly which source(s) actually contributed results for this run, so the human check can tell at a glance whether external search worked as intended.
+
+### `--paper-dir`
+
+Provide the path to the server's local paper storage directory. When given, `discover.py` will automatically scan that directory for PDF files and register any that are not yet in the library — before running keyword search and scoring.
+
+**The LLM must determine this path from the server environment before running the command.** Look for directories containing `.pdf` files under common locations such as the server home directory, a mounted drive, or a path the user has mentioned. Do not hardcode a path — resolve it at runtime.
+
+After auto-registration, stub metadata records are written with the PDF path filled in but bibliographic fields empty. Run `review-metadata-prep` after discovery to extract full metadata (title, authors, abstract, tags) via LLM.
+
+To write outputs to a custom folder:
 
 ```bash
-python /home/ps/review-writer/skills/review-topic-paper-discovery/scripts/discover.py \
-  --review-root /home/ps/review-writer \
+python3 <skill-root>/scripts/discover.py \
   --topic "<review topic>" \
   --project-id <project_id> \
-  --web-search
+  --paper-dir <path/to/paper/storage> \
+  --agent-keywords <path/to/agent_keywords.json> \
+  --web-search \
+  --output-dir <path/to/output/folder>
 ```
 
-If the user gives no keywords, Codex must extract concise keywords from the
-topic first. `keyword_set.draft.json` must not introduce extra local-retrieval
-categories. Every keyword category should be one of the eight structured tag
-categories above. If a topic token does not fit cleanly, classify it as
-`reaction_type` and let human check remove it if needed.
-
-## External Source: SciAtlas
-
-SciAtlas is a hosted scientific knowledge graph. The skill calls
-`POST /v1/search` once per expanded keyword with these defaults:
-
-```text
-retrieval_mode  hybrid
-top_keywords    0
-max_titles      0
-max_refs        0
-bias_exploration low
-ranking_profile  precision
-```
-
-Per-keyword time range / domain hints come from CLI flags. Returned papers are
-normalized into the same shape as Crossref results so the dashboard can render
-both: `title, authors, year, journal, doi, url, abstract, score (0..1),
-raw_score, source="sciatlas"`.
-
-Auth:
-
-```text
-Authorization: Bearer $SCIATLAS_API_KEY
-X-API-Key:     $SCIATLAS_API_KEY
-```
-
-Health check before searching:
-
-```bash
-curl -s http://sciatlas.openkg.cn/healthz
-```
-
-If SciAtlas health or auth fails, the script records the failure in
-`web_results_by_keyword.json.status` and continues with local-only retrieval.
+If the user gives no `--keywords`, that is fine — the LLM-authored `--agent-keywords` file from the expansion step above is the primary source of search keywords.
 
 ## Required Output
 
-Write under:
-
-```text
-review-projects/<project_id>/00_discovery/
-```
-
-Required files:
+Files written to the output directory:
 
 ```text
 topic_input.md
@@ -150,17 +184,14 @@ discovery_report.md
 human_check_state.json
 ```
 
-`web_results_by_keyword.json.source` is `sciatlas`, `crossref`, `sciatlas+crossref`, or `none`. Per-result rows carry a `sources` array so you can see which sources contributed.
-`selected_discovery_results.json` should contain `20-30` kept local papers
-when enough matches exist. External (SciAtlas/Crossref) papers go into
-`web_papers`; they are a topic-coverage check pool only. They never enter
-the local `paper_id` registry and the matrix stage may cite them only as
-references without assigning a `paper_id`. If fewer than 20 local papers
-are found, record why in `discovery_report.md`.
+`selected_discovery_results.json` should contain `20-30` kept local papers when enough matches exist. If fewer than 20 are found, record why in `discovery_report.md`.
+
+## Borderline papers (near-miss review band, required step)
+
+The score threshold is not a cliff. Papers that fall below the selection cut but at or above a near-miss floor are written to `selected_discovery_results.json` under `borderline_papers` and listed in `discovery_report.md` under "Borderline Papers — review required". The script also prints a `[borderline]` line when any exist.
+
+After every discovery run, the LLM must review this list before presenting the candidate set: read each borderline paper's title (and abstract from its metadata if the title is ambiguous), and promote clearly on-topic papers into `local_papers` — recording the promotion in the results file (e.g. `matched_keywords: ["agent_promoted_from_borderline"]`) so the change is auditable. Phrasing drift between topic keywords and paper metadata is the most common reason an on-topic paper lands here; a borderline entry is a request for judgment, not a rejection.
 
 ## Human Check
 
-Stop after discovery. The human checks `/discovery`, deletes irrelevant
-keywords/papers, and confirms the candidate set. SciAtlas papers are visible
-in the same "external" panel as Crossref papers; deletions take effect for
-both sources.
+Stop after discovery. The human checks `/discovery`, deletes irrelevant keywords/papers, reviews any remaining borderline papers, and confirms the candidate set. Once confirmed, run the post-confirmation shortlist tagging step above automatically before handing off to the next stage.

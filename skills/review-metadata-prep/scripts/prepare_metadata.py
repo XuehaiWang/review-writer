@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import hashlib
 import json
 import os
@@ -11,6 +10,7 @@ import ssl
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +19,7 @@ from typing import Any
 
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Za-z0-9]+\b")
 YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+_CROSSREF_WORD_RE = re.compile(r"[a-z0-9]+")
 
 JOURNAL_HINTS = [
     "Angewandte Chemie International Edition",
@@ -37,38 +38,21 @@ JOURNAL_HINTS = [
 ]
 
 STRUCTURED_TAG_KEYS = [
-    "product",
-    "substrate",
-    "catalyst_or_method",
-    "organometallic_partner",
-    "ligand_or_chiral_source",
-    "leaving_group",
-    "reaction_type",
+    "output",
+    "input",
+    "method",
+    "co_input",
+    "modifier",
+    "process_type",
     "document_scope",
 ]
 
-DEFAULT_CLASSIFICATION_LABELS = {key: ["not specified"] for key in STRUCTURED_TAG_KEYS}
-
-CHEM_TAG_RULES = {
-    "propargylic alcohols": ["propargylic alcohol", "propargylic alcohols"],
-    "propargylic derivatives": ["propargylic derivative", "propargylic derivatives", "propargyl"],
-    "allenes": ["allene", "allenes", "allenamide", "allenamides"],
-    "substituted allenes": ["substituted allene", "multisubstituted allene", "disubstituted allene"],
-    "copper catalysis": ["copper", "cui", "cu(", "copper-catalyzed"],
-    "nickel catalysis": ["nickel", "ni(", "nickel-catalyzed"],
-    "palladium catalysis": ["palladium", "pd(", "palladium-catalyzed"],
-    "gold catalysis": ["gold", "au(", "gold-catalyzed"],
-    "rhodium catalysis": ["rhodium", "rh(", "rhodium-catalyzed"],
-    "photoredox catalysis": ["photoredox", "visible-light", "light-mediated"],
-    "enantioselective synthesis": ["enantioselective", "enantiospecific", "enantioenriched", "ee"],
-    "cross-electrophile coupling": ["cross-electrophile"],
-    "radical reaction": ["radical", "radicals"],
-    "carbonylation": ["carbonylation"],
-    "C-H activation": ["c-h activation", "ch activation"],
-    "SN2' substitution": ["sn2", "substitution", "displacement"],
-    "mechanism": ["mechanism", "catalytic cycle", "intermediate", "control experiment", "dft"],
-    "total synthesis": ["total synthesis", "natural product"],
-}
+# Open-vocabulary tagging: there is no fixed allowed-value list for structured
+# tags. Without --use-llm, structured_tags are left as "not specified" for every
+# key (rule-based keyword tagging requires a domain-specific vocabulary that
+# this general-purpose skill does not hardcode). With --use-llm, the model is
+# asked to write a concise natural-language label per category, not to pick
+# from an enum.
 
 
 def utc_now() -> str:
@@ -96,41 +80,22 @@ def load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
-def load_classification_rules(path: Path) -> dict[str, list[str]]:
-    labels = {key: ["not specified"] for key in STRUCTURED_TAG_KEYS}
-    if not path.exists():
-        return labels
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    rules_node = None
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "rules":
-                    rules_node = node.value
-                    break
-        if rules_node is not None:
-            break
-    if rules_node is None:
-        return labels
-    for item in ast.literal_eval(rules_node):
-        if not isinstance(item, tuple) or len(item) < 2:
-            continue
-        label, category = str(item[0]).strip(), str(item[1]).strip()
-        if category in labels and label:
-            labels[category].append(label)
-    return {key: dedupe(value) for key, value in labels.items()}
-
-
-def classification_rules_prompt(labels: dict[str, list[str]]) -> str:
-    lines = [
-        "Allowed allene classification labels. For each category, output exactly one label from its list.",
-        "Use `not specified` only when no listed label is supported by the supplied paper evidence.",
-    ]
-    for key in STRUCTURED_TAG_KEYS:
-        lines.append(f"\n{key}:")
-        for label in labels.get(key, ["not specified"]):
-            lines.append(f"- {label}")
-    return "\n".join(lines)
+def structured_tags_instructions() -> str:
+    return (
+        "For each of the seven structured_tags categories below, write a short, specific, "
+        "natural-language label describing what the paper actually reports for that category "
+        "(a few words, not a sentence). There is no fixed list to choose from — invent a label "
+        "that fits this paper. Use `not specified` only when the paper genuinely gives no basis "
+        "for that category.\n\n"
+        "output: the main output, result, or artifact the paper reports.\n"
+        "input: the main input, starting material, or object of study the paper works on.\n"
+        "method: the central method, technique, or enabling approach used to get from input to output.\n"
+        "co_input: a secondary reagent/partner/co-input alongside the main method, if the field has such a concept. Most papers will not have one -- use `not specified` rather than forcing a value.\n"
+        "modifier: a modifying/selectivity-inducing/control element attached to the method, if applicable. Most papers will not have one -- use `not specified` rather than forcing a value.\n"
+        "process_type: the named or descriptive type of process, transformation, or study design.\n"
+        "document_scope: the kind of document (e.g. full research article, communication, review, "
+        "mechanistic study, application paper)."
+    )
 
 
 def slugify(value: str) -> str:
@@ -179,7 +144,7 @@ def jobs_from_pdf_root(pdf_root: Path, mineru_output: Path) -> list[dict[str, An
     seen: dict[str, int] = {}
     for index, pdf_path in enumerate(sorted(pdf_root.rglob("*.pdf")), start=1):
         relative_stem = str(pdf_path.relative_to(pdf_root).with_suffix(""))
-        base_slug = slugify_mineru(relative_stem)
+        base_slug = slugify_mineru(relative_stem, mineru_output)
         seen[base_slug] = seen.get(base_slug, 0) + 1
         slug = base_slug if seen[base_slug] == 1 else f"{base_slug}-{seen[base_slug]:02d}"
         extracted_dir = mineru_output / "extracted" / slug
@@ -204,7 +169,32 @@ def jobs_from_pdf_root(pdf_root: Path, mineru_output: Path) -> list[dict[str, An
     return jobs
 
 
-def slugify_mineru(value: str) -> str:
+# Must use the IDENTICAL formula to mineru-precise-parse-review-writer/scripts/
+# parse_review_writer_pdfs.py's slug_budget/cap_slug_length -- both scripts
+# independently derive the same slug from the same filename (given the same
+# mineru output directory) and must agree, or this script will not find the
+# Markdown the parser already wrote for a given paper. See that module's
+# slug_budget docstring for the full MAX_PATH rationale.
+WINDOWS_MAX_PATH = 260
+_IMAGE_SUFFIX_RESERVE = len("\\images\\") + 64 + 5 + 8
+
+
+def slug_budget(mineru_output: Path) -> int:
+    extracted_root = str((mineru_output / "extracted").resolve())
+    reserved = len(extracted_root) + 1 + _IMAGE_SUFFIX_RESERVE
+    return max(24, WINDOWS_MAX_PATH - reserved)
+
+
+def cap_slug_length(slug: str, max_len: int) -> str:
+    if len(slug) <= max_len:
+        return slug
+    import hashlib
+
+    digest = hashlib.sha1(slug.encode("utf-8")).hexdigest()[:8]
+    return f"{slug[: max_len - len(digest) - 1]}-{digest}"
+
+
+def slugify_mineru(value: str, mineru_output: Path | None = None) -> str:
     import unicodedata
 
     normalized = unicodedata.normalize("NFKD", value)
@@ -212,7 +202,10 @@ def slugify_mineru(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._/-]+", "-", ascii_text).strip("-._/")
     cleaned = cleaned.replace("/", "__")
     cleaned = re.sub(r"-{2,}", "-", cleaned)
-    return cleaned.lower() or "document"
+    cleaned = cleaned.lower() or "document"
+    if mineru_output is None:
+        return cleaned
+    return cap_slug_length(cleaned, slug_budget(mineru_output))
 
 
 def read_registry_rows(path: Path) -> list[dict[str, Any]]:
@@ -517,22 +510,141 @@ def extract_journal(md: str, pdf_name: str) -> dict[str, Any]:
     return scored(None, "rule_not_found", 0.0)
 
 
-def infer_tags(text: str) -> list[str]:
-    low = text.lower()
-    tags: list[str] = []
-    for tag, needles in CHEM_TAG_RULES.items():
-        if any(n in low for n in needles):
-            tags.append(tag)
-    return tags
+VOLUME_RE = re.compile(r"\bvol(?:ume)?\.?\s*(\d+[a-zA-Z]?(?:\s*\(\d+\))?)", re.I)
+PAGES_RE = re.compile(r"\bpp?\.?\s*(\d+\s*[-–]\s*\d+)", re.I)
 
 
-def classify_tags(tags: list[str]) -> tuple[list[str], list[str], list[str], list[str]]:
-    topic = [t for t in tags if t in {"propargylic alcohols", "propargylic derivatives", "allenes", "substituted allenes"}]
-    reaction = [t for t in tags if t in {"SN2' substitution", "cross-electrophile coupling", "radical reaction", "carbonylation", "C-H activation"}]
-    reaction += [t for t in tags if "catalysis" in t]
-    mechanism = [t for t in tags if t in {"mechanism", "radical reaction", "photoredox catalysis"}]
-    application = [t for t in tags if t in {"total synthesis", "enantioselective synthesis"}]
-    return dedupe(topic), dedupe(reaction), dedupe(mechanism), dedupe(application)
+def extract_volume(md: str) -> dict[str, Any]:
+    m = VOLUME_RE.search(md[:20000])
+    if m:
+        return scored(clean_text(m.group(1)), "markdown_regex", 0.65)
+    return scored(None, "rule_not_found", 0.0)
+
+
+def extract_pages(md: str) -> dict[str, Any]:
+    m = PAGES_RE.search(md[:20000])
+    if m:
+        return scored(clean_text(m.group(1)).replace(" ", ""), "markdown_regex", 0.65)
+    return scored(None, "rule_not_found", 0.0)
+
+
+def crossref_title_tokens(text: str) -> set[str]:
+    return set(_CROSSREF_WORD_RE.findall((text or "").lower()))
+
+
+def crossref_title_similarity(a: str, b: str) -> float:
+    ta, tb = crossref_title_tokens(a), crossref_title_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / max(len(ta), len(tb))
+
+
+def crossref_lookup(title: str, timeout: int = 20, mailto: str = "") -> dict[str, Any] | None:
+    """Look a paper up on Crossref by title and return its journal/volume/pages/doi/year.
+
+    Used both by the initial metadata build (when `--crossref-lookup` is set)
+    and by the standalone `crossref_backfill_metadata.py` for already-registered
+    papers. Only accepts a match at title-similarity >= 0.6 to avoid attaching
+    the wrong paper's bibliographic data.
+    """
+    if not title or not title.strip():
+        return None
+    query = urllib.parse.urlencode({"query.bibliographic": title, "rows": "5"})
+    url = f"https://api.crossref.org/works?{query}"
+    contact = mailto or "anonymous@example.com"
+    req = urllib.request.Request(url, headers={"User-Agent": f"review-writer-metadata-prep/1.0 (mailto:{contact})"})
+    ctx = ssl.create_default_context()
+    with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    best = None
+    best_score = 0.0
+    for item in data.get("message", {}).get("items", []):
+        candidate_title = " ".join(item.get("title") or [])
+        score = crossref_title_similarity(title, candidate_title)
+        if score > best_score:
+            best_score = score
+            best = item
+    if not best or best_score < 0.6:
+        return None
+    year = None
+    issued = best.get("issued", {}).get("date-parts") or []
+    if issued and issued[0]:
+        year = issued[0][0]
+    volume = best.get("volume") or None
+    pages = best.get("page") or None
+    # Sanity check: some Crossref records mistakenly echo the year into the
+    # volume field (e.g. a preprint-server DOI where volume == year). A
+    # citation with volume identical to year is more likely to confuse a
+    # reader than help them, so drop it rather than print it.
+    if volume and year and str(volume).strip() == str(year).strip():
+        volume = None
+    return {
+        "title_match_score": round(best_score, 3),
+        "journal": " ".join(best.get("container-title") or []) or None,
+        "volume": volume,
+        "pages": pages,
+        "doi": best.get("DOI"),
+        "year": year,
+    }
+
+
+_RELEVANCE_WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9'\-]*")
+
+
+def relevance_tokenize(text: str) -> list[str]:
+    return [w.lower() for w in _RELEVANCE_WORD_RE.findall(text or "") if len(w) >= 3]
+
+
+def load_relevance_keywords(path: Path | None) -> list[str]:
+    """Load a flat keyword list for the cheap pre-LLM relevance filter.
+
+    Accepts either the agent_keywords.json shape (a list of
+    {"keyword": ...} objects, as written by review-topic-paper-discovery)
+    or a plain JSON list of strings.
+    """
+    if not path:
+        return []
+    if not path.exists():
+        raise SystemExit(f"--relevance-keywords file not found: {path}")
+    data = read_json(path)
+    keywords: list[str] = []
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict) and item.get("keyword"):
+                keywords.append(str(item["keyword"]))
+            elif isinstance(item, str) and item.strip():
+                keywords.append(item)
+    return dedupe(keywords)
+
+
+def relevance_score(title: str, abstract: str, keywords: list[str]) -> float:
+    """Cheap, rule-based title/abstract-vs-topic relevance score in [0, 1].
+
+    Used to skip the (comparatively expensive) LLM tagging call for papers
+    that are very unlikely to be on-topic, e.g. noise papers deliberately
+    mixed into a knowledge-base folder to test discovery's filtering. This is
+    intentionally crude -- a token-overlap heuristic, not a judgment call --
+    so it only filters clear-cut cases and never blocks a paper the LLM would
+    have found relevant on a plausible reading of the title/abstract alone.
+    """
+    if not keywords:
+        return 1.0
+    haystack = f"{title}\n{abstract}".lower()
+    if not haystack.strip():
+        return 0.0
+    hay_tokens = set(relevance_tokenize(haystack))
+    hits = 0
+    for kw in keywords:
+        kw_low = kw.lower().strip()
+        if not kw_low:
+            continue
+        if kw_low in haystack:
+            hits += 1
+            continue
+        kw_tokens = relevance_tokenize(kw_low)
+        if kw_tokens and all(t in hay_tokens for t in kw_tokens):
+            hits += 1
+    return min(hits / max(len(keywords), 1) * 3.0, 1.0)
 
 
 def dedupe(items: list[str]) -> list[str]:
@@ -564,9 +676,7 @@ def build_llm_payload(
     system_prompt: str,
     model: str,
     reasoning_effort: str = "",
-    classification_labels: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
-    classification_labels = classification_labels or DEFAULT_CLASSIFICATION_LABELS
     front_blocks = []
     for i, block in enumerate(blocks[:80]):
         text = clean_text(str(block.get("text") or block.get("content") or ""))
@@ -593,12 +703,14 @@ def build_llm_payload(
                 "authors",
                 "year",
                 "journal",
+                "volume",
+                "pages",
                 "doi",
                 "abstract",
                 "structured_tags",
             ]
         },
-        "classification_rules": classification_rules_prompt(classification_labels),
+        "structured_tags_instructions": structured_tags_instructions(),
         "front_blocks": front_blocks,
         "markdown_head": md_head[:9000],
     }
@@ -610,6 +722,9 @@ def build_llm_payload(
             "authors",
             "year",
             "abstract",
+            "journal",
+            "volume",
+            "pages",
             "structured_tags",
             "warnings",
         ],
@@ -618,7 +733,10 @@ def build_llm_payload(
             "authors": field_schema("array"),
             "year": field_schema("integer_or_null"),
             "abstract": field_schema("string"),
-            "structured_tags": structured_tags_schema(classification_labels),
+            "journal": field_schema("string_or_null"),
+            "volume": field_schema("string_or_null"),
+            "pages": field_schema("string_or_null"),
+            "structured_tags": structured_tags_schema(),
             "warnings": {"type": "array", "items": {"type": "string"}},
         },
     }
@@ -664,8 +782,8 @@ def field_schema(kind: str) -> dict[str, Any]:
     }
 
 
-def structured_tags_schema(classification_labels: dict[str, list[str]] | None = None) -> dict[str, Any]:
-    classification_labels = classification_labels or DEFAULT_CLASSIFICATION_LABELS
+def structured_tags_schema() -> dict[str, Any]:
+    """Open-vocabulary schema: each tag is a free-text string, not a fixed enum."""
     return {
         "type": "object",
         "additionalProperties": False,
@@ -675,10 +793,7 @@ def structured_tags_schema(classification_labels: dict[str, list[str]] | None = 
                 "type": "object",
                 "additionalProperties": False,
                 "required": STRUCTURED_TAG_KEYS,
-                "properties": {
-                    key: {"type": "string", "enum": classification_labels.get(key, ["not specified"])}
-                    for key in STRUCTURED_TAG_KEYS
-                },
+                "properties": {key: {"type": "string"} for key in STRUCTURED_TAG_KEYS},
             },
             "source": {"type": "string"},
             "confidence": {"type": "number"},
@@ -722,6 +837,9 @@ def merge_llm(base: dict[str, Any], llm: dict[str, Any]) -> dict[str, Any]:
         "authors",
         "year",
         "abstract",
+        "journal",
+        "volume",
+        "pages",
         "structured_tags",
     ]:
         if not isinstance(llm.get(key), dict):
@@ -762,30 +880,11 @@ def normalize_structured_tags(value: Any) -> dict[str, str]:
     return tags
 
 
-def structured_tags_from_legacy(
-    topic: list[str],
-    reaction: list[str],
-    mechanism: list[str],
-    application: list[str],
-) -> dict[str, str]:
-    return {
-        "product": first_or_not_specified([x for x in topic if "allene" in x]),
-        "substrate": first_or_not_specified([x for x in topic if "proparg" in x]),
-        "catalyst_or_method": first_or_not_specified([x for x in reaction if "catalysis" in x]),
-        "organometallic_partner": "not specified",
-        "ligand_or_chiral_source": first_or_not_specified([x for x in application if "enantio" in x]),
-        "leaving_group": "not specified",
-        "reaction_type": first_or_not_specified(reaction),
-        "document_scope": "primary research article",
-    }
-
-
-def first_or_not_specified(items: list[str]) -> str:
-    for item in items:
-        item = clean_text(str(item))
-        if item:
-            return item
-    return "not specified"
+def default_structured_tags() -> dict[str, str]:
+    """Rule-based (non-LLM) tagging has no domain vocabulary to draw from in the
+    general-purpose skill, so every category starts as `not specified`. Run with
+    --use-llm to get real, open-vocabulary labels per paper."""
+    return {key: "not specified" for key in STRUCTURED_TAG_KEYS}
 
 
 def structured_tag_values(meta: dict[str, Any]) -> dict[str, str]:
@@ -829,7 +928,7 @@ def update_quality(meta: dict[str, Any]) -> None:
     for key in ["year"]:
         if not has_value(meta.get(key, {}).get("value")):
             missing.append(key)
-    for key in ["journal", "doi"]:
+    for key in ["journal", "volume", "pages", "doi"]:
         if not has_value(meta.get(key, {}).get("value")):
             warnings.append(f"missing_{key}")
     structured = structured_tag_values(meta)
@@ -891,17 +990,9 @@ def build_metadata(
     year = extract_year(md, job.get("pdf_name") or slug)
     doi = extract_doi(md)
     journal = extract_journal(md, job.get("pdf_name") or slug)
-    text_for_tags = " ".join(
-        [
-            str(title.get("value") or ""),
-            str(abstract.get("value") or ""),
-            " ".join(keywords.get("value") or []),
-            md[:6000],
-        ]
-    )
-    tags = infer_tags(text_for_tags)
-    topic, reaction, mechanism, application = classify_tags(tags)
-    structured_tags = structured_tags_from_legacy(topic, reaction, mechanism, application)
+    volume = extract_volume(md)
+    pages = extract_pages(md)
+    structured_tags = default_structured_tags()
     pdf_hash = sha256_file(pdf_path)
     meta: dict[str, Any] = {
         "paper_id": paper_id,
@@ -910,9 +1001,11 @@ def build_metadata(
         "authors": authors,
         "year": year,
         "journal": journal,
+        "volume": volume,
+        "pages": pages,
         "doi": doi,
         "abstract": abstract,
-        "structured_tags": scored(structured_tags, "rule_keyword_inference_8_category_fallback", 0.45 if tags else 0.0),
+        "structured_tags": scored(structured_tags, "not_available_without_llm", 0.0),
         "source_paths": {
             "pdf": str(pdf_path) if pdf_path else None,
             "markdown": str(md_path) if md_path else None,
@@ -961,6 +1054,8 @@ def build_metadata(
         "authors": meta["authors"]["value"],
         "year": meta["year"]["value"],
         "journal": meta["journal"]["value"],
+        "volume": meta["volume"]["value"],
+        "pages": meta["pages"]["value"],
         "doi": meta["doi"]["value"],
         "source_pdf": meta["source_paths"]["pdf"],
         "markdown_path": meta["source_paths"]["markdown"],
@@ -1019,15 +1114,29 @@ def run(args: argparse.Namespace) -> int:
     model = args.model or os.environ.get("REVIEW_METADATA_MODEL", "gpt-5.4")
     base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
     reasoning_effort = args.reasoning_effort or os.environ.get("REVIEW_METADATA_REASONING_EFFORT", "high")
-    classification_labels = load_classification_rules(review_root / "allene_classification_rules.py")
     use_llm = bool(args.use_llm)
     if use_llm and not api_key:
         print("WARN: --use-llm was set but OPENAI_API_KEY is missing; using rules only.", file=sys.stderr)
         use_llm = False
+    if use_llm and not args.force_llm and args.max_llm_papers > 0 and len(jobs) > args.max_llm_papers:
+        print(
+            f"[auto-rule-mode] library has {len(jobs)} papers (> --max-llm-papers {args.max_llm_papers}); "
+            "switching to rule-only mode to avoid tagging papers discovery will never select.\n"
+            "[auto-rule-mode] recommended next steps: run discovery (untagged papers are scored on "
+            "title/abstract/markdown), then LLM-tag only the selected shortlist "
+            "(llm_retag_metadata.py --paper-ids-from <.../selected_discovery_results.json>).\n"
+            "[auto-rule-mode] pass --force-llm to tag the whole library anyway.",
+            file=sys.stderr,
+        )
+        use_llm = False
+    relevance_keywords = load_relevance_keywords(Path(args.relevance_keywords).resolve()) if args.relevance_keywords else []
+    if args.relevance_keywords and not use_llm:
+        print("WARN: --relevance-keywords has no effect without --use-llm.", file=sys.stderr)
 
     existing_rows = read_registry_rows(out_registry) if args.append_registry else []
     existing_by_key = {registry_key(row): row for row in existing_rows if registry_key(row)}
     rows: list[dict[str, Any]] = []
+    relevance_filtered = 0
     next_paper_number = max_paper_number(existing_rows) + 1
     for index, job in enumerate(jobs, start=1):
         slug = str(job.get("slug") or slugify(job.get("pdf_name") or f"paper-{index:03d}"))
@@ -1056,9 +1165,34 @@ def run(args: argparse.Namespace) -> int:
         meta_path = out_meta_dir / f"{paper_id}.metadata.json"
         existing = existing_metadata(meta_path)
         meta, blocks, md, reg_rows = build_metadata(paper_id, job, pdf_path, md_path, cpath, existing, review_root)
-        if use_llm:
+        if args.crossref_lookup:
+            title_value = str((meta.get("title") or {}).get("value") or "")
+            needed = [k for k in ["journal", "volume", "pages", "doi", "year"] if not has_value((meta.get(k) or {}).get("value"))]
+            if title_value.strip() and needed:
+                try:
+                    result = crossref_lookup(title_value, args.timeout)
+                    if args.sleep_seconds:
+                        time.sleep(args.sleep_seconds)
+                    if result:
+                        for key in needed:
+                            value = result.get(key)
+                            if has_value(value):
+                                meta[key] = scored(value, "crossref_lookup", min(0.55 + result["title_match_score"] * 0.2, 0.85))
+                        meta["extraction"]["notes"].append("crossref_lookup_at_build")
+                        update_quality(meta)
+                except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+                    meta["quality"]["warnings"].append(f"crossref_lookup_failed: {type(exc).__name__}")
+                    update_quality(meta)
+        skip_llm_reason = ""
+        if use_llm and relevance_keywords:
+            title_value = str((meta.get("title") or {}).get("value") or "")
+            abstract_value = str((meta.get("abstract") or {}).get("value") or "")
+            score = relevance_score(title_value, abstract_value, relevance_keywords)
+            if score < args.min_relevance_score:
+                skip_llm_reason = f"relevance_score={round(score, 3)} < {args.min_relevance_score}"
+        if use_llm and not skip_llm_reason:
             try:
-                payload = build_llm_payload(meta, blocks, md, system_prompt, model, reasoning_effort, classification_labels)
+                payload = build_llm_payload(meta, blocks, md, system_prompt, model, reasoning_effort)
                 llm_data = call_openai_responses(payload, api_key or "", base_url)
                 merge_llm(meta, llm_data)
                 meta["extraction"]["mode"] = "rules+llm"
@@ -1071,6 +1205,12 @@ def run(args: argparse.Namespace) -> int:
                 meta["extraction"]["notes"].append(f"llm_failed: {type(exc).__name__}: {exc}")
                 meta["quality"]["warnings"].append("llm_failed")
                 update_quality(meta)
+        elif skip_llm_reason:
+            relevance_filtered += 1
+            meta["extraction"]["notes"].append(f"llm_skipped_low_relevance: {skip_llm_reason}")
+            meta["quality"]["warnings"].append("llm_skipped_low_relevance")
+            update_quality(meta)
+            print(f"{paper_id} skipped LLM tagging ({skip_llm_reason})")
         write_json(meta_path, meta)
         reg = reg_rows[0]
         reg.update(
@@ -1079,6 +1219,8 @@ def run(args: argparse.Namespace) -> int:
                 "authors": meta["authors"]["value"],
                 "year": meta["year"]["value"],
                 "journal": meta["journal"]["value"],
+                "volume": meta["volume"]["value"],
+                "pages": meta["pages"]["value"],
                 "doi": meta["doi"]["value"],
                 "human_review_status": meta["human_review"]["status"],
                 "needs_human_check": meta["quality"]["needs_human_check"],
@@ -1094,14 +1236,16 @@ def run(args: argparse.Namespace) -> int:
     tmp.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
     tmp.replace(out_registry)
     print(f"Wrote {len(rows)} papers to {out_registry}")
+    if relevance_keywords:
+        print(f"Relevance pre-filter: {relevance_filtered} of {len(rows)} papers skipped LLM tagging (min score {args.min_relevance_score})")
     return 0
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare review paper metadata from MinerU outputs.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
-    parser.add_argument("--mineru-output", default="/home/ps/review-writer/mineru-outputs")
-    parser.add_argument("--pdf-root", default="/home/ps/review-writer/source-paper/Progargylic")
+    parser.add_argument("--review-root", default=str(Path.cwd()))
+    parser.add_argument("--mineru-output", default="")
+    parser.add_argument("--pdf-root", default="")
     parser.add_argument(
         "--discover-from-pdf-root",
         action="store_true",
@@ -1113,11 +1257,48 @@ def parse_args() -> argparse.Namespace:
         help="Append or update papers in the existing registry instead of replacing papers.jsonl.",
     )
     parser.add_argument("--use-llm", action="store_true")
+    parser.add_argument(
+        "--max-llm-papers",
+        type=int,
+        default=30,
+        help=(
+            "When --use-llm is set and the run covers more papers than this, automatically fall back "
+            "to rule-only mode and recommend the two-pass tag-after-discovery flow (see SKILL.md). "
+            "Set 0 to disable the auto-switch. Default: 30."
+        ),
+    )
+    parser.add_argument(
+        "--force-llm",
+        action="store_true",
+        help="Tag the whole library with the LLM even when it exceeds --max-llm-papers.",
+    )
     parser.add_argument("--model", default="")
     parser.add_argument("--base-url", default="")
     parser.add_argument("--api-key", default="")
     parser.add_argument("--reasoning-effort", default="", choices=["", "none", "low", "medium", "high"])
     parser.add_argument("--sleep-seconds", type=float, default=0.0)
+    parser.add_argument(
+        "--crossref-lookup",
+        action="store_true",
+        help="Look each paper up on Crossref by title at build time and fill journal/volume/pages/doi/year if the rule-based extraction left them empty.",
+    )
+    parser.add_argument("--timeout", type=int, default=20, help="Network timeout in seconds for --crossref-lookup.")
+    parser.add_argument(
+        "--relevance-keywords",
+        default="",
+        help=(
+            "Path to a keyword JSON file (agent_keywords.json shape, or a plain JSON list of strings). "
+            "When set together with --use-llm, each paper's title/abstract is scored against these "
+            "keywords with a cheap rule-based check before the LLM call; papers scoring below "
+            "--min-relevance-score skip LLM tagging entirely (rules-only metadata is still written)."
+        ),
+    )
+    parser.add_argument(
+        "--min-relevance-score",
+        type=float,
+        default=0.12,
+        help="Minimum relevance score (0-1) required to send a paper to the LLM when --relevance-keywords is set.",
+    )
     return parser.parse_args()
 
 

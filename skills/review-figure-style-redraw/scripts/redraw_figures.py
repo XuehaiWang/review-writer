@@ -46,7 +46,7 @@ def load_candidate_file(review_root: Path, project_id: str, path_arg: str) -> Pa
     if path_arg:
         path = Path(path_arg).resolve()
     else:
-        path = review_root / "review-projects" / project_id / "02_section_drafting" / "figure_candidates.json"
+        path = review_root / "review-projects" / project_id / "03_section_drafting" / "figure_candidates.json"
     if not path.exists():
         raise SystemExit(f"figure_candidates.json not found: {path}")
     return path
@@ -205,15 +205,15 @@ def build_prompt(style_name: str, figure: dict[str, Any]) -> str:
         ] if x
     )
     return (
-        "Restyle the input image into a unified high-quality organic chemistry review figure style. "
-        "Preserve every chemical structure, bond connectivity, stereochemistry, atom label, substituent label, "
-        "reaction arrow direction, reagent, catalyst, solvent, stoichiometry, temperature, time, yield, "
+        "Restyle the input image into a unified, high-quality academic review figure style, appropriate to "
+        "the subject matter shown in the source image. Preserve every structural element, connector/relationship "
+        "line, label, symbol, arrow direction, quantitative value (parameters, conditions, units, results), "
         "footnote marker, panel layout, numbering, and relative placement exactly as in the source. "
-        "Do not add, remove, rename, reorder, summarize, or reinterpret any chemistry or text. "
+        "Do not add, remove, rename, reorder, summarize, or reinterpret any content or text. "
         "If any source text is hard to read, preserve it faithfully rather than inventing new text. "
         "Change only visual style: use consistent dark ink lines, a restrained publication palette, a clean white or off-white background, "
-        "consistent typography, crisp arrows, balanced spacing, and a publication-ready organic review aesthetic. "
-        "Keep the figure scientifically identical to the source. "
+        "consistent typography, crisp arrows/connectors, balanced spacing, and a publication-ready academic aesthetic. "
+        "Keep the figure factually and technically identical to the source. "
         f"Style preset: {style_name}. {extra}"
     )
 
@@ -336,7 +336,7 @@ def run(args: argparse.Namespace) -> int:
     review_root = Path(args.review_root).resolve()
     project = ensure_project_dir(review_root, args.project_id)
     figures_file = load_candidate_file(review_root, args.project_id, args.figures_file)
-    out_dir = project / "03_figure_redraw"
+    out_dir = project / "04_figure_redraw"
     source_dir = out_dir / "source"
     redrawn_dir = out_dir / "redrawn"
     source_dir.mkdir(parents=True, exist_ok=True)
@@ -464,7 +464,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Redraw review figure candidates into a unified style.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=str(Path.cwd()))
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--figures-file", default="")
     parser.add_argument("--base-url", default=default_base_url())
@@ -474,7 +474,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quality", default="high")
     parser.add_argument("--background", default="opaque")
     parser.add_argument("--output-format", default="png")
-    parser.add_argument("--style-name", default="organic-review-clean-v1")
+    parser.add_argument("--style-name", default="academic-review-clean-v1")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--require-redrawn", action="store_true", help="Fail when no figure is redrawn successfully.")

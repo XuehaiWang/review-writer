@@ -50,9 +50,13 @@ def save_b64_png(b64: str, path: Path) -> None:
 
 
 def test_images_generate(base_url: str, api_key: str, out_path: Path) -> None:
+    # Deliberately subject-neutral: this only checks that the image-generation
+    # API is reachable and authenticated, not that it produces a useful figure.
+    # Do not make this prompt domain-specific (e.g. chemistry) -- this skill is
+    # shared across every review topic.
     payload = {
         "model": "gpt-image-2",
-        "prompt": "Generate a simple flat chemistry-themed icon: an Erlenmeyer flask with a small green liquid fill on a white background.",
+        "prompt": "Generate a simple flat icon: a plain gray circle on a white background.",
         "size": "1024x1024",
         "quality": "low",
         "background": "white",
@@ -92,7 +96,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Smoke test image generation and edit APIs.")
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--api-key", required=True)
-    parser.add_argument("--output-dir", default="/home/ps/review-writer/tmp/image-smoke-test")
+    parser.add_argument("--output-dir", default="", help="Defaults to <cwd>/tmp/image-smoke-test.")
     parser.add_argument("--edit-only", action="store_true")
     parser.add_argument("--source-image", default="")
     return parser.parse_args()
@@ -100,7 +104,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    output_dir = Path(args.output_dir).resolve()
+    output_dir = Path(args.output_dir).resolve() if args.output_dir else (Path.cwd() / "tmp" / "image-smoke-test")
     gen_path = output_dir / "generated.png"
     edit_path = output_dir / "edited.png"
     if args.edit_only:

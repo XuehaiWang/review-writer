@@ -16,7 +16,6 @@ from prepare_metadata import (
     apply_structured_tags_to_compat_fields,
     build_llm_payload,
     load_dotenv,
-    load_classification_rules,
     load_blocks,
     markdown_head,
     merge_llm,
@@ -64,7 +63,6 @@ def retag_one(
     model: str,
     timeout: int,
     reasoning_effort: str,
-    classification_labels: dict[str, list[str]],
 ) -> dict[str, Any]:
     meta = read_json(meta_path)
     source_paths = meta.get("source_paths") or {}
@@ -72,14 +70,14 @@ def retag_one(
     markdown_path = Path(str(source_paths.get("markdown") or ""))
     blocks = load_blocks(content_path if content_path.exists() else None)
     md = markdown_head(markdown_path if markdown_path.exists() else None)
-    payload = build_llm_payload(meta, blocks, md, system_prompt, model, reasoning_effort, classification_labels)
+    payload = build_llm_payload(meta, blocks, md, system_prompt, model, reasoning_effort)
     llm_data = call_responses(payload, api_key, base_url, timeout)
     merge_llm(meta, llm_data)
     apply_structured_tags_to_compat_fields(meta)
     meta.setdefault("extraction", {}).setdefault("notes", [])
-    meta["extraction"]["mode"] = "llm_8_category_retag"
+    meta["extraction"]["mode"] = "llm_7_category_retag"
     meta["extraction"]["model"] = model
-    meta["extraction"]["notes"].append("llm_8_category_tags_refreshed")
+    meta["extraction"]["notes"].append("llm_7_category_tags_refreshed")
     update_quality(meta)
     write_json(meta_path, meta)
     return {
@@ -91,13 +89,22 @@ def retag_one(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Refresh existing metadata with LLM-extracted eight-category tags.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser = argparse.ArgumentParser(description="Refresh existing metadata with LLM-extracted seven-category tags.")
+    parser.add_argument("--review-root", default=str(Path.cwd()))
     parser.add_argument("--model", default="")
     parser.add_argument("--base-url", default="")
     parser.add_argument("--api-key", default="")
     parser.add_argument("--reasoning-effort", default="", choices=["", "none", "low", "medium", "high"])
     parser.add_argument("--paper-id", action="append", default=[], help="Retag only selected paper_id. Repeatable.")
+    parser.add_argument(
+        "--paper-ids-from",
+        default="",
+        help=(
+            "Path to a discovery selected_discovery_results.json; retag only the paper_ids in its "
+            "local_papers (and borderline_papers) lists. Enables the two-pass tag-after-discovery "
+            "flow for large libraries. Combined with --paper-id if both are given."
+        ),
+    )
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--sleep-seconds", type=float, default=0.0)
     parser.add_argument("--timeout", type=int, default=120)
@@ -113,21 +120,32 @@ def main() -> int:
     model = args.model or os.environ.get("REVIEW_METADATA_MODEL", "gpt-5.4")
     reasoning_effort = args.reasoning_effort or os.environ.get("REVIEW_METADATA_REASONING_EFFORT", "high")
     if not api_key:
-        raise SystemExit("Missing API key. Pass --api-key, set OPENAI_API_KEY, or write it to /home/ps/review-writer/.env.")
+        raise SystemExit("Missing API key. Pass --api-key, set OPENAI_API_KEY, or write it to <review-root>/.env.")
     skill_root = Path(__file__).resolve().parents[1]
     system_prompt = (skill_root / "references" / "metadata_extraction_system.md").read_text(encoding="utf-8")
-    classification_labels = load_classification_rules(review_root / "allene_classification_rules.py")
     meta_dir = review_root / "review-library" / "metadata" / "papers"
     paths = sorted(meta_dir.glob("*.metadata.json"))
-    if args.paper_id:
-        wanted = set(args.paper_id)
+    wanted = set(args.paper_id)
+    if args.paper_ids_from:
+        sel_path = Path(args.paper_ids_from).resolve()
+        if not sel_path.exists():
+            raise SystemExit(f"--paper-ids-from file not found: {sel_path}")
+        sel = read_json(sel_path)
+        for key in ("local_papers", "borderline_papers"):
+            for entry in sel.get(key) or []:
+                pid = entry.get("paper_id")
+                if pid:
+                    wanted.add(str(pid))
+        if not wanted:
+            raise SystemExit(f"--paper-ids-from file contains no paper_ids: {sel_path}")
+    if wanted:
         paths = [p for p in paths if p.stem.replace(".metadata", "") in wanted]
     if args.limit > 0:
         paths = paths[: args.limit]
     reports = []
     for path in paths:
         try:
-            report = retag_one(path, system_prompt, api_key, base_url, model, args.timeout, reasoning_effort, classification_labels)
+            report = retag_one(path, system_prompt, api_key, base_url, model, args.timeout, reasoning_effort)
             print(f"{report['paper_id']} ok")
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
             report = {
