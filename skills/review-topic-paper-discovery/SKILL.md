@@ -82,7 +82,7 @@ Papers whose structured tags are all `not specified` (rule-only or stub metadata
 After the human confirms the candidate set, check whether any selected (or promoted-from-borderline) papers still have all structured tags as `not specified`. If so, tag them now — automatically, as part of this skill's wrap-up, without asking the user to invoke anything:
 
 ```bash
-python3 <review-root>/skills/review-metadata-prep/scripts/llm_retag_metadata.py \
+python3 <review-root>/skills_versa/review-metadata-prep/scripts/llm_retag_metadata.py \
   --review-root <review-root> \
   --paper-ids-from <review-root>/review-projects/<project_id>/00_discovery/selected_discovery_results.json \
   --model <model> --base-url <base-url> --reasoning-effort high
@@ -191,6 +191,20 @@ human_check_state.json
 The score threshold is not a cliff. Papers that fall below the selection cut but at or above a near-miss floor are written to `selected_discovery_results.json` under `borderline_papers` and listed in `discovery_report.md` under "Borderline Papers — review required". The script also prints a `[borderline]` line when any exist.
 
 After every discovery run, the LLM must review this list before presenting the candidate set: read each borderline paper's title (and abstract from its metadata if the title is ambiguous), and promote clearly on-topic papers into `local_papers` — recording the promotion in the results file (e.g. `matched_keywords: ["agent_promoted_from_borderline"]`) so the change is auditable. Phrasing drift between topic keywords and paper metadata is the most common reason an on-topic paper lands here; a borderline entry is a request for judgment, not a rejection.
+
+## Agent relevance check (required step, excludes false positives by default)
+
+`discover.py` scores by keyword match, not topical understanding — a paper can clear the selection cut through a coincidental match (e.g. the keyword `"REALM"` matching the ordinary English word "realm" inside an unrelated paper) and land in `local_papers` looking exactly as confident as a genuine hit. Nothing in the scoring step judges whether a matched paper is actually about the review topic; that judgment must happen here, before the candidate set reaches the human.
+
+After the borderline-promotion step above and before presenting `local_papers` to the human:
+
+1. Read every paper's title in `local_papers` (and its metadata abstract if the title alone doesn't make relevance obvious).
+2. For each paper the LLM judges is **not actually about the review topic** — regardless of which keyword(s) it matched or how high its score is — move it out of `local_papers` into a new `excluded_papers` array in `selected_discovery_results.json`. Each moved entry keeps its original fields plus `"excluded_reason"`: a short note naming why (e.g. `"matched only via 'REALM' colliding with the unrelated English word 'realm'; paper is about copper-catalyzed allene synthesis"`).
+3. This is an exclude-by-default step, not a delete: excluded papers stay fully recorded in the file, nothing is discarded, and every exclusion must be auditable from its `excluded_reason`.
+4. Add an "## Agent-Excluded Papers — confirm before finalizing" section to `discovery_report.md`, listing each excluded paper with its reason, mirroring the borderline-papers report format.
+5. When handing the candidate set to the user for the human check below, explicitly list the excluded papers and their reasons, and ask whether the user wants any of them moved back into `local_papers` before confirming. Do not silently drop this list — surfacing it is mandatory even though the default action was exclusion.
+
+This step needs no API key or script; it is the same kind of agent judgment call already used for borderline promotion, just applied in the opposite direction (removing false positives instead of recovering false negatives).
 
 ## Human Check
 

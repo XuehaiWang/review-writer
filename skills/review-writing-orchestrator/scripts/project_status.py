@@ -166,7 +166,8 @@ def stage_status(project: Path, stage: dict[str, Any]) -> dict[str, Any]:
         elif not isinstance(figures, list) and "figure_candidates.json" not in missing:
             semantic_issues.append("invalid_figure_candidates")
     complete = not missing
-    if semantic_issues:
+    intentionally_skipped = stage.get("optional_skip") and "figure_redraw_skipped" in semantic_issues
+    if semantic_issues and not intentionally_skipped:
         complete = False
     confirmed = False
     confirmation_notes: list[str] = []

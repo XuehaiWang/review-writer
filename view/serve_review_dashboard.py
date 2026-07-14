@@ -127,13 +127,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def handle_project_export_docx(self, project_id: str) -> None:
         project = self.review_root / "review-projects" / project_id
-        stage = project / "05_final_audit"
+        stage = project / "06_final_audit"
         md_path = stage / "final_draft.md"
         if not md_path.exists():
             self.send_error(HTTPStatus.BAD_REQUEST, "final_draft.md not found")
             return
         docx_path = stage / "final_draft.docx"
-        script = Path("/home/ps/review-writer/skills/review-export-docx/scripts/md2docx.py")
+        script = self.review_root / "skills" / "review-export-docx" / "scripts" / "md2docx.py"
         if not script.exists():
             self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "md2docx.py not found")
             return
@@ -283,7 +283,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.send_error(HTTPStatus.BAD_REQUEST, f"invalid draft payload: {exc}")
             return
-        stage_dir = project / "04_first_draft"
+        stage_dir = project / "05_first_draft"
         stage_dir.mkdir(parents=True, exist_ok=True)
         if "first_draft_md" in data:
             (stage_dir / "first_draft.md").write_text(str(data.get("first_draft_md") or ""), encoding="utf-8")
@@ -509,7 +509,7 @@ def infer_project_topic(project: Path) -> str:
             line = line.strip()
             if line.startswith("# "):
                 return line[2:].strip()
-    bundle = read_json_if_exists(project / "04_first_draft" / "draft_bundle.json")
+    bundle = read_json_if_exists(project / "05_first_draft" / "draft_bundle.json")
     if isinstance(bundle, dict) and bundle.get("topic"):
         return str(bundle.get("topic"))
     return ""
@@ -529,11 +529,11 @@ def list_review_projects(review_root: Path) -> list[dict[str, Any]]:
                 "has_discovery": (project / "00_discovery" / "combined_results_by_keyword.json").exists(),
                 "discovery_status": discovery_state.get("status") or "pending",
                 "has_matrix_outline": (project / "01_matrix_outline" / "literature_matrix.json").exists(),
-                "has_blueprint": (project / "01_matrix_outline" / "section_blueprint.json").exists(),
-                "has_section_drafting": (project / "02_section_drafting" / "section_drafts.md").exists(),
-                "has_figure_redraw": (project / "03_figure_redraw" / "redrawn_figure_manifest.json").exists(),
-                "has_first_draft": (project / "04_first_draft" / "first_draft.md").exists(),
-                "has_final_audit": (project / "05_final_audit" / "final_draft.md").exists(),
+                "has_blueprint": (project / "02_section_blueprint" / "section_blueprint.json").exists(),
+                "has_section_drafting": (project / "03_section_drafting" / "section_drafts.md").exists(),
+                "has_figure_redraw": (project / "04_figure_redraw" / "redrawn_figure_manifest.json").exists(),
+                "has_first_draft": (project / "05_first_draft" / "first_draft.md").exists(),
+                "has_final_audit": (project / "06_final_audit" / "final_draft.md").exists(),
             }
         )
     return projects
@@ -562,21 +562,22 @@ def project_matrix_payload(review_root: Path, project_id: str) -> dict[str, Any]
 
 def project_blueprint_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     project = review_root / "review-projects" / project_id
-    stage = project / "01_matrix_outline"
+    outline_stage = project / "01_matrix_outline"
+    blueprint_stage = project / "02_section_blueprint"
     return {
         "project_id": project_id,
         "topic": infer_project_topic(project),
         "summary": project_summary(review_root, project_id),
-        "section_blueprint": read_json_if_exists(stage / "section_blueprint.json"),
-        "section_writing_plan_md": read_text_if_exists(stage / "section_writing_plan.md"),
-        "selected_outline_md": read_text_if_exists(stage / "selected_outline.md"),
-        "paths": {"stage_dir": str(stage)},
+        "section_blueprint": read_json_if_exists(blueprint_stage / "section_blueprint.json"),
+        "section_writing_plan_md": read_text_if_exists(blueprint_stage / "section_writing_plan.md"),
+        "selected_outline_md": read_text_if_exists(outline_stage / "selected_outline.md"),
+        "paths": {"stage_dir": str(blueprint_stage), "outline_stage_dir": str(outline_stage)},
     }
 
 
 def project_sections_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     project = review_root / "review-projects" / project_id
-    stage = project / "02_section_drafting"
+    stage = project / "03_section_drafting"
     section_files = []
     sections_dir = stage / "sections"
     if sections_dir.exists():
@@ -599,8 +600,8 @@ def project_sections_payload(review_root: Path, project_id: str) -> dict[str, An
 
 def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     project = review_root / "review-projects" / project_id
-    draft_stage = project / "02_section_drafting"
-    stage = project / "03_figure_redraw"
+    draft_stage = project / "03_section_drafting"
+    stage = project / "04_figure_redraw"
     return {
         "project_id": project_id,
         "topic": infer_project_topic(project),
@@ -614,14 +615,17 @@ def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any
 
 def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     project = review_root / "review-projects" / project_id
-    stage = project / "05_final_audit"
+    stage = project / "06_final_audit"
     docx_path = stage / "final_draft.docx"
     return {
         "project_id": project_id,
         "topic": infer_project_topic(project),
         "summary": project_summary(review_root, project_id),
         "final_draft_md": read_text_if_exists(stage / "final_draft.md"),
-        "final_audit_report_md": read_text_if_exists(stage / "final_audit_report.md"),
+        "content_audit_report_md": read_text_if_exists(stage / "content_audit_report.md"),
+        "format_audit_report_md": read_text_if_exists(stage / "format_audit_report.md"),
+        "format_scan_md": read_text_if_exists(stage / "format_scan.md"),
+        "final_remaining_issues_md": read_text_if_exists(stage / "final_remaining_issues.md"),
         "release_report_md": read_text_if_exists(stage / "release_report.md"),
         "final_draft_docx_path": str(docx_path),
         "final_draft_docx_exists": docx_path.exists(),
@@ -631,10 +635,10 @@ def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
 
 def project_draft_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     project = review_root / "review-projects" / project_id
-    stage_dir = project / "04_first_draft"
-    figures_manifest = read_json_if_exists(project / "03_figure_redraw" / "redrawn_figure_manifest.json") or {}
+    stage_dir = project / "05_first_draft"
+    figures_manifest = read_json_if_exists(project / "04_figure_redraw" / "redrawn_figure_manifest.json") or {}
     draft_bundle = read_json_if_exists(stage_dir / "draft_bundle.json")
-    section_drafts = read_json_if_exists(project / "02_section_drafting" / "section_drafts.json")
+    section_drafts = read_json_if_exists(project / "03_section_drafting" / "section_drafts.json")
     redrawn = []
     for row in (figures_manifest.get("figures") or []):
         if isinstance(row, dict):
@@ -713,8 +717,9 @@ def run(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
+    default_review_root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description="Serve local review metadata dashboard.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=str(default_review_root))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     return parser.parse_args()

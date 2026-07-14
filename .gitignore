@@ -6,10 +6,16 @@
 !/view/
 !/view/**
 !/review-library/
-!/review-library/**
+/review-library/**
+!/review-library/dashboard/
+!/review-library/dashboard/**
 
 /.env
 /.env.*
+
+/.claude/
+
+/.venv/
 
 /skills/**/__pycache__/
 /view/**/__pycache__/
@@ -17,3 +23,4 @@
 !/allene_classification_rules.py
 !/template/
 !/template/**
+!/run_dashboard.cmd

@@ -218,22 +218,55 @@ def structured_tag_text(meta: dict[str, Any], tag_key: str, classification_rules
     return " ".join([value] + aliases)
 
 
+def contains_word(needle: str, haystack: str) -> bool:
+    """Word-boundary substring check.
+
+    Plain `needle in haystack` false-positives badly on short terms: "rag" is
+    a literal substring of "encouRAGed", "storage", "paragraph", etc. Every
+    match in this module must go through this (or tokenize(), which already
+    splits on non-word characters) instead of the bare `in` operator.
+    """
+    if not needle:
+        return False
+    return re.search(r"\b" + re.escape(needle) + r"\b", haystack) is not None
+
+
+def tokens_cooccur(tokens: list[str], text: str, window: int = 300) -> bool:
+    """True if every token's first occurrence falls within `window` chars of the others.
+
+    Guards the ratio==1.0 case below: a multi-word term where every individual
+    token happens to appear *somewhere* in a long blob (markdown_signal is up
+    to 12000 chars) is not evidence the phrase's meaning is present — e.g.
+    "knowledge base" scored a full match on a chemistry paper because
+    "knowledge" and "base" (a common reagent term) each occurred, unrelated,
+    thousands of characters apart. Requiring rough proximity keeps genuine
+    phrase-like co-occurrences while rejecting coincidental long-range hits.
+    """
+    positions = []
+    for tok in tokens:
+        m = re.search(r"\b" + re.escape(tok) + r"\b", text)
+        if not m:
+            return False
+        positions.append(m.start())
+    return (max(positions) - min(positions)) <= window
+
+
 def match_score(term: str, text: str) -> float:
     if not term or not text:
         return 0.0
     low = text.lower()
     t = term.lower()
-    if t in low:
+    if contains_word(t, low):
         return 1.0
     tokens = tokenize(t)
     if not tokens:
         return 0.0
-    hits = sum(1 for token in tokens if token in low)
+    hits = sum(1 for token in tokens if contains_word(token, low))
     ratio = hits / len(tokens)
     if len(tokens) == 1:
         return 0.65 if hits else 0.0
     if ratio == 1.0:
-        return 0.72
+        return 0.72 if tokens_cooccur(tokens, low) else 0.0
     # 0.66 not 0.67: a 2-of-3 token match is ratio 0.6667, and the intent is to
     # accept it — with 0.67 it silently scores zero (float comparison off-by-epsilon).
     if ratio >= 0.66 and len(tokens) >= 3:
@@ -391,9 +424,9 @@ def web_search(keyword: str, topic: str, limit: int = 8, mailto: str = "") -> li
         abstract = re.sub("<[^>]+>", " ", item.get("abstract") or "")
         hay = " ".join([title, container, abstract]).lower()
         score = 0.0
-        if keyword.lower() in hay:
+        if contains_word(keyword.lower(), hay):
             score += 0.55
-        score += min(sum(1 for term in topic_terms if term in hay) * 0.04, 0.32)
+        score += min(sum(1 for term in topic_terms if contains_word(term, hay)) * 0.04, 0.32)
         if item.get("DOI"):
             score += 0.08
         year = None
