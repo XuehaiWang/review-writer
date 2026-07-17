@@ -1,7 +1,10 @@
 interface:
   display_name: "Review Writing Orchestrator"
-  short_description: "串联综述写作阶段并控制人工检查节点"
-  default_prompt: "Use $review-writing-orchestrator to inspect the current review project, identify the next required skill, and pause at the correct human review checkpoint."
-
+  short_description: "Run the ten-stage review workflow and enforce its gates."
+  default_prompt: |
+    Use $review-writing-orchestrator and follow this exact order: review-topic-paper-discovery, review-literature-matrix-outline, review-section-blueprint, review-section-drafting-figure-picking, review-figure-style-redraw, review-draft-merge-polish, review-conclusion-generator, review-final-audit-release, review-outline-summary-chart, review-export-docx.
+    Preserve existing human checks: first-draft approval gates conclusion generation; final-audit approval gates summary-chart generation; neither added stage needs a separate confirmation.
+    Require a readable citations.json for the first draft; report `invalid_citations_json` for malformed, empty, or unsupported maps. Require both conclusion outputs, passing validation, substantive 2-3 paragraph parity between Markdown and report, numeric [n] callouts, and no raw paper IDs.
+    Require exactly one conclusion before References in the final draft plus receipt validation through conclusion_integration.json exact-source hashes and generated heading/callout identities. Require a dual chart bundle from the current final draft with a matching SHA-256, stats.generation_scope both, and stats.html_sha256 matching exact HTML bytes. Missing, wrong-source, or stale charts block DOCX export; all-ten-stage completion requires every artifact and semantic gate.
 policy:
   allow_implicit_invocation: true

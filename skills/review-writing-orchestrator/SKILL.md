@@ -1,11 +1,12 @@
 ---
 name: review-writing-orchestrator
-description: Orchestrate the concise review-writing workflow: discovery, fixed-field literature matrix, outline/blueprint, section-file drafting, figure redraw, merge, and final audit.
+description: Use when a review-writing project needs stage ordering, artifact gates, and human approval checkpoints from discovery through DOCX export.
 ---
 
 # Review Writing Orchestrator
 
-Use after the paper library metadata has been prepared.
+Use this skill to identify the next stage, enforce its artifact contract, and
+pause only at the established human checkpoints.
 
 ## Workflow
 
@@ -16,67 +17,71 @@ Use after the paper library metadata has been prepared.
 4. review-section-drafting-figure-picking
 5. review-figure-style-redraw
 6. review-draft-merge-polish
-7. review-final-audit-release
-8. review-export-docx
+7. review-conclusion-generator
+8. review-final-audit-release
+9. review-outline-summary-chart
+10. review-export-docx
 ```
 
-## Core Contract
+## Stage Contract
 
-```text
-Discovery: user topic -> extracted keywords -> search 8 LLM tag categories -> 20-30 papers.
-Matrix: one row per paper with title, authors, keywords, abstract, ~1000-word main_content, most_relevant_figure.
-Outline: use topic + matrix + writing-rule skill to create selected_outline.md.
-Blueprint: convert outline into section_blueprint.json with section, paragraph, paper, and figure mapping.
-Drafting: one section file per section; each paragraph normally maps to one paper and one figure/scheme/table.
-Merge: combine section files into one polished first draft.
-```
-
-## Status
-
-```bash
-python /home/ps/review-writer/skills/review-writing-orchestrator/scripts/project_status.py \
-  --review-root /home/ps/review-writer \
-  --project-id <project_id>
-```
+1. Discover 20-30 papers for the confirmed topic.
+2. Build the fixed-field literature matrix and approved outline.
+3. Map sections, paragraphs, papers, and figures in the blueprint.
+4. Draft one file per section and select figure candidates.
+5. Redraw approved figures or record the permitted no-figure reason.
+6. Merge and polish the section files into `04_first_draft/first_draft.md`.
+7. Generate and validate the grounded conclusion without adding a checkpoint.
+8. Integrate that conclusion, then audit and release `05_final_audit/final_draft.md`.
+9. Generate full-review and per-section charts without adding a checkpoint.
+10. Export DOCX only from the approved, current final-draft artifacts.
 
 ## Human Check Points
 
-Pause after:
+Pause after discovery, matrix/outline, blueprint, section drafting, figure
+redraw, first draft, final audit, and final DOCX styling review. In particular:
 
-```text
-00_discovery: confirm 20-30 papers.
-01_matrix_outline: confirm literature matrix and selected_outline.md.
-01_matrix_outline/section_blueprint: confirm section/paragraph/paper/figure mapping.
-02_section_drafting: confirm section files and figure candidates.
-03_figure_redraw: confirm redrawn figures.
-04_first_draft: confirm merged first draft.
-05_final_audit: confirm final draft.
-05_final_audit (docx): download final_draft.docx and verify styling in Word.
-```
+- first-draft approval is the gate before conclusion generation;
+- final-audit approval is the gate before summary-chart generation;
+- Conclusion generation and summary-chart generation add no separate human confirmation.
 
 Do not skip a human check unless the user explicitly says to continue.
 
 ## Hard Gates
 
-The status script will not let `first_draft`, `final_audit`, or
-`docx_export` be marked complete when any of these blockers are present:
+- First draft: `04_first_draft/first_draft.md` and a readable `citations.json`
+  contract must exist; figures, numeric callouts, references, and image paths
+  must pass the existing draft checks. Malformed, empty, or unsupported maps
+  report `invalid_citations_json` and block progress.
+- Conclusion: both `conclusion_generated.md` and
+  `conclusion_quality_report.json` must exist, validation must pass, and the
+  generated Markdown must contain at least two paragraphs, numeric `[n]`
+  callouts, and no raw paper IDs. Substantive 2-3 paragraph parity is required
+  between the Markdown and report, including nonblank content and word/count fields.
+- Final audit: `final_draft.md` must contain exactly one integrated conclusion before `References`.
+  Receipt validation requires current exact-source hashes and the generated
+  heading/callout identities in `conclusion_integration.json`; the integrated
+  conclusion must be scanned and the audit must have no blocking issues before
+  the final-audit checkpoint can be approved.
+- Summary chart: both HTML and JSON must be generated from the current
+  `05_final_audit/final_draft.md`; `stats.draft_source` must resolve to that
+  file and `stats.draft_sha256` must be a matching SHA-256 of its exact bytes.
+  The dual chart bundle additionally requires `stats.generation_scope` equal
+  to `both` and `stats.html_sha256` matching the exact HTML bytes.
+- DOCX: a missing, wrong-source, or stale chart blocks DOCX export.
 
-```text
-draft_has_no_figures                  draft contains zero ![](...) figures
-                                      and 03_figure_redraw/skip_reason.md is absent.
-draft_has_no_citation_callouts        draft contains zero inline [n] callouts.
-missing_references_section            no References / Reference List / Bibliography /
-                                      Cited Literature / 参考文献 heading.
-empty_references_section              References heading exists but no items follow.
-reference_callouts_missing_from_reference_list
-                                      inline [n] not represented in the list.
-broken_markdown_image_paths           an image path does not resolve.
-source_figure_placeholders_need_redraw_or_permission_check
-                                      source-paper placeholders still in the manuscript.
-final_audit_has_blocking_issues       format_scan.json reports blocking_issues; resolve
-                                      before generating the DOCX.
+The existing manuscript gates remain binding: a figure (or approved
+`03_figure_redraw/skip_reason.md`), inline citations, a non-empty References
+section, complete callout/reference mapping, resolvable image paths, and no
+unresolved source-figure placeholders or final-audit blockers.
+
+All-ten-stage completion is reported only when every stage artifact and semantic
+gate above passes in the exact workflow order.
+
+## Status
+
+```bash
+python skills/review-writing-orchestrator/scripts/project_status.py \
+  --review-root <review-root> \
+  --project-id <project_id>
 ```
-
-To intentionally produce a no-figure manuscript, write
-`review-projects/<project_id>/03_figure_redraw/skip_reason.md` with a
-one-line justification before re-running the draft merge.

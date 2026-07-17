@@ -1,4 +1,8 @@
 interface:
   display_name: "Final Audit Release"
-  short_description: "Check content and format, then produce the final review draft."
-  default_prompt: "Using the approved first draft and upstream evidence files, perform final content and format audits, fix manuscript-level issues, and produce final_draft.md with audit and release reports."
+  short_description: "Integrate the validated conclusion, audit, and release."
+  default_prompt: |
+    Use $review-final-audit-release with 04_first_draft/conclusion_generated.md and 04_first_draft/conclusion_quality_report.json.
+    First verify validation.passes_validation is true; then run integrate_generated_conclusion.py to replace conclusion-like sections, place exactly one canonical conclusion before References, and write `conclusion_integration.json`; next run final_audit_scan.py against the integrated final draft; finally audit semantics and format without changing mapped paper identities.
+    The receipt records exact-source hashes, inserted heading, generated callout identities, and seed hash. Status re-derives the heading and callouts from the hashed generated conclusion. Audited prose edits are permitted, but changed mapped citation identities block release.
+    Block release for an absent, post-References, or duplicate conclusion, an invalid receipt, or any unresolved scan blocker.

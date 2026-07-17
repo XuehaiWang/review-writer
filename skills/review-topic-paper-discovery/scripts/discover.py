@@ -28,6 +28,27 @@ def slugify(value: str) -> str:
     return value.strip("-")[:96] or "review-discovery"
 
 
+def resolve_project_path(review_root: Path, project_id: str) -> Path:
+    if not isinstance(project_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,95})", project_id
+    ):
+        raise QueryPlanError(
+            "project-id must be one safe slug component containing only letters, "
+            "numbers, underscores, or hyphens"
+        )
+    projects_root = (review_root / "review-projects").resolve()
+    project = (projects_root / project_id).resolve()
+    try:
+        relative = project.relative_to(projects_root)
+    except ValueError as exc:
+        raise QueryPlanError(
+            "project-id resolves outside review-root/review-projects"
+        ) from exc
+    if relative == Path(".") or len(relative.parts) != 1:
+        raise QueryPlanError("project-id must resolve to one project component")
+    return project
+
+
 def read_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
@@ -87,6 +108,232 @@ STRUCTURED_TAG_KEYS = [
     "document_scope",
 ]
 
+GENERIC_INSTRUCTION_KEYWORDS = {
+    "a",
+    "an",
+    "and",
+    "around",
+    "by",
+    "for",
+    "from",
+    "in",
+    "into",
+    "last",
+    "literature",
+    "new",
+    "newly",
+    "of",
+    "on",
+    "or",
+    "paper",
+    "papers",
+    "past",
+    "review",
+    "generate",
+    "organized",
+    "developed",
+    "reaction",
+    "reactions",
+    "catalyst",
+    "catalysts",
+    "the",
+    "to",
+    "topic",
+    "type",
+    "types",
+    "with",
+    "write",
+    "writing",
+    "year",
+    "years",
+}
+
+
+class QueryPlanError(ValueError):
+    pass
+
+
+def _normalize_plan_text(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise QueryPlanError(f"{field} must be a string")
+    normalized = re.sub(r"\s+", " ", value.strip())
+    if not normalized:
+        raise QueryPlanError(f"{field} must not be empty")
+    return normalized
+
+
+def validate_query_plan(plan: dict[str, Any], topic: str) -> dict[str, Any]:
+    if not isinstance(plan, dict):
+        raise QueryPlanError("query plan must be a JSON object")
+    if type(plan.get("schema_version")) is not int or plan["schema_version"] != 1:
+        raise QueryPlanError("schema_version must be the integer 1")
+
+    plan_topic = _normalize_plan_text(plan.get("topic"), "topic")
+    requested_topic = _normalize_plan_text(topic, "topic")
+    if plan_topic.casefold() != requested_topic.casefold():
+        raise QueryPlanError(
+            f"query plan topic {plan_topic!r} does not match requested topic {requested_topic!r}"
+        )
+
+    resolved = plan.get("resolved_concepts")
+    if not isinstance(resolved, list):
+        raise QueryPlanError("resolved_concepts must be a list")
+    normalized_resolved: list[dict[str, Any]] = []
+    for index, concept in enumerate(resolved):
+        if not isinstance(concept, dict):
+            raise QueryPlanError(f"resolved_concepts[{index}] must be an object")
+        normalized_concept = dict(concept)
+        for field in ("surface", "expanded_name", "reason"):
+            normalized_concept[field] = _normalize_plan_text(
+                concept.get(field), f"resolved_concepts[{index}].{field}"
+            )
+        confidence = concept.get("confidence")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            raise QueryPlanError(
+                f"resolved_concepts[{index}].confidence must be a number"
+            )
+        if not 0 <= confidence <= 1:
+            raise QueryPlanError(
+                f"resolved_concepts[{index}].confidence must be between 0 and 1"
+            )
+        normalized_concept["confidence"] = confidence
+        normalized_resolved.append(normalized_concept)
+
+    unresolved = plan.get("unresolved_concepts")
+    if not isinstance(unresolved, list):
+        raise QueryPlanError("unresolved_concepts must be a list")
+    normalized_unresolved: list[dict[str, Any]] = []
+    for index, concept in enumerate(unresolved):
+        if not isinstance(concept, dict):
+            raise QueryPlanError(f"unresolved_concepts[{index}] must be an object")
+        normalized_concept = dict(concept)
+        for field in ("surface", "reason"):
+            normalized_concept[field] = _normalize_plan_text(
+                concept.get(field), f"unresolved_concepts[{index}].{field}"
+            )
+        normalized_unresolved.append(normalized_concept)
+
+    keywords = plan.get("keywords")
+    if not isinstance(keywords, list):
+        raise QueryPlanError("keywords must be a list")
+    normalized_keywords: list[dict[str, Any]] = []
+    for index, item in enumerate(keywords):
+        if not isinstance(item, dict):
+            raise QueryPlanError(f"keywords[{index}] must be an object")
+        normalized_item = dict(item)
+        for field in ("keyword", "source", "reason"):
+            normalized_item[field] = _normalize_plan_text(
+                item.get(field), f"keywords[{index}].{field}"
+            )
+        source = normalized_item["source"]
+        if source not in {"user", "agent"}:
+            raise QueryPlanError(
+                f"keywords[{index}].source {source!r} must be 'user' or 'agent'"
+            )
+        keyword = normalized_item["keyword"]
+        if keyword.casefold() in GENERIC_INSTRUCTION_KEYWORDS:
+            raise QueryPlanError(
+                f"keywords[{index}].keyword {keyword!r} is a generic instruction token"
+            )
+        category = _normalize_plan_text(
+            item.get("category"), f"keywords[{index}].category"
+        )
+        if category not in STRUCTURED_TAG_KEYS:
+            raise QueryPlanError(
+                f"keywords[{index}].category {category!r} is not supported"
+            )
+        normalized_item["category"] = category
+        normalized_keywords.append(normalized_item)
+
+    resolved_surfaces = {
+        concept["surface"].casefold(): concept["surface"]
+        for concept in normalized_resolved
+    }
+    unresolved_surfaces = {
+        concept["surface"].casefold(): concept["surface"]
+        for concept in normalized_unresolved
+    }
+    overlapping_surfaces = resolved_surfaces.keys() & unresolved_surfaces.keys()
+    if overlapping_surfaces:
+        surfaces = ", ".join(
+            unresolved_surfaces[key] for key in sorted(overlapping_surfaces)
+        )
+        raise QueryPlanError(
+            f"concept surfaces cannot be both resolved and unresolved: {surfaces}"
+        )
+    for concept in normalized_unresolved:
+        surface = concept["surface"]
+        for index, item in enumerate(normalized_keywords):
+            if contains_phrase(surface, item["keyword"]):
+                raise QueryPlanError(
+                    f"keywords[{index}].keyword {item['keyword']!r} contains "
+                    f"unresolved concept surface {surface!r}"
+                )
+
+    filters = plan.get("filters")
+    if not isinstance(filters, dict):
+        raise QueryPlanError("filters must be an object")
+    normalized_filters = dict(filters)
+    for field in ("year_from", "year_to"):
+        if field in normalized_filters and type(normalized_filters[field]) is not int:
+            raise QueryPlanError(f"filters.{field} must be an integer")
+    year_from = normalized_filters.get("year_from")
+    year_to = normalized_filters.get("year_to")
+    if year_from is not None and year_to is not None and year_from > year_to:
+        raise QueryPlanError("filters.year_from must not be greater than year_to")
+    topic_filters = parse_topic_intent(requested_topic)["filters"]
+    for field in ("year_from", "year_to"):
+        if field in topic_filters and normalized_filters.get(field) != topic_filters[field]:
+            raise QueryPlanError(
+                f"filters.{field} must match the relative-year topic "
+                f"(expected {topic_filters[field]})"
+            )
+
+    group_by = plan.get("group_by")
+    if not isinstance(group_by, list):
+        raise QueryPlanError("group_by must be a list")
+    normalized_groups: list[str] = []
+    for index, group in enumerate(group_by):
+        group = _normalize_plan_text(group, f"group_by[{index}]")
+        if group not in STRUCTURED_TAG_KEYS:
+            raise QueryPlanError(f"group_by[{index}] {group!r} is not supported")
+        if group not in normalized_groups:
+            normalized_groups.append(group)
+
+    if not normalized_keywords:
+        if normalized_unresolved:
+            surfaces = ", ".join(item["surface"] for item in normalized_unresolved)
+            raise QueryPlanError(
+                "no meaningful keyword remains; resolve the unresolved concepts "
+                f"or provide a validated chemistry keyword: {surfaces}"
+            )
+        raise QueryPlanError(
+            "no meaningful keyword remains; clarify the topic or provide a "
+            "validated chemistry keyword"
+        )
+
+    normalized = dict(plan)
+    normalized.update(
+        {
+            "schema_version": 1,
+            "topic": plan_topic,
+            "resolved_concepts": normalized_resolved,
+            "unresolved_concepts": normalized_unresolved,
+            "keywords": normalized_keywords,
+            "filters": normalized_filters,
+            "group_by": normalized_groups,
+        }
+    )
+    return normalized
+
+
+def load_query_plan(path: Path, topic: str) -> dict[str, Any]:
+    try:
+        plan = read_json(path)
+    except Exception as exc:
+        raise QueryPlanError(f"could not read query plan {path}: {exc}") from exc
+    return validate_query_plan(plan, topic)
+
 
 def load_classification_rules(review_root: Path) -> dict[str, dict[str, list[str]]]:
     labels = {key: {} for key in STRUCTURED_TAG_KEYS}
@@ -116,8 +363,11 @@ def load_classification_rules(review_root: Path) -> dict[str, dict[str, list[str
 
 def markdown_signal(meta: dict[str, Any], max_chars: int = 12000) -> str:
     source_paths = meta.get("source_paths") or {}
-    path = Path(str(source_paths.get("markdown") or ""))
-    if not path.exists():
+    raw_path = str(source_paths.get("markdown") or "").strip()
+    if not raw_path:
+        return ""
+    path = Path(raw_path)
+    if not path.is_file():
         return ""
     return path.read_text(encoding="utf-8", errors="ignore")[:max_chars]
 
@@ -126,8 +376,86 @@ def tokenize(text: str) -> list[str]:
     return dedupe([w.lower() for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9'′\\-]*", text or "") if len(w) >= 3])
 
 
-def infer_keywords(topic: str, user_keywords: list[str]) -> list[dict[str, Any]]:
-    text = " ".join([topic] + user_keywords).lower()
+ENGLISH_NUMBER_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+
+
+def contains_phrase(needle: str, haystack: str) -> bool:
+    chunks = re.split(r"\s+", (needle or "").strip())
+    if not chunks or not chunks[0]:
+        return False
+    pattern = r"(?<![A-Za-z0-9])" + r"\s+".join(
+        re.escape(chunk) for chunk in chunks
+    ) + r"(?![A-Za-z0-9])"
+    return re.search(pattern, haystack or "", re.I) is not None
+
+
+def parse_topic_intent(topic: str, current_year: int | None = None) -> dict[str, Any]:
+    current_year = current_year or datetime.now().year
+    filters: dict[str, int] = {}
+    match = re.search(
+        r"(?<![A-Za-z0-9])(?:past|last)\s+"
+        r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
+        r"years?(?![A-Za-z0-9])",
+        topic,
+        re.I,
+    )
+    if match:
+        count = (
+            int(match.group(1))
+            if match.group(1).isdigit()
+            else ENGLISH_NUMBER_WORDS[match.group(1).lower()]
+        )
+        filters = {"year_from": current_year - count + 1, "year_to": current_year}
+    chinese = re.search(r"(?:近|过去)\s*(\d+)\s*年", topic)
+    if chinese:
+        count = int(chinese.group(1))
+        filters = {"year_from": current_year - count + 1, "year_to": current_year}
+    catalyst_grouping = bool(
+        re.search(
+            r"(?<![A-Za-z0-9])(?:organized|grouped)\s+by\s+"
+            r"(?:types?\s+of\s+)?catalysts?(?![A-Za-z0-9])",
+            topic,
+            re.I,
+        )
+        or re.search(r"(?:按照|按)\s*催化剂(?:种类|类型)", topic)
+    )
+    acronyms = dedupe(
+        re.findall(r"(?<![A-Za-z0-9])([A-Z]{2,8})(?![A-Za-z0-9])", topic)
+    )
+    return {
+        "filters": filters,
+        "group_by": ["catalyst_or_method"] if catalyst_grouping else [],
+        "unresolved_concepts": acronyms,
+    }
+
+
+def infer_keywords(
+    topic: str,
+    user_keywords: list[str],
+    unresolved_surfaces: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    text = " ".join([topic] + user_keywords)
+    for surface in unresolved_surfaces or []:
+        if not surface.isupper():
+            continue
+        chunks = re.split(r"\s+", surface.strip())
+        if not chunks or not chunks[0]:
+            continue
+        pattern = r"(?<![A-Za-z0-9])" + r"\s+".join(
+            re.escape(chunk) for chunk in chunks
+        ) + r"(?![A-Za-z0-9])"
+        text = re.sub(pattern, " ", text)
     rules = [
         ("polysubstituted allenes", "product", ["polysubstituted allene", "substituted allene"]),
         ("allenes", "product", ["allene", "allenes"]),
@@ -158,13 +486,8 @@ def infer_keywords(topic: str, user_keywords: list[str]) -> list[dict[str, Any]]
     ]
     candidates: list[dict[str, Any]] = []
     for kw, category, needles in rules:
-        if any(n in text for n in needles) or any(n in kw.lower() for n in tokenize(topic)):
+        if any(contains_phrase(needle, text) for needle in needles):
             candidates.append({"keyword": kw, "category": category, "reason": "rule expansion from topic/user keywords"})
-    for token in tokenize(topic):
-        if token in {"propargylic", "allene", "allenes", "synthesis", "derivatives"}:
-            continue
-        if len(token) > 6:
-            candidates.append({"keyword": token, "category": "reaction_type", "reason": "topic token"})
     return unique_keyword_dicts(candidates)
 
 
@@ -179,27 +502,93 @@ def unique_keyword_dicts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def build_keyword_set(topic: str, user_keywords: list[str]) -> dict[str, Any]:
-    agent = infer_keywords(topic, user_keywords)
+def build_keyword_set(
+    topic: str,
+    user_keywords: list[str],
+    agent_keywords: list[dict[str, Any]] | None = None,
+    query_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    user_keywords = dedupe(user_keywords)
+    ignored_user_keywords = [
+        keyword
+        for keyword in user_keywords
+        if keyword.casefold() in GENERIC_INSTRUCTION_KEYWORDS
+    ]
+    user_keywords = [
+        keyword
+        for keyword in user_keywords
+        if keyword.casefold() not in GENERIC_INSTRUCTION_KEYWORDS
+    ]
+    unresolved_surfaces = []
+    if query_context is not None:
+        unresolved_surfaces = [
+            str(item.get("surface") or "").strip()
+            if isinstance(item, dict)
+            else str(item).strip()
+            for item in query_context.get("unresolved_concepts", [])
+        ]
+    agent = (
+        infer_keywords(topic, user_keywords, unresolved_surfaces)
+        if agent_keywords is None
+        else agent_keywords
+    )
     merged: dict[str, dict[str, Any]] = {}
     for kw in user_keywords:
-        merged[kw.lower()] = {"keyword": kw, "category": classify_keyword(kw), "source": ["user"], "keep": True}
+        merged[kw.casefold()] = {"keyword": kw, "category": classify_keyword(kw), "source": ["user"], "keep": True}
     for item in agent:
-        key = item["keyword"].lower()
+        normalized_keyword = re.sub(r"\s+", " ", str(item["keyword"]).strip())
+        key = normalized_keyword.casefold()
+        declared_source = str(item.get("source") or "agent")
         if key in merged:
-            if "agent" not in merged[key]["source"]:
-                merged[key]["source"].append("agent")
-            if not merged[key].get("category"):
-                merged[key]["category"] = item["category"]
+            if declared_source not in merged[key]["source"]:
+                merged[key]["source"].append(declared_source)
+            merged[key].update(
+                {
+                    "keyword": normalized_keyword,
+                    "category": item["category"],
+                    "reason": item.get("reason", ""),
+                }
+            )
         else:
-            merged[key] = {"keyword": item["keyword"], "category": item["category"], "source": ["agent"], "keep": True, "reason": item.get("reason", "")}
-    return {
+            merged[key] = {"keyword": normalized_keyword, "category": item["category"], "source": [declared_source], "keep": True, "reason": item.get("reason", "")}
+    for surface in unresolved_surfaces:
+        for item in merged.values():
+            if contains_phrase(surface, item["keyword"]):
+                raise QueryPlanError(
+                    f"merged keyword {item['keyword']!r} contains unresolved "
+                    f"concept surface {surface!r}; resolve it or remove that keyword"
+                )
+    if not merged:
+        if unresolved_surfaces:
+            surfaces = ", ".join(unresolved_surfaces)
+            raise QueryPlanError(
+                "no meaningful keyword remains; resolve the unresolved concepts "
+                f"or provide a validated chemistry keyword: {surfaces}"
+            )
+        raise QueryPlanError(
+            "no meaningful keyword remains; clarify the topic or provide a "
+            "validated chemistry keyword"
+        )
+    result = {
         "user_topic": topic,
         "user_keywords": user_keywords,
+        "ignored_user_keywords": ignored_user_keywords,
         "agent_keywords": agent,
         "merged_keywords": list(merged.values()),
         "created_at": utc_now(),
     }
+    if query_context is not None:
+        for field in (
+            "resolved_concepts",
+            "unresolved_concepts",
+            "filters",
+            "group_by",
+            "query_plan_source",
+            "query_plan_path",
+        ):
+            if field in query_context:
+                result[field] = query_context[field]
+    return result
 
 
 def classify_keyword(keyword: str) -> str:
@@ -241,14 +630,13 @@ def structured_tag_text(meta: dict[str, Any], tag_key: str, classification_rules
 def match_score(term: str, text: str) -> float:
     if not term or not text:
         return 0.0
-    low = text.lower()
     t = term.lower()
-    if t in low:
+    if contains_phrase(t, text):
         return 1.0
     tokens = tokenize(t)
     if not tokens:
         return 0.0
-    hits = sum(1 for token in tokens if token in low)
+    hits = sum(1 for token in tokens if contains_phrase(token, text))
     ratio = hits / len(tokens)
     if len(tokens) == 1:
         return 0.65 if hits else 0.0
@@ -262,27 +650,29 @@ def match_score(term: str, text: str) -> float:
 def score_local_paper(
     meta: dict[str, Any],
     keyword: str,
+    keyword_category: str,
     topic_terms: list[str],
     classification_rules: dict[str, dict[str, list[str]]],
 ) -> dict[str, Any]:
+    if keyword_category not in STRUCTURED_TAG_KEYS:
+        raise ValueError(f"unsupported keyword category: {keyword_category!r}")
     matched_fields: list[str] = []
     matched_terms: list[str] = []
     reasons: list[str] = []
     raw = 0.0
     direct_raw = 0.0
-    for field, weight in STRUCTURED_TAG_WEIGHTS.items():
-        text = structured_tag_text(meta, field, classification_rules)
-        s = match_score(keyword, text)
-        if s > 0:
-            contribution = s * weight
-            raw += contribution
-            direct_raw += contribution
-            matched_fields.append(field)
-            matched_terms.append(keyword)
-            reasons.append(f"structured_tags.{field} matched keyword")
-        topic_hits = sum(1 for term in topic_terms if match_score(term, text) > 0)
-        if topic_hits and s > 0:
-            raw += min(topic_hits * 0.15, 0.9)
+    text = structured_tag_text(meta, keyword_category, classification_rules)
+    s = match_score(keyword, text)
+    if s > 0:
+        contribution = s * STRUCTURED_TAG_WEIGHTS[keyword_category]
+        raw += contribution
+        direct_raw += contribution
+        matched_fields.append(keyword_category)
+        matched_terms.append(keyword)
+        reasons.append(f"structured_tags.{keyword_category} matched keyword")
+    topic_hits = sum(1 for term in topic_terms if match_score(term, text) > 0)
+    if topic_hits and s > 0:
+        raw += min(topic_hits * 0.15, 0.9)
     source_text = " ".join(
         [
             str(field_value(meta.get("title"), "")),
@@ -293,7 +683,8 @@ def score_local_paper(
     if source_signal > 0 and direct_raw > 0:
         raw += min(source_signal * 0.8, 0.8)
         reasons.append("source text confirms keyword")
-    year = field_value(meta.get("year"))
+    raw_year = field_value(meta.get("year"))
+    year = raw_year if type(raw_year) is int else None
     source_paths = meta.get("source_paths") or {}
     normalized = min(round(raw / 8.0, 4), 1.0)
     if normalized >= 0.65:
@@ -328,18 +719,53 @@ def local_search_by_keyword(
     keywords: list[dict[str, Any]],
     topic: str,
     classification_rules: dict[str, dict[str, list[str]]],
-) -> list[dict[str, Any]]:
+    year_from: int | None = None,
+    year_to: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    filter_stats = {
+        "before_filter": len(papers),
+        "after_filter": 0,
+        "missing_year_excluded": 0,
+        "out_of_range_excluded": 0,
+    }
+    filtered_papers: list[dict[str, Any]] = []
+    year_filter_active = year_from is not None or year_to is not None
+    for meta in papers.values():
+        year = field_value(meta.get("year"))
+        valid_year = year if type(year) is int else None
+        if year_filter_active and valid_year is None:
+            filter_stats["missing_year_excluded"] += 1
+            continue
+        if (
+            (year_from is not None and valid_year < year_from)
+            or (year_to is not None and valid_year > year_to)
+        ):
+            filter_stats["out_of_range_excluded"] += 1
+            continue
+        filtered_papers.append(meta)
+    filter_stats["after_filter"] = len(filtered_papers)
+
     topic_terms = tokenize(topic)
     grouped: list[dict[str, Any]] = []
     for kw in keywords:
         if not kw.get("keep", True):
             continue
         keyword = kw["keyword"]
-        results = [score_local_paper(meta, keyword, topic_terms, classification_rules) for meta in papers.values()]
+        keyword_category = kw.get("category")
+        results = [
+            score_local_paper(
+                meta,
+                keyword,
+                keyword_category,
+                topic_terms,
+                classification_rules,
+            )
+            for meta in filtered_papers
+        ]
         results = [r for r in results if r["direct_raw_score"] >= 1.4 and r["score"] >= 0.12]
         results.sort(key=lambda r: (r["score"], r["raw_score"], r.get("year") or 0), reverse=True)
-        grouped.append({"keyword": keyword, "category": kw.get("category"), "keep": True, "local_results": results})
-    return grouped
+        grouped.append({"keyword": keyword, "category": keyword_category, "keep": True, "local_results": results})
+    return grouped, filter_stats
 
 
 def web_search(keyword: str, topic: str, limit: int = 8) -> list[dict[str, Any]]:
@@ -591,13 +1017,113 @@ def selected_from_combined(combined: list[dict[str, Any]]) -> dict[str, Any]:
     return selected
 
 
+def group_selected_papers(
+    selected: dict[str, Any],
+    papers: dict[str, dict[str, Any]],
+    group_by: list[str],
+) -> dict[str, Any]:
+    grouped: dict[str, Any] = {}
+    selected_ids = {
+        row.get("paper_id")
+        for row in selected.get("local_papers", [])
+        if row.get("paper_id")
+    }
+    for field in group_by:
+        buckets: dict[str, set[str]] = {}
+        for paper_id in selected_ids:
+            meta = papers.get(paper_id, {})
+            structured_tags = field_value(meta.get("structured_tags"), {})
+            raw_value = (
+                structured_tags.get(field)
+                if isinstance(structured_tags, dict)
+                else None
+            )
+            value = str(raw_value).strip() if raw_value is not None else ""
+            value = value or "not specified"
+            buckets.setdefault(value, set()).add(paper_id)
+        grouped[field] = {
+            value: {
+                "count": len(paper_ids),
+                "paper_ids": sorted(paper_ids),
+            }
+            for value, paper_ids in sorted(buckets.items())
+        }
+    return grouped
+
+
 def role_rank(role: str | None) -> int:
     order = {"core_candidate": 0, "supporting_candidate": 1, "background": 2, "uncertain": 3, "excluded": 4}
     return order.get(role or "uncertain", 3)
 
 
-def write_report(out_dir: Path, topic: str, keyword_set: dict[str, Any], combined: list[dict[str, Any]]) -> None:
-    lines = ["# Topic Paper Discovery Report", "", f"Topic: {topic}", "", "## Keywords", ""]
+def write_report(
+    out_dir: Path,
+    topic: str,
+    keyword_set: dict[str, Any],
+    combined: list[dict[str, Any]],
+    selected_count: int,
+) -> None:
+    filters = keyword_set.get("filters") or {}
+    filter_stats = keyword_set.get("filter_stats") or {}
+    year_from = filters.get("year_from")
+    year_to = filters.get("year_to")
+    if year_from is None and year_to is None:
+        effective_year_range = "none"
+    else:
+        effective_year_range = (
+            f"{year_from if year_from is not None else 'unbounded'}-"
+            f"{year_to if year_to is not None else 'unbounded'}"
+        )
+    unresolved = keyword_set.get("unresolved_concepts") or []
+    unresolved_surfaces = [
+        str(item.get("surface") or "").strip()
+        if isinstance(item, dict)
+        else str(item).strip()
+        for item in unresolved
+    ]
+    unresolved_text = ", ".join(value for value in unresolved_surfaces if value) or "none"
+    grouping_text = ", ".join(keyword_set.get("group_by") or []) or "none"
+    zero_match_groups = sum(
+        1 for group in combined if not group.get("local_results")
+    )
+    matched_groups = len(combined) - zero_match_groups
+    lines = [
+        "# Topic Paper Discovery Report",
+        "",
+        f"Topic: {topic}",
+        f"Query-plan source: {keyword_set.get('query_plan_source') or 'topic_intent'}",
+        f"Query-plan path: {keyword_set.get('query_plan_path') or 'none'}",
+        f"Effective year range: {effective_year_range}",
+        f"Papers before year filtering: {filter_stats.get('before_filter', 0)}",
+        f"Papers after year filtering: {filter_stats.get('after_filter', 0)}",
+        f"Papers excluded for missing year: {filter_stats.get('missing_year_excluded', 0)}",
+        f"Papers excluded outside year range: {filter_stats.get('out_of_range_excluded', 0)}",
+        f"Unresolved concepts: {unresolved_text}",
+        f"Requested grouping fields: {grouping_text}",
+        f"Selected local papers: {selected_count}",
+        f"Keyword groups with local matches: {matched_groups}",
+        f"Keyword groups with zero local matches: {zero_match_groups}",
+        "",
+        "## Keywords",
+        "",
+    ]
+    if selected_count == 0:
+        lines.extend(
+            [
+                "No local papers matched the validated keywords and filters.",
+                "Fewer than 20 local papers were selected because only 0 unique "
+                "local papers matched the validated keywords and filters.",
+                "",
+            ]
+        )
+    elif selected_count < 20:
+        lines.extend(
+            [
+                f"Fewer than 20 local papers were selected because only {selected_count} "
+                "unique local papers matched the validated keywords and filters.",
+                "",
+            ]
+        )
     for kw in keyword_set["merged_keywords"]:
         lines.append(f"- {kw['keyword']} ({kw.get('category')}, source={'+'.join(kw.get('source', []))})")
     lines += ["", "## Results by Keyword", ""]
@@ -635,22 +1161,61 @@ def _load_dotenv_if_present(review_root: Path) -> None:
 
 def run(args: argparse.Namespace) -> int:
     review_root = Path(args.review_root).resolve()
+    project_id = args.project_id or slugify(args.topic)
+    project = resolve_project_path(review_root, project_id)
     _load_dotenv_if_present(review_root)
     user_keywords = split_keywords(args.keywords)
-    project_id = args.project_id or slugify(args.topic)
-    project = review_root / "review-projects" / project_id
+    query_plan_path = getattr(args, "query_plan", "")
+    if query_plan_path:
+        query_plan = load_query_plan(Path(query_plan_path), args.topic)
+        query_plan_source = "llm_plan"
+        effective_query_plan_path = str(query_plan_path)
+        agent_keywords = query_plan["keywords"]
+        resolved_concepts = query_plan["resolved_concepts"]
+        unresolved_concepts = query_plan["unresolved_concepts"]
+        filters = query_plan["filters"]
+        group_by = query_plan["group_by"]
+    else:
+        topic_intent = parse_topic_intent(args.topic)
+        query_plan_source = "topic_intent"
+        effective_query_plan_path = None
+        agent_keywords = None
+        resolved_concepts = []
+        unresolved_concepts = topic_intent["unresolved_concepts"]
+        filters = topic_intent["filters"]
+        group_by = topic_intent["group_by"]
+    query_context = {
+        "query_plan_source": query_plan_source,
+        "resolved_concepts": resolved_concepts,
+        "unresolved_concepts": unresolved_concepts,
+        "filters": filters,
+        "group_by": group_by,
+    }
+    if effective_query_plan_path is not None:
+        query_context["query_plan_path"] = effective_query_plan_path
+
+    keyword_set = build_keyword_set(
+        args.topic,
+        user_keywords,
+        agent_keywords=agent_keywords,
+        query_context=query_context,
+    )
     out_dir = project / "00_discovery"
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "topic_input.md").write_text(
         f"# {args.topic}\n\nUser keywords:\n\n" + "\n".join(f"- {kw}" for kw in user_keywords) + "\n",
         encoding="utf-8",
     )
-    keyword_set = build_keyword_set(args.topic, user_keywords)
-    write_json(out_dir / "keyword_set.draft.json", keyword_set)
     papers = load_metadata(review_root)
     classification_rules = load_classification_rules(review_root)
-    local_grouped = local_search_by_keyword(papers, keyword_set["merged_keywords"], args.topic, classification_rules)
-    write_json(out_dir / "local_results_by_keyword.json", {"project_id": project_id, "results": local_grouped})
+    local_grouped, filter_stats = local_search_by_keyword(
+        papers,
+        keyword_set["merged_keywords"],
+        args.topic,
+        classification_rules,
+        year_from=filters.get("year_from"),
+        year_to=filters.get("year_to"),
+    )
     sciatlas_requested = bool(args.sciatlas_search)
     crossref_requested = bool(args.web_search)
     sciatlas_client: SciAtlasClient | None = None
@@ -731,10 +1296,31 @@ def run(args: argparse.Namespace) -> int:
     })
     web_grouped = external_grouped
     combined = combine_results(local_grouped, web_grouped)
-    write_json(out_dir / "combined_results_by_keyword.json", {"project_id": project_id, "topic": args.topic, "results": combined})
     selected = selected_from_combined(combined)
+    groups = group_selected_papers(selected, papers, group_by)
+    output_context = {
+        **query_context,
+        "filter_stats": filter_stats,
+        "groups": groups,
+    }
+    keyword_set.update(output_context)
+    write_json(out_dir / "keyword_set.draft.json", keyword_set)
+    write_json(
+        out_dir / "local_results_by_keyword.json",
+        {"project_id": project_id, **output_context, "results": local_grouped},
+    )
+    write_json(
+        out_dir / "combined_results_by_keyword.json",
+        {
+            "project_id": project_id,
+            "topic": args.topic,
+            **output_context,
+            "results": combined,
+        },
+    )
     selected["project_id"] = project_id
     selected["human_confirmed"] = False
+    selected.update(output_context)
     write_json(out_dir / "selected_discovery_results.json", selected)
     write_json(
         out_dir / "human_check_state.json",
@@ -745,7 +1331,13 @@ def run(args: argparse.Namespace) -> int:
             "instructions": "Use the dashboard to delete irrelevant keywords/results, then mark discovery confirmed.",
         },
     )
-    write_report(out_dir, args.topic, keyword_set, combined)
+    write_report(
+        out_dir,
+        args.topic,
+        keyword_set,
+        combined,
+        selected_count=len(selected["local_papers"]),
+    )
     print(f"Discovery project: {project}")
     print(f"Keyword set: {out_dir / 'keyword_set.draft.json'}")
     print(f"Human dashboard data: {out_dir / 'combined_results_by_keyword.json'}")
@@ -758,6 +1350,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project-id", default="")
     parser.add_argument("--topic", required=True)
     parser.add_argument("--keywords", default="")
+    parser.add_argument("--query-plan", default="", help="Path to a validated query-plan JSON file.")
     parser.add_argument("--web-search", action="store_true", help="Fallback: query Crossref when SciAtlas is unavailable.")
     parser.add_argument("--web-limit", type=int, default=8)
     parser.add_argument("--web-delay", type=float, default=0.2)

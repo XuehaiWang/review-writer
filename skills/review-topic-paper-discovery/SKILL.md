@@ -40,59 +40,62 @@ the joined label for quick reading.
 
 ## Run
 
-Local-only (default):
+Before invoking the script, Codex must resolve the Topic using
+`references/keyword_expansion_prompt.md` and write the query plan to:
 
-```bash
-python /home/ps/review-writer/skills/review-topic-paper-discovery/scripts/discover.py \
-  --review-root /home/ps/review-writer \
-  --topic "<review topic>" \
-  --keywords "<optional user keywords>" \
-  --project-id <project_id>
+```text
+review-projects/<project-id>/00_discovery/query_plan.draft.json
 ```
 
-Local + SciAtlas KG:
+For every resolved abbreviation, record an LLM confidence score and reason.
+Put ambiguous concepts in `unresolved_concepts` rather than guessing, then
+review them before discovery. Proceed only if other resolved concepts or
+validated keywords still define a meaningful search; stop and ask for
+clarification when the plan contains unresolved concepts only.
+
+Convert relative-year instructions to inclusive local limits in
+`filters.year_from` and `filters.year_to` using the current calendar year.
+Record organization requests such as "by catalyst type" in `group_by` as
+`["catalyst_or_method"]`, not as generic retrieval keywords.
+
+Invoke the local discovery boundary with the generated plan:
+
+```bash
+python skills/review-topic-paper-discovery/scripts/discover.py \
+  --review-root <review-root> \
+  --topic "<review topic>" \
+  --project-id <project-id> \
+  --query-plan review-projects/<project-id>/00_discovery/query_plan.draft.json
+```
+
+Add `--sciatlas-search`, `--web-search`, or both to that command when external
+coverage is requested. For SciAtlas KG, configure the service and append its
+search controls:
 
 ```bash
 export SCIATLAS_API_BASE_URL=http://sciatlas.openkg.cn
 export SCIATLAS_API_KEY=sciatlas_xxx     # required for /v1/search
 
-python /home/ps/review-writer/skills/review-topic-paper-discovery/scripts/discover.py \
-  --review-root /home/ps/review-writer \
+python skills/review-topic-paper-discovery/scripts/discover.py \
+  --review-root <review-root> \
   --topic "<review topic>" \
-  --keywords "<optional user keywords>" \
-  --project-id <project_id> \
+  --project-id <project-id> \
+  --query-plan review-projects/<project-id>/00_discovery/query_plan.draft.json \
   --sciatlas-search \
   --sciatlas-limit 8 \
   --sciatlas-time-range 2015-2025 \
   --sciatlas-domain "organic chemistry"
 ```
 
-Both SciAtlas and Crossref together (results merged per keyword):
+`--sciatlas-time-range` is only a hint for the external SciAtlas search. Local
+metadata is filtered independently and inclusively by `filters.year_from` and
+`filters.year_to` from `query_plan.draft.json`. The external hint does not
+replace or alter the local query-plan year bounds.
 
-```bash
-python /home/ps/review-writer/skills/review-topic-paper-discovery/scripts/discover.py \
-  --review-root /home/ps/review-writer \
-  --topic "<review topic>" \
-  --project-id <project_id> \
-  --sciatlas-search \
-  --web-search
-```
-
-Crossref only (no SciAtlas token available):
-
-```bash
-python /home/ps/review-writer/skills/review-topic-paper-discovery/scripts/discover.py \
-  --review-root /home/ps/review-writer \
-  --topic "<review topic>" \
-  --project-id <project_id> \
-  --web-search
-```
-
-If the user gives no keywords, Codex must extract concise keywords from the
-topic first. `keyword_set.draft.json` must not introduce extra local-retrieval
-categories. Every keyword category should be one of the eight structured tag
-categories above. If a topic token does not fit cleanly, classify it as
-`reaction_type` and let human check remove it if needed.
+Direct script execution without `--query-plan` retains the deterministic
+fallback for compatibility, but Codex and discovery agents must use the query
+plan handoff. Every keyword category and `group_by` value must be one of the
+eight structured tag categories above.
 
 ## External Source: SciAtlas
 
@@ -141,6 +144,7 @@ Required files:
 
 ```text
 topic_input.md
+query_plan.draft.json
 keyword_set.draft.json
 local_results_by_keyword.json
 web_results_by_keyword.json

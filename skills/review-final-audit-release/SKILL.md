@@ -1,40 +1,13 @@
 ---
 name: review-final-audit-release
-description: Perform final content audit and format audit on a merged review draft, verify claims against available evidence, fix manuscript-level issues, and produce the final draft plus audit reports. Use after review-draft-merge-polish and human approval of the first draft.
+description: Use when an approved first review draft and validated generated conclusion need integration, final evidence audit, and release preparation.
 ---
 
 # Review Final Audit Release
 
-Use this skill after `review-draft-merge-polish` has produced `04_first_draft/first_draft.md` and the human has approved the draft structure.
-
-This is the final quality gate. It should not create new arguments casually. Its job is to check, correct, and release a defensible final manuscript.
-
-## Hard Gate
-
-`final_draft.md` is rejected if any of these are missing. The status script
-will not let the project advance past this stage when a blocker exists:
-
-```text
-draft_has_no_figures               at least one ![](path) figure or scheme is required;
-                                   to override, write 03_figure_redraw/skip_reason.md
-                                   with a one-line justification before re-running.
-draft_has_no_citation_callouts     at least one inline `[n]` citation callout is required.
-missing_references_section         the draft must end with a heading named "References",
-                                   "Reference List", "Bibliography", "Cited Literature",
-                                   or "参考文献".
-empty_references_section           the References section must list at least one item
-                                   formatted as "1. Author ..." or "[1] Author ...".
-reference_callouts_missing_from_reference_list
-                                   every `[n]` referenced inline must appear in the list.
-broken_markdown_image_paths        every image path must resolve to a real file.
-citations_reference_unknown_papers any cited_paper_id in citations.json must be present
-                                   in literature_matrix.json.
-source_figure_placeholders_need_redraw_or_permission_check
-                                   source-paper placeholders must be redrawn or removed.
-```
-
-Run `final_audit_scan.py` first; resolve every entry in `blocking_issues`
-before declaring the audit complete.
+This stage integrates the already validated conclusion before scanning or
+editing the final manuscript. It corrects and releases supported content; it
+does not invent new arguments or remap paper identities.
 
 ## Required Inputs
 
@@ -42,6 +15,9 @@ Read:
 
 ```text
 review-projects/<project_id>/04_first_draft/first_draft.md
+review-projects/<project_id>/04_first_draft/conclusion_generated.md
+review-projects/<project_id>/04_first_draft/conclusion_quality_report.json
+review-projects/<project_id>/04_first_draft/citations.json
 review-projects/<project_id>/04_first_draft/merge_report.md
 review-projects/<project_id>/04_first_draft/remaining_issues.md
 review-projects/<project_id>/01_matrix_outline/literature_matrix.json
@@ -51,157 +27,79 @@ review-projects/<project_id>/02_section_drafting/section_drafts.json
 review-projects/<project_id>/02_section_drafting/figure_candidates.json
 ```
 
-If figures were redrawn, also read:
+Also read the redraw manifest/report when figures were redrawn. Reopen local
+paper metadata or Markdown/PDF for high-risk claims.
 
-```text
-review-projects/<project_id>/03_figure_redraw/redrawn_figure_manifest.json
-review-projects/<project_id>/03_figure_redraw/figure_redraw_report.md
-```
+## Required Order
 
-For high-risk claims, reopen the relevant local paper metadata and Markdown/PDF listed in the matrix or section outputs.
+Follow this order exactly:
 
-## Process
+1. Read `conclusion_quality_report.json` and verify `validation.passes_validation` is `true`.
+2. From the project root, run `integrate_generated_conclusion.py` to seed
+   `05_final_audit/final_draft.md`. It replaces conclusion-like sections and
+   places one canonical generated conclusion before `References`, then writes
+   `conclusion_integration.json`.
+3. Run `final_audit_scan.py` against that integrated `05_final_audit/final_draft.md`.
+4. Perform the semantic and format audit without changing mapped paper identities.
 
-Follow this order:
-
-```text
-1. Run the deterministic format scan script.
-2. Read the first draft and upstream evidence files.
-3. Audit content: evidence support, citation fit, chemistry accuracy, overclaiming, missing caveats, outline fit.
-4. Audit review quality: synthesis vs paper listing, comparison axes, scheme/table integration, organic-review style.
-5. Audit format: headings, references, figure/table callouts, abbreviations, placeholders, unresolved notes.
-6. Revise the manuscript into a final draft.
-7. Write content and format audit reports.
-8. Write a release report with remaining risks.
-```
-
-Do not hide unresolved problems. If a claim cannot be verified from local evidence, either weaken it, remove it, or list it in `final_remaining_issues.md`.
-
-## Content Audit Rules
-
-Check for:
-
-```text
-claim has support from the cited paper or matrix entry
-citation number or paper_id matches the claim
-reaction class, catalyst, substrate, product, regioselectivity, stereoselectivity, and mechanism are not distorted
-non-comparable yields or conditions are not directly ranked
-speculative mechanisms are described as tentative
-paragraphs synthesize patterns rather than listing one paper after another
-each major section follows the approved outline purpose
-figures or schemes support the surrounding claims
-```
-
-For organic synthesis reviews, give special attention to:
-
-```text
-named reaction type and activation mode
-substrate scope boundaries
-leaving group and propargylic/allenyl regioselectivity
-metal catalyst and ligand identity
-enantioselectivity or stereospecificity claims
-mechanistic evidence vs author proposal
-```
-
-## Format Audit Rules
-
-Check for:
-
-```text
-heading hierarchy
-duplicate or empty headings
-reference callouts and reference list consistency
-figure/table numbering and callouts
-caption completeness
-source figure placeholders that still need redraw or permission review
-undefined abbreviations
-placeholder text such as TODO, verification needed, citation needed
-broken Markdown links or image paths
-front matter style inappropriate for a chemistry review
-```
-
-## Script
-
-Run:
+Example commands:
 
 ```bash
-python /home/ps/review-writer/skills/review-final-audit-release/scripts/final_audit_scan.py \
-  --review-root /home/ps/review-writer \
-  --project-id <project_id>
+python skills/review-final-audit-release/scripts/integrate_generated_conclusion.py \
+  --review-root <review-root> --project-id <project_id>
+python skills/review-final-audit-release/scripts/final_audit_scan.py \
+  --review-root <review-root> --project-id <project_id>
 ```
 
-The script writes `format_scan.json` and `format_scan.md`. Codex must then perform the semantic content audit and final revision.
+## Blocking Conditions
+
+Release is blocked by an absent conclusion, a conclusion after `References`,
+or duplicate conclusion-like sections. It is also blocked by failed conclusion
+validation, format-scan `blocking_issues`, missing/empty References, citation
+or identity mismatches, broken image paths, unresolved source-figure
+placeholders, or an unapproved no-figure manuscript.
+
+## Integration Receipt
+
+`conclusion_integration.json` records the exact-source hashes for the approved
+first draft and generated conclusion, their resolved paths, the inserted
+heading, generated callout identities, and the integrated final-draft seed
+hash. Status re-derives the heading and callouts from the hashed generated
+conclusion and validates them against the receipt and current final draft.
+Audited prose edits are permitted, but the recorded heading and citation
+identity set remain binding; changed mapped citation identities block release.
+
+## Audit Contract
+
+Semantic audit checks evidence support, citation fit, chemistry accuracy,
+overclaiming, caveats, outline fit, synthesis quality, comparison axes, and
+figure relevance. Format audit checks headings, references, figure/table
+callouts, captions, abbreviations, placeholders, and links.
+
+When evidence cannot verify a claim, weaken it, remove it, or record it in
+`final_remaining_issues.md`. Do not alter the numeric-callout-to-paper mapping
+in `citations.json`.
 
 ## Outputs
 
-Write outputs under:
-
-```text
-review-projects/<project_id>/05_final_audit/
-```
-
-Create:
+Create under `review-projects/<project_id>/05_final_audit/`:
 
 ```text
 format_scan.json
 format_scan.md
 content_audit_report.md
 format_audit_report.md
+conclusion_integration.json
 final_draft.md
 final_remaining_issues.md
 release_report.md
 ```
 
-## Output Requirements
-
-`content_audit_report.md` must include:
-
-```text
-major content fixes made
-claims weakened or removed
-citation or paper_id mismatches found
-sections still weak in evidence
-chemistry-specific risks
-```
-
-`format_audit_report.md` must include:
-
-```text
-format scan summary
-manual format fixes made
-remaining formatting issues
-```
-
-`final_draft.md` must be the clean manuscript without inline TODOs, verification notes, or editor-only comments.
-
-Do not treat source-paper image placeholders as final publication figures. If `figure_insertion_report.json` has `mode: source_candidates`, either replace them with redrawn figures or list this as a blocking remaining issue.
-
-`final_remaining_issues.md` must be short and explicit. If there are no known remaining issues, say so.
-
-`release_report.md` must state:
-
-```text
-source first draft
-upstream evidence files used
-final draft path
-whether release is ready for human export
-residual risks
-```
+`final_draft.md` is clean manuscript text with one canonical conclusion and
+no inline TODOs or editor notes. The reports list fixes, unresolved risks,
+evidence files, the source first draft, and readiness for export.
 
 ## Human Check Point
 
-Stop after this stage.
-
-The human should check:
-
-```text
-whether the final manuscript is scientifically acceptable
-whether any remaining risk requires returning to an earlier stage
-whether figures and references are ready for export to the target format
-```
-
-Suggested completion message:
-
-```text
-终稿检查已完成，请人工最终确认 final_draft.md 和 release_report.md。
-```
+Stop after this stage. The human confirms scientific acceptability, remaining
+risks, figures, and references before summary-chart generation.

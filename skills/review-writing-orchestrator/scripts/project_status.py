@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 
@@ -90,11 +92,23 @@ STAGES: list[dict[str, Any]] = [
         "required": [
             "draft_bundle.json",
             "first_draft.md",
+            "citations.json",
             "merge_report.md",
             "remaining_issues.md",
         ],
         "human_check": "Review the unified first draft in http://127.0.0.1:8765/draft.",
         "confirmed_by": ["human_check.json"],
+    },
+    {
+        "id": "conclusion_generation",
+        "name": "Conclusion generation",
+        "dir": "04_first_draft",
+        "skill": "review-conclusion-generator",
+        "required": [
+            "conclusion_generated.md",
+            "conclusion_quality_report.json",
+        ],
+        "human_check": "No additional human confirmation required.",
     },
     {
         "id": "final_audit",
@@ -106,12 +120,24 @@ STAGES: list[dict[str, Any]] = [
             "format_scan.md",
             "content_audit_report.md",
             "format_audit_report.md",
+            "conclusion_integration.json",
             "final_draft.md",
             "final_remaining_issues.md",
             "release_report.md",
         ],
         "human_check": "Check final_draft.md and release_report.md before export.",
         "confirmed_by": ["human_check.json"],
+    },
+    {
+        "id": "summary_chart",
+        "name": "Review summary chart",
+        "dir": "05_final_audit",
+        "skill": "review-outline-summary-chart",
+        "required": [
+            "review_summary_chart.html",
+            "review_summary_chart.json",
+        ],
+        "human_check": "No additional human confirmation required.",
     },
     {
         "id": "docx_export",
@@ -127,11 +153,400 @@ STAGES: list[dict[str, Any]] = [
 ]
 
 
+NUMERIC_CITATION_RE = re.compile(r"\[\d+(?:\s*[-,]\s*\d+)*\]")
+RAW_PAPER_ID_RE = re.compile(r"\bP\d+\b")
+LOWERCASE_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+ATX_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
+FENCE_OPEN_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
+FENCE_CLOSE_RE = re.compile(r"^\s{0,3}(`+|~+)\s*$")
+INTEGRATOR_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$")
+INTEGRATOR_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+INTEGRATOR_CONCLUSION_HEADINGS = {
+    "conclusion",
+    "conclusions",
+    "challenges",
+    "outlook",
+    "future direction",
+    "future directions",
+    "insight",
+    "insights",
+    "总结",
+    "结论",
+    "挑战",
+    "展望",
+}
+CONCLUSION_HEADINGS = {
+    name.casefold()
+    for name in (
+        "Conclusion",
+        "Conclusions",
+        "Challenge",
+        "Challenges",
+        "Outlook",
+        "Future Direction",
+        "Future Directions",
+        "Insight",
+        "Insights",
+        "鎬荤粨",
+        "缁撹",
+        "鎸戞垬",
+        "灞曟湜",
+        "总结",
+        "结论",
+        "挑战",
+        "展望",
+    )
+}
+REFERENCE_HEADINGS = {
+    name.casefold()
+    for name in (
+        "References",
+        "Reference List",
+        "Bibliography",
+        "Cited Literature",
+        "鍙傝€冩枃鐚?",
+        "参考文献",
+    )
+}
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def read_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def markdown_heading_positions(
+    text: str, accepted: set[str], *, allow_slash_suffix: bool = False
+) -> list[int]:
+    positions: list[int] = []
+    fence_character: str | None = None
+    fence_length = 0
+    for line_number, line in enumerate(text.splitlines()):
+        if fence_character is not None:
+            closing = FENCE_CLOSE_RE.match(line)
+            if (
+                closing
+                and closing.group(1)[0] == fence_character
+                and len(closing.group(1)) >= fence_length
+            ):
+                fence_character = None
+                fence_length = 0
+            continue
+        opening = FENCE_OPEN_RE.match(line)
+        if opening:
+            fence_character = opening.group(1)[0]
+            fence_length = len(opening.group(1))
+            continue
+        match = ATX_HEADING_RE.match(line)
+        if not match:
+            continue
+        heading = re.sub(r"\s+#+\s*$", "", match.group(1)).strip()
+        if allow_slash_suffix:
+            heading = heading.split("/", 1)[0].strip()
+        if heading.casefold() in accepted:
+            positions.append(line_number)
+    return positions
+
+
+def markdown_heading_entries(text: str) -> list[tuple[int, int, str, str]]:
+    entries: list[tuple[int, int, str, str]] = []
+    fence_character: str | None = None
+    fence_length = 0
+    for line_number, line in enumerate(text.splitlines()):
+        if fence_character is not None:
+            closing = FENCE_CLOSE_RE.match(line)
+            if (
+                closing
+                and closing.group(1)[0] == fence_character
+                and len(closing.group(1)) >= fence_length
+            ):
+                fence_character = None
+                fence_length = 0
+            continue
+        opening = FENCE_OPEN_RE.match(line)
+        if opening:
+            fence_character = opening.group(1)[0]
+            fence_length = len(opening.group(1))
+            continue
+        match = ATX_HEADING_RE.match(line)
+        if not match:
+            continue
+        raw_heading = line.strip()
+        heading = re.sub(r"\s+#+\s*$", "", match.group(1)).strip()
+        level = len(raw_heading) - len(raw_heading.lstrip("#"))
+        entries.append((line_number, level, heading, raw_heading))
+    return entries
+
+
+def markdown_body_paragraphs(text: str) -> list[str]:
+    paragraphs: list[str] = []
+    current: list[str] = []
+    fence_character: str | None = None
+    fence_length = 0
+
+    def flush() -> None:
+        paragraph = "\n".join(current).strip()
+        if paragraph and re.search(r"\w", paragraph, re.UNICODE):
+            paragraphs.append(paragraph)
+        current.clear()
+
+    for line in text.splitlines():
+        if fence_character is not None:
+            closing = FENCE_CLOSE_RE.match(line)
+            if (
+                closing
+                and closing.group(1)[0] == fence_character
+                and len(closing.group(1)) >= fence_length
+            ):
+                fence_character = None
+                fence_length = 0
+            continue
+        opening = FENCE_OPEN_RE.match(line)
+        if opening:
+            flush()
+            fence_character = opening.group(1)[0]
+            fence_length = len(opening.group(1))
+        elif ATX_HEADING_RE.match(line):
+            flush()
+        elif not line.strip():
+            flush()
+        else:
+            current.append(line)
+    flush()
+    return paragraphs
+
+
+def numeric_callout_identities(text: str) -> list[int]:
+    identities: set[int] = set()
+    for match in NUMERIC_CITATION_RE.finditer(text):
+        inner = match.group(0)[1:-1]
+        for part in re.split(r"\s*,\s*", inner):
+            if "-" in part:
+                left, right = (value.strip() for value in part.split("-", 1))
+                if left.isdigit() and right.isdigit() and int(left) <= int(right):
+                    identities.update(range(int(left), int(right) + 1))
+            elif part.strip().isdigit():
+                identities.add(int(part.strip()))
+    return sorted(identities)
+
+
+def generated_conclusion_provenance(text: str) -> tuple[str, list[int]] | None:
+    clean_text = text.strip()
+    fence_character: str | None = None
+    fence_length = 0
+    derived_heading: str | None = None
+    for line in clean_text.splitlines():
+        fence_match = INTEGRATOR_FENCE_RE.match(line)
+        if fence_character is not None:
+            if fence_match:
+                marker, remainder = fence_match.groups()
+                if (
+                    marker[0] == fence_character
+                    and len(marker) >= fence_length
+                    and not remainder.strip()
+                ):
+                    fence_character = None
+                    fence_length = 0
+            continue
+        if fence_match:
+            marker, remainder = fence_match.groups()
+            if marker[0] != "`" or "`" not in remainder:
+                fence_character = marker[0]
+                fence_length = len(marker)
+            continue
+        heading_match = INTEGRATOR_HEADING_RE.match(line)
+        if not heading_match:
+            continue
+        title = re.sub(r"[ \t]+#+[ \t]*$", "", heading_match.group(2)).strip()
+        base_title = title.split("/", 1)[0].strip()
+        if base_title.casefold() in INTEGRATOR_CONCLUSION_HEADINGS:
+            derived_heading = line.strip()
+            break
+    if derived_heading is None:
+        return None
+    return derived_heading, numeric_callout_identities(clean_text)
+
+
+def valid_citations_data(data: Any) -> bool:
+    if isinstance(data, list):
+        slots = (
+            (item.get("callout", item.get("index")), item)
+            for item in data
+            if isinstance(item, dict)
+        )
+    elif isinstance(data, dict):
+        slots = data.items()
+    else:
+        return False
+
+    for raw_callout, slot in slots:
+        if not re.fullmatch(r"(?:\[\d+\]|\d+)", str(raw_callout).strip()):
+            continue
+        if isinstance(slot, str) and slot.strip():
+            return True
+        if not isinstance(slot, dict):
+            continue
+        paper_id = slot.get("paper_id")
+        if isinstance(paper_id, str) and paper_id.strip():
+            return True
+        for key in ("paper_ids", "cited_paper_ids"):
+            paper_ids = slot.get(key)
+            if isinstance(paper_ids, list) and any(
+                isinstance(value, str) and value.strip() for value in paper_ids
+            ):
+                return True
+    return False
+
+
+def conclusion_receipt_is_valid(project: Path, final_text: str) -> bool:
+    first_draft = project / "04_first_draft" / "first_draft.md"
+    generated_conclusion = project / "04_first_draft" / "conclusion_generated.md"
+    stage_dir = project / "05_final_audit"
+    receipt = read_json(stage_dir / "conclusion_integration.json")
+    if (
+        not isinstance(receipt, dict)
+        or not isinstance(receipt.get("schema_version"), int)
+        or isinstance(receipt.get("schema_version"), bool)
+        or receipt.get("schema_version") != 1
+    ):
+        return False
+
+    for field, expected in (
+        ("first_draft_path", first_draft),
+        ("generated_conclusion_path", generated_conclusion),
+    ):
+        value = receipt.get(field)
+        if not isinstance(value, str) or not value.strip():
+            return False
+        source = Path(value)
+        if not source.is_absolute():
+            source = stage_dir / source
+        if source.resolve() != expected.resolve():
+            return False
+
+    for field, source in (
+        ("first_draft_sha256", first_draft),
+        ("generated_conclusion_sha256", generated_conclusion),
+    ):
+        digest = receipt.get(field)
+        if (
+            not isinstance(digest, str)
+            or not LOWERCASE_SHA256_RE.fullmatch(digest)
+            or not source.exists()
+            or digest != sha256_file(source)
+        ):
+            return False
+
+    try:
+        generated_text = generated_conclusion.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    producer_values = generated_conclusion_provenance(generated_text)
+    if producer_values is None:
+        return False
+    producer_heading, producer_callouts = producer_values
+    if (
+        receipt.get("inserted_conclusion_heading") != producer_heading
+        or receipt.get("generated_conclusion_callouts") != producer_callouts
+    ):
+        return False
+
+    integrated_seed = receipt.get("integrated_final_draft_sha256")
+    if not isinstance(integrated_seed, str) or not LOWERCASE_SHA256_RE.fullmatch(
+        integrated_seed
+    ):
+        return False
+
+    receipt_heading = receipt.get("inserted_conclusion_heading")
+    if not isinstance(receipt_heading, str) or not receipt_heading.strip():
+        return False
+    entries = markdown_heading_entries(final_text)
+    matches = [entry for entry in entries if entry[3] == receipt_heading.strip()]
+    references = [
+        entry for entry in entries if entry[2].casefold() in REFERENCE_HEADINGS
+    ]
+    if len(matches) != 1 or not references or matches[0][0] >= references[0][0]:
+        return False
+
+    receipt_callouts = receipt.get("generated_conclusion_callouts")
+    if (
+        not isinstance(receipt_callouts, list)
+        or any(not isinstance(value, int) or isinstance(value, bool) for value in receipt_callouts)
+        or receipt_callouts != sorted(set(receipt_callouts))
+    ):
+        return False
+
+    conclusion_line, conclusion_level, _, _ = matches[0]
+    section_end = references[0][0]
+    for line_number, level, _, _ in entries:
+        if (
+            conclusion_line < line_number < section_end
+            and level <= conclusion_level
+        ):
+            section_end = line_number
+            break
+    section_lines = final_text.splitlines()[conclusion_line + 1 : section_end]
+    return numeric_callout_identities("\n".join(section_lines)) == receipt_callouts
+
+
+def summary_chart_semantic_issues(project: Path) -> list[str]:
+    stage_dir = project / "05_final_audit"
+    final_draft = stage_dir / "final_draft.md"
+    chart_path = stage_dir / "review_summary_chart.json"
+    html_path = stage_dir / "review_summary_chart.html"
+    chart = read_json(chart_path)
+    stats = chart.get("stats") if isinstance(chart, dict) else None
+    issues: list[str] = []
+
+    source_matches = False
+    if final_draft.exists() and isinstance(stats, dict):
+        draft_source = stats.get("draft_source")
+        if isinstance(draft_source, str) and draft_source.strip():
+            source_path = Path(draft_source)
+            if not source_path.is_absolute():
+                source_path = stage_dir / source_path
+            source_matches = source_path.resolve() == final_draft.resolve()
+    if not source_matches:
+        issues.append("summary_chart_not_from_final_draft")
+
+    digest_matches = False
+    if isinstance(stats, dict):
+        draft_sha256 = stats.get("draft_sha256")
+        if (
+            isinstance(draft_sha256, str)
+            and LOWERCASE_SHA256_RE.fullmatch(draft_sha256)
+            and final_draft.exists()
+        ):
+            digest_matches = draft_sha256 == sha256_file(final_draft)
+    if not digest_matches:
+        issues.append("summary_chart_stale")
+
+    if not isinstance(stats, dict) or stats.get("generation_scope") != "both":
+        issues.append("summary_chart_not_generated_with_both")
+
+    html_digest_matches = False
+    if isinstance(stats, dict):
+        html_sha256 = stats.get("html_sha256")
+        if (
+            isinstance(html_sha256, str)
+            and LOWERCASE_SHA256_RE.fullmatch(html_sha256)
+            and html_path.exists()
+        ):
+            html_digest_matches = html_sha256 == sha256_file(html_path)
+    if not html_digest_matches and "summary_chart_stale" not in issues:
+        issues.append("summary_chart_stale")
+
+    return issues
 
 
 def discover_projects(review_root: Path) -> list[str]:
@@ -182,6 +597,75 @@ def stage_status(project: Path, stage: dict[str, Any]) -> dict[str, Any]:
             missing_ids = [t.get("section_id") for t in task_list if isinstance(t, dict) and t.get("section_id") and t["section_id"] not in have]
             if missing_ids:
                 semantic_issues.append("section_files_missing_for_tasks")
+    if stage["id"] == "first_draft":
+        citations = read_json(stage_dir / "citations.json")
+        if "citations.json" not in missing and not valid_citations_data(citations):
+            semantic_issues.append("invalid_citations_json")
+    if stage["id"] == "conclusion_generation":
+        report = read_json(stage_dir / "conclusion_quality_report.json")
+        paragraphs = report.get("paragraphs") if isinstance(report, dict) else None
+        validation = report.get("validation") if isinstance(report, dict) else None
+        substantive_paragraphs = (
+            paragraphs
+            if isinstance(paragraphs, list)
+            and 2 <= len(paragraphs) <= 3
+            and all(
+                isinstance(paragraph, dict)
+                and isinstance(paragraph.get("content"), str)
+                and bool(paragraph["content"].strip())
+                for paragraph in paragraphs
+            )
+            else None
+        )
+        actual_word_count = (
+            sum(
+                len(re.findall(r"\b\w+\b", paragraph["content"]))
+                for paragraph in substantive_paragraphs
+            )
+            if substantive_paragraphs is not None
+            else None
+        )
+        count_fields: list[Any] = []
+        if isinstance(report, dict) and "total_words" in report:
+            count_fields.append(report.get("total_words"))
+        if isinstance(validation, dict) and "total_words" in validation:
+            count_fields.append(validation.get("total_words"))
+        count_fields_valid = bool(count_fields) and all(
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value == actual_word_count
+            for value in count_fields
+        )
+        paragraph_count_valid = (
+            not isinstance(validation, dict)
+            or "paragraph_count" not in validation
+            or validation.get("paragraph_count") == (
+                len(substantive_paragraphs)
+                if substantive_paragraphs is not None
+                else None
+            )
+        )
+        generated_path = stage_dir / "conclusion_generated.md"
+        generated_text = (
+            generated_path.read_text(encoding="utf-8", errors="ignore")
+            if generated_path.exists()
+            else ""
+        )
+        rendered_paragraphs = markdown_body_paragraphs(generated_text)
+        report_valid = (
+            isinstance(validation, dict)
+            and validation.get("passes_validation") is True
+            and substantive_paragraphs is not None
+            and len(rendered_paragraphs) == len(substantive_paragraphs)
+            and count_fields_valid
+            and paragraph_count_valid
+        )
+        if not report_valid or not NUMERIC_CITATION_RE.search(generated_text):
+            semantic_issues.append("conclusion_validation_failed")
+        if RAW_PAPER_ID_RE.search(generated_text):
+            semantic_issues.append("conclusion_contains_raw_paper_ids")
+    if stage["id"] == "summary_chart":
+        semantic_issues.extend(summary_chart_semantic_issues(project))
     if stage["id"] == "docx_export":
         # DOCX is only valid when the final audit passed all blocking checks.
         final_scan = read_json(project / "05_final_audit" / "format_scan.json")
@@ -189,18 +673,21 @@ def stage_status(project: Path, stage: dict[str, Any]) -> dict[str, Any]:
             semantic_issues.append("final_audit_has_blocking_issues")
         elif not (project / "05_final_audit" / "final_draft.md").exists():
             semantic_issues.append("final_draft_md_missing")
+        chart_artifacts_present = all(
+            (project / "05_final_audit" / name).exists()
+            for name in ("review_summary_chart.html", "review_summary_chart.json")
+        )
+        if not chart_artifacts_present or summary_chart_semantic_issues(project):
+            semantic_issues.append("summary_chart_incomplete")
     if stage["id"] in {"first_draft", "final_audit"}:
         draft_path = stage_dir / ("first_draft.md" if stage["id"] == "first_draft" else "final_draft.md")
         if draft_path.exists():
             draft_text = draft_path.read_text(encoding="utf-8", errors="ignore")
-            import re as _re
-            has_image = bool(_re.search(r"!\[[^\]]*\]\(([^)]+)\)", draft_text))
-            has_citation = bool(_re.search(r"\[\d+(?:\s*[-,]\s*\d+)*\]", draft_text))
-            has_references = bool(_re.search(
-                r"^\s*#{1,6}\s*(references|reference list|bibliography|cited literature|参考文献)\s*$",
-                draft_text,
-                _re.I | _re.M,
-            ))
+            has_image = bool(re.search(r"!\[[^\]]*\]\(([^)]+)\)", draft_text))
+            has_citation = bool(NUMERIC_CITATION_RE.search(draft_text))
+            has_references = bool(
+                markdown_heading_positions(draft_text, REFERENCE_HEADINGS)
+            )
             skip_reason = project / "03_figure_redraw" / "skip_reason.md"
             figures_skipped_with_reason = skip_reason.exists() and bool(skip_reason.read_text(encoding="utf-8", errors="ignore").strip())
             if not has_image and not figures_skipped_with_reason:
@@ -210,6 +697,31 @@ def stage_status(project: Path, stage: dict[str, Any]) -> dict[str, Any]:
             if not has_references:
                 semantic_issues.append("missing_references_section")
         if stage["id"] == "final_audit":
+            conclusion_positions = (
+                markdown_heading_positions(
+                    draft_text, CONCLUSION_HEADINGS, allow_slash_suffix=True
+                )
+                if draft_path.exists()
+                else []
+            )
+            reference_positions = (
+                markdown_heading_positions(draft_text, REFERENCE_HEADINGS)
+                if draft_path.exists()
+                else []
+            )
+            if not (
+                len(conclusion_positions) == 1
+                and reference_positions
+                and conclusion_positions[0] < reference_positions[0]
+            ):
+                semantic_issues.append(
+                    "generated_conclusion_missing_from_final_draft"
+                )
+            if not conclusion_receipt_is_valid(project, draft_text if draft_path.exists() else ""):
+                if "generated_conclusion_missing_from_final_draft" not in semantic_issues:
+                    semantic_issues.append(
+                        "generated_conclusion_missing_from_final_draft"
+                    )
             scan = read_json(stage_dir / "format_scan.json")
             if isinstance(scan, dict):
                 blockers = scan.get("blocking_issues") or []
@@ -317,7 +829,7 @@ def print_text(summary: dict[str, Any]) -> None:
                 print(f"- {issue}")
     else:
         print("Next skill: none")
-        print("Status: final audit outputs exist")
+        print("Status: all ten workflow stages are complete")
 
 
 def parse_args() -> argparse.Namespace:

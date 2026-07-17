@@ -1,4 +1,16 @@
 interface:
   display_name: "Topic Paper Discovery"
   short_description: "Discover papers by topic keywords."
-  default_prompt: "Create a review topic discovery project, expand keywords, and search local/web papers by keyword. Use /home/ps/review-writer/view/serve_review_dashboard.py only when human check UI is needed."
+  default_prompt: >-
+    Create a review topic discovery project. Before running discover.py,
+    resolve Topic concepts and abbreviations into the query-plan schema, with
+    confidence and reasons for resolved concepts, ambiguous items in
+    unresolved_concepts, search-useful categorized keywords, inclusive
+    filters.year_from and filters.year_to values for relative-year requests,
+    and group_by intent. Write
+    review-projects/<project-id>/00_discovery/query_plan.draft.json and pass it
+    through --query-plan. Stop for clarification before invoking discover.py if
+    the plan is unresolved-only or has no meaningful keyword; otherwise review
+    unresolved concepts before searching local and optional web sources. Use
+    /home/ps/review-writer/view/serve_review_dashboard.py only when the
+    human-check UI is needed.

@@ -14,6 +14,29 @@
 /skills/**/__pycache__/
 /view/**/__pycache__/
 
+# Local tests and generated test caches are not part of the release package.
+**/tests/
+**/test_*.py
+**/smoke_test_*.py
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+
+# Local Codex/agent execution records and planning artifacts.
+/.agents/
+/.codex/
+/.superpowers/
+/docs/superpowers/
+
+# LLM retag run logs; canonical paper metadata remains tracked.
+/review-library/metadata/llm_retag_report.json
+/review-library/metadata/llm_retag_report.md
+/review-library/metadata/llm_retag_batch_report.json
+/review-library/metadata/llm_retag_batch_report.md
+
 !/allene_classification_rules.py
 !/template/
 !/template/**

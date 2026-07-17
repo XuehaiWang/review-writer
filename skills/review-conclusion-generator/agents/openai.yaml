@@ -1,0 +1,7 @@
+interface:
+  display_name: "Review Conclusion Generator"
+  short_description: "Generate and validate the grounded review ending."
+  default_prompt: |
+    Use $review-conclusion-generator with the default `--mode orchestrated`, which selects only the approved first draft at `04_first_draft/first_draft.md`; `04_first_draft/citations.json` is the authoritative allowed-paper and numeric-callout map.
+    Produce one clean heading plus 2-3 paragraphs with numeric `[n]` callouts and no raw `P001`, model, timestamp, or editor metadata. Reject injected numeric callouts and reject blank paragraphs; require both conclusion outputs, `conclusion_generated.md` and `conclusion_quality_report.json`, and finish only when `validation.passes_validation` is `true`.
+    No-API/manual mode remains incomplete: no-API or API failure invalidates old required outputs and leaves the stage incomplete. Standalone draft fallbacks remain supported only through explicit `--mode standalone`, which retains final > first > section draft order without satisfying the orchestrated gate.
