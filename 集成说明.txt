@@ -1,0 +1,283 @@
+review-writer 检索优化与工作流集成说明
+=====================================
+
+文档范围
+--------
+
+本文说明 dy 分支相对原版 main 的检索逻辑变化，以及新增的结论生成、总结图和最终导出阶段。
+检索实现主要位于：
+
+  skills/review-topic-paper-discovery/
+
+最重要的边界是：LLM 负责理解 Topic 并生成结构化 query plan；discover.py 负责严格校验、
+metadata 召回、评分、过滤、去重和产物落盘。discover.py 本身不会在后台自动调用 LLM。
+
+
+一、原版与修改版的主要差异
+--------------------------
+
+1. Topic 理解
+
+   原版：直接对 Topic 和用户关键词运行英文规则扩展，未定义 LLM 到检索脚本的结构化边界。
+
+   修改版：编排器/Codex 先依据
+   skills/review-topic-paper-discovery/references/keyword_expansion_prompt.md
+   生成 query_plan.draft.json，再通过 --query-plan 交给 discover.py。
+
+2. 缩写和陌生反应名
+
+   原版：不具备上下文缩写解析，APA 等未收录词通常无法命中 metadata。
+
+   修改版：LLM 可以根据 Topic 和化学上下文解析缩写；每个已解析概念必须记录 0–1 的
+   confidence 和 reason。证据不足时必须进入 unresolved_concepts，禁止猜测。
+
+3. 时间条件
+
+   原版：诸如“近 5 年”主要作为 Topic 文本参与匹配，不形成可靠的 metadata 年份过滤。
+
+   修改版：相对年份被转换为闭区间 filters.year_from/year_to，并在本地 metadata 进入评分前
+   执行。例如以 2026 年为当前年份，“近 5 年”或“past five years”转换为 2022–2026。
+   年份缺失的论文在启用年份过滤时会被排除，并记录统计数据。
+
+4. 组织意图
+
+   原版：“按催化剂种类区分”可能被当成普通检索文字，不能直接形成分类结果。
+
+   修改版：该意图写入 group_by: ["catalyst_or_method"]。group_by 只负责对召回结果分组，
+   不把“catalysts”“organized”“review”等泛化指令词加入检索关键词。
+
+5. structured tags 匹配
+
+   原版：一个关键词会遍历全部 8 类标签，容易产生跨字段弱匹配。
+
+   修改版：每个关键词必须先归入一个标签类别，只在对应 structured_tags 字段及其别名中
+   定向匹配，再使用标题和 Markdown 信号作确认。这样可减少把底物词误匹配到催化剂字段、
+   把写作指令误当成化学概念等问题。
+
+6. 可审计性
+
+   修改版新增 query plan、解析/未解析概念、年份过滤统计、分组结果、外部源状态和候选角色，
+   可以从输出 JSON 追踪每篇论文为什么被召回或排除。
+
+
+二、修改后的端到端检索流程
+--------------------------
+
+  用户 Topic
+      ↓
+  LLM/Codex 解析化学概念、缩写、时间和组织意图
+      ↓
+  query_plan.draft.json
+      ↓
+  discover.py 严格校验 query plan
+      ↓
+  合并用户关键词与 agent 关键词，删除泛化指令词
+      ↓
+  按年份过滤本地 metadata
+      ↓
+  在 8 类 structured tags 中定向匹配、评分和角色划分
+      ↓
+  可选 SciAtlas / Crossref 外部覆盖检查
+      ↓
+  按 paper_id、DOI 或规范化标题去重
+      ↓
+  最多保留 30 篇本地候选，并按 group_by 汇总
+      ↓
+  人工检查关键词和候选论文后确认 discovery 阶段
+
+
+三、query plan 结构与校验
+-----------------------
+
+query_plan.draft.json 使用 schema_version 1，核心字段如下：
+
+  schema_version       固定为整数 1
+  topic                必须与命令行 --topic 完全一致（忽略大小写和多余空白）
+  resolved_concepts    已解析概念；包含 surface、expanded_name、confidence、reason
+  unresolved_concepts  不能可靠解析的概念；包含 surface 和 reason
+  keywords             检索词、所属类别、来源 user/agent 和生成理由
+  filters              本地过滤条件，目前支持 year_from、year_to
+  group_by             结果分组字段
+
+脚本会阻止以下不安全计划：
+
+  - schema_version、字段类型或 Topic 不一致；
+  - confidence 不在 0–1；
+  - 同一概念同时出现在 resolved 和 unresolved；
+  - 关键词包含尚未解析的概念；
+  - 关键词或 group_by 使用 8 类标签以外的新类别；
+  - 将 review、topic、year、organized、catalysts 等写作指令作为关键词；
+  - year_from 大于 year_to，或相对年份换算结果与 Topic 不一致；
+  - 没有任何有效关键词；
+  - 计划只有未解析概念，无法形成有意义检索。
+
+如果存在未解析概念，但其他已验证关键词仍能定义明确检索，计划可以忽略该未解析词继续；
+如果 Topic 只剩未解析缩写，则必须停止并向用户确认。
+
+
+四、8 类 metadata 标签
+---------------------
+
+本地检索只使用下列 8 类 structured tags：
+
+  product
+  substrate
+  catalyst_or_method
+  organometallic_partner
+  ligand_or_chiral_source
+  leaving_group
+  reaction_type
+  document_scope
+
+分类规则和别名来自根目录 allene_classification_rules.py。类别权重为：
+
+  product 5.0
+  substrate 5.0
+  reaction_type 4.8
+  catalyst_or_method 4.4
+  organometallic_partner 4.0
+  ligand_or_chiral_source 3.8
+  leaving_group 3.8
+  document_scope 1.5
+
+每个关键词只检查它声明的类别。直接标签贡献不足 1.4，或归一化分数低于 0.12 的结果不会进入
+该关键词的本地结果。保留结果按分数和年份排序，并标记为：
+
+  core_candidate        score >= 0.65
+  supporting_candidate  score >= 0.35
+  background            score >= 0.15
+  uncertain             score < 0.15
+
+同一论文被多个关键词命中时按 paper_id 合并，保留最高分和所有 matched_keywords。
+
+
+五、年份过滤、候选池与分组
+------------------------
+
+年份过滤发生在本地论文评分之前：
+
+  - year_from/year_to 为闭区间；
+  - 开启过滤后，year 缺失的论文不会进入候选；
+  - discovery_report.md 记录过滤前数量、过滤后数量、缺失年份排除数和区间外排除数。
+
+本地候选按 best_score 和年份排序，最多保留 30 篇。工作流目标为 20–30 篇；如果有效结果少于
+20 篇，系统会如实报告，不会为了凑数加入零匹配论文。
+
+group_by 只对已选本地论文读取相应 structured_tags 并生成 count 和 paper_ids。例如按催化剂
+分组时使用 catalyst_or_method 的规范值，而不是从标题临时猜测 Pd、Ni、Cu 等类别。
+
+
+六、SciAtlas、Crossref 与回退
+---------------------------
+
+默认检索为本地 metadata。可按需增加：
+
+  --sciatlas-search  调用 SciAtlas /v1/search
+  --web-search       调用 Crossref 作为外部补充
+
+两者同时启用时，外部结果按 DOI 或规范化标题合并并记录 sources。SciAtlas 未配置、健康检查
+失败或请求失败时，状态会写入 web_results_by_keyword.json；如果同时启用 Crossref，则继续
+使用 Crossref，不会使本地检索失败。
+
+外部论文属于 Topic 覆盖检查池，不会自动混入本地 metadata 候选或后续文献矩阵。需要人工确认
+并正式导入 metadata 后，才能进入后续综述写作流程。
+
+
+七、两个 Topic 示例
+------------------
+
+示例 A：APA
+
+  围绕近 5 年间新开发的 APA 反应，按照催化剂种类区分，生成一篇综述。
+
+预期处理：
+
+  - “近 5 年”转换为包含当前年的闭区间；
+  - “按照催化剂种类”转换为 group_by: ["catalyst_or_method"]；
+  - APA 只有在上下文足以确定具体化学含义时才由 LLM 展开，并记录 confidence/reason；
+  - 如果 APA 无法可靠解析且没有其他有效化学关键词，计划停止并要求补充反应全称、底物、
+    产物或催化体系；系统不会仅用字面量“APA reaction”执行零命中检索。
+
+示例 B：axial-chiral allenes
+
+  Please write a review on the topic "syntheses of the axial-chiral allenes",
+  categorized by the substrates (propargylic alcohols, their derivatives,
+  terminal alkynes, conjugated enynes, etc.) of methods.
+
+预期处理：
+
+  - product 包含 axially chiral allenes / allenes；
+  - substrate 包含 propargylic alcohols、相应衍生物、terminal alkynes、enynes；
+  - reaction_type 包含 allene synthesis / asymmetric synthesis 等可检索概念；
+  - 本地 metadata 在对应标签字段中分别召回并按 paper_id 去重；
+  - 最终候选按底物标签组织，而不是让“categorized”“methods”参与检索。
+
+
+八、标准运行方式
+----------------
+
+第一步：由 Codex/编排器生成：
+
+  review-projects/<project-id>/00_discovery/query_plan.draft.json
+
+第二步：运行本地检索：
+
+  python skills/review-topic-paper-discovery/scripts/discover.py \
+    --review-root <review-root> \
+    --project-id <project-id> \
+    --topic "<与 query plan 完全一致的 Topic>" \
+    --query-plan review-projects/<project-id>/00_discovery/query_plan.draft.json
+
+可选外部补充：
+
+  ... --sciatlas-search --web-search
+
+兼容模式：直接运行 discover.py 而不传 --query-plan 时，仍保留确定性规则扩展、英文/中文相对
+年份解析、催化剂分组意图解析和缩写检测。但正式 Codex discovery 工作流必须使用 query plan，
+因为只有该路径能够保存 LLM 的概念解析、置信度和理由。
+
+
+九、discovery 阶段产物
+--------------------
+
+  topic_input.md
+  query_plan.draft.json
+  keyword_set.draft.json
+  local_results_by_keyword.json
+  web_results_by_keyword.json
+  combined_results_by_keyword.json
+  selected_discovery_results.json
+  human_check_state.json
+  discovery_report.md
+
+human_check_state.json 初始状态为 pending。用户应在继续 literature matrix 和正文生成前删除无关
+关键词/论文并确认 discovery 阶段。
+
+
+十、后续工作流集成
+------------------
+
+修改后的编排器在原写作阶段基础上增加：
+
+  - review-conclusion-generator：基于 first draft、matrix、blueprint 和 reading notes 生成结论、
+    挑战、趋势和洞见，并输出质量报告；
+  - integrate_generated_conclusion.py：将通过检查的结论集成进最终稿；
+  - review-outline-summary-chart：在 final audit 后生成全文/小节结构总结图；
+  - final audit 和 DOCX export：完成引用、图片、占位符、格式与发布检查。
+
+推荐顺序：
+
+  discovery → matrix/outline → section drafting → first draft → conclusion →
+  conclusion integration → final audit → summary chart → DOCX export
+
+
+十一、限制与注意事项
+--------------------
+
+  - LLM query plan 提升的是 Topic 理解与检索约束，不会凭空增加 metadata 库中不存在的论文；
+  - 未收录缩写必须有足够化学上下文，不能强行扩展；
+  - group_by 不等于为每种催化剂自动生成新关键词；需要召回 Pd、Ni、Cu 等具体体系时，应由
+    LLM 根据 Topic 和目标范围生成相应 catalyst_or_method 关键词；
+  - “近 N 年”使用运行时当前年份，因此同一 Topic 在不同年份运行时区间会变化；
+  - 外部搜索是覆盖补充，不替代本地 metadata 的人工导入和质量控制；
+  - 任何候选集都必须经过 human check，不能把 Top 30 直接视为最终金标或最终引用集。
