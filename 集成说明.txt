@@ -262,7 +262,10 @@ human_check_state.json 初始状态为 pending。用户应在继续 literature m
   - review-conclusion-generator：基于 first draft、matrix、blueprint 和 reading notes 生成结论、
     挑战、趋势和洞见，并输出质量报告；
   - integrate_generated_conclusion.py：将通过检查的结论集成进最终稿；
-  - review-outline-summary-chart：在 final audit 后生成全文/小节结构总结图；
+  - review-outline-summary-chart：在 final audit 后生成全文/小节结构总结图，同时输出一张全文
+    PNG 和每个正文小节的 PNG，并在 JSON 中记录路径与 SHA-256；
+  - DOCX export：自动校验同目录结构图清单，将全文图插入正文前、各小节图插入匹配标题后；
+    缺失、过期、哈希不符或标题无法匹配时阻止导出；
   - final audit 和 DOCX export：完成引用、图片、占位符、格式与发布检查。
 
 推荐顺序：

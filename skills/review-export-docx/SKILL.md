@@ -29,7 +29,7 @@ review-projects/<project_id>/05_final_audit/final_draft.md
 ## Dependencies
 
 ```bash
-pip install python-docx latex2word
+pip install python-docx Pillow latex2word
 ```
 
 If `latex2word` is missing, math is rendered as italic plain text and a warning is printed.
@@ -101,6 +101,15 @@ YAML front matter (silently skipped)
 ## Image Paths
 
 Relative image paths in the Markdown are resolved against the Markdown file's directory. Make sure redrawn or source images are reachable when the script runs.
+
+## Summary-chart bridge
+
+When `review_summary_chart.json` exists beside the selected Markdown, validate
+that it was generated from the current draft with `generation_scope: both`.
+Validate every PNG path and SHA-256 in `stats.image_manifest`, then insert the
+full-review chart before the manuscript body and each section chart immediately
+after its matching section heading. Missing, stale, unsafe, or unmatched chart
+entries stop export with a clear error instead of being skipped.
 
 ## Boundary
 

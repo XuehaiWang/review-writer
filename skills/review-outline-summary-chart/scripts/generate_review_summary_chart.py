@@ -22,6 +22,8 @@ Inputs:
 Outputs (under 05_final_audit/):
     review_summary_chart.html
     review_summary_chart.json
+    review_summary_chart.png
+    review_section_chart_<nn>_<section>.png
 
 Usage:
     python generate_review_summary_chart.py \
@@ -35,10 +37,13 @@ import argparse
 import hashlib
 import json
 import re
+import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from PIL import Image, ImageDraw, ImageFont
 
 
 # ── Data structures ──────────────────────────────────────────────────────────
@@ -69,6 +74,13 @@ SECTION_SIGNALS: dict[str, list[str]] = {
                 "general procedure", "实验", "方法"],
     "references": ["references", "bibliography", "cited literature", "参考文献"],
     "supporting": ["supporting information", "supplementary", "补充"],
+}
+
+NUMBERED_SECTION_HEADING_RE = re.compile(r"^\s*\d+(?:\.\d+)*[.)]?\s+\S")
+EXCLUDED_CHART_HEADING_KEYS = {
+    "abstract", "keywords", "key words", "references", "reference list",
+    "bibliography", "cited literature", "supporting information",
+    "supplementary information", "table of contents",
 }
 
 
@@ -111,8 +123,16 @@ def write_text(path: Path, text: str) -> None:
 
 # ── Parsing ──────────────────────────────────────────────────────────────────
 
+def normalize_chart_heading(heading: str) -> str:
+    value = re.sub(r"^\s*\d+(?:\.\d+)*[.)]?\s*", "", heading)
+    value = re.sub(r"[^\w]+", " ", value.casefold(), flags=re.UNICODE)
+    return re.sub(r"\s+", " ", value).strip()
+
+
 def classify_section(heading: str) -> str:
-    low = heading.lower().strip("#").strip()
+    low = normalize_chart_heading(heading)
+    if low in {"keywords", "key words"}:
+        return "keywords"
     for sec_type, signals in SECTION_SIGNALS.items():
         for signal in signals:
             if signal in low:
@@ -129,11 +149,27 @@ def parse_review_outline(md_text: str) -> list[ReviewSection]:
     lines = md_text.splitlines()
     root: list[ReviewSection] = []
     stack: list[ReviewSection] = []
-    heading_re = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+    heading_re = re.compile(r"^ {0,3}(#{1,6})\s+(.+?)\s*$")
     current: ReviewSection | None = None
+    fence_character: str | None = None
+    fence_length = 0
 
     for idx, line in enumerate(lines, start=1):
-        m = heading_re.match(line.strip())
+        if fence_character is not None:
+            closing_fence = re.compile(
+                rf"^\s*{re.escape(fence_character)}{{{fence_length},}}\s*$"
+            )
+            if closing_fence.match(line):
+                fence_character = None
+                fence_length = 0
+            continue
+        fence_match = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if fence_match:
+            marker = fence_match.group(1)
+            fence_character = marker[0]
+            fence_length = len(marker)
+            continue
+        m = heading_re.match(line)
         if m:
             level = len(m.group(1))
             heading = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", m.group(2).strip()).strip()
@@ -167,7 +203,7 @@ def extract_section_summary(md_text: str, heading: str, max_sentences: int = 2) 
     """Extract key sentences from the body under a heading."""
     heading_escaped = re.escape(heading.strip())
     pattern = re.compile(
-        rf"^#{{1,6}}\s+{heading_escaped}\s*$(.+?)(?=^#{{1,6}}\s+|\Z)",
+        rf"^ {{0,3}}#{{1,6}}\s+{heading_escaped}\s*$(.+?)(?=^ {{0,3}}#{{1,6}}\s+|\Z)",
         re.MULTILINE | re.DOTALL | re.IGNORECASE,
     )
     m = pattern.search(md_text)
@@ -275,6 +311,40 @@ def flatten(sections: list[ReviewSection]) -> list[ReviewSection]:
     return out
 
 
+def chartable_sections(sections: list[ReviewSection]) -> list[ReviewSection]:
+    """Return manuscript body sections that should receive DOCX charts."""
+    return [
+        section for section in sections
+        if normalize_chart_heading(section.heading) not in EXCLUDED_CHART_HEADING_KEYS
+    ]
+
+
+def manuscript_sections(sections: list[ReviewSection]) -> list[ReviewSection]:
+    """Select the same top-level manuscript sections used by export and gating."""
+    all_sections = flatten(sections)
+    level_two = [section for section in all_sections if section.level == 2]
+    if level_two:
+        return level_two
+    return [
+        section for section in all_sections
+        if section.level == 1 and NUMBERED_SECTION_HEADING_RE.match(section.heading)
+    ]
+
+
+def section_detail_text(section: ReviewSection) -> str:
+    """Return concise chart text without leaking Markdown table syntax."""
+    if section.children:
+        return ", ".join(child.heading for child in section.children[:5])
+    summary = re.sub(r"\s+", " ", section.summary).strip()
+    if summary and "|" not in summary:
+        return summary
+    return (
+        f"{section.word_count} words; "
+        f"{len(section.citation_callouts)} citation callouts; "
+        f"{len(section.cited_paper_ids)} mapped papers"
+    )
+
+
 def infer_section_id(section: ReviewSection) -> str:
     """Infer a section id like 'sec1' from a numbered heading '1 ...' or '1.1 ...'."""
     m = re.match(r"^(\d+)", section.heading.strip())
@@ -378,6 +448,184 @@ def generate_section_mermaid(section: ReviewSection) -> str:
 
     render(section, None)
     return "\n".join(lines)
+
+
+# ── Offline PNG output ───────────────────────────────────────────────────────
+
+_FONT_CANDIDATES = {
+    "regular": [
+        Path("C:/Windows/Fonts/msyh.ttc"),
+        Path("C:/Windows/Fonts/arial.ttf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    ],
+    "bold": [
+        Path("C:/Windows/Fonts/msyhbd.ttc"),
+        Path("C:/Windows/Fonts/arialbd.ttf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+    ],
+}
+
+
+def _font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
+    for candidate in _FONT_CANDIDATES["bold" if bold else "regular"]:
+        if candidate.exists():
+            return ImageFont.truetype(str(candidate), size=size)
+    return ImageFont.load_default()
+
+
+def _slug(text: str, fallback: str) -> str:
+    value = re.sub(r"[^a-z0-9]+", "-", text.casefold()).strip("-")
+    return value[:48] or fallback
+
+
+def _wrapped_lines(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont,
+                   max_width: int) -> list[str]:
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return []
+    words = text.split(" ")
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if not current or draw.textbbox((0, 0), candidate, font=font)[2] <= max_width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    # Long CJK strings may contain no spaces. Use a conservative character wrap.
+    if len(lines) == 1 and draw.textbbox((0, 0), lines[0], font=font)[2] > max_width:
+        average = max(1, draw.textbbox((0, 0), "测", font=font)[2])
+        width = max(1, max_width // average)
+        lines = textwrap.wrap(text, width=width, break_long_words=True,
+                              break_on_hyphens=False)
+    return lines
+
+
+def _draw_centered_lines(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int],
+                         lines: list[str], font: ImageFont.ImageFont,
+                         fill: str = "#1f2937", spacing: int = 8) -> None:
+    x1, y1, x2, y2 = box
+    heights = [draw.textbbox((0, 0), line, font=font)[3] for line in lines]
+    total = sum(heights) + spacing * max(0, len(lines) - 1)
+    y = y1 + max(0, (y2 - y1 - total) // 2)
+    for line, height in zip(lines, heights):
+        width = draw.textbbox((0, 0), line, font=font)[2]
+        draw.text((x1 + (x2 - x1 - width) / 2, y), line, font=font, fill=fill)
+        y += height + spacing
+
+
+def _save_png(image: Image.Image, path: Path) -> dict[str, str]:
+    image.save(path, format="PNG", optimize=True)
+    return {"path": path.name, "sha256": sha256_file(path)}
+
+
+def render_full_chart_png(sections: list[ReviewSection], review_title: str,
+                          path: Path) -> dict[str, str]:
+    width = 1800
+    margin = 90
+    title_height = 150
+    card_width = width - 2 * margin
+    card_height = 150
+    gap = 70
+    height = margin + title_height + 80 + len(sections) * (card_height + gap) + margin
+    image = Image.new("RGB", (width, max(height, 720)), "#f8fafc")
+    draw = ImageDraw.Draw(image)
+    title_font = _font(42, bold=True)
+    heading_font = _font(30, bold=True)
+    detail_font = _font(23)
+
+    title_box = (margin, margin, width - margin, margin + title_height)
+    draw.rounded_rectangle(title_box, radius=24, fill="#e8eaf6", outline="#3f51b5", width=4)
+    title_lines = _wrapped_lines(draw, review_title or "Review Article", title_font,
+                                 card_width - 80)[:2]
+    _draw_centered_lines(draw, title_box, title_lines, title_font, fill="#1e3a8a")
+
+    previous_bottom = title_box[3]
+    for index, section in enumerate(sections, start=1):
+        top = previous_bottom + gap
+        box = (margin, top, width - margin, top + card_height)
+        center_x = width // 2
+        draw.line((center_x, previous_bottom, center_x, top - 14), fill="#64748b", width=5)
+        draw.polygon([(center_x, top), (center_x - 12, top - 18),
+                      (center_x + 12, top - 18)], fill="#64748b")
+        fill = "#fdfdfd" if index % 2 else "#f0f9ff"
+        draw.rounded_rectangle(box, radius=22, fill=fill, outline="#64748b", width=3)
+        heading = f"{index}. {section.heading}"
+        heading_lines = _wrapped_lines(draw, heading, heading_font, card_width - 100)[:2]
+        details = section_detail_text(section)
+        detail_lines = _wrapped_lines(draw, details, detail_font, card_width - 120)[:2]
+        all_lines = heading_lines + detail_lines
+        fonts = [heading_font] * len(heading_lines) + [detail_font] * len(detail_lines)
+        heights = [draw.textbbox((0, 0), line, font=font)[3]
+                   for line, font in zip(all_lines, fonts)]
+        y = top + max(18, (card_height - sum(heights) - 8 * max(0, len(all_lines) - 1)) // 2)
+        for line, font, line_height in zip(all_lines, fonts, heights):
+            line_width = draw.textbbox((0, 0), line, font=font)[2]
+            draw.text(((width - line_width) / 2, y), line, font=font,
+                      fill="#0f172a" if font is heading_font else "#475569")
+            y += line_height + 8
+        previous_bottom = box[3]
+    return _save_png(image, path)
+
+
+def render_section_chart_png(section: ReviewSection, path: Path) -> dict[str, str]:
+    width = 1800
+    margin = 90
+    rows = section.children or [section]
+    row_height = 145
+    gap = 55
+    header_height = 145
+    height = margin * 2 + header_height + 80 + len(rows) * (row_height + gap)
+    image = Image.new("RGB", (width, max(height, 700)), "#ffffff")
+    draw = ImageDraw.Draw(image)
+    title_font = _font(38, bold=True)
+    heading_font = _font(28, bold=True)
+    detail_font = _font(22)
+
+    header = (margin, margin, width - margin, margin + header_height)
+    draw.rounded_rectangle(header, radius=24, fill="#e0f2fe", outline="#0284c7", width=4)
+    _draw_centered_lines(
+        draw,
+        header,
+        _wrapped_lines(draw, section.heading, title_font, width - 2 * margin - 80)[:2],
+        title_font,
+        fill="#0c4a6e",
+    )
+    previous_bottom = header[3]
+    for index, node in enumerate(rows, start=1):
+        top = previous_bottom + gap
+        box = (margin + 100, top, width - margin - 100, top + row_height)
+        center_x = width // 2
+        draw.line((center_x, previous_bottom, center_x, top - 12), fill="#94a3b8", width=4)
+        draw.polygon([(center_x, top), (center_x - 10, top - 16),
+                      (center_x + 10, top - 16)], fill="#94a3b8")
+        draw.rounded_rectangle(box, radius=20, fill="#f8fafc", outline="#94a3b8", width=3)
+        label = node.heading if section.children else "Section overview"
+        papers = ", ".join(node.cited_paper_ids[:8])
+        details = papers or section_detail_text(node)
+        heading_lines = _wrapped_lines(draw, f"{index}. {label}", heading_font,
+                                       box[2] - box[0] - 100)[:2]
+        detail_lines = _wrapped_lines(draw, details, detail_font,
+                                      box[2] - box[0] - 100)[:2]
+        all_lines = heading_lines + detail_lines
+        fonts = [heading_font] * len(heading_lines) + [detail_font] * len(detail_lines)
+        heights = [draw.textbbox((0, 0), line, font=font)[3]
+                   for line, font in zip(all_lines, fonts)]
+        y = top + max(16, (row_height - sum(heights) - 7 * max(0, len(all_lines) - 1)) // 2)
+        for line, font, line_height in zip(all_lines, fonts, heights):
+            line_width = draw.textbbox((0, 0), line, font=font)[2]
+            draw.text(((width - line_width) / 2, y), line, font=font,
+                      fill="#0f172a" if font is heading_font else "#475569")
+            y += line_height + 7
+        previous_bottom = box[3]
+    entry = _save_png(image, path)
+    entry["heading"] = section.heading
+    return entry
 
 
 # ── HTML ─────────────────────────────────────────────────────────────────────
@@ -560,23 +808,25 @@ def run(args: argparse.Namespace) -> int:
         project / "01_matrix_outline" / "section_blueprint.json")
 
     topic = infer_topic(project)
-    review_title = sections[0].heading if sections else (topic or "Review Article")
-    # The review title is usually a level-1 heading whose level-2 children are
-    # the real body sections (Abstract, Introduction, ...). Use those children
-    # as the body tree so the title is not duplicated in the chart.
-    if sections and sections[0].level == 1 and sections[0].children:
-        body_sections = sections[0].children
-    elif sections and sections[0].level == 1:
-        body_sections = sections[1:]
-    else:
-        body_sections = sections
+    body_sections = manuscript_sections(sections)
+    first_is_title = bool(
+        sections
+        and sections[0].level == 1
+        and not NUMBERED_SECTION_HEADING_RE.match(sections[0].heading)
+        and any(section.level == 2 for section in flatten(sections))
+    )
+    review_title = (
+        sections[0].heading if first_is_title else (topic or "Review Article")
+    )
 
     full_mermaid = generate_full_mermaid(body_sections or sections, review_title)
 
-    # Per-section detail charts (小节大纲) for top-level sections
+    body_chart_sections = chartable_sections(body_sections or sections)
+
+    # Per-section detail charts (小节大纲) for every manuscript body section.
     section_charts: list[dict[str, str]] = []
     if args.scope in ("section", "both"):
-        for s in (body_sections or sections)[:8]:
+        for s in body_chart_sections:
             section_charts.append({
                 "heading": s.heading,
                 "mermaid": generate_section_mermaid(s),
@@ -596,6 +846,24 @@ def run(args: argparse.Namespace) -> int:
 
     out_dir = draft_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    image_manifest: dict[str, Any] = {"full": None, "sections": []}
+    if args.scope in ("full", "both"):
+        image_manifest["full"] = render_full_chart_png(
+            body_sections or sections,
+            review_title,
+            out_dir / "review_summary_chart.png",
+        )
+    if args.scope in ("section", "both"):
+        for index, section in enumerate(body_chart_sections, start=1):
+            filename = (
+                f"review_section_chart_{index:02d}_"
+                f"{_slug(section.heading, f'section-{index:02d}')}.png"
+            )
+            image_manifest["sections"].append(
+                render_section_chart_png(section, out_dir / filename)
+            )
+    stats["image_manifest"] = image_manifest
 
     html = generate_html(body_sections or sections, review_title, topic,
                          full_mermaid, section_charts, stats)

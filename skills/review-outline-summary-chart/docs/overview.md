@@ -8,7 +8,8 @@ per-section evidence charts before document export.
 ## Orchestrated Contract
 
 - Orchestrated use requires `05_final_audit/final_draft.md` and `--scope both`.
-- Write both HTML and JSON next to the selected draft.
+- Write HTML, JSON, a full-review PNG, and all manuscript-body section PNGs
+  next to the selected draft.
 - JSON includes resolved `stats.draft_source`, `stats.draft_sha256`,
   `stats.generation_scope`, and `stats.html_sha256`; the draft digest is an
   exact-byte SHA-256.
@@ -17,7 +18,8 @@ per-section evidence charts before document export.
 - JSON-only/HTML-only output cannot satisfy the stage.
 - Fallback artifacts do not satisfy the orchestrated summary stage;
   standalone selection remains final > first > section draft.
-- A missing, wrong-source, or stale chart blocks DOCX export.
+- JSON records every PNG path and SHA-256 in `stats.image_manifest`.
+- A missing, wrong-source, stale, or hash-mismatched chart blocks DOCX export.
 - Generation makes no network request, though rendered HTML may load Mermaid from a CDN.
 
 ## Processing
@@ -27,14 +29,16 @@ per-section evidence charts before document export.
 3. Classify sections and extract concise summaries.
 4. Resolve numeric callouts through `citations.json` when available.
 5. Generate the full-review and per-section Mermaid definitions.
-6. Save both required artifacts beside the selected draft with provenance.
+6. Render an offline full-review PNG and one PNG per manuscript body section.
+7. Save HTML, JSON, PNGs, and exact-byte provenance beside the selected draft.
 
 ## JSON Provenance
 
 The `stats` object contains section/word/citation counts plus the absolute,
 resolved draft source, draft digest, generation scope, and exact HTML-byte
-digest. The status gate compares both hashes to the current draft and HTML;
-editing either artifact after chart generation makes the bundle stale.
+digest plus `image_manifest`. The status gate compares the draft, HTML, and
+every PNG hash; editing any artifact after chart generation makes the bundle
+stale.
 
 ## HTML Behavior
 

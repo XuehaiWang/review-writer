@@ -11,7 +11,8 @@ final-audit checkpoint has approved the final draft.
 ## Orchestrated Contract
 
 - Orchestrated use requires `05_final_audit/final_draft.md` and `--scope both`.
-- Write both HTML and JSON next to the selected draft.
+- Write HTML, JSON, one full-review PNG, and one PNG for every manuscript body
+  section next to the selected draft.
 - JSON records the resolved source in `stats.draft_source` and its exact-byte
   SHA-256 in `stats.draft_sha256`, plus scope in `stats.generation_scope` and
   the exact HTML bytes in `stats.html_sha256`.
@@ -20,7 +21,8 @@ final-audit checkpoint has approved the final draft.
 - JSON-only/HTML-only output cannot satisfy the stage.
 - Fallback artifacts do not satisfy the orchestrated summary stage;
   standalone selection remains final > first > section draft.
-- A missing, wrong-source, or stale chart blocks DOCX export.
+- JSON `stats.image_manifest` records every PNG path and exact-byte SHA-256.
+- A missing, wrong-source, stale, or hash-mismatched chart blocks DOCX export.
 - Generation makes no network request, though rendered HTML may load Mermaid from a CDN.
 
 ## Inputs and Outputs
@@ -35,10 +37,14 @@ The selected draft directory receives:
 ```text
 review_summary_chart.html
 review_summary_chart.json
+review_summary_chart.png
+review_section_chart_<nn>_<section>.png
 ```
 
 `--scope both` is mandatory for orchestrated use because it produces the
-full-review chart and all per-section charts in both required artifacts.
+full-review chart and all manuscript-body section charts in HTML, JSON, and
+offline PNG form. Abstract, Keywords, References, and Supporting Information
+remain in the full-review chart but do not receive separate DOCX section PNGs.
 
 ## Run
 

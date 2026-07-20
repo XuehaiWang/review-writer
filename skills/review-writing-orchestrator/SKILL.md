@@ -67,8 +67,12 @@ Do not skip a human check unless the user explicitly says to continue.
   `05_final_audit/final_draft.md`; `stats.draft_source` must resolve to that
   file and `stats.draft_sha256` must be a matching SHA-256 of its exact bytes.
   The dual chart bundle additionally requires `stats.generation_scope` equal
-  to `both` and `stats.html_sha256` matching the exact HTML bytes.
-- DOCX: a missing, wrong-source, or stale chart blocks DOCX export.
+  to `both`, `stats.html_sha256` matching the exact HTML bytes, and a complete
+  `stats.image_manifest` covering the full-review PNG and every body-section
+  PNG with matching exact-byte SHA-256 values.
+- DOCX: a missing, wrong-source, stale, hash-mismatched, or unmatched chart
+  blocks export. The exporter inserts the full chart before the body and each
+  section chart after its matching heading.
 
 The existing manuscript gates remain binding: a figure (or approved
 `03_figure_redraw/skip_reason.md`), inline citations, a non-empty References

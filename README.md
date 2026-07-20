@@ -65,7 +65,7 @@ Topic discovery
 
 - `review-conclusion-generator`：根据初稿、文献矩阵和阅读笔记生成结论、挑战、趋势及洞见；
 - `integrate_generated_conclusion.py`：把通过质量检查的结论合并到最终稿；
-- `review-outline-summary-chart`：生成全文和小节结构总结图；
+- `review-outline-summary-chart`：离线生成全文和全部正文小节结构图，并通过带 SHA-256 的图片清单自动嵌入 Word；
 - final audit / DOCX export：检查引用、图片、占位符和格式后导出 Word。
 
 ## 快速开始

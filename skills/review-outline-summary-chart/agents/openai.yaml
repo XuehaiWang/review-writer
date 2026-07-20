@@ -2,7 +2,7 @@ interface:
   display_name: "Review Outline Summary Chart"
   short_description: "Generate current full-review and per-section charts."
   default_prompt: |
-    Use $review-outline-summary-chart only after final-audit approval. Orchestrated use requires `05_final_audit/final_draft.md` and `--scope both`; write both HTML and JSON next to the selected draft.
-    Require resolved `stats.draft_source`, `stats.draft_sha256`, `stats.generation_scope`, and `stats.html_sha256`; the draft digest is an exact-byte SHA-256. Orchestrated completion requires scope `both`, the JSON/current-draft hash, and the exact HTML-byte hash to match the current dual chart bundle.
-    JSON-only/HTML-only output cannot satisfy the stage. Fallback artifacts do not satisfy the orchestrated summary stage; standalone selection remains final > first > section draft. A missing, wrong-source, or stale chart blocks DOCX export.
+    Use $review-outline-summary-chart only after final-audit approval. Orchestrated use requires `05_final_audit/final_draft.md` and `--scope both`; write HTML, JSON, one full-review PNG, and all manuscript-body section PNGs next to the selected draft.
+    Require resolved `stats.draft_source`, `stats.draft_sha256`, `stats.generation_scope`, `stats.html_sha256`, and a complete `stats.image_manifest`; every digest is an exact-byte SHA-256. Orchestrated completion requires scope `both` and all source, HTML, and PNG hashes to match.
+    Partial output cannot satisfy the stage. Fallback artifacts do not satisfy the orchestrated summary stage; standalone selection remains final > first > section draft. A missing, wrong-source, stale, or hash-mismatched chart blocks DOCX export.
     Generation makes no network request, though rendered HTML may load Mermaid from a CDN.

@@ -25,12 +25,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 from copy import deepcopy  # noqa: F401
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+from PIL import Image as PILImage
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement, parse_xml  # noqa: F401
@@ -432,13 +435,19 @@ class Block:
     lines:    List[str]       = field(default_factory=list)
 
 
-_HEADING_RE    = re.compile(r"^(#{1,6})\s+(.*)")
+@dataclass
+class SummaryChartBundle:
+    full: Path
+    sections: Dict[str, Tuple[str, Path]]
+
+
+_HEADING_RE    = re.compile(r"^ {0,3}(#{1,6})\s+(.*)")
 _EMBEDDED_HEADING_PREFIX_RE = re.compile(r"^#{1,6}\s+")
-_NUMBERED_SECTION_HEADING_RE = re.compile(r"^\d+(?:\.\d+)*\.\s+\S")
+_NUMBERED_SECTION_HEADING_RE = re.compile(r"^\s*\d+(?:\.\d+)*[.)]?\s+\S")
 _HTML_ANCHOR_RE = re.compile(r"^<a\s+id=[\"']ref-\d+[\"']\s*>\s*</a>\s*$", re.I)
 _UL_RE         = re.compile(r"^(\s*)[-*+]\s+(.*)")
 _OL_RE         = re.compile(r"^(\s*)\d+[.)]\s+(.*)")
-_FENCE_RE      = re.compile(r"^```(\w*)\s*$")
+_FENCE_RE      = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 _MATH_FENCE_RE = re.compile(r"^\$\$\s*$")
 _IMG_RE        = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$")
 _TABLE_ROW_RE  = re.compile(r"^\|.+")
@@ -481,13 +490,19 @@ def tokenize(md_text: str) -> List[Block]:
         # Fenced code block
         m = _FENCE_RE.match(line)
         if m:
-            lang = m.group(1)
+            marker = m.group(1)
+            language_info = m.group(2).strip()
+            lang = language_info.split(maxsplit=1)[0] if language_info else ""
+            closing_fence = re.compile(
+                rf"^\s*{re.escape(marker[0])}{{{len(marker)},}}\s*$"
+            )
             code_lines: List[str] = []
             i += 1
-            while i < n and not lines[i].startswith("```"):
+            while i < n and not closing_fence.match(lines[i]):
                 code_lines.append(lines[i])
                 i += 1
-            i += 1
+            if i < n:
+                i += 1
             blocks.append(Block(kind="code_block", language=lang,
                                 code="\n".join(code_lines)))
             continue
@@ -677,6 +692,147 @@ def _clear_body(doc: Document) -> None:
         body.append(sect_pr)
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _normalize_chart_heading(text: str) -> str:
+    value = re.sub(r"^\s*\d+(?:\.\d+)*[.)]?\s*", "", text)
+    value = re.sub(r"[^\w]+", " ", value.casefold(), flags=re.UNICODE)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+_EXCLUDED_CHART_HEADING_KEYS = {
+    "abstract", "keywords", "key words", "references", "reference list",
+    "bibliography", "cited literature", "supporting information",
+    "supplementary information", "table of contents",
+}
+
+
+def _expected_chart_headings(blocks: List[Block]) -> Dict[str, str]:
+    expected: Dict[str, str] = {}
+    for block in blocks:
+        if block.kind != "heading":
+            continue
+        numbered_h1 = block.level == 1 and _NUMBERED_SECTION_HEADING_RE.match(block.text.strip())
+        effective_level = 2 if numbered_h1 else block.level
+        if effective_level != 2:
+            continue
+        key = _normalize_chart_heading(block.text)
+        if key and key not in _EXCLUDED_CHART_HEADING_KEYS:
+            expected[key] = block.text.strip()
+    return expected
+
+
+def _manifest_image(base_dir: Path, entry: Any, label: str) -> Path:
+    if not isinstance(entry, dict):
+        raise ValueError(f"summary chart {label} manifest entry must be an object")
+    rel = entry.get("path")
+    expected_sha = entry.get("sha256")
+    if not isinstance(rel, str) or not rel.strip():
+        raise ValueError(f"summary chart {label} path is missing")
+    rel_path = Path(rel)
+    if rel_path.is_absolute():
+        raise ValueError(f"summary chart {label} path must be relative")
+    if rel_path.suffix.casefold() != ".png":
+        raise ValueError(f"summary chart {label} image must use a .png path")
+    if not isinstance(expected_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+        raise ValueError(f"summary chart {label} SHA-256 is invalid")
+    image_path = (base_dir / rel).resolve()
+    resolved_base = base_dir.resolve()
+    if image_path != resolved_base and resolved_base not in image_path.parents:
+        raise ValueError(f"summary chart {label} path escapes the draft directory")
+    if not image_path.is_file():
+        raise ValueError(f"summary chart {label} image is missing: {image_path}")
+    if _sha256_file(image_path) != expected_sha:
+        raise ValueError(f"summary chart {label} image hash does not match: {image_path}")
+    try:
+        with PILImage.open(image_path) as image:
+            if image.format != "PNG":
+                raise ValueError
+            image.verify()
+    except Exception:
+        raise ValueError(
+            f"summary chart {label} image is not a valid PNG: {image_path}"
+        ) from None
+    return image_path
+
+
+def _load_summary_chart_bundle(md_path: Path, blocks: List[Block]) -> Optional[SummaryChartBundle]:
+    manifest_path = md_path.parent / "review_summary_chart.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"cannot read summary chart manifest: {manifest_path}: {exc}") from exc
+    stats = payload.get("stats") if isinstance(payload, dict) else None
+    if not isinstance(stats, dict):
+        raise ValueError("summary chart manifest is missing stats")
+    if stats.get("generation_scope") != "both":
+        raise ValueError("summary chart generation_scope must be 'both' for DOCX export")
+    draft_source = stats.get("draft_source")
+    if not isinstance(draft_source, str) or not draft_source.strip():
+        raise ValueError("summary chart draft_source is missing")
+    source_path = Path(draft_source)
+    if not source_path.is_absolute():
+        source_path = md_path.parent / source_path
+    if source_path.resolve() != md_path.resolve():
+        raise ValueError("summary chart draft_source does not match the current Markdown draft")
+    if stats.get("draft_sha256") != _sha256_file(md_path):
+        raise ValueError("summary chart was not generated from the current Markdown draft")
+    image_manifest = stats.get("image_manifest")
+    if not isinstance(image_manifest, dict):
+        raise ValueError("summary chart manifest is missing image_manifest")
+    full = _manifest_image(md_path.parent, image_manifest.get("full"), "full")
+    section_entries = image_manifest.get("sections")
+    if not isinstance(section_entries, list):
+        raise ValueError("summary chart section image manifest must be a list")
+    sections: Dict[str, Tuple[str, Path]] = {}
+    for index, entry in enumerate(section_entries, start=1):
+        if not isinstance(entry, dict) or not isinstance(entry.get("heading"), str):
+            raise ValueError(f"summary chart section {index} heading is missing")
+        heading = entry["heading"].strip()
+        key = _normalize_chart_heading(heading)
+        if not key or key in sections:
+            raise ValueError(f"summary chart section heading is empty or duplicated: {heading!r}")
+        sections[key] = (heading, _manifest_image(md_path.parent, entry, f"section {heading}"))
+    expected = _expected_chart_headings(blocks)
+    if set(sections) != set(expected):
+        missing = [expected[key] for key in expected.keys() - sections.keys()]
+        extra = [sections[key][0] for key in sections.keys() - expected.keys()]
+        details = []
+        if missing:
+            details.append("missing=" + ", ".join(sorted(missing)))
+        if extra:
+            details.append("extra=" + ", ".join(sorted(extra)))
+        raise ValueError(
+            "summary chart manifest does not cover manuscript body sections: "
+            + "; ".join(details)
+        )
+    return SummaryChartBundle(full=full, sections=sections)
+
+
+def _chart_width_inches(doc: Document, image_path: Path) -> float:
+    usable_width = _usable_page_width_inches(doc)
+    section = doc.sections[-1]
+    usable_height = (
+        section.page_height.inches
+        - section.top_margin.inches
+        - section.bottom_margin.inches
+        - 0.75
+    )
+    with PILImage.open(image_path) as image:
+        width_px, height_px = image.size
+    if not width_px or not height_px:
+        return usable_width
+    return min(usable_width, usable_height * width_px / height_px)
+
+
 # ---------------------------------------------------------------------------
 # Main converter
 # ---------------------------------------------------------------------------
@@ -685,6 +841,7 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
     md_text = md_path.read_text(encoding="utf-8")
     blocks  = tokenize(md_text)
     toc_entries = _collect_static_toc_entries(blocks)
+    chart_bundle = _load_summary_chart_bundle(md_path, blocks)
     doc     = Document(str(template_path))
     _clear_body(doc)
 
@@ -693,6 +850,9 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
     inserted_toc_heading = False
     saw_toc_heading = False
     skipping_source_toc = False
+    full_chart_inserted = False
+    inserted_section_charts: set[str] = set()
+    chart_number = 0
 
     def insert_toc_once() -> None:
         nonlocal inserted_toc_heading
@@ -702,9 +862,21 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
         _insert_static_toc(doc, toc_entries)
         inserted_toc_heading = True
 
+    def insert_chart(image_path: Path, caption: str) -> None:
+        nonlocal chart_number
+        chart_number += 1
+        paragraph = doc.add_paragraph(style=_S["body"])
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        paragraph.add_run().add_picture(
+            str(image_path),
+            width=Inches(_chart_width_inches(doc, image_path)),
+        )
+        _para(doc, "chart", "chart", f"Chart {chart_number}. {caption}")
+
     for block in blocks:
 
         if block.kind == "heading":
+            previous_ctx = ctx
             plain_heading = block.text.strip().lower()
             numbered_h1_section = block.level == 1 and _NUMBERED_SECTION_HEADING_RE.match(block.text.strip())
             if plain_heading == "table of contents":
@@ -716,6 +888,14 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
                 insert_toc_once()
             skipping_source_toc = False
             effective_level = 2 if numbered_h1_section else block.level
+            chart_heading_key = _normalize_chart_heading(block.text)
+            if (
+                chart_bundle is not None
+                and not full_chart_inserted
+                and (previous_ctx == "keywords" or chart_heading_key in chart_bundle.sections)
+            ):
+                insert_chart(chart_bundle.full, "Full-review structure summary.")
+                full_chart_inserted = True
             style_key, spec_key = _HEADING_FORMAT.get(effective_level, ("body", "body"))
             new_ctx = _section_ctx(block.text)
             ctx = new_ctx if new_ctx else "body"
@@ -724,6 +904,10 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
             elif effective_level >= 2:
                 front_matter = False
             _para(doc, style_key, spec_key, block.text)
+            if chart_bundle is not None and chart_heading_key in chart_bundle.sections:
+                manifest_heading, image_path = chart_bundle.sections[chart_heading_key]
+                insert_chart(image_path, f"Section structure summary: {manifest_heading}.")
+                inserted_section_charts.add(chart_heading_key)
 
         elif block.kind == "paragraph":
             text  = block.text.strip()
@@ -827,6 +1011,16 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
     if not inserted_toc_heading and not saw_toc_heading:
         insert_toc_once()
 
+    if chart_bundle is not None:
+        if not full_chart_inserted:
+            raise ValueError("full-review summary chart could not be placed before the manuscript body")
+        missing_sections = set(chart_bundle.sections) - inserted_section_charts
+        if missing_sections:
+            missing = ", ".join(
+                chart_bundle.sections[key][0] for key in sorted(missing_sections)
+            )
+            raise ValueError(f"summary chart section headings were not found in Markdown: {missing}")
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(out_path))
     print(f"[md2docx] Saved -> {out_path}")
@@ -866,7 +1060,10 @@ def main() -> None:
               "math will render as plain text.\n"
               "          Fix: pip install latex2word")
 
-    convert(md_path, out_path, template_path)
+    try:
+        convert(md_path, out_path, template_path)
+    except ValueError as exc:
+        raise SystemExit(f"[md2docx] ERROR: {exc}") from None
 
 
 if __name__ == "__main__":

@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 from typing import Any
 
+from PIL import Image as PILImage
+
 
 STAGES: list[dict[str, Any]] = [
     {
@@ -136,6 +138,7 @@ STAGES: list[dict[str, Any]] = [
         "required": [
             "review_summary_chart.html",
             "review_summary_chart.json",
+            "review_summary_chart.png",
         ],
         "human_check": "No additional human confirmation required.",
     },
@@ -208,6 +211,31 @@ REFERENCE_HEADINGS = {
         "参考文献",
     )
 }
+
+
+def normalize_chart_heading(text: str) -> str:
+    value = re.sub(r"^\s*\d+(?:\.\d+)*[.)]?\s*", "", text)
+    value = re.sub(r"[^\w]+", " ", value.casefold(), flags=re.UNICODE)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def expected_chart_heading_keys(final_text: str) -> set[str]:
+    excluded = {
+        "abstract", "keywords", "key words", "references", "reference list",
+        "bibliography", "cited literature", "supporting information",
+        "supplementary information", "table of contents",
+    }
+    entries = markdown_heading_entries(final_text)
+    selected = [heading for _, level, heading, _ in entries if level == 2]
+    if not selected:
+        selected = [
+            heading for _, level, heading, _ in entries
+            if level == 1 and re.match(r"^\d+(?:\.\d+)*[.)]?\s+\S", heading)
+        ]
+    return {
+        key for heading in selected
+        if (key := normalize_chart_heading(heading)) and key not in excluded
+    }
 
 
 def sha256_file(path: Path) -> str:
@@ -545,6 +573,83 @@ def summary_chart_semantic_issues(project: Path) -> list[str]:
             html_digest_matches = html_sha256 == sha256_file(html_path)
     if not html_digest_matches and "summary_chart_stale" not in issues:
         issues.append("summary_chart_stale")
+
+    image_manifest = stats.get("image_manifest") if isinstance(stats, dict) else None
+    manifest_valid = isinstance(image_manifest, dict)
+    entries: list[tuple[str, object]] = []
+    if manifest_valid:
+        entries.append(("full", image_manifest.get("full")))
+        section_entries = image_manifest.get("sections")
+        if isinstance(section_entries, list):
+            entries.extend((f"section_{index}", entry)
+                           for index, entry in enumerate(section_entries, start=1))
+        else:
+            manifest_valid = False
+
+    seen_paths: set[Path] = set()
+    seen_headings: set[str] = set()
+    for label, entry in entries:
+        if not isinstance(entry, dict):
+            manifest_valid = False
+            continue
+        rel_path = entry.get("path")
+        expected_sha = entry.get("sha256")
+        if (
+            not isinstance(rel_path, str)
+            or not rel_path.strip()
+            or not isinstance(expected_sha, str)
+            or not LOWERCASE_SHA256_RE.fullmatch(expected_sha)
+        ):
+            manifest_valid = False
+            continue
+        manifest_path = Path(rel_path)
+        if manifest_path.is_absolute() or manifest_path.suffix.casefold() != ".png":
+            manifest_valid = False
+            continue
+        if label != "full":
+            heading = entry.get("heading")
+            if not isinstance(heading, str) or not heading.strip():
+                manifest_valid = False
+                continue
+            heading_key = normalize_chart_heading(heading)
+            if heading_key in seen_headings:
+                manifest_valid = False
+                continue
+            seen_headings.add(heading_key)
+        image_path = (stage_dir / rel_path).resolve()
+        if image_path != stage_dir.resolve() and stage_dir.resolve() not in image_path.parents:
+            manifest_valid = False
+            continue
+        if image_path in seen_paths:
+            manifest_valid = False
+            continue
+        seen_paths.add(image_path)
+        if not image_path.is_file():
+            if "summary_chart_image_missing" not in issues:
+                issues.append("summary_chart_image_missing")
+            continue
+        if sha256_file(image_path) != expected_sha:
+            if "summary_chart_image_stale" not in issues:
+                issues.append("summary_chart_image_stale")
+            continue
+        try:
+            with PILImage.open(image_path) as image:
+                if image.format != "PNG":
+                    raise ValueError
+                image.verify()
+        except Exception:
+            if "summary_chart_image_invalid" not in issues:
+                issues.append("summary_chart_image_invalid")
+
+    if not manifest_valid:
+        issues.append("summary_chart_image_manifest_invalid")
+
+    if final_draft.exists():
+        expected_headings = expected_chart_heading_keys(
+            final_draft.read_text(encoding="utf-8", errors="ignore")
+        )
+        if seen_headings != expected_headings:
+            issues.append("summary_chart_section_coverage_incomplete")
 
     return issues
 
