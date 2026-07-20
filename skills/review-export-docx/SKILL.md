@@ -32,7 +32,7 @@ Do not use this skill to revise content, fix citations, or validate evidence.
 ```text
 review-projects/<project_id>/05_first_draft/first_draft.md
 or
-review-projects/<project_id>/06_final_audit/final_draft.md
+review-projects/<project_id>/07_final_audit/final_draft.md
 ```
 
 ## Output
@@ -40,7 +40,7 @@ review-projects/<project_id>/06_final_audit/final_draft.md
 DOCX files are written to their own stage folder, not next to the source Markdown:
 
 ```text
-review-projects/<project_id>/07_docx_export/
+review-projects/<project_id>/09_docx_export/
 ```
 
 ## Dependencies
@@ -57,8 +57,8 @@ Default (final draft):
 
 ```bash
 python3 <skill-root>/scripts/md2docx.py \
-  --input  <review-root>/review-projects/<project_id>/06_final_audit/final_draft.md \
-  --output <review-root>/review-projects/<project_id>/07_docx_export/final_draft.docx
+  --input  <review-root>/review-projects/<project_id>/07_final_audit/final_draft.md \
+  --output <review-root>/review-projects/<project_id>/09_docx_export/final_draft.docx
 ```
 
 First draft:
@@ -66,7 +66,7 @@ First draft:
 ```bash
 python3 <skill-root>/scripts/md2docx.py \
   --input  <review-root>/review-projects/<project_id>/05_first_draft/first_draft.md \
-  --output <review-root>/review-projects/<project_id>/07_docx_export/first_draft.docx
+  --output <review-root>/review-projects/<project_id>/09_docx_export/first_draft.docx
 ```
 
 Custom template (see Template Selection above):

@@ -1,11 +1,11 @@
 ---
 name: review-final-audit-release
-description: Perform final content audit and format audit on a merged review draft, verify claims against available evidence, fix manuscript-level issues, and produce the final draft plus audit reports. Use after review-draft-merge-polish and human approval of the first draft.
+description: Perform final content audit and format audit on a merged review draft, verify claims against available evidence, fix manuscript-level issues, and produce the final draft plus audit reports. Use after review-conclusion-generator has produced a validated conclusion and the human has approved the first draft.
 ---
 
 # Review Final Audit Release
 
-Use this skill after `review-draft-merge-polish` has produced `05_first_draft/first_draft.md` and the human has approved the draft structure.
+Use this skill after `review-draft-merge-polish` has produced `05_first_draft/first_draft.md` (with human approval) and `review-conclusion-generator` has produced a validated `06_conclusion_generation/conclusion_generated.md`. This stage integrates the conclusion before scanning or editing the final manuscript; it corrects and releases supported content and does not invent new arguments or remap paper identities.
 
 This is the final quality gate. It should not create new arguments casually. Its job is to check, correct, and release a defensible final manuscript.
 
@@ -17,6 +17,8 @@ Read:
 review-projects/<project_id>/05_first_draft/first_draft.md
 review-projects/<project_id>/05_first_draft/merge_report.md
 review-projects/<project_id>/05_first_draft/remaining_issues.md
+review-projects/<project_id>/06_conclusion_generation/conclusion_generated.md
+review-projects/<project_id>/06_conclusion_generation/conclusion_quality_report.json
 review-projects/<project_id>/01_matrix_outline/literature_matrix.json
 review-projects/<project_id>/01_matrix_outline/selected_outline.md
 review-projects/<project_id>/03_section_drafting/section_tasks.json
@@ -38,15 +40,34 @@ For high-risk claims, reopen the relevant local paper metadata and Markdown/PDF 
 Follow this order:
 
 ```text
-1. Run the deterministic format scan script.
-2. Audit content and review quality per section (see "Audit Per Section" below), one section at a time.
-3. Do one lightweight whole-document pass for cross-cutting format checks only (headings, citation numbering consistency, reference list formatting) -- this does not require re-reading paper content, only the merged draft's own text.
-4. Revise the manuscript into a final draft.
-5. Write content and format audit reports.
-6. Write a release report with remaining risks.
+1. Read conclusion_quality_report.json (from review-conclusion-generator) and verify validation.passes_validation is true.
+2. Run integrate_generated_conclusion.py to seed 07_final_audit/final_draft.md -- it removes any old/duplicate conclusion-like sections and places one canonical generated conclusion before References, then writes conclusion_integration.json.
+3. Run the deterministic format scan script against the now-integrated final_draft.md.
+4. Audit content and review quality per section (see "Audit Per Section" below), one section at a time.
+5. Do one lightweight whole-document pass for cross-cutting format checks only (headings, citation numbering consistency, reference list formatting) -- this does not require re-reading paper content, only the merged draft's own text.
+6. Revise the manuscript into a final draft.
+7. Write content and format audit reports.
+8. Write a release report with remaining risks.
+```
+
+Example commands for steps 2-3:
+
+```bash
+python3 <skill-root>/scripts/integrate_generated_conclusion.py \
+  --review-root <review-root> --project-id <project_id>
+python3 <skill-root>/scripts/final_audit_scan.py \
+  --review-root <review-root> --project-id <project_id>
 ```
 
 Do not hide unresolved problems. If a claim cannot be verified from local evidence, either weaken it, remove it, or list it in `final_remaining_issues.md`.
+
+## Blocking Conditions
+
+Release is blocked by an absent conclusion, a conclusion after `References`, or duplicate conclusion-like sections. It is also blocked by failed conclusion validation, format-scan blocking issues, missing/empty References, citation or identity mismatches, broken image paths, unresolved source-figure placeholders, or an unapproved no-figure manuscript.
+
+## Integration Receipt
+
+`conclusion_integration.json` records the exact-source hashes for the approved first draft and generated conclusion, their resolved paths, the inserted heading, generated callout identities, and the integrated final-draft seed hash. Status re-derives the heading and callouts from the hashed generated conclusion and validates them against the receipt and current final draft. Audited prose edits are permitted, but the recorded heading and citation identity set remain binding; changed mapped citation identities block release.
 
 ## Audit Per Section (cost control)
 
@@ -117,7 +138,7 @@ The script writes `format_scan.json` and `format_scan.md`. Codex must then perfo
 Write outputs under:
 
 ```text
-review-projects/<project_id>/06_final_audit/
+review-projects/<project_id>/07_final_audit/
 ```
 
 Create:
@@ -127,6 +148,7 @@ format_scan.json
 format_scan.md
 content_audit_report.md
 format_audit_report.md
+conclusion_integration.json
 final_draft.md
 final_remaining_issues.md
 release_report.md

@@ -37,7 +37,9 @@ def expand_ref_callouts(text: str) -> set[int]:
 
 
 def scan_draft(project: Path) -> dict[str, Any]:
-    draft = project / "05_first_draft" / "first_draft.md"
+    final_draft = project / "07_final_audit" / "final_draft.md"
+    first_draft = project / "05_first_draft" / "first_draft.md"
+    draft = final_draft if final_draft.exists() else first_draft
     text = read_text(draft) if draft.exists() else ""
     headings = [{"level": len(m.group(1)), "title": m.group(2).strip()} for m in HEADING_RE.finditer(text)]
     duplicate_headings = sorted(
@@ -63,7 +65,9 @@ def scan_draft(project: Path) -> dict[str, Any]:
         candidate = (draft.parent / raw).resolve()
         if not candidate.exists():
             broken_images.append(raw)
-    figure_insert_report = project / "05_first_draft" / "figure_insertion_report.json"
+    figure_insert_report = project / "07_final_audit" / "figure_insertion_report.json"
+    if not figure_insert_report.exists():
+        figure_insert_report = project / "05_first_draft" / "figure_insertion_report.json"
     source_placeholder_mode = False
     if figure_insert_report.exists():
         try:
@@ -168,7 +172,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     project = Path(args.review_root).resolve() / "review-projects" / args.project_id
-    out_dir = project / "06_final_audit"
+    out_dir = project / "07_final_audit"
     scan = scan_draft(project)
     write_reports(out_dir, scan)
     print(f"Wrote final audit scan to {out_dir}")

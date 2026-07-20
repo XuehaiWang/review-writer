@@ -1,0 +1,4 @@
+interface:
+  display_name: "Conclusion Generator"
+  short_description: "Generate a grounded conclusion/challenges/insights section for the approved review draft."
+  default_prompt: "Using the approved first draft and literature matrix, generate a conclusion/challenges/insights section with numeric citation callouts and produce conclusion_generated.md with a quality validation report."

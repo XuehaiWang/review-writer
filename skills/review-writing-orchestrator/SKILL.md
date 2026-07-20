@@ -36,8 +36,10 @@ Never overwrite or reuse an existing project folder for a new topic. Confirm the
 4. review-section-drafting-figure-picking
 5. review-figure-style-redraw
 6. review-draft-merge-polish
-7. review-final-audit-release
-8. review-export-docx
+7. review-conclusion-generator
+8. review-final-audit-release
+9. review-outline-summary-chart
+10. review-export-docx
 ```
 
 For each stage, invoke that stage's skill by name (e.g. call the `review-topic-paper-discovery` skill, not just read its file). Do not read a sub-skill's `SKILL.md` yourself and improvise its steps inline — invoke the skill so it runs under its own instructions. The correct CLI invocation, required flags, required output files, and human-check gates for each stage live inside that sub-skill and are applied when it is invoked. The summary below is only a rough map of what each stage does, not a substitute for invoking it.
@@ -53,6 +55,9 @@ Outline: use topic + matrix + writing-rule skill to create selected_outline.md.
 Blueprint: convert outline into section_blueprint.json with section, paragraph, paper, and figure mapping.
 Drafting: one section file per section; each paragraph normally maps to one paper and one figure/scheme/table.
 Merge: combine section files into one polished first draft.
+Conclusion: generate a grounded conclusion/challenges/insights section from the approved first draft.
+Final audit: integrate the validated conclusion, then run content and format audits to produce final_draft.md.
+Summary chart: generate a full-review and per-section Mermaid summary chart from the approved final draft.
 ```
 
 ## Status
@@ -72,8 +77,10 @@ Pause after:
 03_section_drafting: confirm section files and figure candidates.
 04_figure_redraw: confirm redrawn figures.
 05_first_draft: confirm merged first draft.
-06_final_audit: confirm final draft.
-07_docx_export: download final_draft.docx and verify styling in Word.
+06_conclusion_generation: no additional confirmation (agent-run stage).
+07_final_audit: confirm final draft.
+08_summary_chart: no additional confirmation (agent-run stage).
+09_docx_export: download final_draft.docx and verify styling in Word.
 ```
 
 Do not skip a human check unless the user explicitly says to continue. Each of these is a hard stop: finish the one stage, summarize its output, name the specific check the user should perform, and end your turn there.

@@ -147,6 +147,12 @@ Both can run together: results are merged and deduplicated by DOI (falling back 
 
 **Crossref** (`--web-search`) needs no credentials and is a reasonable default when SciAtlas is not configured. `web_results_by_keyword.json`'s `source`/`sources`/`status` fields report exactly which source(s) actually contributed results for this run, so the human check can tell at a glance whether external search worked as intended.
 
+## Year filtering and grouping (optional)
+
+If the topic text contains an explicit recency phrase ("past 5 years", "近5年"), `discover.py` parses it automatically and restricts local scoring to papers published in that range (papers with no known year are excluded once a year filter is active). Override or set this explicitly with `--year-from`/`--year-to` (each an integer year; omit or pass `0` for unbounded). `discovery_report.md` reports how many papers were excluded and why.
+
+`--group-by <field>` (comma-separated, one or more of the structured-tag categories) buckets the selected local papers by that field's value and adds a `groups` object to `selected_discovery_results.json`. Useful when the user wants candidates organized by method, output type, etc. before matrix/outline work begins.
+
 ### `--paper-dir`
 
 Provide the path to the server's local paper storage directory. When given, `discover.py` will automatically scan that directory for PDF files and register any that are not yet in the library — before running keyword search and scoring.

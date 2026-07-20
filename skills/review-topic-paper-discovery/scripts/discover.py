@@ -28,6 +28,26 @@ def slugify(value: str) -> str:
     return value.strip("-")[:96] or "review-discovery"
 
 
+def resolve_project_path(review_root: Path, project_id: str) -> Path:
+    """Resolve project_id to a path-traversal-safe directory under review-projects/."""
+    if not isinstance(project_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,95})", project_id
+    ):
+        raise SystemExit(
+            "--project-id must be one safe slug component containing only letters, "
+            "numbers, underscores, or hyphens"
+        )
+    projects_root = (review_root / "review-projects").resolve()
+    project = (projects_root / project_id).resolve()
+    try:
+        relative = project.relative_to(projects_root)
+    except ValueError:
+        raise SystemExit("--project-id resolves outside review-root/review-projects")
+    if relative == Path(".") or len(relative.parts) != 1:
+        raise SystemExit("--project-id must resolve to one project component")
+    return project
+
+
 def read_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
@@ -130,6 +150,82 @@ def markdown_signal(meta: dict[str, Any], max_chars: int = 12000) -> str:
 
 def tokenize(text: str) -> list[str]:
     return dedupe([w.lower() for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9'′\\-]*", text or "") if len(w) >= 3])
+
+
+ENGLISH_NUMBER_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+
+
+def parse_year_filters(topic: str, current_year: int | None = None) -> dict[str, int]:
+    """Parse an explicit year range out of the topic text (e.g. "past 5 years"
+    or "近5年"). Returns {} when no such phrase is present. Domain-agnostic --
+    unlike keyword expansion, this doesn't depend on the review's subject matter.
+    """
+    current_year = current_year or datetime.now().year
+    match = re.search(
+        r"(?<![A-Za-z0-9])(?:past|last)\s+"
+        r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
+        r"years?(?![A-Za-z0-9])",
+        topic,
+        re.I,
+    )
+    if match:
+        count = (
+            int(match.group(1))
+            if match.group(1).isdigit()
+            else ENGLISH_NUMBER_WORDS[match.group(1).lower()]
+        )
+        return {"year_from": current_year - count + 1, "year_to": current_year}
+    chinese = re.search(r"(?:近|过去)\s*(\d+)\s*年", topic)
+    if chinese:
+        count = int(chinese.group(1))
+        return {"year_from": current_year - count + 1, "year_to": current_year}
+    return {}
+
+
+def group_selected_papers(
+    selected: dict[str, Any],
+    papers: dict[str, dict[str, Any]],
+    group_by: list[str],
+) -> dict[str, Any]:
+    """Bucket selected local papers by one or more structured-tag fields."""
+    grouped: dict[str, Any] = {}
+    selected_ids = {
+        row.get("paper_id")
+        for row in selected.get("local_papers", [])
+        if row.get("paper_id")
+    }
+    for field in group_by:
+        buckets: dict[str, set[str]] = {}
+        for paper_id in selected_ids:
+            meta = papers.get(paper_id, {})
+            structured_tags = field_value(meta.get("structured_tags"), {})
+            raw_value = (
+                structured_tags.get(field)
+                if isinstance(structured_tags, dict)
+                else None
+            )
+            value = str(raw_value).strip() if raw_value is not None else ""
+            value = value or "not specified"
+            buckets.setdefault(value, set()).add(paper_id)
+        grouped[field] = {
+            value: {
+                "count": len(paper_ids),
+                "paper_ids": sorted(paper_ids),
+            }
+            for value, paper_ids in sorted(buckets.items())
+        }
+    return grouped
 
 
 def load_agent_keywords(path: Path | None) -> list[dict[str, Any]]:
@@ -376,14 +472,39 @@ def local_search_by_keyword(
     keywords: list[dict[str, Any]],
     topic: str,
     classification_rules: dict[str, dict[str, list[str]]],
-) -> list[dict[str, Any]]:
+    year_from: int | None = None,
+    year_to: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    filter_stats = {
+        "before_filter": len(papers),
+        "after_filter": 0,
+        "missing_year_excluded": 0,
+        "out_of_range_excluded": 0,
+    }
+    year_filter_active = year_from is not None or year_to is not None
+    filtered_papers: dict[str, dict[str, Any]] = {}
+    for paper_id, meta in papers.items():
+        year = field_value(meta.get("year"))
+        valid_year = year if type(year) is int else None
+        if year_filter_active and valid_year is None:
+            filter_stats["missing_year_excluded"] += 1
+            continue
+        if (
+            (year_from is not None and valid_year is not None and valid_year < year_from)
+            or (year_to is not None and valid_year is not None and valid_year > year_to)
+        ):
+            filter_stats["out_of_range_excluded"] += 1
+            continue
+        filtered_papers[paper_id] = meta
+    filter_stats["after_filter"] = len(filtered_papers)
+
     topic_terms = tokenize(topic)
     grouped: list[dict[str, Any]] = []
     for kw in keywords:
         if not kw.get("keep", True):
             continue
         keyword = kw["keyword"]
-        scored = [score_local_paper(meta, keyword, topic_terms, classification_rules) for meta in papers.values()]
+        scored = [score_local_paper(meta, keyword, topic_terms, classification_rules) for meta in filtered_papers.values()]
         results = [r for r in scored if r["direct_raw_score"] >= SELECT_DIRECT_RAW and r["score"] >= SELECT_SCORE]
         selected_ids = {r["paper_id"] for r in results}
         near_miss = [
@@ -402,7 +523,7 @@ def local_search_by_keyword(
                 "near_miss_results": near_miss,
             }
         )
-    return grouped
+    return grouped, filter_stats
 
 
 def web_search(keyword: str, topic: str, limit: int = 8, mailto: str = "") -> list[dict[str, Any]]:
@@ -725,8 +846,25 @@ def write_report(
     keyword_set: dict[str, Any],
     combined: list[dict[str, Any]],
     borderline_papers: list[dict[str, Any]] | None = None,
+    filter_stats: dict[str, int] | None = None,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    group_by: list[str] | None = None,
 ) -> None:
-    lines = ["# Topic Paper Discovery Report", "", f"Topic: {topic}", "", "## Keywords", ""]
+    lines = ["# Topic Paper Discovery Report", "", f"Topic: {topic}", ""]
+    if filter_stats and (year_from is not None or year_to is not None):
+        year_range = f"{year_from if year_from is not None else 'unbounded'}-{year_to if year_to is not None else 'unbounded'}"
+        lines += [
+            f"Effective year range: {year_range}",
+            f"Papers before year filtering: {filter_stats.get('before_filter', 0)}",
+            f"Papers after year filtering: {filter_stats.get('after_filter', 0)}",
+            f"Papers excluded for missing year: {filter_stats.get('missing_year_excluded', 0)}",
+            f"Papers excluded outside year range: {filter_stats.get('out_of_range_excluded', 0)}",
+            "",
+        ]
+    if group_by:
+        lines += [f"Requested grouping fields: {', '.join(group_by)}", ""]
+    lines += ["## Keywords", ""]
     for kw in keyword_set["merged_keywords"]:
         lines.append(f"- {kw['keyword']} ({kw.get('category')}, source={'+'.join(kw.get('source', []))})")
     if borderline_papers:
@@ -906,20 +1044,34 @@ def run(args: argparse.Namespace) -> int:
     if args.output_dir:
         out_dir = Path(args.output_dir).resolve()
     else:
-        out_dir = review_root / "review-projects" / project_id / "00_discovery"
+        out_dir = resolve_project_path(review_root, project_id) / "00_discovery"
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "topic_input.md").write_text(
         f"# {args.topic}\n\nUser keywords:\n\n" + "\n".join(f"- {kw}" for kw in user_keywords) + "\n",
         encoding="utf-8",
     )
+    default_filters = parse_year_filters(args.topic)
+    year_from = args.year_from if args.year_from else default_filters.get("year_from")
+    year_to = args.year_to if args.year_to else default_filters.get("year_to")
+    group_by = [field.strip() for field in args.group_by.split(",") if field.strip()] if args.group_by else []
+    for field in group_by:
+        if field not in STRUCTURED_TAG_KEYS:
+            raise SystemExit(f"--group-by field '{field}' is not one of {STRUCTURED_TAG_KEYS}")
+
     agent_keywords_path = Path(args.agent_keywords).resolve() if args.agent_keywords else None
     agent_keywords = load_agent_keywords(agent_keywords_path)
     keyword_set = build_keyword_set(args.topic, user_keywords, agent_keywords)
+    keyword_set["filters"] = {k: v for k, v in {"year_from": year_from, "year_to": year_to}.items() if v is not None}
+    keyword_set["group_by"] = group_by
     write_json(out_dir / "keyword_set.draft.json", keyword_set)
     papers = load_metadata(review_root)
     classification_rules_path = Path(args.classification_rules).resolve() if args.classification_rules else None
     classification_rules = load_classification_rules(classification_rules_path)
-    local_grouped = local_search_by_keyword(papers, keyword_set["merged_keywords"], args.topic, classification_rules)
+
+    local_grouped, filter_stats = local_search_by_keyword(
+        papers, keyword_set["merged_keywords"], args.topic, classification_rules,
+        year_from=year_from, year_to=year_to,
+    )
     write_json(out_dir / "local_results_by_keyword.json", {"project_id": project_id, "results": local_grouped})
 
     sciatlas_requested = bool(args.sciatlas_search)
@@ -1000,6 +1152,9 @@ def run(args: argparse.Namespace) -> int:
     selected = selected_from_combined(combined)
     selected["project_id"] = project_id
     selected["human_confirmed"] = False
+    selected["filters"] = keyword_set["filters"]
+    if group_by:
+        selected["groups"] = group_selected_papers(selected, papers, group_by)
     write_json(out_dir / "selected_discovery_results.json", selected)
     write_json(
         out_dir / "human_check_state.json",
@@ -1010,7 +1165,10 @@ def run(args: argparse.Namespace) -> int:
             "instructions": "Use the dashboard to delete irrelevant keywords/results, then mark discovery confirmed.",
         },
     )
-    write_report(out_dir, args.topic, keyword_set, combined, selected.get("borderline_papers"))
+    write_report(
+        out_dir, args.topic, keyword_set, combined, selected.get("borderline_papers"),
+        filter_stats=filter_stats, year_from=year_from, year_to=year_to, group_by=group_by,
+    )
     if selected.get("borderline_papers"):
         print(
             f"[borderline] {len(selected['borderline_papers'])} paper(s) scored in the near-miss band -- "
@@ -1043,6 +1201,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--paper-dir", default="", help="Path to local paper storage directory. When provided, unregistered PDFs are auto-registered before discovery.")
     parser.add_argument("--agent-keywords", default="", help="Path to a JSON file of LLM-expanded keywords (see SKILL.md). Required for keyword expansion beyond --keywords.")
     parser.add_argument("--classification-rules", default="", help="Optional path to a Python file defining a 'rules' list of (label, category, aliases) tuples, used to widen structured-tag matching. Safe to omit.")
+    parser.add_argument("--year-from", type=int, default=0, help="Explicit lower year bound (overrides any year range parsed from --topic). 0 = unset.")
+    parser.add_argument("--year-to", type=int, default=0, help="Explicit upper year bound (overrides any year range parsed from --topic). 0 = unset.")
+    parser.add_argument("--group-by", default="", help="Comma-separated structured-tag field(s) to bucket selected papers by, e.g. 'method' or 'method,input'. Must be one of: " + ", ".join(STRUCTURED_TAG_KEYS))
     return parser.parse_args()
 
 
