@@ -1183,6 +1183,48 @@ def run_download(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_probe(args: argparse.Namespace) -> int:
+    """Lightweight, project-agnostic search -- no files written, no project
+    required. Meant for disambiguating an ambiguous topic term before
+    committing to full keyword expansion (see references/
+    topic_decomposition_prompt.md): run a quick search on a candidate
+    meaning and see what the actual literature returns, instead of resolving
+    it from general/training-data knowledge alone."""
+    _load_dotenv_if_present(Path(args.review_root).resolve())
+    if not args.web_search and not args.sciatlas_search:
+        raise SystemExit("At least one of --web-search or --sciatlas-search is required for a probe.")
+
+    rows: list[dict[str, Any]] = []
+    if args.web_search:
+        rows.extend(web_search(args.query, "", args.limit, args.mailto))
+    if args.sciatlas_search:
+        sciatlas_config = load_sciatlas_config(
+            base_url=args.sciatlas_base_url or None,
+            api_key=args.sciatlas_api_key or None,
+            timeout=args.sciatlas_timeout or None,
+        )
+        if not sciatlas_config.configured:
+            print("[probe] SciAtlas not configured (missing API key) -- skipping.")
+        else:
+            client = SciAtlasClient(config=sciatlas_config)
+            try:
+                client.health()
+                rows.extend(sciatlas_search(client, args.query, "", args.limit, None, None))
+            except Exception as exc:
+                print(f"[probe] SciAtlas unavailable: {exc}")
+
+    rows = merge_external_results(rows)[: args.limit]
+    if not rows:
+        print(f"[probe] No results for {args.query!r}. Inconclusive -- do not guess; ask the user.")
+        return 0
+
+    print(f"[probe] Top {len(rows)} result(s) for {args.query!r}:")
+    for row in rows:
+        journal = row.get("journal") or "(no journal)"
+        print(f"  - {row.get('year')} | {journal} | {row.get('title')}")
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Search Crossref/SciAtlas for papers by topic, and download confirmed "
@@ -1256,6 +1298,21 @@ def parse_args() -> argparse.Namespace:
         help="Bypass the online_search_human_check_state.json confirmation gate.",
     )
 
+    probe = subparsers.add_parser(
+        "probe", help="Quick, project-agnostic search for a term -- no files written. "
+        "Use to gather evidence when disambiguating an ambiguous topic term before "
+        "committing to full keyword expansion (see references/topic_decomposition_prompt.md).",
+    )
+    probe.add_argument("--review-root", default=str(Path.cwd()))
+    probe.add_argument("--query", required=True, help="The ambiguous term or a candidate expansion of it.")
+    probe.add_argument("--web-search", action="store_true", help="Query Crossref. At least one source is required.")
+    probe.add_argument("--sciatlas-search", action="store_true", help="Query SciAtlas.")
+    probe.add_argument("--limit", type=int, default=8)
+    probe.add_argument("--mailto", default="", help="Contact email for Crossref polite pool.")
+    probe.add_argument("--sciatlas-api-key", default="", help="Overrides SCIATLAS_API_KEY env var.")
+    probe.add_argument("--sciatlas-base-url", default="", help="Overrides SCIATLAS_API_BASE_URL env var.")
+    probe.add_argument("--sciatlas-timeout", type=int, default=0, help="HTTP timeout in seconds. 0 = use env/default.")
+
     return parser.parse_args()
 
 
@@ -1263,6 +1320,8 @@ def main() -> int:
     args = parse_args()
     if args.mode == "search":
         return run_search(args)
+    if args.mode == "probe":
+        return run_probe(args)
     return run_download(args)
 
 

@@ -33,9 +33,13 @@ else:
 
 Never overwrite or reuse an existing project folder for a new topic.
 
+## Topic decomposition and disambiguation (LLM step, do this first)
+
+Before expanding keywords, break the topic into its constituent concepts and check for ambiguous terms (an abbreviation or phrase with more than one plausible meaning in the relevant domain). See `references/topic_decomposition_prompt.md` for the full method — in short: decompose into concepts, and for anything ambiguous, run a quick `discover.py probe` search (see below) to see which meaning the actual literature supports before committing to it, rather than guessing from general knowledge. Ask the user only if probe evidence is genuinely inconclusive.
+
 ## Keyword expansion (LLM step, required before running the script)
 
-`discover.py` does not contain any hardcoded keyword-expansion rules — it has no built-in knowledge of any subject matter. Before running the script, the LLM must expand the (English) topic into a broader set of search keywords itself, using its own domain knowledge of whatever field the topic belongs to. See `references/keyword_expansion_prompt.md` for the expected output shape.
+`discover.py` does not contain any hardcoded keyword-expansion rules — it has no built-in knowledge of any subject matter. Before running the script, the LLM must expand the (English, disambiguated) topic into a broader set of search keywords itself, using its own domain knowledge of whatever field the topic belongs to. See `references/keyword_expansion_prompt.md` for the expected output shape.
 
 Write the expansion to a JSON file as a flat list:
 
@@ -58,10 +62,21 @@ If `--agent-keywords` is omitted, discovery runs on `--keywords` alone (no expan
 
 where `<skill-root>` is the directory containing this `SKILL.md` file.
 
-## Two-phase flow
+## Two-phase flow (plus an optional pre-flight probe)
 
+0. **`probe`** (optional, before Phase 1) — a lightweight, project-agnostic search for one term, used to disambiguate an ambiguous topic term (see "Topic decomposition and disambiguation" above). Writes nothing, needs no `--project-id`.
 1. **`search`** — query Crossref/SciAtlas, aggregate and score results into candidates, write a report, and stop for human review/confirmation.
 2. **`download`** (automatic, agent-run after confirmation) — resolve and download a PDF for every confirmed, non-excluded candidate into `review-library/paper_pdf/`, registering a stub metadata entry for each.
+
+## Phase 0: probe (disambiguation)
+
+```bash
+python3 <skill-root>/scripts/discover.py probe \
+  --query "<candidate meaning or term in context>" \
+  --web-search --limit 8
+```
+
+At least one of `--sciatlas-search`/`--web-search` is required, same as `search`. Prints the top results' year/journal/title to stdout — nothing is written to disk. Use it once per candidate meaning of an ambiguous term; compare what comes back.
 
 ## Phase 1: search
 
