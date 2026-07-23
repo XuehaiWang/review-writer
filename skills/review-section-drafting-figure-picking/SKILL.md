@@ -81,7 +81,7 @@ Figure selection has three ordered steps. Do not run step 3 before step 2 exists
 python3 <skill-root>/scripts/build_paper_figure_inventory.py --project-id <project_id>
 ```
 
-This writes `paper_figure_inventory.json`.
+This reads `00_discovery/selected_discovery_results.json` (produced by `labkag-review-skill`'s `export_discovery_format.py` bridge, per `review-literature-matrix-outline/SKILL.md` -- not by `review-online-paper-discovery` directly) and writes `paper_figure_inventory.json`.
 
 2. Write `section_tasks.json` (LLM output, see Outputs below — one item per section with `section_id`, `heading`, `core_argument`, `allowed_papers`, `must_cover_points`, `avoid_points`, `figure_need`).
 

@@ -212,10 +212,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         tmp.replace(path)
+
+        # Preserve any excluded_candidates the agent already recorded (per
+        # review-online-paper-discovery/SKILL.md's "Agent relevance check"
+        # step) -- re-aggregating from raw per-keyword results would otherwise
+        # silently discard that work on every dashboard save.
+        candidates_path = path.parent / "online_search_candidates.json"
+        prior = read_json_if_exists(candidates_path) or {}
+        prior_excluded = prior.get("excluded_candidates") if isinstance(prior.get("excluded_candidates"), list) else []
+        excluded_keys = {_result_dedupe_key(c) for c in prior_excluded if isinstance(c, dict)}
+
         aggregated = aggregate_candidates_from_groups(data.get("results", []))
+        if excluded_keys:
+            aggregated["candidates"] = [
+                c for c in aggregated["candidates"] if _result_dedupe_key(c) not in excluded_keys
+            ]
+            aggregated["borderline_candidates"] = [
+                c for c in aggregated["borderline_candidates"] if _result_dedupe_key(c) not in excluded_keys
+            ]
+        aggregated["excluded_candidates"] = prior_excluded
         aggregated["project_id"] = project_id
         aggregated["human_confirmed"] = bool(confirm)
-        (path.parent / "online_search_candidates.json").write_text(
+        candidates_path.write_text(
             json.dumps(aggregated, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )

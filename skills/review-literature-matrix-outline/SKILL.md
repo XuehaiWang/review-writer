@@ -11,6 +11,8 @@ Goal: read selected papers and create the literature matrix plus outline options
 
 All paths are relative to `<review-root>` — the root directory of this review-writer project (the folder that contains `skills/`, `review-projects/`, and `review-library/`).
 
+**`selected_discovery_results.json` is not produced by `review-online-paper-discovery`.** That skill only searches Crossref/SciAtlas and grows `review-library/paper_pdf/` — it writes `online_search_*`-prefixed files, not this one. This file is produced by `labkag-review-skill`'s workflow: build/update the project's LabKAG knowledge base (ingest + taxonomy), run `match-topic` for this review's topic, then run `labkag-review-skill/scripts/export_discovery_format.py` to export the match into this exact format. If `00_discovery/selected_discovery_results.json` doesn't exist yet, stop and run that bridge step first — this skill's scripts will fail outright without it, not degrade gracefully.
+
 ```text
 review-projects/<project_id>/00_discovery/selected_discovery_results.json
 review-projects/<project_id>/00_discovery/topic_input.md
