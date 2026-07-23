@@ -1,0 +1,7 @@
+interface:
+  display_name: "LabKAG API"
+  short_description: "API wrapper for calling LabKAG through the bundled CLI script."
+  default_prompt: "Use $labkag-review-skill to call the LabKAG API through the bundled CLI script, including taxonomy management and topic-based paper discovery."
+
+policy:
+  allow_implicit_invocation: true

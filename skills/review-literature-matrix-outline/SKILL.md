@@ -48,7 +48,7 @@ If no API key is available, fall back to the agent reading papers directly under
 Reading the full Markdown of every paper in one continuous pass is the single largest token cost in this skill. Bound it:
 
 ```text
-Read only the first ~8,000-10,000 characters of each paper's Markdown by default (title, abstract, intro, and enough of the methods/results to identify the main output, method, and key figure). This mirrors the same front-matter cap review-metadata-prep already uses.
+Read only the first ~8,000-10,000 characters of each paper's Markdown by default (title, abstract, intro, and enough of the methods/results to identify the main output, method, and key figure) -- this cost-control cap keeps per-paper reads bounded regardless of document length.
 Only read further into the paper (a later section, or the full document) when that initial excerpt genuinely lacks what main_content needs -- e.g. the main quantitative result is reported later, or the most relevant figure's caption isn't in the excerpt.
 Process papers in small batches (e.g. 3-5 at a time), writing their matrix rows to literature_matrix.json as you go, rather than holding all 20-30 papers' full text in context simultaneously before writing anything. This bounds peak context size regardless of paper count.
 Reuse the paper's metadata (abstract, structured_tags) as the first source before re-deriving the same facts from the raw Markdown -- metadata_prep already extracted these once; don't pay to re-extract them.

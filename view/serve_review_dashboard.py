@@ -127,12 +127,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def handle_project_export_docx(self, project_id: str) -> None:
         project = self.review_root / "review-projects" / project_id
-        stage = project / "06_final_audit"
-        md_path = stage / "final_draft.md"
+        md_path = project / "07_final_audit" / "final_draft.md"
         if not md_path.exists():
             self.send_error(HTTPStatus.BAD_REQUEST, "final_draft.md not found")
             return
-        docx_path = stage / "final_draft.docx"
+        docx_stage = project / "09_docx_export"
+        docx_stage.mkdir(parents=True, exist_ok=True)
+        docx_path = docx_stage / "final_draft.docx"
         script = self.review_root / "skills" / "review-export-docx" / "scripts" / "md2docx.py"
         if not script.exists():
             self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "md2docx.py not found")
@@ -211,13 +212,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         tmp.replace(path)
-        selected = selected_from_combined(data.get("results", []), project_id)
-        selected["human_confirmed"] = bool(confirm)
-        (path.parent / "selected_discovery_results.json").write_text(
-            json.dumps(selected, ensure_ascii=False, indent=2) + "\n",
+        aggregated = aggregate_candidates_from_groups(data.get("results", []))
+        aggregated["project_id"] = project_id
+        aggregated["human_confirmed"] = bool(confirm)
+        (path.parent / "online_search_candidates.json").write_text(
+            json.dumps(aggregated, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        (path.parent / "human_check_state.json").write_text(
+        (path.parent / "online_search_human_check_state.json").write_text(
             json.dumps(
                 {
                     "project_id": project_id,
@@ -296,7 +298,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, "project_id": project_id})
 
     def discovery_path(self, project_id: str) -> Path:
-        return self.review_root / "review-projects" / project_id / "00_discovery" / "combined_results_by_keyword.json"
+        return self.review_root / "review-projects" / project_id / "00_discovery" / "online_search_results_by_keyword.json"
 
     def handle_metadata_get(self, paper_id: str) -> None:
         path = self.metadata_dir / f"{paper_id}.metadata.json"
@@ -447,41 +449,59 @@ def now_utc() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def selected_from_combined(groups: list[dict], project_id: str) -> dict:
-    selected = {"project_id": project_id, "keywords": [], "local_papers": {}, "web_papers": []}
+# Mirrors discover.py's ONLINE_CANDIDATE_SCORE/ONLINE_BORDERLINE_SCORE and
+# aggregate_candidates() -- kept in sync by hand since this dashboard doesn't
+# import discover.py (it may be serving a different --base-url's data).
+ONLINE_CANDIDATE_SCORE = 0.35
+ONLINE_BORDERLINE_SCORE = 0.15
+
+
+def _result_dedupe_key(row: dict) -> str:
+    doi = (row.get("doi") or "").strip().lower()
+    if doi:
+        return "doi:" + doi
+    url = (row.get("url") or "").strip().lower()
+    if url:
+        return "url:" + url
+    title = " ".join((row.get("title") or "").strip().lower().split())
+    return "title:" + title
+
+
+def aggregate_candidates_from_groups(groups: list[dict]) -> dict:
+    merged: dict[str, dict] = {}
+    order: list[str] = []
     for group in groups:
         if group.get("keep") is False:
             continue
-        selected["keywords"].append({"keyword": group.get("keyword"), "category": group.get("category")})
-        for row in group.get("local_results", []):
+        keyword = group.get("keyword")
+        for row in group.get("web_results", []):
             if row.get("keep") is False:
                 continue
-            pid = row.get("paper_id")
-            if not pid:
+            key = _result_dedupe_key(row)
+            if not key:
                 continue
-            item = selected["local_papers"].setdefault(
-                pid,
-                {
-                    "paper_id": pid,
-                    "title": row.get("title"),
-                    "year": row.get("year"),
-                    "journal": row.get("journal"),
-                    "role": row.get("role", "uncertain"),
-                    "matched_keywords": [],
-                    "best_score": 0,
-                    "keep": True,
-                },
-            )
-            item["matched_keywords"].append(group.get("keyword"))
-            item["best_score"] = max(item.get("best_score", 0), row.get("score", 0))
-        for row in group.get("web_results", []):
-            if row.get("keep") is not False:
-                selected["web_papers"].append({**row, "matched_keyword": group.get("keyword")})
-    selected["local_papers"] = sorted(
-        selected["local_papers"].values(), key=lambda x: x.get("best_score", 0), reverse=True
-    )[:30]
-    selected["web_papers"] = selected["web_papers"][:30]
-    return selected
+            if key not in merged:
+                merged[key] = {**row, "matched_keywords": [keyword]}
+                order.append(key)
+                continue
+            existing = merged[key]
+            if keyword not in existing["matched_keywords"]:
+                existing["matched_keywords"].append(keyword)
+            if (row.get("score") or 0) > (existing.get("score") or 0):
+                matched_keywords = existing["matched_keywords"]
+                merged[key] = {**row, "matched_keywords": matched_keywords}
+    rows = [merged[key] for key in order]
+    candidates = [r for r in rows if (r.get("score") or 0) >= ONLINE_CANDIDATE_SCORE]
+    borderline = [
+        r for r in rows if ONLINE_BORDERLINE_SCORE <= (r.get("score") or 0) < ONLINE_CANDIDATE_SCORE
+    ]
+    candidates.sort(key=lambda r: (r.get("score") or 0, r.get("year") or 0), reverse=True)
+    borderline.sort(key=lambda r: (r.get("score") or 0, r.get("year") or 0), reverse=True)
+    return {
+        "keywords": [{"keyword": g.get("keyword")} for g in groups],
+        "candidates": candidates,
+        "borderline_candidates": borderline,
+    }
 
 
 def read_text_if_exists(path: Path) -> str:
@@ -500,10 +520,10 @@ def read_json_if_exists(path: Path) -> Any:
 
 
 def infer_project_topic(project: Path) -> str:
-    discovery = read_json_if_exists(project / "00_discovery" / "combined_results_by_keyword.json")
+    discovery = read_json_if_exists(project / "00_discovery" / "online_search_results_by_keyword.json")
     if isinstance(discovery, dict) and discovery.get("topic"):
         return str(discovery.get("topic"))
-    topic_input = project / "00_discovery" / "topic_input.md"
+    topic_input = project / "00_discovery" / "online_search_topic.md"
     if topic_input.exists():
         for line in topic_input.read_text(encoding="utf-8", errors="ignore").splitlines():
             line = line.strip()
@@ -521,19 +541,19 @@ def list_review_projects(review_root: Path) -> list[dict[str, Any]]:
     if not base.exists():
         return projects
     for project in sorted(p for p in base.iterdir() if p.is_dir()):
-        discovery_state = read_json_if_exists(project / "00_discovery" / "human_check_state.json") or {}
+        discovery_state = read_json_if_exists(project / "00_discovery" / "online_search_human_check_state.json") or {}
         projects.append(
             {
                 "project_id": project.name,
                 "topic": infer_project_topic(project),
-                "has_discovery": (project / "00_discovery" / "combined_results_by_keyword.json").exists(),
+                "has_discovery": (project / "00_discovery" / "online_search_results_by_keyword.json").exists(),
                 "discovery_status": discovery_state.get("status") or "pending",
                 "has_matrix_outline": (project / "01_matrix_outline" / "literature_matrix.json").exists(),
                 "has_blueprint": (project / "02_section_blueprint" / "section_blueprint.json").exists(),
                 "has_section_drafting": (project / "03_section_drafting" / "section_drafts.md").exists(),
                 "has_figure_redraw": (project / "04_figure_redraw" / "redrawn_figure_manifest.json").exists(),
                 "has_first_draft": (project / "05_first_draft" / "first_draft.md").exists(),
-                "has_final_audit": (project / "06_final_audit" / "final_draft.md").exists(),
+                "has_final_audit": (project / "07_final_audit" / "final_draft.md").exists(),
             }
         )
     return projects
@@ -615,8 +635,8 @@ def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any
 
 def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     project = review_root / "review-projects" / project_id
-    stage = project / "06_final_audit"
-    docx_path = stage / "final_draft.docx"
+    stage = project / "07_final_audit"
+    docx_path = project / "09_docx_export" / "final_draft.docx"
     return {
         "project_id": project_id,
         "topic": infer_project_topic(project),
@@ -693,7 +713,7 @@ def run(args: argparse.Namespace) -> int:
         final_app_path,
     ) = dashboard_assets(view_root)
     if not (review_root / "review-library" / "metadata" / "papers").exists():
-        print("ERROR: metadata files not found. Run prepare_metadata.py first.", file=sys.stderr)
+        print("ERROR: metadata files not found. Run labkag-review-skill's ingest workflow first.", file=sys.stderr)
         return 2
     DashboardHandler.review_root = review_root
     DashboardHandler.library_app_path = library_app_path

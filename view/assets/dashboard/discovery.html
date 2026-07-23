@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Review Topic Discovery</title>
+  <title>Review Online Paper Discovery</title>
   <style>
     :root {
       --ink: #1b241f;
@@ -255,17 +255,6 @@
       </div>
       <div class="toolbar">
         <input id="keywordFilter" placeholder="Filter keywords">
-        <select id="centerFilter">
-          <option value="all">All centers</option>
-          <option value="general">General / Review</option>
-          <option value="palladium">Pd</option>
-          <option value="gold_silver">Au / Ag</option>
-          <option value="copper">Cu</option>
-          <option value="rhodium">Rh</option>
-          <option value="nickel">Ni</option>
-          <option value="transfer_template">Transfer / Template</option>
-          <option value="nonmetal">Non-metal</option>
-        </select>
       </div>
       <div id="keywordList" class="list"></div>
     </section>
@@ -304,7 +293,7 @@
     const els = {
       globalProjectSelect: document.getElementById('globalProjectSelect'),
       projectInfo: document.getElementById('projectInfo'), projectSelect: document.getElementById('projectSelect'),
-      keywordList: document.getElementById('keywordList'), keywordFilter: document.getElementById('keywordFilter'), centerFilter: document.getElementById('centerFilter'),
+      keywordList: document.getElementById('keywordList'), keywordFilter: document.getElementById('keywordFilter'),
       keywordTitle: document.getElementById('keywordTitle'), keywordMeta: document.getElementById('keywordMeta'),
       results: document.getElementById('results'), detailTitle: document.getElementById('detailTitle'),
       detailMeta: document.getElementById('detailMeta'), summary: document.getElementById('summary'),
@@ -411,101 +400,58 @@
       selectedPaper = null;
       renderAll();
     }
-    function classifyCenter(keyword='') {
-      const k = keyword.toLowerCase();
-      if (k.includes('palladium') || k.includes('pd-catalyzed')) return 'palladium';
-      if (k.includes('gold') || k.includes('au-catalyzed') || k.includes('silver') || k.includes('ag-catalyzed')) return 'gold_silver';
-      if (k.includes('copper') || k.includes('cu-catalyzed') || k.includes('trisubstituted allenes')) return 'copper';
-      if (k.includes('rhodium') || k.includes('rh-catalyzed') || k.includes('enynone')) return 'rhodium';
-      if (k.includes('nickel') || k.includes('ni-catalyzed')) return 'nickel';
-      if (k.includes('terminal alkyne asymmetric allene synthesis') || k.includes('chirality transfer')) return 'transfer_template';
-      if (k.includes('organocatalytic') || k.includes('enzymatic') || k.includes('dynamic kinetic resolution')) return 'nonmetal';
-      return 'general';
-    }
-    function centerLabel(center) {
-      return {
-        general: 'General / Review',
-        palladium: 'Pd',
-        gold_silver: 'Au / Ag',
-        copper: 'Cu',
-        rhodium: 'Rh',
-        nickel: 'Ni',
-        transfer_template: 'Transfer / Template',
-        nonmetal: 'Non-metal'
-      }[center] || center;
-    }
     function currentGroup() { return data?.results?.find(g => g.keyword === selectedKeyword); }
     function renderAll() { renderKeywords(); renderResults(); renderDetail(); }
     function renderKeywords() {
       const groups = data?.results || [];
-      const counts = {};
-      for (const g of groups) {
-        const c = classifyCenter(g.keyword);
-        counts[c] = (counts[c] || 0) + (g.local_results || []).filter(r => r.keep !== false).length;
-      }
-      const countText = Object.entries(counts).map(([k,v]) => `${centerLabel(k)}:${v}`).join(' · ');
-      els.projectInfo.textContent = `${selected} · ${data?.topic || ''}${countText ? ' · ' + countText : ''}`;
+      const total = groups.reduce((sum, g) => sum + (g.web_results || []).filter(r => r.keep !== false).length, 0);
+      els.projectInfo.textContent = `${selected} · ${data?.topic || ''} · ${total} candidate result(s)`;
       const q = els.keywordFilter.value.toLowerCase();
-      const center = els.centerFilter.value;
       els.keywordList.innerHTML = groups
         .filter(g => g.keyword.toLowerCase().includes(q))
-        .filter(g => center === 'all' || classifyCenter(g.keyword) === center)
         .map(g => `
         <button class="card ${selectedKeyword===g.keyword?'active':''} ${g.keep===false?'deleted':''}" data-keyword="${esc(g.keyword)}">
           <div class="k-title">${esc(g.keyword)}</div>
-          <div class="meta">${esc(centerLabel(classifyCenter(g.keyword)))} · ${esc(g.category || '')}</div>
-          <span class="pill">${(g.local_results||[]).filter(r=>r.keep!==false).length} local</span>
-          <span class="pill web">${(g.web_results||[]).filter(r=>r.keep!==false).length} external</span>
+          <span class="pill web">${(g.web_results||[]).filter(r=>r.keep!==false).length} results</span>
         </button>`).join('');
     }
     function renderResults() {
       const g = currentGroup();
       if (!g) { els.results.innerHTML = ''; return; }
       els.keywordTitle.textContent = g.keyword;
-      els.keywordMeta.textContent = `${centerLabel(classifyCenter(g.keyword))} · ${g.category || ''} · keep=${g.keep !== false}`;
-      const rows = [...(g.local_results||[]).map(r => ({...r, kind:'local'})), ...(g.web_results||[]).map((r,i) => ({...r, kind:'web', webIndex:i}))];
+      els.keywordMeta.textContent = `keep=${g.keep !== false}`;
+      const rows = (g.web_results || []).map((r, i) => ({...r, id: `r-${i}`}));
       els.results.innerHTML = rows.map(r => {
-        const id = r.kind === 'local' ? r.paper_id : `web-${r.webIndex}`;
         return `<div class="result ${r.keep===false?'drop':''}">
-          <div class="r-title">${esc(r.title || '(untitled)')}</div>
-          <div class="meta">${esc([r.paper_id, r.year, r.journal, `score=${r.score}`, (Array.isArray(r.sources) && r.sources.length) ? `source=${r.sources.join('+')}` : (r.source ? `source=${r.source}` : null)].filter(Boolean).join(' · '))}</div>
+          <div class="r-title">${esc(r.title || '(untitled)')}${r.pdf_url ? ' <span class="pill">pdf</span>' : ''}</div>
+          <div class="meta">${esc([r.year, r.journal, `score=${r.score}`, (Array.isArray(r.sources) && r.sources.length) ? `source=${r.sources.join('+')}` : (r.source ? `source=${r.source}` : null)].filter(Boolean).join(' · '))}</div>
           <div class="meta">${esc(r.reason || '')} ${r.url ? `<a href="${esc(r.url)}" target="_blank">Open link</a>` : ''}</div>
           <div class="r-actions">
-            <button class="btn ${r.keep===false?'primary':'red'}" data-action="toggle" data-kind="${r.kind}" data-id="${esc(id)}">${r.keep===false?'Restore':'Delete'}</button>
-            ${r.kind==='local' ? `<select data-role="${esc(id)}">${['core_candidate','supporting_candidate','background','uncertain','excluded'].map(x=>`<option ${r.role===x?'selected':''}>${x}</option>`).join('')}</select>` : ''}
-            <button class="btn" data-action="view" data-kind="${r.kind}" data-id="${esc(id)}">View</button>
+            <button class="btn ${r.keep===false?'primary':'red'}" data-action="toggle" data-id="${esc(r.id)}">${r.keep===false?'Restore':'Delete'}</button>
+            <button class="btn" data-action="view" data-id="${esc(r.id)}">View</button>
           </div>
         </div>`;
       }).join('');
     }
-    function findRow(kind, id) {
+    function findRow(id) {
       const g = currentGroup();
-      if (kind === 'local') return (g.local_results || []).find(r => r.paper_id === id);
-      return (g.web_results || [])[Number(id.replace('web-', ''))];
+      return (g.web_results || [])[Number(id.replace('r-', ''))];
     }
     async function renderDetail() {
       if (!selectedPaper) {
         els.detailTitle.textContent = 'Paper Detail';
-        els.detailMeta.textContent = 'Select a paper result.';
-        els.summary.innerHTML = '<p>Select a local or web paper to inspect.</p>';
+        els.detailMeta.textContent = 'Select a candidate result.';
+        els.summary.innerHTML = '<p>Select a candidate to inspect.</p>';
         els.markdown.innerHTML = ''; els.metadata.textContent = ''; els.pdfFrame.src = 'about:blank';
         return;
       }
       const r = selectedPaper.row;
       els.detailTitle.textContent = r.title || '(untitled)';
-      els.detailMeta.textContent = selectedPaper.kind === 'local' ? `${r.paper_id} · ${r.year || ''} · ${r.journal || ''}` : `${r.year || ''} · ${r.journal || ''}`;
-      els.summary.innerHTML = `<h3>${esc(r.title)}</h3><p><strong>Score:</strong> ${esc(r.score)}</p><p><strong>Reason:</strong> ${esc(r.reason || '')}</p><p><strong>Role:</strong> ${esc(r.role || 'web_candidate')}</p>${r.url ? `<p><a href="${esc(r.url)}" target="_blank">Open web result</a></p>` : ''}`;
-      if (selectedPaper.kind === 'local') {
-        const meta = await (await fetch(`/api/local/metadata/${encodeURIComponent(r.paper_id)}`)).json();
-        els.metadata.textContent = JSON.stringify(meta, null, 2);
-        const md = await (await fetch(`/api/local/markdown/${encodeURIComponent(r.paper_id)}`)).text();
-        els.markdown.innerHTML = renderMarkdown(md, r.paper_id);
-        els.pdfFrame.src = meta.source_paths?.pdf ? `/file?path=${encodeURIComponent(meta.source_paths.pdf)}` : 'about:blank';
-      } else {
-        els.metadata.textContent = JSON.stringify(r, null, 2);
-        els.markdown.innerHTML = '<p>No local Markdown for web result.</p>';
-        els.pdfFrame.src = 'about:blank';
-      }
+      els.detailMeta.textContent = `${r.year || ''} · ${r.journal || ''}`;
+      els.summary.innerHTML = `<h3>${esc(r.title)}</h3><p><strong>Score:</strong> ${esc(r.score)}</p><p><strong>Reason:</strong> ${esc(r.reason || '')}</p>${r.url ? `<p><a href="${esc(r.url)}" target="_blank">Open link</a></p>` : ''}${r.pdf_url ? `<p><a href="${esc(r.pdf_url)}" target="_blank">Open PDF</a></p>` : '<p>No direct PDF link yet -- Phase 2 (download) will try Unpaywall for this DOI.</p>'}`;
+      els.metadata.textContent = JSON.stringify(r, null, 2);
+      els.markdown.innerHTML = '<p>Not yet downloaded -- no local Markdown available for a search candidate.</p>';
+      els.pdfFrame.src = 'about:blank';
     }
     async function save(confirm=false) {
       if (!selected) return;
@@ -518,12 +464,11 @@
     els.results.addEventListener('click', async e => {
       const btn = e.target.closest('[data-action]');
       if (!btn) return;
-      const row = findRow(btn.dataset.kind, btn.dataset.id);
+      const row = findRow(btn.dataset.id);
       if (btn.dataset.action === 'toggle') row.keep = row.keep === false;
-      if (btn.dataset.action === 'view') selectedPaper = {kind: btn.dataset.kind, id: btn.dataset.id, row};
+      if (btn.dataset.action === 'view') selectedPaper = {id: btn.dataset.id, row};
       renderResults(); await renderDetail();
     });
-    els.results.addEventListener('change', e => { const sel = e.target.closest('[data-role]'); if (sel) findRow('local', sel.dataset.role).role = sel.value; });
     document.getElementById('projectSelect').addEventListener('change', e => loadProject(e.target.value));
     els.globalProjectSelect.addEventListener('change', e => loadProject(e.target.value));
     document.getElementById('reloadBtn').addEventListener('click', () => selected && loadProject(selected));
@@ -531,11 +476,6 @@
     document.getElementById('confirmBtn').addEventListener('click', () => save(true));
     document.getElementById('toggleKeywordBtn').addEventListener('click', () => { const g = currentGroup(); if (g) { g.keep = g.keep === false; renderAll(); } });
     els.keywordFilter.addEventListener('input', renderKeywords);
-    els.centerFilter.addEventListener('change', () => {
-      const visible = (data?.results || []).filter(g => els.centerFilter.value === 'all' || classifyCenter(g.keyword) === els.centerFilter.value);
-      if (visible.length && !visible.find(g => g.keyword === selectedKeyword)) selectedKeyword = visible[0].keyword;
-      renderAll();
-    });
     document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');

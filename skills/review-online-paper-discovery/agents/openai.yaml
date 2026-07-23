@@ -1,0 +1,4 @@
+interface:
+  display_name: "Online Paper Discovery"
+  short_description: "Search Crossref/SciAtlas for papers by topic, then download confirmed candidates' PDFs."
+  default_prompt: "Search Crossref/SciAtlas for a review topic, write candidates for human review, then (after confirmation) download the confirmed candidates' PDFs into review-library/paper_pdf/. Use serve_review_dashboard.py only when human check UI is needed."

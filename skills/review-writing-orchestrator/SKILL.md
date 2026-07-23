@@ -5,9 +5,9 @@ description: Orchestrate the concise review-writing workflow: discovery, fixed-f
 
 # Review Writing Orchestrator
 
-Before starting, locate the server's local paper storage directory (a folder containing `.pdf` files). Pass it as `--paper-dir` to `review-topic-paper-discovery` so new papers are auto-registered. If the directory is unknown, ask the user.
+The corpus is grown two ways: `review-online-paper-discovery` searches Crossref/SciAtlas and downloads confirmed candidates' PDFs into `review-library/paper_pdf/`, and/or `labkag-review-skill`'s ingest workflow processes PDFs already placed there. Neither requires a manually-located external paper directory.
 
-If the user's topic is not in English, translate it to English first. Discovery scoring and web search are English-keyword based; a non-English topic passed straight through will fail to match papers.
+If the user's topic is not in English, translate it to English first. Discovery search is English-keyword based; a non-English topic passed straight through will fail to match papers.
 
 ## Project folder naming
 
@@ -30,7 +30,7 @@ Never overwrite or reuse an existing project folder for a new topic. Confirm the
 ## Workflow
 
 ```text
-1. review-topic-paper-discovery
+1. review-online-paper-discovery
 2. review-literature-matrix-outline
 3. review-section-blueprint
 4. review-section-drafting-figure-picking
@@ -42,14 +42,14 @@ Never overwrite or reuse an existing project folder for a new topic. Confirm the
 10. review-export-docx
 ```
 
-For each stage, invoke that stage's skill by name (e.g. call the `review-topic-paper-discovery` skill, not just read its file). Do not read a sub-skill's `SKILL.md` yourself and improvise its steps inline — invoke the skill so it runs under its own instructions. The correct CLI invocation, required flags, required output files, and human-check gates for each stage live inside that sub-skill and are applied when it is invoked. The summary below is only a rough map of what each stage does, not a substitute for invoking it.
+For each stage, invoke that stage's skill by name (e.g. call the `review-online-paper-discovery` skill, not just read its file). Do not read a sub-skill's `SKILL.md` yourself and improvise its steps inline — invoke the skill so it runs under its own instructions. The correct CLI invocation, required flags, required output files, and human-check gates for each stage live inside that sub-skill and are applied when it is invoked. The summary below is only a rough map of what each stage does, not a substitute for invoking it.
 
 **Run exactly one stage per turn, then stop.** After invoking a stage's skill and its outputs are written, do not continue to the next stage in the same turn. Report what was produced, point to the human-check instructions for that stage, and explicitly ask the user to review and confirm before you proceed. Wait for the user's next message before invoking the following stage — even if the user's original request described the full end-to-end goal. The only exception is when the user explicitly says to run multiple stages back-to-back without stopping (e.g. "run all steps," "skip the checks," "continue through stage N").
 
 ## Core Contract (rough map only — always defer to the sub-skill's SKILL.md)
 
 ```text
-Discovery: user topic -> expanded keywords -> score local papers + optional web search -> 20-30 papers.
+Discovery: user topic -> expanded keywords -> search Crossref/SciAtlas -> human-confirmed candidates -> download PDFs into review-library/paper_pdf/.
 Matrix: one row per paper with title, authors, keywords, abstract, ~1000-word main_content, most_relevant_figure.
 Outline: use topic + matrix + writing-rule skill to create selected_outline.md.
 Blueprint: convert outline into section_blueprint.json with section, paragraph, paper, and figure mapping.
@@ -71,7 +71,7 @@ python3 <skill-root>/scripts/project_status.py --project-id <project_id>
 Pause after:
 
 ```text
-00_discovery: confirm 20-30 papers.
+00_discovery: confirm online-search candidates; confirming triggers the automatic PDF-download step into review-library/paper_pdf/.
 01_matrix_outline: confirm literature matrix and selected_outline.md.
 02_section_blueprint: confirm section/paragraph/paper/figure mapping.
 03_section_drafting: confirm section files and figure candidates.
