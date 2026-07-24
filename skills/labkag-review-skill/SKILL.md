@@ -8,10 +8,14 @@ description: "API wrapper skill for LabKAG. Use when an agent needs to call the 
 Use this skill when you need to call LabKAG as an external service.
 Do not modify the LabKAG repository.
 
-This skill folder lives inside the LabKAG project itself
-(`labkag-review-skill/`) — it is self-contained and should not be confused
-with any other `labkag-skill`-named folder elsewhere on disk. All paths
-below are relative to this project's root.
+This copy of the skill lives inside review-writer's own `skills/` tree — it
+only wraps the LabKAG HTTP API (`scripts/labkag_api.py`,
+`scripts/export_discovery_format.py`). The actual LabKAG backend (FastAPI
+service, venv, `requirements.txt`, `scripts/run_dev.ps1`, `scripts/init_storage.py`,
+etc.) lives in a **separate repository** the user maintains elsewhere (e.g.
+`D:\Git_projects\LabKAG` on this machine) — do not assume its files exist
+under this skill folder. The "Starting the Backend" section below refers to
+that separate LabKAG repository's root, not this folder.
 
 ## Two Separate Workflows
 
@@ -48,6 +52,51 @@ http://127.0.0.1:8001
 
 Override with `--base-url` or `LABKAG_BASE_URL`.
 
+## Starting the Backend
+
+This skill only calls the API; it does not start it. Before any command
+below will work, the FastAPI service must actually be running on the
+expected port.
+
+**One-time setup** (from the LabKAG project root):
+
+```powershell
+py -3.10 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+copy .env.example .env
+```
+
+Edit `.env` and fill in at minimum: `MINERU_API_TOKEN` (needed for real PDF
+parsing; leave blank to fall back to the PyMuPDF `--use-backup` path) and
+`LLM_API_KEY` (needed for `extract`/`batch-extract`, not needed just to
+start the service or to run a MinerU-only parse). Graph backend defaults to
+`GRAPH_BACKEND=neo4j`, which requires a running Neo4j instance
+(`NEO4J_URI`/`NEO4J_USER`/`NEO4J_PASSWORD`). **If Neo4j isn't available, set
+`GRAPH_BACKEND=sqlite` instead** — it implements the same adapter interface,
+so ingest/query/match-topic all work identically against it, with data
+stored at `sqlite_db_path` (default `data/graph.db`). Then initialize local
+storage directories once:
+
+```powershell
+python scripts/init_storage.py
+```
+
+**Start the server** — **must be run on port 8001**, since that's this
+skill's own default `--base-url` (the bare `uvicorn app.main:app --reload`
+shown in the project README defaults to port 8000, which will NOT match):
+
+```powershell
+py -3.10 -m uvicorn app.main:app --reload --port 8001
+```
+
+or, equivalently, `scripts/run_dev.ps1` (already pinned to `--port 8001`).
+Verify it came up before doing anything else:
+
+```text
+py -3.10 labkag-review-skill/scripts/labkag_api.py health
+```
+
 ## Commands
 
 - `health`
@@ -80,32 +129,50 @@ fits it, and every paper tagged against that taxonomy. Run this once to
 build a project, and again whenever the corpus grows or the taxonomy needs
 revisiting — it never needs a topic to run.
 
-### 1a. Ingest the corpus
+### 1a. Extract + ingest a small pilot batch first
 
-`batch-extract` and `batch-ingest` process many PDFs at once. Both are
-resumable: they write a manifest after every paper and skip
-already-succeeded ones on re-run (`--force` reprocesses anyway).
+Build the taxonomy **before** the bulk of the corpus is extracted, not
+after — `extract`/`batch-extract` already auto-tags a paper against a
+project's taxonomy inline, at extraction time, if one exists for that
+project (`skill_orchestrator.extract_paper` checks `taxonomy_store` and
+calls `tag_extraction` as part of the same LLM call). So once a taxonomy
+exists, every subsequent extraction comes out tagged for free — there is no
+separate tagging pass to run for the bulk of the corpus, and the standing
+`backfill_taxonomy_tags.py` step below is no longer part of the normal path.
 
-`batch-extract` uploads and extracts every PDF under `--input-dir`, caching
-each successful `paper_extraction` JSON in `--extractions-dir` **on this
-machine** — not assumed to share a filesystem with wherever the backend
-runs, since this skill may be calling a remote `--base-url`. Pass
-`--mineru-output-dir` to reuse a pre-parsed MinerU batch (see
-`mineru_batch_parse.py` in the LabKAG repo) instead of re-parsing.
-
-`batch-ingest` reads every `paper_extraction` JSON cached by a prior
-`batch-extract` run from `--extractions-dir` and ingests each one via
-`POST /v1/papers/ingest?confirm=true`. Ingest-time dedup (by DOI, then
-title) means re-running `batch-ingest` on the same corpus never creates
-duplicate Paper nodes.
+The one thing this order still needs first is real content to derive the
+taxonomy from — `taxonomy_bootstrap_prompt.md` forbids inventing categories
+or values that were not observed. So run a **pilot** `batch-extract` +
+`batch-ingest` limited to a representative slice (10-20 papers is usually
+enough; use the whole corpus if it's already that size or smaller) before
+any taxonomy exists for this project. These pilot papers will be untagged
+for now — expected and temporary, fixed in 1c below.
 
 ```text
-batch-extract --input-dir <pdfs> --extractions-dir <cache> --project-id <id>
+batch-extract --input-dir <pdfs> --extractions-dir <cache> --project-id <id> --limit 15
 batch-ingest  --extractions-dir <cache> --project-id <id>
 ```
 
-Run `batch-extract` again any time to pick up newly added PDFs — it only
-processes what's not already in its manifest.
+Both commands are resumable: they write a manifest after every paper and
+skip already-succeeded ones on re-run (`--force` reprocesses anyway). Pass
+`--mineru-output-dir` to reuse a pre-parsed MinerU batch (see
+`mineru_batch_parse.py` in the LabKAG repo) instead of re-parsing.
+
+**Always pass `--mineru-output-dir <review-root>/review-library/mineru-outputs`
+explicitly here.** This project's PDF folder is agent/user-chosen and can be
+anywhere on disk (a Downloads folder, another drive) — never assumed to be
+under `review-library/` — but MinerU's *parsed output* is derived data that
+belongs inside the review-library workspace by convention, and
+`review-online-paper-discovery`'s `register-pdfs` step defaults to looking
+for it at exactly that path. Parsing into anywhere else (including LabKAG's
+own default `data/parsed/`) means `register-pdfs`'s title-match fallback
+won't find it, silently leaving `source_paths.markdown` empty for
+`review-literature-matrix-outline` and
+`review-section-drafting-figure-picking` — no error, just missing context.
+
+Ingest-time dedup (by DOI, then title) means re-running `batch-ingest` on
+the same corpus never creates duplicate Paper nodes — this is what makes
+1c's re-ingest safe.
 
 ### 1b. Build (or rebuild) the taxonomy
 
@@ -130,24 +197,53 @@ If a taxonomy already exists and this is a revision, `taxonomy-set` reports
 count before resubmitting with `--confirm` (see error-code remediation
 below).
 
-### 1c. Tag every paper
+### 1c. Re-tag the pilot, then extract the rest of the corpus already tagged
+
+Now that a taxonomy exists for this project, re-run `batch-extract --force`
+on the **same pilot batch only** (cheap — the same 10-20 papers, one more
+LLM call each) so each pilot paper's re-extraction auto-tags it inline, the
+same way any fresh extraction does. Re-run `batch-ingest` right after:
+DOI/title dedup resolves each re-extracted paper back to its existing Paper
+node and refreshes it via a graph `MERGE ... SET`, not a duplicate.
 
 ```text
-python scripts/backfill_taxonomy_tags.py --project-id <id>
+batch-extract --input-dir <pilot-pdfs> --extractions-dir <cache> --project-id <id> --limit 15 --force
+batch-ingest  --extractions-dir <cache> --project-id <id>
 ```
 
-Retags every paper whose `taxonomy_version` doesn't match the taxonomy's
-current version (i.e. everything after a first bootstrap, or everything
-touched by a breaking edit). Resumable and checkpointed per paper — safe to
-re-run if it's interrupted partway through.
+Then extract/ingest the rest of the corpus normally — no `--limit`, no
+`--force` needed for files not yet in the manifest. Every new paper is
+tagged on its one and only extraction pass, since the taxonomy already
+exists:
+
+```text
+batch-extract --input-dir <pdfs> --extractions-dir <cache> --project-id <id>
+batch-ingest  --extractions-dir <cache> --project-id <id>
+```
+
+Run `batch-extract` again any time later to pick up newly added PDFs — it
+only processes what's not already in its manifest, and every new paper
+still comes out tagged for free.
+
+`backfill_taxonomy_tags.py` is **not** a routine step in this order — with
+the taxonomy built before the bulk of the corpus, nothing needs retroactive
+tagging. It still exists for two real edge cases, not the standard path:
+(a) a **breaking taxonomy revision** later (renamed/removed an
+`allowed_value` — see `affected_papers_count` in the error-code remediation
+section), which invalidates `taxonomy_version` on every already-tagged
+paper project-wide; (b) recovering an older project that was built under
+the previous extract-everything-then-tag order.
 
 ### 1d. Report the build's actual performance
 
 **Before considering storage building done, report back to the user**, not
 just a silent "done":
 
-- The backfill script's own summary line (`Retagged: N  Failed: N`
-  `Skipped/total scanned: N`) — state it plainly, including any failures.
+- State `batch-extract`/`batch-ingest`'s own summary lines plainly,
+  including any failures. If a `backfill_taxonomy_tags.py` pass also ran
+  (a revision or legacy-project case, not the normal path above), report
+  its summary line (`Retagged: N  Failed: N  Skipped/total scanned: N`)
+  too.
 - If validation tooling is available for this project, run it and report
   warnings/blocking issues, not just a pass/fail count.
 - Name anything that looks like a data-quality gap worth flagging (e.g. a
@@ -283,9 +379,11 @@ others workflow 2 (match) concerns:
 ### Interop with review-writer's discovery format
 
 `review-online-paper-discovery` (the review-writer skill that used to own
-this whole file set) now only searches Crossref/SciAtlas and downloads PDFs
-into `review-library/paper_pdf/` — it no longer scores or shortlists papers
-already in the local library. This script (`export_discovery_format.py`) is
+this whole file set) now only searches Crossref/SciAtlas, resolves a
+download source per confirmed candidate, and registers the human's
+manually-downloaded PDFs into review-library — it no longer scores or
+shortlists papers already in the local library. This script
+(`export_discovery_format.py`) is
 therefore the **sole** producer of `review-projects/<project_id>/00_discovery/
 selected_discovery_results.json` and its siblings, for any downstream stage
 that expects them (e.g. `review-literature-matrix-outline`, which reads

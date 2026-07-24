@@ -5,8 +5,9 @@ review-writer stage (e.g. review-literature-matrix-outline, which reads only
 selected_discovery_results.json + topic_input.md) can run unmodified. This
 script is the sole producer of that file set -- review-online-paper-discovery
 (the review-writer skill that used to own it) now only searches Crossref/
-SciAtlas and downloads PDFs into review-library/paper_pdf/; it no longer
-scores or shortlists papers already in the local library.
+SciAtlas, resolves a download source per candidate, and registers the
+human's manually-downloaded PDFs into review-library; it no longer scores or
+shortlists papers already in the local library.
 
 Standalone script -- no LabKAG app import needed, pure JSON transformation
 over already-computed match-topic output.
@@ -64,6 +65,15 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Paper titles routinely contain non-ASCII characters (unicode dashes,
+# accents). The default console encoding on some Windows locales (e.g. GBK)
+# can't represent them, which crashes plain print() when reporting unresolved
+# papers.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 from typing import Any
 
 STRUCTURED_TAG_KEYS = [

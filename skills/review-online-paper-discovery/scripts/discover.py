@@ -573,9 +573,9 @@ def write_report(
     (out_dir / "online_search_report.md").write_text("\n".join(lines), encoding="utf-8")
 
 
-# This slug is now only used for this skill's own review-library/paper_pdf/
-# registration bookkeeping (see write_stub_metadata/register_downloaded_pdf).
-# It no longer needs to match any sibling parser/tagger's slug scheme --
+# This slug is now only used for this skill's own review-library
+# registration bookkeeping (see write_stub_metadata/register_pdf). It no
+# longer needs to match any sibling parser/tagger's slug scheme --
 # mineru-precise-parse-review-writer and review-metadata-prep, which this
 # used to have to agree with, have been removed from the pipeline.
 WINDOWS_MAX_PATH = 260
@@ -687,8 +687,8 @@ def write_stub_metadata(
         if f["source"] == "pending"
     ] + ["structured_tags"]
 
-    md_path = review_root / "mineru-outputs" / "markdown" / f"{slug}.md"
-    content_list_dir = review_root / "mineru-outputs" / "extracted" / slug
+    md_path = mineru_output / "markdown" / f"{slug}.md"
+    content_list_dir = mineru_output / "extracted" / slug
     content_list_candidates = list(content_list_dir.glob("*_content_list.json")) if content_list_dir.exists() else []
     meta: dict[str, Any] = {
         "paper_id": paper_id,
@@ -725,20 +725,32 @@ def write_stub_metadata(
     with registry_path.open("a", encoding="utf-8") as f:
         f.write(
             json.dumps(
-                {"paper_id": paper_id, "slug": slug, "pdf": str(pdf_path), "source_pdf": str(pdf_path.resolve())},
+                {
+                    "paper_id": paper_id, "slug": slug, "title": title_field["value"],
+                    "pdf": str(pdf_path), "source_pdf": str(pdf_path.resolve()),
+                },
                 ensure_ascii=False,
             )
             + "\n"
         )
 
 
-def register_downloaded_pdf(
-    review_root: Path, pdf_path: Path, paper_pdf_dir: Path, candidate: dict[str, Any]
+def register_pdf(
+    review_root: Path,
+    pdf_path: Path,
+    paper_pdf_dir: Path,
+    mineru_output_dir: Path,
+    candidate: dict[str, Any],
+    notes: list[str],
 ) -> str:
-    mineru_output = review_root / "mineru-outputs"
+    """Register one PDF already sitting in paper_pdf_dir (agent-chosen, not
+    assumed to be review-library/paper_pdf/) against candidate metadata, and
+    seed source_paths.markdown/content_list from mineru_output_dir (also
+    agent-chosen, not assumed to be <review-root>/mineru-outputs) if that
+    directory already has this PDF's slug parsed."""
     meta_dir = review_root / "review-library" / "metadata" / "papers"
     relative_stem = str(pdf_path.relative_to(paper_pdf_dir).with_suffix(""))
-    slug = slugify_for_registration(relative_stem, mineru_output)
+    slug = slugify_for_registration(relative_stem, mineru_output_dir)
     paper_id = next_paper_id(meta_dir)
     seed_fields = {
         "title": candidate.get("title"),
@@ -748,16 +760,60 @@ def register_downloaded_pdf(
         "doi": candidate.get("doi"),
         "abstract": candidate.get("abstract"),
     }
-    notes = [
-        f"downloaded by review-online-paper-discovery via {candidate.get('pdf_source', 'unknown')} "
-        f"({candidate.get('resolved_pdf_url', '')})",
-        "run labkag-review-skill's ingest workflow for full extraction and taxonomy tagging",
-    ]
     write_stub_metadata(
         review_root, paper_id, slug, pdf_path, str(pdf_path.relative_to(paper_pdf_dir)),
-        mineru_output, seed_fields, notes,
+        mineru_output_dir, seed_fields, notes,
     )
     return paper_id
+
+
+def normalize_title(title: str) -> str:
+    text = re.sub(r"\\[a-zA-Z]+", " ", title or "")
+    text = re.sub(r"[{}$^_]", " ", text)
+    text = re.sub(r"[^a-z0-9 ]", " ", text.lower())
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def title_tokens(title: str) -> set[str]:
+    return {t for t in normalize_title(title).split(" ") if len(t) >= 3}
+
+
+def extract_markdown_title(md_path: Path) -> str:
+    try:
+        text = md_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+    for line in text.splitlines()[:40]:
+        line = line.strip()
+        if line.startswith("# "):
+            return line[2:].strip()
+    return ""
+
+
+def match_title_to_candidates(
+    title: str, candidates: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Exact-normalized match first, then token-overlap >= 0.6 -- same bar
+    used elsewhere in this pipeline (export_discovery_format.py's
+    resolve_paper_id). Never guesses below that bar."""
+    if not title:
+        return None
+    key = normalize_title(title)
+    for candidate in candidates:
+        if normalize_title(candidate.get("title", "")) == key:
+            return candidate
+    query_tokens = title_tokens(title)
+    if not query_tokens:
+        return None
+    best, best_overlap = None, 0.0
+    for candidate in candidates:
+        tokens = title_tokens(candidate.get("title", ""))
+        if not tokens:
+            continue
+        overlap = len(query_tokens & tokens) / len(query_tokens | tokens)
+        if overlap > best_overlap:
+            best_overlap, best = overlap, candidate
+    return best if best_overlap >= 0.6 else None
 
 
 def existing_library_keys(papers: dict[str, dict[str, Any]]) -> tuple[set[str], set[str]]:
@@ -833,75 +889,41 @@ def resolve_pdf_source(
     return {"resolved": False, "pdf_url": None, "source": "none", "reason": "no DOI and no direct PDF link available"}
 
 
-def download_pdf(url: str, dest_path: Path, mailto: str, timeout: int = 60) -> dict[str, Any]:
-    """Download url to dest_path, verifying the response actually looks like a
-    PDF (Content-Type or magic bytes) before accepting it -- the most common
-    OA-resolution failure mode is a landing/paywall HTML page returned with a
-    200 status instead of the real PDF."""
-    contact = mailto or "anonymous@example.com"
-    req = urllib.request.Request(url, headers={"User-Agent": f"review-writer-discovery/0.1 (mailto:{contact})"})
-    ctx = ssl.create_default_context()
-    try:
-        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
-            content_type = resp.headers.get("Content-Type", "")
-            data = resp.read()
-    except Exception as exc:
-        return {"ok": False, "bytes": 0, "content_type": None, "error": f"{type(exc).__name__}: {exc}"}
-    looks_like_pdf = "pdf" in content_type.lower() or data[:5] == b"%PDF-"
-    if not looks_like_pdf:
-        return {
-            "ok": False,
-            "bytes": len(data),
-            "content_type": content_type,
-            "error": "response did not look like a PDF (no pdf content-type, no %PDF- header)",
-        }
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest_path.with_suffix(dest_path.suffix + ".tmp")
-    tmp.write_bytes(data)
-    tmp.replace(dest_path)
-    return {"ok": True, "bytes": len(data), "content_type": content_type, "error": None}
-
-
-def unique_pdf_filename(paper_pdf_dir: Path, slug: str) -> Path:
-    candidate = paper_pdf_dir / f"{slug}.pdf"
-    if not candidate.exists():
-        return candidate
-    n = 2
-    while (paper_pdf_dir / f"{slug}-{n}.pdf").exists():
-        n += 1
-    return paper_pdf_dir / f"{slug}-{n}.pdf"
-
-
-def write_download_report(out_dir: Path, results: list[dict[str, Any]]) -> None:
-    downloaded = [r for r in results if r["status"] == "downloaded"]
+def write_download_list_report(out_dir: Path, results: list[dict[str, Any]]) -> None:
+    resolved = [r for r in results if r["status"] == "resolved"]
     skipped_existing = [r for r in results if r["status"] == "skipped_existing_in_library"]
-    no_pdf = [r for r in results if r["status"] == "no_pdf_available"]
-    failed = [r for r in results if r["status"] == "download_failed"]
+    no_pdf = [r for r in results if r["status"] == "no_pdf_source_found"]
     lines = [
-        "# Online Search Download Report",
+        "# Manual Download List",
         "",
-        f"Downloaded: {len(downloaded)}",
+        "Nothing here was downloaded automatically. For each resolved paper below,",
+        "open the URL, save the PDF yourself, then place it in whatever folder you",
+        "give `register-pdfs --paper-pdf-dir` -- the suggested filename is only a",
+        "convenience so filename-matching at registration time works without",
+        "further input; rename freely if you prefer, `register-pdfs` falls back to",
+        "matching by title once the file has a MinerU markdown counterpart.",
+        "",
+        f"Resolved (has a URL to try): {len(resolved)}",
         f"Already in library (skipped): {len(skipped_existing)}",
-        f"No PDF available: {len(no_pdf)}",
-        f"Download failed: {len(failed)}",
+        f"No PDF source found: {len(no_pdf)}",
         "",
     ]
 
-    def section(title: str, rows: list[dict[str, Any]]) -> list[str]:
+    def section(title: str, rows: list[dict[str, Any]], show_url: bool) -> list[str]:
         out = [f"## {title}", ""]
         if not rows:
             out.append("None.")
         for r in rows:
-            pid = f" paper_id={r['paper_id']}" if r.get("paper_id") else ""
-            out.append(f"- {r.get('title', '(untitled)')} -- {r.get('reason', '')}{pid}")
+            extra = f" -- suggested filename: `{r['suggested_filename']}`" if show_url and r.get("suggested_filename") else ""
+            url = f" -- {r.get('pdf_url', '')}" if show_url else ""
+            out.append(f"- {r.get('title', '(untitled)')} -- {r.get('reason', '')}{url}{extra}")
         out.append("")
         return out
 
-    lines += section("Downloaded", downloaded)
-    lines += section("Already in Library (Skipped)", skipped_existing)
-    lines += section("No PDF Available", no_pdf)
-    lines += section("Download Failed", failed)
-    (out_dir / "online_search_download_report.md").write_text("\n".join(lines), encoding="utf-8")
+    lines += section("Resolved", resolved, show_url=True)
+    lines += section("Already in Library (Skipped)", skipped_existing, show_url=False)
+    lines += section("No PDF Source Found", no_pdf, show_url=False)
+    (out_dir / "online_search_manual_download_list.md").write_text("\n".join(lines), encoding="utf-8")
 
 
 def run_search(args: argparse.Namespace) -> int:
@@ -1044,9 +1066,11 @@ def run_search(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_download(args: argparse.Namespace) -> int:
-    review_root = Path(args.review_root).resolve()
-    _load_dotenv_if_present(review_root)
+def _load_candidates_for_download(args: argparse.Namespace, review_root: Path) -> tuple[Path, list[dict[str, Any]]]:
+    """Loads the full confirmed candidate set (minus excluded ones), gated on
+    human confirmation. Never crops by --limit -- callers that only want to
+    *act* on a subset (list-for-download) apply the cap themselves, since
+    register-pdfs needs the complete set available for title-matching."""
     project = resolve_project_path(review_root, args.project_id)
     out_dir = project / "00_discovery"
 
@@ -1070,35 +1094,34 @@ def run_download(args: argparse.Namespace) -> int:
     # excluded_candidates isn't written by 'search' today, but is agent-editable
     # in online_search_candidates.json per the Agent relevance check step (see
     # SKILL.md) -- respect it if present so an excluded candidate never gets
-    # downloaded just because it wasn't formally removed from `candidates`.
+    # listed just because it wasn't formally removed from `candidates`.
     excluded = data.get("excluded_candidates")
     if isinstance(excluded, list):
         excluded_keys = {_result_dedupe_key(c) for c in excluded if isinstance(c, dict)}
         candidates = [c for c in candidates if _result_dedupe_key(c) not in excluded_keys]
+    return out_dir, candidates
 
+
+def run_list_for_download(args: argparse.Namespace) -> int:
+    """Resolve a PDF source for every confirmed candidate and write a report
+    for a human to act on -- no fetch, no file writes into any paper
+    directory. Auto-fetch was removed: in practice it almost never succeeds
+    against mainstream paywalled journals or Cloudflare-protected preprint
+    servers, so the only thing it reliably did was add failure modes. The
+    resolution logic (Unpaywall lookup, direct-link check) is still useful --
+    it tells a human where to look -- so it's kept."""
+    review_root = Path(args.review_root).resolve()
+    _load_dotenv_if_present(review_root)
+    out_dir, candidates = _load_candidates_for_download(args, review_root)
     if args.limit:
         candidates = candidates[: args.limit]
-
-    paper_pdf_dir = (
-        Path(args.paper_pdf_dir).resolve() if args.paper_pdf_dir else review_root / "review-library" / "paper_pdf"
-    )
-    paper_pdf_dir.mkdir(parents=True, exist_ok=True)
 
     papers = load_metadata(review_root)
     known_dois, known_titles = existing_library_keys(papers)
 
-    manifest_path = out_dir / "online_search_download_manifest.json"
-    prior_manifest = read_json(manifest_path) if manifest_path.exists() else {"entries": {}}
-    prior_entries: dict[str, Any] = prior_manifest.get("entries", {})
-
     results: list[dict[str, Any]] = []
     for candidate in candidates:
         key = _result_dedupe_key(candidate)
-        prior = prior_entries.get(key)
-        if prior and prior.get("status") == "downloaded":
-            results.append(prior)
-            continue
-
         title = candidate.get("title", "(untitled)")
         doi = str(candidate.get("doi") or "").strip().lower()
         norm_title = re.sub(r"\s+", " ", str(title).strip().lower())
@@ -1108,78 +1131,159 @@ def run_download(args: argparse.Namespace) -> int:
                     "key": key, "title": title, "doi": candidate.get("doi"),
                     "status": "skipped_existing_in_library",
                     "reason": "already present in review-library by DOI or title match",
-                    "paper_id": None,
                 }
             )
             continue
 
         resolution = resolve_pdf_source(candidate, args.mailto, args.unpaywall_base_url, args.unpaywall_timeout)
         if not resolution["resolved"]:
-            print(f"[no-pdf] {str(title)[:80]} -- {resolution['reason']}")
+            print(f"[no-pdf-source] {str(title)[:80]} -- {resolution['reason']}")
             results.append(
                 {
                     "key": key, "title": title, "doi": candidate.get("doi"),
-                    "status": "no_pdf_available", "reason": resolution["reason"], "paper_id": None,
+                    "status": "no_pdf_source_found", "reason": resolution["reason"],
                 }
             )
-            if args.download_delay:
-                time.sleep(args.download_delay)
-            continue
-
-        if args.dry_run:
-            print(f"[dry-run] {str(title)[:80]} -- {resolution['source']}: {resolution['pdf_url']}")
-            results.append(
-                {
-                    "key": key, "title": title, "doi": candidate.get("doi"),
-                    "status": "resolved_dry_run",
-                    "reason": f"{resolution['source']}: {resolution['pdf_url']}", "paper_id": None,
-                }
-            )
+            if args.delay:
+                time.sleep(args.delay)
             continue
 
         slug_source = title if title and title != "(untitled)" else (candidate.get("doi") or key)
-        slug = slugify_for_registration(str(slug_source)[:120], review_root / "mineru-outputs")
-        dest_path = unique_pdf_filename(paper_pdf_dir, slug)
-        download = download_pdf(resolution["pdf_url"], dest_path, args.mailto)
-        if not download["ok"]:
-            results.append(
-                {
-                    "key": key, "title": title, "doi": candidate.get("doi"),
-                    "status": "download_failed", "reason": download["error"], "paper_id": None,
-                }
-            )
-            if args.download_delay:
-                time.sleep(args.download_delay)
-            continue
-
-        candidate_with_source = {
-            **candidate, "pdf_source": resolution["source"], "resolved_pdf_url": resolution["pdf_url"],
-        }
-        paper_id = register_downloaded_pdf(review_root, dest_path, paper_pdf_dir, candidate_with_source)
+        slug = cap_slug_length(_slugify_no_dir(str(slug_source)[:120]), 180)
+        print(f"[resolved] {str(title)[:80]} -- {resolution['source']}: {resolution['pdf_url']}")
         results.append(
             {
                 "key": key, "title": title, "doi": candidate.get("doi"),
-                "status": "downloaded", "reason": f"downloaded via {resolution['source']}",
-                "paper_id": paper_id, "pdf_path": str(dest_path),
+                "status": "resolved", "reason": f"resolved via {resolution['source']}",
+                "pdf_url": resolution["pdf_url"], "pdf_source": resolution["source"],
+                "suggested_filename": f"{slug}.pdf",
             }
         )
-        print(f"[download] {paper_id} <- {str(title)[:80]}")
-        if args.download_delay:
-            time.sleep(args.download_delay)
+        if args.delay:
+            time.sleep(args.delay)
 
-    if not args.dry_run:
-        write_json(
-            manifest_path,
-            {
-                "project_id": args.project_id,
-                "updated_at": utc_now(),
-                "entries": {r["key"]: r for r in results if r.get("key")},
-            },
-        )
-        write_download_report(out_dir, results)
+    write_json(
+        out_dir / "online_search_manual_download_list.json",
+        {
+            "project_id": args.project_id,
+            "updated_at": utc_now(),
+            "instructions": "Nothing was downloaded automatically. Open each resolved paper's URL, "
+            "save the PDF yourself, place it in whatever folder you'll later pass to "
+            "'register-pdfs --paper-pdf-dir', then run 'register-pdfs' to link it into review-library.",
+            "results": results,
+        },
+    )
+    write_download_list_report(out_dir, results)
 
-    downloaded = sum(1 for r in results if r["status"] == "downloaded")
-    print(f"Downloaded: {downloaded} / {len(candidates)} candidates attempted")
+    resolved_count = sum(1 for r in results if r["status"] == "resolved")
+    print(f"Resolved: {resolved_count} / {len(candidates)} candidates")
+    print(f"List: {out_dir / 'online_search_manual_download_list.json'}")
+    return 0
+
+
+def _slugify_no_dir(value: str) -> str:
+    """Same cleanup as slugify_for_registration, without a mineru_output
+    dependency -- the list step doesn't know where PDFs or parsed output will
+    eventually live, so it can't compute a filesystem-path-length budget yet.
+    register-pdfs re-slugs from the PDF's own filename anyway; this is only a
+    convenience suggestion."""
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKD", value)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    cleaned = re.sub(r"[^A-Za-z0-9._/-]+", "-", ascii_text).strip("-._/")
+    cleaned = cleaned.replace("/", "__")
+    cleaned = re.sub(r"-{2,}", "-", cleaned)
+    return cleaned.lower() or "document"
+
+
+def run_register_pdfs(args: argparse.Namespace) -> int:
+    """Scan --paper-pdf-dir (agent-chosen -- can be anywhere on disk, e.g. a
+    Downloads folder or another drive, never assumed to be under review-root)
+    for PDFs not yet in the registry, match each to a confirmed candidate (by
+    suggested filename, falling back to a title match against
+    --mineru-output-dir's parsed markdown), and register it. Never guesses:
+    an unmatched file is reported, not silently skipped or force-registered
+    under a wrong title.
+
+    --mineru-output-dir defaults to <review-root>/review-library/mineru-outputs
+    -- unlike --paper-pdf-dir, this one nests inside review-library by
+    convention, since it holds derived/processed data (parsed markdown,
+    extracted content) that belongs with the rest of the review-library
+    workspace rather than wherever the raw PDFs happen to live."""
+    review_root = Path(args.review_root).resolve()
+    _load_dotenv_if_present(review_root)
+    out_dir, candidates = _load_candidates_for_download(args, review_root)
+
+    paper_pdf_dir = Path(args.paper_pdf_dir).resolve()
+    if not paper_pdf_dir.is_dir():
+        raise SystemExit(f"--paper-pdf-dir does not exist or is not a directory: {paper_pdf_dir}")
+    mineru_output_dir = (
+        Path(args.mineru_output_dir).resolve()
+        if args.mineru_output_dir
+        else review_root / "review-library" / "mineru-outputs"
+    )
+
+    download_list_path = (
+        Path(args.download_list_file).resolve()
+        if args.download_list_file
+        else out_dir / "online_search_manual_download_list.json"
+    )
+    suggested_by_filename: dict[str, dict[str, Any]] = {}
+    if download_list_path.exists():
+        listed = read_json(download_list_path).get("results") or []
+        for row in listed:
+            name = row.get("suggested_filename")
+            if name:
+                # candidate metadata isn't on the list row itself -- recover it
+                # by re-matching this row's own title against `candidates`.
+                match = match_title_to_candidates(row.get("title", ""), candidates)
+                if match is not None:
+                    suggested_by_filename[Path(name).stem] = match
+
+    md_dir = mineru_output_dir / "markdown"
+    already_registered = registered_pdf_paths(review_root)
+
+    results: list[dict[str, Any]] = []
+    for pdf_path in sorted(paper_pdf_dir.rglob("*.pdf")):
+        if str(pdf_path.resolve()) in already_registered:
+            continue
+
+        candidate = suggested_by_filename.get(pdf_path.stem)
+        method = "filename"
+        if candidate is None:
+            slug = slugify_for_registration(pdf_path.stem, mineru_output_dir)
+            md_path = md_dir / f"{slug}.md"
+            if md_path.exists():
+                candidate = match_title_to_candidates(extract_markdown_title(md_path), candidates)
+                method = "title_via_markdown"
+        if candidate is None:
+            results.append(
+                {"pdf": str(pdf_path), "status": "unmatched",
+                 "reason": "no filename match on the download list, and no MinerU markdown title match"}
+            )
+            print(f"[unmatched] {pdf_path.name}")
+            continue
+
+        notes = [
+            f"manually downloaded and placed by the user, registered from {paper_pdf_dir}",
+            "run labkag-review-skill's ingest workflow for full extraction and taxonomy tagging",
+        ]
+        paper_id = register_pdf(review_root, pdf_path, paper_pdf_dir, mineru_output_dir, candidate, notes)
+        results.append({"pdf": str(pdf_path), "status": "registered", "paper_id": paper_id, "method": method})
+        print(f"[registered] {paper_id} <- {pdf_path.name} ({method})")
+
+    registered = sum(1 for r in results if r["status"] == "registered")
+    unmatched = [r for r in results if r["status"] == "unmatched"]
+    write_json(
+        out_dir / "online_search_register_report.json",
+        {"project_id": args.project_id, "updated_at": utc_now(), "results": results},
+    )
+    print(f"Registered: {registered}  Unmatched: {len(unmatched)}")
+    if unmatched:
+        print("Unmatched files (not registered -- rename to a suggested filename or check the title matches):")
+        for r in unmatched:
+            print(f"  {r['pdf']}")
     return 0
 
 
@@ -1274,26 +1378,57 @@ def parse_args() -> argparse.Namespace:
         help="Explicit upper year bound (overrides any year range parsed from --topic). 0 = unset.",
     )
 
-    download = subparsers.add_parser(
-        "download", help="Download confirmed candidates' PDFs into review-library/paper_pdf/."
+    list_for_download = subparsers.add_parser(
+        "list-for-download",
+        help="Resolve a PDF source (Unpaywall/direct link) for every confirmed candidate and write "
+        "a report for manual download -- no fetch, no file writes into any paper directory.",
     )
-    download.add_argument("--review-root", default=str(Path.cwd()))
-    download.add_argument("--project-id", required=True)
-    download.add_argument(
+    list_for_download.add_argument("--review-root", default=str(Path.cwd()))
+    list_for_download.add_argument("--project-id", required=True)
+    list_for_download.add_argument(
         "--candidates-file", default="",
         help="Defaults to <review-root>/review-projects/<project-id>/00_discovery/online_search_candidates.json",
     )
-    download.add_argument("--paper-pdf-dir", default="", help="Defaults to <review-root>/review-library/paper_pdf")
-    download.add_argument("--mailto", default="", help="Contact email for Unpaywall lookups and PDF download User-Agent.")
-    download.add_argument("--unpaywall-base-url", default="https://api.unpaywall.org/v2")
-    download.add_argument("--unpaywall-timeout", type=int, default=20)
-    download.add_argument("--download-delay", type=float, default=0.5)
-    download.add_argument("--limit", type=int, default=0, help="Max candidates to attempt this run. 0 = all.")
-    download.add_argument(
-        "--dry-run", action="store_true",
-        help="Resolve PDF sources only -- no download, no file writes, no registration.",
+    list_for_download.add_argument("--mailto", default="", help="Contact email for Unpaywall lookups.")
+    list_for_download.add_argument("--unpaywall-base-url", default="https://api.unpaywall.org/v2")
+    list_for_download.add_argument("--unpaywall-timeout", type=int, default=20)
+    list_for_download.add_argument("--delay", type=float, default=0.5, help="Politeness delay between lookups.")
+    list_for_download.add_argument("--limit", type=int, default=0, help="Max candidates to attempt this run. 0 = all.")
+    list_for_download.add_argument(
+        "--allow-unconfirmed", action="store_true",
+        help="Bypass the online_search_human_check_state.json confirmation gate.",
     )
-    download.add_argument(
+
+    register_pdfs = subparsers.add_parser(
+        "register-pdfs",
+        help="Scan a folder of manually-downloaded PDFs and register each against its confirmed "
+        "candidate metadata into review-library. --paper-pdf-dir is never assumed -- it can be "
+        "anywhere on disk (a Downloads folder, another drive, wherever the PDFs actually are).",
+    )
+    register_pdfs.add_argument("--review-root", default=str(Path.cwd()))
+    register_pdfs.add_argument("--project-id", required=True)
+    register_pdfs.add_argument(
+        "--paper-pdf-dir", required=True,
+        help="Folder to scan for PDFs to register. Can be anywhere on disk -- the agent/user "
+        "decides this, no default and no assumption it's under review-root.",
+    )
+    register_pdfs.add_argument(
+        "--mineru-output-dir", default="",
+        help="Folder with this PDF batch's MinerU output (markdown/, extracted/), used to seed "
+        "source_paths and to resolve a title-match fallback for files not matched by filename. "
+        "Defaults to <review-root>/review-library/mineru-outputs -- unlike --paper-pdf-dir, this "
+        "one belongs inside the review-library workspace since it's derived/processed data.",
+    )
+    register_pdfs.add_argument(
+        "--candidates-file", default="",
+        help="Defaults to <review-root>/review-projects/<project-id>/00_discovery/online_search_candidates.json",
+    )
+    register_pdfs.add_argument(
+        "--download-list-file", default="",
+        help="Defaults to <review-root>/review-projects/<project-id>/00_discovery/"
+        "online_search_manual_download_list.json (for filename-based matching).",
+    )
+    register_pdfs.add_argument(
         "--allow-unconfirmed", action="store_true",
         help="Bypass the online_search_human_check_state.json confirmation gate.",
     )
@@ -1322,7 +1457,9 @@ def main() -> int:
         return run_search(args)
     if args.mode == "probe":
         return run_probe(args)
-    return run_download(args)
+    if args.mode == "register-pdfs":
+        return run_register_pdfs(args)
+    return run_list_for_download(args)
 
 
 if __name__ == "__main__":

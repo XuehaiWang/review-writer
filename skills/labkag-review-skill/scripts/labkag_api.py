@@ -9,6 +9,14 @@ from pathlib import Path
 
 import requests
 
+# Paper titles/authors routinely contain non-ASCII characters (unicode minus,
+# accents, Greek letters). The default console encoding on some Windows
+# locales (e.g. GBK) can't represent them, which crashes plain print() mid-batch.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 DEFAULT_BASE_URL = os.environ.get("LABKAG_BASE_URL", "http://127.0.0.1:8001").rstrip("/")
 
 

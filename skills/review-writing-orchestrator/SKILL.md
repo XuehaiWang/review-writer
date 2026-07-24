@@ -1,11 +1,11 @@
 ---
 name: review-writing-orchestrator
-description: Orchestrate the concise review-writing workflow: discovery, fixed-field literature matrix, outline/blueprint, section-file drafting, figure redraw, merge, and final audit.
+description: Orchestrate the concise review-writing workflow: discovery, LabKAG ingest/taxonomy/topic-match bridge, fixed-field literature matrix, outline/blueprint, section-file drafting, figure redraw, merge, and final audit.
 ---
 
 # Review Writing Orchestrator
 
-The corpus is grown two ways: `review-online-paper-discovery` searches Crossref/SciAtlas and downloads confirmed candidates' PDFs into `review-library/paper_pdf/`, and/or `labkag-review-skill`'s ingest workflow processes PDFs already placed there. Neither requires a manually-located external paper directory.
+The corpus is grown two ways: `review-online-paper-discovery` searches Crossref/SciAtlas, resolves a download source for each confirmed candidate, and (once the human has manually downloaded them into a folder of their choosing) registers the PDFs into `review-library` via its `register-pdfs` step; and/or `labkag-review-skill`'s ingest workflow processes PDFs already placed somewhere. Neither assumes PDFs live in any one fixed location.
 
 If the user's topic is not in English, translate it to English first. Discovery search is English-keyword based; a non-English topic passed straight through will fail to match papers.
 
@@ -31,27 +31,29 @@ Never overwrite or reuse an existing project folder for a new topic. Confirm the
 
 ```text
 1. review-online-paper-discovery
-2. review-literature-matrix-outline
-3. review-section-blueprint
-4. review-section-drafting-figure-picking
-5. review-figure-style-redraw
-6. review-draft-merge-polish
-7. review-conclusion-generator
-8. review-final-audit-release
-9. review-outline-summary-chart
-10. review-export-docx
+2. labkag-review-skill
+3. review-literature-matrix-outline
+4. review-section-blueprint
+5. review-section-drafting-figure-picking
+6. review-figure-style-redraw
+7. review-draft-merge-polish
+8. review-conclusion-generator
+9. review-final-audit-release
+10. review-outline-summary-chart
+11. review-export-docx
 ```
 
 For each stage, invoke that stage's skill by name (e.g. call the `review-online-paper-discovery` skill, not just read its file). Do not read a sub-skill's `SKILL.md` yourself and improvise its steps inline — invoke the skill so it runs under its own instructions. The correct CLI invocation, required flags, required output files, and human-check gates for each stage live inside that sub-skill and are applied when it is invoked. The summary below is only a rough map of what each stage does, not a substitute for invoking it.
 
-**A manual bridge step is required between stage 1 and stage 2, and it is not automatic.** `review-online-paper-discovery` only grows `review-library/paper_pdf/` with confirmed PDFs — it does not write `00_discovery/selected_discovery_results.json`, the file `review-literature-matrix-outline` (and later, figure-picking) hard-requires. Before invoking stage 2, run `labkag-review-skill`'s knowledge-base build (ingest + taxonomy) if not already done, then its `match-topic` workflow for this review's topic, then `labkag-review-skill/scripts/export_discovery_format.py` to produce `selected_discovery_results.json` in this project's `00_discovery/`. Stage 2 will fail outright, not degrade gracefully, if this step is skipped.
+**Stage 2 (`labkag-review-skill`) is a required bridge, not automatic, and stage 3 will fail outright (not degrade gracefully) if it's skipped.** `review-online-paper-discovery` only grows the review-library corpus with confirmed PDFs (via its own resolve → human-download → `register-pdfs` sequence) — it does not write `00_discovery/selected_discovery_results.json`, the file `review-literature-matrix-outline` (and later, figure-picking) hard-requires. Invoke `labkag-review-skill`'s knowledge-base build (ingest + taxonomy) if not already done, then its `match-topic` workflow for this review's topic, then `labkag-review-skill/scripts/export_discovery_format.py` to produce `selected_discovery_results.json` in this project's `00_discovery/` — same directory stage 1 already wrote to, since this stage's output is a sibling set of files, not a new folder.
 
 **Run exactly one stage per turn, then stop.** After invoking a stage's skill and its outputs are written, do not continue to the next stage in the same turn. Report what was produced, point to the human-check instructions for that stage, and explicitly ask the user to review and confirm before you proceed. Wait for the user's next message before invoking the following stage — even if the user's original request described the full end-to-end goal. The only exception is when the user explicitly says to run multiple stages back-to-back without stopping (e.g. "run all steps," "skip the checks," "continue through stage N").
 
 ## Core Contract (rough map only — always defer to the sub-skill's SKILL.md)
 
 ```text
-Discovery: user topic -> expanded keywords -> search Crossref/SciAtlas -> human-confirmed candidates -> download PDFs into review-library/paper_pdf/.
+Discovery: user topic -> expanded keywords -> search Crossref/SciAtlas -> human-confirmed candidates -> resolve download sources -> human downloads PDFs manually -> register them into review-library.
+LabKAG bridge: ingest downloaded PDFs + build/reuse a taxonomy -> decompose the topic -> match-topic against the taxonomy-tagged corpus -> export confirmed/borderline matches into 00_discovery/selected_discovery_results.json.
 Matrix: one row per paper with title, authors, keywords, abstract, ~1000-word main_content, most_relevant_figure.
 Outline: use topic + matrix + writing-rule skill to create selected_outline.md.
 Blueprint: convert outline into section_blueprint.json with section, paragraph, paper, and figure mapping.
@@ -73,7 +75,8 @@ python3 <skill-root>/scripts/project_status.py --project-id <project_id>
 Pause after:
 
 ```text
-00_discovery: confirm online-search candidates; confirming triggers the automatic PDF-download step into review-library/paper_pdf/.
+00_discovery (stage 1): confirm online-search candidates; confirming triggers the automatic PDF-source-resolution step (list-for-download) -- actual downloading and placement is manual, then register-pdfs links the files in.
+00_discovery (stage 2, labkag-review-skill bridge): confirm selected_discovery_results.json's local_papers list, then mark human_check_state.json confirmed.
 01_matrix_outline: confirm literature matrix and selected_outline.md.
 02_section_blueprint: confirm section/paragraph/paper/figure mapping.
 03_section_drafting: confirm section files and figure candidates.

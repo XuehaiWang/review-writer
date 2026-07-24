@@ -448,9 +448,9 @@
       const r = selectedPaper.row;
       els.detailTitle.textContent = r.title || '(untitled)';
       els.detailMeta.textContent = `${r.year || ''} · ${r.journal || ''}`;
-      els.summary.innerHTML = `<h3>${esc(r.title)}</h3><p><strong>Score:</strong> ${esc(r.score)}</p><p><strong>Reason:</strong> ${esc(r.reason || '')}</p>${r.url ? `<p><a href="${esc(r.url)}" target="_blank">Open link</a></p>` : ''}${r.pdf_url ? `<p><a href="${esc(r.pdf_url)}" target="_blank">Open PDF</a></p>` : '<p>No direct PDF link yet -- Phase 2 (download) will try Unpaywall for this DOI.</p>'}`;
+      els.summary.innerHTML = `<h3>${esc(r.title)}</h3><p><strong>Score:</strong> ${esc(r.score)}</p><p><strong>Reason:</strong> ${esc(r.reason || '')}</p>${r.url ? `<p><a href="${esc(r.url)}" target="_blank">Open link</a></p>` : ''}${r.pdf_url ? `<p><a href="${esc(r.pdf_url)}" target="_blank">Open PDF</a></p>` : '<p>No direct PDF link yet -- Phase 2 (list-for-download) will try Unpaywall for this DOI.</p>'}`;
       els.metadata.textContent = JSON.stringify(r, null, 2);
-      els.markdown.innerHTML = '<p>Not yet downloaded -- no local Markdown available for a search candidate.</p>';
+      els.markdown.innerHTML = '<p>Not yet registered -- no local Markdown available for a search candidate. Download manually and run register-pdfs.</p>';
       els.pdfFrame.src = 'about:blank';
     }
     async function save(confirm=false) {
