@@ -762,8 +762,17 @@ def infer_topic(project: Path) -> str:
     return ""
 
 
-def resolve_draft(project: Path) -> tuple[Path, bytes]:
-    """Find the review draft (final > first) and return one byte snapshot."""
+def resolve_draft(project: Path, input_markdown: str | None = None) -> tuple[Path, bytes]:
+    """Return an explicit project manuscript, or the final-to-sections fallback."""
+    if input_markdown:
+        project_path = project.resolve()
+        draft_path = Path(input_markdown).resolve()
+        try:
+            draft_path.relative_to(project_path)
+        except ValueError as error:
+            raise ValueError("input markdown must be inside the selected project") from error
+        return draft_path, draft_path.read_bytes()
+
     for rel in ("05_final_audit/final_draft.md", "04_first_draft/first_draft.md",
                 "02_section_drafting/section_drafts.md"):
         p = project / rel
@@ -779,7 +788,7 @@ def run(args: argparse.Namespace) -> int:
         print(f"ERROR: Project not found: {project}", file=__import__("sys").stderr)
         return 2
 
-    draft_path, draft_payload = resolve_draft(project)
+    draft_path, draft_payload = resolve_draft(project, args.input_markdown)
     if not draft_payload:
         print("ERROR: No review draft found (final_draft.md / first_draft.md / section_drafts.md).",
               file=__import__("sys").stderr)
@@ -896,6 +905,8 @@ def parse_args() -> argparse.Namespace:
                     default="both",
                     help="full=全文大纲 only; section=小节大纲 only; both=all; "
                          "html/json limit output format")
+    ap.add_argument("--input-markdown",
+                    help="Explicit manuscript path inside the selected project")
     return ap.parse_args()
 
 
