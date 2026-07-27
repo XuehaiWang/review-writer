@@ -1,71 +1,82 @@
 {
   "paper_id": "P023",
-  "slug": "adv-synth-catal-2024-ji-regiodivergent-reactions-of-2alkynyl-aziridines-with-grignard-reagents",
+  "slug": "1f2adcb9-3af2-4fee-bb64-f35dec5bfb23_origin",
   "title": {
-    "value": "Regiodivergent Reactions of 2-Alkynyl Aziridines with Grignard Reagents",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Axially Chiral Allenylboranes: Catalytic Asymmetric Synthesis by Palladium-catalysed Hydroboration of But-1-en-3-ynes and their Reaction with an Aldehyde",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Wen-Tao Ji",
-      "A-Nan Ping",
-      "Gaosheng Yang",
-      "Zhuo Chai"
+      "Yonetatsu Matsumoto",
+      "Masaki Naito",
+      "Yasuhiro Uozumi and Tamio Hayashi"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2025,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 1986,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Adv Synth Catal",
-    "source": "filename_prefix",
-    "confidence": 0.55,
+    "value": "Tetrahedron",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
-    "value": "10.1002/adsc.202401311",
-    "source": "markdown_regex",
-    "confidence": 0.9,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "abstract": {
-    "value": "Herein, we report regiodivergent nucleophilic attack of Grignard reagents to 2-alkynyl aziridines. Under the catalysis of a Cu(I)-diphosphine complex, benzylic Grignard reagents add to the carbon-carbon triple bond of the aziridines to deliver α-allenylamines in moderate to excellent yields; the direct addition of the Grignard reagents to the aziridines in the absence of catalyst provided homopropargylic amine derivatives. Both reactions could proceed in highly enantiospecific ways. Further synthetic manipulations of these products enable rapid access to diverse useful heterocyclic molecular scaffolds.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Reaction of but-1-en-3-ynes (CH₂=CR-C≡CH: R = H, n-C₅H₁₁) with catecholborane in the presence of a palladium catalyst bearing a chiral monodentate phosphine ligand, (S)-(-)-MeO-MOP, give optically active (3-substituted-1,2-butadienyl)-1,3,2-benzodioxaborolanes [Me(R)C=C=CH(BO₂C₆H₄)], the reaction of which with benzaldehyde proceeded with syn attack to give the corresponding optically active but-3-ynyl alcohols of up to 61% enantiomeric excess (e.e.).",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "enynes",
+      "catalyst_or_method": "palladium catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "chiral biaryl bisphosphine ligands",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Alkynol/Adv Synth Catal - 2024 - Ji - Regiodivergent Reactions of 2‐Alkynyl Aziridines with Grignard Reagents.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/adv-synth-catal-2024-ji-regiodivergent-reactions-of-2alkynyl-aziridines-with-grignard-reagents.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/adv-synth-catal-2024-ji-regiodivergent-reactions-of-2alkynyl-aziridines-with-grignard-reagents/28485edf-bc56-4bb0-8392-dc1015a35ff9_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/adv-synth-catal-2024-ji-regiodivergent-reactions-of-2alkynyl-aziridines-with-grignard-reagents"
+    "pdf": "D:\\work\\data\\1f2adcb9-3af2-4fee-bb64-f35dec5bfb23_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\1f2adcb9-3af2-4fee-bb64-f35dec5bfb23_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\1f2adcb9-3af2-4fee-bb64-f35dec5bfb23_origin\\09feb275-643d-43d1-b433-afa6e4911b7f_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\1f2adcb9-3af2-4fee-bb64-f35dec5bfb23_origin"
   },
   "source_file": {
-    "pdf_name": "Adv Synth Catal - 2024 - Ji - Regiodivergent Reactions of 2‐Alkynyl Aziridines with Grignard Reagents.pdf",
-    "relative_pdf_path": "Adv Synth Catal - 2024 - Ji - Regiodivergent Reactions of 2‐Alkynyl Aziridines with Grignard Reagents.pdf",
-    "sha256": "1e2e02558ad858f456c3d046f4b638949ba2a48382f83d544988a1c14556fc43"
+    "pdf_name": "1f2adcb9-3af2-4fee-bb64-f35dec5bfb23_origin.pdf",
+    "relative_pdf_path": "1f2adcb9-3af2-4fee-bb64-f35dec5bfb23_origin.pdf",
+    "sha256": "238e3a7c990a2963b97b9bf0bd5e750985beeedfec7eafe32ab945f0d506c9c2"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:29Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 103,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 35,
+      "markdown_chars_used": 8006
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -76,26 +87,14 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "Allowed substrate and leaving-group labels do not directly cover 2-alkynyl aziridine ring-opening systems, so those categories were set to not specified.",
-      "structured_tag_not_specified_substrate",
-      "structured_tag_not_specified_leaving_group"
+      "missing_doi",
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.891,
+    "overall_confidence": 0.593,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "copper catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "ferrocenyl and phosphametallocene phosphorus ligands",
-      "organometallic_partner": "Grignard reagents",
-      "product": "allenyl amines",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "not specified"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.84,
-    "human_checked": false
   }
 }

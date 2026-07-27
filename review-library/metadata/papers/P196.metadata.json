@@ -1,32 +1,33 @@
 {
   "paper_id": "P196",
-  "slug": "8b",
+  "slug": "piis2666951x24000524",
   "title": {
-    "value": "Synthetic Use of an Unusual Organocuprate Intermediate",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Synthesis of allenones via nickel-catalyzed reductive coupling of propargyl esters with acyl chlorides",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Jean-Marie Dollat",
-      "Jean-Louis Luche",
-      "Pierre Crabbé"
+      "Zhen Song",
+      "Yueming Wang",
+      "Ming Ma <sup></sup>",
+      "Yuanhong Ma"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1977,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "journal": {
-    "value": "Tetrahedron Letters",
-    "source": "known_journal_hint",
-    "confidence": 0.72,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
@@ -36,35 +37,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "The organometallic intermediate (3) can be used to prepare iodo-allenes, and allenic and β-acetylenic ketones as well as ethers; the site of the reaction of an electrophile on the organometallic intermediate seems to depend on the hard or soft nature of the reagent according to Pearson's theory.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.95,
+    "value": "Transition metal-catalyzed reductive coupling of two electrophilic components has proved to be a powerful and step-economic tool for forging diverse organic molecules. However, the application of such strategy for the synthesis of allenones that are very important in pharmaceutical chemistry and synthetic chemistry remains very limited and challenging. Herein, we have developed a nickel-catalyzed reductive cross-coupling of propargyl esters with acyl chlorides, which affords an alternative route for the synthesis of allenones. The current catalytic protocol features readily available starting materials, wide substrate scope, mild conditions and good regioselectivity. Allenones as a class of prominent structural motifs popularly exist in numerous natural products, bioactive compounds, and pharmaceuticals, and they also serve as versatile feedstocks for construction of diverse organic molecules, especially for poly-substituted heterocycles (Scheme 1a) [1,2]. Therefore, the development of methods for the efficient syn thesis of functionalized allenones is of great interest and significance. The conventional routes to access allenones mainly depend on the Wittig reaction involving α-carbonyl phosphorus ylide [3,4] and the oxidation of secondary allenols or homopropargylic alcohols [5–8]. However, such methods generally suffer from tedious steps for the preparation of the starting material, the requirement of stoichiometric oxidant, and limited scope. In this regard, various catalytic approaches have been exploited as alternative strategies for the synthesis of allenones [9–11]. For instance, functionalization of 1,3-enynes with aldehydes or acyl halides, even with CO as a carbonyl source, by nickel catalysis or N-heterocyclic carbenes (NHCs) catalysis has recently been demonstrated as a robust platform for the synthesis of structurally diverse allenones [9f-9g, 10a-10d]. Despite these impressive advances, the facile and rapid syn thesis of allenones from easily available handles remains a challenge due to the high reactivity of allenones. As such, it is highly in demand and significant to exploit new catalytic strategies for the efficient synthesis of allenones. Transition metal-catalyzed reductive cross-coupling has emerged a one of the most powerful tools for the synthesis of organic molecules due to avoiding the use of organometallic reagents and good functional group tolerance [12]. However, despite considerable advances in this area, successful examples for the synthesis of allenones through such strategy are still very rare. Recently, Fang’s group reported nickel-catalyzed reductive hydroalkylation of α-alkynyl enones with alkyl bromides to access allenones (Scheme 1b) [13a]. Wang et al. dis closed a chromium-catalyzed electrophilic coupling of propargyl bro mides with aromatic aldehydes for the synthesis of allenones through sequential radical–polar crossover and Oppenauer oxidation [13b]. In consideration of easy availability and wide applications of propargyl esters in synthesis of allenes [14], as well as our continuous interest in utilization of carboxylic acid derivatives in reductive coupling [15], herein, we report the first nickel-catalyzed reductive cross-coupling of propargyl esters with acyl chlorides, affording a new alternative route for the synthesis of allenones with wide substrate scope, good functional group compatibility and regioselectivity (Scheme 1c). Initially, Boc-protected propargyl ester 1 and aroyl chloride 2 were selected as the model substrates to optimize the reaction conditions under nickel catalysis (Table 1; also see Table S1 in supplementary in formation). After carefully evaluating various parameters, we found that the desired allenone 3 could be obtained in 63 % isolated yield by using NiBr ⋅diglyme (10 mol%) as catalyst, L1 (12 mol%) as ligand, Zn (2.0 (a) Allenones in drugs. bioactive molecules. and synthetic feedstocks equiv.) as reductant, TBAI (tetrabutylammonium iodide), $\\mathrm { { \\bf M g C l _ { 2 } } },$ and $\\mathrm { K _ { 2 } H P O _ { 4 } }$ as additives in THF at r.t. for 3 h (entry 1, Table 1). Subse quently, control experiments indicated that the nickel catalyst, ligand and Zn are essential for this catalytic reaction (entry 2, Table 1). Moreover, we found that no desired product was detected without the additive TBAI (entry 3, Table 1) probably due to anion exchange [16]. Besides, the $\\mathbf { M g C l } _ { 2 }$ as the commonly used additive in reductive coupling $[ 1 6, 1 7 ]$ also played crucial roles in this system although its exact functions are still indefinite at this stage (entry 4, Table 1). The yield was decreased to 37 % without weak base $\\mathrm { K _ { 2 } H P O _ { 4 } }$ (entry $^ { 5, }$ Table 1) [14d]. The other nickel catalysts such as NiBr, NiI and Ni(cod) resulted in inferior vields (entries 6–8, Table 1). Then, the performance of various ligands was examined, and it was found that the yields with substituent-free phenanthroline L2, bipyridine L3 or terpyridine L4 were lower than the case of L1 (entries 9–11, Table 1). When Mn powder (2.0 equiv) was used as the reductant instead of Zn, the yield was decreased to 25 % (entry 12). The preliminary screening of solvent showed that almost no desired coupling product was detected in DMA, 1,4-dioxane and toluene (entry 13–15, Table 1). Additionally, we found the yield was down to 31 % with some unconfirmed side-products when the catalytic reaction was performed at $5 0 ~ ^ { \\circ } \\mathrm { C }$ (entry $^ { 1 6, }$ Table 1). It needs to be pointed out that the current catalytic system is pretty sen sitive to the reaction time, and we surprisingly found that the trace amount of product 3 was observed with consumption of the product in current conditions by prolonging the reaction time to 6 h (entry 17, Table 1). This phenomenon may be explained that the allenone is indeed a highly reactive synthetic intermediate that easily undergoes various transformation under the presence of transition metal catalyst. It exactly demonstrates the potential challenges of such coupling system. Furthermore, we found that representative propargyl esters containing other protecting groups could undergo this coupling reaction, giving the coupling product 3 with lower yields (Table 1, bottom). With the established conditions in hand, the generality of this nickelcatalyzed reductive cross-coupling of propargyl esters and acyl chlorides for the synthesis of allenones was investigated (Scheme 2). First, the scope of propargyl esters was examined. It was found that the coupling reactions of acyl chloride 2 with a series of aryl propargyl esters pro ceeded smoothly, affording the corresponding allenones 3–11 with tolerance of alkyl (3, 5, 10), ether (6), halides (7, 8), ester (9), and phenyl (11) groups. The structure of product 3 was further confirmed by an X-ray analysis. Moreover, heterocycle-containing propargyl esters such as thiophene and carbazole were also compatible with such cata lytic system, leading to the desired products 12 and 13. Additionally, we Optimization of reaction conditions<sup>a</sup>. Scheme 1. Synthesis of allenones by reductive nickel catalysis. <sup>a</sup>Reaction conditions: 1 (0.2 mmol), 2 (2.2 equiv), NiBr ⋅diglyme (10 mol%), L1 (12 mol%), Zn (2.0 equiv), TBAI (1.5 equiv), MgCl (2.0 equiv), K HPO (1.0 equiv), and THF (2.5 mL) under $\\Nu _ { 2 }$ at $3 0 ~ ^ { \\circ } \\mathrm { C }$ for 3 h. Isolated yields. found that some propargyl esters bearing diverse alkyl (14–16) and alkenyl (17) at terminal position of alkynyl groups smoothly reacted with acyl chloride 2, delivering the target allenones 14–17. Unfortu nately, the propargyl ester with alkyl chain at propargyl position showed no reactivity, and the corresponding product 18 was not detected. Then, the scope of acyl chlorides was evaluated. Benzoyl chloride and an array of aroyl chlorides bearing different substituents such as alkyl, ether and amino groups can smoothly undergo such coupling re actions, furnishing the corresponding allenones 19–26 in moderate yields. Aroyl chloride with methoxy group at ortho position of phenyl ring reacted with propargyl ester 1 under standard conditions, giving the desired product 27 albeit with lower yield probably due to hindrance effect. Representative poly-substituted aroyl chlorides were also amenable to this catalytic system, giving the allenones 28–31 in syn thetically useful yields. π-Extended aroyl chlorides (32, 33) and het erocyclic acyl chloride such as thiophene (34) could take part in this catalytic reaction, affording the corresponding products 32–34. It is a pity that aroyl chlorides bearing electron-withdrawing groups such as ester and cyano were not tolerated with such protocol (35 and 36). Furthermore, we found that aliphatic acyl chlorides can participate in the reactions, providing the desired allenones such as 37 and 38. It needs to be pointed out that lower yields for some products generally account for homo-coupling of propargyl esters and acyl chlorides as well as considerable deprotection of propargyl esters. Scheme 2. The scope of propargyl esters and acyl chlorides for this nickel-catalyzed reductive cross-coupling. Reaction conditions: propargyl esters (0.2 mmol), acyl chlorides (2.2 equiv), NiBr ⋅diglyme (10 mol%), L1(12 mol%), Zn (2.0 equiv), TBAI (1.5 equiv), MgCl (2.0 equiv), K HPO (1.0 equiv), and THF (2.5 mL) under $\\Nu _ { 2 }$ at 30 <sup>◦</sup>C for 3 h. Isolated Yields. ${ } ^ { a } 0 { } ^ { \\circ } \\mathrm { C }$ and 12 h.",
+    "source": "content_list_abstract_region",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "non-phosphorus metal-coordination ligands",
+      "leaving_group": "ether leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "method optimization study"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/8b/d1a2a61a-6503-4c7d-8526-ac3358460b0d_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/8b.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/8b/d1a2a61a-6503-4c7d-8526-ac3358460b0d_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/8b"
+    "pdf": "D:\\work\\data\\PIIS2666951X24000524.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\piis2666951x24000524.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\piis2666951x24000524\\e18a2ed5-8253-4c5a-8936-5f66ac027cf0_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\piis2666951x24000524"
   },
   "source_file": {
-    "pdf_name": "8b.pdf",
-    "relative_pdf_path": "8b.pdf",
-    "sha256": "2b24f321c0cf64037ccdb9d07b35080340061054887fae463dd2bbaf70135ab1"
+    "pdf_name": "PIIS2666951X24000524.pdf",
+    "relative_pdf_path": "PIIS2666951X24000524.pdf",
+    "sha256": "dc38b969a8cab9bb5674b46f1bdb51769303456b49746077907d416cbab4aa6d"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T20:56:27Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 35,
-      "markdown_chars_used": 7912
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 132,
+      "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -73,33 +86,16 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [],
-    "warnings": [
-      "missing_year",
-      "missing_doi",
-      "low_confidence_abstract",
-      "The paper provides a summary rather than a modern full abstract.",
-      "The catalyst_or_method label is approximate because the paper uses a stoichiometric lithium dialkylcuprate intermediate rather than a clearly catalytic copper system.",
-      "The paper reports multiple product classes; 'haloallenes' was chosen as the most prominent allene product family from the title/front summary and Table 1 emphasis.",
-      "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+    "missing_fields": [
+      "year"
     ],
-    "overall_confidence": 0.787,
+    "warnings": [
+      "missing_journal",
+      "missing_doi",
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_reaction_type"
+    ],
+    "overall_confidence": 0.416,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "copper catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "acetate leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "haloallenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic acetates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.87,
-    "human_checked": false
   }
 }

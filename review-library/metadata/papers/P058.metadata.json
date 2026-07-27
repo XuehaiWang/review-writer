@@ -1,33 +1,31 @@
 {
   "paper_id": "P058",
-  "slug": "bmc-chemistry-2022-16-14",
+  "slug": "64388549-d13e-4e61-bb20-23cca7c5732b_origin",
   "title": {
-    "value": "Cu-catalyzed, Mn-mediated propargylation and allenylation of aldehydes with propargyl bromides",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Bimetallic Enantioselective Approach to Axially Chiral Allenes",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Rongli Zhang",
-      "Yanping Xia",
-      "Yuchen Yan",
-      "Lu Ouyang"
+      "Vol.",
+      "No. –"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2022,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2013,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "Organic Letters",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
@@ -37,35 +35,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "A simple, practical, and high chemo-selective method for the synthesis of propargyl alcohol and allenyl alcohols via Cu-catalyzed, Mn-mediated propargylation and allenylation of aldehydes with propargyl bromides has been established. When 3-bromo-1-propyne was conducted under the standard condition, the aldehydes were transformed to the corresponding propargylation products completely, while when 1-bromo-2-pentyne was used, allenic alcohol was the only product. Variety of homopropargyl alcohols and allenyl alcohols were obtained in high yields and the reaction is compatible with broad substrate scopes. In addition, the large-scale reaction could also be proceeded smoothly indicating the potential synthetic applications of this transformation.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "An efficient bimetallic Zn(ll)/Cu(l)-mediated asymmetric synthesis of simple axially chiral allenes from terminal alkynes and aldehydes was realized by taking advantage of the chiral amine (S)-R,R-diphenylprolinol 3. This one-pot procedure is compatible with broad scopes of both terminal alkynes and aldehydes, providing axially chiral allenes in practical yields with an excellent enantioselectivity. Control experiments revealed that CuBr is responsible for the efficient formation of propargylic amine while the combination of CuBr and ZnBr plays crucial roles in the amine-to-allene transformation. Allenes, which had been considered as highly unstable, are now becoming more and more important in organic synthesis, pharmaceuticals, and materials science.<sup>1</sup> Thus, there is an urgent demand for efficient entries to optically active allenes.<sup>2</sup>\u0001<sup>6</sup> Recently, we have developed a “chiral amine” approach enabling the synthesis of axially chiral 1,3-disubstituted allenes directly from terminal alkynes and aldehydes using (S)-R,R-diphenylprolinol 3 (a, Scheme 1).<sup>4</sup> However, extensive study in this group revealed that the substrate scope is very limited: only the A-type of R-oxy-functionalized alkynes and aliphatic aldehydes may be applied (a, Scheme 1 and entry 1, Table $1 ) ; ^ { 4 }$ with 1-dodecyne and benzaldehyde, the corresponding allene (R)-4aa was formed in 31% yield with a much lower ee (82%) (eq 2, Scheme 1).<sup>5</sup> Thus, it is still a challenge to prepare the optically active simple 1,3-disubstituted allenes from widely available terminal alkynes with much less sterically bulky “naked” $\\mathrm { C H } _ { 2 }$ units adjacent to the $\\mathrm { C - C }$ triple bond since the oxygen-containing unit (CH(OY)R<sup>1</sup>) (eq 1, Scheme 1) acts as the enantioselectivedictating group based on our previous studies.<sup>4</sup> On the other hand, bimetallic catalysts, which are distinct from those of their monometallic counterparts, have been shown to exhibit unique activities in a wide range of organic transformations.<sup>7</sup> Given that $Z \\mathrm { n ( I I ) }$ salt alone showed low efficiency for the synthesis of simple axially chiral allenes, we thus envisaged that the bimetallic strategy might be a solution for higher reactivity and enantioselectivity for this reaction. Herein, we report a highly enantioselective bimetallic asymmetric approach to axially chiral allenes from both aromatic or aliphatic aldehydes, less sterically bulky alkynes, and chiral amine (S)-R,R-diphenylprolinol 3 (b, Scheme 1). Scheme 1. Synthesis of Axially Chiral Allenes Using (S)-R,R-Diphenylprolinol 3 After screening numerous additives to $\\mathrm { Z n B r } _ { 2 }$ such as FeCl, ${ \\mathrm { F e C l } } _ { 3 },$ NaBr, LiBr, KBr, $\\mathrm { H g C l } _ { 2 },$ AuBr, etc., we eventually observed that when 10 mol % CuBr was added to the reaction mixture of 1.5 equiv of 1-decyne 1b, 2.0 equiv of benzaldehyde 2a, 1.0 equiv of (S)-R,R-diphenylprolinol 3, and 50 mol % ZnBr, the yield of (R)-4ba dramatically improved from 22% to 53% (entry 2 vs 1, Table 1); in addition, the enantiomeric excess also improved to 96% (cf. eq 2 in Scheme 1)! The reaction temperature was also found to be crucial for this transformation: Elevating the temperature to $1 2 0 ~ ^ { \\circ } \\mathrm { C }$ led to an erosion in enantioselectivity (entry 3, Table 1) whereas lowering the temperature to $1 0 0 ~ ^ { \\circ } \\mathrm { C }$ resulted in a very low yield of (R)-4ba, although the enantioselectivity improved slightly (entry 4, Table 1), which is expected. Notably, when the reaction was carried out with 50 mol % $\\mathrm { Z n B r } _ { 2 }$ and 20 mol $\\%$ CuBr in dioxane at $1 2 0 ~ ^ { \\circ } \\mathrm { C }$, (R)-4ba can be obtained in comparable yield with 98% ee (entry 5, Table 1). Therefore, 50 mol $\\% \\ Z \\mathrm { n B r } _ { 2 },$, 10 20 mol % CuBr, 1.5 equiv of 1-alkyne, and 2 equiv of aldehyde in toluene at $1 1 0 ~ ^ { \\circ } \\mathrm { C }$ (conditions A) or dioxane at $1 2 0 ~ ^ { \\circ } \\mathrm { C }$ (conditions B) for 13 h were established as the standard conditions for further study. Table 1. Optimization of the Reaction Conditions<sup>a</sup> With the optimized reaction conditions in hand, the generality of the reaction was then explored, and representative results are summarized in Table 2. Gratifyingly, both electron-poor and -rich aromatic aldehydes are compatible under the optimized conditions: Aromatic aldehydes with a synthetically versatile Br, Cl, or F substituent at the meta- or para-position all underwent the reaction smoothly, affording the corresponding allene products (R)-4bb (R)-4bf in moderate yields with up to 98% ee (entries 3 7, Table 2); aromatic aldehydes containing an electron-donating group such as $\\mathrm { C H } _ { 3 }$ or MeO can also be transformed into the desired products (R)-4bg (R)-4bi in practical yields with 93 98% ee (entries 8 10, Table 2). Notably, terminal alkyne 1d with a chlorine atom at the 5-position was also tolerated, furnishing (R)-4da in 50% yield with 93% ee and 43% yield with 99% ee under conditions A and B, respectively (entry 12, Table 2). Moreover, phenylacetylene 1e and aliphatic aldehyde 2j may also be employed to afford axially chiral allene (R)-4ej in moderate yields with 99% ee (entry 13, Table 2). This protocol may also be extended to the alkynyl benzyl ether $\\mathbf { 1 6 },$ affording axially chiral allene (R)-4fj in modest yield with 99% ee under the two sets of reaction conditions (entry 14, Table 2). Interestingly, reactions carried out in dioxane at $1 2 0 ~ ^ { \\circ } \\mathrm { C }$ generally afforded the corresponding axially chiral allenes with higher enantioselectivity, albeit Table 2. Bimetallic Zn(II)/Cu(I)-Mediated Asymmetric Synthe sis of Axially Chiral Allenes from 1-Alkyne, Aldehyde, and $( S ) ^ { - 3 ^ { a } }$ To gain insight into the roles of both ZnBr and CuBr, control experiments were conducted (Scheme 2). When the reaction was carried out with 50 mol % $\\mathrm { Z n B r } _ { 2 }$ in the absence of CuBr at $1 1 0 ~ ^ { \\circ } \\mathrm { C }$ for 13 h, the allene product (R)-4ba was formed in only 22% yield as determined by <sup>1</sup>H NMR analysis (eq 1, Scheme 2). On the other hand, when the same reaction was carried out with only 20 mol % CuBr, (R)-4ba was obtained in only 8% yield with 98% ee and a 71% yield of propargylic amine (S,S)-5ba<sup>3</sup> was isolated (eq 1, Scheme 2). Based on these experimental data, we believe that the catalytic amount of CuBr must play a much more important role than the 50 mol % of ZnBr in furnishing the first step efficient and high-yielding forma tion of the 5-type propargylic amine ensuring an excellent de (cf. eq 2 in Scheme 1). When the isolated propargylic amine intermediate (S,S)- 5ba was treated with 50 mol % $\\mathrm { Z n B r } _ { 2 }$ for 8 h, (R)-4ba was obtained in 43% yield with 98% ee, with 31% of (S,S)-5ba being recovered (eq 2, Scheme 2); as a comparison, with 20 mol % CuBr, (R)-4ba was obtained only in 14% yield with 97% ee and 65% of the propargylic amine (S,S)-5ba was recovered after 8 h (eq 3, Scheme 2). These data clearly indicate that $\\mathrm { Z n B r } _ { 2 }$ exhibits a higher activity for transforming the propargyl amine intermediate into the allene products as compared to CuBr. Importantly, it should be noted that it is the combination of 50 mol % $\\mathrm { Z n B r } _ { 2 }$ and 20 mol % CuBr that efficiently converted the propargylic amine (S,S)-5ba to (R)-4ba in 53% yield with 98% ee within 8 h (eq 4, Scheme 2). Therefore, we may safely come to the conclusion that both ZnBr and CuBr are respon sible for the more efficient transformation of the chiral propargylic amine intermediate to the chiral allene product with a very high efficiency of central-to-axial chirality transfer. The absolute configurations of allenes were assigned clearly based on the Lowe Brewster rule<sup>8</sup> and the previous studies.<sup>4</sup> A model to predict the absolute configuration of the allene moiety for the highly enantioselective formation of (R)-4 is shown in Scheme 3.<sup>4,9</sup> The alkynylmetal species 6, which was formed by deprotonation of the correspond ing alkyne in the presence of CuBr, ZnBr, and amine, reacted with the in situ generated iminium ion 7 via Re-face attack, furnishing highly enantioenriched propargylic amine intermediate (S,S)-5, which then undergoes highly stereoselective intramolecular 1,5-hydride transfer and β-elimination to generate the axially chiral allene unit under the cooperation of Cu(I) and ZnBr. As indicated by the aforementioned experimental results, CuBr may play an exclusive role in the efficient formation of chiral propargylic amine whereas both CuBr and ZnBr are responsible for the formation of allene products. Scheme 3. Proposed Mechanism and Prediction of the Absolute Configuration of the Allene",
+    "source": "content_list_abstract_region",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic amines",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "prolinol-derived and other chiral amine catalysts",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/BMC Chemistry (2022) 16 14.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/bmc-chemistry-2022-16-14.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/bmc-chemistry-2022-16-14/48fbcb34-dd88-400d-8674-c5ab309d3bc8_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/bmc-chemistry-2022-16-14"
+    "pdf": "D:\\work\\data\\64388549-d13e-4e61-bb20-23cca7c5732b_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\64388549-d13e-4e61-bb20-23cca7c5732b_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\64388549-d13e-4e61-bb20-23cca7c5732b_origin\\fac1dd1a-6699-46e9-a815-4dcb609fbf33_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\64388549-d13e-4e61-bb20-23cca7c5732b_origin"
   },
   "source_file": {
-    "pdf_name": "BMC Chemistry (2022) 16 14.pdf",
-    "relative_pdf_path": "BMC Chemistry (2022) 16 14.pdf",
-    "sha256": "5845471eb80bde270798682c99374c813ab4114b3fc5530896b1d6b1e313da94"
+    "pdf_name": "64388549-d13e-4e61-bb20-23cca7c5732b_origin.pdf",
+    "relative_pdf_path": "64388549-d13e-4e61-bb20-23cca7c5732b_origin.pdf",
+    "sha256": "304ab68cf0d1201d6ae8530d6ee4f1f67471f486c5228f7b63e2ed40c199cfae"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:39Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 160,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 54,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -76,28 +86,12 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_journal",
       "missing_doi",
-      "Paper reports both homopropargyl alcohols and allenyl alcohols; allene-focused tags reflect the allenyl alcohol branch.",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.691,
+    "overall_confidence": 0.616,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "copper catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "halide leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "alpha-allenic alcohols",
-      "reaction_type": "allenyl-reagent addition to carbonyl compounds",
-      "substrate": "aldehydes"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.88,
-    "human_checked": false
   }
 }

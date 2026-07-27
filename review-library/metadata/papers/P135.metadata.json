@@ -1,75 +1,86 @@
 {
   "paper_id": "P135",
-  "slug": "31a-iron-porphyrin-catalyzed-olefination-of-ketenes-with-diazoacetate-for-the-enantioselective-synthesis-of-allenes",
+  "slug": "d4cc04307c",
   "title": {
-    "value": "Iron Porphyrin-Catalyzed Olefination of Ketenes with Diazoacetate for the Enantioselective Synthesis of Allenes",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Copper-catalyzed perfluoroalkylation of propargyl gem-dichlorides†",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Chuan-Ying Li",
-      "Xiao-Bing Wang",
-      "Xiu-Li Sun",
-      "Yong Tang",
-      "Jun-Cheng Zheng",
-      "Zheng-Hu Xu",
-      "Yong-Gui Zhou",
-      "Li-Xin Dai"
+      "Received th August",
+      "Accepted th September Bosheng Liu",
+      "<sup></sup> Jinxu Dong",
+      "<sup></sup> Qi Zhu",
+      "<sup></sup> Jundong Zhang",
+      "<sup></sup> Jian Huang",
+      "<sup></sup> Shiwen Liu <sup></sup> and Xiaojun Zeng <sup></sup>"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2007,
-    "source": "llm_from_front_matter",
-    "confidence": 0.97,
+    "value": 2024,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "Chem. Commun.",
+    "source": "cite_this_line",
+    "confidence": 0.7,
     "human_checked": false
   },
   "doi": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "10.1039/d4cc04307c",
+    "source": "markdown_regex",
+    "confidence": 0.9,
     "human_checked": false
   },
   "abstract": {
-    "value": "In summary, we have developed an efficient method for the synthesis of allenes under neutral conditions by olefination of ketenes with EDA in the presence of Ph P and catalytic Fe(TCP)- Cl for the first time. We have also realized its asymmetric version and found that, by employing chiral phosphine instead of PPh3, chiral allenes could be synthesized with high enantioselectivities (93 98% ee) in good yields, providing an easy access to optically active allenic esters. In addition, the results described here confirmed that the mechanism involves ylide olefination. The high enantioselectivity, the neutral condition, and the fact that the phosphine could be recovered and reused make the current method potentially useful in organic synthesis.",
-    "source": "llm_from_body_summary_paragraph",
-    "confidence": 0.72,
+    "value": "Herein, we present a highly eficient copper-catalyzed protocol for transforming propargyl gem-dichlorides into the corresponding chloro-substituted fluoroalkylated allenes. This protocol demonstrates a broad substrate scope and excellent tolerance towards various functional groups. Moreover, the strategy of utilizing the chloro-substituted pentafluoroethylation allenes for multiple transformations has shown significant value in synthetic chemistry.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic halides",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "Grignard reagents",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "mesylate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/31a-iron-porphyrin-catalyzed-olefination-of-ketenes-with-diazoacetate-for-the-enantioselective-synthesis-of-allenes/27d22cde-37ec-4b2f-8313-cb4bdd7147d0_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/31a-iron-porphyrin-catalyzed-olefination-of-ketenes-with-diazoacetate-for-the-enantioselective-synthesis-of-allenes.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/31a-iron-porphyrin-catalyzed-olefination-of-ketenes-with-diazoacetate-for-the-enantioselective-synthesis-of-allenes/27d22cde-37ec-4b2f-8313-cb4bdd7147d0_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/31a-iron-porphyrin-catalyzed-olefination-of-ketenes-with-diazoacetate-for-the-enantioselective-synthesis-of-allenes"
+    "pdf": "D:\\work\\data\\d4cc04307c.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\d4cc04307c.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\d4cc04307c\\97f9b0a4-4a4f-4c4a-b99a-98fb1f9bbc48_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\d4cc04307c"
   },
   "source_file": {
-    "pdf_name": "31a-iron-porphyrin-catalyzed-olefination-of-ketenes-with-diazoacetate-for-the-enantioselective-synthesis-of-allenes.pdf",
-    "relative_pdf_path": "31a-iron-porphyrin-catalyzed-olefination-of-ketenes-with-diazoacetate-for-the-enantioselective-synthesis-of-allenes.pdf",
-    "sha256": "490f2c9003a20526aacdb33a65f78638a4960b378240d0ed7efed33c40b22a70"
+    "pdf_name": "d4cc04307c.pdf",
+    "relative_pdf_path": "d4cc04307c.pdf",
+    "sha256": "0bfb970da10db50026a7ac08a8bcda4793122b025617053d520a4d8bb3655272"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 35,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 89,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -80,32 +91,11 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_journal",
-      "missing_doi",
-      "low_confidence_abstract",
-      "No formal abstract was visible in the supplied snippets; the abstract field uses the article's concluding summary paragraph instead.",
-      "No formal abstract was visible in the supplied paper evidence; abstract left empty.",
-      "A chiral phosphine/diphosphine controls enantioselectivity, but its subtype cannot be mapped unambiguously to the allowed ligand_or_chiral_source labels.",
-      "structured_tag_not_specified_organometallic_partner",
       "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.66,
+    "overall_confidence": 0.719,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "iron catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allenoates",
-      "reaction_type": "ketene olefination to allenecarboxylates",
-      "substrate": "ketenes"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.95,
-    "human_checked": false
   }
 }

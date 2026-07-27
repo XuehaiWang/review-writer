@@ -1,33 +1,34 @@
 {
   "paper_id": "P173",
-  "slug": "49a",
+  "slug": "j.-org.-chem.-2023-88-5457",
   "title": {
-    "value": "Palladium-Catalyzed Reaction of Aryl Bromides with Dialkylacetylenes to Produce Allenic Compounds",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Divergent Cyclizative Approaches of In Situ Formed β‑Keto-Allenes: Chemo- and Regioselective Synthesis of Bicyclic Furans, and Pyrroles",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Sommai Pivsa-Art",
-      "Tetsuya Satoh",
-      "Masahiro Miura",
-      "Masakatsu Nomura"
+      "Liyaqat Ali",
+      "Dandugula Sneha Latha",
+      "Avinash Kumar",
+      "Srinivasarao Yaragorla Cite This: J. Org. Chem.",
+      "− Read Online Article Recommendations sı Supporting Information"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1997,
-    "source": "llm_from_front_matter_and_header",
-    "confidence": 0.98,
+    "value": 2023,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "J. Org. Chem. 2023",
+    "source": "cite_this_line",
+    "confidence": 0.7,
     "human_checked": false
   },
   "doi": {
@@ -37,35 +38,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "It has been found that aryl bromides, especially ortho-substituted ones, effectively react with dialkylacetylenes in the presence of a palladium catalyst and an appropriate base to give the corresponding aryl-substituted allenes as the predominant products.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "A unified strategy for the construction of bicyclic furans and pyrroles is developed from tert-propargyl alcohols and α- acyl cyclic ketones using an alkaline earth catalyst under solvent-free conditions. The reaction proceeds via the formation of a β-keto allene intermediate, which upon treatment with a tert-amine underwent thermodynamic enol formation and a subsequent annulation to form bicyclic furans. Interestingly, the same allene forms bicyclic pyrrole with primary amines. The reaction shows excellent atom economy as water is the only byproduct formed in bicyclic furans. The generality of the reaction is well established. Gram-scale synthesis and synthetic applications are demonstrated.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "chiral Brønsted acid and base catalysts",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "application or total synthesis paper"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/49a/bb5466f2-398f-4670-97be-7d75e43ac5ca_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/49a.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/49a/bb5466f2-398f-4670-97be-7d75e43ac5ca_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/49a"
+    "pdf": "D:\\work\\data\\J. Org. Chem. 2023, 88, 5457.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\j.-org.-chem.-2023-88-5457.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\j.-org.-chem.-2023-88-5457\\d070c41e-b07d-43f3-aa6c-91c41a7b72c5_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\j.-org.-chem.-2023-88-5457"
   },
   "source_file": {
-    "pdf_name": "49a.pdf",
-    "relative_pdf_path": "49a.pdf",
-    "sha256": "c8f387bd2900d106cd76518f24464c751fbf111759a5c938f619d5d7516d0324"
+    "pdf_name": "J. Org. Chem. 2023, 88, 5457.pdf",
+    "relative_pdf_path": "J. Org. Chem. 2023, 88, 5457.pdf",
+    "sha256": "eb00477263160bd8cde9041d5101dc93ef6adbece669620ece439dd12f90e94d"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 24,
-      "markdown_chars_used": 10567
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 268,
+      "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -76,29 +89,12 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_journal",
       "missing_doi",
-      "low_confidence_abstract",
-      "structured_tag_not_specified_substrate",
       "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_leaving_group",
       "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.693,
+    "overall_confidence": 0.613,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "palladium catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "halide leaving groups",
-      "ligand_or_chiral_source": "monodentate phosphine-type ligands",
-      "organometallic_partner": "not specified",
-      "product": "arylallenes",
-      "reaction_type": "not specified",
-      "substrate": "not specified"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.9,
-    "human_checked": false
   }
 }

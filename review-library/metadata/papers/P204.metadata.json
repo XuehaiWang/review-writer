@@ -1,31 +1,38 @@
 {
   "paper_id": "P204",
-  "slug": "9a",
+  "slug": "zeng-et-al-2024-copper-difluorocarbene-enables-catalytic-difluoromethylation",
   "title": {
-    "value": "Chiral Allenes are Racemised by Organocuprates",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Copper Difluorocarbene Enables Catalytic Difluoromethylation",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Alf Claesson",
-      "Lars-Inge Olsson"
+      "Xin Zeng",
+      "Jimin Yang",
+      "Wei Deng",
+      "Xiao-Tian Feng",
+      "Hai-Yang Zhao",
+      "Lanfeng Wei",
+      "Xiao-Song Xue",
+      "Xingang Zhang Cite This: J. Am. Chem. Soc.",
+      "− Read Online sı Supporting Information"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1979,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2024,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Tetrahedron Letters",
-    "source": "known_journal_hint",
-    "confidence": 0.72,
+    "value": "J. Am. Chem. Soc. 2024",
+    "source": "cite_this_line",
+    "confidence": 0.7,
     "human_checked": false
   },
   "doi": {
@@ -35,35 +42,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "The chiral allenes (1) and (2) are racemised in the presence of various organocuprates, or, in the case of the alcohol (2), by methylmagnesium iodide alone; the racemisations probably proceed via an anion radical.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "Despite the synthetic versatility of difluorocarbene, its high reactivity severely regulates widespread applications of difluorocarbene in organic synthesis. Here, we report a copper difluorocarbene-involved catalytic coupling, representing a new mode of the difluoromethylation reaction. This method allows difluoromethylation of a wide range of readily available allyl/propargyl electrophiles with NaBH CN and low-cost difluorocarbene precursor $\\mathrm { B r C F } _ { 2 } \\mathrm { C O } _ { 2 } \\mathrm { K },$ featuring high cost-eficiency, high stereo- and regioselectivities, and high functional group tolerance, even with complex drug-like molecules. Applying the method led to the efficient synthesis of deuterated difluoromethylated compounds of medicinal interest. The resulting difluoromethylated allyl and allenyl products can serve as versatile synthons for diverse transformations, rendering the approach attractive for synthesizing complex fluorinated structures. Experimental mechanistic studies and computational calculations reveal that the formation of a difluoromethylcopper(I) intermediate through the nucleophilic attack of boron hydride on the copper(I) difluorocarbene is the key step in the reaction.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "not specified",
+      "substrate": "not specified",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "application or total synthesis paper"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/9a/987c1b42-56d9-4323-b362-edfdd30cea93_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/9a.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/9a/987c1b42-56d9-4323-b362-edfdd30cea93_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/9a"
+    "pdf": "D:\\work\\data\\zeng-et-al-2024-copper-difluorocarbene-enables-catalytic-difluoromethylation.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\zeng-et-al-2024-copper-difluorocarbene-enables-catalytic-difluoromethylation.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\zeng-et-al-2024-copper-difluorocarbene-enables-catalytic-difluoromethylation\\c72dad4a-aee3-4584-abb4-c0d7137a5c46_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\zeng-et-al-2024-copper-difluorocarbene-enables-catalytic-difluoromethylation"
   },
   "source_file": {
-    "pdf_name": "9a.pdf",
-    "relative_pdf_path": "9a.pdf",
-    "sha256": "9ae8ed7014937de36ea69524fe9e0223d027ce22e74c1bd4eca039c433d441be"
+    "pdf_name": "zeng-et-al-2024-copper-difluorocarbene-enables-catalytic-difluoromethylation.pdf",
+    "relative_pdf_path": "zeng-et-al-2024-copper-difluorocarbene-enables-catalytic-difluoromethylation.pdf",
+    "sha256": "46a70f36f8dbf8075c559f2726f4aac493dbdc2621d64583d318da76a35eb170"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T20:56:27Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 31,
-      "markdown_chars_used": 7884
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 157,
+      "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -74,32 +93,15 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "empty_authors",
-      "missing_year",
       "missing_doi",
-      "low_confidence_abstract",
-      "The paper concerns stoichiometric organocuprate-mediated racemization rather than true catalysis; the closest allowed catalyst/method label is 'copper catalysis'.",
-      "The studied starting materials are general chiral allenes, but the allowed substrate labels do not include a generic allene class, so 'not specified' was used for substrate.",
+      "structured_tag_not_specified_product",
       "structured_tag_not_specified_substrate",
+      "structured_tag_not_specified_organometallic_partner",
       "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.776,
+    "overall_confidence": 0.613,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "copper catalysis",
-      "document_scope": "mechanistic study",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "Grignard reagents",
-      "product": "axially chiral allenes",
-      "reaction_type": "radical transformations of allenes",
-      "substrate": "not specified"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.76,
-    "human_checked": false
   }
 }

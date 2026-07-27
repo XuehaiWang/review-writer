@@ -1,31 +1,35 @@
 {
   "paper_id": "P193",
-  "slug": "7a",
+  "slug": "org.-lett.-2023-25-9176",
   "title": {
-    "value": "A Novel Allene Synthesis",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Electroreductive Carboxylation of Propargylic Acetates with { \\mathsf { C O } } _ { 2 } { \\mathrm { : } } : Access to Tetrasubstituted 2,3-Allenoates",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Peter Rona",
-      "Pierre Crabbé"
+      "Jing-Hao Qin",
+      "Zhi-Qiang Xiong",
+      "Chaozhihui Cheng",
+      "Ming Hu",
+      "Jin-Heng $operatorname { L i } ^ { }$ Cite This: Org. Lett.",
+      "− Read Online"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1968,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2023,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "Org. Lett. 2023",
+    "source": "cite_this_line",
+    "confidence": 0.7,
     "human_checked": false
   },
   "doi": {
@@ -35,35 +39,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "",
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "F <sup>unctionalized</sup> <sup>allenes,</sup> <sup>including</sup> <sup>2,3-allenoates,</sup> <sup>have</sup> <sup>been</sup> become importantly versatile synthetic intermediates for increasing molecular complexity in chemical synthesis<sup>1</sup> and are commonly present in natural products, pharmaceuticals, and functional materials.<sup>2</sup> As a result, considerable eforts have been devoted to the invention of reliable, eficient methods for targeting their preparation.<sup>3</sup> Among the methods developed, traditional methods for the 2,3-allenoates and their derivatives construction involve the $\\mathrm { { W i t t i g } ^ { 4 } }$ or Horner-Wadsworth Emmons reactions<sup>5</sup> of ketenes or ketene equivalents, isomerization of alkynoates,<sup>6a−c</sup> β-hydride elimination of (E)-enol triflates,<sup>6d,e</sup> cross-coupling of α-diazoesters with alkynes $\\xi ^ { 6 \\mathrm { f, g } }$ and caboxylation with $\\mathrm { \\dot { C } O } ^ { \\mathrm { \\check { 6 } h - n } }$ or $\\mathrm { C O } _ { 2 }. ^ { 6 \\mathrm { o - r } }$ However, these approaches sufer from poor step-economy, unsatisfactory selectivity, harsh reaction conditions, and/or limited substrate scope. Moreover, it is still a high challenge to synthesize tetrasubstituted $^ { 2, 3 \\cdot }$ -allenoates, especially when operating in a cis/trans stereoselectivity-controlled fashion.<sup>7,8</sup> Typically, methods that consist of base-mediated trapping of alleny anions from $^ { 2, 3 }$ -allenoates with electrophiles (Scheme $1 \\mathsf { a } ) ^ { 7 \\mathsf { a } - \\mathsf { d } }$",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "boranes and boronates",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "acetate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/7a/24364ca0-44fd-4984-99e2-f498db216d0b_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/7a.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/7a/24364ca0-44fd-4984-99e2-f498db216d0b_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/7a"
+    "pdf": "D:\\work\\data\\Org. Lett. 2023, 25, 9176.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\org.-lett.-2023-25-9176.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\org.-lett.-2023-25-9176\\f56649ae-e452-4c27-97b4-35edf7a5cd7e_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\org.-lett.-2023-25-9176"
   },
   "source_file": {
-    "pdf_name": "7a.pdf",
-    "relative_pdf_path": "7a.pdf",
-    "sha256": "ac8cdb721ae106fdd3a4a927f1fd19c320fb4dd5a961f83a5ce3ee0a2ca2f539"
+    "pdf_name": "Org. Lett. 2023, 25, 9176.pdf",
+    "relative_pdf_path": "Org. Lett. 2023, 25, 9176.pdf",
+    "sha256": "a9577e5bd238160471acd5676bc50b4497b06d832dbfdcda46e039981bde9ce6"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 46,
-      "markdown_chars_used": 11150
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 97,
+      "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -72,40 +88,14 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [
-      "abstract"
-    ],
+    "missing_fields": [],
     "warnings": [
-      "empty_authors",
-      "missing_year",
-      "missing_journal",
       "missing_doi",
-      "low_confidence_title",
-      "low_confidence_abstract",
-      "No explicit abstract is present in the supplied snippets, so the abstract field is left empty.",
-      "The supplied front matter includes content from a preceding article before the target paper begins.",
-      "No abstract is present in the supplied paper evidence, so the abstract field is left empty.",
-      "The extracted front matter includes text from a preceding communication; metadata and classification were taken only from the 'A Novel Allene Synthesis' section.",
-      "The method uses stoichiometric lithium dialkylcopper reagents; 'copper catalysis' was selected because no more precise allowed label for organocopper mediation is available.",
-      "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.549,
+    "overall_confidence": 0.59,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "copper catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "acetate leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "alkylallenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic acetates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.87,
-    "human_checked": false
   }
 }

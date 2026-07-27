@@ -1,36 +1,40 @@
 {
   "paper_id": "P010",
-  "slug": "almendros-et-al-2024-indium-mediated-preparation-of-bis-hydroxyallenes-or-dihydroxyallenynes-and-further-gold",
+  "slug": "1-s2.0-s1001841724001360-main",
   "title": {
-    "value": "Indium-Mediated Preparation of Bis(α-hydroxyallenes) or α,α′-Dihydroxyallenynes and Further Gold-Catalyzed Cyclizations",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Cu-catalyzed three-component C–S–P coupling for the synthesis of trisubstituted allenyl phosphorothioates",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Teresa Martínez del Campo",
-      "Daniel San Martín",
-      "Laura Gamarra",
-      "Eva Cerrón",
-      "Sara Cembellín",
-      "Hikaru Yanai",
-      "Pedro Almendros"
+      "Bowen Wang<sup>",
+      "</sup>",
+      "Longwu Sun<sup>",
+      "Qianqian Cao<sup></sup>",
+      "Xinzhi Li<sup></sup>",
+      "Jianai Chen<sup></sup>",
+      "Shizhao Wang<sup>",
+      "</sup>∗",
+      "Miaolin Ke <sup>",
+      "Fener Chen <sup>",
+      "</sup>∗∗"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
     "value": 2024,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "J. Org. Chem. 2024",
-    "source": "cite_this_line",
-    "confidence": 0.7,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
@@ -40,35 +44,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "We present the regio- and diastereoselective Barbier-type allenylation reaction of glyoxals mediated by indium to furnish highly valuable syn-bis(α-hydroxyallenes) and syn-α,α′-dihydroxyallenynes. The gold-catalyzed controlled cyclization of these unsaturated diols enables the divergent preparation of three types of oxacycles.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "A copper-catalyzed three-component reaction involving cyclic carbonates, elemental sulfur, and Hphosphonates is presented. It proceeds with excellent yields and provides an attractive approach for the construction of valuable trisubstituted allenyl phosphorothioates using a one-step strategy. Moreover, this method can be easily adapted to large-scale preparation. © 2024 Published by Elsevier B.V. on behalf of Chinese Chemical Society and Institute of Materia Medica, Chinese Academy of Medical Sciences. Allenes extensively exist in numerous natural products, materials, and pharmaceuticals due to their excellent bioactivities and reactivities (Fig. 1a) [1,2]. Among the different classes of allenes, 2,3-allenols are also important building blocks in advanced organic synthesis [3–18] as they provide expeditious routes to a wide range of useful compounds such as 1,3-enynes [19,20], dihydrofurans [21,22], furanone [23,24], dienes [25,26], vinyl epoxides [27,28], and other heterocycles [29–31]. Owing to the versatility of these ubiquitous motifs, substantial efforts have been devoted including the transition metal catalyzed ring opening of propargyl epoxides with organometallic reagents such as Grignard [32,33], organolithium [34], organozinc [35], and organoboron reagent [36]. This methodology has met with considerable success in offering access to a variety of 2,3-allenols via the formation of C–C bonds based on the use of carbon-nucleophiles. Few examples were reported for the preparation of 2,3-allenols via the formation of Cheteroatom (C–Si or C–B, C–P bond) [37–40].",
+    "source": "content_list_abstract_region",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "organolithium reagents",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Progargylic/almendros-et-al-2024-indium-mediated-preparation-of-bis(α-hydroxyallenes)-or-α-α-dihydroxyallenynes-and-further-gold.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/almendros-et-al-2024-indium-mediated-preparation-of-bis-hydroxyallenes-or-dihydroxyallenynes-and-further-gold.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/almendros-et-al-2024-indium-mediated-preparation-of-bis-hydroxyallenes-or-dihydroxyallenynes-and-further-gold/61ea0d41-a18e-4158-bc29-37ae6dbe47e3_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/almendros-et-al-2024-indium-mediated-preparation-of-bis-hydroxyallenes-or-dihydroxyallenynes-and-further-gold"
+    "pdf": "D:\\work\\data\\1-s2.0-S1001841724001360-main.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\1-s2.0-s1001841724001360-main.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\1-s2.0-s1001841724001360-main\\215ab55b-b05a-4bd2-bfe2-805769818494_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\1-s2.0-s1001841724001360-main"
   },
   "source_file": {
-    "pdf_name": "almendros-et-al-2024-indium-mediated-preparation-of-bis(α-hydroxyallenes)-or-α-α-dihydroxyallenynes-and-further-gold.pdf",
-    "relative_pdf_path": "almendros-et-al-2024-indium-mediated-preparation-of-bis(α-hydroxyallenes)-or-α-α-dihydroxyallenynes-and-further-gold.pdf",
-    "sha256": "e037bcb2b87660faa9e061da5bc37cbfa0ce06fef1d069c584f1d5f1b75b5b39"
+    "pdf_name": "1-s2.0-S1001841724001360-main.pdf",
+    "relative_pdf_path": "1-s2.0-S1001841724001360-main.pdf",
+    "sha256": "43a7445c7933dc404313dced81b930740631a13954b62f70dda75cfe0ec15df2"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-16T11:15:55Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 123,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 134,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -79,29 +95,14 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
+      "missing_journal",
       "missing_doi",
-      "Paper combines an indium-mediated allenylation stage with subsequent gold-catalyzed cyclizations; structured tags compress this multistage scope into single labels.",
-      "Single-label classification is approximate because the paper covers both indium-mediated allenylation to α-hydroxyallenes/dihydroxyallenynes and downstream gold-catalyzed cyclizations to oxacycles.",
-      "The substrate label is somewhat ambiguous because the key carbonyl partners are arylglyoxals, which contain both aldehyde and ketone functionality.",
-      "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope"
     ],
-    "overall_confidence": 0.77,
+    "overall_confidence": 0.513,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "main-group metal mediation",
-      "document_scope": "primary research article",
-      "leaving_group": "halide leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "alpha-allenic alcohols",
-      "reaction_type": "allenyl-reagent addition to carbonyl compounds",
-      "substrate": "aldehydes"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.74,
-    "human_checked": false
   }
 }

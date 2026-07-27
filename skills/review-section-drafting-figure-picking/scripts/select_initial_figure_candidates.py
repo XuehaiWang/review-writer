@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -85,15 +86,67 @@ def best_candidate_for_paper(paper: dict[str, Any]) -> dict[str, Any]:
     return best
 
 
-def build_outputs(project: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def best_redrawable_candidate_index(candidates: list[dict[str, Any]]) -> int | None:
+    """Choose the highest-scoring image/scheme that the redraw stage can use."""
+    redrawable = [
+        candidate
+        for candidate in candidates
+        if candidate.get("source_type") != "table" and candidate.get("source_image_path")
+    ]
+    if not redrawable:
+        return None
+    return int(max(redrawable, key=lambda candidate: (candidate.get("score", 0), -candidate.get("candidate_index", 0))).get("candidate_index"))
+
+
+def build_default_figure_reviews(paper_level: dict[str, Any], reviewed_at: str) -> dict[str, Any]:
+    """Record deterministic defaults so Figure Review is ready before a user changes one."""
+    reviews: dict[str, dict[str, Any]] = {}
+    for paper in paper_level.get("papers", []) if isinstance(paper_level, dict) else []:
+        if not isinstance(paper, dict):
+            continue
+        paper_id = str(paper.get("paper_id") or "")
+        selected_index = paper.get("selected_candidate_index")
+        if not paper_id or not isinstance(selected_index, int):
+            continue
+        candidate = next(
+            (item for item in paper.get("candidates", []) if isinstance(item, dict) and item.get("candidate_index") == selected_index),
+            None,
+        )
+        if not isinstance(candidate, dict):
+            continue
+        reviews[paper_id] = {
+            "selected_candidate_index": selected_index,
+            "selected_source_image_path": str(candidate.get("source_image_path") or ""),
+            "review_note": "Automatically selected as the highest-scoring redrawable candidate.",
+            "selection_source": "automatic_top_score",
+            "reviewed_at": reviewed_at,
+        }
+    return {"source": "automatic_top_score", "generated_at": reviewed_at, "papers": reviews}
+
+
+def build_outputs(project: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     inventory = read_json(project / "02_section_drafting" / "paper_figure_inventory.json")
     tasks = read_json(project / "02_section_drafting" / "section_tasks.json")
     by_paper = inventory_by_paper(inventory)
 
-    paper_level: list[dict[str, Any]] = []
+    paper_rows: list[dict[str, Any]] = []
     for paper in inventory.get("papers", []):
         if isinstance(paper, dict):
-            paper_level.append(best_candidate_for_paper(paper))
+            choices = [dict(candidate) for candidate in paper.get("top_candidates", []) if isinstance(candidate, dict)]
+            for index, candidate in enumerate(choices):
+                candidate["candidate_index"] = index
+                candidate["score"] = figure_score(candidate)
+                candidate["resolution_status"] = "ready" if candidate.get("source_image_path") else "needs_source_resolution"
+                candidate["needs_human_check"] = True
+            selected_index = best_redrawable_candidate_index(choices)
+            paper_rows.append({
+                "paper_id": paper.get("paper_id"),
+                "title": paper.get("title"),
+                "candidates": choices,
+                "selected_candidate_index": selected_index,
+                "status": "auto_selected" if selected_index is not None else ("needs_human_selection" if choices else "no_useful_figure"),
+                "no_useful_figure_reason": "No redrawable image or scheme candidate was found in MinerU content_list." if choices and selected_index is None else ("No image/table candidates were found in MinerU content_list." if not choices else ""),
+            })
 
     manuscript: list[dict[str, Any]] = []
     used_keys: set[tuple[str, str]] = set()
@@ -142,7 +195,7 @@ def build_outputs(project: Path) -> tuple[list[dict[str, Any]], list[dict[str, A
             manuscript.append(candidate)
             if section_selected >= 2:
                 break
-    return paper_level, manuscript
+    return {"project_id": project.name, "papers": paper_rows}, manuscript
 
 
 def parse_args() -> argparse.Namespace:
@@ -159,9 +212,11 @@ def main() -> int:
         raise SystemExit(f"Project not found: {project}")
     paper_level, manuscript = build_outputs(project)
     out_dir = project / "02_section_drafting"
+    generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     write_json(out_dir / "paper_figure_candidates.json", paper_level)
     write_json(out_dir / "figure_candidates.json", manuscript)
-    print(f"Wrote {out_dir / 'paper_figure_candidates.json'} ({len(paper_level)} records)")
+    write_json(out_dir / "human_figure_review.json", build_default_figure_reviews(paper_level, generated_at))
+    print(f"Wrote {out_dir / 'paper_figure_candidates.json'} ({len(paper_level['papers'])} papers)")
     print(f"Wrote {out_dir / 'figure_candidates.json'} ({len(manuscript)} records)")
     if not manuscript:
         raise SystemExit("No manuscript figure candidates selected.")

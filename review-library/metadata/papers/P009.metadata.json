@@ -1,27 +1,28 @@
 {
   "paper_id": "P009",
-  "slug": "piis2666951x24000524",
+  "slug": "1-s2.0-s004040202400526x-main",
   "title": {
-    "value": "Synthesis of allenones via nickel-catalyzed reductive coupling of propargyl esters with acyl chlorides",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Highly efficient synthesis of di-substituted allenes via copper-catalyzed \\mathsf { S } _ { \\mathrm { N } } 2 ^ { \\prime }. substitution reaction of organotitanium reagents with propargyl bromides",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Zhen Song",
-      "Yueming Wang",
-      "Ming Ma",
-      "Yuanhong Ma"
+      "Chuan Wu <sup></sup>",
+      "Li-Rong Han <sup></sup>",
+      "Jin-Song Hou <sup></sup>",
+      "Qing-Han Li <sup>",
+      "</sup>"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2024,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "journal": {
@@ -37,35 +38,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Transition metal-catalyzed reductive coupling of two electrophilic components has proved to be a powerful and step-economic tool for forging diverse organic molecules. However, the application of such strategy for the synthesis of allenones that are very important in pharmaceutical chemistry and synthetic chemistry remains very limited and challenging. Herein, we have developed a nickel-catalyzed reductive cross-coupling of propargyl esters with acyl chlorides, which affords an alternative route for the synthesis of allenones. The current catalytic protocol features readily available starting materials, wide substrate scope, mild conditions and good regioselectivity.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "A simple and mild catalytic S 2′-type displacement of propargyl halides with organotitanium reagents is re ported. The S 2′-type displacement of propargyl bromides with organotitanium reagents mediated by CuI (2 mol %)/MePPh (4 mol%) in dichloro methane afforded multi-substituted allenes in good yields (up to 95 %) at 40 <sup>◦</sup>C for 5 h. The aryls bearing electron-donating or electron-withdrawing groups in aryltitanium reagents gave multisubstituted allenes in good yields. In addition, the di-substituted allenes bearing a naphthyl group was obtained in 54–99 % selectivities with isolated yields of 43–83 %. The process was simple and easily performed, and it provides an efficient method for the synthesis of di-substituted allene derivatives. On the basis of the experi mental results, a possible catalytic cycle has been proposed.",
+    "source": "content_list_abstract_region",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Progargylic/PIIS2666951X24000524.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/piis2666951x24000524.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/piis2666951x24000524/15c23014-ef4d-4657-9c61-6f3701e0e7ef_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/piis2666951x24000524"
+    "pdf": "D:\\work\\data\\1-s2.0-S004040202400526X-main.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\1-s2.0-s004040202400526x-main.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\1-s2.0-s004040202400526x-main\\e09be65e-f77c-4e21-9a9e-98e961139ce3_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\1-s2.0-s004040202400526x-main"
   },
   "source_file": {
-    "pdf_name": "PIIS2666951X24000524.pdf",
-    "relative_pdf_path": "PIIS2666951X24000524.pdf",
-    "sha256": "dc38b969a8cab9bb5674b46f1bdb51769303456b49746077907d416cbab4aa6d"
+    "pdf_name": "1-s2.0-S004040202400526X-main.pdf",
+    "relative_pdf_path": "1-s2.0-S004040202400526X-main.pdf",
+    "sha256": "da92cf3de62abcb40cf92fb511f254e5112d9e9203b915060bba85fad544e63f"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-16T11:15:55Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 91,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 235,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -74,30 +87,19 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [],
+    "missing_fields": [
+      "year"
+    ],
     "warnings": [
-      "missing_year",
       "missing_journal",
       "missing_doi",
-      "The substrate and leaving-group labels are inferred from the Boc-protected propargyl ester described in the article body; the title and abstract state only generic propargyl esters.",
-      "structured_tag_not_specified_organometallic_partner"
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope"
     ],
-    "overall_confidence": 0.684,
+    "overall_confidence": 0.416,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "nickel catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "carbonate leaving groups",
-      "ligand_or_chiral_source": "non-phosphorus metal-coordination ligands",
-      "organometallic_partner": "not specified",
-      "product": "allenic ketones and ethers",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic carbonates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.84,
-    "human_checked": false
   }
 }

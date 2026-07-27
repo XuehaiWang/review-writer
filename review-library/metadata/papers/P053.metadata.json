@@ -1,75 +1,80 @@
 {
   "paper_id": "P053",
-  "slug": "angew.-chem.-int.-ed.-2023-62-e202214838",
+  "slug": "599eaaf8-ccd7-4687-97a7-d914def1e0d2_origin",
   "title": {
-    "value": "Kinetic Resolution of Azaarylethynyl Tertiary Alcohols by Chiral Brønsted Acid Catalysed Phosphine-Mediated Deoxygenation",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Enantioselective Synthesis of and with Allenes",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Guanghui Wang",
-      "Lulu Li",
-      "Yifeng Jiang",
-      "Xiaowei Zhao",
-      "Xu Ban",
-      "Tianju Shao",
-      "Yanli Yin",
-      "Zhiyong Jiang"
+      "Anja Hoffmann-Rˆder and Norbert Krause"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2023,
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "journal": {
-    "value": "Angew. Chem. Int. Ed.",
-    "source": "known_journal_hint",
-    "confidence": 0.72,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
-    "value": "10.1002/anie.202214838",
-    "source": "markdown_regex",
-    "confidence": 0.9,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "abstract": {
-    "value": "A chiral Brønsted acid catalysed phosphine-mediated deoxygenation protocol is reported. This metal-free method provides a precise kinetic resolution platform for azaarylethynyl tertiary alcohols, which are a broad category of biologically and synthetically important azaarene derivatives. In addition to providing an efficient method for the first asymmetric preparation of these tertiary alcohols, the strategy facilitates the construction of azaaryl-functionalized allenes with good to excellent enantioselectivities. The high selectivity factors (s up to 235), broad substrate scope, and ability to convert azaaryl compounds into both chiral tertiary alcohols and allenes robustly underscore the efficiency and promising utility of this method. The practicability is further validated by the successful synthesis of deuterated allenes with high ee values and substantial incorporation of deuterium using inexpensive D2O as the deuterium source.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "In recent years, allenes have gained increasing attraction as interesting building blocks in modern organic chemistry. Their synthetic utility is not only demonstrated by an abundance of regio- and stereoselective C<sub>\u0001</sub>C-bond-forming transformations (e.g., Diels ± Alder reactions), but they are also prone to transfer their axial chirality efficiently to one or several new stereogenic centers.<sup>[1]</sup> These characteristics, as well as the occurrence of allenic structures in a variety of natural products and pharmacologically active compounds, gave rise to ample interest in the stereoselective synthesis of allenes.<sup>[2]</sup> In this account, we report selected developments in the enantioselective synthesis of allenes and allenic natural products in the last two years, but by no means comprehensively.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "allenic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "Grignard reagents",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "account or perspective"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/Angew. Chem. Int. Ed. 2023, 62, e202214838.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/angew.-chem.-int.-ed.-2023-62-e202214838.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/angew.-chem.-int.-ed.-2023-62-e202214838/4ca6d412-20be-4322-822d-aa296aa03f00_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/angew.-chem.-int.-ed.-2023-62-e202214838"
+    "pdf": "D:\\work\\data\\599eaaf8-ccd7-4687-97a7-d914def1e0d2_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\599eaaf8-ccd7-4687-97a7-d914def1e0d2_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\599eaaf8-ccd7-4687-97a7-d914def1e0d2_origin\\a6c7f604-4b15-4164-96ae-7359778fd72a_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\599eaaf8-ccd7-4687-97a7-d914def1e0d2_origin"
   },
   "source_file": {
-    "pdf_name": "Angew. Chem. Int. Ed. 2023, 62, e202214838.pdf",
-    "relative_pdf_path": "Angew. Chem. Int. Ed. 2023, 62, e202214838.pdf",
-    "sha256": "c340a212ad2509fc92d62994dbc82647f35dbf82174ae31ee475863aaf1ab35a"
+    "pdf_name": "599eaaf8-ccd7-4687-97a7-d914def1e0d2_origin.pdf",
+    "relative_pdf_path": "599eaaf8-ccd7-4687-97a7-d914def1e0d2_origin.pdf",
+    "sha256": "4bd9737a69c3b0f0e0c13593b1068b1d81eb0ad792f0e71b95f13a005006afca"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:39Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 95,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 66,
+      "markdown_chars_used": 13612
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -78,27 +83,18 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [],
-    "warnings": [
-      "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_leaving_group"
+    "missing_fields": [
+      "year"
     ],
-    "overall_confidence": 0.921,
+    "warnings": [
+      "missing_journal",
+      "missing_doi",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
+    ],
+    "overall_confidence": 0.393,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "chiral phosphoric acid catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "chiral Brønsted acid and base catalysts",
-      "organometallic_partner": "not specified",
-      "product": "trisubstituted allenes",
-      "reaction_type": "isomerization fragmentation and protonation to allenes",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.89,
-    "human_checked": false
   }
 }

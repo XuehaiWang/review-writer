@@ -1,35 +1,37 @@
 {
   "paper_id": "P086",
-  "slug": "org.-lett.-2023-25-2543",
+  "slug": "abcac3d7-21ac-4909-9b57-f0e5506ccd19_origin",
   "title": {
-    "value": "Modular and Selective Access to Functionalized Alkynes and Allenes via the Intermediacy of Propargylic Acetates",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "A Novel Palladium-Catalyzed Synthesis of Phenanthrenes from ortho-Substituted Aryl Iodides and Diphenyl- or Alkylphenylacetylenes",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Rundong Li",
-      "Feng Ouyang",
-      "Yike Bai",
-      "Ruiren Tang",
-      "Guipeng Yu",
-      "Baosheng Wei"
+      "Marta Catellani",
+      "Elena Motti",
+      "Simone Baratta Vol.",
+      "No. Dipartimento di Chimica Organica e Industriale",
+      "Uni ersita` di Parma",
+      "Parco Area delle Scienze",
+      "I- Parma",
+      "Italy Received June"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2023,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2001,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Org. Lett. 2023",
-    "source": "cite_this_line",
-    "confidence": 0.7,
+    "value": "Organic Letters",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
@@ -39,35 +41,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "We report an efficient one-pot, two-step procedure for the modular synthesis of α-difunctionalized alkynes and trisubstituted allenes by sequential cross-coupling of benzal gem-diacetates with organozinc or -copper reagents in the absence of external transition metals. The intermediacy of propargylic acetates enables the divergent and selective synthesis of these valuable products. This method features its readily accessible substrates, relatively mild conditions, wide scope, and scalability in practical synthesis.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Selective aromatic functionalization is an important goal of organic chemistry.<sup>1</sup> We previously reported palladiumcatalyzed procedures leading to selectively alkylated aromatics.<sup>2</sup> A recent report also describes an interesting extension to condensed ring formation.<sup>3</sup> We have now worked out a new and selective aromatic arylation leading to substituted phenanthrenes. The present synthesis stems from the observation that two molecules of an ortho-substituted aryl iodide react with palladium(0) in the presence of norbornene to give a palladium-bonded biphenylyl 1. The reaction could be made catalytic by ring closure with diphenyl- or alkylphenylacetylenes<sup>4</sup> to form 1,5-disubstituted 9,10-diphenyl- or alkylphenylphenanthrenes 2 and 2a (Scheme 1).",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "not specified",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/Org. Lett. 2023, 25, 2543.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/org.-lett.-2023-25-2543.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/org.-lett.-2023-25-2543/32a9d12d-f9f5-4ddf-a311-647e2ac9db4c_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/org.-lett.-2023-25-2543"
+    "pdf": "D:\\work\\data\\abcac3d7-21ac-4909-9b57-f0e5506ccd19_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\abcac3d7-21ac-4909-9b57-f0e5506ccd19_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\abcac3d7-21ac-4909-9b57-f0e5506ccd19_origin\\8b587948-90f9-42e4-b590-eba7395081b6_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\abcac3d7-21ac-4909-9b57-f0e5506ccd19_origin"
   },
   "source_file": {
-    "pdf_name": "Org. Lett. 2023, 25, 2543.pdf",
-    "relative_pdf_path": "Org. Lett. 2023, 25, 2543.pdf",
-    "sha256": "b636519a817869c95624bb9606bb2e9e16cbee23d4156a0b7a84a59456bc7d2e"
+    "pdf_name": "abcac3d7-21ac-4909-9b57-f0e5506ccd19_origin.pdf",
+    "relative_pdf_path": "abcac3d7-21ac-4909-9b57-f0e5506ccd19_origin.pdf",
+    "sha256": "d46859ea8f375c2348bba62bdc13d4bab123cea19d077120bd022067d79758cc"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:40Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 132,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 56,
+      "markdown_chars_used": 10828
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -79,30 +93,14 @@
     "missing_fields": [],
     "warnings": [
       "missing_doi",
-      "low_confidence_abstract",
-      "The study is divergent, covering both α-difunctionalized alkynes and trisubstituted allenes in one paper.",
-      "The actual starting materials are benzal gem-diacetates; the selected substrate label uses the explicitly named in situ intermediate family because benzal gem-diacetates are not available in the controlled label set.",
-      "The allene-forming branch uses stoichiometric organocopper together with alkynylzinc intermediates, but the available catalyst/method and organometallic-partner labels do not exactly represent this combination, so those fields are conservatively marked as not specified.",
-      "structured_tag_not_specified_catalyst_or_method",
+      "structured_tag_not_specified_substrate",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.78,
+    "overall_confidence": 0.593,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "not specified",
-      "document_scope": "communication or letter",
-      "leaving_group": "acetate leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "trisubstituted allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic acetates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.8,
-    "human_checked": false
   }
 }

@@ -1,32 +1,32 @@
 {
   "paper_id": "P144",
-  "slug": "37",
+  "slug": "db5fe5f8-1b3d-428a-b6da-7670c30ae830_origin",
   "title": {
-    "value": "Enantiomerically Selective Pig Liver Esterase-catalysed Hydrolyses of Racemic Allenic Esters",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Sequential asymmetric homoallenylation of primary amines with a palladium catalyst",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Sowmianarayanan Ramaswamy",
-      "Raymond A. H. F. Hui",
-      "J. Bryan Jones"
+      "Yasushi Imada <sup></sup>",
+      "Masayuki Nishida",
+      "Takeshi Naota"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1986,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2008,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Tetrahedron",
-    "source": "known_journal_hint",
-    "confidence": 0.72,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
@@ -36,35 +36,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Pig liver esterase-catalysed hydrolyses of variously substituted racemic allenic esters proceed with predictable enantiomeric selectivity, with the highest (93%) enantiomeric excess values being observed for the most highly substituted substrates.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.92,
+    "value": "Optically active bis(homoallenyl)amines bearing two chiral axes with the same sense of axial chirality were prepared by a one-pot, palladium-catalyzed sequential homoallenylation of primary amines with 2,3-allenyl phosphates. \\- 2008 Elsevier Ltd. All rights reserved. Keywords: Palladium catalyst Asymmetric reaction Optically active allenes Bishomoallenylamines Sequential asymmetric induction has attracted much attention toward the ultimate goal of developing one-pot sequential synthetic reactions.<sup>1</sup> One-pot asymmetric reactions of molecules bearing multiple and remote functionalities (Eq. 1) have been studied extensively for sequential asymmetric inductions in many types of organic reactions including oxidation of sulfides,<sup>2</sup> epoxidation of trienes,<sup>3</sup> phosphination of dibromides,<sup>4</sup> hydrogenation of diketones,<sup>5</sup> alkylation of dialdehydes with diethyl zinc,<sup>6</sup> and cyanation–aldol reactions.<sup>7</sup> In contrast, asymmetric inductions performed via successive enantiomeric differentiations on the same reaction point (Eq. 2) are not as frequently reported despite their potential importance in various fields of organic synthesis such as catalytic allylation<sup>8</sup> and 1,4-conjugate additions.<sup>9</sup> The difficulties in this mode of asymmetric induction are probably due to the fatal conflict of enantiomeric differentiation which commonly arises from the inevitable generation of the adjacent diastereoface by the first asymmetric induction. During the course of our systematic studies on catalytic coupling reactions via p-allyl palladium intermediates,<sup>10</sup> we found that catalytic homoallenylation of primary amines<sup>11a</sup> is a rare and suitable platform for the above sequential asymmetric induction (Eq. 2). This is due to the specific axial chirality of a-methylene-p-allyl intermediates,<sup>11,12</sup> which would prevent the above conflict of facial differentiation. In this Letter, we describe a practical method for one-pot asymmetric bishomoallenylation of primary amines with 2,3-allenyl phosphates in the presence of palladium complex catalysts (Eq. 3). Since bishomoallenylamino compounds have been used as starting materials in a variety of carbocyclizations such as [2+2] cycloadditions<sup>13</sup> and stannylative cyclizations,<sup>14,15</sup> the reaction provides a facile and convenient method for synthesizing a wide variety of optically active nitrogen-containing carbon skeletons. The sequential asymmetric homoallenylation was examined using the reaction of diethyl 5,5-dimethyl-2,3-hexadienyl phosphate (1a) with benzylamine in the presence of Pd (dba) -CHCl (0.025 equiv) and (R)-SEGPHOS $[ ( R ) \\dot { - } \\pmb { 4 } ] ^ { 1 6 }$ (0.05 equiv) in THF at 20 \u0003C (Scheme 1). <sup>1</sup>H NMR analysis of the time-dependent change in product distribution showed that the process occurs via the initial formation of N-benzyl-5,5-dimethyl-2,3-hexadienylamine $( 2 \\mathbf { a } ),$ which undergoes subsequent catalytic homoallenylation to afford the chiral $( \\boldsymbol { R } ^ { * }, \\boldsymbol { R } ^ { * } )$ form of N,N-bis(5,5-dimethyl-2,3-hexadienyl)benzylamine (3a) along with achiral $( \\boldsymbol { R } ^ { * }, \\boldsymbol { S } ^ { * } )$ -3a with a diastereoselectivity of 81/19. HPLC analysis using a chiral stationary phase column showed that moderately high enantioselectivity was observed for the product $( R ^ { * }, R ^ { * } ).$ -3a (88% ee). Compounds 2a and 3a exhibited (\u0003) specific rotations,<sup>17</sup> from which their absolute configurations were assigned to be (R) and $( R, R ),$ respectively, from the established molecular structure of $\\scriptstyle ( R ) - ( - ) -$ and (S)-(+)-N-benzyl-Nmethyl-2,3-pentadienylamine.<sup>18</sup> Scheme 1. Palladium-catalyzed homoallenylation of benzylamine. Sequential asymmetric homoallenylations of primary amines can be performed with 2,3-allenyl phosphates. Representative results for the reactions with benzylamine are shown in Table 1. Moderate to high enantio- and diastereoselectivities were observed in the reactions with 2,3-allenyl phosphates 1a–c bearing substituents at C4 position, when (R)-SEGPHOS [(R)-4] or (R)- DTBM-SEGPHOS [(R)-5] was used as the chiral ligand (entries 1, 3, and 5). Other chiral ligands such as BINAP showed moderate enantioselectivity. The use of the (S)-ligands afforded (S,S)-products with nearly identical diastereo- and enantioselectivities (entries 2 and 4). The present asymmetric induction can be rationalized by the mechanism shown in Scheme 2,<sup>11</sup> where oxidative addition of the chiral palladium species to the 2,3-allenyl phosphate 1 gives r-1,3-alkadienylpalladium $\\mathbf { 6 } ^ { 1 1 \\mathrm { b } }$ and the equilibrated chiral isomers of the a-methylene-p-allylpalladium intermediates (R)- and (S)-7. The enantiomer differentiating reaction of primary amines with 7 affords optically active monohomoallenylamine (R)- or (S)-2, which in turn acts as a nucleophile in this asymmetric reaction to afford the (R,R)- or (S,S)-form of the bishomoallenylamines 3 with high enantioselectivity. Scheme 2. Asymmetric induction of chiral axes by palladium-catalyzed homoall enylation of benzylamine. Similar treatment of 1a with benzylamine (0.7 equiv) in the presence of achiral catalyst, Pd (dba) -CHCl (0.025 equiv) and dppp (0.05 equiv), afforded a mixture of (R<sup>\\*</sup>,R<sup>\\*</sup>)- and (R<sup>\\*</sup>,S<sup>\\*</sup>)-3a in a 50:50 ratio (total yield 71%). This result indicates that nucleophilic attack of (R)-2a to a-methylene-p-allylpalladium intermediate (R)-7 proceeds at the same rate as that of (S)-2. Thus, we can be fairly certain that the system is substantially protected from the common diastereomeric conflict, which is encountered in sequential aldol and Michael reactions. This can be ascribed to the molecular structure of the homoallenylamines, whose asymmetric carbon (C4) is located in a sufficiently remote position from the reactive nitrogen atom. As shown in Scheme 3, a minor product, meso-3, is formed both by the major reaction with the minor intermediate, (S)-2, and the minor reaction with the major intermediate, (R)-2. Thus, it is noteworthy that the present sequential process can substantially achieve high enantioselectivity of the product, since most of the minor intermediate is transformed into the removable meso compound in the second step.<sup>19</sup> Principally, 95% ee of (R,R)-3 can be obtained by enantioselectivities of 86:14 both in the first and in the second homoallenylation steps. Further studies are currently underway. Scheme 3. Statistical enantiomeric amplification by sequential homoallenylation This work was supported by a Grant-in-Aid for Scientific Research from the Ministry of Education, Science, Sports, and Culture, Japan. We thank Takasago International Co., Japan for a generous gift of chiral ligands.",
+    "source": "content_list_abstract_region",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "allenyl phosphates",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "chiral biaryl bisphosphine ligands",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/37/f52fecf7-4f50-4401-b753-e1926d059991_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/37.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/37/f52fecf7-4f50-4401-b753-e1926d059991_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/37"
+    "pdf": "D:\\work\\data\\db5fe5f8-1b3d-428a-b6da-7670c30ae830_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\db5fe5f8-1b3d-428a-b6da-7670c30ae830_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\db5fe5f8-1b3d-428a-b6da-7670c30ae830_origin\\8775d852-29ac-4701-89af-6611e683ee6c_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\db5fe5f8-1b3d-428a-b6da-7670c30ae830_origin"
   },
   "source_file": {
-    "pdf_name": "37.pdf",
-    "relative_pdf_path": "37.pdf",
-    "sha256": "26ecf640369584ef9deab02b5fe4852b56a1a3ad0c34b1a6eb4c404b24f91e2b"
+    "pdf_name": "db5fe5f8-1b3d-428a-b6da-7670c30ae830_origin.pdf",
+    "relative_pdf_path": "db5fe5f8-1b3d-428a-b6da-7670c30ae830_origin.pdf",
+    "sha256": "eac32632b8fc2fe7840f0211a2a7c41703c6695d589e153137745167db3ee2cb"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 25,
-      "markdown_chars_used": 8878
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 67,
+      "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -75,32 +87,13 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_year",
+      "missing_journal",
       "missing_doi",
-      "low_confidence_abstract",
-      "The paper is a short communication without a conventional abstract; the leading summary sentence was used as the abstract.",
-      "The reaction is an enzymatic kinetic resolution/hydrolysis, which is not directly represented in the allowed reaction_type labels; 'intermolecular functionalization of allenes' is the closest available label.",
-      "Product classification emphasizes the hydrolysis acid products, although the study also reports recovered enantioenriched allenic esters.",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.776,
+    "overall_confidence": 0.513,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "enzymatic catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allenic carboxylic acids",
-      "reaction_type": "intermolecular functionalization of allenes",
-      "substrate": "allenoates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.82,
-    "human_checked": false
   }
 }

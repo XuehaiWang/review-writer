@@ -1,71 +1,78 @@
 {
   "paper_id": "P088",
-  "slug": "org.-lett.-2023-25-6654",
+  "slug": "adv-synth-catal-2023-jaravabarrera-enantiospecific-synthesis-of-1-3disubstituted-allenes-from-propargylic",
   "title": {
-    "value": "Organocatalytic Tandem Synthesis of Chiral Hexacyclic Bisindoles from Propargylic 3‑Methyleneindoles with 2‑Indolylmethanols",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Enantiospecific Synthesis of 1,3-Disubstituted Allenes from Propargylic Carbonates through a Borylation-1,2-Elimination Process",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
-    "value": [
-      "Kanghua Rui",
-      "Haorui Gu",
-      "Alemayehu Gashaw Woldegiorgis",
-      "Xufeng Lin"
-    ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
-    "human_checked": false
-  },
-  "year": {
-    "value": 2023,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
-    "human_checked": false
-  },
-  "journal": {
-    "value": "Org. Lett. 2023",
-    "source": "cite_this_line",
-    "confidence": 0.7,
-    "human_checked": false
-  },
-  "doi": {
-    "value": null,
+    "value": [],
     "source": "rule_not_found",
     "confidence": 0.0,
     "human_checked": false
   },
+  "year": {
+    "value": 2023,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "journal": {
+    "value": "Advanced Synthesis & Catalysis",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
+    "human_checked": false
+  },
+  "doi": {
+    "value": "10.1002/adsc.202300813",
+    "source": "markdown_regex",
+    "confidence": 0.9,
+    "human_checked": false
+  },
   "abstract": {
-    "value": "A novel chiral phosphoric acid-catalyzed tandem regioselective 1,6-addition/double intramolecular nucleophilic addition annulation of the propargylic 3-methyleneindoles in situ generated from α-indolyl propargylic alcohols with 2-indolylmethanols has been developed. The methodology afforded the new chiral trifluoromethyl pentalenobisindoles bearing an all-carbon quaternary stereogenic center in generally good yields with excellent enantioselectivities.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "An array of enantioenriched vinyl boronates bearing an allylic carbonate moiety have been prepared through selective hydroboration of propargyl carbonates. Treatment of these vinyl boronates with TBAF in THF affords enantioenriched 1,3- disubstituted allenes through a novel 1,2-anti elimination in good yields and high enantiospecificities.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "organolithium reagents",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "carbonate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "stereochemical study"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/Org. Lett. 2023, 25, 6654.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/org.-lett.-2023-25-6654.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/org.-lett.-2023-25-6654/0552653a-216f-4466-b4b7-bff57fbb25ee_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/org.-lett.-2023-25-6654"
+    "pdf": "D:\\work\\data\\Adv Synth Catal - 2023 - Jarava‐Barrera - Enantiospecific Synthesis of 1 3‐Disubstituted Allenes from Propargylic.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\adv-synth-catal-2023-jaravabarrera-enantiospecific-synthesis-of-1-3disubstituted-allenes-from-propargylic.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\adv-synth-catal-2023-jaravabarrera-enantiospecific-synthesis-of-1-3disubstituted-allenes-from-propargylic\\2519cfc9-3d70-4090-99a0-c52ead1821ee_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\adv-synth-catal-2023-jaravabarrera-enantiospecific-synthesis-of-1-3disubstituted-allenes-from-propargylic"
   },
   "source_file": {
-    "pdf_name": "Org. Lett. 2023, 25, 6654.pdf",
-    "relative_pdf_path": "Org. Lett. 2023, 25, 6654.pdf",
-    "sha256": "bb9e38059c12447254685af1fcd27db9c393555c0e0a56c31ce09ec954a1f47b"
+    "pdf_name": "Adv Synth Catal - 2023 - Jarava‐Barrera - Enantiospecific Synthesis of 1 3‐Disubstituted Allenes from Propargylic.pdf",
+    "relative_pdf_path": "Adv Synth Catal - 2023 - Jarava‐Barrera - Enantiospecific Synthesis of 1 3‐Disubstituted Allenes from Propargylic.pdf",
+    "sha256": "d048cdc7041860b2a4e39d09d9f2ba9d07c21ff7951537fe2fd8037193ff4fd0"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:40Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 118,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 108,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -76,27 +83,11 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_doi",
-      "Paper also reports a secondary CPA-catalyzed 1,6-addition to form axially chiral allenes; structured tags reflect the main bisindole annulation.",
-      "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_leaving_group"
+      "empty_authors",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.79,
+    "overall_confidence": 0.639,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "chiral phosphoric acid catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "chiral Brønsted acid and base catalysts",
-      "organometallic_partner": "not specified",
-      "product": "allene-derived cyclic products",
-      "reaction_type": "conjugate 1,6-addition to enynes",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.88,
-    "human_checked": false
   }
 }

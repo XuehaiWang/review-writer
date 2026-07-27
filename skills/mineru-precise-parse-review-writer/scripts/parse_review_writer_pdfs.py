@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import time
 import unicodedata
 import zipfile
@@ -15,6 +16,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 import requests
+
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
 MINERU_BASE_URL = "https://mineru.net"
@@ -127,6 +132,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_TIMEOUT_MINUTES,
         help=f"Maximum wait time per batch. Default: {DEFAULT_TIMEOUT_MINUTES}",
+    )
+    parser.add_argument(
+        "--upload-retries",
+        type=int,
+        default=5,
+        help="Retries for transient object-storage upload failures. Default: 5.",
+    )
+    parser.add_argument(
+        "--upload-retry-delay",
+        type=float,
+        default=3.0,
+        help="Initial delay in seconds between upload retries. Default: 3.",
     )
     parser.add_argument(
         "--disable-formula",
@@ -320,12 +337,27 @@ def request_upload_batch(
     return data
 
 
-def upload_batch_files(jobs: List[ParseJob], upload_urls: List[str]) -> None:
+def upload_batch_files(
+    jobs: List[ParseJob], upload_urls: List[str], retries: int, retry_delay: float
+) -> None:
     for job, upload_url in zip(jobs, upload_urls):
-        with job.pdf_path.open("rb") as handle:
-            response = requests.put(upload_url, data=handle, timeout=300)
-        response.raise_for_status()
-        print(f"[upload] {job.relative_pdf_path}")
+        attempts = max(1, retries + 1)
+        for attempt in range(attempts):
+            try:
+                with job.pdf_path.open("rb") as handle:
+                    response = requests.put(upload_url, data=handle, timeout=300)
+                response.raise_for_status()
+                print(f"[upload] {job.relative_pdf_path}")
+                break
+            except requests.RequestException as exc:
+                if attempt + 1 >= attempts:
+                    raise
+                delay = max(0.1, retry_delay) * (2 ** attempt)
+                print(
+                    f"[upload retry] {job.relative_pdf_path}: {type(exc).__name__}; "
+                    f"retrying in {delay:g}s ({attempt + 1}/{retries})"
+                )
+                time.sleep(delay)
 
 
 def poll_batch_results(
@@ -451,7 +483,12 @@ def run_batch(
         raise RuntimeError("MinerU did not return a batch_id.")
     print(f"[batch] {batch_id} ({len(jobs)} files)")
 
-    upload_batch_files(jobs, list(upload_batch.get("file_urls") or []))
+    upload_batch_files(
+        jobs,
+        list(upload_batch.get("file_urls") or []),
+        retries=args.upload_retries,
+        retry_delay=args.upload_retry_delay,
+    )
     results = poll_batch_results(
         session=session,
         token=token,
@@ -529,6 +566,8 @@ def main() -> int:
             "batch_size": args.batch_size,
             "poll_interval": args.poll_interval,
             "timeout_minutes": args.timeout_minutes,
+            "upload_retries": args.upload_retries,
+            "upload_retry_delay": args.upload_retry_delay,
         },
         "queued": len(jobs),
         "batches": [],

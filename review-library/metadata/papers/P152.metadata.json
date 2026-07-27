@@ -1,34 +1,35 @@
 {
   "paper_id": "P152",
-  "slug": "3f-transition-metal-catalyzed-cycloisomerizations-of-1-n-allenynes-and-allenenes",
+  "slug": "eur-j-org-chem-2024-shen-palladiumcatalyzed-intermolecular-5-2-cycloaddition-highly-regioselective-synthesis-of",
   "title": {
-    "value": "Transition Metal Catalyzed Cycloisomerizations of 1,n-Allenynes and -Allenenes",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Palladium-Catalyzed Intermolecular [5+ 2] Cycloaddition: Highly Regioselective Synthesis of Allene-Containing 2- Benzoxepines",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Corinne Aubert",
-      "Louis Fensterbank",
-      "Pierre Garcia",
-      "Max Malacria",
-      "Antoine Simonneau"
+      "Bingyu Shen",
+      "<sup>[",
+      "</sup> <sup>]</sup> Aimei Yang",
+      "<sup>[]</sup> Xihong Lu",
+      "<sup>[]</sup> Zhijun Xin",
+      "<sup>[]</sup> and Xuehu Li<sup>[]</sup>"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2011,
-    "source": "llm_from_front_matter",
-    "confidence": 0.97,
+    "value": 2024,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Tetrahedron",
-    "source": "known_journal_hint",
-    "confidence": 0.72,
+    "value": "Eur J Org Chem",
+    "source": "filename_prefix",
+    "confidence": 0.55,
     "human_checked": false
   },
   "doi": {
@@ -38,35 +39,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Institut Parisien de Chimie Mol\u0001eculaire (UMR CNRS 7201), UPMC Univ Paris 06, 4 place Jussieu, C. 229, 75005 Paris, France",
+    "value": "Palladium-catalyzed intermolecular [5 + 2] cycloaddition of propargylic carbonates with benzyl allenyl ethers has been developed for the synthesis of allene-containing 2-benzoxepines. The reaction proceeds by a pathway involving decarbox-",
     "source": "content_list_first_paragraph_after_authors",
     "confidence": 0.68,
     "human_checked": false
   },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic carbonates",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "carbonate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
+    "human_checked": false
+  },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/3f-transition-metal-catalyzed-cycloisomerizations-of-1-n-allenynes-and-allenenes/be832ead-884f-4e44-bd79-dabea86316e6_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/3f-transition-metal-catalyzed-cycloisomerizations-of-1-n-allenynes-and-allenenes.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/3f-transition-metal-catalyzed-cycloisomerizations-of-1-n-allenynes-and-allenenes/be832ead-884f-4e44-bd79-dabea86316e6_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/3f-transition-metal-catalyzed-cycloisomerizations-of-1-n-allenynes-and-allenenes"
+    "pdf": "D:\\work\\data\\Eur J Org Chem - 2024 - Shen - Palladium‐Catalyzed Intermolecular  5 2  Cycloaddition  Highly Regioselective Synthesis of.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\eur-j-org-chem-2024-shen-palladiumcatalyzed-intermolecular-5-2-cycloaddition-highly-regioselective-synthesis-of.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\eur-j-org-chem-2024-shen-palladiumcatalyzed-intermolecular-5-2-cycloaddition-highly-regioselective-synthesis-of\\49d5682d-b676-40d2-bc45-52ffa8fd5c7b_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\eur-j-org-chem-2024-shen-palladiumcatalyzed-intermolecular-5-2-cycloaddition-highly-regioselective-synthesis-of"
   },
   "source_file": {
-    "pdf_name": "3f-transition-metal-catalyzed-cycloisomerizations-of-1-n-allenynes-and-allenenes.pdf",
-    "relative_pdf_path": "3f-transition-metal-catalyzed-cycloisomerizations-of-1-n-allenynes-and-allenenes.pdf",
-    "sha256": "5b57745c149cdf3aad63cfb047968c7cb7bc6b57a217a465384a317e9e971ca1"
+    "pdf_name": "Eur J Org Chem - 2024 - Shen - Palladium‐Catalyzed Intermolecular  5 2  Cycloaddition  Highly Regioselective Synthesis of.pdf",
+    "relative_pdf_path": "Eur J Org Chem - 2024 - Shen - Palladium‐Catalyzed Intermolecular  5 2  Cycloaddition  Highly Regioselective Synthesis of.pdf",
+    "sha256": "e0fa6e2eeb33aa8edcb92be6e8095d13bfa7061201c9c42171369b0aa858f718"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 559,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 92,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -78,33 +91,13 @@
     "missing_fields": [],
     "warnings": [
       "missing_doi",
-      "low_confidence_abstract",
-      "No explicit abstract was provided in the supplied snippets; the abstract field uses an introductory scope paragraph instead.",
-      "structured_tag_not_specified_selectivity_profile",
-      "No explicit abstract was found in the provided front matter/excerpts; abstract field left empty.",
-      "The review spans multiple allenyne/allene substrate classes and several transition metals, so `substrate` and `catalyst_or_method` are classified as `not specified` under the allowed label set.",
-      "structured_tag_not_specified_substrate",
-      "structured_tag_not_specified_catalyst_or_method",
       "structured_tag_not_specified_organometallic_partner",
       "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.74,
+    "overall_confidence": 0.569,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "not specified",
-      "document_scope": "comprehensive review",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allene-derived cyclic products",
-      "reaction_type": "intramolecular cyclization and skeletal reorganization of allenes",
-      "substrate": "not specified"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.83,
-    "human_checked": false
   }
 }

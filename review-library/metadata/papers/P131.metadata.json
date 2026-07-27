@@ -1,32 +1,30 @@
 {
   "paper_id": "P131",
-  "slug": "29b",
+  "slug": "d04d12cd-44b4-4523-abb0-00b24bf761dc_origin",
   "title": {
-    "value": "Stereochemistry of P-Chiral Phosphinylacetic Acid Esters I. Asymmetric Synthesis of Substituted Alkadiene-1,2-carboxylic-1 and γ-Chiral α,β-Unsaturated Carboxylic Acid Esters",
-    "source": "llm_from_front_matter",
-    "confidence": 0.93,
+    "value": "Enantioselective Decarboxylative Amination: Synthesis of Axially Chiral Allenyl Amines\\*\\*",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "S. Musierowicz",
-      "A. Wróblewski",
-      "H. Krawozyk"
+      "Baoqiang Wan and Shengming Ma"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.95,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1975,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "journal": {
-    "value": "Tetrahedron Letters",
-    "source": "known_journal_hint",
-    "confidence": 0.72,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
@@ -36,35 +34,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "",
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "Initially, we successfully established the palladium-catalyzed decarboxylative amination of N-tosylcarbamates for the synthesis of racemic allenyl amines. After screening the reaction conditions, it was observed that the reaction of 1 could proceed smoothly to afford the allenyl amines 2 by utilizing 5 mol% of [Pd(PPh ) ] in CH Cl at 40 8C. The scope of decarboxylative reaction of the N-tosylcarbamates 1 was investigated and the results are listed in Table 1. Some issues should be noted: 1) the yields of these reactions are good to excellent; 2) functional groups such as alkynyl, allenyl, and alkenyl, were tolerated in the reaction; 3) when R<sup>2</sup> = H, the reaction afforded the monoallenylation product 2n and the diallenylation product 2 n’ in 73 % and 8 % yields, respectively, upon isolation.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "chiral biaryl bisphosphine ligands",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/29b/6f2eae54-44c9-4dba-919a-253311b5f217_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/29b.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/29b/6f2eae54-44c9-4dba-919a-253311b5f217_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/29b"
+    "pdf": "D:\\work\\data\\d04d12cd-44b4-4523-abb0-00b24bf761dc_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\d04d12cd-44b4-4523-abb0-00b24bf761dc_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\d04d12cd-44b4-4523-abb0-00b24bf761dc_origin\\ccba0e8a-ae6c-46e1-8b46-cc7fcd7ce346_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\d04d12cd-44b4-4523-abb0-00b24bf761dc_origin"
   },
   "source_file": {
-    "pdf_name": "29b.pdf",
-    "relative_pdf_path": "29b.pdf",
-    "sha256": "ed5174526f7b170f9d31c08c094889ffdc8bd581bbe36718f5374e1fd56f27c8"
+    "pdf_name": "d04d12cd-44b4-4523-abb0-00b24bf761dc_origin.pdf",
+    "relative_pdf_path": "d04d12cd-44b4-4523-abb0-00b24bf761dc_origin.pdf",
+    "sha256": "79ce17e35f5bd0baca0417d64d08174ce8f02422da4b264108e74ca5c7e151a5"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 30,
-      "markdown_chars_used": 7590
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 90,
+      "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -74,40 +84,18 @@
   },
   "quality": {
     "missing_fields": [
-      "abstract"
+      "year"
     ],
     "warnings": [
-      "empty_authors",
-      "missing_year",
+      "missing_journal",
       "missing_doi",
-      "low_confidence_title",
-      "low_confidence_abstract",
-      "No explicit abstract was present in the provided front matter; abstract left empty.",
-      "Some title and author text appear OCR-noisy; minor normalization was applied without changing scientific meaning.",
-      "No abstract is present in the extracted front matter; abstract left blank.",
-      "Title wording appears OCR-affected around the 'Alkadiene-1,2-carboxylic-1' segment.",
-      "Author surname spelling for 'H. Krawozyk' may be OCR-affected.",
-      "structured_tag_not_specified_catalyst_or_method",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.624,
+    "overall_confidence": 0.393,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "not specified",
-      "document_scope": "stereochemical study",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allenoates",
-      "reaction_type": "ketene olefination to allenecarboxylates",
-      "substrate": "ketenes"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.78,
-    "human_checked": false
   }
 }

@@ -1,76 +1,84 @@
 {
   "paper_id": "P031",
-  "slug": "chinese-journal-of-chemistry-2024-xiao-dual-photoredox-and-titanium-catalyzed-regioselective-allenylation-of",
+  "slug": "2933853e-4c2b-4600-b437-412875e742d5_origin",
   "title": {
-    "value": "Dual Photoredox and Titanium Catalyzed Regioselective Allenylation of Aldehydes via Reductive Radical-Polar Crossover",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Enantioselective synthesis of allenic esters via an ylide route{",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Zulin Xiao",
-      "Wenzhe Shang",
-      "Tao Huang",
-      "Lei He",
-      "Jingyao Li",
-      "Shen Luo",
-      "Xiaoxia He",
-      "Xiang Li",
-      "Fusheng Li"
+      "Chuan-Ying Li",
+      "Xiu-Li Sun",
+      "Qing Jing and Yong Tang Received (in Cambridge",
+      "UK) th March",
+      "up to % ee has been achieved."
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2025,
-    "source": "llm_from_front_matter",
-    "confidence": 0.93,
+    "value": 2006,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Chinese Journal of Chemistry",
-    "source": "filename_prefix",
-    "confidence": 0.55,
-    "human_checked": false
-  },
-  "doi": {
     "value": null,
     "source": "rule_not_found",
     "confidence": 0.0,
     "human_checked": false
   },
+  "doi": {
+    "value": "10.1039/b603659g",
+    "source": "markdown_regex",
+    "confidence": 0.9,
+    "human_checked": false
+  },
   "abstract": {
-    "value": "The direct reductive coupling of carbonyl compounds with propargyl halides is a powerful and reliable tool in the synthesis of α-allenols. However, stoichiometric metal reductants, harsh reaction conditions and a variety of additional additives are required in the traditional strategies. Additionally, the reactivity and regioselectivity control remains an elusive challenge. Herein, we developed the Ti-catalyzed regioselective reductive coupling of readily available aldehydes and racemic propargyl bromides to rapidly access a wide range of α-allenols. This method proceeds efficiently in a reductive radical-polar crossover manner featuring mild conditions, excellent regioselectivity control, broad substrate scope, and eco-friendliness. Preliminary mechanistic studies support the radical-involved catalytic cycle, and DFT calculations demonstrate that the regioselectivity is determined by the Zimmerman-Traxler-type transition states.",
-    "source": "llm_from_comprehensive_summary",
-    "confidence": 0.94,
+    "value": "Pseudo-C -symmetric chiral phosphorus ylides have been designed and synthesized for the enantioselective preparation of allenic esters, and up to 92% ee has been achieved.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "allenic acids and esters",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Alkynol/Chinese Journal of Chemistry - 2024 - Xiao - Dual Photoredox and Titanium Catalyzed Regioselective Allenylation of.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/chinese-journal-of-chemistry-2024-xiao-dual-photoredox-and-titanium-catalyzed-regioselective-allenylation-of.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/chinese-journal-of-chemistry-2024-xiao-dual-photoredox-and-titanium-catalyzed-regioselective-allenylation-of/5cc9d11a-582b-4f33-b4c6-770e99804b25_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/chinese-journal-of-chemistry-2024-xiao-dual-photoredox-and-titanium-catalyzed-regioselective-allenylation-of"
+    "pdf": "D:\\work\\data\\2933853e-4c2b-4600-b437-412875e742d5_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\2933853e-4c2b-4600-b437-412875e742d5_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\2933853e-4c2b-4600-b437-412875e742d5_origin\\3fa80a06-ef5a-42a1-b945-112b17e40953_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\2933853e-4c2b-4600-b437-412875e742d5_origin"
   },
   "source_file": {
-    "pdf_name": "Chinese Journal of Chemistry - 2024 - Xiao - Dual Photoredox and Titanium Catalyzed Regioselective Allenylation of.pdf",
-    "relative_pdf_path": "Chinese Journal of Chemistry - 2024 - Xiao - Dual Photoredox and Titanium Catalyzed Regioselective Allenylation of.pdf",
-    "sha256": "04518dc762598575e8cbb7118ef262012a2bdd7062337689e4cf39fbb156ecf1"
+    "pdf_name": "2933853e-4c2b-4600-b437-412875e742d5_origin.pdf",
+    "relative_pdf_path": "2933853e-4c2b-4600-b437-412875e742d5_origin.pdf",
+    "sha256": "e7a31474537a3d54e83c5572b3d15e478ccde9cfa2eb8feacb0b7b54b51bd7e1"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:29Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 100,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 63,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -81,33 +89,14 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_doi",
-      "low_confidence_abstract",
-      "Publication year appears as 2025 in the citation line, despite 2024 appearing in the file/path metadata.",
-      "No explicit abstract header is shown; the abstract field is taken from the 'Comprehensive Summary' paragraph.",
-      "The photocatalyst identity is inconsistent across snippets (4CzIPN in optimization text vs Ir-1 in experimental/mechanistic text), so the catalyst tag is generalized to Ti/photoredox dual catalysis.",
-      "Citation/front matter support 2025 as the publication year, while the filename/slug and copyright footer suggest a 2024 online-early context.",
-      "The catalyst system is dual photoredox/titanium catalysis, but the allowed catalyst labels do not include titanium or generic photoredox catalysis; OCR text also shows some photocatalyst ambiguity (4CzIPN vs Ir-1).",
-      "structured_tag_not_specified_catalyst_or_method",
+      "missing_journal",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.753,
+    "overall_confidence": 0.619,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "not specified",
-      "document_scope": "communication or letter",
-      "leaving_group": "halide leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "alpha-allenic alcohols",
-      "reaction_type": "allenyl-reagent addition to carbonyl compounds",
-      "substrate": "aldehydes"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.87,
-    "human_checked": false
   }
 }

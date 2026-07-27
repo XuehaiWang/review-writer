@@ -1,33 +1,34 @@
 {
   "paper_id": "P035",
-  "slug": "eur-j-org-chem-2025-liu-ligandfree-coppercatalyzed-allenylative-c-p-coupling-of-propargylic-acetates-with",
+  "slug": "32501c1a-6247-472f-877e-c732efa6e3d8_origin",
   "title": {
-    "value": "Ligand-Free Copper-Catalyzed Allenylative C–P Coupling of Propargylic Acetates with H-Phosphine Oxides",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Synthesis of Conjugated Allenes through Copper-Catalyzed γ-Selective and Stereospecific Coupling between Propargylic Phosphates and Aryl- or Alkenylboronates",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Shaoqing Liu",
-      "Jiawei Liu",
-      "Li-Biao Han",
-      "Ruwei Shen"
+      "Vol.",
+      "No. – Mingyu Yang",
+      "Natsumi Yokokawa",
+      "Hirohisa Ohmiya",
+      "Masaya Sawamura"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2025,
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": 2011,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Eur J Org Chem",
-    "source": "filename_prefix",
-    "confidence": 0.55,
+    "value": "Organic Letters",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
@@ -37,35 +38,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "The extra-ligand-free CuTC-catalyzed C–P cross coupling reaction of propargylic acetates with H-phosphine oxides is reported to afford allenylphosphine oxides. The reaction took place efficiently with diphenylphosphine oxide and electron-deficient di(4-fluorophenyl)phosphine oxide, but less effectively with electron-rich ones such as di(4-methoxylphenyl)phosphine oxide and dialkylphosphine oxides. H-phosphine oxides themselves may serve as the ligand.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "A Cu-catalyzed γ-selective coupling reaction between propargylic phosphates and aryl- or alkenylboronates afforded aryl- or alkenyl-conjugated allenes. The reaction showed excellent functional group compatibility in both the propargylic substrates and the boronates. The reaction of an enantioenriched propargylic phosphate proceeded with excellent chirality transfer with 1,3-anti stereochemistry to give axially chiral aryl- and alkenylallenes. Allenes are important building blocks that have unique reactivity due to the orthogonal consecutive π-bonds.<sup>1,2</sup> Additionally, they are found in many natural products.<sup>3,4</sup> Among a number of routes to allenes, the γ-substitution (formal $\\mathrm { S } _ { \\mathrm { N } } 2 ^ { \\prime }$ displacement) of propargylic alcohol derivatives with organocuprate reagents is most straightforward.<sup>5</sup>-<sup>8</sup> However, the method often suffers from problems of functional group compatibility because the organocopper reagents must be prepared from highly reactive organometallic reagents such as Grignard or organolithium reagents.<sup>4o,9</sup> Furthermore, the use of $\\mathrm { s p } ^ { 2 } -$ carbon nucleophiles, such as aryl- or alkenylmetal reagents, has not been well exploited due to the poor nucleophilicity of these reagents relative to that of the alkylcopper species.<sup>9</sup> Therefore, the organocopper-based method is not generally applicable for the synthesis of arylor alkenyl-conjugated allenes. Previously, we found that the copper-catalyzed allyl aryl coupling between allylic phosphates and arylboronates proceeded in the presence of KO<sup>t</sup>Bu and water (3 equiv each) with excellent γ-selectivity and stereospecifity.<sup>10b</sup> On the basis of this knowledge, we envisioned that arylboron compounds could be coupled regioselectively with propargyl alcohol derivatives under copper-catalyzed condition for constructing aryl- or alkenyl-conjugated allenes. Here we report a copper-catalyzed γ-selective coupling between propargylic phosphates and aryl- or alkenylboronates as an approach to conjugated allenes.<sup>10</sup>-<sup>13</sup> The reaction is compatible with various functional groups in both propargylic phosphates and boronates, affording functionalized aryl- and alkenylallenes that are difficult to prepare by other methods. The reaction of enantioenriched propargylic phosphates took place with excellent point-to-axial chirality transfer with anti stereochemistry to give axially chiral conjugated allenes. Specifically, the reaction of propargylic phosphate 2a with 5,5-dimethyl-2-phenyl-1,3,2-dioxaborinane (1a) (2 equiv) in the presence of CuCl (5 mol %), KO<sup>t</sup>Bu (3 equiv), and H O (3 equiv) in CH CN at 60 \u0001C for 4 h afforded arylallene product 3aa in 88% isolated yield. The <sup>1</sup>H NMR analysis of the crude product confirmed that no R-substitution product (alkyne) was formed (γ/R >99:1) (Scheme 1). The optimum reaction conditions are similar to those of the copper-catalyzed allyl aryl coupling between allylic phosphates and arylboronates.<sup>10b</sup> Some noteworthy points are described below. No reaction occurred in the absence of CuCl. CuCl was as effective as CuCl (82% yield). The use of a small amount of H O (3 equiv) is critical: the reaction without H O resulted in a complex mixture. The amount of KO<sup>t</sup>Bu is also critical: reducing it from 3 to 2 equiv decreased the yield from 88 to 44% under otherwise identi cal conditions, and no reaction occurred in the absence of KO<sup>t</sup>Bu. Reducing the amount of boronate 1a to 1 equiv caused considerable hydrolysis of 2a. The use of phenyl boronic acid pinacol ester in place of the neopentyl glycolato 1a decreased the yield of 3aa (60%). Phenylboronic acid was also usable instead of 1a, but the yield of 3aa was further decreased to 40%. Changing the leaving group to diethyl- or diisopropyl phosphates inhibited the reaction. The reaction showed a range of substrate scope of arylboronates (1) and propargylic phosphates (2), affording a variety of allenes (Table 1). Functionalities such as MeO, CF<sub>3</sub>, Cl, ketone, ester, and silyl ether in 1 or 2 were compatible with the Cu system (entries 2 7). The tolerance of the reaction toward steric demand in both arylboronates (1) and propargylic phosphates (2) is shown in Table 1, entries 1 and 8 11. o-Tolylboronate (1b) was coupled with 2a in a reasonable yield (entry 1). The propargylic phosphates 2c, 2d, and 2e with Me, MeOCH, and bulkier i-Bu groups, respectively, instead of the Bu group at the γ-position in 2 were phenylated effectively to afford the corresponding allenes 3ac, 3ad, and 3ae (entries 8 10). A sterically more demanding R-substituent such as an i-Pr group was also tolerated (entry 11). The Cu catalyst system was also applicable to the synthesis of conjugated alkenylallenes (Scheme 2 and Table 2). Specifically, the treatment of trans-1-hexen 1-ylboronic acid pinacol ester (1h) (3 equiv) with 2a in the presence of $\\mathrm { C u C l } _ { 2 }$ (10 mol %), KO<sup>t</sup>Bu (3 equiv), and $_ \\mathrm { H _ { 2 } O }$ (3 equiv) in $\\mathrm { C H } _ { 3 } \\mathrm { C N }$ at $3 0 ~ ^ { \\circ } \\mathrm { C }$ for 12 h afforded alkenylal lene product 3ha in 71% isolated yield. No R-substitution product (alkyne) was observed (Scheme 2). Increasing the amounts of both boronate 1h and $\\mathrm { K O ^ { \\prime } B u / H _ { 2 } O }$ to 3 and 4 equiv, respectively, resulted in a slight increase in the yield $( 7 7 \\% )$. In contrast to the reaction of the arylboronates, the use of CuCl resulted in lower reaction efficiency (61%). The use of the neopentylglycol ester derivative as an alkenylboronate was not effective.<sup>14</sup> A scope for the synthesis of alkenyl-conjugated allenes is summarized in Table 2. The protocol was applicable to the vinylboronate 1i, affording the corresponding vinylallene 3ia (entry 1). Both alkyl and aryl substituents were tolerated at the β-position in the alkenylboronates (entries 2 7). The styrylboronate 1j and 1-octenylboronate 1k underwent the reaction with 2a in reasonable yields (entries 2 and 3). A sterically more demanding t-Bu substituent was tolerated at the β-position of alkenylboronate (1l) (entry 4).",
+    "source": "content_list_abstract_region",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "organolithium reagents",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "phosphate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Alkynol/Eur J Org Chem - 2025 - Liu - Ligand‐Free Copper‐Catalyzed Allenylative C P Coupling of Propargylic Acetates with.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/eur-j-org-chem-2025-liu-ligandfree-coppercatalyzed-allenylative-c-p-coupling-of-propargylic-acetates-with.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/eur-j-org-chem-2025-liu-ligandfree-coppercatalyzed-allenylative-c-p-coupling-of-propargylic-acetates-with/e6622469-6ee2-457b-9c8e-bacaec2d875e_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/eur-j-org-chem-2025-liu-ligandfree-coppercatalyzed-allenylative-c-p-coupling-of-propargylic-acetates-with"
+    "pdf": "D:\\work\\data\\32501c1a-6247-472f-877e-c732efa6e3d8_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\32501c1a-6247-472f-877e-c732efa6e3d8_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\32501c1a-6247-472f-877e-c732efa6e3d8_origin\\2c0611e6-f55a-4a70-89e1-d3f0a6fb5b55_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\32501c1a-6247-472f-877e-c732efa6e3d8_origin"
   },
   "source_file": {
-    "pdf_name": "Eur J Org Chem - 2025 - Liu - Ligand‐Free Copper‐Catalyzed Allenylative C P Coupling of Propargylic Acetates with.pdf",
-    "relative_pdf_path": "Eur J Org Chem - 2025 - Liu - Ligand‐Free Copper‐Catalyzed Allenylative C P Coupling of Propargylic Acetates with.pdf",
-    "sha256": "94c46f04f86e31a8d5cf3158578b6bdaa2833ec1551ba32a510c44854f56b103"
+    "pdf_name": "32501c1a-6247-472f-877e-c732efa6e3d8_origin.pdf",
+    "relative_pdf_path": "32501c1a-6247-472f-877e-c732efa6e3d8_origin.pdf",
+    "sha256": "979dd462608de3c50e8c1b4d43571acb1eb3928a38fb15678570fba0d9843344"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:29Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 106,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 66,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -77,27 +90,10 @@
     "missing_fields": [],
     "warnings": [
       "missing_doi",
-      "low_confidence_abstract",
-      "Product label mapped broadly to 'allenes' because the allowed schema does not include allenylphosphine oxides and the substitution pattern varies across examples.",
-      "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.774,
+    "overall_confidence": 0.616,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "copper catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "acetate leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic acetates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.93,
-    "human_checked": false
   }
 }

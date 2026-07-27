@@ -1,34 +1,28 @@
 {
   "paper_id": "P047",
-  "slug": "ligand-controlled-preparation-of-aryl-substituted-allenes-enabled-by-nickel-catalyzed-reductive-coupling-of-secondary",
+  "slug": "527d1667-3ac5-4dcc-9336-78f2872344bb_origin",
   "title": {
-    "value": "Ligand-Controlled Preparation of Aryl-Substituted Allenes Enabled by Nickel-Catalyzed Reductive Coupling of Secondary Propargylic Carbonates with Aryl Halides",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "527d1667 3ac5 4dcc 9336 78f2872344bb_origin",
+    "source": "slug_fallback",
+    "confidence": 0.35,
     "human_checked": false
   },
   "authors": {
-    "value": [
-      "Ruotong Li",
-      "Jie Hu",
-      "Yonghao Xi",
-      "Hegui Gong",
-      "Weichen Huang"
-    ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": [],
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "year": {
-    "value": 2025,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 1999,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Org. Lett. 2025",
-    "source": "cite_this_line",
-    "confidence": 0.7,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
@@ -38,35 +32,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Herein, we developed a new method for the synthesis of aryl-substituted allenes through a nickel-catalyzed reductive coupling reaction between secondary propargyl carbonates and aryl halides. By employing the dimethyl-1,10-phenanthroline ligand, we achieved a ligand-controlled, regioselective nickel-catalyzed reductive arylation, overcoming the structural limitations of propargyl electrophiles. Notably, this reaction exhibits exceptional functional group compatibility, rendering it particularly suitable for late-stage allenylation modifications of complex molecules.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "",
+    "source": "rule_not_found",
+    "confidence": 0.0,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "enynes",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Alkynol/ligand-controlled-preparation-of-aryl-substituted-allenes-enabled-by-nickel-catalyzed-reductive-coupling-of-secondary.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/ligand-controlled-preparation-of-aryl-substituted-allenes-enabled-by-nickel-catalyzed-reductive-coupling-of-secondary.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/ligand-controlled-preparation-of-aryl-substituted-allenes-enabled-by-nickel-catalyzed-reductive-coupling-of-secondary/927a8074-62ac-44bb-93ff-80c1317e1122_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/ligand-controlled-preparation-of-aryl-substituted-allenes-enabled-by-nickel-catalyzed-reductive-coupling-of-secondary"
+    "pdf": "D:\\work\\data\\527d1667-3ac5-4dcc-9336-78f2872344bb_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\527d1667-3ac5-4dcc-9336-78f2872344bb_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\527d1667-3ac5-4dcc-9336-78f2872344bb_origin\\2ea2b96a-2eca-404c-afdd-4d459360011f_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\527d1667-3ac5-4dcc-9336-78f2872344bb_origin"
   },
   "source_file": {
-    "pdf_name": "ligand-controlled-preparation-of-aryl-substituted-allenes-enabled-by-nickel-catalyzed-reductive-coupling-of-secondary.pdf",
-    "relative_pdf_path": "ligand-controlled-preparation-of-aryl-substituted-allenes-enabled-by-nickel-catalyzed-reductive-coupling-of-secondary.pdf",
-    "sha256": "548879a70e259bc31a47bc9b7707b3567fec9be8c74a46f5d2efc7ea7a382a00"
+    "pdf_name": "527d1667-3ac5-4dcc-9336-78f2872344bb_origin.pdf",
+    "relative_pdf_path": "527d1667-3ac5-4dcc-9336-78f2872344bb_origin.pdf",
+    "sha256": "57f9021e9b1e2bdb702dc27c94217cf7d8f9fd4d3d2c349669a0673381628393"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:29Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 148,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 43,
+      "markdown_chars_used": 7229
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -75,27 +81,21 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [],
-    "warnings": [
-      "missing_doi",
-      "structured_tag_not_specified_organometallic_partner"
+    "missing_fields": [
+      "abstract"
     ],
-    "overall_confidence": 0.801,
+    "warnings": [
+      "empty_authors",
+      "missing_journal",
+      "missing_doi",
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_title",
+      "low_confidence_abstract"
+    ],
+    "overall_confidence": 0.211,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "nickel catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "carbonate leaving groups",
-      "ligand_or_chiral_source": "non-phosphorus metal-coordination ligands",
-      "organometallic_partner": "not specified",
-      "product": "arylallenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic carbonates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.95,
-    "human_checked": false
   }
 }

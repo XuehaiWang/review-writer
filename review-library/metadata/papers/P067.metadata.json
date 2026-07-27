@@ -1,34 +1,28 @@
 {
   "paper_id": "P067",
-  "slug": "j.-am.-chem.-soc.-2022-144-17815",
+  "slug": "7bb054b5-ba89-4b9a-9479-f2ce71e8a4be_origin",
   "title": {
-    "value": "Copper-Catalyzed Coupling of Alkyl Vicinal Bis(boronic Esters) to an Array of Electrophiles",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Allenes and Acetylenes. XXI. Leaving-group Effects on the Stereochemistry of Allene-forming Organocuprate Reactions\\*",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
-    "value": [
-      "Ningxin Xu",
-      "Ziyin Kong",
-      "Johnny Z. Wang",
-      "Gabriel J. Lovinger",
-      "James P. Morken"
-    ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": [],
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "year": {
-    "value": 2022,
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": 1979,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "J. Am. Chem. Soc. 2022",
-    "source": "cite_this_line",
-    "confidence": 0.7,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
@@ -38,35 +32,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "A neighboring boronate group in the substrate provides a dramatic rate acceleration in transmetalation to copper and thereby enables organoboronic esters to participate in unprecedented site-selective cross-couplings. This cross-coupling operates under practical experimental conditions and allows for coupling between vicinal bis(boronic esters) and allyl, alkynyl, and propargyl electrophiles as well as a simple proton. Because the reactive substrates are vicinal bis(boronic esters), the cross-coupling described herein provides an expedient new method for the construction of boron-containing reaction products from alkenes. Mechanistic experiments suggest that chelated cyclic ate complexes may play a role in the transmetalation.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "The reactions of four chiral 1-methyl-2-propynyl derivatives (4a-d) with a combination of hexylmagnesium bromide and copper(I) bromide (10:1) in diethyl ether resulted in the formation of chiral 2,3-decadiene in varying enantiomeric yield. The acetate (4b) and the mesylate (4c) resulted in the highest enantiomeric yields, 79 and 66 %, respectively, when the reaction time was less than 15 min. The longer reaction times used for the derivatives 4a and 4d probably resulted in a decrease in yield due to racemization of the allene. The preferred mode of substitution was found to be anti in all cases. The chiral allenic alcohols 2 and 3 were prepared by reacting the acetylenic derivatives 1a and 1b with methylmagnesium iodide-copper(I) iodide (4:1) and butyllithium, respectively. The enantiomeric yields were low.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "allenic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "organolithium reagents",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "sulfinate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/J. Am. Chem. Soc. 2022, 144, 17815.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/j.-am.-chem.-soc.-2022-144-17815.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/j.-am.-chem.-soc.-2022-144-17815/b6c7bd59-0764-438f-932f-c49bf57f2554_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/j.-am.-chem.-soc.-2022-144-17815"
+    "pdf": "D:\\work\\data\\7bb054b5-ba89-4b9a-9479-f2ce71e8a4be_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\7bb054b5-ba89-4b9a-9479-f2ce71e8a4be_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\7bb054b5-ba89-4b9a-9479-f2ce71e8a4be_origin\\22750df2-b99f-49b9-a1b3-16fbcee0657c_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\7bb054b5-ba89-4b9a-9479-f2ce71e8a4be_origin"
   },
   "source_file": {
-    "pdf_name": "J. Am. Chem. Soc. 2022, 144, 17815.pdf",
-    "relative_pdf_path": "J. Am. Chem. Soc. 2022, 144, 17815.pdf",
-    "sha256": "b73ff28c8644c8c762bfc16268d513706c37618a103802330052ece016c3dcb7"
+    "pdf_name": "7bb054b5-ba89-4b9a-9479-f2ce71e8a4be_origin.pdf",
+    "relative_pdf_path": "7bb054b5-ba89-4b9a-9479-f2ce71e8a4be_origin.pdf",
+    "sha256": "177352b9bd396de65fc774a21b829eaab39a616a0cd00581267676ed98b28f46"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:39Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 190,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 105,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -77,29 +83,15 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
+      "empty_authors",
+      "missing_journal",
       "missing_doi",
-      "Paper is not primarily an allene-synthesis study; several allene-specific classification fields are therefore set to `not specified`.",
-      "structured_tag_not_specified_product",
-      "structured_tag_not_specified_substrate",
       "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_reaction_type"
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.793,
+    "overall_confidence": 0.384,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "copper catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "halide leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "boranes and boronates",
-      "product": "not specified",
-      "reaction_type": "not specified",
-      "substrate": "not specified"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.9,
-    "human_checked": false
   }
 }

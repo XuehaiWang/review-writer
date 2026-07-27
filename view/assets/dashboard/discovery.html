@@ -27,7 +27,7 @@
       height: 100vh;
       overflow: hidden;
     }
-    button, input, select { font: inherit; }
+    button, input, select, textarea { font: inherit; }
     .nav {
       height: 58px;
       padding: 9px 14px;
@@ -92,6 +92,28 @@
       flex-wrap: wrap;
       align-items: center;
     }
+    .new-discovery {
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+      display: grid;
+      gap: 8px;
+    }
+    .new-discovery label { color: var(--muted); font-size: 12px; }
+    textarea {
+      min-height: 76px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      background: #fffdf7;
+      border-radius: 6px;
+      padding: 9px 10px;
+      outline: none;
+    }
+    .new-discovery input { width: 100%; }
+    .new-actions { display: flex; gap: 8px; align-items: center; }
+    .new-actions .btn { flex: 1; }
+    .new-options { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+    .new-options input { min-width: auto; }
+    .run-status { color: var(--muted); font-size: 12px; line-height: 1.35; white-space: pre-wrap; }
     input, select {
       border: 1px solid var(--line);
       background: #fffdf7;
@@ -111,7 +133,8 @@
     .btn.primary, .tab.active { color: white; background: var(--green); border-color: var(--green); }
     .btn.orange { color: white; background: var(--orange); border-color: var(--orange); }
     .btn.red { color: white; background: var(--red); border-color: var(--red); }
-    .list, .results { overflow: auto; padding: 9px; }
+    .list, .results { overflow: auto; padding: 9px; min-height: 0; }
+    .list { flex: 1 1 auto; }
     .card, .result {
       background: #fffdf7;
       border: 1px solid transparent;
@@ -221,6 +244,23 @@
       max-width: 420px;
     }
     .message.show { display: block; }
+    #projectInfo {
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      overflow: hidden;
+    }
+    .icon-btn { min-width: 36px; padding: 8px 10px; font-size: 18px; line-height: 1; }
+    @media (max-width: 900px) {
+      body { height: auto; min-height: 100dvh; overflow: auto; }
+      .nav { height: auto; flex-wrap: wrap; }
+      .nav-center { order: 3; flex-basis: 100%; justify-content: stretch; }
+      .project-select { width: 100%; min-width: 0; max-width: none; }
+      .nav-right { justify-content: flex-start; }
+      .app { height: auto; grid-template-columns: 1fr; padding: 10px; }
+      .panel { min-height: 500px; }
+      .app > .panel:first-child { height: calc(100dvh - 180px); }
+    }
   </style>
   <link rel="stylesheet" href="/assets/dashboard/review-ui.css">
 </head>
@@ -246,6 +286,17 @@
       <div class="head">
         <h1>Discovery Check</h1>
         <div id="projectInfo" class="sub">Loading project...</div>
+      </div>
+      <div class="new-discovery">
+        <label for="newProjectId">Project ID</label>
+        <input id="newProjectId" maxlength="80" placeholder="axial-allene-review">
+        <label for="newTopic">Topic</label>
+        <textarea id="newTopic" maxlength="500" placeholder="e.g. syntheses of axial-chiral allenes"></textarea>
+        <label for="newKeywords">Keywords (optional)</label>
+        <input id="newKeywords" maxlength="500" placeholder="comma-separated chemistry terms">
+        <label class="new-options"><input id="newWebSearch" type="checkbox"> Include Crossref results</label>
+        <div class="new-actions"><button class="btn primary" id="runDiscoveryBtn">Run discovery</button></div>
+        <div id="runStatus" class="run-status"></div>
       </div>
       <div class="toolbar">
         <select id="projectSelect"></select>
@@ -309,7 +360,10 @@
       results: document.getElementById('results'), detailTitle: document.getElementById('detailTitle'),
       detailMeta: document.getElementById('detailMeta'), summary: document.getElementById('summary'),
       pdfFrame: document.getElementById('pdfFrame'), markdown: document.getElementById('markdown'),
-      metadata: document.getElementById('metadata'), message: document.getElementById('message')
+      metadata: document.getElementById('metadata'), message: document.getElementById('message'),
+      newProjectId: document.getElementById('newProjectId'), newTopic: document.getElementById('newTopic'),
+      newKeywords: document.getElementById('newKeywords'), newWebSearch: document.getElementById('newWebSearch'),
+      runDiscoveryBtn: document.getElementById('runDiscoveryBtn'), runStatus: document.getElementById('runStatus')
     };
     function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
     function msg(text) { els.message.textContent = text; els.message.classList.add('show'); setTimeout(() => els.message.classList.remove('show'), 2600); }
@@ -402,8 +456,62 @@
       }
       else { els.projectInfo.textContent = 'No discovery projects found.'; }
     }
+    async function startDiscovery() {
+      const payload = {
+        project_id: els.newProjectId.value.trim(),
+        topic: els.newTopic.value.trim(),
+        keywords: els.newKeywords.value.trim(),
+        web_search: els.newWebSearch.checked
+      };
+      if (!payload.project_id) {
+        els.runStatus.textContent = 'Enter a project ID before running discovery.';
+        els.newProjectId.focus();
+        msg('Project ID is required.');
+        return;
+      }
+      if (!payload.topic) {
+        els.runStatus.textContent = 'Enter a topic before running discovery.';
+        els.newTopic.focus();
+        msg('Topic is required.');
+        return;
+      }
+      els.runDiscoveryBtn.disabled = true;
+      els.runStatus.textContent = 'Searching local metadata...';
+      try {
+        const response = await fetch('/api/discovery', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const raw = await response.text();
+        let result;
+        try {
+          result = raw ? JSON.parse(raw) : {};
+        } catch (_) {
+          result = {error: raw};
+        }
+        if (!response.ok || !result.ok) throw new Error(result.error || result.output || 'Discovery failed.');
+        els.newProjectId.value = '';
+        els.newTopic.value = '';
+        els.newKeywords.value = '';
+        els.newWebSearch.checked = false;
+        await loadProjects();
+        await loadProject(result.project_id);
+        const groups = data?.results || [];
+        const localMatches = groups.reduce((total, group) => total + (group.local_results || []).length, 0);
+        const externalMatches = groups.reduce((total, group) => total + (group.web_results || []).length, 0);
+        els.runStatus.textContent = `Project ${result.project_id} is ready: ${localMatches} local matches and ${externalMatches} external matches across ${groups.length} keyword groups.`;
+        msg('Discovery complete');
+      } catch (error) {
+        els.runStatus.textContent = error.message || 'Discovery failed.';
+        msg(error.message || 'Discovery failed.');
+      } finally {
+        els.runDiscoveryBtn.disabled = false;
+      }
+    }
     async function loadProject(id) {
       selected = id;
+      window.reviewUi?.setProject(id);
       data = await (await fetch(`/api/discovery/${encodeURIComponent(id)}`)).json();
       els.projectSelect.value = id;
       els.globalProjectSelect.value = id;
@@ -509,10 +617,28 @@
     }
     async function save(confirm=false) {
       if (!selected) return;
-      const res = await fetch(`/api/discovery/${encodeURIComponent(selected)}${confirm?'?confirm=1':''}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
-      if (!res.ok) { msg(await res.text()); return; }
-      msg(confirm ? 'Discovery confirmed and saved' : 'Saved');
-      await loadProject(selected);
+      const button = confirm ? document.getElementById('confirmBtn') : document.getElementById('saveBtn');
+      button.disabled = true;
+      try {
+        const res = await fetch(`/api/discovery/${encodeURIComponent(selected)}${confirm?'?confirm=1':''}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+        const raw = await res.text();
+        let result = {};
+        try { result = raw ? JSON.parse(raw) : {}; } catch (_) { result = {error: raw}; }
+        if (!res.ok || !result.ok) throw new Error(result.error || 'Could not save Discovery.');
+        if (confirm) {
+          const count = result.matrix_sync?.selected_paper_count || 0;
+          els.runStatus.textContent = `Discovery confirmed. ${count} selected papers were synchronized to Matrix.`;
+          window.location.assign(`/matrix?project=${encodeURIComponent(selected)}`);
+          return;
+        }
+        msg('Saved');
+        await loadProject(selected);
+      } catch (error) {
+        els.runStatus.textContent = error.message || 'Could not save Discovery.';
+        msg(error.message || 'Could not save Discovery.');
+      } finally {
+        button.disabled = false;
+      }
     }
     els.keywordList.addEventListener('click', e => { const card = e.target.closest('[data-keyword]'); if (card) { selectedKeyword = card.dataset.keyword; selectedPaper = null; renderAll(); } });
     els.results.addEventListener('click', async e => {
@@ -527,6 +653,7 @@
     document.getElementById('projectSelect').addEventListener('change', e => loadProject(e.target.value));
     els.globalProjectSelect.addEventListener('change', e => loadProject(e.target.value));
     document.getElementById('reloadBtn').addEventListener('click', () => selected && loadProject(selected));
+    els.runDiscoveryBtn.addEventListener('click', startDiscovery);
     document.getElementById('saveBtn').addEventListener('click', () => save(false));
     document.getElementById('confirmBtn').addEventListener('click', () => save(true));
     document.getElementById('toggleKeywordBtn').addEventListener('click', () => { const g = currentGroup(); if (g) { g.keep = g.keep === false; renderAll(); } });

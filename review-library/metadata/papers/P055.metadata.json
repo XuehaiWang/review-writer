@@ -1,75 +1,82 @@
 {
   "paper_id": "P055",
-  "slug": "angew.-chem.-int.-ed.-2023-62-e202300309",
+  "slug": "5f2bbd21-12f8-44ce-98ff-27c94308ba9f_origin",
   "title": {
-    "value": "Enantioselective Synthesis of Dihydropyrazoles by Palladium/Xu-Phos-Catalyzed Alleneamination of β,γ-Unsaturated Hydrazones with Propargylic Acetates",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Tetrahedron report number 697",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Shuting Zhang",
-      "Shuaijie Wu",
-      "Qiang Wang",
-      "Shiji Xu",
-      "Ying Han",
-      "Chao-Guo Yan",
-      "Junliang Zhang",
-      "Lei Wang"
+      "Norbert Krause<sup>",
+      "</sup> and Anja Hoffmann-Ro¨der<sup>",
+      "</sup>"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2023,
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": 2004,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Angew. Chem. Int. Ed.",
+    "value": "Tetrahedron",
     "source": "known_journal_hint",
     "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
-    "value": "10.1002/anie.202300309",
-    "source": "markdown_regex",
-    "confidence": 0.9,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "abstract": {
-    "value": "The palladium-catalyzed asymmetric carboamination reaction is one of the most significant transformations in organic chemistry. Herein, we report the first palladium-catalyzed asymmetric alleneamination of β,γ-unsaturated hydrazones with propargylic acetates. This protocol enables the efficient installation of various multisubstituted allene groups onto dihydropyrazoles in good yields with excellent enantioselectivities. The chiral sulfinamide phosphine ligand Xu-5 exhibits highly efficient stereoselective control in this protocol. The salient features of this reaction include the readily available starting materials, a broad substrate scope, an easy scale-up, mild reaction conditions and versatile transformations.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "The use of organometallic reagents for the synthesis of allenes is highly developed, and several fundamentally different methods are now well established. These include transition metal-catalyzed addition and substitution reactions, as well as isomerizations of alkynes to generate allenes with organometallic bases; furthermore, the preparation of allenes from allenyl/propargylmetal reagents and the well-known Doering–Moore–Skattebøl method for converting alkenes into allenes by addition of dihalocarbenes and subsequent insertion reaction should be mentioned here.<sup>1</sup> In contrast to these methods, this report deals with the use of stoichiometric amounts of non-allenic organometallic reagents for the generation of allenic target molecules starting from unsaturated electrophiles.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic ethers",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "Grignard reagents",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/Angew. Chem. Int. Ed. 2023, 62, e202300309.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/angew.-chem.-int.-ed.-2023-62-e202300309.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/angew.-chem.-int.-ed.-2023-62-e202300309/b9cb271e-7157-42d1-bc2c-933bdd78fc11_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/angew.-chem.-int.-ed.-2023-62-e202300309"
+    "pdf": "D:\\work\\data\\5f2bbd21-12f8-44ce-98ff-27c94308ba9f_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\5f2bbd21-12f8-44ce-98ff-27c94308ba9f_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\5f2bbd21-12f8-44ce-98ff-27c94308ba9f_origin\\cfceaab4-8dea-453a-9a6f-bdeb13c86d56_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\5f2bbd21-12f8-44ce-98ff-27c94308ba9f_origin"
   },
   "source_file": {
-    "pdf_name": "Angew. Chem. Int. Ed. 2023, 62, e202300309.pdf",
-    "relative_pdf_path": "Angew. Chem. Int. Ed. 2023, 62, e202300309.pdf",
-    "sha256": "35dd1321c6b881d34404781418121839aad97ad3af1c48f80ea3af0a897f09ca"
+    "pdf_name": "5f2bbd21-12f8-44ce-98ff-27c94308ba9f_origin.pdf",
+    "relative_pdf_path": "5f2bbd21-12f8-44ce-98ff-27c94308ba9f_origin.pdf",
+    "sha256": "f8f0e384c5867cab4219941eee4d9cdeab75a09591ad90f7c69e574d68a09d3d"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:39Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 133,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 386,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -80,24 +87,14 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "structured_tag_not_specified_organometallic_partner"
+      "missing_doi",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.916,
+    "overall_confidence": 0.593,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "palladium catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "acetate leaving groups",
-      "ligand_or_chiral_source": "monodentate phosphine-type ligands",
-      "organometallic_partner": "not specified",
-      "product": "polysubstituted allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic acetates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.86,
-    "human_checked": false
   }
 }

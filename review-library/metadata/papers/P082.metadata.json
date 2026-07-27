@@ -1,36 +1,28 @@
 {
   "paper_id": "P082",
-  "slug": "org.-lett.-2022-24-4507",
+  "slug": "a0b044fd-0d64-452f-ba5d-6efbc0a242e5_origin",
   "title": {
-    "value": "Regioselective Cycloaddition and Substitution Reaction of Tertiary Propargylic Alcohols and Heteroareneboronic Acids via Acid Catalysis",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "a0b044fd 0d64 452f ba5d 6efbc0a242e5_origin",
+    "source": "slug_fallback",
+    "confidence": 0.35,
     "human_checked": false
   },
   "authors": {
-    "value": [
-      "Jian-Fei Bai",
-      "Jianbo Tang",
-      "Xiaolong Gao",
-      "Zhi-Jiang Jiang",
-      "Bencan Tang",
-      "Jia Chen",
-      "Zhanghua Gao"
-    ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": [],
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "year": {
-    "value": 2022,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2001,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "2022",
-    "source": "cite_this_line",
-    "confidence": 0.7,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
@@ -40,35 +32,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "We report an acid-catalyzed formal cycloaddition and dehydrative substitution reaction of tertiary propargylic alcohols and heteroareneboronic acids. The properties of the substituents on the alkynyl moiety determines the regioselectivity of the reaction, which could selectively construct fused heterocycles, tetrasubstituted allenes, or 1,3-dienes. This reaction proceeds efficiently with a wide array of substrate scope in up to 89% yield. A significant advantage of this protocol is the transition-metal-free and mild conditions needed.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "",
+    "source": "rule_not_found",
+    "confidence": 0.0,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenyl silanes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "palladium catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "chiral biaryl bisphosphine ligands",
+      "leaving_group": "not specified",
+      "reaction_type": "enyne hydrofunctionalization to allenes",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/Org. Lett. 2022, 24, 4507.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/org.-lett.-2022-24-4507.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/org.-lett.-2022-24-4507/1cbfed1e-06a2-4232-8cb8-08b52c05a223_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/org.-lett.-2022-24-4507"
+    "pdf": "D:\\work\\data\\a0b044fd-0d64-452f-ba5d-6efbc0a242e5_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\a0b044fd-0d64-452f-ba5d-6efbc0a242e5_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\a0b044fd-0d64-452f-ba5d-6efbc0a242e5_origin\\9597dbdc-08f6-4924-9956-9c085ea18548_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\a0b044fd-0d64-452f-ba5d-6efbc0a242e5_origin"
   },
   "source_file": {
-    "pdf_name": "Org. Lett. 2022, 24, 4507.pdf",
-    "relative_pdf_path": "Org. Lett. 2022, 24, 4507.pdf",
-    "sha256": "10269f7dc42801a332f0bca53d36b5b9b11e5e4b5c3fa8e02efac43fae638099"
+    "pdf_name": "a0b044fd-0d64-452f-ba5d-6efbc0a242e5_origin.pdf",
+    "relative_pdf_path": "a0b044fd-0d64-452f-ba5d-6efbc0a242e5_origin.pdf",
+    "sha256": "f3848abe6a71af1f870536decb6234fda643ea809b66b4bc42f510f95c3fc28a"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:40Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 147,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 43,
+      "markdown_chars_used": 10702
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -77,30 +81,20 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [],
-    "warnings": [
-      "missing_doi",
-      "Paper reports multiple product classes (fused heterocycles, tetrasubstituted allenes, and 1,3-dienes); the product label reflects the explicit allene product subset.",
-      "Acid catalysis is mapped to 'main-group metal mediation' because the allowed label set lacks a generic Brønsted/Lewis acid category.",
-      "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+    "missing_fields": [
+      "abstract"
     ],
-    "overall_confidence": 0.786,
+    "warnings": [
+      "empty_authors",
+      "missing_journal",
+      "missing_doi",
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_title",
+      "low_confidence_abstract"
+    ],
+    "overall_confidence": 0.211,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "main-group metal mediation",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "boranes and boronates",
-      "product": "tetrasubstituted allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.84,
-    "human_checked": false
   }
 }

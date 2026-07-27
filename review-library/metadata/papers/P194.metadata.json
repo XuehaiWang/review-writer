@@ -1,31 +1,30 @@
 {
   "paper_id": "P194",
-  "slug": "7b",
+  "slug": "pd-brnsted-acid-co-catalyzed-dehydrative-coupling-of-propargylic-alcohols-with-diarylphosphine-oxides",
   "title": {
-    "value": "A Novel Synthesis of Substituted Allenes",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Pd/Brønsted Acid Co-catalyzed Dehydrative Coupling of Propargylic Alcohols with Diarylphosphine Oxides",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Peter Rona",
-      "Pierre Crabbé"
+      "Zhaoqiang Chen and Hui Qian Cite This: Org. Lett."
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1969,
-    "source": "llm_from_front_matter",
-    "confidence": 0.93,
+    "value": 2024,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Angew. Chem. Int. Ed.",
-    "source": "known_journal_hint",
-    "confidence": 0.72,
+    "value": "Org. Lett. 2025",
+    "source": "cite_this_line",
+    "confidence": 0.7,
     "human_checked": false
   },
   "doi": {
@@ -35,35 +34,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Alkyl allenes were obtained by the reaction of 1-ethynylcycloalkanol acetates with the organocopper reagents, LiMe₂Cu and Li-n-Bu₂Cu. Reactions of steroidal ethynylcarbinol acetates show that the reaction is not stereoselective. The functional group specificity of the organocopper reagents and the scope of the reaction are outlined.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "An eficient dehydrative coupling of propargylic alcohols with diarylphosphine oxides to construct tetrasubstituted allenylphosphoryl compounds in the presence of a Pd/Brønsted acid co-catalyst has been developed. As a benefit from the use of a Brønsted acid, this reaction could perform under mild conditions with excellent yields, accommodating a wide range of functional groups. The potential utility of this method has also been demonstrated.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/7b/63d0e106-8322-48db-b802-9f6b524bf138_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/7b.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/7b/63d0e106-8322-48db-b802-9f6b524bf138_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/7b"
+    "pdf": "D:\\work\\data\\pd-brønsted-acid-co-catalyzed-dehydrative-coupling-of-propargylic-alcohols-with-diarylphosphine-oxides.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\pd-brnsted-acid-co-catalyzed-dehydrative-coupling-of-propargylic-alcohols-with-diarylphosphine-oxides.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\pd-brnsted-acid-co-catalyzed-dehydrative-coupling-of-propargylic-alcohols-with-diarylphosphine-oxides\\971a36b1-4eb3-4d42-8bce-a153aa6a599e_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\pd-brnsted-acid-co-catalyzed-dehydrative-coupling-of-propargylic-alcohols-with-diarylphosphine-oxides"
   },
   "source_file": {
-    "pdf_name": "7b.pdf",
-    "relative_pdf_path": "7b.pdf",
-    "sha256": "76794c47dc6d8828e1e7f71582c538eba10353263ee69e12c7e3420d7c371ace"
+    "pdf_name": "pd-brønsted-acid-co-catalyzed-dehydrative-coupling-of-propargylic-alcohols-with-diarylphosphine-oxides.pdf",
+    "relative_pdf_path": "pd-brønsted-acid-co-catalyzed-dehydrative-coupling-of-propargylic-alcohols-with-diarylphosphine-oxides.pdf",
+    "sha256": "f1db8ef76b101ce5843c441ec2889ec7d34ffff1bcc8e48f00249410d0680270"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T20:56:27Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 80,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 118,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -74,29 +85,13 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_year",
       "missing_doi",
-      "Input snippets include text from adjacent articles; metadata was extracted only from the section beginning with the target title.",
-      "Publication year is inferred from the journal footer (1969); the front matter itself gives only the received date.",
-      "Organometallic partner classification is approximate because the reacting reagent is lithium dialkylcuprate; the available label set does not include organocopper/cuprate reagents.",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.796,
+    "overall_confidence": 0.613,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "copper catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "acetate leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "organolithium reagents",
-      "product": "alkylallenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic acetates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.95,
-    "human_checked": false
   }
 }

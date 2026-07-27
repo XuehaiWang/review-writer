@@ -1,71 +1,83 @@
 {
   "paper_id": "P072",
-  "slug": "j.-org.-chem.-2023-88-5457",
+  "slug": "876c7196-c9bd-4639-b320-5742fbfdb166_origin",
   "title": {
-    "value": "Divergent Cyclizative Approaches of In Situ Formed β‑Keto-Allenes: Chemo- and Regioselective Synthesis of Bicyclic Furans, and Pyrroles",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "tert-Butyldimethylsilyl-Directed Highly Enantioselective Approach to Axially Chiral a-Allenols",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Liyaqat Ali",
-      "Dandugula Sneha Latha",
-      "Avinash Kumar",
-      "Srinivasarao Yaragorla"
+      "Juntao Ye",
+      "<sup>[]</sup> Wu Fan",
+      "<sup>[]</sup> and Shengming Ma<sup>[",
+      "</sup> <sup>]</sup>"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2023,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
-    "human_checked": false
-  },
-  "journal": {
-    "value": "J. Org. Chem. 2023",
-    "source": "cite_this_line",
-    "confidence": 0.7,
-    "human_checked": false
-  },
-  "doi": {
     "value": null,
     "source": "rule_not_found",
     "confidence": 0.0,
     "human_checked": false
   },
+  "journal": {
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
+    "human_checked": false
+  },
+  "doi": {
+    "value": "10.1002/chem.201201948",
+    "source": "markdown_regex",
+    "confidence": 0.9,
+    "human_checked": false
+  },
   "abstract": {
-    "value": "A unified strategy for the construction of bicyclic furans and pyrroles is developed from tert-propargyl alcohols and α-acyl cyclic ketones using an alkaline earth catalyst under solvent-free conditions. The reaction proceeds via the formation of a β-keto allene intermediate, which upon treatment with a tert-amine underwent thermodynamic enol formation and a subsequent annulation to form bicyclic furans. Interestingly, the same allene forms bicyclic pyrrole with primary amines. The reaction shows excellent atom economy as water is the only byproduct formed in bicyclic furans. The generality of the reaction is well established. Gram-scale synthesis and synthetic applications are demonstrated.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "A highly efficient and enantioselective synthesis of axially chiral a-allenols was realized in practical yields with 96–99 % ee or de from TBS-protected propargylic alcohols, aldehydes, and a commercially available, inexpensive, chiral, secondary amine (S)-a,a-diphenylprolinol or its enantiomer followed by desilylation. The easily removable TBS group not only acts as a protecting group, but also as a possible sterically directing group for the excellent enantioselectivity and in situ prevention of possible allene racemization.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "prolinol-derived and other chiral amine catalysts",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/J. Org. Chem. 2023, 88, 5457.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/j.-org.-chem.-2023-88-5457.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/j.-org.-chem.-2023-88-5457/66bdb124-3157-486b-bd41-ddf528a8d97b_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/j.-org.-chem.-2023-88-5457"
+    "pdf": "D:\\work\\data\\876c7196-c9bd-4639-b320-5742fbfdb166_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\876c7196-c9bd-4639-b320-5742fbfdb166_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\876c7196-c9bd-4639-b320-5742fbfdb166_origin\\51d22aa3-4ff2-44c4-bfed-8e5d3d3797e2_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\876c7196-c9bd-4639-b320-5742fbfdb166_origin"
   },
   "source_file": {
-    "pdf_name": "J. Org. Chem. 2023, 88, 5457.pdf",
-    "relative_pdf_path": "J. Org. Chem. 2023, 88, 5457.pdf",
-    "sha256": "eb00477263160bd8cde9041d5101dc93ef6adbece669620ece439dd12f90e94d"
+    "pdf_name": "876c7196-c9bd-4639-b320-5742fbfdb166_origin.pdf",
+    "relative_pdf_path": "876c7196-c9bd-4639-b320-5742fbfdb166_origin.pdf",
+    "sha256": "1cd860f9ad663ce4c993c097e08b03bd2cd5c62b6d543949a313d4fbb9bb301a"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:40Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 262,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 101,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -74,30 +86,17 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [],
-    "warnings": [
-      "missing_doi",
-      "Mechanistic discussion includes both an early Ca(II)-assisted SN2' proposal and a later proposed SN1/allenyl cation pathway; the mechanism tag follows the later proposed mechanism section.",
-      "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+    "missing_fields": [
+      "year"
     ],
-    "overall_confidence": 0.79,
+    "warnings": [
+      "missing_journal",
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope"
+    ],
+    "overall_confidence": 0.544,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "main-group metal mediation",
-      "document_scope": "primary research article",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allene-derived cyclic products",
-      "reaction_type": "cycloaddition and annulation of allenes",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.88,
-    "human_checked": false
   }
 }

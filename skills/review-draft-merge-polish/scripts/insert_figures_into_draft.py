@@ -23,17 +23,46 @@ def write_text(path: Path, text: str) -> None:
 
 
 def load_available_figures(project: Path) -> tuple[str, list[dict[str, Any]]]:
+    candidates_path = project / "02_section_drafting" / "figure_candidates.json"
+    candidate_data = read_json(candidates_path) if candidates_path.exists() else []
+    candidate_rows = candidate_data.get("figures") if isinstance(candidate_data, dict) else candidate_data
+    candidate_by_id = {
+        str(row.get("figure_id")): row
+        for row in candidate_rows or []
+        if isinstance(row, dict) and row.get("figure_id")
+    }
     redrawn_path = project / "03_figure_redraw" / "redrawn_figure_manifest.json"
     if redrawn_path.exists():
         data = read_json(redrawn_path)
         figures = data.get("figures") if isinstance(data, dict) else None
         if isinstance(figures, list):
-            redrawn = [f for f in figures if isinstance(f, dict) and f.get("status") == "redrawn" and f.get("redrawn_image")]
+            redrawn = [
+                f for f in figures
+                if isinstance(f, dict)
+                and f.get("status") == "redrawn"
+                and f.get("redrawn_image")
+                and (
+                    f.get("render_mode") == "source-faithful-bw"
+                    or (
+                        f.get("render_mode") == "ocr-hollow-ai"
+                        and (f.get("content_fidelity") or {}).get("status") == "pass"
+                        and (f.get("structural_fidelity") or {}).get("status") == "pass"
+                    )
+                )
+            ]
             if redrawn:
+                # The redraw manifest can retain only a label ("Scheme 2") as
+                # its caption. Recover the descriptive MinerU caption from the
+                # selected candidate for the manuscript figure caption.
+                for figure in redrawn:
+                    current = str(figure.get("source_caption_text") or "").strip()
+                    if re.fullmatch(r"(?:figure|fig\.?|scheme|table)\s*\d+\.?", current, re.I):
+                        candidate = candidate_by_id.get(str(figure.get("figure_id") or ""))
+                        recovered = str((candidate or {}).get("source_caption_text") or "").strip()
+                        if recovered:
+                            figure["source_caption_text"] = recovered
                 return "redrawn", redrawn
-    candidates_path = project / "02_section_drafting" / "figure_candidates.json"
-    data = read_json(candidates_path)
-    figures = data.get("figures") if isinstance(data, dict) else data
+    figures = candidate_rows
     source = [f for f in figures if isinstance(f, dict) and f.get("source_image_path")]
     return "source_candidates", source
 
@@ -61,11 +90,18 @@ def copy_figure(project: Path, figure: dict[str, Any], index: int, mode: str) ->
 def figure_markdown(figure: dict[str, Any], rel_path: str, index: int, mode: str) -> str:
     label = figure.get("source_label") or f"Figure {index}"
     caption = figure.get("source_caption_text") or figure.get("what_it_shows") or ""
-    paper_id = figure.get("paper_id") or "source paper"
-    note = "Redrawn unified-style figure" if mode == "redrawn" else "Source figure placeholder; redraw still required before final release"
+    kind = "Scheme" if re.match(r"^\s*scheme\b", str(label), re.I) else "Figure"
+    # Source labels and redraw state are workflow metadata. Keep just the
+    # descriptive source caption in the publication-facing manuscript.
+    caption = re.sub(r"<[^>]+>", "", str(caption))
+    caption = re.sub(r"^\s*(?:figure|fig\.?|scheme|table)\s*\d+\s*[.:]?\s*", "", caption, flags=re.I)
+    caption = re.sub(r"\s+", " ", caption).strip().rstrip(".")
+    published_caption = f"{kind} {index}."
+    if caption:
+        published_caption += f" {caption}."
     return (
         f"\n\n![{label}]({rel_path})\n\n"
-        f"**Figure {index}.** {caption} Source: {paper_id}, {label}. {note}.\n\n"
+        f"{published_caption}\n\n"
     )
 
 
@@ -120,7 +156,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Insert available figures into the first draft.")
     parser.add_argument("--review-root", default="/home/ps/review-writer")
     parser.add_argument("--project-id", required=True)
-    parser.add_argument("--max-per-section", type=int, default=1)
+    parser.add_argument("--max-per-section", type=int, default=0,
+                        help="Maximum figures per section; 0 keeps every human-selected figure.")
     return parser.parse_args()
 
 
@@ -133,14 +170,25 @@ def main() -> int:
     mode, figures = load_available_figures(project)
     if not figures:
         raise SystemExit("No available figures to insert.")
-    selected: list[dict[str, Any]] = []
-    section_counts: dict[str, int] = {}
+    selected_by_anchor: dict[str, dict[str, Any]] = {}
     for figure in figures:
-        section_id = str(figure.get("section_id") or "")
-        if section_counts.get(section_id, 0) >= args.max_per_section:
+        anchor = str(figure.get("target_paragraph_id") or figure.get("paper_id") or figure.get("figure_id") or "")
+        if not anchor:
             continue
-        section_counts[section_id] = section_counts.get(section_id, 0) + 1
-        selected.append(figure)
+        existing = selected_by_anchor.get(anchor)
+        if existing is None or (figure.get("human_selected_source") and not existing.get("human_selected_source")):
+            selected_by_anchor[anchor] = figure
+    selected = list(selected_by_anchor.values())
+    if args.max_per_section > 0:
+        limited: list[dict[str, Any]] = []
+        section_counts: dict[str, int] = {}
+        for figure in selected:
+            section_id = str(figure.get("section_id") or "")
+            if section_counts.get(section_id, 0) >= args.max_per_section:
+                continue
+            section_counts[section_id] = section_counts.get(section_id, 0) + 1
+            limited.append(figure)
+        selected = limited
     text = read_text(draft_path)
     inserted = []
     for index, figure in enumerate(selected, start=1):

@@ -1,35 +1,30 @@
 {
   "paper_id": "P070",
-  "slug": "j.-org.-chem.-2022-87-12175",
+  "slug": "80c12bf8-0d3a-467e-8a36-795acae73299_origin",
   "title": {
-    "value": "One-Pot Assembly and Synthetic Applications of Geminal Acyl/Alkoxy Tetrasubstituted Allenes",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "New and Stereospecific Synthesis of Allenes in a Single Step from Propargylic Alcohols",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Benjamin D. Bergstrom",
-      "Garrett Toth-Williams",
-      "Anna Lo",
-      "Jeffrey W. Toman",
-      "James C. Fettinger",
-      "Jared T. Shaw"
+      "Andrew G. Myers and Bin Zheng"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2022,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 1996,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "J. Org. Chem. 2022",
-    "source": "cite_this_line",
-    "confidence": 0.7,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
@@ -39,35 +34,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Polysubstituted allenes are useful synthetic intermediates in many applications, offering structural complexity, modularity, and their axial chirality in further transformations. While acyl and alkoxy-substituted allenes are known, there are currently few examples of allenes containing both functionalities and no reports of geminally substituted acyl/alkoxy allenes being isolated and characterized. Herein, we report the synthesis of tetrasubstituted allenes featuring a novel geminal acyl/alkoxy substitution. These unique \"push-pull\" allenes are bench-stable and exhibit interesting reactivity in several applications.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "There are few reliable methods for the stereodefined construction of allenes, despite their growing importance in organic synthesis.<sup>1</sup> As part of an earlier study, we developed a threestep procedure for the synthesis of allenes from readily available propargylic alcohols involving (1) mesylate formation, (2) displacement with excess hydrazine, and (3) oxidation with an azodicarboxylate reagent to produce a propargylic diazene intermediate that evolves dinitrogen in a sigmatropic elimination process (e.g., 1 <sup>f</sup> 3 below).<sup>2</sup> Although this method did provide a stereospecific preparation of allenes, it was lengthy, unsuccessful in the preparation of the important (trimethylsilyl)- substituted allenes,<sup>3</sup> and proceeded in 48<sup>-</sup>81% yield. We describe herein a new and stereospecific method for the synthesis of allenes from propargylic alcohols that proceeds in a single operation, is efficient, and provides access to a wide range of stereodefined, substituted allenes, to include (trimethylsilyl)- allenes.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "sulfinate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/J. Org. Chem. 2022, 87, 12175.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/j.-org.-chem.-2022-87-12175.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/j.-org.-chem.-2022-87-12175/cd0cc81a-4c34-4468-8157-d35a09479217_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/j.-org.-chem.-2022-87-12175"
+    "pdf": "D:\\work\\data\\80c12bf8-0d3a-467e-8a36-795acae73299_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\80c12bf8-0d3a-467e-8a36-795acae73299_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\80c12bf8-0d3a-467e-8a36-795acae73299_origin\\b4442c8c-f0ef-4497-9e94-ff7a8b2fd1d8_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\80c12bf8-0d3a-467e-8a36-795acae73299_origin"
   },
   "source_file": {
-    "pdf_name": "J. Org. Chem. 2022, 87, 12175.pdf",
-    "relative_pdf_path": "J. Org. Chem. 2022, 87, 12175.pdf",
-    "sha256": "98af17e6feafa94967fd80bda022d15dc4eda17ee8e11b7967eab9d9fd0139c7"
+    "pdf_name": "80c12bf8-0d3a-467e-8a36-795acae73299_origin.pdf",
+    "relative_pdf_path": "80c12bf8-0d3a-467e-8a36-795acae73299_origin.pdf",
+    "sha256": "f98454bc28259c998f7ab2b576e76508f74ab8525c9dcaf638f8590bf52fab29"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:39Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 150,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 37,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -78,27 +85,15 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
+      "missing_journal",
       "missing_doi",
-      "low_confidence_abstract",
-      "structured_tag_not_specified_selectivity_profile",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.789,
+    "overall_confidence": 0.49,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "main-group metal mediation",
-      "document_scope": "primary research article",
-      "leaving_group": "halide leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "organolithium reagents",
-      "product": "tetrasubstituted allenes",
-      "reaction_type": "allenyl-reagent addition to carbonyl compounds",
-      "substrate": "propargylic ethers"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.87,
-    "human_checked": false
   }
 }

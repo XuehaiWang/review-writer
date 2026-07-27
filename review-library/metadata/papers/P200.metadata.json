@@ -1,33 +1,28 @@
 {
   "paper_id": "P200",
-  "slug": "8f",
+  "slug": "tetrahedron-104-2022-132606",
   "title": {
-    "value": "ARE ALLENES FORMED FROM PROPARGYLIC ETHERS THROUGH A SYN OR ANTI DISPLACEMENT?",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "CuI-catalyzed decarboxylative highly regioselective phosphonylation of terminal alkyne-substituted cyclic carbonates/carbamates to access 4-phosphonyl 2,3-allenols/2,3-allenamines",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
-    "value": [
-      "I. Marek",
-      "P. Mangeney",
-      "A. Alexakis",
-      "J.F. Normant"
-    ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": [],
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "year": {
-    "value": 1986,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2021,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "Tetrahedron",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
@@ -37,35 +32,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "The copper catalyzed reaction of Grignard reagents with asymmetric propargylic ethers leads to chiral allenes, with very high optical yield. This reaction proceeds through a syn addition to the triple bond followed by a syn or anti β-elimination, according to the nature of the halogen of the Grignard derivative.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.96,
+    "value": "CuI-catalyzed decarboxylative phosphonylation of terminal alkyne-substituted cyclic carbonates/carba mates with phosphine oxides has been developed relying on the highly regioselective addition at the a position of the in situ generated copper-allenylidene intermediates. A series of 4-phosphonyl 2,3-allenols and 4-phosphonyl 2,3-allenamines were smoothly obtained in moderate to excellent yields under mild conditions. The synthetic utility of this methodology was demonstrated by large-scale synthesis and versatile transformations of product © 2021 Elsevier Ltd. All rights reserved.",
+    "source": "content_list_abstract_region",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "allenic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/8f/d385fa53-8d81-42cc-b092-b8df5bff78e6_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/8f.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/8f/d385fa53-8d81-42cc-b092-b8df5bff78e6_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/8f"
+    "pdf": "D:\\work\\data\\Tetrahedron 104 (2022) 132606.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\tetrahedron-104-2022-132606.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\tetrahedron-104-2022-132606\\e249bfad-18ae-4962-9f3f-77c01d27971f_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\tetrahedron-104-2022-132606"
   },
   "source_file": {
-    "pdf_name": "8f.pdf",
-    "relative_pdf_path": "8f.pdf",
-    "sha256": "ff47599d9c0e8df1f9f058004bcebae408e1ba53bf150895ee8d05fa65dc0f2e"
+    "pdf_name": "Tetrahedron 104 (2022) 132606.pdf",
+    "relative_pdf_path": "Tetrahedron 104 (2022) 132606.pdf",
+    "sha256": "3797918cf583de3a67d8f93260333547b249124313fc262a98f6bc15f43a3049"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T20:56:27Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 36,
-      "markdown_chars_used": 9263
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 209,
+      "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -76,28 +83,15 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_year",
-      "missing_journal",
+      "empty_authors",
       "missing_doi",
-      "low_confidence_abstract",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope"
     ],
-    "overall_confidence": 0.684,
+    "overall_confidence": 0.51,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "copper catalysis",
-      "document_scope": "stereochemical study",
-      "leaving_group": "ether leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "Grignard reagents",
-      "product": "axially chiral allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic ethers"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.86,
-    "human_checked": false
   }
 }

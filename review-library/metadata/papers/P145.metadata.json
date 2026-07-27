@@ -1,69 +1,83 @@
 {
   "paper_id": "P145",
-  "slug": "39a",
+  "slug": "dde23cd2-eff9-47d8-9db2-b559edb1c659_origin",
   "title": {
-    "value": "Enzymatic kinetic resolution of primary allenic alcohols. Application to the total synthesis and stereochemical assignment of striatisporolide A",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Asymmetric Synthesis of Trisubstituted Allenes: Copper-Catalyzed Alkylation and Arylation of Propargylic Phosphates",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Jan Deska",
-      "Jan-E. Backvall"
+      "Mycah R. Uehling",
+      "Samuel T. Marionni",
+      "Gojko Lalic Vol.",
+      "No. –"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.97,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2009,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 1993,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
+    "value": "Organic Letters",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
+    "human_checked": false
+  },
+  "doi": {
     "value": null,
     "source": "rule_not_found",
     "confidence": 0.0,
     "human_checked": false
   },
-  "doi": {
-    "value": "10.1039/b912128p",
-    "source": "markdown_regex",
-    "confidence": 0.9,
+  "abstract": {
+    "value": "Allenes play an important role in organic chemistry as synthetic targets<sup>1</sup> and intermediates.<sup>2</sup> While numerous methods for their synthesis exist,<sup>3</sup> asymmetric synthesis of chiral allenes is still a considerable challenge. Most methods mandate the presence of a specific functional group in the allene product,<sup>4</sup> and have a limited substrate scope. Reactions developed by Myers<sup>5</sup> and Ready<sup>6</sup> have no such requirements and can be applied to the synthesis of a wide variety of chiral allenes. Unfortunately, neither meth od can be used to prepare trisubstituted allenes. In view of the limitations of existing methodology and the utility of chiral trisubstituted allenes as synthetic intermediates,<sup>7</sup> we pursued the development of a practical method for their synthesis.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
     "human_checked": false
   },
-  "abstract": {
-    "value": "Crude Porcine pancreatic lipase was successfully used for the kinetic resolution of axially chiral primary allenic alcohols providing very high enantioselectivities with E values above 200. This simple access to optically active allenes was applied to the total synthesis of the fungal metabolite (-)-striatisporolide A, allowing its unambiguous stereochemical assignment.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic phosphates",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "Grignard reagents",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "phosphate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/39a/5719f6b5-1864-4b86-9d5e-f0e13ccebf9e_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/39a.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/39a/5719f6b5-1864-4b86-9d5e-f0e13ccebf9e_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/39a"
+    "pdf": "D:\\work\\data\\dde23cd2-eff9-47d8-9db2-b559edb1c659_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\dde23cd2-eff9-47d8-9db2-b559edb1c659_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\dde23cd2-eff9-47d8-9db2-b559edb1c659_origin\\30084a6b-7a3c-4073-a94e-a1d2e53bb804_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\dde23cd2-eff9-47d8-9db2-b559edb1c659_origin"
   },
   "source_file": {
-    "pdf_name": "39a.pdf",
-    "relative_pdf_path": "39a.pdf",
-    "sha256": "5327cdd1a2ae3bd04a358cd13d4b96233b649c1da49d3cb4508ed69c7a8c70a5"
+    "pdf_name": "dde23cd2-eff9-47d8-9db2-b559edb1c659_origin.pdf",
+    "relative_pdf_path": "dde23cd2-eff9-47d8-9db2-b559edb1c659_origin.pdf",
+    "sha256": "b2b1f20071b3ee6306ba7fa3ef260aeb87520e370888dbcfdcf177050dff8957"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 48,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 75,
+      "markdown_chars_used": 13997
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -74,29 +88,12 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_journal",
-      "low_confidence_abstract",
-      "Document scope is somewhat ambiguous because the paper is formatted as a communication while the title and abstract emphasize a total-synthesis application.",
-      "structured_tag_not_specified_organometallic_partner",
+      "missing_doi",
       "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.81,
+    "overall_confidence": 0.593,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "enzymatic catalysis",
-      "document_scope": "application or total synthesis paper",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "alpha-allenic alcohols",
-      "reaction_type": "intermolecular functionalization of allenes",
-      "substrate": "allenic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.84,
-    "human_checked": false
   }
 }

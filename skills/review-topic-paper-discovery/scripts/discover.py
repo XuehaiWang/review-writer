@@ -1168,7 +1168,11 @@ def run(args: argparse.Namespace) -> int:
     query_plan_path = getattr(args, "query_plan", "")
     if query_plan_path:
         query_plan = load_query_plan(Path(query_plan_path), args.topic)
-        query_plan_source = "llm_plan"
+        query_plan_source = (
+            "dashboard_deterministic"
+            if query_plan.get("planner") == "dashboard_deterministic"
+            else "llm_plan"
+        )
         effective_query_plan_path = str(query_plan_path)
         agent_keywords = query_plan["keywords"]
         resolved_concepts = query_plan["resolved_concepts"]

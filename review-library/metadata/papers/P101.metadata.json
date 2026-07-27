@@ -1,71 +1,83 @@
 {
   "paper_id": "P101",
-  "slug": "15a",
+  "slug": "angew.-chem.-int.-ed.-2022-61-e202117114",
   "title": {
-    "value": "Synthesis of optically active allenes using tandem enzyme and palladium-catalysed reactions",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Catalytic Enantioconvergent Allenylation of Aldehydes with Propargyl Halides",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Pierre H. Dixneuf",
-      "Thierry Guyot",
-      "Mark D. Ness",
-      "Stanley M. Roberts"
+      "Feng-Hua Zhang",
+      "Xiaochong Guo",
+      "Xianrong Zeng",
+      "Zhaobin Wang"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1997,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2022,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "Angew. Chem. Int. Ed.",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "10.1002/anie.202117114",
+    "source": "markdown_regex",
+    "confidence": 0.9,
     "human_checked": false
   },
   "abstract": {
-    "value": "The propargylic carbonates (S)-6 and (R)-9 are converted into the chiral allenes 10, 11, 13 and 14 (ee 82–85%) using organozinc reagents and tetrakis(triphenylphosphine)palladium as catalyst.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.93,
+    "value": "α-Allenol is a versatile synthon in organic synthesis. The catalytic asymmetric synthesis of α-allenols from readily available starting materials remains a prominent challenge, especially when simultaneous control over axial and central chirality is required. Herein, we describe the Cr-catalyzed enantioconvergent allenylation of aldehydes with racemic propargyl halides to rapidly access a wide range of chiral α- allenols with adjacent axial and central chiralities. This method features excellent regio-, diastereo- and enantioselectivity control with broad substrate scope, and provides facile access to all four stereoisomers when allied with a Mitsunobu reaction. Preliminary mechanistic studies support radicalbased reaction pathways. The synthetic utility is demonstrated by the application in late-stage functionalization and the formal total synthesis of (+)-varitriol.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "method optimization study"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/15a/824c7e40-3151-49b4-bf6e-016fa7cf63c1_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/15a.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/15a/824c7e40-3151-49b4-bf6e-016fa7cf63c1_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/15a"
+    "pdf": "D:\\work\\data\\Angew. Chem. Int. Ed. 2022, 61, e202117114.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\angew.-chem.-int.-ed.-2022-61-e202117114.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\angew.-chem.-int.-ed.-2022-61-e202117114\\b1a273d1-a507-47d1-9472-816f20dd37b8_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\angew.-chem.-int.-ed.-2022-61-e202117114"
   },
   "source_file": {
-    "pdf_name": "15a.pdf",
-    "relative_pdf_path": "15a.pdf",
-    "sha256": "4cc59794cae3564ae64c2f70205e8ae7575edcbe863f00fae31a8cd0d278891c"
+    "pdf_name": "Angew. Chem. Int. Ed. 2022, 61, e202117114.pdf",
+    "relative_pdf_path": "Angew. Chem. Int. Ed. 2022, 61, e202117114.pdf",
+    "sha256": "d2dde064952aea818d9a720cc4645a8f2899dfe57c57cfd3310ee14cfb17decc"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:23Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 39,
-      "markdown_chars_used": 10886
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 113,
+      "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -76,28 +88,12 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_year",
-      "missing_journal",
-      "missing_doi",
-      "low_confidence_abstract",
-      "No explicit abstract section was detected; the abstract field uses the lead summary sentence from the first page."
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.694,
+    "overall_confidence": 0.744,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "palladium catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "carbonate leaving groups",
-      "ligand_or_chiral_source": "monodentate phosphine-type ligands",
-      "organometallic_partner": "phenylzinc and alkylzinc reagents",
-      "product": "axially chiral allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic carbonates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.96,
-    "human_checked": false
   }
 }

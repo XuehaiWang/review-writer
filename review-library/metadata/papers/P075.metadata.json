@@ -1,40 +1,33 @@
 {
   "paper_id": "P075",
-  "slug": "nature-communications-2022-13-4280",
+  "slug": "8e7086e7-e5e0-409e-a4d2-5f010ea87b76_origin",
   "title": {
-    "value": "Carbodefluorination of fluoroalkyl ketones via a carbene-initiated rearrangement strategy",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Facile Synthesis of 1,4-Diketones via Palladium Complex Catalyzed Isomerization of Alkynediols",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Linxuan Li",
-      "Xinyu Zhang",
-      "Yongquan Ning",
-      "Xiaolong Zhang",
-      "Binbin Liu",
-      "Zhansong Zhang",
-      "Paramasivam Sivaguru",
-      "Giuseppe Zanoni",
-      "Shuang Li",
-      "Edward A. Anderson",
-      "Xihe Bi"
+      "Xiyan Lu",
+      "$^{}$ Jianguo Ji",
+      "Dawei Ma",
+      "Wei Shen"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2022,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 1988,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "Tetrahedron",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
@@ -44,35 +37,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "The C–F bond cleavage and C–C bond formation (i.e., carbodefluorination) of readily accessible (per)fluoroalkyl groups constitutes an atom-economical and efficient route to partially fluorinated compounds. However, the selective mono-carbodefluorination of trifluoromethyl (CF3) groups remains a challenge, due to the notorious inertness of C–F bond and the risk of overdefluorination arising from C–F bond strength decrease as the defluorination proceeds. Herein, we report a carbene-initiated rearrangement strategy for the carbodefluorination of fluoroalkyl ketones with β,γ-unsaturated alcohols to provide skeletally and functionally diverse α-mono- and α,α-difluoro-γ,δ-unsaturated ketones. The reaction starts with the formation of silver carbenes from fluoroalkyl triftosylhydrazones, followed by nucleophilic attack of a β,γ-unsaturated alcohol to form key silver-coordinated oxonium ylide intermediates, which triggers selective C–F bond cleavage by HF elimination and C–C bond formation through Claisen rearrangement of in situ generated difluorovinyl ether. The origin of chemoselectivity and the reaction mechanism are determined by experimental and DFT calculations. Collectively, this strategy by an intramolecular cascade process offers significant advances over existing stepwise strategies in terms of selectivity, efficiency, functional group tolerance, etc.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.96,
+    "value": "Alkynediols isomerized under the catalysis of $Pd_{2}(dba)_{3}\\cdot CHCl_{3} + 2n-Bu_{3}P$ in acetonitrile at 80 °C to give 1,4-diketones in high yields. This experimentally simple and economically synthetic method is illustrated with examples including substituents such as alkyl, alkenyl, and aryl groups. The order of reactivity of the substituents in this reaction is aryl $\\geq$ alkenyl > alkyl. Alkenyl-substituted alkynediols chemoselectively isomerized to the corresponding $\\alpha,\\beta$ -unsaturated 1,4-diketones. The usefulness of this novel method is exemplified by the synthesis of dihydrojasmonate.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "not specified",
+      "substrate": "ketones",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/Nature Communications  ( 2022) 13 4280.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/nature-communications-2022-13-4280.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/nature-communications-2022-13-4280/3be48e1a-3c8a-4861-afcb-aad337fe8a7d_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/nature-communications-2022-13-4280"
+    "pdf": "D:\\work\\data\\8e7086e7-e5e0-409e-a4d2-5f010ea87b76_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\8e7086e7-e5e0-409e-a4d2-5f010ea87b76_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\8e7086e7-e5e0-409e-a4d2-5f010ea87b76_origin\\95819176-8497-4d66-9574-b12c6a4a2303_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\8e7086e7-e5e0-409e-a4d2-5f010ea87b76_origin"
   },
   "source_file": {
-    "pdf_name": "Nature Communications  ( 2022) 13 4280.pdf",
-    "relative_pdf_path": "Nature Communications  ( 2022) 13 4280.pdf",
-    "sha256": "f837b92dcabd5ea54c34ad51d03e401a805302ff0966c6dda727c3da0fed6769"
+    "pdf_name": "8e7086e7-e5e0-409e-a4d2-5f010ea87b76_origin.pdf",
+    "relative_pdf_path": "8e7086e7-e5e0-409e-a4d2-5f010ea87b76_origin.pdf",
+    "sha256": "770055c92eaa4d1c5c1ba03a6e11f612f88f48d60433692f6e8a8f76d0e58b78"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:40Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 143,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 134,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -83,31 +88,16 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_journal",
       "missing_doi",
-      "low_confidence_abstract",
-      "Scope includes multiple product manifolds; structured tags simplify the paper to its dominant carbodefluorination platform.",
-      "Allene classification is based on the propargyl alcohol/allene subsection of the paper; the article overall also emphasizes non-allene carbodefluorination products.",
-      "The allowed reaction-type vocabulary does not exactly capture the carbene-initiated carbodefluorinative Claisen rearrangement, so the closest supported label was selected.",
+      "structured_tag_not_specified_product",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.679,
+    "overall_confidence": 0.593,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "silver catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "non-phosphorus metal-coordination ligands",
-      "organometallic_partner": "not specified",
-      "product": "allenic ketones and ethers",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.82,
-    "human_checked": false
   }
 }

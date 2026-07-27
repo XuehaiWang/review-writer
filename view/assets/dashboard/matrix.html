@@ -3,98 +3,54 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Review Matrix Outline</title>
-  <style>
-    :root { --ink:#1d241f; --muted:#69756d; --line:#dacdb8; --panel:#fffaf0; --green:#1f6b55; --orange:#bd6b35; --shadow:0 18px 46px rgba(55,43,24,.14); }
-    * { box-sizing:border-box; }
-    body { margin:0; color:var(--ink); background:linear-gradient(135deg,#f1e7d3,#fbf7ec 48%,#eadcc4); font-family:Georgia,"Times New Roman",serif; height:100vh; overflow:hidden; }
-    button,select,input { font:inherit; }
-    .nav { height:58px; padding:8px 14px; display:flex; align-items:center; justify-content:space-between; gap:10px; background:rgba(255,250,240,.94); border-bottom:1px solid var(--line); }
-    .nav-title { font-weight:700; font-size:18px; white-space:nowrap; }
-    .nav-center { flex:1; text-align:center; }
-    .project-select { min-width:280px; max-width:520px; border:1px solid var(--line); background:#fffdf7; border-radius:999px; padding:8px 12px; }
-    .nav-right { display:flex; gap:7px; flex-wrap:wrap; justify-content:flex-end; }
-    .nav a { text-decoration:none; color:var(--ink); border:1px solid var(--line); border-radius:999px; padding:7px 10px; background:#fffdf7; white-space:nowrap; font-size:14px; }
-    .nav a.active { background:var(--green); border-color:var(--green); color:white; }
-    .app { height:calc(100vh - 58px); display:grid; grid-template-columns:320px minmax(520px,1fr) 390px; gap:14px; padding:14px; }
-    .panel { background:rgba(255,250,240,.94); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); overflow:hidden; min-height:0; display:flex; flex-direction:column; }
-    .head,.toolbar { padding:14px; border-bottom:1px solid var(--line); }
-    h1,h2,h3 { margin:0; letter-spacing:-.02em; }
-    h1 { font-size:22px; } h2 { font-size:18px; }
-    .sub { margin-top:6px; color:var(--muted); font-size:13px; line-height:1.35; }
-    .toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-    input { border:1px solid var(--line); background:#fffdf7; border-radius:999px; padding:8px 11px; width:100%; }
-    .list,.main,.side { overflow:auto; min-height:0; }
-    .list { padding:9px; }
-    .card { width:100%; text-align:left; border:1px solid transparent; background:#fffdf7; border-radius:12px; padding:10px; margin-bottom:8px; cursor:pointer; color:var(--ink); }
-    .card:hover,.card.active { border-color:var(--green); background:#f2faf0; }
-    .title { font-weight:700; font-size:14px; line-height:1.25; }
-    .meta { color:var(--muted); font-size:12px; margin-top:5px; line-height:1.35; }
-    .pill { display:inline-block; font-size:11px; padding:3px 7px; border-radius:999px; background:#e4efe4; color:#285a37; margin:5px 4px 0 0; }
-    .main { background:#fffdf7; padding:24px 30px; line-height:1.58; font-size:15px; }
-    .field { margin-bottom:14px; }
-    .label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; margin-bottom:4px; }
-    .value { line-height:1.45; white-space:pre-wrap; }
-    .tabs { padding:10px; border-bottom:1px solid var(--line); display:flex; gap:8px; flex-wrap:wrap; }
-    .tab { border:1px solid var(--line); border-radius:999px; background:#fffdf7; padding:7px 10px; cursor:pointer; }
-    .tab.active { background:var(--green); color:white; border-color:var(--green); }
-    table { border-collapse:collapse; width:100%; font-size:13px; background:white; }
-    td,th { border:1px solid #d5c8b3; padding:7px; vertical-align:top; }
-    th { background:#efe6d4; }
-    pre { white-space:pre-wrap; margin:0; font-family:Consolas,monospace; font-size:12px; }
-    .side { padding:14px; }
-  </style>
+  <title>Review Matrix</title>
   <link rel="stylesheet" href="/assets/dashboard/review-ui.css">
+  <style>
+    :root { --ink:#1f2024; --muted:#69707b; --line:#d7cbb7; --green:#1e6a58; --paper:#fffdf7; --panel:#fffaf1; }
+    * { box-sizing:border-box; } body { margin:0; color:var(--ink); background:#efe3cc; font:14px Georgia,"Times New Roman",serif; }
+    button,select,input,textarea { font:inherit; } .nav { height:58px; display:flex; align-items:center; gap:12px; padding:8px 14px; background:var(--panel); border-bottom:1px solid var(--line); }
+    .nav-title { font-weight:700; font-size:18px; } .nav-center { flex:1; text-align:center; } .project-select { min-width:280px; max-width:520px; padding:8px 12px; border:1px solid var(--line); border-radius:6px; background:var(--paper); }
+    .nav-right { display:flex; gap:7px; flex-wrap:wrap; } .nav a { padding:7px 10px; color:var(--ink); text-decoration:none; border:1px solid var(--line); border-radius:6px; background:var(--paper); } .nav a.active { color:#fff; background:var(--green); border-color:var(--green); }
+    .app { height:calc(100vh - 58px); display:grid; grid-template-columns:300px minmax(500px,1fr) 320px; gap:14px; padding:14px; } .panel { min-height:0; overflow:hidden; display:flex; flex-direction:column; background:var(--panel); border:1px solid var(--line); border-radius:7px; }
+    .head,.toolbar,.tabs { padding:14px; border-bottom:1px solid var(--line); } h1,h2 { margin:0; font-size:18px; } .sub,.meta { margin-top:5px; color:var(--muted); font-size:12px; line-height:1.45; }
+    .toolbar { padding:10px; } input[type="search"],textarea { width:100%; border:1px solid var(--line); border-radius:6px; background:var(--paper); padding:9px; } .list,.main,.side { min-height:0; overflow:auto; } .list,.side { padding:10px; } .main { padding:24px 30px; background:var(--paper); line-height:1.55; }
+    .paper { width:100%; margin-bottom:7px; padding:10px; text-align:left; color:var(--ink); border:1px solid transparent; border-radius:6px; background:var(--paper); cursor:pointer; } .paper.active,.paper:hover { border-color:var(--green); background:#f2faf0; } .paper-title { font-weight:700; line-height:1.3; }
+    .pill { display:inline-block; margin:6px 4px 0 0; padding:2px 6px; color:#285a37; background:#e4efe4; border-radius:5px; font-size:11px; } .pill.warn { color:#8d3e20; background:#f9dfd0; }
+    .tabs { display:flex; gap:7px; flex-wrap:wrap; } .tab,.btn { padding:7px 10px; border:1px solid var(--line); border-radius:6px; background:var(--paper); cursor:pointer; } .tab.active,.btn.primary { color:#fff; background:var(--green); border-color:var(--green); }
+    .field { margin-bottom:16px; } .label { margin-bottom:4px; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; } .value { white-space:pre-wrap; } textarea { min-height:230px; resize:vertical; line-height:1.45; } .choice-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:8px; margin-bottom:16px; } .choice { padding:10px; text-align:left; border:1px solid var(--green); border-radius:6px; background:#f2faf0; cursor:pointer; } .choice.current { color:#fff; background:var(--green); }
+    .status { min-height:1.4em; margin-top:9px; color:var(--muted); } .status.error { color:#a2352c; } pre { white-space:pre-wrap; font:12px Consolas,monospace; }.article-header,.article-content,.figure-card,.editor{border:1px solid var(--line);border-radius:7px;background:#fffdf8}.article-header{padding:16px;margin-bottom:18px}.article-header h3{margin:0 0 8px;font-size:20px;line-height:1.3}.article-meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--muted);font-size:13px}.article-content{padding:16px;line-height:1.72}.article-content p{margin:0 0 13px;text-align:justify}.article-content p:last-child{margin-bottom:0}.article-content h3{margin:0 0 10px;font-size:17px}.article-content ul{margin:0;padding-left:22px}.figure-card{padding:14px}.figure-card p{margin:5px 0}.editor{margin-top:12px;padding:0 12px 12px}.editor summary{padding:12px 0;cursor:pointer;font-weight:700}.editor textarea{margin-top:2px}.empty-note{color:var(--muted);font-style:italic}@media(max-width:1050px){.app{height:auto;grid-template-columns:1fr}.panel{min-height:340px}.nav{height:auto;flex-wrap:wrap}.nav-center{order:3;flex-basis:100%}}
+  </style>
 </head>
 <body>
-  <nav class="nav">
-    <div class="nav-title">Review Writer</div>
-    <div class="nav-center"><select id="projectSelect" class="project-select"></select></div>
-    <div class="nav-right">
-      <a href="/library">Library</a><a href="/discovery">Discovery</a><a class="active" href="/matrix">Matrix</a><a href="/blueprint">Blueprint</a><a href="/sections">Sections</a><a href="/figures">Figures</a><a href="/draft">Draft</a><a href="/final">Final</a>
-    </div>
-  </nav>
+  <nav class="nav"><div class="nav-title">Review Writer</div><div class="nav-center"><select id="projectSelect" class="project-select"></select></div><div class="nav-right"><a href="/library">Library</a><a href="/discovery">Discovery</a><a class="active" href="/matrix">Matrix</a><a href="/blueprint">Blueprint</a><a href="/sections">Sections</a><a href="/figure-review">Figure Review</a><a href="/figures">Figures</a><a href="/draft">Draft</a><a href="/final">Final</a></div></nav>
   <main class="app">
-    <section class="panel">
-      <div class="head"><h1>Literature Matrix</h1><div id="projectInfo" class="sub">Loading...</div></div>
-      <div class="toolbar"><input id="filter" placeholder="Filter paper/title/tag"></div>
-      <div id="paperList" class="list"></div>
-    </section>
-    <section class="panel">
-      <div class="head"><h2 id="mainTitle">Paper Detail</h2><div id="mainMeta" class="sub"></div></div>
-      <div class="tabs">
-        <button class="tab active" data-tab="paper">Paper</button>
-        <button class="tab" data-tab="outline">Outline Options</button>
-        <button class="tab" data-tab="selected">Selected Outline</button>
-        <button class="tab" data-tab="report">Report</button>
-      </div>
-      <div id="main" class="main"></div>
-    </section>
-    <section class="panel">
-      <div class="head"><h2>Review Gate</h2><div class="sub">Check whether every selected paper has enough evidence for outline planning.</div></div>
-      <div id="summary" class="side"></div>
-    </section>
+    <section class="panel"><div class="head"><h1>Literature Matrix</h1><div id="projectInfo" class="sub"></div></div><div class="toolbar"><input id="filter" type="search" placeholder="Filter papers"></div><div id="paperList" class="list"></div></section>
+    <section class="panel"><div class="head"><h2 id="mainTitle">Paper Detail</h2><div id="mainMeta" class="sub"></div></div><div class="tabs"><button class="tab active" data-tab="paper">Paper</button><button class="tab" data-tab="outline">Outline</button><button class="tab" data-tab="selected">Selected Outline</button></div><div id="main" class="main"></div><input id="referenceUpload" type="file" accept=".pdf,.docx,.md,.txt" hidden></section>
+    <section class="panel"><div class="head"><h2>Review Gate</h2><div class="sub">Reading progress is optional; select an outline before Blueprint.</div></div><div id="summary" class="side"></div></section>
   </main>
   <script src="/assets/dashboard/review-ui.js"></script>
   <script>
-    let projects=[], selectedProject='', payload=null, selectedPaper='', tab='paper';
-    const $=id=>document.getElementById(id);
-    const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
-    const val=x=>x&&typeof x==='object'&&'value'in x?x.value:x;
-    const papers=()=>Array.isArray(payload?.literature_matrix)?payload.literature_matrix:(payload?.literature_matrix?.papers||[]);
-    function md(s){ return String(s||'').split(/\n{2,}/).map(b=>{b=b.trim(); if(!b)return''; let m=b.match(/^###\s+(.+)/); if(m)return`<h3>${esc(m[1])}</h3>`; m=b.match(/^##\s+(.+)/); if(m)return`<h2>${esc(m[1])}</h2>`; m=b.match(/^#\s+(.+)/); if(m)return`<h1>${esc(m[1])}</h1>`; return`<p>${esc(b).replace(/\n/g,'<br>')}</p>`;}).join(''); }
-    async function loadProjects(){ projects=await(await fetch('/api/projects')).json(); $('projectSelect').innerHTML=projects.map(p=>`<option value="${esc(p.project_id)}">${esc(p.project_id)}</option>`).join(''); if(projects[0]) loadProject(projects[0].project_id); }
-    async function loadProject(id){ selectedProject=id; payload=await(await fetch(`/api/project/${encodeURIComponent(id)}/matrix`)).json(); selectedPaper=(papers()[0]||{}).paper_id||''; render(); }
-    function renderList(){ const q=$('filter').value.toLowerCase(); const rows=papers().filter(p=>[p.paper_id,p.title,p.keywords,p.abstract].join(' ').toLowerCase().includes(q)); $('paperList').innerHTML=rows.map(p=>`<button class="card ${p.paper_id===selectedPaper?'active':''}" data-id="${esc(p.paper_id)}"><div class="title">${esc(p.paper_id)} · ${esc(p.title||'(untitled)')}</div><div class="meta">${esc((p.authors||[]).join(', '))}</div>${(p.keywords||[]).map(k=>`<span class="pill">${esc(k)}</span>`).join('')}</button>`).join('')||'<div class="empty">No matrix rows match the current filter.</div>'; }
-    function renderPaper(){ const p=papers().find(x=>x.paper_id===selectedPaper)||{}; $('mainTitle').textContent=p.paper_id?`${p.paper_id} Matrix Row`:'Paper Detail'; $('mainMeta').textContent=p.title||''; $('main').innerHTML=['title','authors','keywords','abstract','main_content','most_relevant_figure'].map(k=>`<div class="field"><div class="label">${k}</div><div class="value">${esc(Array.isArray(p[k])?p[k].join(', '):(typeof p[k]==='object'?JSON.stringify(p[k],null,2):p[k]||''))}</div></div>`).join(''); }
-    function renderMain(){ if(tab==='paper') renderPaper(); else if(tab==='outline') $('main').innerHTML=md(payload?.outline_options_md); else if(tab==='selected') $('main').innerHTML=md(payload?.selected_outline_md||'No selected_outline.md yet.'); else $('main').innerHTML=md(payload?.matrix_outline_report_md); }
-    function renderSummary(){ const rows=papers(); const required=['title','authors','keywords','abstract','main_content','most_relevant_figure']; const missing=rows.filter(p=>required.some(k=>!p[k]||(Array.isArray(p[k])&&!p[k].length))).length; const status=missing===0&&payload?.outline_options_md?'Can proceed after outline selection':'Needs check'; $('projectInfo').textContent=`${selectedProject} · ${payload?.topic||''}`; $('summary').innerHTML=`<div class="field"><div class="label">Status</div><div class="value">${status}</div></div><div class="field"><div class="label">Papers</div><div class="value">${rows.length}</div></div><div class="field"><div class="label">Incomplete Rows</div><div class="value">${missing}</div></div><div class="field"><div class="label">Outline Options</div><div class="value">${payload?.outline_options_md?'present':'missing'}</div></div><div class="field"><div class="label">Selected Outline</div><div class="value">${payload?.selected_outline_md?'present':'not selected yet'}</div></div><div class="field"><div class="label">Human Check</div><div class="value">1. 主内容是否真的来自全文阅读。\\n2. 最相关图是否能概括该论文工作。\\n3. 大纲是否覆盖主要文献类别。\\n4. 选定后写入 selected_outline.md。</div></div>`; }
-    function render(){ renderList(); renderMain(); renderSummary(); }
-    $('projectSelect').addEventListener('change',e=>loadProject(e.target.value));
-    $('filter').addEventListener('input',renderList);
-    $('paperList').addEventListener('click',e=>{const b=e.target.closest('[data-id]'); if(!b)return; selectedPaper=b.dataset.id; tab='paper'; document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===tab)); render();});
-    document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{tab=t.dataset.tab; document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x===t)); renderMain();}));
-    loadProjects();
+    let projects=[],payload=null,selectedProject='',selectedPaper='',tab='paper';
+    const $=id=>document.getElementById(id), esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
+    const papers=()=>Array.isArray(payload?.literature_matrix)?payload.literature_matrix:(payload?.literature_matrix?.rows||[]);
+    const current=()=>papers().find(paper=>paper.paper_id===selectedPaper)||papers()[0]||null;
+    const fullRead=paper=>paper?.matrix_status==='full_reading_complete';
+    async function loadProjects(){projects=await(await fetch('/api/projects')).json();$('projectSelect').innerHTML=projects.map(project=>`<option value="${esc(project.project_id)}">${esc(project.project_id)}</option>`).join('');const initial=window.reviewUi?.initialProject(projects)||projects[0];if(initial){$('projectSelect').value=initial.project_id;await loadProject(initial.project_id)}}
+    async function loadProject(projectId){selectedProject=projectId;window.reviewUi?.setProject(projectId);payload=await(await fetch(`/api/project/${encodeURIComponent(projectId)}/matrix`)).json();selectedPaper=papers().some(paper=>paper.paper_id===selectedPaper)?selectedPaper:(papers()[0]?.paper_id||'');render()}
+    function plainArticleText(value){const greek={alpha:'alpha',beta:'beta',gamma:'gamma',delta:'delta',epsilon:'epsilon',theta:'theta',lambda:'lambda',mu:'mu',nu:'nu',pi:'pi',rho:'rho',sigma:'sigma',tau:'tau',phi:'phi',chi:'chi',psi:'psi',omega:'omega'};let text=String(value??'').replace(/<[^>]*>/g,'').replace(/\\prime/g,"'").replace(/\\%/g,'%');text=text.replace(/\\(?:mathrm|mathbf|mathit|mathsf|text|operatorname)\s*\{\s*([^{}]+)\s*\}/g,(_,inner)=>inner.replace(/\s+/g,''));text=text.replace(/\\([A-Za-z]+)/g,(_,name)=>greek[name]||name);text=text.replace(/\s*_\s*\{\s*([^{}]+)\s*\}/g,(_,inner)=>inner.replace(/\s+/g,''));text=text.replace(/\s*\^\s*\{\s*([^{}]+)\s*\}/g,(_,inner)=>inner.replace(/\s+/g,''));return text.replace(/[${}]/g,'').replace(/[ \t]+/g,' ').replace(/ *\n */g,'\n').replace(/\n{3,}/g,'\n\n').trim()}
+    function displayText(value){return plainArticleText(value)}
+    function renderList(){const query=$('filter').value.toLowerCase();const rows=papers().filter(paper=>[paper.paper_id,paper.title,paper.keywords,paper.abstract].join(' ').toLowerCase().includes(query));$('paperList').innerHTML=rows.map(paper=>`<button class="paper ${paper.paper_id===selectedPaper?'active':''}" data-paper="${esc(paper.paper_id)}"><div class="paper-title">${esc(paper.paper_id)} · ${esc(displayText(paper.title)||'(untitled)')}</div><div class="meta">${esc((paper.authors||[]).map(displayText).filter(Boolean).join(', '))}</div><span class="pill ${fullRead(paper)?'':'warn'}">${fullRead(paper)?'full reading complete':'needs full reading'}</span></button>`).join('')||'<div class="meta">No papers match the filter.</div>'}
+    function renderArticleContent(value){const text=plainArticleText(value);if(!text)return '<p class="empty-note">No full-paper reading note has been added yet.</p>';return text.split(/\n{2,}/).filter(Boolean).map(block=>{const heading=block.match(/^#{1,6}\s+(.+)$/);if(heading)return '<h3>'+esc(heading[1])+'</h3>';const lines=block.split('\n').map(line=>line.trim()).filter(Boolean);if(lines.length&&lines.every(line=>/^(?:[-*+]\s+)/.test(line)))return '<ul>'+lines.map(line=>'<li>'+esc(line.replace(/^(?:[-*+]\s+)/,''))+'</li>').join('')+'</ul>';const escaped=esc(block).replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/`([^`]+)`/g,'<code>$1</code>');return '<p>'+escaped.replace(/\n/g,'<br>')+'</p>'}).join('')}
+    function renderPaper(){const paper=current();if(!paper){$('main').innerHTML='<div class="meta">Confirm Discovery to populate the Matrix.</div>';return}$('mainTitle').textContent=`${paper.paper_id} Matrix Row`;$('mainMeta').textContent=displayText(paper.title);const figure=typeof paper.most_relevant_figure==='object'?paper.most_relevant_figure:{},authors=Array.isArray(paper.authors)?paper.authors.map(displayText).filter(Boolean).join(', '):displayText(paper.authors),keywords=Array.isArray(paper.keywords)?paper.keywords.map(displayText).filter(Boolean):[];$('main').innerHTML=`<section class="article-header"><h3>${esc(displayText(paper.title)||'(untitled)')}</h3><div class="article-meta"><span>${esc(authors||'Authors unavailable')}</span><span>${esc(displayText(paper.year)||'Year unavailable')}</span><span>${esc(displayText(paper.journal)||'Journal unavailable')}</span>${paper.doi?'<span>DOI: '+esc(displayText(paper.doi))+'</span>':''}</div>${keywords.length?'<div>'+keywords.map(keyword=>'<span class="pill">'+esc(keyword)+'</span>').join('')+'</div>':''}</section><section class="field"><div class="label">Abstract</div><div class="article-content">${renderArticleContent(paper.abstract)}</div></section><section class="field"><div class="label">Full-Paper Reading Note</div><div class="article-content">${renderArticleContent(paper.main_content)}</div><details class="editor"><summary>Edit reading note</summary><textarea id="readingNote" placeholder="Transformation, conditions, evidence, scope, limitations, and review relevance.">${esc(paper.main_content||'')}</textarea></details></section><section class="field"><div class="label">Most Relevant Figure</div><div class="figure-card"><p><strong>Source:</strong> ${esc(displayText(figure.source_label)||'Not specified')}</p><p><strong>Page:</strong> ${esc(displayText(figure.page_hint)||'Not specified')}</p><p><strong>Caption:</strong> ${esc(displayText(figure.caption)||'Not specified')}</p><p><strong>Relevance:</strong> ${esc(displayText(figure.relevance)||'Not specified')}</p></div></section><div class="field"><label><input id="readingComplete" type="checkbox" ${fullRead(paper)?'checked':''}> I completed the full-paper reading for this paper.</label></div><button id="saveReading" class="btn primary">Save Reading Note</button><div id="readingStatus" class="status"></div>`}
+    function outlineChoices(){const currentStyle=payload?.outline_selection?.outline_style||'';const standard=[['substrate','Substrate structure'],['catalyst','Catalyst / method structure'],['reaction','Reaction-type structure']];const references=(payload?.reference_outline_candidates||[]).map(candidate=>[`reference:${candidate.candidate_id}`,`Reference: ${candidate.source_name||candidate.candidate_id}`]);return [...standard,...references].map(([style,label])=>`<button class="choice ${style===currentStyle?'current':''}" data-outline="${esc(style)}">${esc(label)}</button>`).join('')}
+    function renderOutline(){ $('mainTitle').textContent='Outline Options';$('mainMeta').textContent='Select an outline to convert the current Matrix into a Blueprint.';$('main').innerHTML=`<div class="choice-grid">${outlineChoices()}<button id="uploadReference" class="choice">Upload Reference Review</button></div><div id="outlineStatus" class="status"></div><pre>${esc(payload?.outline_options_md||'No outline options yet.')}</pre>`}
+    function renderSelected(){ $('mainTitle').textContent='Selected Outline';$('mainMeta').textContent=payload?.outline_selection?.selection_source==='user'?'Selected for the current Matrix':'Choose an outline for the current Matrix';$('main').innerHTML=`<pre>${esc(payload?.selected_outline_md||'No current outline selected.')}</pre>`}
+    function renderSummary(){const rows=papers(),completed=rows.filter(fullRead).length,sync=payload?.matrix_sync?.synced_at||'',selection=payload?.outline_selection||{},outlineReady=selection.selection_source==='user'&&selection.matrix_synced_at===sync;$('projectInfo').textContent=`${selectedProject} · ${payload?.topic||''}`;$('summary').innerHTML=`<div class="field"><div class="label">Full Reading</div><div class="value">${completed}/${rows.length} complete (optional)</div></div><div class="field"><div class="label">Outline</div><div class="value">${outlineReady?'selected for current Matrix':'select or reselect'}</div></div><div class="field"><div class="label">Next Gate</div><div class="value">${outlineReady?'Execute Matrix to create Blueprint.':'Select an outline for the current Matrix.'}</div></div>`}
+    function render(){renderList();if(tab==='paper')renderPaper();else if(tab==='outline')renderOutline();else renderSelected();renderSummary();document.querySelectorAll('.tab').forEach(button=>button.classList.toggle('active',button.dataset.tab===tab))}
+    async function saveReading(){const paper=current(),status=$('readingStatus');if(!paper||!status)return;status.textContent='Saving...';try{const response=await fetch(`/api/project/${encodeURIComponent(selectedProject)}/matrix/${encodeURIComponent(paper.paper_id)}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({main_content:$('readingNote').value,most_relevant_figure:paper.most_relevant_figure,mark_complete:$('readingComplete').checked})});const result=await response.json();if(!response.ok||!result.ok)throw new Error(result.error||'Unable to save.');await loadProject(selectedProject)}catch(error){status.className='status error';status.textContent=error.message||String(error)}}
+    async function chooseOutline(style){const status=$('outlineStatus');if(!status)return;status.textContent='Saving outline...';try{const response=await fetch(`/api/project/${encodeURIComponent(selectedProject)}/matrix-outline`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({outline_style:style})});const result=await response.json();if(!response.ok||!result.ok)throw new Error(result.error||'Unable to save.');await loadProject(selectedProject);tab='selected';render()}catch(error){status.className='status error';status.textContent=error.message||String(error)}}
+    async function uploadReference(file){if(!file)return;const status=$('outlineStatus');status.textContent='Uploading reference...';try{const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',',2)[1]||'');reader.onerror=reject;reader.readAsDataURL(file)});const response=await fetch(`/api/project/${encodeURIComponent(selectedProject)}/reference-outline`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:file.name,content_base64:data})});const result=await response.json();if(!response.ok||!result.ok)throw new Error(result.error||'Unable to analyze reference.');await loadProject(selectedProject);tab='outline';render()}catch(error){status.className='status error';status.textContent=error.message||String(error)}}
+    $('projectSelect').addEventListener('change',event=>loadProject(event.target.value));$('filter').addEventListener('input',renderList);$('paperList').addEventListener('click',event=>{const button=event.target.closest('[data-paper]');if(button){selectedPaper=button.dataset.paper;tab='paper';render()}});$('main').addEventListener('click',event=>{if(event.target.closest('#saveReading'))saveReading();const choice=event.target.closest('[data-outline]');if(choice)chooseOutline(choice.dataset.outline);if(event.target.closest('#uploadReference'))$('referenceUpload').click()});$('referenceUpload').addEventListener('change',event=>{const file=event.target.files?.[0];event.target.value='';uploadReference(file)});document.querySelectorAll('.tab').forEach(button=>button.addEventListener('click',()=>{tab=button.dataset.tab;render()}));loadProjects();
   </script>
 </body>
 </html>

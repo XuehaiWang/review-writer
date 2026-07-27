@@ -1,34 +1,31 @@
 {
   "paper_id": "P033",
-  "slug": "eur-j-org-chem-2024-shen-palladiumcatalyzed-intermolecular-5-2-cycloaddition-highly-regioselective-synthesis-of",
+  "slug": "2c66c6d0-46b1-457c-a73b-54c8158f79dd_origin",
   "title": {
-    "value": "Palladium-Catalyzed Intermolecular [5 + 2] Cycloaddition: Highly Regioselective Synthesis of Allene-Containing 2-Benzoxepines",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Allenes as Three-Carbon Units in Catalytic Cycloadditions: New Opportunities with Transition-Metal Catalysts",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Bingyu Shen",
-      "Aimei Yang",
-      "Xihong Lu",
-      "Zhijun Xin",
-      "Xuehu Li"
+      "– - Wiley-VCH Verlag GmbH & Co. KGaA",
+      "Weinheim"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2024,
+    "value": 2001,
     "source": "filename_or_front_matter",
     "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Eur J Org Chem",
-    "source": "filename_prefix",
-    "confidence": 0.55,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
@@ -38,35 +35,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Palladium-catalyzed intermolecular [5 + 2] cycloaddition of propargylic carbonates with benzyl allenyl ethers has been developed for the synthesis of allene-containing 2-benzoxepines. The reaction proceeds by a pathway involving decarboxylative allenylpalladium formation, regioselective intermolecular insertion, and intramolecular nucleophilic attack. In this way, the sequential formation of C-C and C-O bonds results in the generation of a 2-benzoxepine skeleton in a one-pot process.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "Allenes are very versatile synthetic units that are used in many types of catalytic cycloaddition reactions. Most examples reported so far involve their use as 2C-atom components, whereas their participations as 3C-atom components have been much less frequent. In this concept article, we present an overview of this latter strategy, emphasizing on those more recent contributions involving the use of $\\mathrm { P t } ^ { \\mathrm { I I } }$ and Au<sup>I</sup> catalysts, which have uncovered new opportunities in this area.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "ketones",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "account or perspective"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Alkynol/Eur J Org Chem - 2024 - Shen - Palladium‐Catalyzed Intermolecular  5 2  Cycloaddition  Highly Regioselective Synthesis of.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/eur-j-org-chem-2024-shen-palladiumcatalyzed-intermolecular-5-2-cycloaddition-highly-regioselective-synthesis-of.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/eur-j-org-chem-2024-shen-palladiumcatalyzed-intermolecular-5-2-cycloaddition-highly-regioselective-synthesis-of/c5302c6d-8780-416c-8da9-1f216948648f_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/eur-j-org-chem-2024-shen-palladiumcatalyzed-intermolecular-5-2-cycloaddition-highly-regioselective-synthesis-of"
+    "pdf": "D:\\work\\data\\2c66c6d0-46b1-457c-a73b-54c8158f79dd_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\2c66c6d0-46b1-457c-a73b-54c8158f79dd_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\2c66c6d0-46b1-457c-a73b-54c8158f79dd_origin\\270cdd70-e8ab-4738-afcc-bd521600067b_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\2c66c6d0-46b1-457c-a73b-54c8158f79dd_origin"
   },
   "source_file": {
-    "pdf_name": "Eur J Org Chem - 2024 - Shen - Palladium‐Catalyzed Intermolecular  5 2  Cycloaddition  Highly Regioselective Synthesis of.pdf",
-    "relative_pdf_path": "Eur J Org Chem - 2024 - Shen - Palladium‐Catalyzed Intermolecular  5 2  Cycloaddition  Highly Regioselective Synthesis of.pdf",
-    "sha256": "e0fa6e2eeb33aa8edcb92be6e8095d13bfa7061201c9c42171369b0aa858f718"
+    "pdf_name": "2c66c6d0-46b1-457c-a73b-54c8158f79dd_origin.pdf",
+    "relative_pdf_path": "2c66c6d0-46b1-457c-a73b-54c8158f79dd_origin.pdf",
+    "sha256": "408aeec5b1ed51b699eacfd1a28a571431122488fc5d089d5007c307cfc036d4"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:29Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 95,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 238,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -77,28 +86,14 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
+      "missing_journal",
       "missing_doi",
-      "low_confidence_abstract",
-      "Year is ambiguous in the supplied snippets: journal footers show 2025, while copyright, DOI context, and path hints indicate 2024.",
-      "Publication year is ambiguous in the supplied evidence: the article footer cites Eur. J. Org. Chem. 2025, while copyright and file metadata indicate 2024; year set to 2025 based on the visible citation line.",
-      "structured_tag_not_specified_organometallic_partner"
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.729,
+    "overall_confidence": 0.513,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "palladium catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "carbonate leaving groups",
-      "ligand_or_chiral_source": "monodentate phosphine-type ligands",
-      "organometallic_partner": "not specified",
-      "product": "allene-derived cyclic products",
-      "reaction_type": "cycloaddition and annulation of allenes",
-      "substrate": "propargylic carbonates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.91,
-    "human_checked": false
   }
 }

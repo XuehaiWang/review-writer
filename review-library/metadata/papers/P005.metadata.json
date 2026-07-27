@@ -1,70 +1,81 @@
 {
   "paper_id": "P005",
-  "slug": "angew-chem-int-ed-2023-chen-asymmetric-rutheniumcatalyzed-c-h-activation-by-a-versatile-chiralamidedirecting",
+  "slug": "04e9f44e-2e57-493e-9990-27b7731cac5a_origin",
   "title": {
-    "value": "Asymmetric Ruthenium-Catalyzed C-H Activation by a Versatile Chiral-Amide-Directing Strategy",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Optically Active 2,3-Allenoates via Palladium-Catalyzed Carbonylation of Enantioenriched Propargylic Mesylates",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Wenkun Chen",
-      "Jijun Jiang",
-      "Jun Wang"
+      "Yuli Wang<sup></sup> and Shengming Ma<sup>",
+      "</sup>"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2024,
-    "source": "llm_from_front_matter",
-    "confidence": 0.96,
+    "value": 2012,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Angew Chem Int Ed",
-    "source": "filename_prefix",
-    "confidence": 0.55,
+    "value": "Green Chemistry",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "10.1002/adsc.201200910",
+    "source": "markdown_regex",
+    "confidence": 0.9,
     "human_checked": false
   },
   "abstract": {
-    "value": "A versatile and readily available chiral amide directing group has been developed for the ruthenium(II)-catalyzed asymmetric C-H activation. Asymmetric C-H activation of the related chiral benzamides with various olefins, aldehydes and propargylic alcohols has been accomplished with high stereoselectivities, affording a series of chiral products including 3,4-dihydroisocoumarins (up to 96 % ee), isocoumarins (up to 92 % ee), phthalides (up to 99 % ee), chiral bicyclo[2.2.1]heptanes (> 20 : 1 dr), 4-alkylidene-3,4-dihydroisocoumarins (up to 97 % ee) and allenes (> 20 : 1 dr). Importantly, our methodologies enabled concise syntheses of many biologically active compounds and natural products (e.g., Montroumarin, Cyclosporone E, Cyclosporone Q, Concentricolide, Chuangxinol, and Eleutherol).",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "Under mild conditions, optically active 2,3- allenoates were synthesized from enantioenriched propargylic mesylates with moderate to excellent yields and high efficiency of chirality transfer by using palladium(0) bis(dibenzylideneacetone) (3 mol%) with (S)-(-)-5,5’-bis(diphenylphosphino)-",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic mesylates",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "chiral biaryl bisphosphine ligands",
+      "leaving_group": "mesylate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "method optimization study"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Progargylic/Angew Chem Int Ed - 2023 - Chen - Asymmetric Ruthenium‐Catalyzed C H Activation by a Versatile Chiral‐Amide‐Directing.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/angew-chem-int-ed-2023-chen-asymmetric-rutheniumcatalyzed-c-h-activation-by-a-versatile-chiralamidedirecting.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/angew-chem-int-ed-2023-chen-asymmetric-rutheniumcatalyzed-c-h-activation-by-a-versatile-chiralamidedirecting/1c7a587e-73b0-4ebb-8455-69e9279e72f6_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/angew-chem-int-ed-2023-chen-asymmetric-rutheniumcatalyzed-c-h-activation-by-a-versatile-chiralamidedirecting"
+    "pdf": "D:\\work\\data\\04e9f44e-2e57-493e-9990-27b7731cac5a_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\04e9f44e-2e57-493e-9990-27b7731cac5a_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\04e9f44e-2e57-493e-9990-27b7731cac5a_origin\\0c39cfa3-3124-4fb0-b068-0fc10d0e0c03_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\04e9f44e-2e57-493e-9990-27b7731cac5a_origin"
   },
   "source_file": {
-    "pdf_name": "Angew Chem Int Ed - 2023 - Chen - Asymmetric Ruthenium‐Catalyzed C H Activation by a Versatile Chiral‐Amide‐Directing.pdf",
-    "relative_pdf_path": "Angew Chem Int Ed - 2023 - Chen - Asymmetric Ruthenium‐Catalyzed C H Activation by a Versatile Chiral‐Amide‐Directing.pdf",
-    "sha256": "5b94cfb4010897ce49742ee78830f85b85940bd062a9ba5ccafcd432b239e166"
+    "pdf_name": "04e9f44e-2e57-493e-9990-27b7731cac5a_origin.pdf",
+    "relative_pdf_path": "04e9f44e-2e57-493e-9990-27b7731cac5a_origin.pdf",
+    "sha256": "5abe0a59dd0ada9e15f1ed9bea8b08bf8c69a6b34bed726ac73817ff35608bda"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-16T11:15:55Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 155,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 178,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -75,29 +86,10 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_doi",
-      "The paper covers multiple substrate/reaction/product classes; structured tags summarize the overall platform rather than a single subsection-specific transformation.",
-      "Paper scope is broader than allenes; allene classification is based on the abstract and introductory statements about the propargylic alcohol branch.",
-      "Allene-specific substitution pattern and leaving-group details are not explicit in the supplied excerpts, so those labels are assigned conservatively.",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.751,
+    "overall_confidence": 0.744,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "ruthenium catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "prolinol-derived and other chiral amine catalysts",
-      "organometallic_partner": "not specified",
-      "product": "axially chiral allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.79,
-    "human_checked": false
   }
 }

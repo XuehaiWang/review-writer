@@ -1,27 +1,22 @@
 {
   "paper_id": "P129",
-  "slug": "28e-rhodium-catalyzed-enantioselective-1-6-addition-of-arylboronic-acids-to-enynamides-asymmetric-synthesis-of-axially",
+  "slug": "cl.210803",
   "title": {
-    "value": "Rhodium-Catalyzed Enantioselective 1,6-Addition of Arylboronic Acids to Enynamides: Asymmetric Synthesis of Axially Chiral Allenylsilanes",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Chiral Brønsted Acid Catalyzed Enantioconvergent Synthesis of Chiral Tetrahydrocarbazoles with Allenylsilanes from Racemic Indolylmethanols",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
-    "value": [
-      "Takahiro Nishimura",
-      "Hiroki Makino",
-      "Makoto Nagaosa",
-      "Tamio Hayashi"
-    ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": [],
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "year": {
-    "value": 2010,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "journal": {
@@ -37,35 +32,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Rhodium-catalyzed asymmetric 1,6-addition of arylboronic acids to β-alkynyl acrylamides substituted with a silyl group on the alkyne terminus took place to give high yields of axially chiral allenylsilanes with 94-99% enantioselectivity, which was realized by use of a rhodium/chiral diene complex.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.94,
+    "value": "An eficient method for the synthesis of chiral tetrahydrocarbazoles (THCs) containing an allene moiety is disclosed, which was established by an enantioconvergent substitution reaction catalyzed by a chiral phosphoric acid. Racemic indolylmethanols bearing the THC motif reacted with Nmethylpyrrole in the presence of the SPINOL-derived chiral phosphoric acid to give the corresponding chiral THCs with allenylsilanes in good yields with high enantioselectivities.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "chiral Brønsted acid and base catalysts",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/28e-rhodium-catalyzed-enantioselective-1-6-addition-of-arylboronic-acids-to-enynamides-asymmetric-synthesis-of-axially/52adb6b2-b6db-4823-81ad-2d055bb78bee_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/28e-rhodium-catalyzed-enantioselective-1-6-addition-of-arylboronic-acids-to-enynamides-asymmetric-synthesis-of-axially.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/28e-rhodium-catalyzed-enantioselective-1-6-addition-of-arylboronic-acids-to-enynamides-asymmetric-synthesis-of-axially/52adb6b2-b6db-4823-81ad-2d055bb78bee_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/28e-rhodium-catalyzed-enantioselective-1-6-addition-of-arylboronic-acids-to-enynamides-asymmetric-synthesis-of-axially"
+    "pdf": "D:\\work\\data\\cl.210803.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\cl.210803.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\cl.210803\\dfc8aeb1-4153-4ee3-80e2-b2c50f5ec3b8_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\cl.210803"
   },
   "source_file": {
-    "pdf_name": "28e-rhodium-catalyzed-enantioselective-1-6-addition-of-arylboronic-acids-to-enynamides-asymmetric-synthesis-of-axially.pdf",
-    "relative_pdf_path": "28e-rhodium-catalyzed-enantioselective-1-6-addition-of-arylboronic-acids-to-enynamides-asymmetric-synthesis-of-axially.pdf",
-    "sha256": "fede72b06dfe71ff730794bbc21b14aed5236c5469b55dac677b9f6f626dec5e"
+    "pdf_name": "cl.210803.pdf",
+    "relative_pdf_path": "cl.210803.pdf",
+    "sha256": "89e9ca1aaaf6ece615f7e5082093e6ee3c36df9b037196c57c4141def58a05c1"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 42,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 65,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -74,29 +81,20 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [],
+    "missing_fields": [
+      "year"
+    ],
     "warnings": [
+      "empty_authors",
       "missing_journal",
       "missing_doi",
-      "Abstract text contains OCR artifacts; minor cleanup of corrupted spacing and punctuation was applied.",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.694,
+    "overall_confidence": 0.287,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "rhodium catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "chiral diene ligands",
-      "organometallic_partner": "boranes and boronates",
-      "product": "allenyl silanes",
-      "reaction_type": "conjugate 1,6-addition to enynes",
-      "substrate": "enynes"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.96,
-    "human_checked": false
   }
 }

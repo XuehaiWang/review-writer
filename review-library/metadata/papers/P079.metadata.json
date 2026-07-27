@@ -1,31 +1,35 @@
 {
   "paper_id": "P079",
-  "slug": "org.-lett.-2022-24-1496",
+  "slug": "9945c8e4-ca15-4553-a184-bd5530cda7af_origin",
   "title": {
-    "value": "Cooperative Palladium/Brønsted Acid Catalysis toward the Highly Enantioselective Allenylation of β‑Keto Esters",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Highly Enantioselective Synthesis of Chiral Allenes by Sequential Creation of Stereogenic Center and Chirality Transfer in a Single Pot Operation",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Henning J. Loui",
-      "Christoph Schneider"
+      "Mariappan Periasamy",
+      "Nalluri Sanjeevakumar",
+      "Manasi Dalai",
+      "Ramani Gurubrahamam",
+      "Polimera Obula Reddy Vol.",
+      "No. –"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2022,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2012,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "2022",
-    "source": "cite_this_line",
-    "confidence": 0.7,
+    "value": "Organic Letters",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
@@ -35,35 +39,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "We report the first enantioselective allenylation of Pd enolates enabled by cooperative Pd/Brønsted acid catalysis employing β-keto esters and propargyl alcohols. The enantioselectivity originates solely from an in-situ-generated chiral metal enolate in an open transition state with no additional binding of the propargyl component to the catalyst. Thus a broad substrate scope was established, furnishing hitherto inaccessible products in very good yields with excellent enantioselectivities (up to >99:1 e.r.).",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "Table 1. Reaction of 1-Decyne 6a and Benzaldehyde 7a with Chiral Amines 1 5 Promoted by Zinc Halides<sup>a</sup>",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic amines",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "prolinol-derived and other chiral amine catalysts",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/Org. Lett. 2022, 24, 1496.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/org.-lett.-2022-24-1496.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/org.-lett.-2022-24-1496/cd7a9c47-3057-4928-b630-8294ec24fb6a_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/org.-lett.-2022-24-1496"
+    "pdf": "D:\\work\\data\\9945c8e4-ca15-4553-a184-bd5530cda7af_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\9945c8e4-ca15-4553-a184-bd5530cda7af_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\9945c8e4-ca15-4553-a184-bd5530cda7af_origin\\97266b43-b493-4aba-a705-cb4e70c2dda7_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\9945c8e4-ca15-4553-a184-bd5530cda7af_origin"
   },
   "source_file": {
-    "pdf_name": "Org. Lett. 2022, 24, 1496.pdf",
-    "relative_pdf_path": "Org. Lett. 2022, 24, 1496.pdf",
-    "sha256": "b57d8b35c4842d887bbdb961985c97cfba992394e506a91cd68fbe502d7cccc6"
+    "pdf_name": "9945c8e4-ca15-4553-a184-bd5530cda7af_origin.pdf",
+    "relative_pdf_path": "9945c8e4-ca15-4553-a184-bd5530cda7af_origin.pdf",
+    "sha256": "8da38fc4e638604cd18ab49400a04e6448360bfed52f165b0c3d0cc7223e68b3"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:40Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 144,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 56,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -75,26 +91,12 @@
     "missing_fields": [],
     "warnings": [
       "missing_doi",
-      "The reaction proceeds via dehydration of propargylic alcohols, but the schema has no dedicated hydroxy leaving-group label, so leaving_group is set to 'not specified'.",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.796,
+    "overall_confidence": 0.593,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "palladium catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "chiral biaryl bisphosphine ligands",
-      "organometallic_partner": "not specified",
-      "product": "tetrasubstituted allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.92,
-    "human_checked": false
   }
 }

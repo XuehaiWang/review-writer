@@ -1,27 +1,28 @@
 {
   "paper_id": "P093",
-  "slug": "cl.210803",
+  "slug": "ae9ef878-d678-45cd-af42-227f44d0ca0b_origin",
   "title": {
-    "value": "Chiral Brønsted Acid Catalyzed Enantioconvergent Synthesis of Chiral Tetrahydrocarbazoles with Allenylsilanes from Racemic Indolylmethanols",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Palladium-Catalyzed Asymmetric Alkylation of 2,3-Alkadienyl Phosphates. Synthesis of Optically Active 2-(2,3-Alkadienyl)malonates",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Shigenobu Umemiya",
-      "Kong Lingqi",
-      "Yuno Eto",
-      "Masahiro Terada"
+      "Yasushi Imada",
+      "<sup>\u0001</sup> Katsuya Ueno",
+      "Koji Kutsuwa",
+      "Shun-Ichi Murahashi<sup>\u0001</sup> (Received November",
+      "; CL-) Asymmetric alkylation of"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2022,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2001,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
@@ -37,35 +38,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "An efficient method for the synthesis of chiral tetrahydrocarbazoles (THCs) containing an allene moiety is disclosed, which was established by an enantioconvergent substitution reaction catalyzed by a chiral phosphoric acid. Racemic indolylmethanols bearing the THC motif reacted with N-methylpyrrole in the presence of the SPINOL-derived chiral phosphoric acid to give the corresponding chiral THCs with allenylsilanes in good yields with high enantioselectivities.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.96,
+    "value": "Asymmetric alkylation of 2,3-alkadienyl phosphates with soft carbon nucleophiles proceeds eficiently in the presence of palladium complex catalyst bearing MeOBIPHEP or BINAP ligand to give optically active functionalized allenes up to 90% ee.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "not specified",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "chiral biaryl bisphosphine ligands",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/cl.210803.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/cl.210803.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/cl.210803/1259c657-efbb-4d97-9d9f-580e035880cf_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/cl.210803"
+    "pdf": "D:\\work\\data\\ae9ef878-d678-45cd-af42-227f44d0ca0b_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\ae9ef878-d678-45cd-af42-227f44d0ca0b_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\ae9ef878-d678-45cd-af42-227f44d0ca0b_origin\\c4bb6720-3bea-45ef-9e3c-b72fd628c8c1_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\ae9ef878-d678-45cd-af42-227f44d0ca0b_origin"
   },
   "source_file": {
-    "pdf_name": "cl.210803.pdf",
-    "relative_pdf_path": "cl.210803.pdf",
-    "sha256": "89e9ca1aaaf6ece615f7e5082093e6ee3c36df9b037196c57c4141def58a05c1"
+    "pdf_name": "ae9ef878-d678-45cd-af42-227f44d0ca0b_origin.pdf",
+    "relative_pdf_path": "ae9ef878-d678-45cd-af42-227f44d0ca0b_origin.pdf",
+    "sha256": "6c0043633d179883db396f930f9242b57bbfa1f9b92fcb86b4962feab2e51c72"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:40Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 52,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 61,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -76,30 +89,16 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "empty_authors",
-      "missing_year",
       "missing_journal",
       "missing_doi",
-      "low_confidence_abstract",
+      "structured_tag_not_specified_substrate",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.689,
+    "overall_confidence": 0.49,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "chiral phosphoric acid catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "chiral Brønsted acid and base catalysts",
-      "organometallic_partner": "not specified",
-      "product": "allenyl silanes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.89,
-    "human_checked": false
   }
 }

@@ -1,69 +1,83 @@
 {
   "paper_id": "P155",
-  "slug": "3i-angew-chem-int-ed-2012-yu-allenes-in-catalytic-asymmetric-synthesis-and-natural-product-syntheses",
+  "slug": "eur-j-org-chem-2025-liu-ligandfree-coppercatalyzed-allenylative-c-p-coupling-of-propargylic-acetates-with",
   "title": {
-    "value": "Allenes in Catalytic Asymmetric Synthesis and Natural Product Syntheses",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Ligand-Free Copper-Catalyzed Allenylative C─P Coupling of Propargylic Acetates with H-Phosphine Oxides",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Shichao Yu",
-      "Shengming Ma"
+      "Shaoqing Liu",
+      "Jiawei Liu",
+      "Li-Biao Han",
+      "Ruwei Shen"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.97,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2012,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2025,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "3i-Angew Chem Int Ed",
+    "value": "Eur J Org Chem",
     "source": "filename_prefix",
     "confidence": 0.55,
     "human_checked": false
   },
   "doi": {
-    "value": "10.1002/anie.201101460",
-    "source": "markdown_regex",
-    "confidence": 0.9,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "abstract": {
-    "value": "Allenes are the simplest class of cumulenes, with two contiguous C=C bonds, and show unique physical and chemical properties. These features make allenes particularly attractive in modern organic chemistry. In this Review, attention is paid to the advances made in catalytic asymmetric synthesis and natural product syntheses based on well-established reactions of allenes, such as propargylation, addition, cycloaddition, cycloisomerization, cyclization, etc., with or without catalysts. Their versatile reactivity, substituent-loading ability, axial to center chirality transfer, and controllable selectivity allow access to target molecules by unique and efficient approaches. The main topics in this Review are presented with selected examples from 2003 to 2011.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "The extra-ligand-free CuTC-catalyzed C─P cross coupling reaction of propargylic acetates with H-phosphine oxides is reported to afford allenylphosphine oxides. The reaction took place efficiently with diphenylphosphine oxide and electron-deficient",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "not specified",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "acetate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/3i-angew-chem-int-ed-2012-yu-allenes-in-catalytic-asymmetric-synthesis-and-natural-product-syntheses/6c830634-968b-4daf-8e15-0ed7563abce4_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/3i-angew-chem-int-ed-2012-yu-allenes-in-catalytic-asymmetric-synthesis-and-natural-product-syntheses.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/3i-angew-chem-int-ed-2012-yu-allenes-in-catalytic-asymmetric-synthesis-and-natural-product-syntheses/6c830634-968b-4daf-8e15-0ed7563abce4_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/3i-angew-chem-int-ed-2012-yu-allenes-in-catalytic-asymmetric-synthesis-and-natural-product-syntheses"
+    "pdf": "D:\\work\\data\\Eur J Org Chem - 2025 - Liu - Ligand‐Free Copper‐Catalyzed Allenylative C P Coupling of Propargylic Acetates with.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\eur-j-org-chem-2025-liu-ligandfree-coppercatalyzed-allenylative-c-p-coupling-of-propargylic-acetates-with.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\eur-j-org-chem-2025-liu-ligandfree-coppercatalyzed-allenylative-c-p-coupling-of-propargylic-acetates-with\\9845c832-475e-444e-b7fd-ed8e617e98ec_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\eur-j-org-chem-2025-liu-ligandfree-coppercatalyzed-allenylative-c-p-coupling-of-propargylic-acetates-with"
   },
   "source_file": {
-    "pdf_name": "3i-Angew Chem Int Ed - 2012 - Yu - Allenes in Catalytic Asymmetric Synthesis and Natural Product Syntheses.pdf",
-    "relative_pdf_path": "3i-Angew Chem Int Ed - 2012 - Yu - Allenes in Catalytic Asymmetric Synthesis and Natural Product Syntheses.pdf",
-    "sha256": "be65337bc7044c2189e4c6f53801c05fcab4e5f5181074f1e14e6e7cfd97a6aa"
+    "pdf_name": "Eur J Org Chem - 2025 - Liu - Ligand‐Free Copper‐Catalyzed Allenylative C P Coupling of Propargylic Acetates with.pdf",
+    "relative_pdf_path": "Eur J Org Chem - 2025 - Liu - Ligand‐Free Copper‐Catalyzed Allenylative C P Coupling of Propargylic Acetates with.pdf",
+    "sha256": "94c46f04f86e31a8d5cf3158578b6bdaa2833ec1551ba32a510c44854f56b103"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 632,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 110,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -74,34 +88,15 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "low_confidence_abstract",
-      "This is a broad review article, so structured tags are necessarily generalized rather than tied to a single transformation.",
-      "Author name 'Shengming Ma' was corrected from OCR-corrupted front-matter text.",
-      "Broad review scope spans multiple allene reaction classes, catalyst systems, and substrate families, so several classification fields are necessarily coarse.",
-      "No single specific listed substrate, catalyst, leaving group, or reaction type is uniquely supported by the title and abstract evidence.",
-      "structured_tag_not_specified_substrate",
-      "structured_tag_not_specified_catalyst_or_method",
+      "missing_doi",
+      "structured_tag_not_specified_product",
       "structured_tag_not_specified_organometallic_partner",
       "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group",
-      "structured_tag_not_specified_reaction_type"
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.866,
+    "overall_confidence": 0.569,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "not specified",
-      "document_scope": "comprehensive review",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allenes",
-      "reaction_type": "not specified",
-      "substrate": "not specified"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.67,
-    "human_checked": false
   }
 }

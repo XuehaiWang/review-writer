@@ -1,72 +1,78 @@
 {
   "paper_id": "P027",
-  "slug": "angew-chem-int-ed-2025-chen-reductive-crosscoupling-of-alcohol-derivatives-with-chlorosilanes-via-pyridinespromoted",
+  "slug": "24364ca0-44fd-4984-99e2-f498db216d0b_origin",
   "title": {
-    "value": "Reductive Cross-Coupling of Alcohol Derivatives with Chlorosilanes via Pyridines-Promoted Si─Cl Activation",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "24364ca0 44fd 4984 99e2 f498db216d0b_origin",
+    "source": "slug_fallback",
+    "confidence": 0.35,
     "human_checked": false
   },
   "authors": {
-    "value": [
-      "Changpeng Chen",
-      "Tenggang Jiao",
-      "Zhitao Zhang",
-      "Xiaoming Zeng",
-      "Xuefeng Cong"
-    ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": [],
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "year": {
-    "value": 2025,
-    "source": "llm_from_front_matter",
-    "confidence": 0.96,
+    "value": 1953,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Angew. Chem. Int. Ed.",
-    "source": "known_journal_hint",
-    "confidence": 0.72,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
-    "value": "10.1002/anie.202518431",
-    "source": "markdown_regex",
-    "confidence": 0.9,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "abstract": {
-    "value": "The development of efficient approaches mediated by silyl radicals for constructing C─Si bonds is of great interest and importance, yet methods to generate these intermediates from readily available chlorosilanes remain scarce. Herein, we report a new strategy for silyl radical generation via pyridines-promoted reductive Si─Cl activation of chlorosilanes and demonstrate its application in the reductive cross-coupling with a wide array of benzyl, allyl, and propargyl alcohol derivatives. This protocol offers an efficient and step-economical route for the synthesis of diverse benzyl-, allyl-, and allenylsilanes, featuring broad substrate scope and easy scalability. Mechanistic investigations suggest that the coupling reaction was initiated by the reductive Si─Cl activation of chlorosilanes with magnesium promoted by pyridine derivatives, which generates silyl radicals. These silyl radicals subsequently mediate the deoxygenation of alcohol derivatives to form carbon radicals, culminating in C─Si radical–radical cross-coupling.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "",
+    "source": "rule_not_found",
+    "confidence": 0.0,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic acetates",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "acetate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Alkynol/Angew Chem Int Ed - 2025 - Chen - Reductive Cross‐Coupling of Alcohol Derivatives with Chlorosilanes via Pyridines‐Promoted.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/angew-chem-int-ed-2025-chen-reductive-crosscoupling-of-alcohol-derivatives-with-chlorosilanes-via-pyridinespromoted.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/angew-chem-int-ed-2025-chen-reductive-crosscoupling-of-alcohol-derivatives-with-chlorosilanes-via-pyridinespromoted/2eb4b6ca-11a3-42fa-9cee-fbbc0742adbf_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/angew-chem-int-ed-2025-chen-reductive-crosscoupling-of-alcohol-derivatives-with-chlorosilanes-via-pyridinespromoted"
+    "pdf": "D:\\work\\data\\24364ca0-44fd-4984-99e2-f498db216d0b_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\24364ca0-44fd-4984-99e2-f498db216d0b_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\24364ca0-44fd-4984-99e2-f498db216d0b_origin\\dd15b1f3-80a6-4dd8-8b68-1eda26e7ef3c_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\24364ca0-44fd-4984-99e2-f498db216d0b_origin"
   },
   "source_file": {
-    "pdf_name": "Angew Chem Int Ed - 2025 - Chen - Reductive Cross‐Coupling of Alcohol Derivatives with Chlorosilanes via Pyridines‐Promoted.pdf",
-    "relative_pdf_path": "Angew Chem Int Ed - 2025 - Chen - Reductive Cross‐Coupling of Alcohol Derivatives with Chlorosilanes via Pyridines‐Promoted.pdf",
-    "sha256": "ce79681f3417b8b03f09b2ba37e26a2a82cd1e6cb0d79829ffa56791d7952753"
+    "pdf_name": "24364ca0-44fd-4984-99e2-f498db216d0b_origin.pdf",
+    "relative_pdf_path": "24364ca0-44fd-4984-99e2-f498db216d0b_origin.pdf",
+    "sha256": "052019b4068262b3e1ac5681f44f618e6118ab2891530413542041fe133e8caf"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:29Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 114,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 47,
+      "markdown_chars_used": 9648
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -75,26 +81,21 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [],
-    "warnings": [
-      "Paper scope is broader than allene chemistry; classification emphasizes the propargyl-ether-to-allenylsilane subset relevant to the allene library."
+    "missing_fields": [
+      "abstract"
     ],
-    "overall_confidence": 0.911,
+    "warnings": [
+      "empty_authors",
+      "missing_journal",
+      "missing_doi",
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_title",
+      "low_confidence_abstract"
+    ],
+    "overall_confidence": 0.211,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "main-group metal mediation",
-      "document_scope": "primary research article",
-      "leaving_group": "ether leaving groups",
-      "ligand_or_chiral_source": "non-phosphorus metal-coordination ligands",
-      "organometallic_partner": "chlorotrimethylsilane",
-      "product": "allenyl silanes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic ethers"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.85,
-    "human_checked": false
   }
 }

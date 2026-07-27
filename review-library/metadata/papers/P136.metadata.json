@@ -1,71 +1,87 @@
 {
   "paper_id": "P136",
-  "slug": "31b",
+  "slug": "d4cc04384g",
   "title": {
-    "value": "Enantioselective synthesis of allenic esters via an ylide route",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "d4cc04384g",
+    "source": "slug_fallback",
+    "confidence": 0.35,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Chuan-Ying Li",
-      "Xiu-Li Sun",
-      "Qing Jing",
-      "Yong Tang"
+      "Hiroto Mori",
+      "<sup></sup> Yusuke Ono",
+      "<sup></sup> Shota Nakagawa",
+      "<sup></sup> Sota Akima",
+      "<sup></sup> Miki Murakami",
+      "<sup></sup> Toshinobu Korenaga",
+      "<sup>cd</sup> Tadashi Nakaji-Hirabayashi",
+      "<sup>be</sup> Mayumi Kyogoku<sup></sup> and Yoshikazu Horino"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2006,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2024,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "Chemical Communications",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
-    "value": "10.1039/b603659g",
+    "value": "10.1039/d4cc04384g",
     "source": "markdown_regex",
     "confidence": 0.9,
     "human_checked": false
   },
   "abstract": {
-    "value": "Pseudo-C2-symmetric chiral phosphorus ylides have been designed and synthesized for the enantioselective preparation of allenic esters, and up to 92% ee has been achieved.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.95,
+    "value": "The reaction of c-stannylated propargyl esters in the presence of a cationic gold( ) catalyst afords vinylidenecyclopropane derivatives as a mixture of diastereomers. The cis-geometry of the alkenes is almost entirely retained in the product. DFT calculations suggest the involvement of the gold(I)-stabilized propargyl cation as a resonance form of gold(I)-coordinated allenylidene species.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "not specified",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/31b/2933853e-4c2b-4600-b437-412875e742d5_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/31b.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/31b/2933853e-4c2b-4600-b437-412875e742d5_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/31b"
+    "pdf": "D:\\work\\data\\d4cc04384g.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\d4cc04384g.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\d4cc04384g\\cac5f60d-c51b-47fb-b7bb-40552ce87c44_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\d4cc04384g"
   },
   "source_file": {
-    "pdf_name": "31b.pdf",
-    "relative_pdf_path": "31b.pdf",
-    "sha256": "90e7db2bd7a61929df94a0849156a11c04404fcfe5c657c5c9ea3d2f337e412a"
+    "pdf_name": "d4cc04384g.pdf",
+    "relative_pdf_path": "d4cc04384g.pdf",
+    "sha256": "97407c3a1d19a5178299d57759b12af68fb00913b1da27ed3901b809d61c0e8b"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 53,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 106,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -76,30 +92,15 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_journal",
-      "low_confidence_abstract",
-      "The central chiral phosphorus ylide/Wittig-type method is not represented in the allowed catalyst_or_method or ligand_or_chiral_source label sets, so those fields were assigned `not specified`.",
-      "structured_tag_not_specified_catalyst_or_method",
+      "structured_tag_not_specified_substrate",
       "structured_tag_not_specified_organometallic_partner",
       "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_title",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.821,
+    "overall_confidence": 0.646,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "not specified",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allenoates",
-      "reaction_type": "ketene olefination to allenecarboxylates",
-      "substrate": "ketenes"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.93,
-    "human_checked": false
   }
 }

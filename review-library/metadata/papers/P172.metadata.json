@@ -1,34 +1,38 @@
 {
   "paper_id": "P172",
-  "slug": "48b-cyclic-carbopalladation-a-versatile-synthetic-methodology-for-the-construction-of-cyclic-organic-compounds",
+  "slug": "j.-org.-chem.-2022-87-15061",
   "title": {
-    "value": "Cyclic Carbopalladation. A Versatile Synthetic Methodology for the Construction of Cyclic Organic Compounds",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Sulfonylation of Propargyl Alcohols with Sulfinamides for the Synthesis of Allenyl Sulfones",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Ei-ichi Negishi",
-      "Christophe Copéret",
-      "Shengming Ma",
-      "Show-Yee Liou",
-      "Fang Liu"
+      "Fei-Fei Zou",
+      "Zhen Luo",
+      "Yu-Ting Yang",
+      "Xin Zhuang",
+      "Chuan-Ming Hong",
+      "Zheng-Qiang Liu",
+      "Wan-Fang Li",
+      "Qing-Hua Li",
+      "Tang-Lin Liu Cite This: J. Org. Chem."
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1996,
-    "source": "llm_from_front_matter",
-    "confidence": 0.95,
+    "value": 2022,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "J. Org. Chem. 2022",
+    "source": "cite_this_line",
+    "confidence": 0.7,
     "human_checked": false
   },
   "doi": {
@@ -38,35 +42,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "",
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "A regio- and chemoselective sulfonylation of propargyl alcohols with sulfinamides in 1,1,1,3,3,3-hexafluoroisopropanol (HFIP) was developed. It provided straightforward and mild access to multi-substituted allenyl sulfones by using sulfinamides as the sulfonyl sources. This transformation was promoted by HFIP and did not require any catalysts or oxidants, which allowed for the successful conversion of various tertiary and secondary propargyl alcohols into allenyl sulfones in high yields.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "sulfinate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/48b-cyclic-carbopalladation-a-versatile-synthetic-methodology-for-the-construction-of-cyclic-organic-compounds/de81dd16-3427-4e98-bdb5-ac9077d4e29d_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/48b-cyclic-carbopalladation-a-versatile-synthetic-methodology-for-the-construction-of-cyclic-organic-compounds.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/48b-cyclic-carbopalladation-a-versatile-synthetic-methodology-for-the-construction-of-cyclic-organic-compounds/de81dd16-3427-4e98-bdb5-ac9077d4e29d_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/48b-cyclic-carbopalladation-a-versatile-synthetic-methodology-for-the-construction-of-cyclic-organic-compounds"
+    "pdf": "D:\\work\\data\\J. Org. Chem. 2022, 87, 15061.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\j.-org.-chem.-2022-87-15061.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\j.-org.-chem.-2022-87-15061\\eac09dab-daa5-42a8-977a-3908058a4253_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\j.-org.-chem.-2022-87-15061"
   },
   "source_file": {
-    "pdf_name": "48b-cyclic-carbopalladation-a-versatile-synthetic-methodology-for-the-construction-of-cyclic-organic-compounds.pdf",
-    "relative_pdf_path": "48b-cyclic-carbopalladation-a-versatile-synthetic-methodology-for-the-construction-of-cyclic-organic-compounds.pdf",
-    "sha256": "b18ccedf6b955a48027f783c6d7b7f199f30c187c18605e4de20d0a1865e38cb"
+    "pdf_name": "J. Org. Chem. 2022, 87, 15061.pdf",
+    "relative_pdf_path": "J. Org. Chem. 2022, 87, 15061.pdf",
+    "sha256": "5bbbc4db09fd92bf532158c1bbcff381b53fa14f2924e796df1fda6a9f86af05"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 421,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 194,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -75,40 +91,15 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [
-      "abstract"
-    ],
+    "missing_fields": [],
     "warnings": [
-      "missing_journal",
       "missing_doi",
-      "low_confidence_abstract",
-      "No abstract was visible in the supplied snippets; abstract left empty.",
-      "Publication year inferred as 1996 from page headers/copyright despite 1995 manuscript receipt dates.",
-      "Structured tags describe the overall review scope and may compress multiple reaction subclasses into single labels.",
-      "No abstract was found in the supplied front matter or extracted metadata.",
-      "This is a broad palladium carbopalladation review; allene-specific tags are assigned from the title, contents, and introductory text rather than from an allene-focused abstract.",
-      "The paper discusses allenes as part of a wider substrate class, so specific allene substrate, leaving-group, ligand, and organometallic-partner labels are not directly supported.",
-      "structured_tag_not_specified_substrate",
       "structured_tag_not_specified_organometallic_partner",
       "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope"
     ],
-    "overall_confidence": 0.53,
+    "overall_confidence": 0.613,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "palladium catalysis",
-      "document_scope": "comprehensive review",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allene-derived cyclic products",
-      "reaction_type": "intramolecular cyclization and skeletal reorganization of allenes",
-      "substrate": "not specified"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.79,
-    "human_checked": false
   }
 }

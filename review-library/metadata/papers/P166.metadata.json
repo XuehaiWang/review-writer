@@ -1,69 +1,87 @@
 {
   "paper_id": "P166",
-  "slug": "46-angew-chem-int-ed-2012-wan-enantioselective-decarboxylative-amination-synthesis-of-axially-chiral-allenyl-amines",
+  "slug": "hu-et-al-2024-nickel-catalyzed-photoredox-allenylation-of-alkyl-halides",
   "title": {
-    "value": "Enantioselective Decarboxylative Amination: Synthesis of Axially Chiral Allenyl Amines",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Nickel-Catalyzed Photoredox Allenylation of Alkyl Halides",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Baoqiang Wan",
-      "Shengming Ma"
+      "Tingjun Hu",
+      "<sup>§</sup> Camille Beluze",
+      "<sup>§</sup> Vincent Fagué",
+      "Oho Eliantine Kambire",
+      "Didier Bouyssi",
+      "Nuno Monteiro",
+      "Abderrahmane Amgoune Cite This: Org. Lett.",
+      "− Read Online Article Recommendations sı Supporting Information"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2013,
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": 2024,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "46-Angew Chem Int Ed",
-    "source": "filename_prefix",
-    "confidence": 0.55,
+    "value": "Org. Lett. 2024",
+    "source": "cite_this_line",
+    "confidence": 0.7,
     "human_checked": false
   },
   "doi": {
-    "value": "10.1002/anie.201204796",
-    "source": "markdown_regex",
-    "confidence": 0.9,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "abstract": {
-    "value": "Naturally occurring biomolecules that display chirality are enantiomerically enriched and different enantiomers show different biological activities. Thus, the development of new enantioselective approaches for chiral compounds are still of great interest. Allenes are now an important class of compounds and versatile intermediates in organic synthesis. Thus, efficient methodologies for synthesizing allenes is of current interest for organic chemists. The synthesis of axially chiral allenes are particularly important because of their efficient chirality transfer and their existence as core structures in natural products and pharmaceuticals. Typically, the synthesis of axially chiral allenes relies on the resolution of racemic allenic precursors and the chirality transfer of chiral propargyl alcohols or propargyl amine derivatives. However, most of these procedures require stoichiometric amounts of enantiomerically enriched chiral compounds, and are thus inefficient. Recently, asymmetric catalysis for the synthesis of chiral allenes has attracted much attention. Trost et al. and Imada et al. have independently reported the asymmetric synthesis of allenyl amines with 76–91% ee by using intermolecular reactions. Interestingly, in two reported examples, 95 or 97% of ee has been realized. Herein, we disclose a different protocol for the construction of axially chiral allenyl amines, bearing an extra hydroxy group or C=C bond, by the decarboxylative amination of allenyl N-tosylcarbamates; the products are obtained in 91–99% ee.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.86,
+    "value": "We report a dual Ni/photoredox-catalyzed cross-coupling method for propargyl carbonates and nonactivated alkyl bromides, facilitating the synthesis of a variety of substituted allenes under mild and practical conditions. Mechanistically, the reaction integrates Ni-catalyzed activation of the propargyl electrophile via ${ S _ { \\mathrm { N } } } ^ { 2 \\prime }$ oxidative addition at Ni(I) with silyl radicalinduced activation of the alkyl halide through halogen-atom transfer. This methodology provides a gentle approach for introducing allenyl groups into complex halogenated aliphatic molecules, ofering further opportunities for derivatization.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic carbonates",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/46-angew-chem-int-ed-2012-wan-enantioselective-decarboxylative-amination-synthesis-of-axially-chiral-allenyl-amines/d04d12cd-44b4-4523-abb0-00b24bf761dc_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/46-angew-chem-int-ed-2012-wan-enantioselective-decarboxylative-amination-synthesis-of-axially-chiral-allenyl-amines.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/46-angew-chem-int-ed-2012-wan-enantioselective-decarboxylative-amination-synthesis-of-axially-chiral-allenyl-amines/d04d12cd-44b4-4523-abb0-00b24bf761dc_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/46-angew-chem-int-ed-2012-wan-enantioselective-decarboxylative-amination-synthesis-of-axially-chiral-allenyl-amines"
+    "pdf": "D:\\work\\data\\hu-et-al-2024-nickel-catalyzed-photoredox-allenylation-of-alkyl-halides.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\hu-et-al-2024-nickel-catalyzed-photoredox-allenylation-of-alkyl-halides.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\hu-et-al-2024-nickel-catalyzed-photoredox-allenylation-of-alkyl-halides\\0132a42b-326c-4c8b-aa14-37bc504e2549_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\hu-et-al-2024-nickel-catalyzed-photoredox-allenylation-of-alkyl-halides"
   },
   "source_file": {
-    "pdf_name": "46-Angew Chem Int Ed - 2012 - Wan - Enantioselective Decarboxylative Amination  Synthesis of Axially Chiral Allenyl Amines.pdf",
-    "relative_pdf_path": "46-Angew Chem Int Ed - 2012 - Wan - Enantioselective Decarboxylative Amination  Synthesis of Axially Chiral Allenyl Amines.pdf",
-    "sha256": "33897f8659b0862c4c65b1981ae2cac60c52d5a84c96bdfd3bce111701988840"
+    "pdf_name": "hu-et-al-2024-nickel-catalyzed-photoredox-allenylation-of-alkyl-halides.pdf",
+    "relative_pdf_path": "hu-et-al-2024-nickel-catalyzed-photoredox-allenylation-of-alkyl-halides.pdf",
+    "sha256": "1f7dd3e1898d51c6e55de4e592292a3ad8ec9fbdc9e56d06bc09caaf8698e674"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 79,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 127,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -74,30 +92,13 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "low_confidence_abstract",
-      "No formal abstract was visible in the provided snippets; the abstract field uses the opening summary paragraph from the article.",
-      "Year evidence is split between 2012 (online publication/path hint) and 2013 (journal issue footer); using 2013 as the journal publication year.",
-      "No distinct abstract section is visible; the abstract field uses the opening summary paragraph from the first page.",
-      "The paper was published online in 2012, but the journal issue citation on the article front matter gives publication year 2013.",
-      "The substrate is described as N-tosylcarbamates/allenyl N-tosylcarbamates; it was mapped to the closest allowed substrate label, propargylic carbamates.",
-      "structured_tag_not_specified_organometallic_partner"
+      "missing_doi",
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.886,
+    "overall_confidence": 0.613,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "palladium catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "carbamate leaving groups",
-      "ligand_or_chiral_source": "chiral biaryl bisphosphine ligands",
-      "organometallic_partner": "not specified",
-      "product": "allenyl amines",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic carbamates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.93,
-    "human_checked": false
   }
 }

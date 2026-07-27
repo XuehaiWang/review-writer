@@ -1,34 +1,36 @@
 {
   "paper_id": "P170",
-  "slug": "47d-applications-of-4-4-me3si-2-binap-in-transition-metal-catalyzed-asymmetric-carbon-carbon-bond-forming-reactions",
+  "slug": "j.-am.-chem.-soc.-2023-145-4613",
   "title": {
-    "value": "Applications of 4,4′-(Me3Si)2-BINAP in Transition-Metal-Catalyzed Asymmetric Carbon-Carbon Bond-Forming Reactions",
-    "source": "llm_from_front_matter",
-    "confidence": 0.97,
+    "value": "Diverse Alkyl−Silyl Cross-Coupling via Homolysis of Unactivated \\mathsf { C } ( \\mathsf { s p } ^ { 3 } ) −O Bonds with the Cooperation of Gold Nanoparticles and Amphoteric Zirconium Oxides",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Masamichi Ogasawara",
-      "Helen L. Ngo",
-      "Takeshi Sakamoto",
-      "Tamotsu Takahashi",
-      "Wenbin Lin"
+      "Hiroki Miura",
+      "Masafumi Doi",
+      "Yuki Yasui",
+      "Yosuke Masaki",
+      "Hidenori Nishio",
+      "Tetsuya Shishido Cite This: J. Am. Chem. Soc.",
+      "− Read Online Article Recommendations sı Supporting Information"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2005,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2023,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Tetrahedron",
-    "source": "known_journal_hint",
-    "confidence": 0.72,
+    "value": "J. Am. Chem. Soc. 2023",
+    "source": "cite_this_line",
+    "confidence": 0.7,
     "human_checked": false
   },
   "doi": {
@@ -38,35 +40,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "A recently developed BINAP derivative with trimethylsilyl substituents on the 4- and 4′-positions of the binaphthyl skeleton, 2,2′-bis(diphenylphosphino)-4,4′-bis(trimethylsilyl)-1,1′-binaphthyl (tms-BINAP), was used in a variety of transition-metal-catalyzed asymmetric carbon-carbon bond-forming reactions. In π-allylpalladium-mediated reactions, tms-BINAP gave better enantioselectivity than the unsubstituted BINAP, and the origin of the improved enantioselectivity was gained from an X-ray structural study of [Pd(η3-C3H5)((R)-tms-BINAP)]ClO4.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "Since $\\mathrm { C } ( \\mathsf { s p } ^ { 3 } ) \\mathrm { - O }$ bonds are a ubiquitous chemical motif in both natural and artificial organic molecules, the universal transformation of $\\mathrm { C } ( \\mathsf { s p } ^ { 3 } ) \\mathrm { - O }$ bonds will be a key technology for achieving carbon neutrality. We report herein that gold nanoparticles supported on amphoteric metal oxides, namely, $\\mathrm { Z r O } _ { 2 },$ eficiently generated alkyl radicals via homolysis of unactivated $\\mathrm { C } ( \\mathrm { s p } ^ { 3 } ) \\mathrm { - \\dot { O } }$ bonds, which consequently promoted $\\mathrm { C } ( \\mathrm { s p } ^ { 3 } ) { \\mathrm { - } } \\mathrm { S i }$ bond formation to give diverse organosilicon compounds. A wide array of esters and ethers, which are either commercially available or easily synthesized from alcohols participated in the heterogeneous gold-catalyzed silylation by disilanes to give diverse alkyl-, allyl-, benzyl-, and allenyl silanes in high yields. In addition, this novel reaction technology for $\\mathrm { C } ( \\mathrm { s p } ^ { 3 } ) \\mathrm { - O }$ bond transformation could be applied to the upcycling of polyesters, i.e., the degradation of polyesters and the synthesis of organosilanes were realized concurrently by the unique catalysis of supported gold nanoparticles. Mechanistic studies corroborated the notion that the generation of alkyl radicals is involved in $\\mathrm { C } ( \\mathrm { s p } ^ { 3 } ) \\mathrm { - } \\mathrm { S i }$ coupling and the cooperation of gold and an acid−base pair on $\\mathrm { Z r O } _ { 2 }$ is responsible for the homolysis of stable $\\mathrm { C } ( \\mathsf { s p } ^ { 3 } ) \\bar { - } \\mathrm { O }$ bonds. The high reusability and air tolerance of the heterogeneous gold catalysts as well as a simple, scalable, and green reaction system enabled the practical synthesis of diverse organosilicon compounds.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "not specified",
+      "substrate": "not specified",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/47d-applications-of-4-4-me3si-2-binap-in-transition-metal-catalyzed-asymmetric-carbon-carbon-bond-forming-reactions/d0a7237e-dbea-4ca8-9384-21078651f4a7_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/47d-applications-of-4-4-me3si-2-binap-in-transition-metal-catalyzed-asymmetric-carbon-carbon-bond-forming-reactions.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/47d-applications-of-4-4-me3si-2-binap-in-transition-metal-catalyzed-asymmetric-carbon-carbon-bond-forming-reactions/d0a7237e-dbea-4ca8-9384-21078651f4a7_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/47d-applications-of-4-4-me3si-2-binap-in-transition-metal-catalyzed-asymmetric-carbon-carbon-bond-forming-reactions"
+    "pdf": "D:\\work\\data\\J. Am. Chem. Soc. 2023, 145, 4613.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\j.-am.-chem.-soc.-2023-145-4613.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\j.-am.-chem.-soc.-2023-145-4613\\0930563b-212f-4174-b7a2-e6068966f2f4_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\j.-am.-chem.-soc.-2023-145-4613"
   },
   "source_file": {
-    "pdf_name": "47d-applications-of-4-4-(me3si)2-binap-in-transition-metal-catalyzed-asymmetric-carbon-carbon-bond-forming-reactions.pdf",
-    "relative_pdf_path": "47d-applications-of-4-4-(me3si)2-binap-in-transition-metal-catalyzed-asymmetric-carbon-carbon-bond-forming-reactions.pdf",
-    "sha256": "b4f77f38212eef72e4afdf84cae8e374b52fa4668fcfba38497d8e74490b96de"
+    "pdf_name": "J. Am. Chem. Soc. 2023, 145, 4613.pdf",
+    "relative_pdf_path": "J. Am. Chem. Soc. 2023, 145, 4613.pdf",
+    "sha256": "0cc6af16519d3b69b3eaa298e1bb0348eee9e15155a834b3e8168f54e4f373b2"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 65,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 208,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -78,28 +92,15 @@
     "missing_fields": [],
     "warnings": [
       "missing_doi",
-      "low_confidence_abstract",
-      "Paper covers multiple reaction classes; structured tags summarize the dominant π-allylpalladium theme and the stated Rh exception.",
-      "Paper scope is broader than allene chemistry and includes several non-allene reactions; allene classification is based on the explicitly described Pd-catalyzed synthesis of axially chiral allenes from 2-bromo-1,3-dienes.",
-      "Substrate and leaving-group labels are mapped from 2-bromo-1,3-dienes to the closest allowed controlled-vocabulary options; exact diene substrate class is not listed in the schema.",
-      "structured_tag_not_specified_organometallic_partner"
+      "structured_tag_not_specified_product",
+      "structured_tag_not_specified_substrate",
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope"
     ],
-    "overall_confidence": 0.779,
+    "overall_confidence": 0.613,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "palladium catalysis",
-      "document_scope": "ligand-development study",
-      "leaving_group": "halide leaving groups",
-      "ligand_or_chiral_source": "chiral biaryl bisphosphine ligands",
-      "organometallic_partner": "not specified",
-      "product": "axially chiral allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic halides"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.8,
-    "human_checked": false
   }
 }

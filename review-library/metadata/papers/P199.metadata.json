@@ -1,31 +1,31 @@
 {
   "paper_id": "P199",
-  "slug": "8e",
+  "slug": "sutro-furstner-2024-total-synthesis-of-the-allenic-macrolide-archangiumide",
   "title": {
-    "value": "Highly Stereoselective Synthesis of Chiral Alkylallenes by Organocopper(I)-Induced Anti 1,3-Substitution of Chiral Propynyl Esters",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Total Synthesis of the Allenic Macrolide (+)-Archangiumide",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Cornelis J. Elsevier",
-      "Peter Vermeer"
+      "Jack L. Sutro and Alois Fürstner Cite This: J. Am. Chem. Soc.",
+      "− Read Online Article Recommendations Supporting Information"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1989,
-    "source": "llm_from_journal_header_and_front_matter",
-    "confidence": 0.98,
+    "value": 2024,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "J. Am. Chem. Soc. 2024",
+    "source": "cite_this_line",
+    "confidence": 0.7,
     "human_checked": false
   },
   "doi": {
@@ -35,35 +35,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "The synthesis of chiral 1,3-dialkylallenes R1CH=C=CHR2 of high enantiomeric purity, by applying homogeneous reactions between organocopper(I) reagents of the type [{R2CuX}MgX·LiX] and chiral propynyl methanesulfonates or sulfinates at low temperatures in THF, is reported. The reactions are generally fast; typically complete conversion is obtained within a few minutes at -60 °C. Overall, high anti stereoselectivity is observed. A plausible mechanism is put forward, and comparison is made with the stereochemistry of reactions of comparable substrates with d10 complexes, e.g. of Pd(0).",
-    "source": "llm_from_front_matter",
-    "confidence": 0.95,
+    "value": "Archangiumide is the first known macrolide natural product comprising an endocyclic allene. For the ring strain that this linear substructure might entail, it was planned to unveil the allene at a very late stage of the projected total synthesis; in actual fact, this was achieved as the last step of the longest linear sequence by using an otherwise globally deprotected substrate. This unconventional timing was made possible by a gold catalyzed rearrangement of a macrocyclic propargyl benzyl ether derivative that uses a −PMB group as latent hydride source to unveil the signature cycloallene; the protecting group therefore gains a strategic role beyond its mere safeguarding function. Although the gold catalyzed reaction per se is stereoablative, the macrocyclic frame of the target was found to impose high selectivity and a stereoconvergent character on the transformation. The required substrate was formed by ring closing alkyne metathesis (RCAM) with the aid of a new air-stable molybdenum alkylidyne catalyst.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "aldehydes",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/8e/f1eab78f-39fc-4350-9225-e9962078ad16_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/8e.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/8e/f1eab78f-39fc-4350-9225-e9962078ad16_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/8e"
+    "pdf": "D:\\work\\data\\sutro-fürstner-2024-total-synthesis-of-the-allenic-macrolide-(-)-archangiumide.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\sutro-furstner-2024-total-synthesis-of-the-allenic-macrolide-archangiumide.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\sutro-furstner-2024-total-synthesis-of-the-allenic-macrolide-archangiumide\\d6613566-54bf-4193-b633-c66502b968bf_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\sutro-furstner-2024-total-synthesis-of-the-allenic-macrolide-archangiumide"
   },
   "source_file": {
-    "pdf_name": "8e.pdf",
-    "relative_pdf_path": "8e.pdf",
-    "sha256": "9a73a0278d572445d1f79af7b87d2879aec0e451a0a3c6fd43ca39218db3fe0c"
+    "pdf_name": "sutro-fürstner-2024-total-synthesis-of-the-allenic-macrolide-(-)-archangiumide.pdf",
+    "relative_pdf_path": "sutro-fürstner-2024-total-synthesis-of-the-allenic-macrolide-(-)-archangiumide.pdf",
+    "sha256": "5f533786d14ac78770714220b8fe00263ce8e1fb39335b9f78c40c587e1b8871"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T20:56:27Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 108,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 143,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -74,33 +86,13 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_year",
-      "missing_journal",
       "missing_doi",
-      "low_confidence_abstract",
-      "Front-page text before the title appears to belong to a preceding article.",
-      "Initial rule-based author extraction included affiliations; corrected to named authors only.",
-      "Provided markdown/front blocks begin with unrelated text from a preceding article before the actual title page.",
-      "Product evidence also supports alkylallenes and 1,3-disubstituted allenes; the stereochemically explicit label was selected.",
-      "Leaving-group evidence includes both methanesulfonate/sulfonate and sulfinate substrates, but the schema permits only one leaving-group label.",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.674,
+    "overall_confidence": 0.613,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "copper catalysis",
-      "document_scope": "stereochemical study",
-      "leaving_group": "tosylate and sulfonate leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "Grignard reagents",
-      "product": "axially chiral allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic sulfinates and sulfonates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.81,
-    "human_checked": false
   }
 }

@@ -1,70 +1,87 @@
 {
   "paper_id": "P128",
-  "slug": "28d-rhodium-catalyzed-asymmetric-1-6-addition-of-aryltitanates-to-enynones-giving-axially-chiral-allenes",
+  "slug": "chinese-journal-of-chemistry-2025-zhang-organocatalytic-access-to-c1functionalized-indolizines-via-remote",
   "title": {
-    "value": "Rhodium-Catalyzed Asymmetric 1,6-Addition of Aryltitanates to Enynones Giving Axially Chiral Allenes",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Organocatalytic Access to C1-Functionalized Indolizines via Remote Stereocontrolled Construction of Axially Chiral Allenes",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Tamio Hayashi",
-      "Norihito Tokunaga",
-      "Kazuya Inoue"
+      "Xuan Zhang",
+      "<sup></sup> Xu-Hua Jiang",
+      "<sup></sup> Chun-Dong Huang",
+      "<sup></sup> Cheng Gao",
+      "<sup></sup> Shao-Fei Ni",
+      "<sup>",
+      "</sup> and Qi-Jian Ni<sup>",
+      "</sup>"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2004,
-    "source": "llm_from_front_matter",
-    "confidence": 0.97,
+    "value": 2025,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "Chinese Journal of Chemistry",
+    "source": "filename_prefix",
+    "confidence": 0.55,
     "human_checked": false
   },
   "doi": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "10.1002/cjoc.70188",
+    "source": "markdown_regex",
+    "confidence": 0.9,
     "human_checked": false
   },
   "abstract": {
-    "value": "The addition of aryltitanate reagents ArTi(OPr-i)4Li to 3-alkynyl-2-en-1-ones in the presence of chlorotrimethylsilane and a rhodium-(R)-segphos as a catalyst proceeded in a 1,6-fashion to give a high yield of axially chiral allenylalkenyl silyl enol ethers with up to 93% ee.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Asymmetric catalysis | Enantioselectivity | Organocatalysis | Chiral allenes | Indolizines | 1,8-Conjugate addition | Regioselectivity | Chiral phosphoric acid | Axial chirality",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "chiral Brønsted acid and base catalysts",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/28d-rhodium-catalyzed-asymmetric-1-6-addition-of-aryltitanates-to-enynones-giving-axially-chiral-allenes/5756273a-0815-4d9d-a845-d41c2882b1ff_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/28d-rhodium-catalyzed-asymmetric-1-6-addition-of-aryltitanates-to-enynones-giving-axially-chiral-allenes.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/28d-rhodium-catalyzed-asymmetric-1-6-addition-of-aryltitanates-to-enynones-giving-axially-chiral-allenes/5756273a-0815-4d9d-a845-d41c2882b1ff_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/28d-rhodium-catalyzed-asymmetric-1-6-addition-of-aryltitanates-to-enynones-giving-axially-chiral-allenes"
+    "pdf": "D:\\work\\data\\Chinese Journal of Chemistry - 2025 - Zhang - Organocatalytic Access to C1‐Functionalized Indolizines via Remote.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\chinese-journal-of-chemistry-2025-zhang-organocatalytic-access-to-c1functionalized-indolizines-via-remote.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\chinese-journal-of-chemistry-2025-zhang-organocatalytic-access-to-c1functionalized-indolizines-via-remote\\69ab5efb-283e-46ff-9c78-d45a413e0f78_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\chinese-journal-of-chemistry-2025-zhang-organocatalytic-access-to-c1functionalized-indolizines-via-remote"
   },
   "source_file": {
-    "pdf_name": "28d-rhodium-catalyzed-asymmetric-1-6-addition-of-aryltitanates-to-enynones-giving-axially-chiral-allenes.pdf",
-    "relative_pdf_path": "28d-rhodium-catalyzed-asymmetric-1-6-addition-of-aryltitanates-to-enynones-giving-axially-chiral-allenes.pdf",
-    "sha256": "0113134d14df0d2288e2d10bd5ce3ccad8af9701807a80d6ae983fadaeb34e22"
+    "pdf_name": "Chinese Journal of Chemistry - 2025 - Zhang - Organocatalytic Access to C1‐Functionalized Indolizines via Remote.pdf",
+    "relative_pdf_path": "Chinese Journal of Chemistry - 2025 - Zhang - Organocatalytic Access to C1‐Functionalized Indolizines via Remote.pdf",
+    "sha256": "725a73e679590e5fcd82e250411fbae19525bc9702422e56324a618889bb9ed2"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 56,
-      "markdown_chars_used": 10680
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 134,
+      "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -75,26 +92,13 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_journal",
-      "missing_doi",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
     "overall_confidence": 0.697,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "rhodium catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "chiral biaryl bisphosphine ligands",
-      "organometallic_partner": "aryltitanate reagents",
-      "product": "axially chiral allenes",
-      "reaction_type": "conjugate 1,6-addition to enynes",
-      "substrate": "enynes"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.94,
-    "human_checked": false
   }
 }

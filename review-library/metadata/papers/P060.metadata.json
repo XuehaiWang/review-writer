@@ -1,29 +1,27 @@
 {
   "paper_id": "P060",
-  "slug": "chem.-eur.-j.-2023-29-e202203130",
+  "slug": "6bce6227-6c89-4bed-aaa8-4c3084ba25c5_origin",
   "title": {
-    "value": "Iron-Catalyzed Borylation of Propargylic Acetates for the Synthesis of Multisubstituted Allenylboronates",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Phase-transfer-catalysed asymmetric synthesis of tetrasubstituted allenes",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Aitor Bermejo-López",
-      "Wei-Jun Kong",
-      "Pedro J. Tortajada",
-      "Daniels Posevins",
-      "Belén Martín-Matute",
-      "Jan-E. Bäckvall"
+      "Takuya Hashimoto",
+      "Kazuki Sakata",
+      "Fumiko Tamakuni",
+      "Mark J. Dutton and Keiji Maruoka"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2023,
-    "source": "llm_from_front_matter",
-    "confidence": 0.97,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "journal": {
@@ -39,35 +37,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "A novel iron-catalyzed borylation of propargylic acetates leading to allenylboronates has been developed. The method allows the preparation of a variety of di-, tri- and tetrasubstituted allenylboronates at room temperature with good functional group compatibility. Stereochemical studies show that an anti-SN2′ displacement of acetate by boron occurs; this also allows transfer of chirality to yield enantiomerically enriched allenylboronates. The synthetic utility of this protocol was further substantiated by transformations of the obtained allenylboronates including oxidation and propargylation.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Allenes are molecules based on three carbons connected by two cumulated carbon–carbon double bonds. Given thei axially chiral nature and unique reactivity, substituted allenes have a variety of applications in organic chemistry as key synthetic intermediates and directly as part of biologically active compounds. Although the demands for these motivated many endeavours to make axially chiral, substituted allenes by exercising asymmetric catalysis, the catalytic asymmetric synthesis of fully substituted ones (tetrasubstituted allenes) remained largely an unsolved issue. The fundamental obstacle to solving this conundrum is the lack of a simple synthetic transformation that provides tetrasubstituted allenes in the action of catalysis. We report herein a strategy to overcome this issue by the use of a phase-transfer-catalysed asymmetric functionalization of 1-alkylallene-1,3-dicarboxylates with N-arylsulfonyl imines and benzylic and allylic bromides.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/Chem. Eur. J. 2023, 29, e202203130.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/chem.-eur.-j.-2023-29-e202203130.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/chem.-eur.-j.-2023-29-e202203130/dad95547-a9da-4a7d-9953-f9adba78d6ef_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/chem.-eur.-j.-2023-29-e202203130"
+    "pdf": "D:\\work\\data\\6bce6227-6c89-4bed-aaa8-4c3084ba25c5_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\6bce6227-6c89-4bed-aaa8-4c3084ba25c5_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\6bce6227-6c89-4bed-aaa8-4c3084ba25c5_origin\\1df32d53-6e4c-4ccd-b5c3-b935d9ce342e_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\6bce6227-6c89-4bed-aaa8-4c3084ba25c5_origin"
   },
   "source_file": {
-    "pdf_name": "Chem. Eur. J. 2023, 29, e202203130.pdf",
-    "relative_pdf_path": "Chem. Eur. J. 2023, 29, e202203130.pdf",
-    "sha256": "1a8df6fe75c6b8dda62e1eb140bffe0c65de238088b53f4dfdfcee4a3dd8a122"
+    "pdf_name": "6bce6227-6c89-4bed-aaa8-4c3084ba25c5_origin.pdf",
+    "relative_pdf_path": "6bce6227-6c89-4bed-aaa8-4c3084ba25c5_origin.pdf",
+    "sha256": "20002b00ef4b2c8269ffff3718e19632474f9ab4ba48ae71867c1e4f4c47252c"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:39Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 103,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 100,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -76,28 +86,20 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [],
+    "missing_fields": [
+      "year"
+    ],
     "warnings": [
       "missing_journal",
       "missing_doi",
-      "Copyright notice shows 2022, while the journal issue footer indicates publication year 2023."
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.703,
+    "overall_confidence": 0.393,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "iron catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "acetate leaving groups",
-      "ligand_or_chiral_source": "non-phosphorus metal-coordination ligands",
-      "organometallic_partner": "boranes and boronates",
-      "product": "allenyl boranes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic acetates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.98,
-    "human_checked": false
   }
 }

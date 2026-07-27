@@ -1,34 +1,32 @@
 {
   "paper_id": "P015",
-  "slug": "kale-et-al-2024-ca-ii-catalyzed-cascade-reaction-of-tryptamines-with-propargylic-alcohols-temperature-driven-ring",
+  "slug": "14d81937-0c20-4d7f-9254-425ce9e853e7_origin",
   "title": {
-    "value": "Ca(II)-Catalyzed Cascade Reaction of Tryptamines with Propargylic Alcohols: Temperature-Driven Ring Opening and Closing via the Allene Migration Pathway for the Synthesis of Pyrrolo[1,2-a]indoles",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Enantioselective Enzymatic Desymmetrization of Prochiral Allenic Diols\\*\\*",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Ashok Kale",
-      "Su Jeong Kwon",
-      "Joohan Lee",
-      "Jae Kyun Lee",
-      "Kyeong Lee"
+      "Chicco Manzuna Sapu",
+      "Jan-E. B-ckvall",
+      "Jan Deska"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2024,
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "journal": {
-    "value": "Org. Lett. 2024",
-    "source": "cite_this_line",
-    "confidence": 0.7,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
@@ -38,35 +36,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "A temperature-dependent cascade of reactions between tryptamines and propargylic alcohols was developed to achieve selective formation of pyrroloindoline and pyrrolo[1,2-a]indole heterocycles by Ca(II) catalysis. The cascade consists of electrophilic addition of allene at the C3 carbon of indole followed by intramolecular cyclization at 60 °C to yield pyrroloindolines. Furthermore, simultaneous 1,2-allene migration and pyrrolidine ring opening were followed by intramolecular cyclization via C−N bond formation at reflux temperature to obtain pyrrolo[1,2-a]indole scaffolds. A wide range of substrates, a clean reaction profile, scalability, and good to excellent yields are the advantages of this protocol.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.96,
+    "value": "An alternative strategy to overcome yield limitations in enzyme-catalyzed transformations is to use prochiral substrates. Thus, by selective transformation of one out of two enantiotopic groups, elements of symmetry are eliminated and optically active products can be obtained in high yield.<sup>[10]</sup> Herein, we report on our investigations regarding a novel protocol for the lipase-catalyzed desymmetrization of prochiral allenic diols through selective transesterification,<sup>[11]</sup> which yields highly enantioenriched axially chiral monoesters (Scheme 1, bottom).",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "allenic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Progargylic/kale-et-al-2024-ca(ii)-catalyzed-cascade-reaction-of-tryptamines-with-propargylic-alcohols-temperature-driven-ring.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/kale-et-al-2024-ca-ii-catalyzed-cascade-reaction-of-tryptamines-with-propargylic-alcohols-temperature-driven-ring.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/kale-et-al-2024-ca-ii-catalyzed-cascade-reaction-of-tryptamines-with-propargylic-alcohols-temperature-driven-ring/3700740c-8327-4f09-ba23-ea7fc06693b6_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/kale-et-al-2024-ca-ii-catalyzed-cascade-reaction-of-tryptamines-with-propargylic-alcohols-temperature-driven-ring"
+    "pdf": "D:\\work\\data\\14d81937-0c20-4d7f-9254-425ce9e853e7_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\14d81937-0c20-4d7f-9254-425ce9e853e7_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\14d81937-0c20-4d7f-9254-425ce9e853e7_origin\\9fcfbdf0-1238-4604-8117-42257ae88557_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\14d81937-0c20-4d7f-9254-425ce9e853e7_origin"
   },
   "source_file": {
-    "pdf_name": "kale-et-al-2024-ca(ii)-catalyzed-cascade-reaction-of-tryptamines-with-propargylic-alcohols-temperature-driven-ring.pdf",
-    "relative_pdf_path": "kale-et-al-2024-ca(ii)-catalyzed-cascade-reaction-of-tryptamines-with-propargylic-alcohols-temperature-driven-ring.pdf",
-    "sha256": "57e4407b8f26d759a1663288615d05055e5686995f02de4854adaa85c9abc97a"
+    "pdf_name": "14d81937-0c20-4d7f-9254-425ce9e853e7_origin.pdf",
+    "relative_pdf_path": "14d81937-0c20-4d7f-9254-425ce9e853e7_origin.pdf",
+    "sha256": "2c483a06c5c0db884d72653cef59754374829c5949614c0ed3e39903fa88b84d"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-16T11:15:55Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 116,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 73,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -75,30 +85,20 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [],
+    "missing_fields": [
+      "year"
+    ],
     "warnings": [
+      "missing_journal",
       "missing_doi",
-      "Calcium catalysis was mapped to the broader allowed label 'main-group metal mediation' because no calcium-specific catalyst label is available.",
       "structured_tag_not_specified_organometallic_partner",
       "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.787,
+    "overall_confidence": 0.393,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "main-group metal mediation",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allene-derived cyclic products",
-      "reaction_type": "intramolecular cyclization and skeletal reorganization of allenes",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.89,
-    "human_checked": false
   }
 }

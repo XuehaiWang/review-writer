@@ -1,71 +1,90 @@
 {
   "paper_id": "P091",
-  "slug": "rsc-adv.-2023-13-3468",
+  "slug": "adv-synth-catal-2025-liang-organocatalytic-remotecontrolled-enantioselective-1-10additions-of-in-situ-generated",
   "title": {
-    "value": "Zinc-mediated carboxylations of allylic and propargylic halides in flow: synthesis of γ-lactones via subsequent bromolactonization",
-    "source": "llm_from_front_matter",
-    "confidence": 0.96,
+    "value": "Organocatalytic Remote-Controlled Enantioselective 1,10-Additions of In Situ Generated Alkynyl 2,40-Biphenyl Quinone Methides",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Patrick J. Sutter",
-      "Guowei Kang",
-      "Sreekumar Vellalath",
-      "Daniel Romo"
+      "Tian Liang",
+      "<sup></sup> Meiwen Liu",
+      "<sup></sup> Aman Ullah",
+      "<sup></sup> Zhibin Yue",
+      "<sup></sup> Yan Xia",
+      "<sup></sup> Fang Fang",
+      "<sup></sup> Pengfei Li",
+      "<sup>",
+      "</sup> Shao-Fei Ni",
+      "</sup> and Wenjun Li<sup>",
+      "</sup>"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2023,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2025,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "RSC Adv.",
-    "source": "cite_this_line",
-    "confidence": 0.7,
+    "value": "Adv Synth Catal",
+    "source": "filename_prefix",
+    "confidence": 0.55,
     "human_checked": false
   },
   "doi": {
-    "value": "10.1039/d2ra07715a",
+    "value": "10.1002/adsc.70091",
     "source": "markdown_regex",
     "confidence": 0.9,
     "human_checked": false
   },
   "abstract": {
-    "value": "Zinc-mediated carboxylation of allylic halides under flow conditions delivered β,γ-unsaturated carboxylic acids and subsequent bromolactonization provides a streamlined process for the synthesis of β-bromo-γ-lactones. The described process further demonstrates the utility of organozinc reagents prepared by passage of allylic halides through a metallic zinc column integrated into a flow process. Use of a tube-in-tube reactor for efficient CO2 introduction led to improvements in conversion compared to a batch process and improved overall yields of γ-lactones. The described flow process was also applied to propargylic bromides for the synthesis of allenic and propargylic acids.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.93,
+    "value": "The strategic incorporation of auxiliary groups has recently established α-functionalized alcohols as versatile electrophilic alkylation reagents, enabling remotely controlled conjugate additions. Strikingly, while quinone methide chemistry has been extensively developed, their extended analogues—featuring spatially separated carbonyl and methide units across biphenyl systems—remain unexplored. Building on the prior work with alkynyl 4,4 0-biphenyl quinone methides, an organocatalytic remotely controlled enantioselective 1,10-additions of in situ-generated alkynyl 2,40-biphenyl quinone methides from α-[4-(2- hydroxyphenyl)phenyl]propargyl alcohols with 3-arylindoles and indole-2-carboxylates is reported, affording a broad scope of enantioenriched 3H-pyrrolo[1,2-a]indoles and axially chiral tetrasubstituted allenes, respectively. Combined with control experiments, density functional theory calculations elucidate the reaction mechanism, revealing that the dehydration of α-functionalized alcohols to generate 2,4 0-biphenyl quinone methides constitutes the rate-limiting step, while enantioselectivity arises from the nucleophilic addition of alkynyl biphenyl quinone methides. Notably, beyond proving 2,40-biphenyl quinone methides as competent intermediates, this work breaks new ground by demonstrating their participation in previously unreported stereoselective 1,10-additions.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/RSC Adv., 2023, 13, 3468.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/rsc-adv.-2023-13-3468.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/rsc-adv.-2023-13-3468/02e6bd75-9f1b-4bc4-983f-322af6ea85f7_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/rsc-adv.-2023-13-3468"
+    "pdf": "D:\\work\\data\\Adv Synth Catal - 2025 - Liang - Organocatalytic Remote‐Controlled Enantioselective 1 10‐Additions of In Situ Generated.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\adv-synth-catal-2025-liang-organocatalytic-remotecontrolled-enantioselective-1-10additions-of-in-situ-generated.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\adv-synth-catal-2025-liang-organocatalytic-remotecontrolled-enantioselective-1-10additions-of-in-situ-generated\\fb2b1703-9fc3-4622-ac0d-d4682036bde6_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\adv-synth-catal-2025-liang-organocatalytic-remotecontrolled-enantioselective-1-10additions-of-in-situ-generated"
   },
   "source_file": {
-    "pdf_name": "RSC Adv., 2023, 13, 3468.pdf",
-    "relative_pdf_path": "RSC Adv., 2023, 13, 3468.pdf",
-    "sha256": "facdd1791ffd37e39f73cf8b70eb55e957923a55a84663ecf17f32b70f2b4350"
+    "pdf_name": "Adv Synth Catal - 2025 - Liang - Organocatalytic Remote‐Controlled Enantioselective 1 10‐Additions of In Situ Generated.pdf",
+    "relative_pdf_path": "Adv Synth Catal - 2025 - Liang - Organocatalytic Remote‐Controlled Enantioselective 1 10‐Additions of In Situ Generated.pdf",
+    "sha256": "8e90ad4422e153a6c406e2a9d4b4e193bb806ea1abba5d15a68b5c8e4636030a"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:40Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 121,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 146,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -76,29 +95,13 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "low_confidence_abstract",
-      "OCR in the supplied snippets dropped several Greek letters; β/γ notation was restored from context in the title and abstract.",
-      "Paper has mixed allylic/propargylic scope; allene-focused classification is based on the propargylic bromide to allenic acid portion of the study.",
-      "The reaction_type label is approximate because the paper describes CO2 carboxylation rather than a named allene-classification reaction category with an exact match.",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope"
     ],
-    "overall_confidence": 0.89,
+    "overall_confidence": 0.72,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "zinc catlysis",
-      "document_scope": "primary research article",
-      "leaving_group": "halide leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allenic carboxylic acids",
-      "reaction_type": "carbonylative synthesis of allenes and allenoates",
-      "substrate": "propargylic halides"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.76,
-    "human_checked": false
   }
 }

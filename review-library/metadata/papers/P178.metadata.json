@@ -1,25 +1,26 @@
 {
   "paper_id": "P178",
-  "slug": "4d-s-2007-965963",
+  "slug": "nature-communications-2022-13-3146",
   "title": {
-    "value": "Synthesizing Allenes Today (1982–2006)",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Enyne diketones as substrate in asymmetric Nazarov cyclization for construction of chiral allene cyclopentenones",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Kay M. Brummond",
-      "Jolie E. DeForrest"
+      "Shengbiao Tang <sup>✉</sup>",
+      "Peng Zhang<sup></sup>",
+      "Ying Shao<sup></sup> & Jiangtao Sun <sup>✉</sup>"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2007,
-    "source": "llm_from_front_matter",
-    "confidence": 0.95,
+    "value": 2022,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
@@ -29,41 +30,53 @@
     "human_checked": false
   },
   "doi": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "10.1038/s41467-022-30846-y",
+    "source": "markdown_regex",
+    "confidence": 0.9,
     "human_checked": false
   },
   "abstract": {
-    "value": "Allenes have allowed chemists to access a variety of structurally interesting and biologically active products. The emergence of these unique compounds in organic synthesis is a direct result of the discovery and development of efficient protocols for their preparation. Moreover, efficient syntheses of the allenyl functionality are important to the synthetic community and will be reported and discussed in this review.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "The Nazarov cyclization is one of the most powerful tools for the stereoselective synthesis of various cyclopentenone scaffolds. Therefore, developing the new classes substrate of Nazarov reaction is an important endeavor in synthetic chemistry. Herein, we report enyne diketones, enables diastereo- and enantioselective construction of chiral allene cyclopentenones in moderate to good yields with good enantioselectivities (up to 97% ee). Importantly, it is a typical example for asymmetric synthesis of cyclopentanones with allene moiety using Nazarov cyclisation. Mechanistic studies indicate that this metal-organo relay catalysis protocol involves a rhodium-catalyzed tandem oxonium ylide formation/[2,3]-sigmatropic rearrangement/reverse benzylic acid rearrangement, followed by organo-catalyzed asymmetric Nazarov cyclization/alkyne-to-allene isomerization to give the final chiral allene cyclopentenones.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "enynes",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "isomerization fragmentation and protonation to allenes",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/4d-s-2007-965963/637e3c63-e1f5-4c1e-9e51-0045f0e77102_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/4d-s-2007-965963.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/4d-s-2007-965963/637e3c63-e1f5-4c1e-9e51-0045f0e77102_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/4d-s-2007-965963"
+    "pdf": "D:\\work\\data\\NATURE COMMUNICATIONS  (2022) 13 3146.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\nature-communications-2022-13-3146.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\nature-communications-2022-13-3146\\a039d44a-eaa1-4e7d-8857-67ee7c9ce817_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\nature-communications-2022-13-3146"
   },
   "source_file": {
-    "pdf_name": "4d-s-2007-965963.pdf",
-    "relative_pdf_path": "4d-s-2007-965963.pdf",
-    "sha256": "23192d82eb871379a41660b7837420940d41a981f991f2462c8ad75af66b27f8"
+    "pdf_name": "NATURE COMMUNICATIONS  (2022) 13 3146.pdf",
+    "relative_pdf_path": "NATURE COMMUNICATIONS  (2022) 13 3146.pdf",
+    "sha256": "73f5e813a56084c57184d4441915afed8f5bae7eda26069a9a9ecdd63af75157"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 440,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 174,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -74,34 +87,13 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "empty_authors",
       "missing_journal",
-      "missing_doi",
-      "structured_tag_not_specified_selectivity_profile",
-      "This is a broad review covering multiple allene-synthesis methods, substrates, and catalyst systems; several strict classification fields are therefore set to `not specified` because no single listed label is uniquely supported as the main focus.",
-      "structured_tag_not_specified_substrate",
-      "structured_tag_not_specified_catalyst_or_method",
       "structured_tag_not_specified_organometallic_partner",
       "structured_tag_not_specified_ligand_or_chiral_source",
       "structured_tag_not_specified_leaving_group",
-      "structured_tag_not_specified_reaction_type"
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.684,
+    "overall_confidence": 0.619,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "not specified",
-      "document_scope": "comprehensive review",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allenes",
-      "reaction_type": "not specified",
-      "substrate": "not specified"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.88,
-    "human_checked": false
   }
 }

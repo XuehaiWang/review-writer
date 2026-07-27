@@ -105,7 +105,12 @@ def load_paper_to_callout(path: Path) -> dict[str, str]:
             if isinstance(item, dict)
         )
     elif isinstance(data, dict):
-        slots = data.items()
+        entries = data.get("entries") or data.get("citations")
+        slots = (
+            (item.get("callout", item.get("index", item.get("number"))), item)
+            for item in entries
+            if isinstance(item, dict)
+        ) if isinstance(entries, list) else data.items()
     else:
         slots = []
 
@@ -446,7 +451,8 @@ Write 2-3 paragraphs covering:
 
 ## Quality Requirements
 - **CRITICAL: Do NOT simply recapitulate or restate the body text.** The conclusion must ABSTRACT, COMPARE, and JUDGE at the review level — synthesize across papers, contrast competing approaches, and render a judgment. A paragraph that mostly repeats what the body already said is a failure.
-- **CRITICAL: Reference specific paper IDs from the available list below.** Only cite papers that actually appear in the review; do NOT invent paper IDs.
+- **CRITICAL: Record specific paper IDs only in `referenced_papers`.** Only use papers that actually appear in the review; do NOT invent paper IDs.
+- **CRITICAL: `content` is manuscript prose only.** Do not put `P001`-style IDs, parenthetical paper-ID lists, or numeric citations such as `[1]` anywhere in `content`. The workflow renders numeric callouts from `referenced_papers` after validation.
 - **CRITICAL: Use a diversity of papers.** Spread references across paragraphs; do not lean on a single paper.
 - Use review-level judgment language: "while...", "in contrast...", "collectively...", "however..."
 - Each paragraph should be 150-300 words.
@@ -484,7 +490,7 @@ Return the conclusion as a JSON object with this structure:
         {{
             "index": 1,
             "type": "conclusion|challenges|insights",
-            "content": "The paragraph text...",
+            "content": "Manuscript prose only, without paper IDs or numeric citations.",
             "referenced_papers": ["P001", "P003"]
         }}
     ],

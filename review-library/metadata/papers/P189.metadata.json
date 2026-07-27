@@ -1,70 +1,86 @@
 {
   "paper_id": "P189",
-  "slug": "51a-pd-catalyzed-asymmetric-hydride-elimination-en-route-to-chiral-allenes",
+  "slug": "org.-lett.-2023-25-2543",
   "title": {
-    "value": "Pd-Catalyzed Asymmetric β‑Hydride Elimination en Route to Chiral Allenes",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Modular and Selective Access to Functionalized Alkynes and Allenes via the Intermediacy of Propargylic Acetates",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Ian T. Crouch",
-      "Robynne K. Neff",
-      "Doug E. Frantz"
+      "Rundong Li",
+      "<sup></sup> Feng Ouyang",
+      "<sup></sup> Yike Bai",
+      "Ruiren Tang",
+      "Guipeng Yu",
+      "Baosheng Wei Cite This: Org. Lett.",
+      "− Read Online Article Recommendations sı Supporting Information"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2013,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2023,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "Org. Lett. 2023",
+    "source": "cite_this_line",
+    "confidence": 0.7,
     "human_checked": false
   },
   "doi": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "10.1021/acs.orglett.3c00750",
+    "source": "markdown_regex",
+    "confidence": 0.9,
     "human_checked": false
   },
   "abstract": {
-    "value": "We wish to report our preliminary results on the discovery and development of a catalytic, asymmetric β-hydride elimination from vinyl Pd(II)- complexes derived from enol triflates to access chiral allenes. To achieve this, we developed a class of chiral phosphite ligands that demonstrate high enantioselectivity, allow access of either allene enantiomer, and are readily synthesized. The methodology is demonstrated on over 20 substrates, and application to the formal asymmetric total synthesis of the natural product, (+)-epibatidine, is also provided.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "We report an eficient one-pot, two-step procedure for the modular synthesis of α-difunctionalized alkynes and trisubstituted allenes by sequential cross-coupling of benzal gem-diacetates with organozinc or -copper reagents in the absence of external transition metals. The intermediacy of propargylic acetates enables the divergent and selective synthesis of these valuable products. This method features its readily accessible substrates, relatively mild conditions, wide scope, and scalability in practical synthesis.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic acetates",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "acetate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/51a-pd-catalyzed-asymmetric-hydride-elimination-en-route-to-chiral-allenes/277ff172-fb9f-4a55-aee0-38da9d617d0e_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/51a-pd-catalyzed-asymmetric-hydride-elimination-en-route-to-chiral-allenes.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/51a-pd-catalyzed-asymmetric-hydride-elimination-en-route-to-chiral-allenes/277ff172-fb9f-4a55-aee0-38da9d617d0e_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/51a-pd-catalyzed-asymmetric-hydride-elimination-en-route-to-chiral-allenes"
+    "pdf": "D:\\work\\data\\Org. Lett. 2023, 25, 2543.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\org.-lett.-2023-25-2543.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\org.-lett.-2023-25-2543\\68336fcf-5595-45c5-abab-19b0b20494eb_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\org.-lett.-2023-25-2543"
   },
   "source_file": {
-    "pdf_name": "51a-pd-catalyzed-asymmetric-β-hydride-elimination-en-route-to-chiral-allenes.pdf",
-    "relative_pdf_path": "51a-pd-catalyzed-asymmetric-β-hydride-elimination-en-route-to-chiral-allenes.pdf",
-    "sha256": "aae0e1c8f7cc67d417cc28fd559e2c87b9ea990c78fc0785f7216e42f881e772"
+    "pdf_name": "Org. Lett. 2023, 25, 2543.pdf",
+    "relative_pdf_path": "Org. Lett. 2023, 25, 2543.pdf",
+    "sha256": "b636519a817869c95624bb9606bb2e9e16cbee23d4156a0b7a84a59456bc7d2e"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 71,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 124,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -75,30 +91,11 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_journal",
-      "missing_doi",
-      "Key substrate is enol triflates, which is not an available substrate label in the provided taxonomy; classified as 'not specified'.",
-      "Main transformation is asymmetric β-hydride elimination from enol triflates to allenes, which is not directly represented in the provided reaction-type labels; classified as 'not specified'.",
-      "structured_tag_not_specified_substrate",
       "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
       "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.694,
+    "overall_confidence": 0.741,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "palladium catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "tosylate and sulfonate leaving groups",
-      "ligand_or_chiral_source": "phosphite and phosphoramidite ligands",
-      "organometallic_partner": "not specified",
-      "product": "axially chiral allenes",
-      "reaction_type": "not specified",
-      "substrate": "not specified"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.9,
-    "human_checked": false
   }
 }

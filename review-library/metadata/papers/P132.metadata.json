@@ -1,24 +1,31 @@
 {
   "paper_id": "P132",
-  "slug": "2a",
+  "slug": "d0a7237e-dbea-4ca8-9384-21078651f4a7_origin",
   "title": {
-    "value": "A SUGGESTION LOOKING TO THE EXTENSION INTO SPACE OF THE STRUCTURAL FORMULAS AT PRESENT USED IN CHEMISTRY. AND A NOTE UPON THE RELATION BETWEEN THE OPTICAL ACTIVITY AND THE CHEMICAL CONSTITUTION OF ORGANIC COMPOUNDS.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Applications of 4,4′-(Me<sub>3</sub>Si)<sub>2</sub>-BINAP in Transition-Metal-Catalyzed Asymmetric Carbon−Carbon Bond-Forming Reactions",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Jacobus Henricus van 't Hoff"
+      "Masamichi Ogasawara",
+      "<sup>",
+      "</sup> Helen L. Ngo",
+      "<sup></sup> Takeshi Sakamoto",
+      "<sup></sup> Tamotsu Takahashi",
+      "</sup> and Wenbin Lin<sup>",
+      "</sup> Vol.",
+      "No."
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1874,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 1999,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
@@ -34,35 +41,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "I desire to introduce some remarks which may lead to discussion and hope to avail myself of the discussion to give my ideas more definiteness and breadth. Since the starting point for the following communication is found in the chemistry of the carbon compounds, I shall for the present do nothing more than state the points having reference to it.",
+    "value": "Design of chiral ligands is central to the development of transition-metal-catalyzed asymmetric reactions. Among numerous reported chiral ligands, 2,2′-bis(diphenylphosphino)-1,1′-binaphthyl (BINAP) is arguably the most successful one to date.<sup>1</sup> Since the first report of BINAP on the rhodium-catalyzed asymmetric hydrogenation in 1980,<sup>1a</sup> transition-metal/BINAP complexes have been used for a wide range of asymmetric reactions with good enantioselectivity, which include Rh-catalyzed isomerization of allylamines,<sup>2</sup> Ru-catalyzed hydrogenation of carbonyl groups,<sup>3</sup> Pdcatalyzed Heck reaction,<sup>4</sup> Rh-catalyzed conjugate addition of aryl- or alkenyl-nucleophiles,<sup>5</sup> Ir-catalyzed Pauson Khand type cyclization,<sup>6</sup> and Ag-catalyzed allylation of carbonyl groups.<sup>7</sup> Structural modification of BINAP has been extensively examined to improve enantioselectivity of the asymmetric reactions catalyzed by transition-metal/BINAP complexes. Notable examples include modifications of the phenyl groups of the PPh<sub>2</sub> moieties of BINAP<sup>8</sup> and the development of atropisomeric bisphosphines based on modified biaryls such as $\\mathrm { H } _ { 8 ^ { - } } \\mathrm { B I N A P }, { \\bar { 9 } }$ MeO-biphep,<sup>10</sup> biphemp,<sup>11</sup> and segphos.<sup>12</sup>",
     "source": "content_list_first_paragraph_after_authors",
     "confidence": 0.68,
     "human_checked": false
   },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "not specified",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "chiral biaryl bisphosphine ligands",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
+    "human_checked": false
+  },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/2a/01c4e8af-1ba1-4f3c-a076-9f15e9561583_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/2a.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/2a/01c4e8af-1ba1-4f3c-a076-9f15e9561583_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/2a"
+    "pdf": "D:\\work\\data\\d0a7237e-dbea-4ca8-9384-21078651f4a7_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\d0a7237e-dbea-4ca8-9384-21078651f4a7_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\d0a7237e-dbea-4ca8-9384-21078651f4a7_origin\\198a3f0a-e7a2-45d7-ba01-e856043c9b34_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\d0a7237e-dbea-4ca8-9384-21078651f4a7_origin"
   },
   "source_file": {
-    "pdf_name": "2a.pdf",
-    "relative_pdf_path": "2a.pdf",
-    "sha256": "335f3530a696231e5a7551b98b4cb3b973c68603821ad2b218753364872f1e77"
+    "pdf_name": "d0a7237e-dbea-4ca8-9384-21078651f4a7_origin.pdf",
+    "relative_pdf_path": "d0a7237e-dbea-4ca8-9384-21078651f4a7_origin.pdf",
+    "sha256": "4e425f164acf20575fb805865e15e56a368d6528189b47eb5346c2ba8ffc1d64"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 132,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 72,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -73,40 +92,14 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_year",
       "missing_doi",
-      "low_confidence_abstract",
-      "No formal abstract is visible in the provided snippets; the abstract field uses the opening paragraph.",
-      "This is a foundational stereochemistry/optical-activity paper rather than a reaction or catalysis study, so several structured tags are set to not specified.",
-      "structured_tag_not_specified_reaction_type",
-      "structured_tag_not_specified_activation_mode",
-      "structured_tag_not_specified_catalyst_system",
-      "structured_tag_not_specified_selectivity_profile",
-      "No evidence of allene chemistry is present in the supplied title/front-matter text, so all allene-specific reaction labels are set to not specified.",
-      "The paper does not appear to contain a modern formal abstract; the abstract field uses the opening paragraph as a proxy.",
-      "structured_tag_not_specified_product",
       "structured_tag_not_specified_substrate",
-      "structured_tag_not_specified_catalyst_or_method",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.757,
+    "overall_confidence": 0.593,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "not specified",
-      "document_scope": "historical paper",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "not specified",
-      "reaction_type": "not specified",
-      "substrate": "not specified"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.93,
-    "human_checked": false
   }
 }

@@ -1,73 +1,80 @@
 {
   "paper_id": "P081",
-  "slug": "org.-lett.-2022-24-3128",
+  "slug": "a-2534-9086",
   "title": {
-    "value": "Iridium(III)-Catalyzed Regioselective B(4)−H Allenylation of o-Carboranes by Ball Milling",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Preparation of 3-Allenyl-4-methylenetetrahydrofurans",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Seohyun Shin",
-      "Kyusik Um",
-      "Gi Hoon Ko",
-      "Gi Uk Han",
-      "Dongwook Kim",
-      "Phil Ho Lee"
+      "Yu-Min Wang Yi-Hung Liu Shiuh-Tzung Liu"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2022,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2025,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "2022",
-    "source": "cite_this_line",
-    "confidence": 0.7,
-    "human_checked": false
-  },
-  "doi": {
     "value": null,
     "source": "rule_not_found",
     "confidence": 0.0,
     "human_checked": false
   },
+  "doi": {
+    "value": "10.1055/a-2534-9086",
+    "source": "markdown_regex",
+    "confidence": 0.9,
+    "human_checked": false
+  },
   "abstract": {
-    "value": "We disclose an iridium(III)-catalyzed regioselective B(4)-H allenylation of o-carboranes from o-carborane acids and propargyl carbonates under ball-milling conditions. This study sheds light on a novel method to accomplish regioselective B(4)-allenylation of o-carborane that cannot be realized through conventional solution-based reactions. Control experiments, including solution, neat, microwave, and high-temperature reactions, reveal that the B(4)-H allenylation of o-carborane is unique for ball-milling conditions.",
-    "source": "llm_from_front_matter_and_abstract",
-    "confidence": 0.97,
+    "value": "Abstract A novel method for the preparation of 3-allenyl-4-methylenetetrahydrofurans via a Pd-catalyzed enyne cyclization reaction of propargyl 2-en-4-ynyl ethers under Suzuki coupling conditions is disclosed. The reaction proceeds via Pd activation of the terminal alkyne, cyclization, formation of the allenyl moiety, and reductive elimination, leading to the final product. This methodology offers several advantages, such as easy manipulation, mild reaction conditions, and easily accessible starting materials, providing a range of trisubstituted and 1,1- disubstituted allenyl(methylene)furan derivatives.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/Org. Lett. 2022, 24, 3128.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/org.-lett.-2022-24-3128.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/org.-lett.-2022-24-3128/bee67831-527e-42db-9b3e-ddb462cecc07_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/org.-lett.-2022-24-3128"
+    "pdf": "D:\\work\\data\\a-2534-9086.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\a-2534-9086.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\a-2534-9086\\1f139a6e-3c5a-4d70-b7f8-f1bc31345b1d_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\a-2534-9086"
   },
   "source_file": {
-    "pdf_name": "Org. Lett. 2022, 24, 3128.pdf",
-    "relative_pdf_path": "Org. Lett. 2022, 24, 3128.pdf",
-    "sha256": "3c9d98d4e9dd705f08813818fe65aa3e914836fef9c8bd88466ffb82a20e9f28"
+    "pdf_name": "a-2534-9086.pdf",
+    "relative_pdf_path": "a-2534-9086.pdf",
+    "sha256": "7ccccce04563d5c03082b777f9cf1118a07a0faecd8e4a6b779b8f12e5d0d412"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:40Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 151,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 304,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -78,27 +85,15 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_doi",
-      "Product family was mapped broadly to 'polysubstituted allenes' because the paper's carborane-specific allenyl products do not have a more exact allowed label.",
+      "missing_journal",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.79,
+    "overall_confidence": 0.619,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "iridium catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "carbonate leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "polysubstituted allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic carbonates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.89,
-    "human_checked": false
   }
 }

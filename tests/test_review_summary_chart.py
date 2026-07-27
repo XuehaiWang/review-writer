@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PIL import Image, ImageDraw
+
 
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[1]
@@ -22,6 +24,83 @@ SPEC.loader.exec_module(chart)
 
 
 class ResolveDraftTests(unittest.TestCase):
+    def test_full_mermaid_can_stop_at_primary_review_sections(self) -> None:
+        """Catches the full chart expanding every descendant into an unreadable banner."""
+        child = chart.ReviewSection("1.1 Detailed mechanism", 3, 2)
+        parent = chart.ReviewSection("1 Introduction", 2, 1, children=[child])
+
+        mermaid = chart.generate_full_mermaid(
+            [parent], "Review article", include_descendants=False
+        )
+
+        self.assertTrue(mermaid.startswith("graph LR"))
+        self.assertIn("1 Introduction", mermaid)
+        self.assertNotIn("Detailed mechanism", mermaid)
+
+    def test_full_chart_export_html_is_an_isolated_mermaid_render(self) -> None:
+        """Catches the PNG export drifting back to a separate Pillow card layout."""
+        mermaid = 'graph TD\n    N1["Review"] --> N2["Conclusion"]'
+
+        html = chart.generate_full_chart_export_html(mermaid)
+
+        self.assertIn("Full-Review Structure Chart", html)
+        self.assertIn(f'<div class="mermaid">{mermaid}</div>', html)
+        self.assertIn("mermaid.initialize", html)
+        self.assertEqual(html.count('class="mermaid"'), 1)
+
+    def test_full_chart_png_is_rendered_from_mermaid_source(self) -> None:
+        """Catches the full PNG using a separate hand-drawn card layout."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "full-review.png"
+
+            entry = chart.render_full_chart_png("graph TD\n    A --> B", image_path)
+
+            self.assertEqual(entry["path"], "full-review.png")
+            self.assertTrue(image_path.exists())
+            self.assertGreater(image_path.stat().st_size, 0)
+
+    def test_full_chart_export_has_room_for_tall_primary_section_layout(self) -> None:
+        """Catches an LR outline being clipped at the fixed browser viewport height."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "tall-review.png"
+            children = "\n".join(f'    R --> N{index}["Section {index}"]' for index in range(1, 13))
+
+            chart.render_full_chart_png(f"graph LR\n    R[\"Review\"]\n{children}", image_path)
+
+            with Image.open(image_path) as rendered:
+                self.assertGreater(rendered.height, 900)
+
+    def test_trim_browser_screenshot_removes_only_canvas_background(self) -> None:
+        """Catches a fixed browser viewport leaving a large blank image footer."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "full-review.png"
+            image = Image.new("RGB", (400, 300), "#f5f5f5")
+            ImageDraw.Draw(image).rectangle((20, 20, 380, 120), fill="white")
+            image.save(image_path)
+
+            chart.trim_browser_screenshot(image_path, "#f5f5f5")
+
+            with Image.open(image_path) as trimmed:
+                self.assertEqual(trimmed.size, (400, 145))
+
+    def test_plain_text_converts_common_latex_for_chart_labels(self) -> None:
+        """Catches raw TeX commands leaking into the raster chart labels."""
+        value = r"{\mathrm {CO}}_{2} and S_{N^{2}}\prime with \alpha-allenes"
+
+        self.assertEqual(chart.plain_chart_text(value), "CO2 and SN2' with alpha-allenes")
+
+    def test_plain_text_converts_spaced_mineru_latex(self) -> None:
+        """Catches MinerU's spaces around subscript and superscript delimiters."""
+        value = r"{\mathrm {CO}} _ {2} and S _ {N ^ {2}} \prime"
+
+        self.assertEqual(chart.plain_chart_text(value), "CO2 and SN2'")
+
+    def test_plain_text_compacts_spaces_inside_mineru_math_groups(self) -> None:
+        """Catches chart labels such as C O 2 instead of the readable CO2."""
+        value = r"{\mathrm { C O }} _ { 2 } and S _ { N ^ { 2 } }"
+
+        self.assertEqual(chart.plain_chart_text(value), "CO2 and SN2")
+
     def test_explicit_project_preview_wins_over_final_draft(self) -> None:
         """Catches fallback selection overriding a requested preview manuscript."""
         with tempfile.TemporaryDirectory() as temp_dir:

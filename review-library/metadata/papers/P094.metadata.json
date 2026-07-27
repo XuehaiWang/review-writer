@@ -1,35 +1,37 @@
 {
   "paper_id": "P094",
-  "slug": "s41467-022-34764-x-1",
+  "slug": "almendros-et-al-2024-indium-mediated-preparation-of-bis-hydroxyallenes-or-dihydroxyallenynes-and-further-gold",
   "title": {
-    "value": "Nickel-catalyzed switchable 1,3-dienylation and enantioselective allenylation of phosphine oxides",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Indium-Mediated Preparation of Bis(α-hydroxyallenes) or { \\pmb { \\alpha } }, { \\pmb { \\alpha } } ^ { \\prime } - Dihydroxyallenynes and Further Gold-Catalyzed Cyclizations",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Jiayin Zhang",
-      "Xihao Chang",
-      "Xianghong Xu",
-      "Hongyi Wang",
-      "Lingzi Peng",
-      "Chang Guo"
+      "Teresa Martínez del Campo",
+      "Daniel San Martín",
+      "Laura Gamarra",
+      "Eva Cerrón",
+      "Sara Cembellín",
+      "Hikaru Yanai",
+      "Pedro Almendros Cite This: J. Org. Chem.",
+      "− Read Online"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2022,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2024,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "J. Org. Chem. 2024",
+    "source": "cite_this_line",
+    "confidence": 0.7,
     "human_checked": false
   },
   "doi": {
@@ -39,35 +41,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "The development of general catalytic methods for the regio- and stereoselective construction of phosphoryl derivatives from identical substrates remains a formidable challenge in organic synthesis. Enabled by the newly developed BDPP-type ligands, we disclosed a nickel-catalyzed allenylation of phosphine oxides rationally and predictably, allowing the construction of versatile chiral allenylphosphoryl derivatives with high enantiopurity (up to 94% e.e.). Alternatively, using an achiral phosphine ligand dcypbz under acidic conditions, we achieved a regiochemical switch of the 1,3-dienylation to afford functionalized phosphinoyl 1,3-butadienes (up to 93% yield). The salient features of this method include switchable reactivity, broad substrate scope, readily available feedstock, single-step preparation, and high asymmetric induction.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "We present the regio- and diastereoselective Barbier-type allenylation reaction of glyoxals mediated by indium to furnish highly valuable syn-bis(α-hydroxyallenes) and syn-α,α′- dihydroxyallenynes. The gold-catalyzed controlled cyclization of these unsaturated diols enables the divergent preparation of three types of oxacycles.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/s41467-022-34764-x (1).pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/s41467-022-34764-x-1.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/s41467-022-34764-x-1/953f18db-eca3-413e-a0ea-b52e71662c20_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/s41467-022-34764-x-1"
+    "pdf": "D:\\work\\data\\almendros-et-al-2024-indium-mediated-preparation-of-bis(α-hydroxyallenes)-or-α-α-dihydroxyallenynes-and-further-gold.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\almendros-et-al-2024-indium-mediated-preparation-of-bis-hydroxyallenes-or-dihydroxyallenynes-and-further-gold.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\almendros-et-al-2024-indium-mediated-preparation-of-bis-hydroxyallenes-or-dihydroxyallenynes-and-further-gold\\8e6aaa63-0479-4c08-8562-cbda74acd781_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\almendros-et-al-2024-indium-mediated-preparation-of-bis-hydroxyallenes-or-dihydroxyallenynes-and-further-gold"
   },
   "source_file": {
-    "pdf_name": "s41467-022-34764-x (1).pdf",
-    "relative_pdf_path": "s41467-022-34764-x (1).pdf",
-    "sha256": "7832619a0fecf6807232d5253ab09378b4db49c99037f68e5457a9124ea5a5db"
+    "pdf_name": "almendros-et-al-2024-indium-mediated-preparation-of-bis(α-hydroxyallenes)-or-α-α-dihydroxyallenynes-and-further-gold.pdf",
+    "relative_pdf_path": "almendros-et-al-2024-indium-mediated-preparation-of-bis(α-hydroxyallenes)-or-α-α-dihydroxyallenynes-and-further-gold.pdf",
+    "sha256": "e037bcb2b87660faa9e061da5bc37cbfa0ce06fef1d069c584f1d5f1b75b5b39"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:40Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 171,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 119,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -78,31 +92,14 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_journal",
       "missing_doi",
-      "low_confidence_abstract",
-      "structured_tag_not_specified_limitation_or_scope_boundary",
-      "Paper also reports a switchable 1,3-dienylation pathway; allene-focused tags prioritize the enantioselective allenylation branch.",
-      "The ligand system is described as BDPP-type chiral bisphosphines and achiral dcypbz, but no exact allowed ligand label matches these classes, so ligand_or_chiral_source is set to not specified.",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope"
     ],
-    "overall_confidence": 0.684,
+    "overall_confidence": 0.613,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "nickel catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "carbonate leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "axially chiral allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic carbonates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.84,
-    "human_checked": false
   }
 }

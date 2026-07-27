@@ -168,6 +168,24 @@ body {
   background: rgba(255,255,255,.22);
   color: white;
 }
+.stage-execute {
+  align-self: center;
+  border: 1px solid #1d6655;
+  border-radius: 6px;
+  background: #1d6655;
+  color: #fffdf7;
+  padding: 8px 11px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.stage-execute:hover { background: #164d43; }
+.stage-execute:disabled { cursor: wait; opacity: .72; }
+.stage-execute-status { color: var(--rw-danger); font-size: 12px; line-height: 1.25; max-width: 230px; }
+.stage-execute-wrap { margin-top: 10px; }
+.stage-execute-wrap .stage-execute { width: 100%; }
+.stage-execute-wrap .stage-execute-status { margin-top: 7px; max-width: none; }
 
 .app {
   height: calc(100vh - 124px) !important;

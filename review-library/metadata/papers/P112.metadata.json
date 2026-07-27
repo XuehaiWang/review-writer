@@ -1,29 +1,36 @@
 {
   "paper_id": "P112",
-  "slug": "23a-an-efficient-synthesis-of-terminal-allenes-from-terminal-1-alkynes",
+  "slug": "be832ead-884f-4e44-bd79-dabea86316e6_origin",
   "title": {
-    "value": "An Efficient Synthesis of Terminal Allenes from Terminal 1-Alkynes",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Transition Metal Catalyzed Cycloisomerizations of 1,n-Allenynes and -Allenenes",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Jinqiang Kuang",
-      "Shengming Ma"
+      "Corinne Aubert",
+      "Louis Fensterbank",
+      "Pierre Garcia",
+      "Max Malacria",
+      "Antoine Simonneau Institut Parisien de Chimie Mol\u0001eculaire (UMR CNRS )",
+      "UPMC Univ Paris",
+      "place Jussieu",
+      "Paris",
+      "France"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2009,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 1955,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Green Chemistry",
+    "value": "Tetrahedron",
     "source": "known_journal_hint",
     "confidence": 0.72,
     "human_checked": false
@@ -35,35 +42,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "We have developed a modified method for the synthesis of terminal allenes from terminal 1-alkyne: The reaction of 1-alkynes with 1.8 equiv of Cy2NH and 2.5 equiv of paraformaldehyde mediated by CuI (0.5 equiv) in refluxing dioxane may produce terminal allenes in much higher yields than the previously reported protocol and many functional groups such as mesylate, hydroxyl group, ether, amide, etc. may be tolerated.",
-    "source": "llm_from_opening_summary",
-    "confidence": 0.95,
+    "value": "Allenes have always fascinated chemists because of the intriguing features of the cumulated diene function such as the higher reactivity compared to simple alkenes and the peculiar axial chirality of the elongated tetrahedron system. For a long period, allenes have been considered more as chemical curiosities and unstable unsaturated moieties than reliable partners which has retarded the development of their synthetic applications. However, allenes have become increasingly popular over the last twenty years. They have notably been involved in <sup>fi</sup>elds where their use was previously limited, such as radical chemistry or transition metal-mediated reactions. Since the 1980s monographs on allenes, a series of books and an important <sup>fl</sup>ow of reviews and current articles have appeared,<sup>1</sup> re<sup>fl</sup>ecting the growing interest about the synthesis and the reactivity of allenes. It is also worthy of note that at the same time, isolation and characterization of allenic natural compounds have been pursued and about 150 natural products containing an allenic or a cumulenic structure are now known,<sup>2</sup> which has provided incentive for their synthesis.<sup>3</sup>",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "enynes",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "application or total synthesis paper"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/23a-an-efficient-synthesis-of-terminal-allenes-from-terminal-1-alkynes/c3ccc195-f313-44b1-831c-e2f53c41fb09_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/23a-an-efficient-synthesis-of-terminal-allenes-from-terminal-1-alkynes.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/23a-an-efficient-synthesis-of-terminal-allenes-from-terminal-1-alkynes/c3ccc195-f313-44b1-831c-e2f53c41fb09_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/23a-an-efficient-synthesis-of-terminal-allenes-from-terminal-1-alkynes"
+    "pdf": "D:\\work\\data\\be832ead-884f-4e44-bd79-dabea86316e6_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\be832ead-884f-4e44-bd79-dabea86316e6_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\be832ead-884f-4e44-bd79-dabea86316e6_origin\\6b0cad77-9d0b-4f47-92cc-7a6a608a4be8_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\be832ead-884f-4e44-bd79-dabea86316e6_origin"
   },
   "source_file": {
-    "pdf_name": "23a-an-efficient-synthesis-of-terminal-allenes-from-terminal-1-alkynes.pdf",
-    "relative_pdf_path": "23a-an-efficient-synthesis-of-terminal-allenes-from-terminal-1-alkynes.pdf",
-    "sha256": "37e7107dfe1e9278fbbfe078e3892a0e758b22add615f96326fcc9a431622456"
+    "pdf_name": "be832ead-884f-4e44-bd79-dabea86316e6_origin.pdf",
+    "relative_pdf_path": "be832ead-884f-4e44-bd79-dabea86316e6_origin.pdf",
+    "sha256": "af21bc4adad275e2b5840dcfe866cae8976a6c991e7caef8e666a7554e52585c"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 50,
-      "markdown_chars_used": 13599
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 659,
+      "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -75,30 +94,13 @@
     "missing_fields": [],
     "warnings": [
       "missing_doi",
-      "low_confidence_abstract",
-      "No explicit abstract was visible; the opening summary sentence was used as the abstract surrogate.",
-      "Publication year taken from the journal footer and web publication date; the received date is 2008.",
-      "structured_tag_not_specified_selectivity_profile",
       "structured_tag_not_specified_organometallic_partner",
       "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.796,
+    "overall_confidence": 0.593,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "copper catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "terminal allenes",
-      "reaction_type": "propargylamine formation and allene rearrangement",
-      "substrate": "terminal alkynes"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.93,
-    "human_checked": false
   }
 }

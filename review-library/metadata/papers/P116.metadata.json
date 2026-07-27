@@ -1,71 +1,80 @@
 {
   "paper_id": "P116",
-  "slug": "24b",
+  "slug": "c3ccc195-f313-44b1-831c-e2f53c41fb09_origin",
   "title": {
-    "value": "Silver(I)-mediated highly enantioselective synthesis of axially chiral allenes under thermal and microwave-assisted conditions",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "An Efficient Synthesis of Terminal Allenes from Terminal 1-Alkynes",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Vanessa Kar-Yan Lo",
-      "Cong-Ying Zhou",
-      "Man-Kin Wong",
-      "Chi-Ming Che"
+      "Jinqiang Kuang and Shengming Ma"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2010,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2008,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Chemical Communications",
+    "value": "Green Chemistry",
     "source": "known_journal_hint",
     "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
-    "value": "10.1039/b914516h",
-    "source": "markdown_regex",
-    "confidence": 0.9,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "abstract": {
-    "value": "Silver(I) salts mediated stereospecific transformation of optically active propargylamines to axially chiral allenes with excellent enantioselectivities (17 examples with 96–99% ee; one substrate with 91% ee) without subsequent racemization.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.97,
+    "value": "We have developed a modified method for the synthesis of terminal allenes from terminal 1-alkyne: The reaction of 1-alkynes with 1.8 equiv of Cy<sub>2</sub>NH and 2.5 equiv of paraformaldehyde mediated by CuI (0.5 equiv) in refluxing dioxane may produce terminal allenes in much higher yields than the previously reported protocol and many functional groups such as mesylate, hydroxyl group, ether, amide, etc. may be tolerated.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic amines",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/24b/55dbeef8-8cea-4268-bc33-e4e15c7aed03_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/24b.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/24b/55dbeef8-8cea-4268-bc33-e4e15c7aed03_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/24b"
+    "pdf": "D:\\work\\data\\c3ccc195-f313-44b1-831c-e2f53c41fb09_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\c3ccc195-f313-44b1-831c-e2f53c41fb09_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\c3ccc195-f313-44b1-831c-e2f53c41fb09_origin\\08c96572-e95e-4bfd-b7eb-374bda796e07_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\c3ccc195-f313-44b1-831c-e2f53c41fb09_origin"
   },
   "source_file": {
-    "pdf_name": "24b.pdf",
-    "relative_pdf_path": "24b.pdf",
-    "sha256": "a1411c7169cb86a1f34af12c405fa097a029a1513e8eba51388f939094860ad9"
+    "pdf_name": "c3ccc195-f313-44b1-831c-e2f53c41fb09_origin.pdf",
+    "relative_pdf_path": "c3ccc195-f313-44b1-831c-e2f53c41fb09_origin.pdf",
+    "sha256": "4bfef8af234582ea1b51e9ae95eafad8d73e6b1c73e022ae50b0d27c6dfb77a5"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 67,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 54,
+      "markdown_chars_used": 13048
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -76,30 +85,15 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "empty_authors",
-      "low_confidence_title",
-      "low_confidence_abstract",
-      "No explicit abstract heading was provided; the abstract field uses the leading summary sentence after the DOI.",
+      "missing_doi",
       "structured_tag_not_specified_organometallic_partner",
       "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.93,
+    "overall_confidence": 0.593,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "silver catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "axially chiral allenes",
-      "reaction_type": "propargylamine formation and allene rearrangement",
-      "substrate": "propargylic amines"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.95,
-    "human_checked": false
   }
 }

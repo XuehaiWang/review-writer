@@ -1,24 +1,24 @@
 {
   "paper_id": "P148",
-  "slug": "3b-2005-some-typical-advances-in-the-synthetic-applications-of-allenes",
+  "slug": "e002ec64-a9f2-4422-802e-13c5acb8c442_origin",
   "title": {
-    "value": "Some Typical Advances in the Synthetic Applications of Allenes",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Direct and Stereospecific Synthesis of Allenes via Reduction of Propargylic Alcohols with Cp<sub>2</sub>Zr(H)Cl",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Shengming Ma"
+      "Xiaotao Pu and Joseph M. Ready"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2005,
-    "source": "llm_from_front_matter",
-    "confidence": 0.97,
+    "value": 2008,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
@@ -34,35 +34,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Allenes are a class of unique compounds with two \u0003c0-orbitals perpendicular to each other. The first synthesis can be traced back to 1887. They also exist in many natural products with interesting biological activities. The development of IR and Raman spectroscopy promoted the development of allene chemistry greatly. For a long period of time, allenes were considered as highly unstable, which retarded the development of the chemistry of allenes. However, during the last 8-10 years, allenes have been shown to demonstrate nice reactivities as well as selectivities, which can usually be tuned by the electronic or steric effects and the nature of the catalysts involved. This review will summarize some of the most typical advances on the chemistry of allenes, excluding those having been already included in the related reviews. In some cases, to keep the chemistry complete, there may be some minor overlap with the contents in published reviews or books.",
-    "source": "llm_from_introduction_paragraph",
-    "confidence": 0.72,
+    "value": "Hydrozirconation of alkynes with the Schwartz reagent [Cp<sub>2</sub>Zr(H)Cl] provides vinyl zirconium species in a stereospecific and regioselective fashion. These intermediates can react with a variety of electrophiles or participate in cross-coupling reactions.<sup>1</sup> The least hindered vinyl zirconium product usually dominates under either kinetically or thermodynamically controlled conditions.<sup>2</sup> However, we recently discovered that lithium alkoxides can alter the regioselectivity of these reactions. In particular, hydrozirconation of terminal propargylic alcohols $( \\bf 1, X = H )$ occurs with complete selectivity for the branched products in the presence of BuLi and ZnCl (Scheme $1, \\mathbf { 1 } \\to 2 ). ^ { 3, 4 }$ In contrast, when internal propargylic alcohols were treated under similar reaction conditions, substantial quantities of disubstituted allenes were isolated in addition to branched allylic alcohols (Scheme $1, 1 3 )$. Here we demonstrate that this direct synthesis of allenes is high-yielding, general, and stereospecific.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/3b-2005-some-typical-advances-in-the-synthetic-applications-of-allenes/7dee0a2c-24a5-4085-9e79-d48568cead60_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/3b-2005-some-typical-advances-in-the-synthetic-applications-of-allenes.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/3b-2005-some-typical-advances-in-the-synthetic-applications-of-allenes/7dee0a2c-24a5-4085-9e79-d48568cead60_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/3b-2005-some-typical-advances-in-the-synthetic-applications-of-allenes"
+    "pdf": "D:\\work\\data\\e002ec64-a9f2-4422-802e-13c5acb8c442_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\e002ec64-a9f2-4422-802e-13c5acb8c442_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\e002ec64-a9f2-4422-802e-13c5acb8c442_origin\\0976b23d-2484-4002-b61a-2619f6023811_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\e002ec64-a9f2-4422-802e-13c5acb8c442_origin"
   },
   "source_file": {
-    "pdf_name": "3b-2005-some-typical-advances-in-the-synthetic-applications-of-allenes.pdf",
-    "relative_pdf_path": "3b-2005-some-typical-advances-in-the-synthetic-applications-of-allenes.pdf",
-    "sha256": "4ff89ffc67ca800c2d4330571fdebc335e226df476f4cb2eca59422c453fa558"
+    "pdf_name": "e002ec64-a9f2-4422-802e-13c5acb8c442_origin.pdf",
+    "relative_pdf_path": "e002ec64-a9f2-4422-802e-13c5acb8c442_origin.pdf",
+    "sha256": "e86bb7cce9c557ca3e504904fda4d95fe1b3d90a690f72e2038fe719051d4d34"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 698,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 46,
+      "markdown_chars_used": 12824
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -75,33 +87,14 @@
     "warnings": [
       "missing_journal",
       "missing_doi",
-      "low_confidence_abstract",
-      "No explicit abstract was visible in the supplied snippets; the abstract field uses the introductory summary paragraph.",
-      "This paper is a broad review, so the structured tags are generalized across multiple allene reaction classes.",
-      "Abstract populated from the introduction because no separate abstract was evident in the supplied front matter.",
-      "Broad review scope limits specificity for several structured classification labels.",
-      "structured_tag_not_specified_substrate",
-      "structured_tag_not_specified_catalyst_or_method",
       "structured_tag_not_specified_organometallic_partner",
       "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.627,
+    "overall_confidence": 0.49,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "not specified",
-      "document_scope": "comprehensive review",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allene-derived cyclic products",
-      "reaction_type": "cycloaddition and annulation of allenes",
-      "substrate": "not specified"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.73,
-    "human_checked": false
   }
 }

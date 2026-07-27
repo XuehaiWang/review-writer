@@ -1,35 +1,33 @@
 {
   "paper_id": "P032",
-  "slug": "chinese-journal-of-chemistry-2025-zhang-organocatalytic-access-to-c1functionalized-indolizines-via-remote",
+  "slug": "2bb799bf-0cfd-4341-ad58-8dfb8ea9ab33_origin",
   "title": {
-    "value": "Organocatalytic Access to C1-Functionalized Indolizines via Remote Stereocontrolled Construction of Axially Chiral Allenes",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Gold-Catalyzed Highly Enantioselective Synthesis of Axially Chiral Allenes",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Xuan Zhang",
-      "Xu-Hua Jiang",
-      "Chun-Dong Huang",
-      "Cheng Gao",
-      "Shao-Fei Ni",
-      "Qi-Jian Ni"
+      "Vanessa Kar-Yan Lo",
+      "Man-Kin Wong",
+      "Chi-Ming Che Vol.",
+      "No."
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2025,
-    "source": "llm_from_citation_line",
-    "confidence": 0.99,
+    "value": 2008,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Chinese Journal of Chemistry",
-    "source": "filename_prefix",
-    "confidence": 0.55,
+    "value": "Organic Letters",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
@@ -39,35 +37,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "We present here a straightforward protocol for the enantioselective synthesis of axially chiral tetrasubstituted allenes enabled by chiral phosphoric acid (CPA)-catalyzed 1,8-addition of indolizines to propargylic alcohols. This strategy achieves enantioselective and regioselective C1-functionalization of indolizines under mild reaction conditions with low catalyst loading, broad functional group tolerance (35 examples), and excellent enantioselectivities (up to 96% ee). Moreover, the scale-up reaction and late-stage C3-functionalizations demonstrated its potential applications. DFT calculations were carried out to clarify the reaction mechanism and the origin of enantio- and regioselective control.",
-    "source": "llm_from_front_matter_comprehensive_summary",
-    "confidence": 0.95,
+    "value": "Axially chiral allenes are synthesized from chiral propargylamines catalyzed by KAuCl in high yields (up to 93% yield) and excellent enantioselectivities (up to 97% ee) in CH CN at 40 °C. The reaction has been applied to the synthesis of novel allene-modified artemisinin derivatives with the delicate endoperoxide moieties remaining intact. A tentative mechanism regarding gold(I)-catalyzed intramolecular hydride transfer was proposed on the basis of deuterium-labeling experiments and ESI-MS analysis of the reaction mixture. Allenes are important structural features of a variety of biologically active natural products.<sup>1</sup> The reactive orthogonal π-bonds of chiral allenes render them versatile synthons in synthetic organic chemistry.<sup>2</sup> The synthesis of chiral allenes mainly relies on S<sub>N</sub>2′ displacement reactions of chiral propargyl alcohols by organometallic reagents, 3,3-sigmatropic rearrangement of propargyl alcohol derivatives, and asymmetric catalysis with chiral metal complexes.<sup>3</sup> In view of the importance of axially chiral allenes, there has been a continuing interest in developing new methods for their synthesis under mild reaction conditions. Gold catalysis has emerged to be an active research area in recent years.<sup>4,5</sup> The success of propargyl alcohols in allene synthesis prompts us to consider using chiral propargylamines for the synthesis of axially chiral allenes.<sup>6</sup> Our previous study showed that chiral propargylamines could be readily prepared by gold(III) salen complex-catalyzed synthesis of chiral propargylamines via a three-component coupling reaction of aldehydes, amines, and alkynes.<sup>5b</sup> Here, we report the unprecedented synthesis of axially chiral allenes from chiral propargylamines catalyzed by gold salts with enantiomeric excess up to 97%.<sup>7,8</sup> At the outset, we examined the catalytic activity of gold-(III) salts toward the synthesis of chiral allene 2a from chiral propargylamine 1a (99% ee) (Table 1, entry 1; see also Table S1 in Supporting Information). The reaction was conducted by heating KAuCl (0.01 mmol) and 1a (0.1 mmol) in CH - CN (2 mL) at $4 0 ~ ^ { \\circ } \\mathrm { C }$ for 24 h. On the basis of <sup>1</sup>H NMR analysis of the crude reaction mixture, (R)-1,3-diphenylpropa-1,2-diene (2a) was formed and subsequently isolated in 82% yield based on 91% conversion. The ee value of 2a was 93%, revealing an almost complete center-to-axis chirality transfer from 1a to 2a. A slight increase in enantioselectivity (95% ee) could be achieved when the reaction was conducted at room temperature, or using water as the solvent. A combination of KAuCl<sub>4</sub>/AgOTf could also lead to 2a in 83% ee. [Au-(Salen)Cl] (H salen N,N-ethylenebis(salicylideneimine)) and [Au(TPP)Cl] (H<sub>2</sub>TPP meso-tetraphenylporphyrin) were found to be inactive under similar conditions. Poor substrate conversion was found for Pd(OAc) (8%), while no conversion was observed for TfOH, $Z \\mathrm { n C l } _ { 2 },$ CuBr, $\\mathrm { C u C l } _ { 2 },$ RuCl<sub>3</sub>, ${ \\mathrm { K } } _ { 2 } { \\mathrm { P t C l } } _ { 4 },$ or Yb(OTf)<sub>3</sub>. To examine the scope of this reaction, we extended our study to chiral propargylamines bearing various functionalities (Table 1). Propargylamines 1a g were converted into (R)-allenes 2a g in up to 93% yield and up to 93% ee (entries 1 7). It is worth noting that the aldehyde group of 1g, which is sensitive toward Grignard or cuprate reagents (a commonly used reagent in traditional allene synthesis from propargyl alcohols) remained intact (entry 7). Interestingly, 2b containing the $\\scriptstyle p \\to \\mathrm { C F } _ { 3 }$ functionality could be obtained from either propargylamine 1b or 1h in comparable ee values (93 vs 90%). Allenes 2i with a biphenyl group (83% ee), 2j with a cyclohexyl group (94% ee), and 2k with a cyclohexenyl group (50% ee) were generated from their corresponding chiral propargylamines 1i k (entries 9 11). (R,R)-Bis-allene 2l could be synthesized from dipropargylamine 1l in 97% ee (entry 12). (S)-2a in 88% ee was obtained from 1m (the enantiomer of 1a) (entry 13). Apart from prolinol-derived propargylamines, (methoxymethyl)- pyrrolidine-derived 1n was converted into allene 2a with 86% ee (entry 14). Achiral pyrrolidine-derived 1o and 1p were converted into racemic 2a (entries 15 16). These results showed that the reaction is especially useful for the synthesis of axially chiral 1,3-diarylallenes. The catalysis could be scaled up to the gram scale. Thus, in a one-pot reaction, 0.88 g of 1a ga e 0.34 g of 2a in 90% ee for a reaction time of 24 h (83% yield based on 70% con ersion). Table 1. KAuCl<sub>4</sub>-Catalyzed Synthesis of 2 from 1<sup>a</sup> The present protocol could be applied to the modification of natural products having allene functionality. As depicted in Scheme 1, allene-modified artemisinins 4a d, which have strong cytotoxicities $( \\mathrm { I C } _ { 5 0 } = 0. 6 4 \\mathrm { - } 4. 6 2 \\mu \\mathrm { M } )$ against a human hepatocellular carcinoma cell line (HepG2), were synthesized as single diastereomers.<sup>5b</sup> The delicate endoperoxide moieties remained intact during the course of reaction. Scheme 1. Synthesis of Allene-Modified Artemisinins 4a d A tentative mechanism is depicted in Scheme 2. The Au-(III) salt $\\mathrm { ( A u C l _ { 4 } ^ { - } ) }$ is first reduced to Au(I), possibly by an amine moiety of the substrate.<sup>9</sup> Au(I) generated in situ coordinates to the C C triple bond to give intermediate I. The reaction mixture of 1a and $\\mathrm { K A u C l } _ { 4 }$ (10 mol %) was analyzed by ESI-MS, after stirring at rt for 1 h in $\\mathrm { C H } _ { 3 } \\mathrm { C N }.$ A peak at m/z 488.2 attributable to the adduct of 1a and Au(I) was identified, supporting Au(I) possibly being a reactive species. Moreover, the same ee value of (R)-allene 2a (93%) was obtained from the reaction of 1a individually catalyzed by ${ \\mathrm { K A u C l } } _ { 4 }$ or AuCl, in the latter case, albeit 30% of AuCl was needed. The gold residue left after the reaction was suggested to be Au(0) by XRD analysis. Scheme 2. Tentative Mechanism for Gold-Catalyzed Synthesis of Axially Chiral Allenes To provide insight into the subsequent steps from I, deuterium-labeling experiments were performed. The findings are depicted in Scheme 3. Deuterium-labeled 5a (84% D incorporation) was treated with ${ \\mathrm { K A u C l } } _ { 4 }$ in $\\mathrm { C D } _ { 3 } \\mathrm { C N }$ under ${ \\bf N } _ { 2 }$ at $4 0 ~ ^ { \\circ } \\mathrm { C }$ for 24 h. By <sup>1</sup>H NMR analysis, 82% D incorporation in 6a was obtained with 58% isolated yield (eq 1). Yet no deuterium incorporation was detected in the reaction of 5b (eq 2). As no crossover of deuterium with the allenes was observed by GC MS analysis of the reaction mixture using a 1:1 ratio of 5a and 1f (eq 3), the proposed hydride transfer from I to II could occur intramolecularly,<sup>10</sup> although we cannot exclude the possibility of transition from intermediate I to II, involving the formation of alkylideneaziridine followed by a 1,4-hydrogen migration.<sup>11</sup> Scheme 3. Deuterium-Labeling Experiments To conclude, we have developed the first gold-catalyzed synthesis of axially chiral allenes from chiral propargylamines, with enantiomeric excess up to 97%. Acknowledgment. We are thankful for the financial support of The University of Hong Kong (University Development Fund), Hong Kong Research Grant Council (HKU 7052/07P), and the Areas of Excellence Scheme established under the University Grants Committee of the Hong Kong Special Administrative Region, China (AoE/P-10/01). We thank the reviewers for their insightful comments and suggestions on this work, particularly on the mechanistic studies. Supporting Information Available: Experimental procedures, compound characterization data, cytotoxicity studies of artemisinin derivatives, and supports for mechanistic studies. This material is available free of charge via the Internet at http://pubs.acs.org.",
+    "source": "content_list_abstract_region",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "non-phosphorus metal-coordination ligands",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Alkynol/Chinese Journal of Chemistry - 2025 - Zhang - Organocatalytic Access to C1‐Functionalized Indolizines via Remote.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/chinese-journal-of-chemistry-2025-zhang-organocatalytic-access-to-c1functionalized-indolizines-via-remote.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/chinese-journal-of-chemistry-2025-zhang-organocatalytic-access-to-c1functionalized-indolizines-via-remote/0800d675-5c7d-4c42-99c2-312596e40479_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/chinese-journal-of-chemistry-2025-zhang-organocatalytic-access-to-c1functionalized-indolizines-via-remote"
+    "pdf": "D:\\work\\data\\2bb799bf-0cfd-4341-ad58-8dfb8ea9ab33_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\2bb799bf-0cfd-4341-ad58-8dfb8ea9ab33_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\2bb799bf-0cfd-4341-ad58-8dfb8ea9ab33_origin\\b72f6fd0-e93b-4d0e-9f56-e56bb4b938a9_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\2bb799bf-0cfd-4341-ad58-8dfb8ea9ab33_origin"
   },
   "source_file": {
-    "pdf_name": "Chinese Journal of Chemistry - 2025 - Zhang - Organocatalytic Access to C1‐Functionalized Indolizines via Remote.pdf",
-    "relative_pdf_path": "Chinese Journal of Chemistry - 2025 - Zhang - Organocatalytic Access to C1‐Functionalized Indolizines via Remote.pdf",
-    "sha256": "725a73e679590e5fcd82e250411fbae19525bc9702422e56324a618889bb9ed2"
+    "pdf_name": "2bb799bf-0cfd-4341-ad58-8dfb8ea9ab33_origin.pdf",
+    "relative_pdf_path": "2bb799bf-0cfd-4341-ad58-8dfb8ea9ab33_origin.pdf",
+    "sha256": "0d981b253c676e6cd985886efe79b1a90c8c4a66b4ceb1f57865032b5fb5db25"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:29Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 124,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 47,
+      "markdown_chars_used": 9844
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -79,29 +89,11 @@
     "missing_fields": [],
     "warnings": [
       "missing_doi",
-      "low_confidence_abstract",
-      "No explicit abstract was provided in the snippets; the Comprehensive Summary paragraph was used as an abstract surrogate.",
-      "Reaction type was mapped to the closest available taxonomy label; the paper specifically describes a CPA-catalyzed 1,8-addition of indolizines to propargylic alcohols via in situ generated propargylic para-quinone methides.",
-      "The paper reports axially chiral tetrasubstituted allenes; the single allowed product label selected emphasizes axial chirality rather than substitution pattern.",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.763,
+    "overall_confidence": 0.616,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "chiral phosphoric acid catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "chiral Brønsted acid and base catalysts",
-      "organometallic_partner": "not specified",
-      "product": "axially chiral allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.87,
-    "human_checked": false
   }
 }

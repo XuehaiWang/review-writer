@@ -1,71 +1,82 @@
 {
   "paper_id": "P052",
-  "slug": "angew.-chem.-int.-ed.-2022-61-e202117114",
+  "slug": "5756273a-0815-4d9d-a845-d41c2882b1ff_origin",
   "title": {
-    "value": "Catalytic Enantioconvergent Allenylation of Aldehydes with Propargyl Halides",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Rhodium-Catalyzed Asymmetric 1,6-Addition of Aryltitanates to Enynones Giving Axially Chiral Allenes",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Feng-Hua Zhang",
-      "Xiaochong Guo",
-      "Xianrong Zeng",
-      "Zhaobin Wang"
+      "Tamio Hayashi",
+      "Norihito Tokunaga",
+      "Kazuya Inoue"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2022,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2003,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Angew. Chem. Int. Ed.",
+    "value": "Organic Letters",
     "source": "known_journal_hint",
     "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
-    "value": "10.1002/anie.202117114",
-    "source": "markdown_regex",
-    "confidence": 0.9,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "abstract": {
-    "value": "α-Allenol is a versatile synthon in organic synthesis. The catalytic asymmetric synthesis of α-allenols from readily available starting materials remains a prominent challenge, especially when simultaneous control over axial and central chirality is required. Herein, we describe the Cr-catalyzed enantioconvergent allenylation of aldehydes with racemic propargyl halides to rapidly access a wide range of chiral α-allenols with adjacent axial and central chiralities. This method features excellent regio-, diastereo- and enantioselectivity control with broad substrate scope, and provides facile access to all four stereoisomers when allied with a Mitsunobu reaction. Preliminary mechanistic studies support radical-based reaction pathways. The synthetic utility is demonstrated by the application in late-stage functionalization and the formal total synthesis of (+)-varitriol.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "Enantiomerically enriched allenes whose chirality is due to their allene axis are known to be useful as chiral building blocks in synthetic organic chemistry.<sup>1</sup> Although growing attention has been paid to their asymmetric synthesis,<sup>2</sup> synthesis by means of asymmetric catalysis has not been well developed. To the best of our knowledge, there have been reported only two types of catalytic methods: (1) palladiumcatalyzed asymmetric hydroboration<sup>3</sup> and hydrosilylation<sup>4</sup> of but-1-en-3-ynes and rhodium- or nickel-catalyzed asymmetric double hydrosilylation of butadiynes<sup>5</sup> and (2) palladiumcatalyzed asymmetric substitution of 2-bromobuta-1,3-dienes and allenylmethyl phosphonates.<sup>6</sup> One of the reactions, presumably applicable to the catalytic asymmetric synthesis of axially chiral allenes, is the 1,6-addition of organometallic reagents to 3-alkynyl-2-en-1-ones, which has been reported by Hulce<sup>7</sup> and Krause<sup>8</sup> to proceed by means of organocopper reagents; however, its catalytic asymmetric version has not been reported. Here we wish to report that the catalytic asymmetric 1,6-addition giving axially chiral allenes was realized for the first time by rhodium-catalyzed addition of aryltitanate reagents in the presence of chlorotrimethylsilane.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "ketones",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "organolithium reagents",
+      "ligand_or_chiral_source": "chiral biaryl bisphosphine ligands",
+      "leaving_group": "ether leaving groups",
+      "reaction_type": "conjugate 1,6-addition to enynes",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/Angew. Chem. Int. Ed. 2022, 61, e202117114.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/angew.-chem.-int.-ed.-2022-61-e202117114.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/angew.-chem.-int.-ed.-2022-61-e202117114/e4f0b185-8084-4080-bb77-26527f4e5f10_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/angew.-chem.-int.-ed.-2022-61-e202117114"
+    "pdf": "D:\\work\\data\\5756273a-0815-4d9d-a845-d41c2882b1ff_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\5756273a-0815-4d9d-a845-d41c2882b1ff_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\5756273a-0815-4d9d-a845-d41c2882b1ff_origin\\7e180160-6267-4e6e-9195-d2b19df99f76_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\5756273a-0815-4d9d-a845-d41c2882b1ff_origin"
   },
   "source_file": {
-    "pdf_name": "Angew. Chem. Int. Ed. 2022, 61, e202117114.pdf",
-    "relative_pdf_path": "Angew. Chem. Int. Ed. 2022, 61, e202117114.pdf",
-    "sha256": "d2dde064952aea818d9a720cc4645a8f2899dfe57c57cfd3310ee14cfb17decc"
+    "pdf_name": "5756273a-0815-4d9d-a845-d41c2882b1ff_origin.pdf",
+    "relative_pdf_path": "5756273a-0815-4d9d-a845-d41c2882b1ff_origin.pdf",
+    "sha256": "097bf10e607281cae3565b1bd8ed4696ee36db0aa71dca9fe974511e0be89108"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:39Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 141,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 51,
+      "markdown_chars_used": 9991
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -76,27 +87,10 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "Chromium catalysis is central to the paper, but no chromium-specific label is available in the provided catalyst_or_method list, so catalyst_or_method was set to 'not specified'.",
-      "Both aldehydes and propargylic halides are key reaction partners; substrate was assigned to 'propargylic halides' because they are the direct allene precursor family.",
-      "structured_tag_not_specified_catalyst_or_method",
-      "structured_tag_not_specified_organometallic_partner"
+      "missing_doi",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.92,
+    "overall_confidence": 0.593,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "not specified",
-      "document_scope": "communication or letter",
-      "leaving_group": "halide leaving groups",
-      "ligand_or_chiral_source": "non-phosphorus metal-coordination ligands",
-      "organometallic_partner": "not specified",
-      "product": "alpha-allenic alcohols",
-      "reaction_type": "allenyl-reagent addition to carbonyl compounds",
-      "substrate": "propargylic halides"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.87,
-    "human_checked": false
   }
 }

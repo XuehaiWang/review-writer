@@ -1,33 +1,39 @@
 {
   "paper_id": "P119",
-  "slug": "26a-1-s2.0-s0040402013011022-main",
+  "slug": "cascade-grignard-addition-propargyl-claisen-rearrangement-for-the-stereoselective-synthesis-of-allene-quaternary",
   "title": {
-    "value": "Studies on ZnBr2-mediated synthesis of axially chiral aryl-substituted allenes from terminal alkynes, aromatic aldehydes and (S)-a,a-diphenylprolinol",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Cascade Grignard Addition: Propargyl Claisen Rearrangement for the Stereoselective Synthesis of α‑Allene Quaternary Centers in Cyclohexanones",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Juntao Ye",
-      "Ruizhi Lü",
-      "Wu Fan",
-      "Shengming Ma"
+      "Estefania Armendariz-Gonzalez",
+      "<sup></sup> Adi Saputra",
+      "<sup></sup> Edward W. Mureka",
+      "Cale M. Locicero",
+      "Gabrielle L. Womble",
+      "Gloria Tan",
+      "Abigail A. Watson",
+      "Frank R. Fronczek",
+      "Rendy Kartika Cite This: Org. Lett.",
+      "− Read Online"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.88,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2013,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2025,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Green Chemistry",
-    "source": "known_journal_hint",
-    "confidence": 0.72,
+    "value": "Org. Lett. 2025",
+    "source": "cite_this_line",
+    "confidence": 0.7,
     "human_checked": false
   },
   "doi": {
@@ -37,35 +43,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "The studies on the ZnBr2-mediated synthesis of axially chiral aryl-substituted allenes from terminal alkynes, aromatic aldehydes, and commercially available chiral amine (S)-a,a-diphenylprolinol were conducted. Axially chiral aryl-substituted allenes can be obtained in moderate yields with up to 96% ee.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.96,
+    "value": "We report a new method for the enantio- and diastereoselective synthesis of α-allene quaternary centers in fully substituted cyclohexanones at the α-positions. This reaction involves asymmetric 1,2-carbonyl addition to 2-O-propargyl enones using a mixture of Grignard reagents and the PMP-H8-BINOL ligand. The resulting magnesium alkoxide chelate intermediate then activated the propargyl vinyl ether moiety, thereby triggering a cascade propargyl Claisen rearrangement in a diastereoselective manner. The synthetic applications of this method in the context of complex molecules are also demonstrated.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "ketones",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "Grignard reagents",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/26a-1-s2.0-s0040402013011022-main/fb2ec78e-f32f-4298-9830-cdacd2a9a3dc_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/26a-1-s2.0-s0040402013011022-main.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/26a-1-s2.0-s0040402013011022-main/fb2ec78e-f32f-4298-9830-cdacd2a9a3dc_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/26a-1-s2.0-s0040402013011022-main"
+    "pdf": "D:\\work\\data\\cascade-grignard-addition-propargyl-claisen-rearrangement-for-the-stereoselective-synthesis-of-α-allene-quaternary.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\cascade-grignard-addition-propargyl-claisen-rearrangement-for-the-stereoselective-synthesis-of-allene-quaternary.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\cascade-grignard-addition-propargyl-claisen-rearrangement-for-the-stereoselective-synthesis-of-allene-quaternary\\fd248dc8-62c3-4a98-8a9a-b8712bf3c8f9_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\cascade-grignard-addition-propargyl-claisen-rearrangement-for-the-stereoselective-synthesis-of-allene-quaternary"
   },
   "source_file": {
-    "pdf_name": "26a-1-s2.0-S0040402013011022-main.pdf",
-    "relative_pdf_path": "26a-1-s2.0-S0040402013011022-main.pdf",
-    "sha256": "2112140fe267d0adb761d9694638e8751a280d69b9799af804db80b0279401e5"
+    "pdf_name": "cascade-grignard-addition-propargyl-claisen-rearrangement-for-the-stereoselective-synthesis-of-α-allene-quaternary.pdf",
+    "relative_pdf_path": "cascade-grignard-addition-propargyl-claisen-rearrangement-for-the-stereoselective-synthesis-of-α-allene-quaternary.pdf",
+    "sha256": "cfd50adfcba166c85bd2e4e08eae1171ebea49666e0d89ac64704a7e0c0358d9"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 96,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 118,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -77,29 +95,11 @@
     "missing_fields": [],
     "warnings": [
       "missing_doi",
-      "Author name 'Ruizhi Lu' contains an OCR uncertainty in the source text ('Lu€').",
-      "structured_tag_not_specified_mechanism_type",
-      "Author name 'Ruizhi Lü' was lightly OCR-corrected from distorted front-matter text.",
-      "Document scope is inferred from the first-page discussion emphasizing inability to reproduce a related literature procedure and disclosure of the authors' own observations.",
-      "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.769,
+    "overall_confidence": 0.613,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "zinc catlysis",
-      "document_scope": "reproducibility or verification study",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "prolinol-derived and other chiral amine catalysts",
-      "organometallic_partner": "not specified",
-      "product": "axially chiral allenes",
-      "reaction_type": "allenation of terminal alkyne",
-      "substrate": "terminal alkynes"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.84,
-    "human_checked": false
   }
 }

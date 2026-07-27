@@ -1,70 +1,87 @@
 {
   "paper_id": "P104",
-  "slug": "16-synthetic-routes-to-allenic-acids-and-esters-and-their-stereospecific-conversion-to-butenolides",
+  "slug": "angew.-chem.-int.-ed.-2023-62-e202300309",
   "title": {
-    "value": "Synthetic Routes to Allenic Acids and Esters and Their Stereospecific Conversion to Butenolides",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Enantioselective Synthesis of Dihydropyrazoles by Palladium/Xu-Phos-Catalyzed Alleneamination of β,γ-Unsaturated Hydrazones with Propargylic Acetates",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "James A. Marshall",
-      "Mark A. Wolf",
-      "Eli M. Wallace"
+      "Shuting Zhang",
+      "Shuaijie Wu",
+      "Qiang Wang",
+      "Shiji Xu",
+      "Ying Han",
+      "Chao-Guo Yan",
+      "Junliang Zhang",
+      "Lei Wang"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1997,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2023,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "Angew. Chem. Int. Ed.",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "10.1002/anie.202300309",
+    "source": "markdown_regex",
+    "confidence": 0.9,
     "human_checked": false
   },
   "abstract": {
-    "value": "The synthesis of allenic acids and esters and their conversion to butenolides has been examined in some detail. Racemic butenolides 10 are efficiently prepared from the esters 8 through treatment with BCl3 and exposure of the derived acid 9 to catalytic AgNO3 in acetone. Conversion of the enantioenriched allenylstannane (S)-17 to the acid 18 through lithiation and subsequent carboxylation with CO2 afforded racemic product. The enantioenriched propargylic mesylates 16 and 22 afforded the allenic esters 19 and 23 with inversion of configuration through treatment with Pd(PPh3)4, CO, and the appropriate alcohol in THF. These reactions proceeded with ca. 10% or less of racemization. The allenic esters 23 yielded the iodobutenolides 24 by reaction with IBr. Hydrogenolysis to the butenolide 25 was achieved with Pd(PPh3)4 and Bu3SnH. Alternatively, the allenic acids 27 could be prepared directly from mesylates 22 with Pd(PPh3)4 and CO in aqueous THF. Cyclization to the butenolides 25 was achieved, as before, with catalytic AgNO3.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.97,
+    "value": "The palladium-catalyzed asymmetric carboamination reaction is one of the most significant transformations in organic chemistry. Herein, we report the first palladium-catalyzed asymmetric alleneamination of β,γ-unsaturated hydrazones with propargylic acetates. This protocol enables the efficient installation of various multisubstituted allene groups onto dihydropyrazoles in good yields with excellent enantioselectivities. The chiral sulfinamide phosphine ligand Xu-5 exhibits highly efficient stereoselective control in this protocol. The salient features of this reaction include the readily available starting materials, a broad substrate scope, an easy scale-up, mild reaction conditions and versatile transformations.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic acetates",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "acetate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "method optimization study"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/16-synthetic-routes-to-allenic-acids-and-esters-and-their-stereospecific-conversion-to-butenolides/8c029334-5e11-4e39-9199-89dd917a0953_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/16-synthetic-routes-to-allenic-acids-and-esters-and-their-stereospecific-conversion-to-butenolides.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/16-synthetic-routes-to-allenic-acids-and-esters-and-their-stereospecific-conversion-to-butenolides/8c029334-5e11-4e39-9199-89dd917a0953_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/16-synthetic-routes-to-allenic-acids-and-esters-and-their-stereospecific-conversion-to-butenolides"
+    "pdf": "D:\\work\\data\\Angew. Chem. Int. Ed. 2023, 62, e202300309.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\angew.-chem.-int.-ed.-2023-62-e202300309.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\angew.-chem.-int.-ed.-2023-62-e202300309\\e49d2216-6985-49e4-9be5-e0a00e0e6b99_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\angew.-chem.-int.-ed.-2023-62-e202300309"
   },
   "source_file": {
-    "pdf_name": "16-synthetic-routes-to-allenic-acids-and-esters-and-their-stereospecific-conversion-to-butenolides.pdf",
-    "relative_pdf_path": "16-synthetic-routes-to-allenic-acids-and-esters-and-their-stereospecific-conversion-to-butenolides.pdf",
-    "sha256": "27c2c7087a358e40a43dfa03521f989cabdb5ccf27fcc985173d3fc25863f2d4"
+    "pdf_name": "Angew. Chem. Int. Ed. 2023, 62, e202300309.pdf",
+    "relative_pdf_path": "Angew. Chem. Int. Ed. 2023, 62, e202300309.pdf",
+    "sha256": "35dd1321c6b881d34404781418121839aad97ad3af1c48f80ea3af0a897f09ca"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:23Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 85,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 123,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -75,30 +92,11 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_year",
-      "missing_journal",
-      "missing_doi",
-      "low_confidence_abstract",
-      "The paper spans allenic acids, allenic esters, and downstream butenolides; product and reaction tags prioritize the Pd/CO allenoate-forming sequence emphasized in the abstract.",
-      "Silver-catalyzed cyclization to butenolides is also a major component, but catalyst classification selects the central allene-forming palladium step.",
-      "structured_tag_not_specified_organometallic_partner"
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.68,
+    "overall_confidence": 0.744,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "palladium catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "mesylate leaving groups",
-      "ligand_or_chiral_source": "monodentate phosphine-type ligands",
-      "organometallic_partner": "not specified",
-      "product": "allenoates",
-      "reaction_type": "carbonylative synthesis of allenes and allenoates",
-      "substrate": "propargylic mesylates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.82,
-    "human_checked": false
   }
 }

@@ -1,34 +1,35 @@
 {
   "paper_id": "P205",
-  "slug": "9b",
+  "slug": "zhang-et-al-2024-synthesis-of-multisubstituted-2-3-allenamides-via-palladium-catalyzed-carbonylation-of-propargylic",
   "title": {
-    "value": "On the configurational stability of allenes and butatrienes in the presence of organocopper(I) species",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Synthesis of Multisubstituted 2,3-Allenamides via Palladium-Catalyzed Carbonylation of Propargylic Esters",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "H. Westmijze",
-      "I. Nap",
-      "J. Meijer",
-      "H. Kleijn",
-      "P. Vermeer"
+      "Zhi Zhang",
+      "Miao-Miao Ji",
+      "Xiao-Feng Wu",
+      "Yong-Yu He",
+      "Jin-Bao Peng Cite This: J. Org. Chem.",
+      "− Read Online"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1983,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2024,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "J. Org. Chem. 2024",
+    "source": "cite_this_line",
+    "confidence": 0.7,
     "human_checked": false
   },
   "doi": {
@@ -38,35 +39,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Two epimeric steroidal allenes, 1 and 2, have been interconverted by reaction with Me2CuMgCl and Me2CuLi. MeCu could also be used, although in this case the isomerisation was much slower. The 1,4-disubstituted butatrienes 6 and 8 have also been isomerised by means of Me2CuMgCl and MeCu, while the trisubstituted butatriene Z-7 has been isomerised into its geometric isomer using Et2CuMgCl. The isomerisations are thought to proceed through radical anions. In the case of the butatriene series, it is assumed that the carbometallation of the inner double bond by the copper(I) reagents also proceeds through the proposed radical anion intermediates.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "2,3-Allenamides are an important class of unsaturated group-substituted carbonyl compounds. A palladiumcatalyzed aminocarbonylation of propargyl acetates with amines for the synthesized tri-/tetrasubstituted 2,3-allenamides has been developed. A broad range of tri-/tetrasubstituted 2,3-allenamides have been prepared from propargyl acetates in good to excellent yields. The reaction featured mild reaction conditions and good",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenoates",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "mesylate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "method optimization study"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/9b/1a6a5bf5-9215-4150-9ee5-faaa2e92ee8d_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/9b.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/9b/1a6a5bf5-9215-4150-9ee5-faaa2e92ee8d_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/9b"
+    "pdf": "D:\\work\\data\\zhang-et-al-2024-synthesis-of-multisubstituted-2-3-allenamides-via-palladium-catalyzed-carbonylation-of-propargylic.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\zhang-et-al-2024-synthesis-of-multisubstituted-2-3-allenamides-via-palladium-catalyzed-carbonylation-of-propargylic.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\zhang-et-al-2024-synthesis-of-multisubstituted-2-3-allenamides-via-palladium-catalyzed-carbonylation-of-propargylic\\f8cac93f-9956-4687-adf4-1b73c79b278c_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\zhang-et-al-2024-synthesis-of-multisubstituted-2-3-allenamides-via-palladium-catalyzed-carbonylation-of-propargylic"
   },
   "source_file": {
-    "pdf_name": "9b.pdf",
-    "relative_pdf_path": "9b.pdf",
-    "sha256": "2eb223ea26132da727d6d01b310b6c4b86874d180ab5f6dd99d3c44a47ac7fa7"
+    "pdf_name": "zhang-et-al-2024-synthesis-of-multisubstituted-2-3-allenamides-via-palladium-catalyzed-carbonylation-of-propargylic.pdf",
+    "relative_pdf_path": "zhang-et-al-2024-synthesis-of-multisubstituted-2-3-allenamides-via-palladium-catalyzed-carbonylation-of-propargylic.pdf",
+    "sha256": "3735dcabad7af3e5bf5d1c462c8991cbeba71f053def0a02e2d9e7276cc94bfe"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T20:56:27Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 78,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 180,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -77,34 +90,12 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_year",
-      "missing_journal",
       "missing_doi",
-      "low_confidence_abstract",
-      "Source text includes neighboring article content before and after the target paper; metadata was extracted only from the clearly identified target article.",
-      "Author honorific 'Mrs.' was omitted from 'Mrs. I. Nap' to keep named authors only.",
-      "Paper studies both steroidal allenes and butatrienes; the single `product` label prioritizes the configurationally labile allene component.",
-      "Organocopper reagents include both Grignard-derived cuprates and Me2CuLi; `organometallic_partner` reflects the predominant Grignard-derived reagent set in the abstract and body.",
-      "structured_tag_not_specified_substrate",
+      "structured_tag_not_specified_organometallic_partner",
       "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.676,
+    "overall_confidence": 0.613,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "copper catalysis",
-      "document_scope": "stereochemical study",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "Grignard reagents",
-      "product": "axially chiral allenes",
-      "reaction_type": "radical transformations of allenes",
-      "substrate": "not specified"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.78,
-    "human_checked": false
   }
 }

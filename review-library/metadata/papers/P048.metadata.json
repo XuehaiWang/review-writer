@@ -1,31 +1,33 @@
 {
   "paper_id": "P048",
-  "slug": "pd-brnsted-acid-co-catalyzed-dehydrative-coupling-of-propargylic-alcohols-with-diarylphosphine-oxides",
+  "slug": "52adb6b2-b6db-4823-81ad-2d055bb78bee_origin",
   "title": {
-    "value": "Pd/Brønsted Acid Co-catalyzed Dehydrative Coupling of Propargylic Alcohols with Diarylphosphine Oxides",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Rhodium-Catalyzed Enantioselective 1,6-Addition of Arylboronic Acids to Enynamides: Asymmetric Synthesis of Axially Chiral Allenylsilanes",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Zhaoqiang Chen",
-      "Hui Qian"
+      "Takahiro Nishimura",
+      "Hiroki Makino",
+      "Makoto Nagaosa",
+      "Tamio Hayashi"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2025,
-    "source": "llm_from_front_matter",
-    "confidence": 0.88,
+    "value": 2010,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Org. Lett. 2025",
-    "source": "cite_this_line",
-    "confidence": 0.7,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
@@ -35,35 +37,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "An efficient dehydrative coupling of propargylic alcohols with diarylphosphine oxides to construct tetrasubstituted allenylphosphoryl compounds in the presence of a Pd/Brønsted acid co-catalyst has been developed. As a benefit from the use of a Brønsted acid, this reaction could perform under mild conditions with excellent yields, accommodating a wide range of functional groups. The potential utility of this method has also been demonstrated.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "Rhodium-catalyzed asymmetric 1,6-addition of arylboronic acids to \u0001-alkynyl acrylamides substituted with a silyl group on the alkyne terminus took place to give high yields of axially chiral allenylsilanes with 94 99% enantioselectivity, which was realized by use of a rhodium/chiral diene complex.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "enynes",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "boranes and boronates",
+      "ligand_or_chiral_source": "chiral biaryl bisphosphine ligands",
+      "leaving_group": "not specified",
+      "reaction_type": "conjugate 1,6-addition to enynes",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Alkynol/pd-brønsted-acid-co-catalyzed-dehydrative-coupling-of-propargylic-alcohols-with-diarylphosphine-oxides.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/pd-brnsted-acid-co-catalyzed-dehydrative-coupling-of-propargylic-alcohols-with-diarylphosphine-oxides.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/pd-brnsted-acid-co-catalyzed-dehydrative-coupling-of-propargylic-alcohols-with-diarylphosphine-oxides/a0d02a54-0825-476c-91a3-2085af617b60_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/pd-brnsted-acid-co-catalyzed-dehydrative-coupling-of-propargylic-alcohols-with-diarylphosphine-oxides"
+    "pdf": "D:\\work\\data\\52adb6b2-b6db-4823-81ad-2d055bb78bee_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\52adb6b2-b6db-4823-81ad-2d055bb78bee_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\52adb6b2-b6db-4823-81ad-2d055bb78bee_origin\\0cd08a11-e9ed-4f73-88e2-da1bbc3a7ab8_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\52adb6b2-b6db-4823-81ad-2d055bb78bee_origin"
   },
   "source_file": {
-    "pdf_name": "pd-brønsted-acid-co-catalyzed-dehydrative-coupling-of-propargylic-alcohols-with-diarylphosphine-oxides.pdf",
-    "relative_pdf_path": "pd-brønsted-acid-co-catalyzed-dehydrative-coupling-of-propargylic-alcohols-with-diarylphosphine-oxides.pdf",
-    "sha256": "f1db8ef76b101ce5843c441ec2889ec7d34ffff1bcc8e48f00249410d0680270"
+    "pdf_name": "52adb6b2-b6db-4823-81ad-2d055bb78bee_origin.pdf",
+    "relative_pdf_path": "52adb6b2-b6db-4823-81ad-2d055bb78bee_origin.pdf",
+    "sha256": "f87da648400819f76f83450375b07fce5b610d84348660a7e348f3b5edb17637"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:29Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 117,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 59,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -74,32 +88,12 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
+      "missing_journal",
       "missing_doi",
-      "Year is ambiguous in the provided evidence: the journal citation shows 2025, while the front matter states 'Published: December 25, 2024'. Using 2025 as the bibliographic year from the cited issue information.",
-      "structured_tag_not_specified_selectivity_profile",
-      "Year evidence is slightly mixed: the article is cited as Org. Lett. 2025, while the front matter also states Published: December 25, 2024.",
-      "DPEphos is mentioned in optimization, but no supported ligand label cleanly matches this nonchiral bisphosphine use within the allowed schema.",
-      "The reaction is dehydrative from propargylic alcohols, but no allowed leaving-group label covers hydroxyl/water directly, so leaving_group is set to not specified.",
-      "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_document_scope"
     ],
-    "overall_confidence": 0.784,
+    "overall_confidence": 0.513,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "palladium catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "tetrasubstituted allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.95,
-    "human_checked": false
   }
 }

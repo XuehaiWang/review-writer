@@ -1,69 +1,85 @@
 {
   "paper_id": "P139",
-  "slug": "32b-angew-chem-int-ed-engl-july-1975-modlhammer-synthesis-of-1-3-4-6heptatetraene-divinylallene",
+  "slug": "d5cc04327a",
   "title": {
-    "value": "Synthesis of 1,3,4,6-Heptatetraene (Divinylallene)",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Palladium-catalyzed aminoalkynylation/ alleneamination of urea-tethered alkenes: access to imidazolidinones bearing alkynes and allenes",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Ursula Mödlhammer",
-      "Henning Hopf"
+      "Qianqian Hu",
+      "<sup></sup> Cangzhu Hu",
+      "<sup></sup> Tian Tang",
+      "<sup></sup> Qing Wu",
+      "<sup></sup> Weiming Hu",
+      "<sup></sup> Qiang Dai <sup></sup> and Lei Wang <sup></sup>"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1975,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2025,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Tetrahedron",
-    "source": "known_journal_hint",
-    "confidence": 0.72,
+    "value": "Chem. Commun.",
+    "source": "cite_this_line",
+    "confidence": 0.7,
     "human_checked": false
   },
   "doi": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "10.1039/d5cc04327a",
+    "source": "markdown_regex",
+    "confidence": 0.9,
     "human_checked": false
   },
   "abstract": {
-    "value": "",
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "A novel palladium-catalyzed aminoalkynylation/alleneamination of urea-tethered alkenes has been developed, ofering an eficient strategy for the synthesis of imidazolidinones bearing alkynes and allenes in moderate to good yields. The reaction exhibits a broad substrate scope, excellent functional group tolerance and good synthetic versatility.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic acetates",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "achiral bisphosphine ligands for chirality transfer",
+      "leaving_group": "acetate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/32b-angew-chem-int-ed-engl-july-1975-modlhammer-synthesis-of-1-3-4-6heptatetraene-divinylallene/e276b688-52ed-4923-a27b-3e037c74891a_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/32b-angew-chem-int-ed-engl-july-1975-modlhammer-synthesis-of-1-3-4-6heptatetraene-divinylallene.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/32b-angew-chem-int-ed-engl-july-1975-modlhammer-synthesis-of-1-3-4-6heptatetraene-divinylallene/e276b688-52ed-4923-a27b-3e037c74891a_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/32b-angew-chem-int-ed-engl-july-1975-modlhammer-synthesis-of-1-3-4-6heptatetraene-divinylallene"
+    "pdf": "D:\\work\\data\\d5cc04327a.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\d5cc04327a.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\d5cc04327a\\66ccdc53-49d6-405b-a300-b883a4cee66b_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\d5cc04327a"
   },
   "source_file": {
-    "pdf_name": "32b-Angew  Chem  Int  Ed  Engl - July 1975 - Mödlhammer - Synthesis of 1 3 4 6‐Heptatetraene  Divinylallene.pdf",
-    "relative_pdf_path": "32b-Angew  Chem  Int  Ed  Engl - July 1975 - Mödlhammer - Synthesis of 1 3 4 6‐Heptatetraene  Divinylallene.pdf",
-    "sha256": "0c3ec93b650f6402b0d2b03a3599e9feaac8ff69236495c232d6f05fe428411d"
+    "pdf_name": "d5cc04327a.pdf",
+    "relative_pdf_path": "d5cc04327a.pdf",
+    "sha256": "a23c3fb30a9e009f319d5061ee49acf3625ed2ff015d9db46a12ebe5c973d2f2"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 46,
-      "markdown_chars_used": 11681
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 86,
+      "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -72,39 +88,13 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [
-      "abstract"
-    ],
+    "missing_fields": [],
     "warnings": [
-      "empty_authors",
-      "missing_doi",
-      "low_confidence_title",
-      "low_confidence_abstract",
-      "No explicit abstract is present in the supplied snippet; abstract left empty.",
-      "Supplied markdown includes adjacent articles; metadata and tags were extracted only from the divinylallene section.",
-      "structured_tag_not_specified_selectivity_profile",
-      "No abstract was present in the supplied paper section; abstract left empty.",
-      "The extracted markdown/front blocks include adjacent journal content; metadata and classification were restricted to the target paper section.",
-      "structured_tag_not_specified_catalyst_or_method",
-      "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.646,
+    "overall_confidence": 0.719,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "not specified",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "Grignard reagents",
-      "product": "vinylallenes and cumulenes",
-      "reaction_type": "isomerization fragmentation and protonation to allenes",
-      "substrate": "enynes"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.83,
-    "human_checked": false
   }
 }

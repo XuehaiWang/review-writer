@@ -1,34 +1,35 @@
 {
   "paper_id": "P050",
-  "slug": "acs-catal.-2023-13-6787",
+  "slug": "5644c7c5-1067-4c15-8efe-3128d4776362_origin",
   "title": {
-    "value": "Deoxygenative Silylation of C(sp3)-O Bonds with Hydrosilane by Cooperative Catalysis of Gold Nanoparticles and Solid Acids",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Organozinc Reagents in DMSO Solvent: Remarkable Promotion of \\mathsf { S } _ { \\mathsf { N } } \\mathsf { 2 ^ { \\prime } } Reaction for Allene Synthesis",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Hiroki Miura",
-      "Yuki Yasui",
-      "Yosuke Masaki",
-      "Masafumi Doi",
-      "Tetsuya Shishido"
+      "Vol.",
+      "No. Koji Kobayashi",
+      "<sup></sup> Hiroshi Naka",
+      "<sup></sup> Andrew E. H. Wheatley",
+      "<sup></sup> and Yoshinori Kondo<sup>",
+      "</sup>"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2023,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2008,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "ACS Catal. 2023",
-    "source": "cite_this_line",
-    "confidence": 0.7,
+    "value": "Organic Letters",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
@@ -38,35 +39,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Efficient deoxygenative silylation of C(sp3)-O bonds with hydrosilanes by supported Au catalysts is described. Gold nanoparticles supported on TiO2 enabled various hydrosilanes to be used as sources of silyl groups in C-Si cross-coupling reactions. A variety of alkyl acetates and propargyl carbonates participated in the Au-catalyzed reactions to furnish the corresponding alkyl and allenylsilanes in high yields. In addition, Au/TiO2 was also effective for ring-opening silylation of cyclic ethers. A detailed mechanistic investigation corroborated that the title reaction involves the formation of silyl and alkyl radical intermediates, and the cooperation of Au nanoparticles as single-electron transfer catalysts and Lewis acid sites at the surface of metal oxides was responsible for the unusual reactivity of hydrosilanes for specific C(sp3)-Si bond formation.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "Organozinc reagents have been widely used as soft nucleophiles in organic synthesis, where the control of the nucleophilicity is highly important for many selective transformations.<sup>1</sup> Various methods have been utilized for the promotion of reactivity, and conventionally ate complexation or transmetalation has been employed.<sup>1</sup> Meanwhile, allenes have gained attraction as unique functionalities in natural product chemistry<sup>2</sup> and as important building blocks in transition metal catalyzed cyclization chemistry.<sup>3</sup> In connection with our recent studies on the reactivity control of organozinc reagents,<sup>4</sup> we focused our interest on solvent effects for promoting the reactivity of organozinc reagents. In this paper, we report allene synthesis using the dramatic effect of DMSO on the reaction of propargyl electrophiles with organozinc reagents.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic mesylates",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/ACS Catal. 2023, 13, 6787.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/acs-catal.-2023-13-6787.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/acs-catal.-2023-13-6787/d82f43a7-798c-4a7f-b24d-c43c4c872f0d_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/acs-catal.-2023-13-6787"
+    "pdf": "D:\\work\\data\\5644c7c5-1067-4c15-8efe-3128d4776362_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\5644c7c5-1067-4c15-8efe-3128d4776362_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\5644c7c5-1067-4c15-8efe-3128d4776362_origin\\a6ac7fbd-1d17-4cf5-b7d9-9a5425470a31_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\5644c7c5-1067-4c15-8efe-3128d4776362_origin"
   },
   "source_file": {
-    "pdf_name": "ACS Catal. 2023, 13, 6787.pdf",
-    "relative_pdf_path": "ACS Catal. 2023, 13, 6787.pdf",
-    "sha256": "997899a44429506a77efbe339065e896c0e65af272e8b90ca0254119fb3aaf50"
+    "pdf_name": "5644c7c5-1067-4c15-8efe-3128d4776362_origin.pdf",
+    "relative_pdf_path": "5644c7c5-1067-4c15-8efe-3128d4776362_origin.pdf",
+    "sha256": "553c9206fc734baa6acbaedc3f215c607f2ca057273e041e8ba3b0ab77a63897"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:39Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 152,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 56,
+      "markdown_chars_used": 10960
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -78,27 +91,13 @@
     "missing_fields": [],
     "warnings": [
       "missing_doi",
-      "The paper covers multiple substrate and product subclasses (alkyl acetates, propargyl carbonates, cyclic ethers; alkylsilanes and allenylsilanes), so structured tags are generalized to the common reaction manifold.",
-      "This paper is broader than allene chemistry; allene-classification labels are assigned from the allenylsilane-forming propargyl carbonate subsection rather than the full organosilicon scope.",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.786,
+    "overall_confidence": 0.593,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "gold catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "carbonate leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allenyl silanes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic carbonates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.85,
-    "human_checked": false
   }
 }

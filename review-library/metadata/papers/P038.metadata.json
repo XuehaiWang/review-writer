@@ -1,36 +1,32 @@
 {
   "paper_id": "P038",
-  "slug": "assembly-of-diverse-allenes-via-activator-free-palladium-catalyzed-regioselective-arylation-of-propargylamines-with",
+  "slug": "3d3fef38-3e95-4564-bd18-b0a74f46f288_origin",
   "title": {
-    "value": "Assembly of Diverse Allenes via Activator-Free Palladium-Catalyzed Regioselective γ‑Arylation of Propargylamines with Boronic Acids",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Dynamic Kinetic Asymmetric Allylic Alkylations of Allenes",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Yan Sun",
-      "Ya Pan",
-      "Tao Zhao",
-      "Junwei Li",
-      "Aiguo Gu",
-      "Junhai Huang",
-      "Huangdi Feng"
+      "Barry M. Trost",
+      "Daniel R. Fandrick",
+      "Diana C. Dinh"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2025,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2005,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Green Chemistry",
-    "source": "known_journal_hint",
-    "confidence": 0.72,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
@@ -40,35 +36,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Controlling the reaction selectivity to achieve a precision synthesis is a constant concern for chemists. Here, we report a palladium-catalyzed deaminative coupling of propargylamines with arylboronic acids to generate allene skeletons. Importantly, this approach allows the regioselective γ-arylation of unactivated propargyl tertiary amines to access various allenes in the absence of amino-activating reagents. We present a wide range of propargylamines and boronic acids and demonstrate the synthetic application of the target products to",
-    "source": "llm_from_front_matter",
-    "confidence": 0.93,
+    "value": "Efficient and atom economic<sup>1</sup> methods for construction of chiral allenes are of significance due to the presence of this core structure in numerous natural and biologically important products,<sup>2</sup> as well as synthetic intermediates for asymmetric synthesis of targets involving chirality transfer.<sup>2,3</sup> Undoubtedly, the potential in this latter regard has been retarded by the limited accessibility of enantioenriched allenes. Typically, chiral allenes are derived from chiral propargylic alcohols.<sup>2,4</sup> Only recently has asymmetric catalysis been employed for the construction of allenes.<sup>2,5</sup> Several limited methods utilize the asymmetric addition of soft nucleophiles to vinyl allyl Pd(II) intermediates accessed through both the oxidative addition of racemic 2,3-alkadienyl phosphates<sup>6</sup> and prochiral vinyl bromides.<sup>7</sup> Our group has been active in related palladium-catalyzed asymmetric allylic alkylations (AAA) through a dynamic kinetic asymmetric transformation (DYKAT) utilizing our ligands.<sup>8</sup> Therefore, we focused our studies on the use of these ligands for the dynamic kinetic asymmetric addition of nucleophiles to allenes (eq 1), which has led to a general access to allenes of high enantiomeric excess for both carbon- and nitrogen-based nucleophiles. Further, a most unusual dependence of enantioselectivity on base in the case of amine nucleophiles has been uncovered.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Alkynol/assembly-of-diverse-allenes-via-activator-free-palladium-catalyzed-regioselective-γ-arylation-of-propargylamines-with.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/assembly-of-diverse-allenes-via-activator-free-palladium-catalyzed-regioselective-arylation-of-propargylamines-with.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/assembly-of-diverse-allenes-via-activator-free-palladium-catalyzed-regioselective-arylation-of-propargylamines-with/acbb4e0e-a0c2-46c1-af86-4948dc9473e5_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/assembly-of-diverse-allenes-via-activator-free-palladium-catalyzed-regioselective-arylation-of-propargylamines-with"
+    "pdf": "D:\\work\\data\\3d3fef38-3e95-4564-bd18-b0a74f46f288_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\3d3fef38-3e95-4564-bd18-b0a74f46f288_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\3d3fef38-3e95-4564-bd18-b0a74f46f288_origin\\05311c58-d082-425e-a645-72041f694393_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\3d3fef38-3e95-4564-bd18-b0a74f46f288_origin"
   },
   "source_file": {
-    "pdf_name": "assembly-of-diverse-allenes-via-activator-free-palladium-catalyzed-regioselective-γ-arylation-of-propargylamines-with.pdf",
-    "relative_pdf_path": "assembly-of-diverse-allenes-via-activator-free-palladium-catalyzed-regioselective-γ-arylation-of-propargylamines-with.pdf",
-    "sha256": "ed910cc75d1c578e6a5edebce7016547b07b8268b1c6c0c6f008b160cbc2d530"
+    "pdf_name": "3d3fef38-3e95-4564-bd18-b0a74f46f288_origin.pdf",
+    "relative_pdf_path": "3d3fef38-3e95-4564-bd18-b0a74f46f288_origin.pdf",
+    "sha256": "19fe98857b74c747b1ae504615a5ceee228bf430e699bfd7b3bd7a11b51e5e2b"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:29Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 172,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 50,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -79,28 +87,16 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
+      "missing_journal",
       "missing_doi",
-      "Abstract appears truncated in the supplied front-matter snippet.",
-      "Mechanistic and scope tags partly rely on results/discussion snippets beyond the abstract.",
-      "Abstract appears truncated in the supplied front-matter evidence.",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.793,
+    "overall_confidence": 0.49,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "palladium catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "monodentate phosphine-type ligands",
-      "organometallic_partner": "boranes and boronates",
-      "product": "trisubstituted allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic amines"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.93,
-    "human_checked": false
   }
 }

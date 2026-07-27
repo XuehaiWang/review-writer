@@ -89,32 +89,23 @@ def paper_value(paper: dict[str, Any], key: str) -> str:
     return ""
 
 
-def parse_outline_sections(text: str) -> list[dict[str, str]]:
-    sections: list[dict[str, str]] = []
-    in_outline = False
+def parse_outline_sections(text: str) -> list[dict[str, Any]]:
+    """Extract numbered sections and their explicit Matrix paper assignments."""
+    sections: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
             continue
-        if re.match(r"^#{1,3}\s+Outline\b", line, flags=re.I):
-            in_outline = True
-            continue
-        if in_outline and re.match(r"^#{1,3}\s+", line):
-            break
-        match = re.match(r"^(?:[-*]\s*)?(\d+)[.)]\s+(.+?)\s*$", line)
+        match = re.match(r"^(?:#{1,6}\s+)?(?:[-*]\s*)?(\d+)[.)]\s+(.+?)\s*$", line)
         if match:
             title = match.group(2).strip()
             if title:
-                sections.append({"section_id": f"sec{len(sections) + 1}", "title": title})
-    if sections:
-        return sections
-
-    for raw in text.splitlines():
-        line = raw.strip()
-        match = re.match(r"^(?:[-*]\s*)?(\d+)[.)]\s+(.+?)\s*$", line)
-        if match:
-            title = match.group(2).strip()
-            sections.append({"section_id": f"sec{len(sections) + 1}", "title": title})
+                current = {"section_id": f"sec{len(sections) + 1}", "title": title, "assigned_papers": []}
+                sections.append(current)
+            continue
+        if current and line.lower().startswith("assigned papers:"):
+            current["assigned_papers"] = re.findall(r"\b[A-Za-z]+\d+\b", line)
     return sections
 
 
@@ -122,7 +113,9 @@ def load_matrix(path: Path) -> tuple[str, list[dict[str, Any]], list[str]]:
     data = read_json(path)
     if isinstance(data, dict):
         topic = str(data.get("review_topic") or data.get("topic") or "")
-        papers = data.get("papers") if isinstance(data.get("papers"), list) else []
+        papers = data.get("papers") if isinstance(data.get("papers"), list) else data.get("rows")
+        if not isinstance(papers, list):
+            papers = []
         axes = data.get("comparison_axes") if isinstance(data.get("comparison_axes"), list) else []
         return topic, [p for p in papers if isinstance(p, dict)], [str(a) for a in axes]
     if isinstance(data, list):
@@ -134,9 +127,10 @@ def load_notes(path: Path) -> dict[str, dict[str, Any]]:
     if not path.exists():
         return {}
     data = read_json(path)
-    if not isinstance(data, list):
+    rows = data if isinstance(data, list) else data.get("papers") if isinstance(data, dict) else []
+    if not isinstance(rows, list):
         return {}
-    return {str(row.get("paper_id")): row for row in data if isinstance(row, dict) and row.get("paper_id")}
+    return {str(row.get("paper_id")): row for row in rows if isinstance(row, dict) and row.get("paper_id")}
 
 
 def select_rule_pack(skill_root: Path, topic: str) -> tuple[str, str]:
@@ -378,9 +372,13 @@ def claim_from_papers(section_id: str, title: str, idx: int, papers: list[dict[s
     }
 
 
-def build_section(section: dict[str, str], papers: list[dict[str, Any]], axes: list[str], notes: dict[str, dict[str, Any]], prev_title: str, next_title: str) -> dict[str, Any]:
+def build_section(section: dict[str, Any], papers: list[dict[str, Any]], axes: list[str], notes: dict[str, dict[str, Any]], prev_title: str, next_title: str) -> dict[str, Any]:
     title = section["title"]
-    selected = select_papers(title, papers, notes)
+    assigned_ids = [str(paper_id) for paper_id in section.get("assigned_papers") or []]
+    papers_by_id = {str(paper.get("paper_id")): paper for paper in papers if paper.get("paper_id")}
+    selected = [papers_by_id[paper_id] for paper_id in assigned_ids if paper_id in papers_by_id]
+    if not selected:
+        selected = select_papers(title, papers, notes)
     paper_ids = [str(p.get("paper_id")) for p in selected if p.get("paper_id")]
     claim_count = 2 if title.lower() in {"introduction", "conclusion"} else min(4, max(2, len(selected) // 2 or 2))
     claims = []

@@ -1,33 +1,31 @@
 {
   "paper_id": "P085",
-  "slug": "org.-lett.-2022-24-6472",
+  "slug": "a4ec8f27-1429-4690-a2d7-7551f2ffb0fc_origin",
   "title": {
-    "value": "Catalyst-Controlled Divergent Reactions of 2,3-Disubstituted Indoles with Propargylic Alcohols: Synthesis of 3H‑Benzo[b]azepines and Axially Chiral Tetrasubstituted Allenes",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Enantioselective synthesis of allenecarboxylates from phenyl acetates through C\u0003C bond forming reactions",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Chenxiao Qian",
-      "Tingting Huang",
-      "Jianwei Sun",
-      "Pengfei Li"
+      "Jiro Yamazaki",
+      "Toshiyuki Watanabe and Kiyoshi Tanaka"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2022,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2001,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Org. Lett. 2022",
-    "source": "cite_this_line",
-    "confidence": 0.7,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
@@ -37,35 +35,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Catalyst-controlled divergent reactions of 2,3-disubstituted indoles with propargylic alcohols were developed for the first time. In the presence of TsOH or B(C6F5)3 as catalyst, 2,3-disubstituted indoles reacted smoothly with 3-alkynyl-3-hydroxyisoindolinones to afford 3H-benzo[b]azepines by selective C2(sp2)-C3(sp2) ring expansion of indoles. In contrast, decreasing the catalyst strength (e.g., with chiral phosphoric acid) interrupted the cascade reactions, affording axially chiral tetrasubstituted allenes bearing an adjacent chiral quaternary carbon stereocenter. Control experiments provided insights into the reaction mechanism.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.97,
+    "value": "Abstract—A variety of optically active 4,4-disubstituted allenecarboxylic acid methyl esters were prepared from simple a,a-disub stituted phenyl acetate through base treatment of the esters to generate ketenes, followed by successive Horner–Wadsworth– Emmons reaction. The transformation was further developed as a one-pot procedure with satisfactory yields and high enantioselectivity. © 2001 Elsevier Science Ltd. All rights reserved.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "ketenes",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/Org. Lett. 2022, 24, 6472.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/org.-lett.-2022-24-6472.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/org.-lett.-2022-24-6472/b5a31b61-629a-44c2-ab88-008f1f4b260a_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/org.-lett.-2022-24-6472"
+    "pdf": "D:\\work\\data\\a4ec8f27-1429-4690-a2d7-7551f2ffb0fc_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\a4ec8f27-1429-4690-a2d7-7551f2ffb0fc_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\a4ec8f27-1429-4690-a2d7-7551f2ffb0fc_origin\\7729bacf-4807-4ce7-844b-5288ce85d2d3_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\a4ec8f27-1429-4690-a2d7-7551f2ffb0fc_origin"
   },
   "source_file": {
-    "pdf_name": "Org. Lett. 2022, 24, 6472.pdf",
-    "relative_pdf_path": "Org. Lett. 2022, 24, 6472.pdf",
-    "sha256": "4868333e56ef4929c590ece20b382a1fd82928bd6f500fff8ac3d9cd65774163"
+    "pdf_name": "a4ec8f27-1429-4690-a2d7-7551f2ffb0fc_origin.pdf",
+    "relative_pdf_path": "a4ec8f27-1429-4690-a2d7-7551f2ffb0fc_origin.pdf",
+    "sha256": "7d13b52195ab805789b3fa4b501e1861b82ad9b7a7d29fb0ebb0aa9c245b7a46"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:40Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 110,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 92,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -76,27 +86,16 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
+      "missing_journal",
       "missing_doi",
-      "Paper reports both non-allene ring-expansion products and allenes; structured tags prioritize the isolated allene-forming chiral phosphoric acid branch, and the product label could also be viewed structurally as tetrasubstituted allenes.",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.786,
+    "overall_confidence": 0.49,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "chiral phosphoric acid catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "chiral Brønsted acid and base catalysts",
-      "organometallic_partner": "not specified",
-      "product": "axially chiral allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.86,
-    "human_checked": false
   }
 }

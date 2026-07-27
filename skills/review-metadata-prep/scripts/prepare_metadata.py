@@ -484,7 +484,7 @@ def extract_intro_work_summary(md: str) -> str:
 
 def extract_year(md: str, pdf_name: str) -> dict[str, Any]:
     candidates = [int(m.group(0)) for m in YEAR_RE.finditer(pdf_name + "\n" + md[:8000])]
-    candidates = [y for y in candidates if 1990 <= y <= 2035]
+    candidates = [y for y in candidates if 1800 <= y <= 2035]
     if candidates:
         # Prefer recent years in filename/front matter.
         return scored(max(set(candidates), key=candidates.count), "filename_or_front_matter", 0.68)
@@ -780,6 +780,40 @@ def structured_tags_from_legacy(
     }
 
 
+def structured_tags_from_classification_rules(review_root: Path, text: str) -> dict[str, str]:
+    """Assign only labels defined by the repository's active taxonomy."""
+    values = {key: "not specified" for key in STRUCTURED_TAG_KEYS}
+    rules_path = review_root / "allene_classification_rules.py"
+    if not rules_path.exists():
+        return values
+    tree = ast.parse(rules_path.read_text(encoding="utf-8"), filename=str(rules_path))
+    rules_node = next(
+        (
+            node.value
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "rules" for target in node.targets)
+        ),
+        None,
+    )
+    if rules_node is None:
+        return values
+    try:
+        rules = ast.literal_eval(rules_node)
+    except (ValueError, SyntaxError):
+        return values
+    haystack = text.casefold()
+    for item in rules:
+        if not isinstance(item, tuple) or len(item) < 3:
+            continue
+        label, category, needles = item[0], item[1], item[2]
+        if category not in values or values[category] != "not specified" or not isinstance(needles, list):
+            continue
+        if any(str(needle).casefold() in haystack for needle in needles if str(needle).strip()):
+            values[category] = str(label)
+    return values
+
+
 def first_or_not_specified(items: list[str]) -> str:
     for item in items:
         item = clean_text(str(item))
@@ -900,8 +934,7 @@ def build_metadata(
         ]
     )
     tags = infer_tags(text_for_tags)
-    topic, reaction, mechanism, application = classify_tags(tags)
-    structured_tags = structured_tags_from_legacy(topic, reaction, mechanism, application)
+    structured_tags = structured_tags_from_classification_rules(review_root, text_for_tags)
     pdf_hash = sha256_file(pdf_path)
     meta: dict[str, Any] = {
         "paper_id": paper_id,
@@ -912,7 +945,7 @@ def build_metadata(
         "journal": journal,
         "doi": doi,
         "abstract": abstract,
-        "structured_tags": scored(structured_tags, "rule_keyword_inference_8_category_fallback", 0.45 if tags else 0.0),
+        "structured_tags": scored(structured_tags, "active_taxonomy_keyword_inference", 0.45 if tags else 0.0),
         "source_paths": {
             "pdf": str(pdf_path) if pdf_path else None,
             "markdown": str(md_path) if md_path else None,

@@ -28,11 +28,11 @@ review-projects/<project_id>/05_final_audit/final_draft.md
 
 ## Dependencies
 
-```bash
-pip install python-docx Pillow latex2word
-```
-
-If `latex2word` is missing, math is rendered as italic plain text and a warning is printed.
+The dashboard uses `scripts/run_md2docx.py`, which installs `python-docx` and
+Pillow once into `review-export-docx/.deps/` when they are not already present.
+This keeps the global Python installation unchanged. `latex2word` remains
+optional; without it, math is rendered as italic plain text and a warning is
+printed.
 
 ## Run
 

@@ -1,32 +1,31 @@
 {
   "paper_id": "P182",
-  "slug": "50a",
+  "slug": "org.-lett.-2022-24-1496",
   "title": {
-    "value": "A Novel Palladium-Catalyzed Rearrangement of Acetylenic Ketones to Furans",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Cooperative Palladium/Brønsted Acid Catalysis toward the Highly Enantioselective Allenylation of β‑Keto Esters",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Huaiyu Sheng",
-      "Shouyuan Lin",
-      "Yaozeng Huang"
+      "Henning J. Loui and Christoph Schneider Cite This:",
+      "− Read Online"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1986,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2022,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Tetrahedron",
-    "source": "known_journal_hint",
-    "confidence": 0.72,
+    "value": "2022",
+    "source": "cite_this_line",
+    "confidence": 0.7,
     "human_checked": false
   },
   "doi": {
@@ -36,35 +35,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "A novel rearrangement of 1-aryl-4-alkyl-2-butyn-1-one in the presence of Pd(dba)2-PPh3 catalyst gave 2,4-substituted furans in moderate yields.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "We report the <sup>fi</sup>rst enantioselective allenylation of Pd enolates enabled by cooperative Pd/Brønsted acid catalysis employing β-keto esters and propargyl alcohols. The enantioselectivity originates solely from an in-situ-generated chiral metal enolate in an open transition state with no additional binding of the propargyl component to the catalyst. Thus a broad substrate scope was established, furnishing hitherto inaccessible products in very good yields with excellent enantioselectivities (up to >99:1 e.r.).",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "chiral Brønsted acid and base catalysts",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/50a/79f1d76f-fc01-40fb-89e9-79eddaa59fce_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/50a.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/50a/79f1d76f-fc01-40fb-89e9-79eddaa59fce_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/50a"
+    "pdf": "D:\\work\\data\\Org. Lett. 2022, 24, 1496.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\org.-lett.-2022-24-1496.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\org.-lett.-2022-24-1496\\db9d40a3-847e-4935-bb3d-78cc23037c9c_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\org.-lett.-2022-24-1496"
   },
   "source_file": {
-    "pdf_name": "50a.pdf",
-    "relative_pdf_path": "50a.pdf",
-    "sha256": "dc33113946a33d21a7907bc1059153d9919f6e06a7a80b85d79d2b3644e72bb0"
+    "pdf_name": "Org. Lett. 2022, 24, 1496.pdf",
+    "relative_pdf_path": "Org. Lett. 2022, 24, 1496.pdf",
+    "sha256": "b57d8b35c4842d887bbdb961985c97cfba992394e506a91cd68fbe502d7cccc6"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 18,
-      "markdown_chars_used": 5936
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 150,
+      "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -75,29 +86,12 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "empty_authors",
-      "missing_year",
       "missing_doi",
-      "structured_tag_not_specified_selectivity_profile",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.8,
+    "overall_confidence": 0.613,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "palladium catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "monodentate phosphine-type ligands",
-      "organometallic_partner": "not specified",
-      "product": "allene-derived cyclic products",
-      "reaction_type": "intramolecular cyclization and skeletal reorganization of allenes",
-      "substrate": "ketones"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.92,
-    "human_checked": false
   }
 }

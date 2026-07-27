@@ -1,72 +1,87 @@
 {
   "paper_id": "P090",
-  "slug": "org.-lett.-2023-25-9176",
+  "slug": "adv-synth-catal-2024-kang-organocatalytic-dearomatization-of-naphthols-through-a-1-6conjugated-addition-of-alkynyl",
   "title": {
-    "value": "Electroreductive Carboxylation of Propargylic Acetates with CO2: Access to Tetrasubstituted 2,3-Allenoates",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Organocatalytic Dearomatization of β-Naphthols through a 1,6- Conjugated Addition of Alkynyl 7-Methylene-7H-indoles Formed In Situ",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Jing-Hao Qin",
-      "Zhi-Qiang Xiong",
-      "Chaozhihui Cheng",
-      "Ming Hu",
-      "Jin-Heng Li"
+      "Shengfu Kang",
+      "<sup>+</sup> Xiaohong Liu",
+      "<sup>+</sup> Yi Zhang",
+      "<sup>+</sup> Fang Fang",
+      "<sup></sup> Wenjun Li",
+      "<sup>",
+      "</sup> and Pengfei Li<sup>",
+      "</sup>"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2023,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2024,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Org. Lett. 2023",
-    "source": "cite_this_line",
-    "confidence": 0.7,
+    "value": "Adv Synth Catal",
+    "source": "filename_prefix",
+    "confidence": 0.55,
     "human_checked": false
   },
   "doi": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
-    "human_checked": false
-  },
-  "abstract": {
-    "value": "An electroreductive carboxylation of propargylic alcohols with CO2 and then workup with TMSCHN2 to construct tetrasubstituted 2,3-allenoates is developed. This method allows the incorporation of an external ester group into the resulting allene system through electroreduction, carboxylation, and deacetoxylation cascades. Mechanistically, electricity on/off experiments and cyclic voltammetry analysis support the preferential generation of radical anion intermediates based on the electronic nature of the aryl rings.",
-    "source": "llm_from_front_matter",
+    "value": "10.1002/adsc.202401173",
+    "source": "markdown_regex",
     "confidence": 0.9,
     "human_checked": false
   },
+  "abstract": {
+    "value": "Organocatalytic dearomatization of β- naphthols has been achieved via a 1,6-conjugated addition of 2-naphthols to alkynyl 7-methylene-7Hindoles in situ generated from α-(7- indolyl)methanols. In the presence of racemic phosphoric acid, a series of tetrasubstituted allenes was obtained in high yields. Particularly, with the aid of chiral phosphoric acid, asymmetric dearomatization of β-naphthols was investigated, affording axially chiral tetrasubstituted allenes with moderate enantioselectivity.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "chiral Brønsted acid and base catalysts",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
+    "human_checked": false
+  },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/Org. Lett. 2023, 25, 9176.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/org.-lett.-2023-25-9176.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/org.-lett.-2023-25-9176/0338ff36-6b8b-4eee-97f7-a6c5b43d2d5d_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/org.-lett.-2023-25-9176"
+    "pdf": "D:\\work\\data\\Adv Synth Catal - 2024 - Kang - Organocatalytic Dearomatization of  ‐Naphthols through a 1 6‐Conjugated Addition of Alkynyl.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\adv-synth-catal-2024-kang-organocatalytic-dearomatization-of-naphthols-through-a-1-6conjugated-addition-of-alkynyl.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\adv-synth-catal-2024-kang-organocatalytic-dearomatization-of-naphthols-through-a-1-6conjugated-addition-of-alkynyl\\b80f1ba2-6fa1-4489-a435-ff32927bfcb0_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\adv-synth-catal-2024-kang-organocatalytic-dearomatization-of-naphthols-through-a-1-6conjugated-addition-of-alkynyl"
   },
   "source_file": {
-    "pdf_name": "Org. Lett. 2023, 25, 9176.pdf",
-    "relative_pdf_path": "Org. Lett. 2023, 25, 9176.pdf",
-    "sha256": "a9577e5bd238160471acd5676bc50b4497b06d832dbfdcda46e039981bde9ce6"
+    "pdf_name": "Adv Synth Catal - 2024 - Kang - Organocatalytic Dearomatization of  ‐Naphthols through a 1 6‐Conjugated Addition of Alkynyl.pdf",
+    "relative_pdf_path": "Adv Synth Catal - 2024 - Kang - Organocatalytic Dearomatization of  ‐Naphthols through a 1 6‐Conjugated Addition of Alkynyl.pdf",
+    "sha256": "5a84b19360fe41b0ce28ab31e1eb4dfde7805f39007c3f9d5fe982a109c29e59"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:40Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 106,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 102,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -77,31 +92,12 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_doi",
-      "The abstract text appears to contain OCR inconsistencies, including use of 'propargylic alcohols' versus the title/scope's 'propargylic acetates'.",
-      "structured_tag_not_specified_selectivity_profile",
-      "The visible abstract says 'propargylic alcohols', but the title, scope tables, and experimental discussion consistently indicate propargylic acetates; substrate classification follows the latter evidence.",
-      "The paper centers on electroreductive, transition-metal-free conditions, but the controlled vocabulary does not provide an electrochemistry label, so catalyst_or_method is set to 'not specified'.",
-      "structured_tag_not_specified_catalyst_or_method",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope"
     ],
-    "overall_confidence": 0.784,
+    "overall_confidence": 0.72,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "not specified",
-      "document_scope": "communication or letter",
-      "leaving_group": "acetate leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allenoates",
-      "reaction_type": "carbonylative synthesis of allenes and allenoates",
-      "substrate": "propargylic acetates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.93,
-    "human_checked": false
   }
 }

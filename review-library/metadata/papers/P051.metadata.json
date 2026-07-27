@@ -1,70 +1,81 @@
 {
   "paper_id": "P051",
-  "slug": "adv.-synth.-catal.-2022-364-565",
+  "slug": "5719f6b5-1864-4b86-9d5e-f0e13ccebf9e_origin",
   "title": {
-    "value": "Rh(I)-Catalyzed Decarboxylative Arylation of Alkynyl Cyclic Carbonates: Divergent Access to Substituted α-Allenols and 1,3-Butadienes",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Enzymatic kinetic resolution of primary allenic alcohols. Application to the total synthesis and stereochemical assignment of striatisporolide A†",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Geetanjali S. Sontakke",
-      "Rahul K. Shukla",
-      "Chandra M. R. Volla"
+      "Jan Deska and Jan-E. Backvall¨ Received th June",
+      "Accepted th June First published as an Advance Article on the web th July"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2022,
-    "source": "llm_from_front_matter",
-    "confidence": 0.97,
+    "value": 2009,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Adv. Synth. Catal.",
-    "source": "known_journal_hint",
-    "confidence": 0.72,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
-    "value": "10.1002/adsc.202101064",
+    "value": "10.1039/b912128p",
     "source": "markdown_regex",
     "confidence": 0.9,
     "human_checked": false
   },
   "abstract": {
-    "value": "Rh(I)-catalyzed decarboxylative arylation of alkynyl cyclic carbonates using commercially available and low-toxic aryl boronic acids has been disclosed. Depending on the nature of the cyclic carbonates, the methodology provides a straightforward platform to access either substituted 2,3-allenols or 1,3-butadiene derivatives. Internal alkynyl cyclic carbonates undergo monoarylation to conveniently afford 2,3-allenols with high syn-selectivity for the aryl and hydroxy groups. Whereas, terminal alkynyl carbonates led to the formation of diarylated 1,3-butadiene derivatives having cis-configuration for the two aryl groups via allenyl rhodium(I) alkoxide intermediate. The compatibility of various functional groups allowed to develop a library of diversely functionalized scaffolds with excellent regioselectivity in good yields. Late-stage transformation of a series of natural products highlights the wide applicability of the arylation process. Additionally, scale-up experiments and downstream transformations of α-allenol derivatives into other valuable heterocycles illustrate the efficacy of the protocol.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Crude Porcine pancreatic lipase was successfully used for the kinetic resolution of axially chiral primary allenic alcohols providing very high enantioselectivities with E values above 200. This simple access to optically active allenes was applied to the total synthesis of the fungal metabolite (-)- striatisporolide A, allowing its unambiguous stereochemical assignment.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "allenic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "method optimization study"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/Adv. Synth. Catal. 2022, 364, 565.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/adv.-synth.-catal.-2022-364-565.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/adv.-synth.-catal.-2022-364-565/a5531771-227d-498e-bdf4-69753efe98ca_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/adv.-synth.-catal.-2022-364-565"
+    "pdf": "D:\\work\\data\\5719f6b5-1864-4b86-9d5e-f0e13ccebf9e_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\5719f6b5-1864-4b86-9d5e-f0e13ccebf9e_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\5719f6b5-1864-4b86-9d5e-f0e13ccebf9e_origin\\adc55ae4-9893-4f6d-bbfc-40e93d6a07f6_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\5719f6b5-1864-4b86-9d5e-f0e13ccebf9e_origin"
   },
   "source_file": {
-    "pdf_name": "Adv. Synth. Catal. 2022, 364, 565.pdf",
-    "relative_pdf_path": "Adv. Synth. Catal. 2022, 364, 565.pdf",
-    "sha256": "72cbfbf2d63c0f68d957c05c9794f32254cc58fbfa8bbf61485b69688416c87a"
+    "pdf_name": "5719f6b5-1864-4b86-9d5e-f0e13ccebf9e_origin.pdf",
+    "relative_pdf_path": "5719f6b5-1864-4b86-9d5e-f0e13ccebf9e_origin.pdf",
+    "sha256": "dd0a8800f54ba73f3319593d8de7be8065f3d4552613030500dd3d76e77f9377"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:39Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 136,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 64,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -75,25 +86,14 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "Minor OCR corrections applied to title spacing and the final author's surname/affiliation marker merge.",
-      "Paper reports divergent formation of α-allenic alcohols and 1,3-butadienes; the single product label prioritizes the allene-focused product branch."
+      "missing_journal",
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.92,
+    "overall_confidence": 0.619,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "rhodium catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "carbonate leaving groups",
-      "ligand_or_chiral_source": "achiral bisphosphine ligands for chirality transfer",
-      "organometallic_partner": "boranes and boronates",
-      "product": "alpha-allenic alcohols",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic carbonates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.89,
-    "human_checked": false
   }
 }

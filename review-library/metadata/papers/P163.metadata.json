@@ -1,32 +1,28 @@
 {
   "paper_id": "P163",
-  "slug": "43c",
+  "slug": "fc435308-7572-4343-ac68-f4a776f966cf_origin",
   "title": {
-    "value": "Sequential asymmetric homoallenylation of primary amines with a palladium catalyst",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "fc435308 7572 4343 ac68 f4a776f966cf_origin",
+    "source": "slug_fallback",
+    "confidence": 0.35,
     "human_checked": false
   },
   "authors": {
-    "value": [
-      "Yasushi Imada",
-      "Masayuki Nishida",
-      "Takeshi Naota"
-    ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": [],
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "year": {
-    "value": 2008,
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": 1994,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "Tetrahedron",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
@@ -36,35 +32,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Optically active bis(homoallenyl)amines bearing two chiral axes with the same sense of axial chirality were prepared by a one-pot, palladium-catalyzed sequential homoallenylation of primary amines with 2,3-allenyl phosphates.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "",
+    "source": "rule_not_found",
+    "confidence": 0.0,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "not specified",
+      "substrate": "not specified",
+      "catalyst_or_method": "platinum catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.0,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/43c/db5fe5f8-1b3d-428a-b6da-7670c30ae830_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/43c.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/43c/db5fe5f8-1b3d-428a-b6da-7670c30ae830_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/43c"
+    "pdf": "D:\\work\\data\\fc435308-7572-4343-ac68-f4a776f966cf_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\fc435308-7572-4343-ac68-f4a776f966cf_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\fc435308-7572-4343-ac68-f4a776f966cf_origin\\6f7c67c9-9fb8-4994-a6e3-1e71ec57c4b3_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\fc435308-7572-4343-ac68-f4a776f966cf_origin"
   },
   "source_file": {
-    "pdf_name": "43c.pdf",
-    "relative_pdf_path": "43c.pdf",
-    "sha256": "362fdd8a7289c48a88e0035b98416c285c0729f6ffc2f82515b5153d1cfe7213"
+    "pdf_name": "fc435308-7572-4343-ac68-f4a776f966cf_origin.pdf",
+    "relative_pdf_path": "fc435308-7572-4343-ac68-f4a776f966cf_origin.pdf",
+    "sha256": "f029582ec07e6cb05fe7cd138d0d6e12fa36c64511bb2cff5d80b17a1c0adaa3"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 52,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 86,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -73,29 +81,22 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [],
-    "warnings": [
-      "missing_journal",
-      "missing_doi",
-      "The extracted abstract region in the supplied metadata includes body text beyond the true abstract; only the front-matter abstract sentence was retained.",
-      "structured_tag_not_specified_organometallic_partner"
+    "missing_fields": [
+      "abstract"
     ],
-    "overall_confidence": 0.7,
+    "warnings": [
+      "empty_authors",
+      "missing_doi",
+      "structured_tag_not_specified_product",
+      "structured_tag_not_specified_substrate",
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_title",
+      "low_confidence_abstract"
+    ],
+    "overall_confidence": 0.25,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "palladium catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "phosphate leaving groups",
-      "ligand_or_chiral_source": "chiral biaryl bisphosphine ligands",
-      "organometallic_partner": "not specified",
-      "product": "allenyl amines",
-      "reaction_type": "intermolecular functionalization of allenes",
-      "substrate": "allenyl phosphates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.95,
-    "human_checked": false
   }
 }

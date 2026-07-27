@@ -1,37 +1,30 @@
 {
   "paper_id": "P003",
-  "slug": "1-s2.0-s1872206723646248-main",
+  "slug": "01c4e8af-1ba1-4f3c-a076-9f15e9561583_origin",
   "title": {
-    "value": "Cobalt‐catalyzed dehalogenative deuterations with D2O",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "A SUGGESTION LOOKING TO THE EXTENSION INTO SPACE OF THE STRUCTURAL FORMULAS AT PRESENT USED IN CHEMISTRY. AND A NOTE UPON THE RELATION BETWEEN THE OPTICAL ACTIVITY AND THE CHEMICAL CONSTITUTION OF ORGANIC COMPOUNDS.",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Bing-Zhi Chen",
-      "Ding-Wei Ji",
-      "Bo-Chao Zhou",
-      "Xiao-Yu Wang",
-      "Heng Liu",
-      "Boshun Wan",
-      "Xiang-Ping Hu",
-      "Qing-An Chen"
+      "p. - (September )"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2024,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
-    "human_checked": false
-  },
-  "journal": {
     "value": null,
     "source": "rule_not_found",
     "confidence": 0.0,
+    "human_checked": false
+  },
+  "journal": {
+    "value": "Tetrahedron",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
@@ -41,35 +34,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "The regioselective incorporation of deuterium to organic skeletons has gained ever-growing attention among scientific community. Herein, we present a robust and general protocol for site-specific deuteration through the cobalt catalyzed dehalogenative process. Using D2O as the economical deuterium reagent, we achieved excellent substrate compatibility across a wide collection of organohalides or pseudo-halides, such as aryl, alkenyl, benzyl, allyl, or alkyl halides and propargyl acetates. Preliminary experimental evidences and related DFT calculation are also presented to support a mechanistic scenario involving a Co(I)-C(III)-Co(I) cycle. The generality and potential utilization of this moisture-insensitive catalysis have also been demonstrated by the selective deuterodehalogenation of drug-like candidates, concise synthesis of D-labeled pharmaceutical molecule, as well as the stepwise hydrogen isotope exchange of bioactive compounds.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Submitting the first result of this hypothesis to the control of facts, I believe that it has been thoroughly established that some combinations which contain a carbon atom combined with four different univalent groups (such carbon atoms will henceforth be called asymmetric carbon atoms) present some anomalies in relation to isomerism and other characteristics which are not indicated by the constitutional formulas thus far used.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "not specified",
+      "substrate": "not specified",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Progargylic/1-s2.0-S1872206723646248-main.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/1-s2.0-s1872206723646248-main.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/1-s2.0-s1872206723646248-main/77ca42b7-ea81-48cb-b8c7-7a4a5c138b03_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/1-s2.0-s1872206723646248-main"
+    "pdf": "D:\\work\\data\\01c4e8af-1ba1-4f3c-a076-9f15e9561583_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\01c4e8af-1ba1-4f3c-a076-9f15e9561583_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\01c4e8af-1ba1-4f3c-a076-9f15e9561583_origin\\9fbcaac1-4c56-4b1e-910d-35d611d43c0b_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\01c4e8af-1ba1-4f3c-a076-9f15e9561583_origin"
   },
   "source_file": {
-    "pdf_name": "1-s2.0-S1872206723646248-main.pdf",
-    "relative_pdf_path": "1-s2.0-S1872206723646248-main.pdf",
-    "sha256": "d634c035c63da0db58d2b9b0bb9ec7280b2a385df6439818781c6c1c50eda8a6"
+    "pdf_name": "01c4e8af-1ba1-4f3c-a076-9f15e9561583_origin.pdf",
+    "relative_pdf_path": "01c4e8af-1ba1-4f3c-a076-9f15e9561583_origin.pdf",
+    "sha256": "e29f2f81bfda69713973a186629df69f92d6578025cd71fbc229f295971a6427"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-16T11:15:55Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 134,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 126,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -78,30 +83,20 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [],
-    "warnings": [
-      "missing_journal",
-      "missing_doi",
-      "This paper is a broad deuterodehalogenation study; allene classification is based specifically on the propargylic acetate to deuterated allene section.",
-      "Ligand classification is somewhat uncertain because both dppf and BINAP are used for the allene-forming reactions.",
-      "structured_tag_not_specified_organometallic_partner"
+    "missing_fields": [
+      "year"
     ],
-    "overall_confidence": 0.676,
+    "warnings": [
+      "missing_doi",
+      "structured_tag_not_specified_product",
+      "structured_tag_not_specified_substrate",
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
+    ],
+    "overall_confidence": 0.496,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "cobalt catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "acetate leaving groups",
-      "ligand_or_chiral_source": "chiral biaryl bisphosphine ligands",
-      "organometallic_partner": "not specified",
-      "product": "terminal allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic acetates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.77,
-    "human_checked": false
   }
 }

@@ -116,12 +116,57 @@ _SECTION_CONTEXT: Dict[str, str] = {
     "reference":              "references",
 }
 
+_INTRODUCTION_HEADINGS = {"introduction", "background"}
+
 _CAPTION_PATTERNS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"^(figure|fig\.)\s*\d+", re.I), "figure"),
     (re.compile(r"^table\s*\d+",            re.I), "table_title"),
     (re.compile(r"^scheme\s*\d+",           re.I), "scheme"),
     (re.compile(r"^chart\s*\d+",            re.I), "chart"),
 ]
+
+# MinerU sometimes emits LaTex without a $...$ delimiter and with spaces
+# between commands, braces, and chemical symbols. These patterns cover the
+# chemistry notation found in the review corpus while deliberately leaving
+# Markdown image paths (for example figures\\figure_01.png) untouched.
+_RAW_LATEX_REWRITES: List[Tuple[re.Pattern, Any]] = [
+    (
+        re.compile(r"\{\s*\\mathrm\s*\{\s*([^{}]+?)\s*\}\s*\}\s*_\s*\{\s*([^{}]+?)\s*\}"),
+        lambda m: "$\\mathrm{" + re.sub(r"\s+", "", m.group(1)) + "}_{" + re.sub(r"\s+", "", m.group(2)) + "}$",
+    ),
+    (
+        re.compile(r"\{\s*\\pmb\s*\{\s*\\(alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|rho|sigma|tau|phi|chi|psi|omega)\s*\}\s*\}\s*\^\s*\{\s*\\prime\s*\}"),
+        lambda m: "$\\" + m.group(1) + "^\\prime$",
+    ),
+    (
+        re.compile(r"\{\s*\\pmb\s*\{\s*\\(alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|rho|sigma|tau|phi|chi|psi|omega)\s*\}\s*\}"),
+        lambda m: "$\\" + m.group(1) + "$",
+    ),
+    (
+        re.compile(r"\b([A-Za-z])\s*_\s*\{\s*([A-Za-z])\s*\^\s*\{\s*(\d+)\s*\}\s*\}\s*\\prime"),
+        lambda m: f"${m.group(1)}_{{{m.group(2)}^{m.group(3)}}}\\prime$",
+    ),
+    (
+        re.compile(r"(?<!\$)\\(alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|rho|sigma|tau|phi|chi|psi|omega)\b(?!\$)"),
+        lambda m: "$\\" + m.group(1) + "$",
+    ),
+]
+_RAW_LATEX_COMMAND_RE = re.compile(r"\\(?!figure_[A-Za-z0-9_-]+\.[A-Za-z0-9]+)[A-Za-z]+")
+
+
+def normalize_mineru_latex(md_text: str) -> str:
+    """Turn known raw MinerU LaTex into Math-delimited expressions for DOCX."""
+    for pattern, replacement in _RAW_LATEX_REWRITES:
+        md_text = pattern.sub(replacement, md_text)
+    leftovers = [
+        match.group(0)
+        for match in _RAW_LATEX_COMMAND_RE.finditer(md_text)
+        if md_text[:match.start()].count("$") % 2 == 0
+    ]
+    if leftovers:
+        examples = ", ".join(dict.fromkeys(leftovers[:5]))
+        raise ValueError(f"Unconverted MinerU LaTex remains in Markdown: {examples}")
+    return md_text
 
 
 def _usable_page_width_inches(doc: Document) -> float:
@@ -262,6 +307,88 @@ def parse_inline(raw: str) -> List[Run]:
 # Font + run application
 # ---------------------------------------------------------------------------
 
+_LATEX_SYMBOLS = {
+    "alpha": "\u03b1", "beta": "\u03b2", "gamma": "\u03b3", "delta": "\u03b4",
+    "epsilon": "\u03b5", "theta": "\u03b8", "lambda": "\u03bb", "mu": "\u03bc",
+    "nu": "\u03bd", "pi": "\u03c0", "rho": "\u03c1", "sigma": "\u03c3",
+    "tau": "\u03c4", "phi": "\u03c6", "chi": "\u03c7", "psi": "\u03c8",
+    "omega": "\u03c9", "Gamma": "\u0393", "Delta": "\u0394", "Theta": "\u0398",
+    "Lambda": "\u039b", "Xi": "\u039e", "Pi": "\u03a0", "Sigma": "\u03a3",
+    "Phi": "\u03a6", "Psi": "\u03a8", "Omega": "\u03a9", "times": "\u00d7",
+    "cdot": "\u00b7", "pm": "\u00b1", "leq": "\u2264", "geq": "\u2265",
+    "neq": "\u2260", "approx": "\u2248", "rightarrow": "\u2192", "leftarrow": "\u2190",
+    "leftrightarrow": "\u2194", "sum": "\u03a3", "prod": "\u03a0", "infty": "\u221e",
+}
+_LATEX_TEXT_WRAPPERS = "mathrm|mathbf|mathit|text|operatorname|pmb|boldsymbol|rm|bf|it"
+
+
+def _latex_to_readable_text(latex: str) -> str:
+    """Remove unsupported LaTex syntax while retaining the displayed meaning."""
+    text = latex.strip()
+    # Repeat so adjacent, non-nested formatting wrappers are all unwrapped.
+    wrapper_re = re.compile(r"\\(?:" + _LATEX_TEXT_WRAPPERS + r")\s*\{([^{}]*)\}")
+    previous = None
+    while previous != text:
+        previous = text
+        text = wrapper_re.sub(lambda m: re.sub(r"\s+", "", m.group(1)) if m.group(0).startswith("\\mathrm") else m.group(1), text)
+        text = re.sub(r"\\(?:d?frac)\s*\{([^{}]*)\}\s*\{([^{}]*)\}", r"(\1)/(\2)", text)
+
+    text = text.replace("\\prime", "\u2032")
+    text = re.sub(r"\\([A-Za-z]+)", lambda m: _LATEX_SYMBOLS.get(m.group(1), m.group(1)), text)
+    # TeX spacing commands are no longer meaningful once rendered as Word text.
+    text = text.replace("\\,", "").replace("\\;", " ").replace("\\!", "")
+    return text
+
+
+def _extract_script_content(text: str, start: int) -> Tuple[str, int]:
+    """Return a LaTex script token and the index immediately after it."""
+    if start >= len(text):
+        return "", start
+    if text[start] != "{":
+        return text[start], start + 1
+    depth = 1
+    index = start + 1
+    while index < len(text) and depth:
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+        index += 1
+    return text[start + 1:index - 1] if depth == 0 else text[start + 1:], index
+
+
+def _split_latex_script_segments(text: str, default_mode: str = "normal") -> List[Tuple[str, str]]:
+    """Preserve LaTex _{...} and ^{...} using Word-native run formatting."""
+    segments: List[Tuple[str, str]] = []
+    buffer = ""
+
+    def append(mode: str, value: str) -> None:
+        if not value:
+            return
+        if segments and segments[-1][0] == mode:
+            segments[-1] = (mode, segments[-1][1] + value)
+        else:
+            segments.append((mode, value))
+
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in "_^":
+            append(default_mode, buffer)
+            buffer = ""
+            script, index = _extract_script_content(text, index + 1)
+            script_mode = "subscript" if char == "_" else "superscript"
+            for mode, value in _split_latex_script_segments(script, script_mode):
+                append(mode, value)
+        elif char in "{}":
+            index += 1
+        else:
+            buffer += char
+            index += 1
+    append(default_mode, buffer)
+    return segments
+
+
 def _apply_math(para, latex: str) -> None:
     if _LATEX_OK:
         try:
@@ -269,8 +396,17 @@ def _apply_math(para, latex: str) -> None:
             return
         except Exception:
             pass
-    run = para.add_run(f"[{latex}]")
-    run.italic = True
+    # Do not leak raw LaTex when the optional OMML converter is unavailable.
+    # The fallback keeps formulas readable and carries their scripts as native
+    # Word run formatting.
+    readable = _latex_to_readable_text(latex)
+    for segment_mode, segment_text in _split_latex_script_segments(readable):
+        run = para.add_run(segment_text)
+        run.italic = True
+        if segment_mode == "superscript":
+            run.font.superscript = True
+        elif segment_mode == "subscript":
+            run.font.subscript = True
 
 
 def _split_script_segments(text: str) -> List[Tuple[str, str]]:
@@ -445,6 +581,7 @@ _HEADING_RE    = re.compile(r"^ {0,3}(#{1,6})\s+(.*)")
 _EMBEDDED_HEADING_PREFIX_RE = re.compile(r"^#{1,6}\s+")
 _NUMBERED_SECTION_HEADING_RE = re.compile(r"^\s*\d+(?:\.\d+)*[.)]?\s+\S")
 _HTML_ANCHOR_RE = re.compile(r"^<a\s+id=[\"']ref-\d+[\"']\s*>\s*</a>\s*$", re.I)
+_PARAGRAPH_ID_MARKER_RE = re.compile(r"^\s*<!--\s*paragraph_id:\s*[A-Za-z0-9_.:-]+\s*-->\s*$")
 _UL_RE         = re.compile(r"^(\s*)[-*+]\s+(.*)")
 _OL_RE         = re.compile(r"^(\s*)\d+[.)]\s+(.*)")
 _FENCE_RE      = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
@@ -519,6 +656,9 @@ def tokenize(md_text: str) -> List[Block]:
             continue
 
         if _HTML_ANCHOR_RE.match(line.strip()):
+            i += 1
+            continue
+        if _PARAGRAPH_ID_MARKER_RE.match(line):
             i += 1
             continue
 
@@ -630,6 +770,19 @@ def _section_ctx(text: str) -> Optional[str]:
     return _SECTION_CONTEXT.get(text.strip().lower())
 
 
+def is_introduction_heading(text: str) -> bool:
+    """Recognize the manuscript introduction that anchors the full-review chart."""
+    title = re.sub(r"^\s*\d+(?:\.\d+)*[.)]?\s*", "", text).strip()
+    return title.casefold() in _INTRODUCTION_HEADINGS
+
+
+def should_insert_full_chart_before_heading(
+    introduction_level: int | None, next_heading_level: int
+) -> bool:
+    """Place the chart after Introduction and before the next peer-level section."""
+    return introduction_level is not None and next_heading_level <= introduction_level
+
+
 def _caption_style(raw_text: str) -> Optional[str]:
     plain = _plain_text(raw_text)
     for pat, key in _CAPTION_PATTERNS:
@@ -715,7 +868,7 @@ _EXCLUDED_CHART_HEADING_KEYS = {
 
 def _expected_chart_headings(blocks: List[Block]) -> Dict[str, str]:
     expected: Dict[str, str] = {}
-    for block in blocks:
+    for block_index, block in enumerate(blocks):
         if block.kind != "heading":
             continue
         numbered_h1 = block.level == 1 and _NUMBERED_SECTION_HEADING_RE.match(block.text.strip())
@@ -838,7 +991,7 @@ def _chart_width_inches(doc: Document, image_path: Path) -> float:
 # ---------------------------------------------------------------------------
 
 def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
-    md_text = md_path.read_text(encoding="utf-8")
+    md_text = normalize_mineru_latex(md_path.read_text(encoding="utf-8"))
     blocks  = tokenize(md_text)
     toc_entries = _collect_static_toc_entries(blocks)
     chart_bundle = _load_summary_chart_bundle(md_path, blocks)
@@ -851,6 +1004,7 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
     saw_toc_heading = False
     skipping_source_toc = False
     full_chart_inserted = False
+    introduction_level: int | None = None
     inserted_section_charts: set[str] = set()
     chart_number = 0
 
@@ -873,10 +1027,9 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
         )
         _para(doc, "chart", "chart", f"Chart {chart_number}. {caption}")
 
-    for block in blocks:
+    for block_index, block in enumerate(blocks):
 
         if block.kind == "heading":
-            previous_ctx = ctx
             plain_heading = block.text.strip().lower()
             numbered_h1_section = block.level == 1 and _NUMBERED_SECTION_HEADING_RE.match(block.text.strip())
             if plain_heading == "table of contents":
@@ -892,10 +1045,11 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
             if (
                 chart_bundle is not None
                 and not full_chart_inserted
-                and (previous_ctx == "keywords" or chart_heading_key in chart_bundle.sections)
+                and should_insert_full_chart_before_heading(introduction_level, effective_level)
             ):
                 insert_chart(chart_bundle.full, "Full-review structure summary.")
                 full_chart_inserted = True
+                introduction_level = None
             style_key, spec_key = _HEADING_FORMAT.get(effective_level, ("body", "body"))
             new_ctx = _section_ctx(block.text)
             ctx = new_ctx if new_ctx else "body"
@@ -908,6 +1062,8 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
                 manifest_heading, image_path = chart_bundle.sections[chart_heading_key]
                 insert_chart(image_path, f"Section structure summary: {manifest_heading}.")
                 inserted_section_charts.add(chart_heading_key)
+            if is_introduction_heading(block.text):
+                introduction_level = effective_level
 
         elif block.kind == "paragraph":
             text  = block.text.strip()
@@ -998,8 +1154,17 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
                 p = doc.add_paragraph(style=_S["body"])
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 p.add_run().add_picture(str(img_path), width=Inches(_usable_page_width_inches(doc)))
-                if block.alt:
-                    _para(doc, "figure", "figure", f"Figure. {block.alt}")
+                next_block = blocks[block_index + 1] if block_index + 1 < len(blocks) else None
+                next_caption = (
+                    next_block is not None
+                    and next_block.kind == "paragraph"
+                    and _caption_style(_plain_text(next_block.text.strip())) is not None
+                )
+                # The drafting stage supplies a full caption immediately after
+                # manuscript figures. Do not add a second generic caption.
+                if block.alt and not next_caption:
+                    kind = "Scheme" if block.alt.strip().lower().startswith("scheme") else "Figure"
+                    _para(doc, "scheme" if kind == "Scheme" else "figure", "scheme" if kind == "Scheme" else "figure", f"{kind}. {block.alt}")
             else:
                 continue
 
@@ -1013,7 +1178,7 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
 
     if chart_bundle is not None:
         if not full_chart_inserted:
-            raise ValueError("full-review summary chart could not be placed before the manuscript body")
+            raise ValueError("full-review summary chart could not be placed after Introduction")
         missing_sections = set(chart_bundle.sections) - inserted_section_charts
         if missing_sections:
             missing = ", ".join(
@@ -1056,9 +1221,8 @@ def main() -> None:
     if not template_path.exists():
         raise SystemExit(f"[md2docx] ERROR: Template not found: {template_path}")
     if not _LATEX_OK:
-        print("[md2docx] WARNING: latex2word not installed -- "
-              "math will render as plain text.\n"
-              "          Fix: pip install latex2word")
+        print("[md2docx] INFO: latex2word not installed; "
+              "using native Word text with subscript/superscript for supported MinerU formulas.")
 
     try:
         convert(md_path, out_path, template_path)

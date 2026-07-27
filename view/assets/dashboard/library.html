@@ -356,6 +356,7 @@
     async function loadProjects() {
       const projects = await (await fetch('/api/projects')).json();
       els.globalProjectSelect.innerHTML = ['<option value="">Select review project</option>'].concat(projects.map(p => `<option value="${escapeHtml(p.project_id)}">${escapeHtml(p.project_id)}</option>`)).join('');
+      els.globalProjectSelect.value = new URLSearchParams(window.location.search).get('project') || '';
     }
     function showMessage(text) {
       els.message.textContent = text;

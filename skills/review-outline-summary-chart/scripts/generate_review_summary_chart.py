@@ -37,13 +37,16 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
+import subprocess
+import tempfile
 import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 
 # ── Data structures ──────────────────────────────────────────────────────────
@@ -122,6 +125,44 @@ def write_text(path: Path, text: str) -> None:
 
 
 # ── Parsing ──────────────────────────────────────────────────────────────────
+
+_LATEX_SYMBOLS = {
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ",
+    "epsilon": "ε", "theta": "θ", "lambda": "λ", "mu": "μ",
+    "nu": "ν", "pi": "π", "rho": "ρ", "sigma": "σ", "tau": "τ",
+    "phi": "φ", "chi": "χ", "psi": "ψ", "omega": "ω",
+    "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ",
+    "Pi": "Π", "Sigma": "Σ", "Phi": "Φ", "Omega": "Ω",
+}
+_SUBSCRIPTS = str.maketrans("0123456789+-=()Nn", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₙₙ")
+_SUPERSCRIPTS = str.maketrans("0123456789+-=()", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾")
+_ASCII_CHART_FALLBACK = str.maketrans({
+    "α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta", "ε": "epsilon",
+    "θ": "theta", "λ": "lambda", "μ": "mu", "ν": "nu", "π": "pi", "ρ": "rho",
+    "σ": "sigma", "τ": "tau", "φ": "phi", "χ": "chi", "ψ": "psi", "ω": "omega",
+    "Γ": "Gamma", "Δ": "Delta", "Θ": "Theta", "Λ": "Lambda", "Π": "Pi", "Σ": "Sigma",
+    "Φ": "Phi", "Ω": "Omega", "₀": "0", "₁": "1", "₂": "2", "₃": "3", "₄": "4",
+    "₅": "5", "₆": "6", "₇": "7", "₈": "8", "₉": "9", "ₙ": "N", "⁰": "0", "¹": "1",
+    "²": "2", "³": "3", "⁴": "4", "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9",
+    "′": "'",
+})
+
+
+def plain_chart_text(value: str) -> str:
+    """Convert common manuscript LaTeX to readable plain text for chart labels."""
+    text = str(value or "")
+    text = re.sub(r"\s*\\prime", "′", text).replace("\\%", "%")
+    text = re.sub(r"\\mathrm\s*\{([^{}]*)\}", lambda match: re.sub(r"\s+", "", match.group(1)), text)
+    text = re.sub(r"\\(?:mathrm|mathbf|mathit|text|operatorname)\s*\{", "{", text)
+    text = re.sub(r"\\([A-Za-z]+)", lambda match: _LATEX_SYMBOLS.get(match.group(1), match.group(1)), text)
+    text = re.sub(r"\s*\^\s*\{([^{}]+)\}", lambda match: re.sub(r"\s+", "", match.group(1)).translate(_SUPERSCRIPTS), text)
+    text = re.sub(r"\s*_\s*\{([^{}]+)\}", lambda match: re.sub(r"\s+", "", match.group(1)).translate(_SUBSCRIPTS), text)
+    text = re.sub(r"\s*\^\s*([0-9+-])", lambda match: match.group(1).translate(_SUPERSCRIPTS), text)
+    text = re.sub(r"\s*_\s*([0-9+-])", lambda match: match.group(1).translate(_SUBSCRIPTS), text)
+    text = text.replace("{", "").replace("}", "")
+    text = text.translate(_ASCII_CHART_FALLBACK)
+    return re.sub(r"\s+", " ", text).strip()
+
 
 def normalize_chart_heading(heading: str) -> str:
     value = re.sub(r"^\s*\d+(?:\.\d+)*[.)]?\s*", "", heading)
@@ -334,8 +375,8 @@ def manuscript_sections(sections: list[ReviewSection]) -> list[ReviewSection]:
 def section_detail_text(section: ReviewSection) -> str:
     """Return concise chart text without leaking Markdown table syntax."""
     if section.children:
-        return ", ".join(child.heading for child in section.children[:5])
-    summary = re.sub(r"\s+", " ", section.summary).strip()
+        return ", ".join(plain_chart_text(child.heading) for child in section.children[:5])
+    summary = plain_chart_text(section.summary)
     if summary and "|" not in summary:
         return summary
     return (
@@ -356,6 +397,7 @@ def infer_section_id(section: ReviewSection) -> str:
 # ── Mermaid: full-review chart (全文大纲) ────────────────────────────────────
 
 def sanitize_mermaid(text: str, max_len: int = 50) -> str:
+    text = plain_chart_text(text)
     text = text.replace('"', "'").replace("[", "(").replace("]", ")")
     text = re.sub(r"[\r\n]+", " ", text)
     if len(text) > max_len:
@@ -385,9 +427,11 @@ def icon_for(sec_type: str) -> str:
     }.get(sec_type, "📌")
 
 
-def generate_full_mermaid(sections: list[ReviewSection], review_title: str) -> str:
+def generate_full_mermaid(
+    sections: list[ReviewSection], review_title: str, *, include_descendants: bool = True
+) -> str:
     """全文大纲: review-level structure flowchart with paper-count badges."""
-    lines = ["graph TD"]
+    lines = ["graph TD" if include_descendants else "graph LR"]
     counter = [0]
 
     def nid() -> str:
@@ -402,8 +446,9 @@ def generate_full_mermaid(sections: list[ReviewSection], review_title: str) -> s
         lines.append(f"    style {i} {style_for(node.section_type)}")
         if parent_id:
             lines.append(f"    {parent_id} --> {i}")
-        for child in node.children:
-            render(child, i)
+        if include_descendants:
+            for child in node.children:
+                render(child, i)
         return i
 
     if review_title:
@@ -524,53 +569,97 @@ def _save_png(image: Image.Image, path: Path) -> dict[str, str]:
     return {"path": path.name, "sha256": sha256_file(path)}
 
 
-def render_full_chart_png(sections: list[ReviewSection], review_title: str,
-                          path: Path) -> dict[str, str]:
-    width = 1800
-    margin = 90
-    title_height = 150
-    card_width = width - 2 * margin
-    card_height = 150
-    gap = 70
-    height = margin + title_height + 80 + len(sections) * (card_height + gap) + margin
-    image = Image.new("RGB", (width, max(height, 720)), "#f8fafc")
-    draw = ImageDraw.Draw(image)
-    title_font = _font(42, bold=True)
-    heading_font = _font(30, bold=True)
-    detail_font = _font(23)
+_EDGE_EXECUTABLE_CANDIDATES = (
+    Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"),
+    Path("C:/Program Files/Microsoft/Edge/Application/msedge.exe"),
+)
 
-    title_box = (margin, margin, width - margin, margin + title_height)
-    draw.rounded_rectangle(title_box, radius=24, fill="#e8eaf6", outline="#3f51b5", width=4)
-    title_lines = _wrapped_lines(draw, review_title or "Review Article", title_font,
-                                 card_width - 80)[:2]
-    _draw_centered_lines(draw, title_box, title_lines, title_font, fill="#1e3a8a")
 
-    previous_bottom = title_box[3]
-    for index, section in enumerate(sections, start=1):
-        top = previous_bottom + gap
-        box = (margin, top, width - margin, top + card_height)
-        center_x = width // 2
-        draw.line((center_x, previous_bottom, center_x, top - 14), fill="#64748b", width=5)
-        draw.polygon([(center_x, top), (center_x - 12, top - 18),
-                      (center_x + 12, top - 18)], fill="#64748b")
-        fill = "#fdfdfd" if index % 2 else "#f0f9ff"
-        draw.rounded_rectangle(box, radius=22, fill=fill, outline="#64748b", width=3)
-        heading = f"{index}. {section.heading}"
-        heading_lines = _wrapped_lines(draw, heading, heading_font, card_width - 100)[:2]
-        details = section_detail_text(section)
-        detail_lines = _wrapped_lines(draw, details, detail_font, card_width - 120)[:2]
-        all_lines = heading_lines + detail_lines
-        fonts = [heading_font] * len(heading_lines) + [detail_font] * len(detail_lines)
-        heights = [draw.textbbox((0, 0), line, font=font)[3]
-                   for line, font in zip(all_lines, fonts)]
-        y = top + max(18, (card_height - sum(heights) - 8 * max(0, len(all_lines) - 1)) // 2)
-        for line, font, line_height in zip(all_lines, fonts, heights):
-            line_width = draw.textbbox((0, 0), line, font=font)[2]
-            draw.text(((width - line_width) / 2, y), line, font=font,
-                      fill="#0f172a" if font is heading_font else "#475569")
-            y += line_height + 8
-        previous_bottom = box[3]
-    return _save_png(image, path)
+def find_edge_executable() -> Path | None:
+    """Return the local headless browser used to rasterize Mermaid itself."""
+    for candidate in _EDGE_EXECUTABLE_CANDIDATES:
+        if candidate.exists():
+            return candidate
+    for command in ("msedge.exe", "msedge"):
+        resolved = shutil.which(command)
+        if resolved:
+            return Path(resolved)
+    return None
+
+
+def generate_full_chart_export_html(full_mermaid: str) -> str:
+    """Make a minimal page containing the same full-review Mermaid figure."""
+    return f"""<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+<meta charset=\"UTF-8\">
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+<title>Full-Review Structure Chart</title>
+<script src=\"https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js\"></script>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; padding: 24px; }}
+.chart-section {{ background: white; border-radius: 8px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow-x: auto; }}
+.chart-section h2 {{ font-size: 1.2rem; margin-bottom: 16px; color: #555; }}
+</style>
+</head>
+<body>
+<div class=\"chart-section\">
+    <h2>📊 全文大纲 · Full-Review Structure Chart</h2>
+    <div class=\"mermaid\">{full_mermaid}</div>
+</div>
+<script>mermaid.initialize({{ startOnLoad: true, theme: 'default', flowchart: {{ useMaxWidth: true, htmlLabels: true }} }});</script>
+</body>
+</html>"""
+
+
+def trim_browser_screenshot(path: Path, background: str) -> None:
+    """Remove the unused lower browser viewport while preserving chart margins."""
+    image = Image.open(path).convert("RGB")
+    canvas = Image.new("RGB", image.size, background)
+    bbox = ImageChops.difference(image, canvas).getbbox()
+    if bbox is None:
+        return
+    bottom = min(image.height, bbox[3] + 24)
+    if bottom < image.height:
+        image.crop((0, 0, image.width, bottom)).save(path, format="PNG", optimize=True)
+
+
+def render_full_mermaid_png(full_mermaid: str, path: Path) -> dict[str, str]:
+    """Rasterize the HTML's Full-Review Structure Chart with local Edge."""
+    edge = find_edge_executable()
+    if edge is None:
+        raise RuntimeError("Microsoft Edge is required to render the Mermaid full-review chart PNG.")
+
+    with tempfile.TemporaryDirectory(prefix=".review-summary-chart-", dir=path.parent) as temp_dir:
+        temp = Path(temp_dir)
+        html_path = temp / "full-review-structure-chart.html"
+        profile_path = temp / "edge-profile"
+        write_text(html_path, generate_full_chart_export_html(full_mermaid))
+        result = subprocess.run(
+            [
+                str(edge), "--headless=new", "--disable-gpu", "--no-first-run", "--no-sandbox",
+                f"--user-data-dir={profile_path}", "--allow-file-access-from-files",
+                "--run-all-compositor-stages-before-draw", "--virtual-time-budget=8000",
+                "--window-size=1800,1600", f"--screenshot={path}", html_path.as_uri(),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        if result.returncode or not path.exists() or path.stat().st_size == 0:
+            detail = result.stdout.strip() or f"exit code {result.returncode}"
+            raise RuntimeError(f"Edge could not render the Mermaid full-review chart: {detail}")
+        trim_browser_screenshot(path, "#f5f5f5")
+    return {"path": path.name, "sha256": sha256_file(path)}
+
+
+def render_full_chart_png(full_mermaid: str, path: Path) -> dict[str, str]:
+    """Export the actual Full-Review Structure Chart, rather than a proxy layout."""
+    return render_full_mermaid_png(full_mermaid, path)
 
 
 def render_section_chart_png(section: ReviewSection, path: Path) -> dict[str, str]:
@@ -605,7 +694,7 @@ def render_section_chart_png(section: ReviewSection, path: Path) -> dict[str, st
         draw.polygon([(center_x, top), (center_x - 10, top - 16),
                       (center_x + 10, top - 16)], fill="#94a3b8")
         draw.rounded_rectangle(box, radius=20, fill="#f8fafc", outline="#94a3b8", width=3)
-        label = node.heading if section.children else "Section overview"
+        label = plain_chart_text(node.heading) if section.children else "Section overview"
         papers = ", ".join(node.cited_paper_ids[:8])
         details = papers or section_detail_text(node)
         heading_lines = _wrapped_lines(draw, f"{index}. {label}", heading_font,
@@ -648,11 +737,11 @@ def generate_html(
         <div class="summary-card type-{s.section_type}">
             <div class="card-header">
                 <span class="card-type">{s.section_type.upper()}</span>
-                <span class="card-heading">{s.heading}</span>
+                <span class="card-heading">{plain_chart_text(s.heading)}</span>
                 <span class="card-words">{s.word_count}w · {len(s.cited_paper_ids)} papers</span>
             </div>
             <div class="card-body">
-                <p>{s.summary or 'No summary extracted.'}</p>
+                <p>{plain_chart_text(s.summary) or 'No summary extracted.'}</p>
                 <p class="papers"><strong>Cited:</strong> {papers}</p>
             </div>
         </div>"""
@@ -828,7 +917,9 @@ def run(args: argparse.Namespace) -> int:
         sections[0].heading if first_is_title else (topic or "Review Article")
     )
 
-    full_mermaid = generate_full_mermaid(body_sections or sections, review_title)
+    full_mermaid = generate_full_mermaid(
+        body_sections or sections, review_title, include_descendants=False
+    )
 
     body_chart_sections = chartable_sections(body_sections or sections)
 
@@ -859,8 +950,7 @@ def run(args: argparse.Namespace) -> int:
     image_manifest: dict[str, Any] = {"full": None, "sections": []}
     if args.scope in ("full", "both"):
         image_manifest["full"] = render_full_chart_png(
-            body_sections or sections,
-            review_title,
+            full_mermaid,
             out_dir / "review_summary_chart.png",
         )
     if args.scope in ("section", "both"):

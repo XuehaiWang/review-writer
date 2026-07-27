@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import NamedTuple
@@ -177,6 +178,15 @@ def integrate_conclusion(first_draft: str, conclusion: str) -> str:
     return integrated.rstrip("\r\n") + "\n"
 
 
+def strip_internal_workflow_markers(markdown: str) -> str:
+    """Remove draft-only paragraph anchors from the manuscript deliverable."""
+    return re.sub(
+        r"(?m)^\s*<!--\s*paragraph_id:\s*[A-Za-z0-9_.:-]+\s*-->\s*\n?",
+        "",
+        markdown,
+    )
+
+
 def run(args: argparse.Namespace) -> int:
     project = Path(args.review_root).resolve() / "review-projects" / args.project_id
     input_dir = project / "04_first_draft"
@@ -200,7 +210,7 @@ def run(args: argparse.Namespace) -> int:
     try:
         first_draft = first_draft_bytes.decode("utf-8")
         conclusion = conclusion_bytes.decode("utf-8")
-        final_draft = integrate_conclusion(first_draft, conclusion)
+        final_draft = strip_internal_workflow_markers(integrate_conclusion(first_draft, conclusion))
         clean_conclusion = conclusion.strip()
         conclusion_heading = _generated_conclusion_heading(clean_conclusion)
     except (UnicodeDecodeError, ValueError) as exc:
@@ -211,6 +221,13 @@ def run(args: argparse.Namespace) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     final_draft_bytes = final_draft.encode("utf-8")
     _atomic_write_bytes(output_path, final_draft_bytes)
+
+    # Markdown figure paths are relative to their document. The first-draft
+    # images must therefore accompany the integrated final manuscript.
+    source_figures = input_dir / "figures"
+    output_figures = output_path.parent / "figures"
+    if source_figures.is_dir():
+        shutil.copytree(source_figures, output_figures, dirs_exist_ok=True)
 
     receipt = {
         "schema_version": 1,
@@ -224,6 +241,7 @@ def run(args: argparse.Namespace) -> int:
         ),
         "generated_conclusion_callouts": _numeric_callouts(clean_conclusion),
         "integrated_final_draft_sha256": _sha256(final_draft_bytes),
+        "figure_assets_path": str(output_figures.resolve()) if source_figures.is_dir() else None,
     }
     receipt_path = output_path.parent / "conclusion_integration.json"
     receipt_bytes = (

@@ -1,31 +1,36 @@
 {
   "paper_id": "P065",
-  "slug": "eur.-j.-org.-chem.-2023-26-e202300425",
+  "slug": "7036d1e2-8dda-467b-a2be-ebb0542e5ef7_origin",
   "title": {
-    "value": "Formal Addition of β-Acylalkenyl Anions to Ketones Utilizing [1,2]-Phospha-Brook Rearrangement under Brønsted Base Catalysis",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Mechanistic Aspects on the Formation of Chiral Allenes from Propargylic Ethers and Organocopper Reagents",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Azusa Kondoh",
-      "Sena Takada",
-      "Kohei Aita",
-      "Masahiro Terada"
+      "A. Alexakis",
+      "$^{}$ I. Marek",
+      "P. Mangeney",
+      "J. F. Normant Contribution from the Laboratoire de Chimie des Organoêléments",
+      "Université P. et M. Curie",
+      "Tour -",
+      "Place Jussieu",
+      "F- Paris Cedex",
+      "France. Received April"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2023,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 1986,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Eur. J. Org. Chem.",
+    "value": "Tetrahedron",
     "source": "known_journal_hint",
     "confidence": 0.72,
     "human_checked": false
@@ -37,35 +42,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "A methodology for the formal addition of β-acylalkenyl anions was developed by utilizing the [1,2]-phospha-Brook rearrangement under Brønsted base catalysis. The two-step reaction involves the catalytic addition of α-oxygenated propargyl anions generated via [1,2]-phospha-Brook rearrangement to electron-deficient ketones and subsequent alcoholysis to afford tertiary alcohols having an enone moiety. This is a rare example of a catalytic carbon-carbon bond forming reaction of β-acylalkenyl anion equivalents, providing synthetic building blocks that are otherwise difficult to access.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "Propargylic ethers react with organocopper reagents to afford allenes by a syn addition to the triple bond followed by a $\\beta$ -elimination of the resulting alkenyl copper species. With use of chiral propargylic ethers and stoichiometric organocopper reagent, it was shown that the $\\beta$ -elimination step is purely anti, resulting in the formation of a chiral allene with 96% optical yield. The same reaction, run with a Grignard reagent RMgX and a catalytic amount of a Cu $^{I}$ salt, affords allenes through an anti or syn overall process. The crucial step is the $\\beta$ -elimination of the intermediate alkenyl organometallic species, which is of anti type with RMgI and of syn type with RMgCl. Propargylic acetates, which also afford allenes in this reaction, but through a Cu $^{III}$ intermediate, are not sensitive to this “halogen effect”.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "Grignard reagents",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "acetate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "mechanistic study"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/Eur. J. Org. Chem. 2023, 26, e202300425.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/eur.-j.-org.-chem.-2023-26-e202300425.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/eur.-j.-org.-chem.-2023-26-e202300425/84008282-da0b-4a86-9043-1d0b9734a738_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/eur.-j.-org.-chem.-2023-26-e202300425"
+    "pdf": "D:\\work\\data\\7036d1e2-8dda-467b-a2be-ebb0542e5ef7_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\7036d1e2-8dda-467b-a2be-ebb0542e5ef7_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\7036d1e2-8dda-467b-a2be-ebb0542e5ef7_origin\\5b85938b-ccaf-4cf2-9db6-6bfca596323c_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\7036d1e2-8dda-467b-a2be-ebb0542e5ef7_origin"
   },
   "source_file": {
-    "pdf_name": "Eur. J. Org. Chem. 2023, 26, e202300425.pdf",
-    "relative_pdf_path": "Eur. J. Org. Chem. 2023, 26, e202300425.pdf",
-    "sha256": "81c621ccc07ab9e053c71981339873d90e930d18bc82da253b6d5f031d5bcfae"
+    "pdf_name": "7036d1e2-8dda-467b-a2be-ebb0542e5ef7_origin.pdf",
+    "relative_pdf_path": "7036d1e2-8dda-467b-a2be-ebb0542e5ef7_origin.pdf",
+    "sha256": "f19fec90d798582bab31aaade4dcedec6d415e16f0c763802ca462b9c24b95b0"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:39Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 114,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 151,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -77,28 +94,10 @@
     "missing_fields": [],
     "warnings": [
       "missing_doi",
-      "low_confidence_abstract",
-      "Allene classification is based on the allenyl alcohol intermediates described in the body of the paper; the title and abstract emphasize final enone products rather than allenes.",
-      "The catalyst/method and leaving-group labels are approximate mappings from Brønsted base-promoted [1,2]-phospha-Brook rearrangement chemistry to the constrained allene-review label set.",
-      "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.77,
+    "overall_confidence": 0.616,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "main-group metal mediation",
-      "document_scope": "primary research article",
-      "leaving_group": "phosphate leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "alpha-allenic alcohols",
-      "reaction_type": "allenyl-reagent addition to carbonyl compounds",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.72,
-    "human_checked": false
   }
 }

@@ -1,76 +1,81 @@
 {
   "paper_id": "P025",
-  "slug": "adv-synth-catal-2025-liang-organocatalytic-remotecontrolled-enantioselective-1-10additions-of-in-situ-generated",
+  "slug": "1f81e0d1-ddfc-42b6-ae62-c7a407672c53_origin",
   "title": {
-    "value": "Organocatalytic Remote-Controlled Enantioselective 1,10-Additions of In Situ Generated Alkynyl 2,4'-Biphenyl Quinone Methides",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Catalytic Asymmetric Synthesis of Optically Active Allenes from Terminal Alkynes",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Tian Liang",
-      "Meiwen Liu",
-      "Aman Ullah",
-      "Zhibin Yue",
-      "Yan Xia",
-      "Fang Fang",
-      "Pengfei Li",
-      "Shao-Fei Ni",
-      "Wenjun Li"
+      "Vol.",
+      "No. –"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2025,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2012,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Adv Synth Catal",
-    "source": "filename_prefix",
-    "confidence": 0.55,
+    "value": "Organic Letters",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
-    "value": "10.1002/adsc.70091",
-    "source": "markdown_regex",
-    "confidence": 0.9,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "abstract": {
-    "value": "The strategic incorporation of auxiliary groups has recently established α-functionalized alcohols as versatile electrophilic alkylation reagents, enabling remotely controlled conjugate additions. Strikingly, while quinone methide chemistry has been extensively developed, their extended analogues—featuring spatially separated carbonyl and methide units across biphenyl systems—remain unexplored. Building on the prior work with alkynyl 4,4'-biphenyl quinone methides, an organocatalytic remotely controlled enantioselective 1,10-additions of in situ-generated alkynyl 2,4'-biphenyl quinone methides from α-[4-(2-hydroxyphenyl)phenyl]propargyl alcohols with 3-arylindoles and indole-2-carboxylates is reported, affording a broad scope of enantioenriched 3H-pyrrolo[1,2-a]indoles and axially chiral tetrasubstituted allenes, respectively. Combined with control experiments, density functional theory calculations elucidate the reaction mechanism, revealing that the dehydration of α-functionalized alcohols to generate 2,4'-biphenyl quinone methides constitutes the rate-limiting step, while enantioselectivity arises from the nucleophilic addition of alkynyl biphenyl quinone methides. Notably, beyond proving 2,4'-biphenyl quinone methides as competent intermediates, this work breaks new ground by demonstrating their participation in previously unreported stereoselective 1,10-additions.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "CuBr and ZnI have been developed as catalysts or subcatalysts for the efficient asymmetric synthesis of axially chiral allenols with up to 97% ee from readily available propargylic alcohols, aliphatic or aromatic aldehyde, pyrrolidine, and commerically available ligands. The alcohol unit in the terminal alkynes plays a very important role for ensuring high enantioselectivity via coordination. Allenes have been becoming more important in organic synthesis because of extensive exploration on the development of new highly selective reactions of allenes.<sup>1,2</sup> Of particular interest, because of the intrinsic axial chirality of allenes, the axial-to-central chirality transfer strategy has become an important approach for the synthesis of chiral products.<sup>3</sup> However, the known reports on the synthesis of axially chiral allenes are still largely limited.<sup>2</sup> On the basis of our recent observation that $Z \\mathrm { n l } _ { 2 }$ may promote the reaction of terminal alkynes, aldehydes, and morpholine for the synthesis of 1,3-disubstituted allenes,<sup>4</sup> we reasoned that there are two approaches for the easy synthesis of optically active 1,3-disubstituted allenes from terminal alkynes and aldehydes: the chiral amine approach and catalytic asymmetric synthesis of propargylic amine approach (Scheme 1). In this paper, we wish to report our recent observation on the realization of such concepts. In the first place, we tried the following proline-based commercially available cyclic chiral amines 4 6 for the ZnI -promoted reaction of terminal alkynes based on the earlier observation by Che et al. under the catalysis of $\\mathrm { K A u C l } _ { 4 } ^ { 5 \\mathrm { a } }$ or $\\mathrm { \\bf A g N O } _ { 3 } ^ { \\bar { 5 } \\mathrm { b } }$ salts from L-prolinol-based propargylic amines. After the extensive combinatorial reactions of the substrates in our original report<sup>4</sup> with amines 4 6, it is interesting to note that the reaction of alkyne 1a with n-BuCHO and the diphenyl-substituted prolinol 6 in toluene afforded allene 3aa in 98% ee within 16 h (entry 3, Table 1).<sup>6</sup> Scheme 1. Concepts for the Synthesis of Optically Active Allenes Table 1. Initial Efforts to Synthesize Axially Chiral Allenes Using Chiral Amines 4 6: Selected Examples<sup>a</sup> Because of the expensive nature of at least stoichiometric amounts of chiral amine 6 and an unsuccessful attempt with unprotected propargyl alcohol (entry 6, Table 1), we decided to pursue the second approach shown in Scheme 1. It is envisioned that the challenge will be the availability of a highly enantioselective method for the efficient synthesis of optically active propargylic amines.<sup>5</sup>\u0001<sup>9</sup> Knochel et al.<sup>7</sup> reported CuBr-catalyzed synthesis of optically active pro pargylic amine from terminal alkyne, aldehyde, and dibenzyl or diallyl amine with (R)-quinap 7 as the chiral ligand, affording propargylic amines with 90 98% ee only with trimethylsilylacetylene; 25 89% ee were observed when alkyl- or aryl-substituted terminal alkynes were used. Besides, the reaction is very slow, taking 1 6 days to finish at room temperature; Carreira et al.<sup>8</sup> applied the ligand (R,S)-N-PINAP 8 and $( R, R ) – N – \\mathrm { P I N A P } 9$ to the same reac tion, and higher enantioslelectivities were observed, yet the substrate scope is limited to i-alkyl carbinals and suffers from a long reaction time (3 5 days). In addition, we were also concerned with whether such optically active propargylic amines may be converted to chiral allenes highly stereoselectively in the presence o $\\mathrm { Z n I } _ { 2 }$ and whether the two steps (chiral propargylic amine as well as allene formations) would share the same solvent. After examining a series of secondary amines shown in Scheme 2, we were pleased to find that when pyrrolidine was employed, full conversion from terminal alkynes and aldehydes to propargylic amines can be realized within 12 h at room temperature. However, the second-step reaction with the direct addition o $\\mathrm { Z n I } _ { 2 }$ is incomplete, albeit there is a decent conversion. During the preparation of racemic products, we noticed with control experiments that Cu(I) should be removed for a fast second step forming the allene. Thus, after simple filtration through a short pad of silica gel to remove Cu(I) with ether as the eluent, the ether was then evaporated, and the subsequent transformation from the crude propargylic amine to the allene 3dc was conducted in the same solvent (toluene) in the presence o $\\operatorname { \\mathrm { ~ \\ Z n I } } _ { 2 }$ very efficiently. NaI was added to ensure a higher yield. Scheme 2. Amines Screened and Preparation of Racemic 3dc With the optimized protocol shown in Scheme 2, we examined several chiral ligands including (R)-quinap 7, (R,S)-N-PINAP 8, and (R,R)-N-PINAP 9. It was observed that when (R,R)-N-PINAP 9 was utilized as the chiral ligand, the reaction went smoothly, affording allene (R)-3dc in 60% yield; however, the enantiopurity of allene 3dc was rather low (35%), although a very high enantioselectivity was observed by Carreira et al. for the preparation of chiral propargylic amines from structurally very similar aldehydes, i.e., i-PrCHO or i-BuCHO,<sup>8</sup> indicating a low efficiency of chirality transfer for the ZnI -promoted allene formation (Scheme 3). Scheme 3. Preparation of Optically Active (R)-( )-3dc Thus, we further reasoned that a hydroxyl group in propargylic alcohols may improve the stereoselectivity of the first as well as the second step reaction by the possible coordination of the hydroxyl oxygen with Cu or Zn (Scheme 4). Excitingly, this hypothesis is working: the reaction with unprotected propargylic alcohols did afford 2,3-allenols in moderate yields with a very practical ee. It was noted that the reaction with the tertiary proparylic alcohols yielded the axially chiral allenes in highest ee (Table 2). The scope of the aldehydes is quite general: s-alkyl (entries 1 9, Table 2), or s-alkylmethyl carbinal (entry 10, Table 2), normal aliphatic aldedyde (entry 11, Table 2), and benzaldehyde (entry 12, Table 2) may all be used with decent ee; with (R,S)-N-PINAP 8, the enantiomers (S)-3ec and (S)-3fc may be conveniently prepared, indicating that the axial chirality in the ligand is largely determining the absolute configuration of the allene uni formed (entries 2 4, 6, Table 2). Control experiments showed that ZnBr and $\\mathrm { Z n C l } _ { 2 }$ provided similar levels of ee with much longer reaction times (entries 3 and 4, Table 2). Control experiment showed that $\\mathrm { K A u C l } _ { 4 } ^ { 5 \\mathrm { a } }$ and $\\mathrm { A g N O } _ { 3 } ^ { 5 \\mathrm { b } }$ used by Che et al. failed to promote the allene formation reaction (Scheme 5). Furthermore, the reaction is not limited to tertiary proparylic alcohols: the reaction of secondary proparylic alcohol 1i yielded a pair of diastereoisomers $( \\mathrm { d. r. } = 1 { : } 1 )$ in Scheme 4. Proposed Mechanism and Prediction of the Absolute Configuration of the Allene Table 2. Catalytic Asymmetric Synthesis of Chiral Allenols from Terminal Propargylic Alcohols, Aldehydes, And Pyrrolidine<sup>a</sup> slightly lower yet high ee (eq 1, Scheme 6). When the optically active propargylic alcohols with a central chir ality such as (S)-1i and (R)-1i were used, all four diastereoisomers (R,S)-3ic, (S,S)-3ic, (R,R)-3ic, and (S,R)-3ic were prepared by this protocol conveniently with (R,S)- N-PINAP 8 or (R,R)-N-PINAP 9 as the ligand. The absolute configurations of allenes were assigned based on",
+    "source": "content_list_abstract_region",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "prolinol-derived and other chiral amine catalysts",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Alkynol/Adv Synth Catal - 2025 - Liang - Organocatalytic Remote‐Controlled Enantioselective 1 10‐Additions of In Situ Generated.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/adv-synth-catal-2025-liang-organocatalytic-remotecontrolled-enantioselective-1-10additions-of-in-situ-generated.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/adv-synth-catal-2025-liang-organocatalytic-remotecontrolled-enantioselective-1-10additions-of-in-situ-generated/52cb004b-fcdb-49ba-b3d7-41647d043175_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/adv-synth-catal-2025-liang-organocatalytic-remotecontrolled-enantioselective-1-10additions-of-in-situ-generated"
+    "pdf": "D:\\work\\data\\1f81e0d1-ddfc-42b6-ae62-c7a407672c53_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\1f81e0d1-ddfc-42b6-ae62-c7a407672c53_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\1f81e0d1-ddfc-42b6-ae62-c7a407672c53_origin\\5d32431c-5220-44b1-8790-68458a623c86_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\1f81e0d1-ddfc-42b6-ae62-c7a407672c53_origin"
   },
   "source_file": {
-    "pdf_name": "Adv Synth Catal - 2025 - Liang - Organocatalytic Remote‐Controlled Enantioselective 1 10‐Additions of In Situ Generated.pdf",
-    "relative_pdf_path": "Adv Synth Catal - 2025 - Liang - Organocatalytic Remote‐Controlled Enantioselective 1 10‐Additions of In Situ Generated.pdf",
-    "sha256": "8e90ad4422e153a6c406e2a9d4b4e193bb806ea1abba5d15a68b5c8e4636030a"
+    "pdf_name": "1f81e0d1-ddfc-42b6-ae62-c7a407672c53_origin.pdf",
+    "relative_pdf_path": "1f81e0d1-ddfc-42b6-ae62-c7a407672c53_origin.pdf",
+    "sha256": "ee967fe8ba7e4a4919dbe60435b697a53aa034db6c23aad49a04739cad42206a"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:29Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 196,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 65,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -81,27 +86,12 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "The paper is divergent, giving both fused heterocycles and allenes; allene classification is assigned from the indole-2-carboxylate branch that affords axially chiral tetrasubstituted allenes.",
-      "The allowed reaction-type labels do not contain a direct match for organocatalytic 1,10-addition via biphenyl quinone methides, so 'propargylic substitution and cross-coupling' is the closest available label.",
+      "missing_doi",
       "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.889,
+    "overall_confidence": 0.616,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "chiral phosphoric acid catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "chiral Brønsted acid and base catalysts",
-      "organometallic_partner": "not specified",
-      "product": "tetrasubstituted allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.83,
-    "human_checked": false
   }
 }

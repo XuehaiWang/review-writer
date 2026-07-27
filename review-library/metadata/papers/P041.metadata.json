@@ -1,75 +1,85 @@
 {
   "paper_id": "P041",
-  "slug": "d4cc06716a",
+  "slug": "45cf22b0-0df6-4ea0-bf41-5b2e97072782_origin",
   "title": {
-    "value": "Palladium-catalysed alleneamination of γ,δ-unsaturated hydrazones with propargylic acetates: access to tetrahydropyridazines bearing allenes",
-    "source": "llm_from_front_matter",
-    "confidence": 0.9,
+    "value": "Formation of Allenes by Reaction of Lithium Diorganocuprates on Propargylic Acetates - A Mechanistic Approach ^{1}",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Shuaijie Wu",
-      "Shiji Xu",
-      "Yanru He",
-      "Jing Sun",
-      "Wei Jiang",
-      "Chao-Guo Yan",
-      "Weiming Hu",
-      "Lei Wang"
+      "J.L. Luche",
+      "E. Barreiro",
+      "J.M. Dollat and P. Crabbé $^{}$ C.E.R.M.O.",
+      "Université Scientifique et Médicale",
+      "Grenoble",
+      "France"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.96,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2025,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 1975,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Chem. Commun.",
-    "source": "cite_this_line",
-    "confidence": 0.7,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
-    "value": "10.1039/d4cc06716a",
-    "source": "markdown_regex",
-    "confidence": 0.9,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "abstract": {
-    "value": "A highly efficient palladium-catalysed alleneamination of γ,δ-unsaturated hydrazones with propargylic acetates has been developed. This novel method was used to synthesize tetrahydropyridazines bearing allene derivatives, and did so in moderate to good yields. This protocol features a simple catalytic system, broad substrate scope, easy scale-up, and versatile transformations.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.97,
+    "value": "In the past, we reported an efficient synthesis of substituted allenes by reaction of lithium dimethylcopper with acetylenic acetates $^{2}$. Numerous other preparations of allenes through the use of organometallic reagents (1) on propargylic esters (2) have been reported $^{3-6}$. Besides the expected propadiene (3), a non-alkylated allene (4) has sometimes been isolated, the origin of which remained obscure.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic acetates",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "acetate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "account or perspective"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Alkynol/d4cc06716a.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/d4cc06716a.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/d4cc06716a/5d291d8e-728d-4cc3-9732-f55d0537f6ff_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/d4cc06716a"
+    "pdf": "D:\\work\\data\\45cf22b0-0df6-4ea0-bf41-5b2e97072782_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\45cf22b0-0df6-4ea0-bf41-5b2e97072782_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\45cf22b0-0df6-4ea0-bf41-5b2e97072782_origin\\ea38af67-15f2-4f57-87a4-dae1d94ff9cf_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\45cf22b0-0df6-4ea0-bf41-5b2e97072782_origin"
   },
   "source_file": {
-    "pdf_name": "d4cc06716a.pdf",
-    "relative_pdf_path": "d4cc06716a.pdf",
-    "sha256": "4b63a88e0ca31ce559af7e6c068d8b9d15bf59fda710e4558eff78c11d6e0dee"
+    "pdf_name": "45cf22b0-0df6-4ea0-bf41-5b2e97072782_origin.pdf",
+    "relative_pdf_path": "45cf22b0-0df6-4ea0-bf41-5b2e97072782_origin.pdf",
+    "sha256": "fe7f22bceedd79ee00fef7e30211c5d5d4976cf9cefde8121319971731581f65"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:29Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 73,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 32,
+      "markdown_chars_used": 9765
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -80,28 +90,14 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "low_confidence_abstract",
-      "Title and abstract appear to contain OCR substitutions for Greek letters in the source; γ,δ notation was normalized from corrupted text.",
-      "structured_tag_not_specified_selectivity_profile",
-      "Title and abstract contained OCR ambiguity for γ,δ-unsaturated; normalized from c,d/g,d based on consistent full-text context.",
-      "structured_tag_not_specified_organometallic_partner"
+      "missing_journal",
+      "missing_doi",
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.909,
+    "overall_confidence": 0.49,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "palladium catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "acetate leaving groups",
-      "ligand_or_chiral_source": "monodentate phosphine-type ligands",
-      "organometallic_partner": "not specified",
-      "product": "allene-derived cyclic products",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic acetates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.94,
-    "human_checked": false
   }
 }

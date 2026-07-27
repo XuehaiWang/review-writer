@@ -1,74 +1,83 @@
 {
   "paper_id": "P026",
-  "slug": "angew-chem-int-ed-2024-wen-remote-enantioselective-alkylation-of-copper-ethynylallenylidenes-precise-control-of",
+  "slug": "203082d1-4132-44b0-80c7-8d1959b03a7b_origin",
   "title": {
-    "value": "Remote Enantioselective ε-Alkylation of Copper Ethynylallenylidenes: Precise Control of Central and Axial Chirality",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "General Approach to Allenes through Copper-Catalyzed γ-Selective and Stereospecific Coupling between Propargylic Phosphates and Alkylboranes",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Yu-Hua Wen",
-      "Minghao Liu",
-      "Yu-Hao Wang",
-      "Qian-Wei Gong",
-      "Shuai Li",
-      "Jin Song",
-      "Liu-Zhu Gong"
+      "Hirohisa Ohmiya",
+      "Umi Yokobori",
+      "Yusuke Makida",
+      "Masaya Sawamura"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2025,
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": 2011,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Angew. Chem. Int. Ed.",
+    "value": "Organic Letters",
     "source": "known_journal_hint",
     "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
-    "value": "10.1002/anie.202416089",
-    "source": "markdown_regex",
-    "confidence": 0.9,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "abstract": {
-    "value": "Chiral tetrasubstituted allenes have emerged as important architectures for engineering biologically active compounds. The construction of unique tetrasubstituted allene scaffolds with precise control of continuous central and axial chirality remains yet to be developed. Here, we report a remote enantioselective ε-alkylation of yne-propargylic acetates with enals enabled by NHC and copper cooperative catalysis, leading to a series of tetrasubstituted allenes with excellent enantioselectivities (up to >99% ee) and diastereoselectivities (up to >95:5 dr). This method features high regioselectivity and simultaneous control of axial and central chirality. Mechanistic studies suggest a cooperative activation mode and synergistic control of distal chirality created from the copper ethynylallenylidenes.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Copper-catalyzed γ-selective coupling between propargylic phosphates and alkylboron compounds (alkyl-9-BBN, prepared by hydroboration of alkenes with 9-BBN-H) affords multisubstituted allenes with various functional groups. The reaction of enantioenriched propargylic phosphates to give axially chiral allenes proceeds with excellent point-to-axial chirality transfer with 1,3-anti stereochemistry. Allenes have gained increasing attention in organic synthesis as important building blocks possessing unique reactivities due to the presence of orthogonal consecutive π-bonds.<sup>1,2</sup> In addition, they are found in many natural products.<sup>3</sup> Among the diverse methods for accessing allenes,<sup>4</sup> the γ-substitution (forma $\\mathrm { S } _ { \\mathrm { N } } 2 ^ { \\prime }$ reaction) of propargylic alcohol derivatives with organocuprate reagents is the most straightforward and popular, because it uses readily available substrates and forms a new C C bond while most of the other methods rely on the use of more difficult-to-prepare compounds such as dienes, enynes, cyclopropanes, and other highly functionalized compounds.<sup>5</sup>-<sup>8</sup> Unfortunately, however, unlike the copper-based “S 20-type” reactions of allylic systems, the corresponding allene synthesis, in fact, suffers from serious problems in regioselectivity<sup>9</sup> and stereoselectivity.<sup>10,11</sup> In particular, the reaction of primary propargylic alcohol derivatives affords alkynes rather than allenes as a major product (vide infra).<sup>9b</sup> Additionally, the stereoselectivity in the synthesis of axially chiral allenes from enantioenriched propargylic substrates is not always reliable: while efficient chirality transfers have been reported in many cases, the transformations are susceptive to the drop of enantiomeric purity depending on the reaction conditions. Not only erosion of 1,3-anti stereochemistry but also racemi zation of the allene moieties under the reaction conditions are well documented in the literature.<sup>10</sup>-<sup>12</sup> Furthermore, the organocuprate method based on Grignard or organolithium reagents suffers from the problem of functional group incompatibility within the organocuprates.<sup>6,13</sup> Accordingly, a general method that overcomes the above-mentioned problems is highly desirable. Previously we developed the copper-catalyzed allyl alkyl coupling between allylic phosphates and alkyl boranes, which proceeds with excellent γ-selectivity (>99:1).<sup>14a</sup> Herein, we report that this copper-catalyzed protocol is applicable to the reaction between propargylic phosphates and alkylboranes, providing a versatile approach to multisubstituted allenes.<sup>14</sup>-<sup>16</sup> The substrate scope is markedly broad in terms of both substitution patterns and functional group compatibility. Moreover, the protocol is effective for the stereoselective synthesis of axially chiral allenes, which occurs through excellent point to-axial chirality transfer. Specifically, alkylborane 2a was first prepared through hydroboration of styrene (1a) with 9-borabicyclo-[3.3.1]nonane dimer [9-BBN-H] in THF at 60 \u0001C (1a/B 1.2:1) (Scheme 1). The alkylborane 2a was converted into an alkylborate via treatment with t-BuOK (0.2 mmol, 1 M in THF) at rt for 5 min. Then, CuOAc (10 mol %) and propargylic phosphate 3a (0.2 mmol) was added to the mixture, and the resulting solution was heated at 80 \u0001C for 6 h. The NMR analysis of the crude product indicated 89% conversion of 3a into allene 4aa and confirmed that no R substitution product (alkyne) was formed (γ/R > 99:1). Silica gel chromatography furnished analytically pure 4aa in 81% yield.<sup>17</sup> The reaction was readily scalable: a gramscale reaction with 1.0 g (3.0 mmol) of 3a afforded the allene 4aa in 85% isolated yield. Several observations concerning the optimum reaction conditions are to be noted. Less expensive CuCl was also effective, providing 4aa in 72% yield, while the use of Cu(OAc)<sub>2</sub> resulted in a significantly reduced yield (43%). A ligand for the copper is not necessary. The reaction in the absence of t-BuOK resulted in a lower conversion (34% yield, 40% convn). The use of a catalytic amount (10 mol $\\% )$ of t-BuOK furnished the allene in only 24% yield (44% convn). No reaction occurred with the corresponding propargylic methyl carbonate and acetate. The hydroboration coupling one-pot protocol affords a variety of allenes (Table 1).<sup>17</sup> The reaction tolerates functional groups such as alcohol, phosphate, silyl ether, ester, methyl ether, acetal and carbamate moieties in the pro pargylic phosphates and alkenes (entries 1 7, 10 and 12). Table 1. Synthesis of Tri- and Tetrasubstituted Allenes<sup>a</sup> <sup>a</sup> The reaction was carried out with 3 (0.4 mmol), alkylborane 2 (1.5 equiv), CuOAc (10 mol %), and t-BuOK (1.0 equiv, 1 M in THF) in THF at 80 \u0001C for 6 h. Alkylborane 2 was prepared in advance by hydrobora tion of 1 with 9-BBN-H dimer in THF at 60 \u0001C for 1 h and was used without purification. <sup>b</sup> Isolated yield based on 3. <sup>c</sup> γ/R > 99:1. Determined by <sup>1</sup>H NMR or GC analysis of the crude product. <sup>d</sup> Diastereomeric ratio (1:1). The tolerance of the reaction toward steric demand in alkylboranes (2) was evaluated in Table 1, entries 5, 6, 8, and 12. The sterically more demanding alkylborane 2d, which was derived from a terminal alkene (1d) bearing a tertiary alkyl substituent, served as a substrate to afford the corresponding allenes 4da, dd, and di in good yields (entries 5, 6, and 12). The reaction of the $\\beta \\mathrm { - }$ -branched alkylborane (2f), which was prepared from R-methylstyrene (1f), was also successful to give 4fa as a 1:1 diastereomeric mixture (entry 8). Unfortunately, however, the use of secondary alkylborane reagents prepared from internal alkenes resulted in no reaction (data not shown). Table 1 also displays the substrate scope regarding the steric demand and substitution patterns in the propargylic phosphates (3). The Bu group at the γ-position of 3a could be replaced with Me or MeOCH<sub>2</sub> groups without a drastic change in the yield of allenes 4af and 4ag (entries 9 and 10). However, a bulky isobutyl group severely inhibited the reaction, giving only a trace of the allene product (data not shown). The reaction of a terminal alkyne resulted in a complex mixture (data not shown). The tertiary propargylic phosphates 3h and 3i were converted into the corresponding tetrasubstituted allenes 4ah and 4di, respec tively (entries 11 and 12). Importantly, the reaction of primary propargylic phosphate 3ja also occurred cleanly with excellent γ-selectivity to afford the corresponding geminally disubstituted terminal allene 4aj (Scheme 2a).<sup>17</sup> On the other hand, the cuprate-based reactions between alkyl Grignard reagent 2a0 and propargylic phosphate 3ja or acetate 3jb gave mixtures of the allene (4aj) and alkyne (5aj) irrespective of catalytic or stoichiometric use of copper (Scheme 2d).<sup>9b</sup> The regiocontrolled synthesis of geminally disubstituted terminal allenes tolerates functional groups such as chloro and ester moieties in the substrates (Schemes 2b and c).<sup>17</sup> Scheme 2. Synthesis of Geminally Disubstituted Terminal Allenes from Primary Propargyl Alcohol Derivatives The present Cu-catalyzed protocol is effective for the stereocontrolled synthesis of axially chiral allenes.<sup>12</sup> The stereospecific character of the copper-catalyzed coupling is substantiated in eqs $1 - 3. ^ { 1 7 }$ The couplings between the styrene-derived alkylborane 2a or the allylbenzene-derived alkylborane 2e and the enantioenriched propargylic phosphate (R)-3l (99% ee), which has R-Me and γ-MOMOCH substituents, proceeded with excellent point-to-axial chirality transfer with 1,3-anti-stereochemistry to afford enantioenriched allenes $( R ) – ( + )$ -4al (96% ee) or ( )-4el (96% ee) (eqs 1 and 2).<sup>18</sup> The reaction between the bulkier alkylborane 2g and a simple chiral propargylic phosphate (R)-3m (97% ee) also occurred with excellent chirality transfer to give the corresponding chiral allene ( )-4gm (94% ee) (eq 3). Evaluation of reactions with different reaction times and conversions confirmed that no racemi zation of the allene occurred under the reaction conditions. Thus, the slight decreases in enantionmeric purity are attributable to a minor pathway with 1,3-syn-stereochemistry. This result is in contrast to the observation of racemization in the cuprate-based allene syntheses.<sup>11</sup>",
+    "source": "content_list_abstract_region",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "Grignard reagents",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "phosphate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Alkynol/Angew Chem Int Ed - 2024 - Wen - Remote Enantioselective  ‐Alkylation of Copper Ethynylallenylidenes  Precise Control of.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/angew-chem-int-ed-2024-wen-remote-enantioselective-alkylation-of-copper-ethynylallenylidenes-precise-control-of.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/angew-chem-int-ed-2024-wen-remote-enantioselective-alkylation-of-copper-ethynylallenylidenes-precise-control-of/00783a11-e5ab-4b6d-8401-f8fc9a6f5c79_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/angew-chem-int-ed-2024-wen-remote-enantioselective-alkylation-of-copper-ethynylallenylidenes-precise-control-of"
+    "pdf": "D:\\work\\data\\203082d1-4132-44b0-80c7-8d1959b03a7b_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\203082d1-4132-44b0-80c7-8d1959b03a7b_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\203082d1-4132-44b0-80c7-8d1959b03a7b_origin\\a461c6e3-0aed-4c37-bd5e-8b5bb3a5e86a_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\203082d1-4132-44b0-80c7-8d1959b03a7b_origin"
   },
   "source_file": {
-    "pdf_name": "Angew Chem Int Ed - 2024 - Wen - Remote Enantioselective  ‐Alkylation of Copper Ethynylallenylidenes  Precise Control of.pdf",
-    "relative_pdf_path": "Angew Chem Int Ed - 2024 - Wen - Remote Enantioselective  ‐Alkylation of Copper Ethynylallenylidenes  Precise Control of.pdf",
-    "sha256": "636c4176fef1ce64ca6e7112aa5309bce8e479a0347f7d1c558da1ec93e14548"
+    "pdf_name": "203082d1-4132-44b0-80c7-8d1959b03a7b_origin.pdf",
+    "relative_pdf_path": "203082d1-4132-44b0-80c7-8d1959b03a7b_origin.pdf",
+    "sha256": "10f62181e5a0d44adb61db38b057f13f00b512cd9133586915be286c42a24ca3"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:29Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 151,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 61,
+      "markdown_chars_used": 12692
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -79,29 +88,11 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "Front matter shows citation year 2025, while the footer shows © 2024 Wiley-VCH; year assigned from the citation/front matter.",
-      "The first markdown heading \"Cooperative Catalysis\" is a section/banner heading, not the article title.",
-      "The paper uses cooperative NHC/copper catalysis, but the controlled vocabulary for catalyst_or_method permits only one label; classified under copper catalysis as the central metal-mediated activation.",
-      "The stereocontrolling system includes both a chiral Pybox ligand and a chiral NHC catalyst, but the controlled vocabulary permits only one ligand_or_chiral_source label; classified as non-phosphorus metal-coordination ligands based on the explicitly named Pybox ligand.",
-      "The transformation is described as remote ε-alkylation/allenylation of yne-propargylic acetates with enals; the closest available reaction_type label is propargylic substitution and cross-coupling.",
-      "structured_tag_not_specified_organometallic_partner"
+      "missing_doi",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.926,
+    "overall_confidence": 0.616,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "copper catalysis",
-      "document_scope": "primary research article",
-      "leaving_group": "acetate leaving groups",
-      "ligand_or_chiral_source": "non-phosphorus metal-coordination ligands",
-      "organometallic_partner": "not specified",
-      "product": "tetrasubstituted allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic acetates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.91,
-    "human_checked": false
   }
 }

@@ -1,37 +1,30 @@
 {
   "paper_id": "P063",
-  "slug": "eur.-j.-org.-chem.-2023-26-e202201377",
+  "slug": "6e681a78-4abd-45d8-84e2-0cc932651de5_origin",
   "title": {
-    "value": "Brønsted Acid Promoted Sulfonylation of Propargylic Alcohols: Synthesis of Triaryl Allenyl Sulfones under Mild Conditions",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "paper Enantioselective Synthesis of Axially Chiral Tetrasubstituted Allenes via Lipase-Catalyzed Desymmetrization",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Shimin Jiang",
-      "Sha Du",
-      "Ruchun Yang",
-      "Fengyan Jin",
-      "Zhao-Zhao Zhou",
-      "Wan-Fa Tian",
-      "Xian-Rong Song",
-      "Qiang Xiao"
+      "Jan Deska"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2023,
-    "source": "llm_from_front_matter",
-    "confidence": 0.97,
+    "value": 2012,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Eur. J. Org. Chem.",
-    "source": "known_journal_hint",
-    "confidence": 0.72,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
@@ -41,35 +34,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "An efficient and practical approach for the synthesis of triaryl allenyl sulfones from easily accessible propargylic alcohols was developed, by using sodium sulfinates as a sulfonyl source in the presence of Brønsted acid. The reaction proceeded via allenyl carbocation as the key intermediate and was followed by a nucleophilic attack of sodium sulfinates to produce allenyl sulfones in moderate to excellent yields.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Lipase from Pseudomonas fluorescens efficiently catalyzes the transesterification of prochiral tetrasubstituted allenic diols yielding highly enantioenriched axially chiral allenyl monoesters. In combination with subsequent 5-endo-trig cycliza tions geminally disubstituted dihydrofurans are accessible in high optical purity.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic acetates",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "acetate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "method optimization study"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/Eur. J. Org. Chem. 2023, 26, e202201377.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/eur.-j.-org.-chem.-2023-26-e202201377.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/eur.-j.-org.-chem.-2023-26-e202201377/296d70f7-57b8-469a-9bbb-12c99cc8096e_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/eur.-j.-org.-chem.-2023-26-e202201377"
+    "pdf": "D:\\work\\data\\6e681a78-4abd-45d8-84e2-0cc932651de5_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\6e681a78-4abd-45d8-84e2-0cc932651de5_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\6e681a78-4abd-45d8-84e2-0cc932651de5_origin\\8352c466-431a-4af1-ae06-560582a034c8_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\6e681a78-4abd-45d8-84e2-0cc932651de5_origin"
   },
   "source_file": {
-    "pdf_name": "Eur. J. Org. Chem. 2023, 26, e202201377.pdf",
-    "relative_pdf_path": "Eur. J. Org. Chem. 2023, 26, e202201377.pdf",
-    "sha256": "4d32899df0b408c0b378236e686412c799252487bd2153d639dc1246b1fe8173"
+    "pdf_name": "6e681a78-4abd-45d8-84e2-0cc932651de5_origin.pdf",
+    "relative_pdf_path": "6e681a78-4abd-45d8-84e2-0cc932651de5_origin.pdf",
+    "sha256": "775cdea8f63f02c3165f4f12b4660aec94a1797dac5eafe88f1075fdbea561d2"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:39Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 106,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 207,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -80,31 +85,13 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
+      "missing_journal",
       "missing_doi",
-      "low_confidence_abstract",
-      "The paper uses Brønsted acid promotion (MsOH/p-TsOH), but no matching allowed label exists in catalyst_or_method, so `not specified` was used.",
-      "The transformation proceeds by acid-promoted dehydration of propargylic alcohols; no listed leaving-group label directly matches this activation mode.",
-      "structured_tag_not_specified_catalyst_or_method",
       "structured_tag_not_specified_organometallic_partner",
       "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.801,
+    "overall_confidence": 0.513,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "not specified",
-      "document_scope": "primary research article",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allenyl sulfones",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.95,
-    "human_checked": false
   }
 }

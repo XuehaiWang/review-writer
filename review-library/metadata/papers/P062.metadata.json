@@ -1,30 +1,28 @@
 {
   "paper_id": "P062",
-  "slug": "chinese-chemical-letters-34-2023-107479",
+  "slug": "6caae103-e47a-4369-9b43-1f47d9541436_origin",
   "title": {
-    "value": "Synthesis of allenyl-B(MIDA) via hydrazination/fragmentation reaction of B(MIDA)-propargylic alcohol",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Reactions of 2,3-Allenols and Their Derivatives",
+    "source": "content_list_text_level_1",
+    "confidence": 0.86,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Jiasheng Qian",
-      "Zhi-Hao Chen",
-      "Yuan Liu",
-      "Yin Li",
-      "Qingjiang Li",
-      "Shi-Liang Huang",
-      "Honggen Wang"
+      "DENG",
+      "You-Qian<sup></sup> GU",
+      "Zhen-Hua<sup></sup> MA",
+      "Sheng-Ming<sup>",
+      "</sup>"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2023,
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "journal": {
@@ -40,35 +38,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Allenylboronates represent a very intriguing class of organoborons but are challenging to synthesis. In addition, these compounds are typically unstable, rendering the separation difficult. We report herein a practical and concise route to a new class of stable, easy-separable allenyl B(MIDA) via a hydrazination/fragmentation of B(MIDA)-propargylic alcohols. The synthesis of optically active allenyl B(MIDA) was also achieved. Interesting reactivity of the resulting product was observed.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "Abstract 2,3-Allenols, an important class of allenes containing a 1,2-propadiene unit and a hydroxy group, are highly reactive. The reactions of 2,3-allenols and their derivatives are reviewed. The reactions of 2,3-allenols include transition metal-catalyzed cycloisomerization reactions, Pd-catalyzed coupling reactions, ruthenium-catalyzed cyclic carbonylation reactions, ring expansion reactions, electrophilic addition reactions, cycloaddition reactions, and radical reactions. On the other hand, the reactions of the derivatives of 2,3-allenols are Pd(0)-catalyzed reactions involving methylene-<sup>π</sup>-allyl palladium intermediates forming allenes or 1,3-dienes regioselectively, $S _ { \\mathrm { N } } 2 '$ type addition-elimination reactions, Pd(II)-catalyzed intramolecular cyclizations and rearrangement reactions.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "allenic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "comprehensive review"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/Chinese Chemical Letters 34 (2023) 107479.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/chinese-chemical-letters-34-2023-107479.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/chinese-chemical-letters-34-2023-107479/789f8938-12e5-4ab9-9925-44a5ac968603_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/chinese-chemical-letters-34-2023-107479"
+    "pdf": "D:\\work\\data\\6caae103-e47a-4369-9b43-1f47d9541436_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\6caae103-e47a-4369-9b43-1f47d9541436_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\6caae103-e47a-4369-9b43-1f47d9541436_origin\\d653925d-6f09-4d27-94cc-97bbc969e18c_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\6caae103-e47a-4369-9b43-1f47d9541436_origin"
   },
   "source_file": {
-    "pdf_name": "Chinese Chemical Letters 34 (2023) 107479.pdf",
-    "relative_pdf_path": "Chinese Chemical Letters 34 (2023) 107479.pdf",
-    "sha256": "e0276b6a0529ad649affb07a60a6f6d02d49703c2d883e1d28fd1b27363d4f19"
+    "pdf_name": "6caae103-e47a-4369-9b43-1f47d9541436_origin.pdf",
+    "relative_pdf_path": "6caae103-e47a-4369-9b43-1f47d9541436_origin.pdf",
+    "sha256": "6d1fb02f60e2a1dc0b229701a982a8d161330b32f2b3d274066940cc52494d82"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:39Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 82,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 353,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -77,33 +87,19 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [],
+    "missing_fields": [
+      "year"
+    ],
     "warnings": [
       "missing_journal",
       "missing_doi",
-      "The main enabling method is Mitsunobu hydrazination/fragmentation, which is not represented in the allowed catalyst_or_method labels, so catalyst_or_method is set to not specified.",
-      "Front matter shows 2022 online publication dates, while the journal issue metadata is Chinese Chemical Letters 34 (2023) 107479; year is recorded as 2023 from the issue citation.",
-      "structured_tag_not_specified_catalyst_or_method",
       "structured_tag_not_specified_organometallic_partner",
       "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.686,
+    "overall_confidence": 0.39,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "not specified",
-      "document_scope": "primary research article",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allenyl boranes",
-      "reaction_type": "isomerization fragmentation and protonation to allenes",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.86,
-    "human_checked": false
   }
 }

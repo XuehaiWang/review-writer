@@ -1,71 +1,87 @@
 {
   "paper_id": "P102",
-  "slug": "15b-palladium-catalyzed-cross-coupling-reaction-of-triorganoindium-reagents-with-propargylic-esters",
+  "slug": "angew.-chem.-int.-ed.-2023-62-e202214838",
   "title": {
-    "value": "Palladium-Catalyzed Cross-Coupling Reaction of Triorganoindium Reagents with Propargylic Esters",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Kinetic Resolution of Azaarylethynyl Tertiary Alcohols by Chiral Brønsted Acid Catalysed Phosphine-Mediated Deoxygenation",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Ricardo Riveiros",
-      "David Rodríguez",
-      "José Pérez Sestelo",
-      "Luis A. Sarandeses"
+      "Guanghui Wang",
+      "Lulu Li",
+      "Yifeng Jiang",
+      "Xiaowei Zhao",
+      "Xu Ban",
+      "Tianju Shao",
+      "Yanli Yin",
+      "Zhiyong Jiang"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2006,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2023,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Tetrahedron",
+    "value": "Angew. Chem. Int. Ed.",
     "source": "known_journal_hint",
     "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "10.1002/anie.202214838",
+    "source": "markdown_regex",
+    "confidence": 0.9,
     "human_checked": false
   },
   "abstract": {
-    "value": "Triorganoindium reagents (R3In) react with propargylic esters under palladium catalysis via an SN2′ rearrangement to afford allenes in good yields and with high regioselectivity. The reaction proceeds smoothly at room temperature with a variety of R3In (aryl, alkenyl, alkynyl, and methyl). When chiral, nonracemic propargylic esters are employed, the reaction takes place with high anti-stereoselectivity providing allenes with high enantiomeric excess.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "A chiral Brønsted acid catalysed phosphinemediated deoxygenation protocol is reported. This metal-free method provides a precise kinetic resolution platform for azaarylethynyl tertiary alcohols, which are a broad category of biologically and synthetically important azaarene derivatives. In addition to providing an efficient method for the first asymmetric preparation of these tertiary alcohols, the strategy facilitates the construction of azaaryl-functionalized allenes with good to excellent enantioselectivities. The high selectivity factors (s up to 235), broad substrate scope, and ability to convert azaaryl compounds into both chiral tertiary alcohols and allenes robustly underscore the efficiency and promising utility of this method. The practicability is further validated by the successful synthesis of deuterated allenes with high ee values and substantial incorporation of deuterium using inexpensive $\\mathbf { D } _ { 2 } \\mathbf { O }$ as the deuterium source.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "method optimization study"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/15b-palladium-catalyzed-cross-coupling-reaction-of-triorganoindium-reagents-with-propargylic-esters/493b342f-0ea7-4da4-a3c2-85f3a1238528_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/15b-palladium-catalyzed-cross-coupling-reaction-of-triorganoindium-reagents-with-propargylic-esters.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/15b-palladium-catalyzed-cross-coupling-reaction-of-triorganoindium-reagents-with-propargylic-esters/493b342f-0ea7-4da4-a3c2-85f3a1238528_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/15b-palladium-catalyzed-cross-coupling-reaction-of-triorganoindium-reagents-with-propargylic-esters"
+    "pdf": "D:\\work\\data\\Angew. Chem. Int. Ed. 2023, 62, e202214838.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\angew.-chem.-int.-ed.-2023-62-e202214838.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\angew.-chem.-int.-ed.-2023-62-e202214838\\add72c09-a148-4260-a93b-a3ff61716b93_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\angew.-chem.-int.-ed.-2023-62-e202214838"
   },
   "source_file": {
-    "pdf_name": "15b-palladium-catalyzed-cross-coupling-reaction-of-triorganoindium-reagents-with-propargylic-esters.pdf",
-    "relative_pdf_path": "15b-palladium-catalyzed-cross-coupling-reaction-of-triorganoindium-reagents-with-propargylic-esters.pdf",
-    "sha256": "31a64c56f96ea0f7c88510bbd06bb8c5830158303466df6c52845ab2e004426c"
+    "pdf_name": "Angew. Chem. Int. Ed. 2023, 62, e202214838.pdf",
+    "relative_pdf_path": "Angew. Chem. Int. Ed. 2023, 62, e202214838.pdf",
+    "sha256": "c340a212ad2509fc92d62994dbc82647f35dbf82174ae31ee475863aaf1ab35a"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:23Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 59,
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 104,
       "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -76,29 +92,12 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "missing_doi",
-      "Initial rule-extracted metadata contained OCR noise in authors and abstract; values were corrected from the visible front matter.",
-      "Abstract field uses only the explicit abstract paragraph and excludes article body text that bled into the markdown extraction.",
-      "structured_tag_not_specified_mechanism_type",
-      "The paper studies multiple propargylic ester leaving groups (including benzoates, acetates, and carbonates), but the controlled vocabulary lacks a generic 'propargylic esters' label; 'propargylic acetates' and 'acetate leaving groups' were selected as the closest supported listed labels.",
-      "Ligand evidence includes PPh3 and P(2-furyl)3 as monodentate phosphines, but DPEphos also appears; the ligand classification reflects the clearest supported listed option rather than the full ligand scope."
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type"
     ],
-    "overall_confidence": 0.79,
+    "overall_confidence": 0.744,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "palladium catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "acetate leaving groups",
-      "ligand_or_chiral_source": "monodentate phosphine-type ligands",
-      "organometallic_partner": "triorganoindium reagents",
-      "product": "allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic acetates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.87,
-    "human_checked": false
   }
 }

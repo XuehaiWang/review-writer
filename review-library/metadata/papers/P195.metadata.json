@@ -1,33 +1,40 @@
 {
   "paper_id": "P195",
-  "slug": "8a",
+  "slug": "pd-catalyzed-asymmetric-allenylation-of-secondary-phosphine-oxides-with-enyne-type-propargylic-carbamates-for-the",
   "title": {
-    "value": "Formation of Allenes by Reaction of Lithium Diorganocuprates on Propargylic Acetates - A Mechanistic Approach",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Pd-Catalyzed Asymmetric Allenylation of Secondary Phosphine Oxides with Enyne-Type Propargylic Carbamates for the Construction of Chiral Allenyl Phosphine Oxides",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "J.L. Luche",
-      "E. Barreiro",
-      "J.M. Dollat",
-      "P. Crabbé"
+      "Yujie Dong",
+      "Nianci Zhang",
+      "Fazhou Yang",
+      "Jinbao Wang",
+      "Bo Wang",
+      "Jun Liu",
+      "Bing Zheng",
+      "Cheng Zhang",
+      "Leijie Zhou",
+      "Hongchao Guo Cite This: ACS Catal.",
+      "− Read Online Article Recommendations sı Supporting Information"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1975,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2025,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Tetrahedron Letters",
-    "source": "known_journal_hint",
-    "confidence": 0.72,
+    "value": "ACS Catal. 2025",
+    "source": "cite_this_line",
+    "confidence": 0.7,
     "human_checked": false
   },
   "doi": {
@@ -37,35 +44,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "",
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "Chiral allenyl phosphine oxides represent a significant kind of synthetic target with promising potential for various applications. However, explorations toward their asymmetric synthesis remain scarce, primarily due to the competitive coordination of phosphine oxides with metal catalysts. Herein, we report a Pd-catalyzed enantioselective allenylation of secondary phosphine oxide for the eficient construction of a variety of chiral allenyl phosphine oxides. The success of this reaction arises from the enhanced (bidentate form) coordination of a newly designed, fungicide-inspired enyne-type propargylic carbamate with a chiral Pd complex. This protocol features high yields and enantioselectivities, scalability, and versatile derivatization. Mechanistic studies confirmed the exclusion of a kinetic resolution pathway.",
+    "source": "content_list_inline_abstract",
+    "confidence": 0.84,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic carbamates",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "carbamate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/8a/45cf22b0-0df6-4ea0-bf41-5b2e97072782_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/8a.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/8a/45cf22b0-0df6-4ea0-bf41-5b2e97072782_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/8a"
+    "pdf": "D:\\work\\data\\pd-catalyzed-asymmetric-allenylation-of-secondary-phosphine-oxides-with-enyne-type-propargylic-carbamates-for-the.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\pd-catalyzed-asymmetric-allenylation-of-secondary-phosphine-oxides-with-enyne-type-propargylic-carbamates-for-the.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\pd-catalyzed-asymmetric-allenylation-of-secondary-phosphine-oxides-with-enyne-type-propargylic-carbamates-for-the\\be1a3ad4-86a4-495d-98b4-9c5419aa43b5_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\pd-catalyzed-asymmetric-allenylation-of-secondary-phosphine-oxides-with-enyne-type-propargylic-carbamates-for-the"
   },
   "source_file": {
-    "pdf_name": "8a.pdf",
-    "relative_pdf_path": "8a.pdf",
-    "sha256": "fe7f22bceedd79ee00fef7e30211c5d5d4976cf9cefde8121319971731581f65"
+    "pdf_name": "pd-catalyzed-asymmetric-allenylation-of-secondary-phosphine-oxides-with-enyne-type-propargylic-carbamates-for-the.pdf",
+    "relative_pdf_path": "pd-catalyzed-asymmetric-allenylation-of-secondary-phosphine-oxides-with-enyne-type-propargylic-carbamates-for-the.pdf",
+    "sha256": "5b3e036d01709ae365856d78014dbe08b7f70fd488a0c4902b9f5b0efe7417b4"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T20:56:27Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 21,
-      "markdown_chars_used": 8402
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 146,
+      "markdown_chars_used": 14000
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -74,37 +93,15 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [
-      "abstract"
-    ],
+    "missing_fields": [],
     "warnings": [
-      "missing_year",
       "missing_doi",
-      "low_confidence_title",
-      "low_confidence_abstract",
-      "No explicit abstract was present in the provided snippets; abstract left empty.",
-      "Structured tags are derived from the title and body text rather than an abstract.",
-      "The transformation uses stoichiometric organocuprates rather than a catalytic system.",
-      "No formal abstract located in the supplied paper evidence.",
-      "The organometallic partner label is approximate because the reagent is a lithium diorganocuprate and no dedicated organocuprate label exists in the allowed schema.",
-      "structured_tag_not_specified_ligand_or_chiral_source"
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_ligand_or_chiral_source",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope"
     ],
-    "overall_confidence": 0.647,
+    "overall_confidence": 0.613,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "copper catalysis",
-      "document_scope": "mechanistic study",
-      "leaving_group": "acetate leaving groups",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "organolithium reagents",
-      "product": "allenes",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic acetates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.84,
-    "human_checked": false
   }
 }

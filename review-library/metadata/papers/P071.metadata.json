@@ -1,38 +1,36 @@
 {
   "paper_id": "P071",
-  "slug": "j.-org.-chem.-2022-87-15061",
+  "slug": "824c7e40-3151-49b4-bf6e-016fa7cf63c1_origin",
   "title": {
-    "value": "Sulfonylation of Propargyl Alcohols with Sulfinamides for the Synthesis of Allenyl Sulfones",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Synthesis of optically active allenes using tandem enzyme and palladium-catalysed reactions",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Fei-Fei Zou",
-      "Zhen Luo",
-      "Yu-Ting Yang",
-      "Xin Zhuang",
-      "Chuan-Ming Hong",
-      "Zheng-Qiang Liu",
-      "Wan-Fang Li",
-      "Qing-Hua Li",
-      "Tang-Lin Liu"
+      "Pierre H. Dixneuf",
+      "<sup></sup> Thierry Guyot",
+      "Universite de Rennes I",
+      "Laboratoire de Chimie de Coordination et Catalyse",
+      "Campus de Beaulieu",
+      "´ Rennes",
+      "France"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2022,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "journal": {
-    "value": "J. Org. Chem. 2022",
-    "source": "cite_this_line",
-    "confidence": 0.7,
+    "value": null,
+    "source": "rule_not_found",
+    "confidence": 0.0,
     "human_checked": false
   },
   "doi": {
@@ -42,35 +40,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "A regio- and chemoselective sulfonylation of propargyl alcohols with sulfinamides in 1,1,1,3,3,3-hexafluoroisopropanol (HFIP) was developed. It provided straightforward and mild access to multi-substituted allenyl sulfones by using sulfinamides as the sulfonyl sources. This transformation was promoted by HFIP and did not require any catalysts or oxidants, which allowed for the successful conversion of various tertiary and secondary propargyl alcohols into allenyl sulfones in high yields.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "The propargylic carbonates (S)-6 and (R)-9 are converted into the chiral allenes 10, 11, 13 and 14 (ee 82–85%) using organozinc reagents and tetrakis(triphenylphosphine)- palladium as catalyst.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "propargylic alcohols",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "organolithium reagents",
+      "ligand_or_chiral_source": "cinchona-derived and chiral ammonium catalysts",
+      "leaving_group": "carbonate leaving groups",
+      "reaction_type": "not specified",
+      "document_scope": "not specified"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/APA/J. Org. Chem. 2022, 87, 15061.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/j.-org.-chem.-2022-87-15061.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/j.-org.-chem.-2022-87-15061/b7ab5aee-d1b3-49e9-9c0f-2c6b406bee78_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/j.-org.-chem.-2022-87-15061"
+    "pdf": "D:\\work\\data\\824c7e40-3151-49b4-bf6e-016fa7cf63c1_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\824c7e40-3151-49b4-bf6e-016fa7cf63c1_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\824c7e40-3151-49b4-bf6e-016fa7cf63c1_origin\\b24747db-5d7c-478d-b3eb-47f1b81639d9_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\824c7e40-3151-49b4-bf6e-016fa7cf63c1_origin"
   },
   "source_file": {
-    "pdf_name": "J. Org. Chem. 2022, 87, 15061.pdf",
-    "relative_pdf_path": "J. Org. Chem. 2022, 87, 15061.pdf",
-    "sha256": "5bbbc4db09fd92bf532158c1bbcff381b53fa14f2924e796df1fda6a9f86af05"
+    "pdf_name": "824c7e40-3151-49b4-bf6e-016fa7cf63c1_origin.pdf",
+    "relative_pdf_path": "824c7e40-3151-49b4-bf6e-016fa7cf63c1_origin.pdf",
+    "sha256": "a4cbeb488344dbdd754f1c1a474e00500f558bb5a302c68c03187bbe2013852b"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:40Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 209,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 47,
+      "markdown_chars_used": 10474
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -79,31 +89,17 @@
     "notes": []
   },
   "quality": {
-    "missing_fields": [],
-    "warnings": [
-      "missing_doi",
-      "The paper also reports that some alkyl-substituted propargyl alcohols give propargyl sulfones rather than allenyl sulfones; classification follows the title, abstract, and main reported method focus.",
-      "structured_tag_not_specified_catalyst_or_method",
-      "structured_tag_not_specified_organometallic_partner",
-      "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+    "missing_fields": [
+      "year"
     ],
-    "overall_confidence": 0.796,
+    "warnings": [
+      "missing_journal",
+      "missing_doi",
+      "structured_tag_not_specified_reaction_type",
+      "structured_tag_not_specified_document_scope",
+      "low_confidence_abstract"
+    ],
+    "overall_confidence": 0.393,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "not specified",
-      "document_scope": "primary research article",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "allenyl sulfones",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic alcohols"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.91,
-    "human_checked": false
   }
 }

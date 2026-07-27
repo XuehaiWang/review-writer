@@ -1,38 +1,36 @@
 {
   "paper_id": "P045",
-  "slug": "de-novo-synthesis-of-oligofurans-via-copper-catalyzed-dimerization-of-ethynylethylene-carbonates",
+  "slug": "4fd4bc84-0de4-4fac-b4d7-4494a76195b4_origin",
   "title": {
-    "value": "De Novo Synthesis of Oligofurans via Copper-Catalyzed Dimerization of Ethynylethylene Carbonates",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Palladium-Catalyzed Asymmetric Synthesis of Axially Chiral (Allenylmethyl)silanes and Chirality Transfer to Stereogenic Carbon Centers in S<sub>E</sub>′ Reactions",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "Zhengyu Han",
-      "Biao Zhu",
-      "Yuxuan Liu",
-      "Luyao Wei",
-      "Lixia Xu",
-      "Xiaolin Zhu",
-      "Jingrui Ye",
-      "Jianwei Sun",
-      "Hai Huang"
+      "Vol.",
+      "No. Masamichi Ogasawara",
+      "<sup>",
+      "</sup> Kazuhito Ueyama",
+      "Takashi Nagano",
+      "Yoshiyuki Mizuhata",
+      "Tamio Hayashi"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 2025,
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": 2002,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": "Org. Lett. 2025",
-    "source": "cite_this_line",
-    "confidence": 0.7,
+    "value": "Organic Letters",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
@@ -42,35 +40,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Disclosed here is an efficient Cu-catalyzed de novo synthesis of oligofurans, a type of valuable core unit in organic materials. From the readily available ethynylethylene carbonates, the dimerization process allowed convenient access to differently substituted oligofurans that could not have been easily synthesized before. In contrast to the conventional strategies, this protocol does not rely on preinstallation of cross-coupling functionalities or presynthesis of advanced enyne precursors. Brief studies of their photophysical properties also indicated the great potential of our protocol in tuning these properties for applications. Mechanistic studies not only provided important insights into the reaction pathway but also allowed the identification of another protocol for the synthesis of furan-substituted allenylic alcohols.",
-    "source": "llm_from_front_matter",
-    "confidence": 0.99,
+    "value": "Allylsilanes and allenylsilanes are useful synthetic intermediates reacting with electrophiles in an ${ \\bf S } _ { \\mathrm { E } } ^ { \\prime }$ fashion to give the corresponding allylated and propargylated products, respectively (eq 1 and $2 ), ^ { 1 }$ and chirality transfer to stereogenic carbon centers has been studied by use of enantiomerically enriched allyl-<sup>1a,c e,2</sup> and allenylsilanes.<sup>1b e,3</sup> On the other hand, the chirality transfer from their homologous (allenylmethyl)silanes in the ${ \\bf S } _ { \\mathrm { E } } ^ { \\prime }$ reactions (eq 3) has not been reported except for one recent report by Hiemstra and coworkers.<sup>4</sup> Probably, the lack of efficient routes to enantiomerically enriched axially chiral (allenylmethyl)silanes<sup>4,5</sup> has restricted their use as chiral reagents, while the ${ \\mathrm { S } } _ { \\mathrm { E } } ^ { \\prime }$ reaction of (allenylmethyl)silanes has been conveniently used for the introduction of 1,3-dien-2-yl groups onto electrophiles.<sup>6</sup><sub>-</sub><sup>8</sup> Here we wish to report the first example of catalytic asymmetric synthesis of axially chiral (allenylmethyl)silane derivatives. We also demonstrate the chirality transfer with high selectivity from the (allenylmethyl)silanes onto stereogenic carbon centers in the ${ \\mathrm { S } _ { \\mathrm { E } } } ^ { j }$ reaction.<sup>4</sup>",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "enynes",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "chiral biaryl bisphosphine ligands",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/source-paper/Alkynol/de-novo-synthesis-of-oligofurans-via-copper-catalyzed-dimerization-of-ethynylethylene-carbonates.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/de-novo-synthesis-of-oligofurans-via-copper-catalyzed-dimerization-of-ethynylethylene-carbonates.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/de-novo-synthesis-of-oligofurans-via-copper-catalyzed-dimerization-of-ethynylethylene-carbonates/1c0240af-d9bd-47f3-9f1e-40e2c921e2f0_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/de-novo-synthesis-of-oligofurans-via-copper-catalyzed-dimerization-of-ethynylethylene-carbonates"
+    "pdf": "D:\\work\\data\\4fd4bc84-0de4-4fac-b4d7-4494a76195b4_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\4fd4bc84-0de4-4fac-b4d7-4494a76195b4_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\4fd4bc84-0de4-4fac-b4d7-4494a76195b4_origin\\3e13dbb9-609c-46a6-bec4-1ca15254cd8f_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\4fd4bc84-0de4-4fac-b4d7-4494a76195b4_origin"
   },
   "source_file": {
-    "pdf_name": "de-novo-synthesis-of-oligofurans-via-copper-catalyzed-dimerization-of-ethynylethylene-carbonates.pdf",
-    "relative_pdf_path": "de-novo-synthesis-of-oligofurans-via-copper-catalyzed-dimerization-of-ethynylethylene-carbonates.pdf",
-    "sha256": "8cd439cc4f491d9931521e612b5619f04bd2751f6cbe65583e7a9cdeed0575fb"
+    "pdf_name": "4fd4bc84-0de4-4fac-b4d7-4494a76195b4_origin.pdf",
+    "relative_pdf_path": "4fd4bc84-0de4-4fac-b4d7-4494a76195b4_origin.pdf",
+    "sha256": "7f83c16de8fbcd0aab7fe327e6654fd08fa9a34df1dc3ece634a5d58009c7df8"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T11:51:29Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:09Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 131,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 53,
+      "markdown_chars_used": 12827
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -82,25 +92,12 @@
     "missing_fields": [],
     "warnings": [
       "missing_doi",
-      "Paper primarily focuses on oligofuran formation; allene classification is based on the secondary furyl allenylic alcohol protocol and mechanistic sections rather than the main title product class.",
-      "structured_tag_not_specified_organometallic_partner"
+      "structured_tag_not_specified_organometallic_partner",
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.77,
+    "overall_confidence": 0.593,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "copper catalysis",
-      "document_scope": "communication or letter",
-      "leaving_group": "carbonate leaving groups",
-      "ligand_or_chiral_source": "non-phosphorus metal-coordination ligands",
-      "organometallic_partner": "not specified",
-      "product": "alpha-allenic alcohols",
-      "reaction_type": "propargylic substitution and cross-coupling",
-      "substrate": "propargylic carbonates"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.73,
-    "human_checked": false
   }
 }

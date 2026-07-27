@@ -1,30 +1,35 @@
 {
   "paper_id": "P133",
-  "slug": "2b-hvd-hc1j13-345-355-1781612046",
+  "slug": "d1a2a61a-6503-4c7d-8526-ac3358460b0d_origin",
   "title": {
-    "value": "Sur les relations qui existent entre les formules atomiques des corps organiques et le pouvoir rotatoire de leurs dissolutions",
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "value": "Synthetic Use of an Unusual Organocuprate Intermediate ^{1}",
+    "source": "markdown_first_h1",
+    "confidence": 0.88,
     "human_checked": false
   },
   "authors": {
     "value": [
-      "J.-A. Le Bel"
+      "By JEAN-MARIE DOLLAT",
+      "JEAN-LOUIS LUCHE",
+      "PIERRE CRABBÉ (Laboratoire de Chimie Organique",
+      "C.E.R.M.O. Université Scientifique et Médicale",
+      "Grenoble",
+      "France)"
     ],
-    "source": "llm_from_front_matter",
-    "confidence": 0.98,
+    "source": "content_list_after_title",
+    "confidence": 0.74,
     "human_checked": false
   },
   "year": {
-    "value": 1874,
-    "source": "llm_from_front_matter",
-    "confidence": 0.97,
+    "value": 1975,
+    "source": "filename_or_front_matter",
+    "confidence": 0.68,
     "human_checked": false
   },
   "journal": {
-    "value": null,
-    "source": "rule_not_found",
-    "confidence": 0.0,
+    "value": "Tetrahedron Letters",
+    "source": "known_journal_hint",
+    "confidence": 0.72,
     "human_checked": false
   },
   "doi": {
@@ -34,35 +39,47 @@
     "human_checked": false
   },
   "abstract": {
-    "value": "Pour prévoir si la dissolution d'une substance a ou n'a pas de pouvoir rotatoire, on ne possédait jusqu'à présent aucune règle certaine; on savait seulement que les dérivés d'une substance active sont en général actifs; encore voit-on souvent le pouvoir rotatoire disparaître subitement dans ces dérivés et cela dans les dérivés les plus immédiats, tandis qu'il se conserve dans d'autres dérivés beaucoup plus éloignés. En m'appuyant sur des considérations d'un ordre purement géométrique, je suis arrivé à formuler une règle beaucoup plus générale. Avant d'exposer le raisonnement qui permet d'arriver à cette loi, on présentera les données sur lesquelles il s'appuie, et l'on terminera par une discussion des vérifications que fournit l'état actuel de nos connaissances en chimie.",
-    "source": "llm_from_opening_paragraph",
-    "confidence": 0.72,
+    "value": "Summary The organometallic intermediate (3) can be used to prepare iodo-allenes, and allenic and $\\beta$ -acetylenic ketones as well as ethers; the site of the reaction of an electrophile on the organometallic intermediate seems to depend on the hard or soft nature of the reagent according to Pearson's theory.",
+    "source": "content_list_first_paragraph_after_authors",
+    "confidence": 0.68,
+    "human_checked": false
+  },
+  "structured_tags": {
+    "value": {
+      "product": "allenes",
+      "substrate": "ketones",
+      "catalyst_or_method": "copper catalysis",
+      "organometallic_partner": "not specified",
+      "ligand_or_chiral_source": "not specified",
+      "leaving_group": "not specified",
+      "reaction_type": "not specified",
+      "document_scope": "communication or letter"
+    },
+    "source": "active_taxonomy_keyword_inference",
+    "confidence": 0.45,
     "human_checked": false
   },
   "source_paths": {
-    "pdf": "/home/ps/review-writer/mineru-outputs/extracted/2b-hvd-hc1j13-345-355-1781612046/4deb14db-d7e3-48a6-85f4-9452d82e1164_origin.pdf",
-    "markdown": "/home/ps/review-writer/mineru-outputs/markdown/2b-hvd-hc1j13-345-355-1781612046.md",
-    "content_list": "/home/ps/review-writer/mineru-outputs/extracted/2b-hvd-hc1j13-345-355-1781612046/4deb14db-d7e3-48a6-85f4-9452d82e1164_content_list.json",
-    "extracted_dir": "/home/ps/review-writer/mineru-outputs/extracted/2b-hvd-hc1j13-345-355-1781612046"
+    "pdf": "D:\\work\\data\\d1a2a61a-6503-4c7d-8526-ac3358460b0d_origin.pdf",
+    "markdown": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\markdown\\d1a2a61a-6503-4c7d-8526-ac3358460b0d_origin.md",
+    "content_list": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\d1a2a61a-6503-4c7d-8526-ac3358460b0d_origin\\67168c47-6185-4c00-ae79-ec0bb1e4a45e_content_list.json",
+    "extracted_dir": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\extracted\\d1a2a61a-6503-4c7d-8526-ac3358460b0d_origin"
   },
   "source_file": {
-    "pdf_name": "2b-hvd-hc1j13-345-355-1781612046.pdf",
-    "relative_pdf_path": "2b-hvd-hc1j13-345-355-1781612046.pdf",
-    "sha256": "168f89b51369a9275d41ffb3ce8508ee1df02d8cafdd00ced0eae2a21258cf73"
+    "pdf_name": "d1a2a61a-6503-4c7d-8526-ac3358460b0d_origin.pdf",
+    "relative_pdf_path": "d1a2a61a-6503-4c7d-8526-ac3358460b0d_origin.pdf",
+    "sha256": "2b24f321c0cf64037ccdb9d07b35080340061054887fae463dd2bbaf70135ab1"
   },
   "extraction": {
-    "mode": "llm_8_category_retag",
-    "model": "gpt-5.4",
-    "created_at": "2026-06-17T19:32:24Z",
+    "mode": "rules",
+    "model": null,
+    "created_at": "2026-07-24T07:56:10Z",
     "inputs": {
-      "manifest": "/home/ps/review-writer/mineru-outputs/manifest.json",
-      "content_blocks": 147,
-      "markdown_chars_used": 14000
+      "manifest": "D:\\work\\old1\\review-writer-main\\mineru-outputs\\manifest.json",
+      "content_blocks": 35,
+      "markdown_chars_used": 6659
     },
-    "notes": [
-      "llm_8_category_tags_refreshed",
-      "llm_8_category_tags_refreshed"
-    ]
+    "notes": []
   },
   "human_review": {
     "status": "not_reviewed",
@@ -73,41 +90,14 @@
   "quality": {
     "missing_fields": [],
     "warnings": [
-      "empty_authors",
-      "missing_journal",
       "missing_doi",
-      "low_confidence_abstract",
-      "No formal abstract is visible in the provided snippets; the opening paragraph was used as an abstract surrogate.",
-      "This is a historical stereochemistry paper rather than a synthetic reaction-method paper, so several structured tags are set to not specified.",
-      "structured_tag_not_specified_reaction_type",
-      "structured_tag_not_specified_activation_mode",
-      "structured_tag_not_specified_catalyst_system",
-      "structured_tag_not_specified_selectivity_profile",
-      "Paper is not an allene-focused article; all allene reaction classification fields are marked 'not specified' except document scope.",
-      "The extracted abstract is an opening paragraph from a historical paper rather than a modern journal abstract.",
-      "structured_tag_not_specified_product",
-      "structured_tag_not_specified_substrate",
-      "structured_tag_not_specified_catalyst_or_method",
       "structured_tag_not_specified_organometallic_partner",
       "structured_tag_not_specified_ligand_or_chiral_source",
-      "structured_tag_not_specified_leaving_group"
+      "structured_tag_not_specified_leaving_group",
+      "structured_tag_not_specified_reaction_type",
+      "low_confidence_abstract"
     ],
-    "overall_confidence": 0.647,
+    "overall_confidence": 0.593,
     "needs_human_check": true
-  },
-  "structured_tags": {
-    "value": {
-      "catalyst_or_method": "not specified",
-      "document_scope": "stereochemical study",
-      "leaving_group": "not specified",
-      "ligand_or_chiral_source": "not specified",
-      "organometallic_partner": "not specified",
-      "product": "not specified",
-      "reaction_type": "not specified",
-      "substrate": "not specified"
-    },
-    "source": "llm_from_rules_and_paper_evidence",
-    "confidence": 0.88,
-    "human_checked": false
   }
 }
