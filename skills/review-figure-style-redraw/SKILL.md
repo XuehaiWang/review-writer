@@ -56,7 +56,9 @@ Use this routing order:
 3. A complex multi-panel overview, strategy, comparison, background, rearrangement, catalytic-cycle, kinetic-investigation, or total-synthesis figure: `source-faithful-color`. Strategy figures with bright cyan/green/orange interior fills use `source-faithful-outline-color`: retain dark coloured outlines and all symbols, but whiten only bright saturated interiors.
 4. A simple single-transformation scheme without the above indicators: gated `ai-edit`, with no OCR extraction, OCR prompt injection, OCR masking, OCR text restoration, or OCR comparison.
 
-Low-resolution or thin-stroke schemes are also forced to `source-faithful-bw`, even when their caption suggests a simple transformation. A generative model must never infer missing thin bonds, labels, or stereochemical marks from a small raster.
+Low-resolution or thin-stroke schemes are forced to `source-faithful-bw`, even when their caption suggests a simple transformation. The black-and-white renderer detects saturated red/blue/other coloured source ink at native resolution before enlargement, converts it to continuous black strokes, and uses sharpened neutral-grey antialiasing only to smooth their black edges. It hollows only broad bright fills before conversion. A generative model must never infer missing thin bonds, labels, or stereochemical marks from a small raster.
+
+Tall portrait multi-step figures are forced to `source-faithful-bw`. Their full source canvas and every stacked panel are preserved at 4x resolution; broad bright colour interiors are whitened and all remaining chemical strokes, labels, and symbols are rendered as black line art. Do not use a generative edit for these figures: it can retain the nominal aspect ratio while reflowing or clipping the lowest panel.
 
 Every provider result is saved directly to Stage 7 **Redrawn Output**. The chemistry-integrity gate remains diagnostic metadata: a warning is recorded beside a saved image but it does not require a separate confirmation action or suppress the output path.
 

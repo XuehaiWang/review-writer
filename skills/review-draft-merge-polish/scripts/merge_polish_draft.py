@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Any
 
 
+class ModelResponseError(RuntimeError):
+    """A provider returned a successful transport response without usable model JSON."""
+
+
 def openai_endpoint(base_url: str, endpoint: str) -> str:
     """Accept OpenAI-compatible base URLs with or without a trailing /v1."""
     base = str(base_url or "https://api.openai.com").rstrip("/")
@@ -42,6 +46,55 @@ def load_dotenv(root: Path) -> None:
                 os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
+def response_json(response: Any, endpoint: str) -> dict[str, Any]:
+    """Decode a provider response with actionable errors for blank relay bodies."""
+    raw = response.read()
+    text = raw.decode("utf-8-sig", errors="replace").strip()
+    if not text:
+        raise ModelResponseError(f"{endpoint} returned an empty response body")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        preview = " ".join(text.split())[:160]
+        raise ModelResponseError(f"{endpoint} returned non-JSON content: {preview!r}") from exc
+    if not isinstance(payload, dict):
+        raise ModelResponseError(f"{endpoint} returned JSON {type(payload).__name__}, not an object")
+    return payload
+
+
+def parse_framing(text: Any, endpoint: str) -> dict[str, Any]:
+    """Accept JSON text and the common Markdown-fenced compatibility response."""
+    value = str(text or "").strip()
+    if value.startswith("```"):
+        value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.IGNORECASE)
+        value = re.sub(r"\s*```$", "", value).strip()
+    if not value:
+        raise ModelResponseError(f"{endpoint} returned no framing content")
+    try:
+        framing = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ModelResponseError(f"{endpoint} returned malformed framing JSON") from exc
+    if not isinstance(framing, dict):
+        raise ModelResponseError(f"{endpoint} returned framing JSON {type(framing).__name__}, not an object")
+    return framing
+
+
+def make_request(url: str, payload: dict[str, Any], api_key: str) -> urllib.request.Request:
+    return urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            # The configured relay rejects Python's default user agent.
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        },
+    )
+
+
 def call_llm(prompt: str, api_key: str, base_url: str, model: str) -> dict[str, Any]:
     schema = {
         "type": "object", "additionalProperties": False,
@@ -52,31 +105,51 @@ def call_llm(prompt: str, api_key: str, base_url: str, model: str) -> dict[str, 
             "transitions": {"type": "object", "additionalProperties": {"type": "string"}},
         },
     }
+    endpoint = openai_endpoint(base_url, "responses")
     payload = {"model": model, "input": [{"role": "user", "content": prompt}], "text": {"format": {"type": "json_schema", "name": "review_merge", "schema": schema, "strict": True}}}
-    request = urllib.request.Request(
-        openai_endpoint(base_url, "responses"), data=json.dumps(payload).encode("utf-8"), method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            # The configured relay rejects Python's default user agent.
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        },
-    )
-    # A relay can occasionally return a transient gateway error for an otherwise
-    # valid request. Retrying keeps this framing-only step from blocking a draft.
+    request = make_request(endpoint, payload, api_key)
+    response_error: Exception | None = None
+    # A relay can occasionally return a transient gateway error or an empty body
+    # for an otherwise valid Responses request. Retry both transport and payload
+    # failures before using the broadly supported Chat Completions compatibility path.
     for attempt in range(3):
         try:
             with urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=300) as response:
-                data = json.loads(response.read().decode("utf-8"))
-            break
+                data = response_json(response, endpoint)
+            text = data.get("output_text") or "\n".join(content.get("text", "") for output in data.get("output", []) for content in output.get("content", []) if content.get("type") in {"output_text", "text"})
+            return parse_framing(text, endpoint)
         except urllib.error.HTTPError as exc:
-            if exc.code not in {429, 500, 502, 503, 504} or attempt == 2:
-                raise
+            response_error = exc
+            if exc.code not in {429, 500, 502, 503, 504}:
+                break
+        except (urllib.error.URLError, ModelResponseError) as exc:
+            response_error = exc
+        if attempt < 2:
             time.sleep(2 * (attempt + 1))
-    text = data.get("output_text") or "\n".join(content.get("text", "") for output in data.get("output", []) for content in output.get("content", []) if content.get("type") in {"output_text", "text"})
-    return json.loads(text)
+
+    chat_endpoint = openai_endpoint(base_url, "chat/completions")
+    chat_prompt = f"{prompt}\n\nReturn only one JSON object with the keys title, introduction, and transitions."
+    chat_payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": chat_prompt}],
+        "response_format": {"type": "json_object"},
+    }
+    try:
+        with urllib.request.urlopen(
+            make_request(chat_endpoint, chat_payload, api_key),
+            context=ssl.create_default_context(),
+            timeout=300,
+        ) as response:
+            chat_data = response_json(response, chat_endpoint)
+        choices = chat_data.get("choices") if isinstance(chat_data.get("choices"), list) else []
+        message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+        content = message.get("content") if isinstance(message, dict) else ""
+        if isinstance(content, list):
+            content = "\n".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
+        return parse_framing(content, chat_endpoint)
+    except (urllib.error.HTTPError, urllib.error.URLError, ModelResponseError) as exc:
+        detail = f"Responses failure: {response_error}; chat-completions failure: {exc}"
+        raise ModelResponseError(detail) from exc
 
 
 def section_brief(section: dict[str, Any]) -> dict[str, Any]:
@@ -158,6 +231,9 @@ Section evidence summaries:\n{json.dumps(summaries, ensure_ascii=False)}"""
         framing = fallback_framing(topic, sections)
     except urllib.error.URLError as exc:
         fallback_reason = f"unreachable: {exc.reason}"
+        framing = fallback_framing(topic, sections)
+    except ModelResponseError as exc:
+        fallback_reason = str(exc)
         framing = fallback_framing(topic, sections)
     body = [f"# {str(framing.get('title') or topic or args.project_id).strip()}", "", "## Introduction", "", str(framing.get("introduction") or "").strip(), ""]
     transitions = framing.get("transitions") if isinstance(framing.get("transitions"), dict) else {}

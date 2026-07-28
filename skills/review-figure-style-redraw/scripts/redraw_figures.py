@@ -29,7 +29,10 @@ SOURCE_FAITHFUL_RENDER_MODES = {
 SOURCE_FAITHFUL_DARK_INK_THRESHOLD = 180
 BRIGHT_COLOR_FILL_SPREAD = 50
 BRIGHT_COLOR_FILL_BRIGHTNESS = 135
-BRIGHT_COLOR_FILL_MIN_REGION_SIZE = 9
+# At 4x output, a 9px erosion can still classify thick coloured aromatic
+# double bonds as fill interiors. Require a genuinely broad colour region so
+# ring bonds and other chemical strokes remain available to the black-ink pass.
+BRIGHT_COLOR_FILL_MIN_REGION_SIZE = 17
 CONTENT_INK_THRESHOLD = 192
 CONTENT_MATCH_RADIUS = 3
 MAX_RESTORED_COMPONENT_PIXELS = 1024
@@ -146,6 +149,13 @@ def is_low_resolution_or_thin_scheme(source_path: Path) -> bool:
     with Image.open(source_path) as source:
         width, height = source.size
     return min(width, height) < 360
+
+
+def is_tall_multistep_source(source_path: Path) -> bool:
+    """Protect portrait multi-panel reaction summaries from generative canvas cropping."""
+    with Image.open(source_path) as source:
+        width, height = source.size
+    return height >= 700 and height / max(width, 1) >= 1.35
 
 
 def resolve_tesseract_command(review_root: Path, configured_path: str) -> str:
@@ -630,6 +640,21 @@ def human_selected_figure(project: Path, figure: dict[str, Any]) -> dict[str, An
 
 def whiten_large_bright_color_fills(image: Image.Image) -> int:
     """Whiten only broad bright colour interiors, never thin coloured text strokes."""
+    # Pastel cyan/magenta fills can coexist with darker strokes of exactly the
+    # same hue (for example aromatic double bonds). If a substantial pastel
+    # layer is present, use a higher brightness cutoff so only the fill, not
+    # its darker chemical linework, enters the erosion mask.
+    pastel_pixels = 0
+    for red, green, blue in image.get_flattened_data():
+        spread = max(red, green, blue) - min(red, green, blue)
+        brightness = (red + green + blue) / 3
+        if spread >= BRIGHT_COLOR_FILL_SPREAD and brightness >= 205:
+            pastel_pixels += 1
+    brightness_cutoff = (
+        190
+        if pastel_pixels >= max(200, image.width * image.height // 1000)
+        else BRIGHT_COLOR_FILL_BRIGHTNESS
+    )
     pixels = image.load()
     mask = Image.new("L", image.size, 0)
     mask_pixels = mask.load()
@@ -638,10 +663,10 @@ def whiten_large_bright_color_fills(image: Image.Image) -> int:
             red, green, blue = pixels[x, y]
             spread = max(red, green, blue) - min(red, green, blue)
             brightness = (red + green + blue) / 3
-            if spread >= BRIGHT_COLOR_FILL_SPREAD and brightness >= BRIGHT_COLOR_FILL_BRIGHTNESS:
+            if spread >= BRIGHT_COLOR_FILL_SPREAD and brightness >= brightness_cutoff:
                 mask_pixels[x, y] = 255
     # Erosion keeps only the interior of a solid colour region. Coloured glyphs,
-    # arrows, bonds, and labels are too thin to survive this 9x9 neighbourhood.
+    # arrows, bonds, and labels are too thin to survive this broad neighbourhood.
     fill_interior = mask.filter(ImageFilter.MinFilter(BRIGHT_COLOR_FILL_MIN_REGION_SIZE))
     fill_pixels = fill_interior.load()
     replaced = 0
@@ -663,23 +688,48 @@ def render_source_faithful_bw(source_path: Path, output_path: Path) -> dict[str,
             source.width * SOURCE_FAITHFUL_SCALE_FACTOR,
             source.height * SOURCE_FAITHFUL_SCALE_FACTOR,
         )
-        upscaled = background.convert("RGB").resize(target_size, Image.Resampling.LANCZOS)
-        whiten_large_bright_color_fills(upscaled)
-        # Colored fills such as the cyan indole interiors in P090 are bright but
-        # have a low grayscale luminance. They are hollowed before thresholding;
-        # thin coloured text and labels are preserved as black ink.
-        grayscale = ImageOps.autocontrast(ImageOps.grayscale(upscaled))
-        black_and_white = grayscale.point(
-            lambda value: 255 if value >= SOURCE_FAITHFUL_DARK_INK_THRESHOLD else 0,
-            mode="1",
-        )
+        rgb = background.convert("RGB")
+        if min(source.size) < 360:
+            # Grayscale thresholding after LANCZOS interpolation can split thin
+            # red and blue chemical strokes into dots. Work at native resolution:
+            # the minimum RGB channel retains black and saturated coloured ink.
+            # Hollow broad bright fills first so they cannot become black blocks.
+            whiten_large_bright_color_fills(rgb)
+            red, green, blue = rgb.split()
+            chromatic_ink = ImageChops.darker(ImageChops.darker(red, green), blue)
+            native_binary = chromatic_ink.point(
+                # 220 excludes light JPEG background noise while retaining the
+                # dark cores of black, red, and blue scientific strokes.
+                lambda value: 255 if value >= 220 else 0,
+                mode="L",
+            )
+            # Keep black line cores but use neutral (not coloured) antialiasing
+            # at 4x. This avoids the stair-stepped appearance of a 1-bit
+            # nearest-neighbour enlargement while retaining clear connected
+            # strokes and a pure white background.
+            black_and_white = native_binary.resize(target_size, Image.Resampling.LANCZOS)
+            black_and_white = black_and_white.filter(ImageFilter.MinFilter(3))
+            black_and_white = black_and_white.filter(
+                ImageFilter.UnsharpMask(radius=1.2, percent=175, threshold=3)
+            )
+            conversion_note = "native chromatic-ink threshold with sharpened neutral antialiased enlargement"
+        else:
+            upscaled = rgb.resize(target_size, Image.Resampling.LANCZOS)
+            whiten_large_bright_color_fills(upscaled)
+            grayscale = ImageOps.autocontrast(ImageOps.grayscale(upscaled))
+            black_and_white = grayscale.point(
+                lambda value: 255 if value >= SOURCE_FAITHFUL_DARK_INK_THRESHOLD else 0,
+                mode="1",
+            )
+            conversion_note = "LANCZOS grayscale threshold"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         black_and_white.save(output_path, format="PNG")
         return {
             "width": target_size[0],
             "height": target_size[1],
             "scale_factor": SOURCE_FAITHFUL_SCALE_FACTOR,
-            "color_mode": "1-bit black and white; bright color fills hollowed",
+            "color_mode": "black and white with neutral antialiasing; bright color fills hollowed",
+            "conversion": conversion_note,
         }
 
 
@@ -1412,6 +1462,20 @@ def run(args: argparse.Namespace) -> int:
         if (
             args.edit_profile == "standard"
             and effective_render_mode in {"ai-edit", "ocr-hollow-ai"}
+            and is_tall_multistep_source(source_image)
+        ):
+            effective_render_mode = "source-faithful-bw"
+            redraw_row["render_mode"] = effective_render_mode
+            redraw_row["typography_protection"] = "source_pixel_layout_preserved"
+            redraw_row["color_policy"] = "pure_black_and_white"
+            redraw_row["render_mode_guard"] = {
+                "status": "forced_source_faithful",
+                "requested_render_mode": requested_render_mode,
+                "reason": "Tall multi-step figure: preserve the complete source canvas and every panel as black line art with hollow colour regions instead of allowing a generative edit to crop or reflow the lower content.",
+            }
+        if (
+            args.edit_profile == "standard"
+            and effective_render_mode in {"ai-edit", "ocr-hollow-ai"}
             and is_low_resolution_or_thin_scheme(source_image)
         ):
             effective_render_mode = "source-faithful-bw"
@@ -1421,7 +1485,7 @@ def run(args: argparse.Namespace) -> int:
             redraw_row["render_mode_guard"] = {
                 "status": "forced_source_faithful",
                 "requested_render_mode": requested_render_mode,
-                "reason": "Low-resolution or thin-stroke scheme: preserve source geometry instead of letting a model reconstruct bonds.",
+                "reason": "Low-resolution or thin-stroke scheme: preserve source geometry and convert all source ink to sharp connected black strokes instead of letting a model reconstruct bonds.",
             }
         copied_source = source_dir / f"{figure_id}{source_image.suffix.lower() or '.png'}"
         copied_source.write_bytes(source_image.read_bytes())

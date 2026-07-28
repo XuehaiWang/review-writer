@@ -146,11 +146,10 @@ _RAW_LATEX_REWRITES: List[Tuple[re.Pattern, Any]] = [
         re.compile(r"\b([A-Za-z])\s*_\s*\{\s*([A-Za-z])\s*\^\s*\{\s*(\d+)\s*\}\s*\}\s*\\prime"),
         lambda m: f"${m.group(1)}_{{{m.group(2)}^{m.group(3)}}}\\prime$",
     ),
-    (
-        re.compile(r"(?<!\$)\\(alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|rho|sigma|tau|phi|chi|psi|omega)\b(?!\$)"),
-        lambda m: "$\\" + m.group(1) + "$",
-    ),
 ]
+_RAW_GREEK_COMMAND_RE = re.compile(
+    r"\\(alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|rho|sigma|tau|phi|chi|psi|omega)\b"
+)
 _RAW_LATEX_COMMAND_RE = re.compile(r"\\(?!figure_[A-Za-z0-9_-]+\.[A-Za-z0-9]+)[A-Za-z]+")
 
 
@@ -158,6 +157,20 @@ def normalize_mineru_latex(md_text: str) -> str:
     """Turn known raw MinerU LaTex into Math-delimited expressions for DOCX."""
     for pattern, replacement in _RAW_LATEX_REWRITES:
         md_text = pattern.sub(replacement, md_text)
+
+    # Do not use a simple lookbehind for Greek commands: a formula such as
+    # ``$\\alpha, \\alpha^\\prime$`` contains a later command that is not
+    # immediately adjacent to its opening ``$``.  Re-wrapping that command
+    # would split one valid formula into mismatched math delimiters.
+    source = md_text
+    md_text = _RAW_GREEK_COMMAND_RE.sub(
+        lambda match: (
+            match.group(0)
+            if source[:match.start()].count("$") % 2
+            else "$" + match.group(0) + "$"
+        ),
+        source,
+    )
     leftovers = [
         match.group(0)
         for match in _RAW_LATEX_COMMAND_RE.finditer(md_text)
