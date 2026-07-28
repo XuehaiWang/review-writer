@@ -47,6 +47,10 @@ def load_available_figures(project: Path) -> tuple[str, list[dict[str, Any]]]:
                         f.get("render_mode") == "ocr-hollow-ai"
                         and (f.get("content_fidelity") or {}).get("status") == "pass"
                         and (f.get("structural_fidelity") or {}).get("status") == "pass"
+                        and (
+                            not f.get("chemistry_integrity")
+                            or (f.get("chemistry_integrity") or {}).get("status") == "pass"
+                        )
                     )
                 )
             ]

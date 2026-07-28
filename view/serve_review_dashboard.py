@@ -4,18 +4,23 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
+import io
 import importlib.util
 import json
+import math
 import mimetypes
 import posixpath
 import re
 import shutil
 import subprocess
 import sys
+import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
+
+from PIL import Image
 
 
 _PARAGRAPH_SCRIPTS = Path(__file__).resolve().parent.parent / "skills" / "review-draft-merge-polish" / "scripts"
@@ -27,6 +32,11 @@ from paragraph_manifest_builder import build_manifest
 
 _DISCOVERY_MODULE = None
 _CONCLUSION_INTEGRATION_MODULE = None
+_BATCH_REDRAW_LOCK = threading.RLock()
+_BATCH_REDRAW_JOBS: dict[str, dict[str, object]] = {}
+FULL_SVG_MAX_DIMENSION = 1600
+FULL_SVG_WHITE_THRESHOLD = 245
+FULL_SVG_COLOR_STEP = 24
 
 
 def discovery_script_path() -> Path:
@@ -130,6 +140,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.handle_project_draft_get(project_id)
         elif parsed.path.startswith("/api/project/") and "/paragraph" in parsed.path:
             self.handle_paragraph_get(parsed.path)
+        elif parsed.path.startswith("/api/project/") and parsed.path.endswith("/figures/redraw-all"):
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) == 5 and parts[0:2] == ["api", "project"]:
+                self.handle_batch_figure_redraw_status(unquote(parts[2]))
+            else:
+                self.send_error(HTTPStatus.NOT_FOUND, "batch redraw status not found")
         elif parsed.path.startswith("/api/project/"):
             parts = parsed.path.strip("/").split("/")
             if len(parts) == 4:
@@ -203,10 +219,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
             project_id = unquote(parsed.path.split("/")[3])
             self.handle_section_tasks_start(project_id)
             return
+        if parsed.path.startswith("/api/project/") and parsed.path.endswith("/figures/redraw-all"):
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) == 5 and parts[0:2] == ["api", "project"]:
+                self.handle_batch_figure_redraw_start(unquote(parts[2]))
+                return
+        if parsed.path.startswith("/api/project/") and parsed.path.endswith("/figures/redraw-all/stop"):
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) == 6 and parts[0:2] == ["api", "project"]:
+                self.handle_batch_figure_redraw_stop(unquote(parts[2]))
+                return
         if parsed.path.startswith("/api/project/") and "/figures/" in parsed.path:
             parts = parsed.path.strip("/").split("/")
             if len(parts) == 6 and parts[0:2] == ["api", "project"] and parts[3] == "figures" and parts[5] == "redraw":
                 self.handle_current_figure_redraw(unquote(parts[2]), unquote(parts[4]))
+                return
+            if len(parts) == 6 and parts[0:2] == ["api", "project"] and parts[3] == "figures" and parts[5] == "manual-arrow-edit":
+                self.handle_manual_arrow_edit(unquote(parts[2]), unquote(parts[4]))
+                return
+            if len(parts) == 6 and parts[0:2] == ["api", "project"] and parts[3] == "figures" and parts[5] == "full-svg":
+                self.handle_full_figure_svg(unquote(parts[2]), unquote(parts[4]))
                 return
         if parsed.path.startswith("/api/project/") and "/run/" in parsed.path:
             parts = parsed.path.strip("/").split("/")
@@ -530,6 +562,62 @@ class DashboardHandler(BaseHTTPRequestHandler):
             result = redraw_current_figure(self.review_root, project_id, figure_id)
         except (RuntimeError, ValueError) as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        self.send_json({"ok": True, "project_id": project_id, **result})
+
+    def handle_batch_figure_redraw_start(self, project_id: str) -> None:
+        try:
+            result = start_batch_figure_redraw(self.review_root, project_id)
+        except (RuntimeError, ValueError) as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        self.send_json({"ok": True, "project_id": project_id, **result}, status=HTTPStatus.ACCEPTED)
+
+    def handle_batch_figure_redraw_status(self, project_id: str) -> None:
+        self.send_json({"ok": True, "project_id": project_id, **batch_figure_redraw_status(project_id)})
+
+    def handle_batch_figure_redraw_stop(self, project_id: str) -> None:
+        self.send_json({"ok": True, "project_id": project_id, **stop_batch_figure_redraw(project_id)})
+
+    def handle_manual_arrow_edit(self, project_id: str, figure_id: str) -> None:
+        try:
+            payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode("utf-8"))
+            data_url = str(payload.get("image_png_data_url") or "")
+            if not data_url.startswith("data:image/png;base64,"):
+                raise ValueError("image_png_data_url must be a PNG data URL")
+            image_bytes = base64.b64decode(data_url.split(",", 1)[1], validate=True)
+            operations = payload.get("operations") or []
+            if not isinstance(operations, list):
+                raise ValueError("operations must be a list")
+            base_mode = str(payload.get("base_mode") or "source")
+            svg_content = str(payload.get("editable_svg") or "")
+            full_vector_svg = str(payload.get("full_vector_svg") or "")
+            result = save_manual_arrow_edit(
+                self.review_root,
+                project_id,
+                figure_id,
+                image_bytes,
+                operations,
+                base_mode=base_mode,
+                editable_svg=svg_content,
+                full_vector_svg=full_vector_svg,
+            )
+        except (ValueError, OSError, Image.UnidentifiedImageError) as exc:
+            self.send_json({"ok": False, "error": f"Manual arrow edit was not saved: {exc}"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self.send_json({"ok": True, "project_id": project_id, **result})
+
+    def handle_full_figure_svg(self, project_id: str, figure_id: str) -> None:
+        try:
+            payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode("utf-8") or "{}")
+            result = create_full_figure_svg(
+                self.review_root,
+                project_id,
+                figure_id,
+                base_mode=str(payload.get("base_mode") or "source"),
+            )
+        except (ValueError, OSError, Image.UnidentifiedImageError) as exc:
+            self.send_json({"ok": False, "error": f"Full-image SVG was not created: {exc}"}, status=HTTPStatus.BAD_REQUEST)
             return
         self.send_json({"ok": True, "project_id": project_id, **result})
 
@@ -1668,6 +1756,434 @@ def regenerate_figures(review_root: Path, project_id: str) -> dict[str, Any]:
     return {"redrawn_count": len(redrawn)}
 
 
+_MECHANISM_ARROW_PROFILE_PATTERN = re.compile(
+    r"\b(?:mechanism|mechanistic|catalytic\s+cycle|photocatalytic)\b|"
+    r"反应机理|机理图|催化循环|光催化循环",
+    re.IGNORECASE,
+)
+_DENSE_SCOPE_PROFILE_PATTERN = re.compile(
+    r"\b(?:reaction\s+scope|substrate\s+scope|scope\s+summary|examples?)\b|"
+    r"反应范围|底物范围|反应底物",
+    re.IGNORECASE,
+)
+_COMPLEX_MULTIPANEL_PROFILE_PATTERN = re.compile(
+    r"\b(?:strateg(?:y|ies)|background|overview|comparison|rearrangement|applications?|"
+    r"protocols?|routes?|methodology|stud(?:y|ies))\b|"
+    r"策略|背景|概览|对比|重排|应用|路线",
+    re.IGNORECASE,
+)
+
+
+def use_mechanism_arrow_straighten_profile(candidate: dict[str, Any]) -> bool:
+    """Identify a mechanism/catalytic-cycle figure eligible for strict arrow-only editing."""
+    explicit = str(candidate.get("edit_profile") or candidate.get("redraw_profile") or "").strip()
+    if explicit == "mechanism-arrow-straighten":
+        return True
+    fields = (
+        "source_label",
+        "source_caption_text",
+        "what_it_shows",
+        "recommended_action",
+        "source_type",
+    )
+    return bool(_MECHANISM_ARROW_PROFILE_PATTERN.search(" ".join(str(candidate.get(field) or "") for field in fields)))
+
+
+def use_source_faithful_scope_render(candidate: dict[str, Any]) -> bool:
+    """Avoid generative redraw for dense multi-product scope schemes."""
+    fields = (
+        "source_label",
+        "source_caption_text",
+        "title",
+        "section_heading",
+        "recommended_action",
+    )
+    return bool(_DENSE_SCOPE_PROFILE_PATTERN.search(" ".join(str(candidate.get(field) or "") for field in fields)))
+
+
+def use_source_faithful_multipanel_render(candidate: dict[str, Any]) -> bool:
+    """Avoid model reconstruction of complex multi-panel chemistry graphics."""
+    fields = (
+        "source_label",
+        "source_caption_text",
+        "title",
+        "what_it_shows",
+        "section_heading",
+    )
+    return bool(_COMPLEX_MULTIPANEL_PROFILE_PATTERN.search(" ".join(str(candidate.get(field) or "") for field in fields)))
+
+
+def _svg_number(value: object) -> str:
+    number = float(value)
+    if not number == number or abs(number) > 1_000_000:
+        raise ValueError("SVG coordinate is invalid")
+    return f"{number:.3f}".rstrip("0").rstrip(".")
+
+
+def _svg_points(points: object, scale: float) -> list[tuple[float, float]]:
+    if not isinstance(points, list) or len(points) < 2:
+        return []
+    parsed: list[tuple[float, float]] = []
+    for point in points:
+        if not isinstance(point, dict):
+            return []
+        parsed.append((float(point.get("x") or 0) * scale, float(point.get("y") or 0) * scale))
+    return parsed
+
+
+def build_full_image_vector_svg(base_path: Path, operations: list[dict[str, object]]) -> str:
+    """Trace every non-white source pixel into SVG paths, without chemistry OCR/reconstruction."""
+    with Image.open(base_path) as source:
+        rgba = source.convert("RGBA")
+        background = Image.new("RGBA", rgba.size, "white")
+        background.alpha_composite(rgba)
+        source_rgb = background.convert("RGB")
+        scale = min(1.0, FULL_SVG_MAX_DIMENSION / max(source_rgb.size))
+        if scale < 1.0:
+            traced = source_rgb.resize(
+                (max(1, round(source_rgb.width * scale)), max(1, round(source_rgb.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+        else:
+            traced = source_rgb
+        width, height = traced.size
+        pixels = traced.load()
+        foreground = bytearray(width * height)
+        for y in range(height):
+            for x in range(width):
+                red, green, blue = pixels[x, y]
+                if not (
+                    red >= FULL_SVG_WHITE_THRESHOLD
+                    and green >= FULL_SVG_WHITE_THRESHOLD
+                    and blue >= FULL_SVG_WHITE_THRESHOLD
+                ):
+                    foreground[y * width + x] = 1
+        visited = bytearray(width * height)
+        vector_objects: list[str] = []
+        vector_index = 0
+        for y in range(height):
+            for x in range(width):
+                start = y * width + x
+                if not foreground[start] or visited[start]:
+                    continue
+                visited[start] = 1
+                pending = [start]
+                cursor = 0
+                rows: dict[tuple[int, str], list[int]] = {}
+                min_x = max_x = x
+                min_y = max_y = y
+                while cursor < len(pending):
+                    current = pending[cursor]
+                    cursor += 1
+                    current_y, current_x = divmod(current, width)
+                    red, green, blue = pixels[current_x, current_y]
+                    color = tuple(
+                        min(255, round(channel / FULL_SVG_COLOR_STEP) * FULL_SVG_COLOR_STEP)
+                        for channel in (red, green, blue)
+                    )
+                    hex_color = "#%02x%02x%02x" % color
+                    rows.setdefault((current_y, hex_color), []).append(current_x)
+                    min_x, max_x = min(min_x, current_x), max(max_x, current_x)
+                    min_y, max_y = min(min_y, current_y), max(max_y, current_y)
+                    for delta_y in (-1, 0, 1):
+                        neighbor_y = current_y + delta_y
+                        if neighbor_y < 0 or neighbor_y >= height:
+                            continue
+                        for delta_x in (-1, 0, 1):
+                            if not delta_x and not delta_y:
+                                continue
+                            neighbor_x = current_x + delta_x
+                            if neighbor_x < 0 or neighbor_x >= width:
+                                continue
+                            neighbor = neighbor_y * width + neighbor_x
+                            if foreground[neighbor] and not visited[neighbor]:
+                                visited[neighbor] = 1
+                                pending.append(neighbor)
+                paths_by_color: dict[str, list[str]] = {}
+                for (row_y, hex_color), xs in rows.items():
+                    xs.sort()
+                    run_start = xs[0]
+                    previous = xs[0]
+                    for current_x in xs[1:]:
+                        if current_x == previous + 1:
+                            previous = current_x
+                            continue
+                        paths_by_color.setdefault(hex_color, []).append(
+                            f"M{run_start} {row_y}h{previous - run_start + 1}v1h-{previous - run_start + 1}z"
+                        )
+                        run_start = previous = current_x
+                    paths_by_color.setdefault(hex_color, []).append(
+                        f"M{run_start} {row_y}h{previous - run_start + 1}v1h-{previous - run_start + 1}z"
+                    )
+                paths = "".join(
+                    f'<path fill="{hex_color}" d="{"".join(parts)}"/>'
+                    for hex_color, parts in paths_by_color.items()
+                )
+                vector_objects.append(
+                    f'<g class="vector-object" data-vector-index="{vector_index}" data-vector-kind="source-mark" '
+                    f'data-bbox="{min_x},{min_y},{max_x - min_x + 1},{max_y - min_y + 1}">{paths}</g>'
+                )
+                vector_index += 1
+    operation_scale = scale
+    overlay_paths: list[str] = []
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        points = _svg_points(operation.get("points"), operation_scale)
+        if len(points) < 2:
+            continue
+        points_text = " ".join(f"{_svg_number(x)},{_svg_number(y)}" for x, y in points)
+        op_type = str(operation.get("type") or "")
+        if op_type == "erase":
+            width_value = max(1.0, float(operation.get("width") or 8) * operation_scale)
+            overlay_paths.append(
+                f'<polyline points="{points_text}" fill="none" stroke="#ffffff" stroke-width="{_svg_number(width_value)}" '
+                'stroke-linecap="round" stroke-linejoin="round"/>'
+            )
+        elif op_type == "arrow":
+            width_value = max(1.0, float(operation.get("width") or 2) * operation_scale)
+            color = str(operation.get("color") or "#111111")
+            if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+                color = "#111111"
+            last_x, last_y = points[-1]
+            previous_x, previous_y = points[-2]
+            angle = math.atan2(last_y - previous_y, last_x - previous_x)
+            head = max(8.0 * operation_scale, width_value * 5)
+            left_x = last_x - head * math.cos(angle - math.pi / 6)
+            left_y = last_y - head * math.sin(angle - math.pi / 6)
+            right_x = last_x - head * math.cos(angle + math.pi / 6)
+            right_y = last_y - head * math.sin(angle + math.pi / 6)
+            overlay_paths.append(
+                f'<polyline points="{points_text}" fill="none" stroke="{color}" stroke-width="{_svg_number(width_value)}" '
+                'stroke-linecap="round" stroke-linejoin="round"/>'
+                f'<polygon points="{_svg_number(last_x)},{_svg_number(last_y)} {_svg_number(left_x)},{_svg_number(left_y)} '
+                f'{_svg_number(right_x)},{_svg_number(right_y)}" fill="{color}"/>'
+            )
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
+        '<title>Full-image chemistry figure vector trace</title>'
+        f'<rect width="{width}" height="{height}" fill="#ffffff"/>'
+        f'<g id="full-image-vector-trace">{"".join(vector_objects)}</g>'
+        f'<g id="editable-arrow-overlays">{"".join(overlay_paths)}</g>'
+        '</svg>'
+    )
+
+
+def create_full_figure_svg(
+    review_root: Path,
+    project_id: str,
+    figure_id: str,
+    *,
+    base_mode: str = "source",
+) -> dict[str, object]:
+    """Create an all-path SVG workspace from a selected source or redraw image.
+
+    This deliberately traces pixels rather than attempting chemistry OCR or molecular
+    reconstruction: every visible mark stays in its original position and the SVG has
+    no embedded raster-image element.
+    """
+    if base_mode not in {"source", "redrawn"}:
+        raise ValueError("base_mode must be source or redrawn")
+    project = review_root / "review-projects" / project_id
+    candidates = read_json_if_exists(project / "02_section_drafting" / "figure_candidates.json") or []
+    if isinstance(candidates, dict):
+        candidates = candidates.get("figures") or candidates.get("candidates") or []
+    candidate = next(
+        (row for row in candidates if isinstance(row, dict) and str(row.get("figure_id") or "") == figure_id),
+        None,
+    )
+    if not isinstance(candidate, dict):
+        raise ValueError("Current figure candidate was not found")
+    source_path = Path(str(candidate.get("source_image_path") or candidate.get("image_path") or ""))
+    if not source_path.is_file():
+        raise ValueError("The current source image is unavailable")
+    stage = project / "03_figure_redraw"
+    base_path = source_path
+    if base_mode == "redrawn":
+        manifest = read_json_if_exists(stage / "redrawn_figure_manifest.json") or {}
+        rows = manifest.get("figures") if isinstance(manifest, dict) else []
+        row = next(
+            (item for item in rows or [] if isinstance(item, dict) and str(item.get("figure_id") or "") == figure_id),
+            None,
+        )
+        paths = [
+            str((row or {}).get("redrawn_image") or ""),
+            str((row or {}).get("rejected_preview_image") or ""),
+        ]
+        base_path = next((Path(path) for path in paths if path and Path(path).is_file()), Path())
+        if not base_path.is_file():
+            raise ValueError("No AI redraw or preview is available as the SVG base")
+    svg = build_full_image_vector_svg(base_path, [])
+    if len(svg.encode("utf-8")) > 25 * 1024 * 1024:
+        raise ValueError("Full-image vector SVG is larger than the 25 MB editor limit")
+    output_path = stage / "manual_arrow_edits" / f"{figure_id}-{base_mode}-full.svg"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(svg, encoding="utf-8")
+    return {
+        "figure_id": figure_id,
+        "base_mode": base_mode,
+        "base_image": str(base_path),
+        "full_svg": str(output_path),
+        "vectorization": "full-image-pixel-trace",
+        "contains_embedded_raster": False,
+    }
+
+
+def save_manual_arrow_edit(
+    review_root: Path,
+    project_id: str,
+    figure_id: str,
+    image_bytes: bytes,
+    operations: list[dict[str, object]],
+    *,
+    base_mode: str = "source",
+    editable_svg: str = "",
+    full_vector_svg: str = "",
+) -> dict[str, object]:
+    """Persist a user-drawn local arrow edit without ever invoking image generation."""
+    if len(image_bytes) > 25 * 1024 * 1024:
+        raise ValueError("PNG is larger than the 25 MB manual-edit limit")
+    project = review_root / "review-projects" / project_id
+    candidates = read_json_if_exists(project / "02_section_drafting" / "figure_candidates.json") or []
+    if isinstance(candidates, dict):
+        candidates = candidates.get("figures") or candidates.get("candidates") or []
+    candidate = next(
+        (row for row in candidates if isinstance(row, dict) and str(row.get("figure_id") or "") == figure_id),
+        None,
+    )
+    if not isinstance(candidate, dict):
+        raise ValueError("Current figure candidate was not found")
+    stage = project / "03_figure_redraw"
+    source_path = Path(str(candidate.get("source_image_path") or candidate.get("image_path") or ""))
+    if not source_path.exists():
+        raise ValueError("The current source image is unavailable")
+    if base_mode not in {"source", "redrawn"}:
+        raise ValueError("base_mode must be source or redrawn")
+    base_path = source_path
+    if base_mode == "redrawn":
+        manifest = read_json_if_exists(stage / "redrawn_figure_manifest.json") or {}
+        rows = manifest.get("figures") if isinstance(manifest, dict) else []
+        row = next(
+            (item for item in rows or [] if isinstance(item, dict) and str(item.get("figure_id") or "") == figure_id),
+            None,
+        )
+        candidate_paths = [
+            str((row or {}).get("redrawn_image") or ""),
+            str((row or {}).get("rejected_preview_image") or ""),
+        ]
+        base_path = next((Path(path) for path in candidate_paths if path and Path(path).is_file()), Path())
+        if not base_path.is_file():
+            raise ValueError("No AI redraw or preview is available as the manual-edit base")
+    if editable_svg:
+        if len(editable_svg.encode("utf-8")) > 25 * 1024 * 1024:
+            raise ValueError("Editable SVG is larger than the 25 MB manual-edit limit")
+        if not editable_svg.lstrip().startswith("<svg"):
+            raise ValueError("editable_svg must be SVG markup")
+    if full_vector_svg:
+        if len(full_vector_svg.encode("utf-8")) > 25 * 1024 * 1024:
+            raise ValueError("Full-image vector SVG is larger than the 25 MB manual-edit limit")
+        if not full_vector_svg.lstrip().startswith("<svg"):
+            raise ValueError("full_vector_svg must be SVG markup")
+        if "full-image-vector-trace" not in full_vector_svg or re.search(r"<image\b", full_vector_svg, re.IGNORECASE):
+            raise ValueError("full_vector_svg must contain the full vector trace and no embedded raster image")
+    with Image.open(base_path) as base_image, Image.open(io.BytesIO(image_bytes)) as edited:
+        if edited.format != "PNG":
+            raise ValueError("Manual edit must be encoded as PNG")
+        if edited.size != base_image.size:
+            raise ValueError(f"Canvas size {edited.size} does not match selected base image {base_image.size}")
+        edited.load()
+    if full_vector_svg:
+        editable_svg = full_vector_svg
+    elif editable_svg:
+        editable_svg = build_full_image_vector_svg(base_path, operations)
+        if len(editable_svg.encode("utf-8")) > 25 * 1024 * 1024:
+            raise ValueError("Full-image vector SVG is larger than the 25 MB manual-edit limit")
+
+    output_path = stage / "redrawn" / f"{figure_id}-manual.png"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(image_bytes)
+    audit_path = stage / "manual_arrow_edits" / f"{figure_id}.json"
+    editable_svg_path = stage / "manual_arrow_edits" / f"{figure_id}.svg"
+    if editable_svg:
+        editable_svg_path.parent.mkdir(parents=True, exist_ok=True)
+        editable_svg_path.write_text(editable_svg, encoding="utf-8")
+    write_json(
+        audit_path,
+        {
+            "figure_id": figure_id,
+            "source_image": str(source_path),
+            "base_image": str(base_path),
+            "base_mode": base_mode,
+            "output_image": str(output_path),
+            "editable_svg": str(editable_svg_path) if editable_svg else None,
+            "saved_at": now_utc(),
+            "operations": operations,
+            "rule": "User-operated local pixel edit: erase only original curved arrows and draw only straight or orthogonal arrows.",
+        },
+    )
+    manifest_path = stage / "redrawn_figure_manifest.json"
+    manifest = read_json_if_exists(manifest_path) or {"project_id": project_id, "figures": []}
+    rows = manifest.get("figures") if isinstance(manifest, dict) else []
+    if not isinstance(rows, list):
+        rows = []
+    existing = next((row for row in rows if isinstance(row, dict) and str(row.get("figure_id") or "") == figure_id), {})
+    row = dict(existing) if isinstance(existing, dict) else {}
+    row.update(
+        {
+            "figure_id": figure_id,
+            "section_id": candidate.get("section_id"),
+            "section_heading": candidate.get("section_heading"),
+            "target_paragraph_id": candidate.get("target_paragraph_id") or candidate.get("paragraph_id"),
+            "paper_id": candidate.get("paper_id"),
+            "source_label": candidate.get("source_label"),
+            "source_type": candidate.get("source_type"),
+            "source_caption_text": candidate.get("source_caption_text"),
+            "source_image": str(source_path),
+            "manual_edit_base_image": str(base_path),
+            "manual_edit_base_mode": base_mode,
+            "redrawn_image": str(output_path),
+            "editable_svg": str(editable_svg_path) if editable_svg else None,
+            "render_mode": "manual-arrow-edit",
+            "edit_profile": "manual-mechanism-arrow-paths",
+            "status": "redrawn",
+            "needs_human_check": True,
+            "manual_arrow_edit": {
+                "status": "saved",
+                "audit_path": str(audit_path),
+                "editable_svg": str(editable_svg_path) if editable_svg else None,
+                "full_image_vector_trace": bool(editable_svg),
+                "base_mode": base_mode,
+                "base_image": str(base_path),
+                "operation_count": len(operations),
+                "source_pixels_preserved_outside_user_strokes": True,
+            },
+            "chemistry_integrity": {
+                "status": "needs_human_arrow_check",
+                "failures": [],
+                "human_check_required": True,
+                "manual_check": "Verify every erased stroke was an original curved arrow and every new arrow has the correct endpoint, direction, color, and route.",
+            },
+            "notes": "Manual local arrow edit; no image-generation model or OCR rewriting was used. The SVG is a full-image vector trace with editable arrow overlays.",
+        }
+    )
+    replacement_rows = [
+        row if isinstance(item, dict) and str(item.get("figure_id") or "") == figure_id else item
+        for item in rows
+    ]
+    if not any(isinstance(item, dict) and str(item.get("figure_id") or "") == figure_id for item in rows):
+        replacement_rows.append(row)
+    write_json(manifest_path, {"project_id": project_id, "figures": replacement_rows})
+    return {
+        "figure_id": figure_id,
+        "render_mode": "manual-arrow-edit",
+        "edit_profile": "manual-mechanism-arrow-paths",
+        "redrawn_image": str(output_path),
+        "editable_svg": str(editable_svg_path) if editable_svg else None,
+        "manual_edit_base_mode": base_mode,
+        "requires_human_arrow_check": True,
+    }
+
+
 def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) -> dict[str, Any]:
     """Create one gated AI line-art redraw and reject altered chemical geometry."""
     project = review_root / "review-projects" / project_id
@@ -1683,13 +2199,47 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
     paper_id = str(candidate.get("paper_id") or "")
     if not paper_id:
         raise ValueError("Current figure candidate has no paper ID.")
+
+    def preview_result(row: dict[str, Any] | None) -> dict[str, Any] | None:
+        explicit = str((row or {}).get("rejected_preview_image") or "")
+        preview = Path(explicit) if explicit else None
+        if not preview or not preview.is_file():
+            previews = list((project / "03_figure_redraw" / "redrawn").glob(f"{figure_id}.*"))
+            preview = next((path for path in previews if path.is_file()), None)
+        if not preview:
+            return None
+        return {
+            "figure_id": figure_id,
+            "paper_id": paper_id,
+            "render_mode": str((row or {}).get("render_mode") or "ai-preview"),
+            "edit_profile": str((row or {}).get("edit_profile") or ""),
+            "requires_human_arrow_check": mechanism_arrow_profile,
+            "redrawn_image": str(preview),
+            "preview_only": True,
+        }
+    mechanism_arrow_profile = use_mechanism_arrow_straighten_profile(candidate)
+    source_faithful_scope = not mechanism_arrow_profile and use_source_faithful_scope_render(candidate)
+    source_faithful_multipanel = (
+        not mechanism_arrow_profile
+        and not source_faithful_scope
+        and use_source_faithful_multipanel_render(candidate)
+    )
+    extra = ["--figure-id", figure_id, "--model", "gpt-image-2", "--require-redrawn"]
+    if mechanism_arrow_profile:
+        extra.extend(["--render-mode", "ai-edit", "--edit-profile", "mechanism-arrow-straighten"])
+    elif source_faithful_scope:
+        extra.extend(["--render-mode", "source-faithful-bw"])
+    elif source_faithful_multipanel:
+        extra.extend(["--render-mode", "source-faithful-color"])
+    else:
+        extra.extend(["--render-mode", "ocr-hollow-ai"])
     try:
         run_project_script(
             figure_redraw_script_path(),
             review_root,
             project_id,
             timeout=300,
-            extra=["--figure-id", figure_id, "--render-mode", "ocr-hollow-ai", "--model", "gpt-image-2", "--require-redrawn"],
+            extra=extra,
         )
     except RuntimeError as exc:
         manifest = read_json_if_exists(project / "03_figure_redraw" / "redrawn_figure_manifest.json") or {}
@@ -1699,7 +2249,14 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
             None,
         )
         note = str((failed or {}).get("notes") or "").strip()
+        preview = preview_result(failed if isinstance(failed, dict) else None)
+        if preview:
+            return preview
         if note:
+            if "mechanism integrity retries" in note.lower() or "mechanism-arrow edit" in note.lower():
+                raise RuntimeError(
+                    "AI 机理箭头局部编辑未通过完整性校验。请使用“在线编辑 SVG”，在全图矢量工作区中修改箭头路径。"
+                ) from exc
             raise RuntimeError(f"Current figure redraw failed: {note}") from exc
         raise
     manifest = read_json_if_exists(project / "03_figure_redraw" / "redrawn_figure_manifest.json") or {}
@@ -1709,20 +2266,186 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
         None,
     )
     if not isinstance(redrawn, dict) or redrawn.get("status") != "redrawn" or not redrawn.get("redrawn_image"):
+        preview = preview_result(redrawn if isinstance(redrawn, dict) else None)
+        if preview:
+            return preview
         raise RuntimeError("The selected figure did not produce a usable redrawn output.")
     if redrawn.get("render_mode") == "ocr-hollow-ai":
         if (redrawn.get("content_fidelity") or {}).get("status") != "pass":
             raise RuntimeError("The selected figure failed the content-fidelity check and was rejected.")
         if (redrawn.get("structural_fidelity") or {}).get("status") != "pass":
             raise RuntimeError("The selected figure changed chemical line geometry and was rejected.")
-    elif redrawn.get("render_mode") != "source-faithful-bw":
+        integrity = redrawn.get("chemistry_integrity") or {}
+        if integrity and integrity.get("status") != "pass":
+            raise RuntimeError(
+                "The selected figure failed the chemistry integrity gate: "
+                + "; ".join(str(item) for item in integrity.get("failures") or [])
+            )
+    elif (
+        redrawn.get("render_mode") == "ai-edit"
+        and redrawn.get("edit_profile") == "mechanism-arrow-straighten"
+    ):
+        mechanism_fidelity = redrawn.get("mechanism_source_fidelity") or {}
+        if mechanism_fidelity.get("status") != "pass":
+            raise RuntimeError(
+                "The mechanism-arrow edit erased or displaced source content and was rejected: "
+                + "; ".join(str(item) for item in mechanism_fidelity.get("failures") or [])
+            )
+    elif redrawn.get("render_mode") not in {"source-faithful-bw", "source-faithful-color"}:
         raise RuntimeError("The selected figure used an unsupported redraw mode.")
     return {
         "figure_id": figure_id,
         "paper_id": paper_id,
         "render_mode": str(redrawn.get("render_mode") or ""),
+        "edit_profile": str(redrawn.get("edit_profile") or ""),
+        "requires_human_arrow_check": mechanism_arrow_profile,
+        "source_faithful_scope_render": source_faithful_scope,
+        "source_faithful_multipanel_render": source_faithful_multipanel,
         "redrawn_image": str(redrawn["redrawn_image"]),
     }
+
+
+def batch_figure_redraw_status(project_id: str) -> dict[str, object]:
+    """Return a copy of the persistent in-process batch state for one project."""
+    with _BATCH_REDRAW_LOCK:
+        job = _BATCH_REDRAW_JOBS.get(project_id)
+        if not job:
+            return {
+                "status": "idle",
+                "total": 0,
+                "completed": 0,
+                "succeeded": 0,
+                "preview_succeeded": 0,
+                "failed": 0,
+                "current_figure_id": "",
+                "stop_requested": False,
+                "errors": [],
+            }
+        result = dict(job)
+        result["errors"] = [dict(item) for item in job.get("errors", []) if isinstance(item, dict)]
+        return result
+
+
+def batch_redraw_figure_ids(review_root: Path, project_id: str) -> list[str]:
+    candidates = read_json_if_exists(
+        review_root / "review-projects" / project_id / "02_section_drafting" / "figure_candidates.json"
+    ) or []
+    if isinstance(candidates, dict):
+        candidates = candidates.get("figures") or candidates.get("candidates") or []
+    if not isinstance(candidates, list):
+        raise ValueError("Figure candidates are not available. Regenerate Sections first.")
+    figure_ids: list[str] = []
+    for candidate in candidates:
+        figure_id = str((candidate or {}).get("figure_id") or "") if isinstance(candidate, dict) else ""
+        if figure_id and figure_id not in figure_ids:
+            figure_ids.append(figure_id)
+    if not figure_ids:
+        raise ValueError("No figure candidates are available for AI redraw.")
+    return figure_ids
+
+
+def stop_batch_figure_redraw(project_id: str) -> dict[str, object]:
+    """Stop a running batch before it starts another provider request.
+
+    The active image-edit HTTP request is allowed to return so its output and
+    manifest write remain atomic.  Every remaining queued figure is skipped.
+    """
+    with _BATCH_REDRAW_LOCK:
+        job = _BATCH_REDRAW_JOBS.get(project_id)
+        if not job:
+            return batch_figure_redraw_status(project_id)
+        if job.get("status") in {"running", "stopping"}:
+            job["status"] = "stopping"
+            job["stop_requested"] = True
+            job["stop_requested_at"] = now_utc()
+            job["updated_at"] = now_utc()
+    return batch_figure_redraw_status(project_id)
+
+
+def run_batch_figure_redraw(review_root: Path, project_id: str, figure_ids: list[str]) -> None:
+    """Run redraws sequentially so provider requests and manifests cannot race."""
+    for figure_id in figure_ids:
+        with _BATCH_REDRAW_LOCK:
+            job = _BATCH_REDRAW_JOBS.get(project_id)
+            if not job:
+                return
+            if bool(job.get("stop_requested")):
+                job["status"] = "stopped"
+                job["current_figure_id"] = ""
+                job["current_source_label"] = ""
+                job["finished_at"] = now_utc()
+                job["updated_at"] = now_utc()
+                return
+            job["current_figure_id"] = figure_id
+            job["current_source_label"] = figure_id
+        try:
+            result = redraw_current_figure(review_root, project_id, figure_id)
+        except (RuntimeError, ValueError) as exc:
+            with _BATCH_REDRAW_LOCK:
+                job = _BATCH_REDRAW_JOBS.get(project_id)
+                if not job:
+                    return
+                job["failed"] = int(job.get("failed") or 0) + 1
+                errors = job.setdefault("errors", [])
+                if isinstance(errors, list):
+                    errors.append({"figure_id": figure_id, "error": str(exc)})
+                    del errors[:-12]
+        else:
+            with _BATCH_REDRAW_LOCK:
+                job = _BATCH_REDRAW_JOBS.get(project_id)
+                if not job:
+                    return
+                job["succeeded"] = int(job.get("succeeded") or 0) + 1
+                if result.get("preview_only"):
+                    job["preview_succeeded"] = int(job.get("preview_succeeded") or 0) + 1
+                job["last_redrawn_image"] = str(result.get("redrawn_image") or "")
+        finally:
+            with _BATCH_REDRAW_LOCK:
+                job = _BATCH_REDRAW_JOBS.get(project_id)
+                if job:
+                    job["completed"] = int(job.get("completed") or 0) + 1
+                    job["updated_at"] = now_utc()
+    with _BATCH_REDRAW_LOCK:
+        job = _BATCH_REDRAW_JOBS.get(project_id)
+        if job:
+            job["status"] = "stopped" if bool(job.get("stop_requested")) else "completed"
+            job["current_figure_id"] = ""
+            job["current_source_label"] = ""
+            job["finished_at"] = now_utc()
+            job["updated_at"] = now_utc()
+
+
+def start_batch_figure_redraw(review_root: Path, project_id: str) -> dict[str, object]:
+    project = review_root / "review-projects" / project_id
+    if not project.is_dir():
+        raise ValueError("Project not found.")
+    figure_ids = batch_redraw_figure_ids(review_root, project_id)
+    with _BATCH_REDRAW_LOCK:
+        existing = _BATCH_REDRAW_JOBS.get(project_id)
+        if existing and existing.get("status") == "running":
+            return batch_figure_redraw_status(project_id)
+        job: dict[str, object] = {
+            "status": "running",
+            "total": len(figure_ids),
+            "completed": 0,
+            "succeeded": 0,
+            "preview_succeeded": 0,
+            "failed": 0,
+            "current_figure_id": "",
+            "current_source_label": "",
+            "stop_requested": False,
+            "errors": [],
+            "started_at": now_utc(),
+            "updated_at": now_utc(),
+        }
+        _BATCH_REDRAW_JOBS[project_id] = job
+    threading.Thread(
+        target=run_batch_figure_redraw,
+        args=(review_root, project_id, figure_ids),
+        daemon=True,
+        name=f"figure-redraw-{project_id}",
+    ).start()
+    return batch_figure_redraw_status(project_id)
 
 
 def validate_figure_review(project: Path, project_id: str) -> dict[str, Any]:
@@ -2385,12 +3108,28 @@ def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any
         [draft_stage / "section_drafts.json", draft_stage / "figure_candidates.json", draft_stage / "paper_figure_candidates.json"],
     )
     redraw_freshness = artifact_freshness(stage / "figures_handoff.json", [stage / "redrawn_figure_manifest.json"])
+    redrawn_manifest = read_json_if_exists(stage / "redrawn_figure_manifest.json")
+    if isinstance(redrawn_manifest, dict):
+        redrawn_manifest = dict(redrawn_manifest)
+        rows: list[dict[str, Any]] = []
+        for raw_row in redrawn_manifest.get("figures") or []:
+            row = dict(raw_row) if isinstance(raw_row, dict) else raw_row
+            if isinstance(row, dict) and not row.get("redrawn_image") and not row.get("rejected_preview_image"):
+                figure_id = str(row.get("figure_id") or "")
+                previews = list((stage / "redrawn").glob(f"{figure_id}.*")) if figure_id else []
+                preview = next((path for path in previews if path.is_file()), None)
+                if preview:
+                    row["rejected_preview_image"] = str(preview)
+                    row["rejected_preview_status"] = "not_approved_for_manuscript"
+            rows.append(row)
+        redrawn_manifest["figures"] = rows
     return {
         "project_id": project_id,
         "topic": infer_project_topic(project),
         "summary": project_summary(review_root, project_id),
         "figure_candidates": read_json_if_exists(draft_stage / "figure_candidates.json"),
-        "redrawn_manifest": read_json_if_exists(stage / "redrawn_figure_manifest.json"),
+        "redrawn_manifest": redrawn_manifest,
+        "batch_redraw": batch_figure_redraw_status(project_id),
         "figure_redraw_report_md": read_text_if_exists(stage / "figure_redraw_report.md"),
         "freshness": {
             "source_stale": source_freshness["stale"],
