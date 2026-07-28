@@ -687,10 +687,25 @@ def structured_tags_schema(classification_labels: dict[str, list[str]] | None = 
     }
 
 
+def openai_endpoint(base_url: str, endpoint: str) -> str:
+    """Accept OpenAI-compatible base URLs with or without a trailing /v1."""
+    base = str(base_url or "https://api.openai.com").rstrip("/")
+    prefix = "" if base.lower().endswith("/v1") else "/v1"
+    return f"{base}{prefix}/{endpoint.lstrip('/')}"
+
+
+def resolve_api_key(cli_value: str, base_url: str) -> str:
+    if cli_value:
+        return cli_value
+    if "api.xiaoleai.team" in str(base_url).lower():
+        return os.environ.get("XIAOLEAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+    return os.environ.get("OPENAI_API_KEY", "") or os.environ.get("XIAOLEAI_API_KEY", "")
+
+
 def call_openai_responses(payload: dict[str, Any], api_key: str, base_url: str = "https://api.openai.com") -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        f"{base_url.rstrip('/')}/v1/responses",
+        openai_endpoint(base_url, "responses"),
         data=body,
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -1048,9 +1063,9 @@ def run(args: argparse.Namespace) -> int:
         jobs = iter_jobs(manifest)
 
     system_prompt = (skill_root / "references" / "metadata_extraction_system.md").read_text(encoding="utf-8")
-    api_key = args.api_key or os.environ.get("OPENAI_API_KEY")
-    model = args.model or os.environ.get("REVIEW_METADATA_MODEL", "gpt-5.4")
     base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+    api_key = resolve_api_key(args.api_key, base_url)
+    model = args.model or os.environ.get("REVIEW_METADATA_MODEL", "gpt-5.4")
     reasoning_effort = args.reasoning_effort or os.environ.get("REVIEW_METADATA_REASONING_EFFORT", "high")
     classification_labels = load_classification_rules(review_root / "allene_classification_rules.py")
     use_llm = bool(args.use_llm)

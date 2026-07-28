@@ -20,6 +20,8 @@ from prepare_metadata import (
     load_blocks,
     markdown_head,
     merge_llm,
+    openai_endpoint,
+    resolve_api_key,
     read_json,
     update_quality,
     write_json,
@@ -28,7 +30,7 @@ from prepare_metadata import (
 
 def call_responses(payload: dict[str, Any], api_key: str, base_url: str, timeout: int) -> dict[str, Any]:
     req = urllib.request.Request(
-        f"{base_url.rstrip('/')}/v1/responses",
+        openai_endpoint(base_url, "responses"),
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -108,8 +110,8 @@ def main() -> int:
     args = parse_args()
     review_root = Path(args.review_root).resolve()
     load_dotenv(review_root / ".env")
-    api_key = args.api_key or os.environ.get("OPENAI_API_KEY", "")
     base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+    api_key = resolve_api_key(args.api_key, base_url)
     model = args.model or os.environ.get("REVIEW_METADATA_MODEL", "gpt-5.4")
     reasoning_effort = args.reasoning_effort or os.environ.get("REVIEW_METADATA_REASONING_EFFORT", "high")
     if not api_key:

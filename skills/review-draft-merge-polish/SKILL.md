@@ -81,6 +81,30 @@ Figure insertion is paragraph-anchored: read `target_paragraph_id` from
 its anchor paragraph. Do not fall back to heading-only matching when
 `target_paragraph_id` exists.
 
+## Figure Numbering and Paragraph References
+
+After inserting visual assets, number them from the order in which they occur
+in `first_draft.md`, never from redraw-manifest order, source-paper numbering,
+or the temporary copied-file name. Use conventional independent sequences:
+
+```text
+Scheme 1, Scheme 2, ...
+Figure 1, Figure 2, ...
+Table 1, Table 2, ...
+```
+
+The insertion script records a stable, invisible figure-to-paragraph anchor and
+rewrites the Markdown alt label and publication caption to that sequence. If
+the anchor paragraph refers to that selected source visual (for example,
+`Scheme 1` or `Fig. 1`), update the reference to the new published label in
+that paragraph too. Do **not** apply a document-wide `Scheme 1` replacement:
+each cited paper may have its own source `Scheme 1`, so global replacement can
+corrupt unrelated references. Write the resulting mapping and reference-update
+counts to `04_first_draft/figure_numbering_report.json` and include it in
+`figure_insertion_report.json`. Before Final Audit, rerun the same pass against
+`05_final_audit/final_draft.md` so the published manuscript is the definitive
+numbered version.
+
 `first_draft.md` must be a continuous review manuscript, not a list of section notes.
 
 Stop after this stage for human check.

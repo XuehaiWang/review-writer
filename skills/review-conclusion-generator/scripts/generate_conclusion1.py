@@ -35,6 +35,75 @@ from typing import Any
 _NUMERIC_CITATION_RE = re.compile(r"\[\d+(?:\s*[-,]\s*\d+)*\]")
 
 
+def openai_endpoint(base_url: str, endpoint: str) -> str:
+    """Accept OpenAI-compatible base URLs with or without a trailing /v1."""
+    base = str(base_url or "https://api.openai.com").rstrip("/")
+    prefix = "" if base.lower().endswith("/v1") else "/v1"
+    return f"{base}{prefix}/{endpoint.lstrip('/')}"
+
+
+def resolve_api_key(cli_value: str, base_url: str) -> str:
+    """Keep text calls aligned with the provider-specific image credential."""
+    if cli_value:
+        return cli_value
+    if "api.xiaoleai.team" in str(base_url).lower():
+        return os.environ.get("XIAOLEAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+    return os.environ.get("OPENAI_API_KEY", "") or os.environ.get("XIAOLEAI_API_KEY", "")
+
+
+def extract_response_text(data: dict[str, Any]) -> str:
+    text = str(data.get("output_text") or "")
+    if text.strip():
+        return text.strip()
+    parts: list[str] = []
+    for item in data.get("output", []):
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content", []):
+            if isinstance(content, dict) and content.get("type") in {"output_text", "text"} and content.get("text"):
+                parts.append(str(content["text"]))
+    return "\n".join(parts).strip()
+
+
+def decode_api_json(raw_body: str) -> dict[str, Any] | None:
+    """Decode normal JSON and the final event from an SSE-compatible relay."""
+    cleaned = str(raw_body or "").lstrip("\ufeff").strip()
+    if not cleaned:
+        return None
+    candidates = [cleaned]
+    candidates.extend(
+        line.partition(":")[2].strip()
+        for line in cleaned.splitlines()
+        if line.lstrip().startswith("data:") and line.partition(":")[2].strip() not in {"", "[DONE]"}
+    )
+    for candidate in reversed(candidates):
+        try:
+            decoded = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(decoded, dict):
+            return decoded
+    return None
+
+
+def parse_model_json(text: str) -> dict[str, Any]:
+    """Accept JSON objects wrapped in a Markdown code fence by compatible relays."""
+    cleaned = str(text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    if not cleaned:
+        raise RuntimeError("LLM response was empty or whitespace only")
+    if not cleaned.startswith("{"):
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start >= 0 and end > start:
+            cleaned = cleaned[start:end + 1]
+    parsed = json.loads(cleaned)
+    if not isinstance(parsed, dict):
+        raise RuntimeError("LLM response JSON must be an object")
+    return parsed
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -502,7 +571,7 @@ Return the conclusion as a JSON object with this structure:
 
 # ── LLM API call ─────────────────────────────────────────────────────────────
 
-def call_llm(prompt: str, api_key: str, base_url: str, model: str) -> str:
+def call_llm(prompt: str, api_key: str, base_url: str, model: str, prefer_chat: bool = False) -> str:
     """Call the LLM API and return the generated text."""
     payload = {
         "model": model,
@@ -541,37 +610,69 @@ def call_llm(prompt: str, api_key: str, base_url: str, model: str) -> str:
         },
     }
 
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base_url.rstrip('/')}/v1/responses",
-        data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            # Browser-like UA: some relays (e.g. naiccc.com) sit behind
-            # Cloudflare and block non-browser User-Agents with 403 (error 1010).
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/120.0.0.0 Safari/537.36",
-        },
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        # Browser-like UA: some relays (e.g. naiccc.com) sit behind
+        # Cloudflare and block non-browser User-Agents with 403 (error 1010).
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/120.0.0.0 Safari/537.36",
+    }
+    ctx = ssl.create_default_context()
+    if not prefer_chat:
+        req = urllib.request.Request(
+            openai_endpoint(base_url, "responses"),
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, context=ctx, timeout=300) as resp:
+            raw_body = resp.read().decode("utf-8", errors="replace")
+        data = decode_api_json(raw_body)
+        if isinstance(data, dict) and ("output_text" in data or "output" in data):
+            text = extract_response_text(data)
+        elif isinstance(data, dict) and "paragraphs" in data:
+            # A few relays return the requested JSON object directly rather
+            # than an OpenAI Responses envelope.
+            text = raw_body.strip()
+        else:
+            text = ""
+        if text:
+            return text
+
+    # Some OpenAI-compatible relays acknowledge /responses but omit its
+    # output body. Retry only that unusable response through their more common
+    # Chat Completions surface, preserving the same JSON-only instruction.
+    chat_payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "response_format": {"type": "json_object"},
+    }
+    chat_request = urllib.request.Request(
+        openai_endpoint(base_url, "chat/completions"),
+        data=json.dumps(chat_payload).encode("utf-8"),
+        headers=headers,
         method="POST",
     )
-    ctx = ssl.create_default_context()
-    with urllib.request.urlopen(req, context=ctx, timeout=300) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-
-    text = data.get("output_text")
-    if not text:
-        parts: list[str] = []
-        for item in data.get("output", []):
-            for content in item.get("content", []):
-                if content.get("type") in {"output_text", "text"} and content.get("text"):
-                    parts.append(content["text"])
-        text = "\n".join(parts)
-    if not text:
-        raise RuntimeError("LLM response did not contain output_text")
-    return text
+    with urllib.request.urlopen(chat_request, context=ctx, timeout=300) as response:
+        chat_raw_body = response.read().decode("utf-8", errors="replace")
+    chat_data = decode_api_json(chat_raw_body)
+    if not isinstance(chat_data, dict):
+        # Return the raw body so the caller can persist it for diagnosis if it
+        # is not actually a JSON object. This avoids losing relay evidence.
+        return chat_raw_body.strip()
+    choices = chat_data.get("choices") if isinstance(chat_data, dict) else []
+    content = ((choices or [{}])[0].get("message") or {}).get("content") if isinstance((choices or [{}])[0], dict) else ""
+    if isinstance(content, list):
+        content = "\n".join(str(item.get("text") or "") for item in content if isinstance(item, dict))
+    if not str(content or "").strip() and "paragraphs" in chat_data:
+        return chat_raw_body.strip()
+    if not str(content or "").strip():
+        source = "/chat/completions" if prefer_chat else "both /responses and /chat/completions"
+        raise RuntimeError(f"LLM response was empty from {source}")
+    return str(content).strip()
 
 
 # ── Quality validation ───────────────────────────────────────────────────────
@@ -808,9 +909,8 @@ def run(args: argparse.Namespace) -> int:
         "available_paper_ids": available_paper_ids,
     }
 
-    # API key resolution
-    api_key = args.api_key or os.environ.get("OPENAI_API_KEY", "")
     base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+    api_key = resolve_api_key(args.api_key, base_url)
     model = args.model or os.environ.get("REVIEW_CONCLUSION_MODEL", "gpt-5.4")
 
     if not api_key:
@@ -830,12 +930,28 @@ def run(args: argparse.Namespace) -> int:
     prompt = build_conclusion_prompt(context)
     print(f"Calling LLM ({model})...")
 
+    raw_response = ""
     try:
         raw_response = call_llm(prompt, api_key, base_url, model)
-        result = json.loads(raw_response)
+        try:
+            result = parse_model_json(raw_response)
+        except (json.JSONDecodeError, RuntimeError):
+            # Treat malformed Responses output just like an empty one. This is
+            # common with relays that expose Responses but do not enforce its
+            # structured-output contract.
+            raw_response = call_llm(
+                prompt + "\n\nReturn only the requested JSON object. Do not include analysis, Markdown fences, or any prose.",
+                api_key,
+                base_url,
+                model,
+                prefer_chat=True,
+            )
+            result = parse_model_json(raw_response)
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
         out_dir = project / "04_first_draft"
         _invalidate_required_outputs(out_dir)
+        if raw_response.strip():
+            write_text(out_dir / "conclusion_unparsed_response.txt", raw_response)
         print(f"ERROR: LLM call failed: {type(exc).__name__}: {exc}", file=__import__("sys").stderr)
         # Save context for manual use
         write_json(out_dir / "conclusion_context.json", context)

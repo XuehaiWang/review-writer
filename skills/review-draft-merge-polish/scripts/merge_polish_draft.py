@@ -14,6 +14,21 @@ from pathlib import Path
 from typing import Any
 
 
+def openai_endpoint(base_url: str, endpoint: str) -> str:
+    """Accept OpenAI-compatible base URLs with or without a trailing /v1."""
+    base = str(base_url or "https://api.openai.com").rstrip("/")
+    prefix = "" if base.lower().endswith("/v1") else "/v1"
+    return f"{base}{prefix}/{endpoint.lstrip('/')}"
+
+
+def resolve_api_key(cli_value: str, base_url: str) -> str:
+    if cli_value:
+        return cli_value
+    if "api.xiaoleai.team" in str(base_url).lower():
+        return os.environ.get("XIAOLEAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+    return os.environ.get("OPENAI_API_KEY", "") or os.environ.get("XIAOLEAI_API_KEY", "")
+
+
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -39,7 +54,7 @@ def call_llm(prompt: str, api_key: str, base_url: str, model: str) -> dict[str, 
     }
     payload = {"model": model, "input": [{"role": "user", "content": prompt}], "text": {"format": {"type": "json_schema", "name": "review_merge", "schema": schema, "strict": True}}}
     request = urllib.request.Request(
-        f"{base_url.rstrip('/')}/v1/responses", data=json.dumps(payload).encode("utf-8"), method="POST",
+        openai_endpoint(base_url, "responses"), data=json.dumps(payload).encode("utf-8"), method="POST",
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -117,10 +132,10 @@ def main() -> int:
     args = parser.parse_args()
     root = Path(args.review_root).resolve()
     load_dotenv(root)
-    api_key = args.api_key or os.environ.get("OPENAI_API_KEY", "")
+    base_url = args.base_url or os.environ.get("REVIEW_WRITING_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+    api_key = resolve_api_key(args.api_key, base_url)
     if not api_key:
         raise SystemExit("Missing OPENAI_API_KEY. Configure it before merging the draft.")
-    base_url = args.base_url or os.environ.get("REVIEW_WRITING_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
     model = args.model or os.environ.get("REVIEW_WRITING_MODEL", "gpt-5.4")
     project = root / "review-projects" / args.project_id
     sections_data = read_json(project / "02_section_drafting" / "section_drafts.json")

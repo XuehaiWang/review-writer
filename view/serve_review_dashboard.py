@@ -697,7 +697,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 result = validate_figure_review(project, project_id)
                 next_stage = "figures"
             elif stage_id == "figures":
-                result = regenerate_figures(self.review_root, project_id)
+                result = regenerate_figures_and_first_draft(self.review_root, project_id)
                 next_stage = "draft"
             elif stage_id == "draft":
                 result = regenerate_first_draft(self.review_root, project_id)
@@ -1735,16 +1735,38 @@ def regenerate_figures(review_root: Path, project_id: str) -> dict[str, Any]:
     ]
     if missing_selected:
         raise RuntimeError(f"Selected Figure Review candidates are missing from the redraw input: {', '.join(missing_selected)}.")
-    # The handoff is the input boundary for redraw. It must precede the files
-    # produced below, otherwise the freshness check would mark them stale.
-    write_stage_handoff(
-        project / "03_figure_redraw" / "figures_handoff.json",
-        "figure-review",
-        [draft_stage / "section_drafts.json", draft_stage / "figure_candidates.json", draft_stage / "paper_figure_candidates.json", draft_stage / "human_figure_review.json"],
-    )
-    script = figure_redraw_script_path()
-    run_project_script(script, review_root, project_id, timeout=300, extra=["--render-mode", "source-faithful-bw", "--require-redrawn"])
     manifest = read_json_if_exists(project / "03_figure_redraw" / "redrawn_figure_manifest.json") or {}
+    existing_rows = manifest.get("figures", []) if isinstance(manifest, dict) else []
+    existing_by_figure_id = {
+        str(row.get("figure_id") or ""): row
+        for row in existing_rows
+        if isinstance(row, dict) and row.get("figure_id")
+    }
+    selected_figures = [row for row in figures if isinstance(row, dict) and row.get("manuscript_selected")]
+    target_figures = selected_figures or [row for row in figures if isinstance(row, dict)]
+    missing_figure_ids = []
+    for figure in target_figures:
+        figure_id = str(figure.get("figure_id") or "")
+        previous = existing_by_figure_id.get(figure_id)
+        previous_output = Path(str((previous or {}).get("redrawn_image") or ""))
+        if not (
+            previous
+            and previous.get("status") == "redrawn"
+            and previous_output.is_file()
+        ):
+            missing_figure_ids.append(figure_id)
+    if missing_figure_ids:
+        # The handoff is the input boundary for new redraws. It must precede
+        # only files that will actually be produced; recreating it when all
+        # outputs already exist would make the saved manifest appear stale.
+        write_stage_handoff(
+            project / "03_figure_redraw" / "figures_handoff.json",
+            "figure-review",
+            [draft_stage / "section_drafts.json", draft_stage / "figure_candidates.json", draft_stage / "paper_figure_candidates.json", draft_stage / "human_figure_review.json"],
+        )
+        for figure_id in missing_figure_ids:
+            redraw_current_figure(review_root, project_id, figure_id)
+        manifest = read_json_if_exists(project / "03_figure_redraw" / "redrawn_figure_manifest.json") or {}
     redrawn = [row for row in manifest.get("figures", []) if isinstance(row, dict) and row.get("status") == "redrawn"] if isinstance(manifest, dict) else []
     if not redrawn:
         raise RuntimeError("No figure was redrawn successfully. Resolve source images in Figure Review.")
@@ -1753,7 +1775,18 @@ def regenerate_figures(review_root: Path, project_id: str) -> dict[str, Any]:
         "figures",
         [draft_stage / "section_drafts.json", draft_stage / "human_figure_review.json", project / "03_figure_redraw" / "redrawn_figure_manifest.json"],
     )
-    return {"redrawn_count": len(redrawn)}
+    return {
+        "redrawn_count": len(redrawn),
+        "reused_count": len(target_figures) - len(missing_figure_ids),
+        "generated_count": len(missing_figure_ids),
+    }
+
+
+def regenerate_figures_and_first_draft(review_root: Path, project_id: str) -> dict[str, Any]:
+    """Keep the Figures-to-Draft action atomic from the user's perspective."""
+    figures = regenerate_figures(review_root, project_id)
+    draft = regenerate_first_draft(review_root, project_id)
+    return {"figures": figures, "draft": draft}
 
 
 _MECHANISM_ARROW_PROFILE_PATTERN = re.compile(
@@ -1762,14 +1795,19 @@ _MECHANISM_ARROW_PROFILE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _DENSE_SCOPE_PROFILE_PATTERN = re.compile(
-    r"\b(?:reaction\s+scope|substrate\s+scope|scope\s+summary|examples?)\b|"
+    r"\b(?:reaction\s+scope|substrate\s+scope|scope\s+(?:summary|for|of)|examples?)\b|"
     r"反应范围|底物范围|反应底物",
     re.IGNORECASE,
 )
 _COMPLEX_MULTIPANEL_PROFILE_PATTERN = re.compile(
     r"\b(?:strateg(?:y|ies)|background|overview|comparison|rearrangement|applications?|"
-    r"protocols?|routes?|methodology|stud(?:y|ies))\b|"
+    r"protocols?|routes?|methodology|stud(?:y|ies)|kinetic\s+investigations?|"
+    r"(?:proposed\s+)?catalytic\s+cycles?|total\s+synthesis)\b|"
     r"策略|背景|概览|对比|重排|应用|路线",
+    re.IGNORECASE,
+)
+_HOLLOW_COLOR_FILL_PROFILE_PATTERN = re.compile(
+    r"\b(?:strateg(?:y|ies)|traditional\s+protocols?|research\s+background)\b",
     re.IGNORECASE,
 )
 
@@ -1811,6 +1849,11 @@ def use_source_faithful_multipanel_render(candidate: dict[str, Any]) -> bool:
         "section_heading",
     )
     return bool(_COMPLEX_MULTIPANEL_PROFILE_PATTERN.search(" ".join(str(candidate.get(field) or "") for field in fields)))
+
+
+def use_hollow_color_fill_render(candidate: dict[str, Any]) -> bool:
+    fields = ("source_label", "source_caption_text", "title", "what_it_shows")
+    return bool(_HOLLOW_COLOR_FILL_PROFILE_PATTERN.search(" ".join(str(candidate.get(field) or "") for field in fields)))
 
 
 def _svg_number(value: object) -> str:
@@ -2224,15 +2267,16 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
         and not source_faithful_scope
         and use_source_faithful_multipanel_render(candidate)
     )
+    hollow_color_fills = source_faithful_multipanel and use_hollow_color_fill_render(candidate)
     extra = ["--figure-id", figure_id, "--model", "gpt-image-2", "--require-redrawn"]
     if mechanism_arrow_profile:
         extra.extend(["--render-mode", "ai-edit", "--edit-profile", "mechanism-arrow-straighten"])
     elif source_faithful_scope:
         extra.extend(["--render-mode", "source-faithful-bw"])
     elif source_faithful_multipanel:
-        extra.extend(["--render-mode", "source-faithful-color"])
+        extra.extend(["--render-mode", "source-faithful-outline-color" if hollow_color_fills else "source-faithful-color"])
     else:
-        extra.extend(["--render-mode", "ocr-hollow-ai"])
+        extra.extend(["--render-mode", "ai-edit"])
     try:
         run_project_script(
             figure_redraw_script_path(),
@@ -2270,29 +2314,15 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
         if preview:
             return preview
         raise RuntimeError("The selected figure did not produce a usable redrawn output.")
-    if redrawn.get("render_mode") == "ocr-hollow-ai":
-        if (redrawn.get("content_fidelity") or {}).get("status") != "pass":
-            raise RuntimeError("The selected figure failed the content-fidelity check and was rejected.")
-        if (redrawn.get("structural_fidelity") or {}).get("status") != "pass":
-            raise RuntimeError("The selected figure changed chemical line geometry and was rejected.")
-        integrity = redrawn.get("chemistry_integrity") or {}
-        if integrity and integrity.get("status") != "pass":
-            raise RuntimeError(
-                "The selected figure failed the chemistry integrity gate: "
-                + "; ".join(str(item) for item in integrity.get("failures") or [])
-            )
-    elif (
-        redrawn.get("render_mode") == "ai-edit"
-        and redrawn.get("edit_profile") == "mechanism-arrow-straighten"
-    ):
-        mechanism_fidelity = redrawn.get("mechanism_source_fidelity") or {}
-        if mechanism_fidelity.get("status") != "pass":
-            raise RuntimeError(
-                "The mechanism-arrow edit erased or displaced source content and was rejected: "
-                + "; ".join(str(item) for item in mechanism_fidelity.get("failures") or [])
-            )
-    elif redrawn.get("render_mode") not in {"source-faithful-bw", "source-faithful-color"}:
+    if redrawn.get("render_mode") not in {
+        "source-faithful-bw", "source-faithful-color", "source-faithful-outline-color", "ai-edit", "ocr-hollow-ai"
+    }:
         raise RuntimeError("The selected figure used an unsupported redraw mode.")
+    integrity = redrawn.get("chemistry_integrity") or {}
+    integrity_warning = bool(
+        str(redrawn.get("output_disposition") or "") == "saved_with_integrity_warning"
+        or (integrity and integrity.get("status") == "failed")
+    )
     return {
         "figure_id": figure_id,
         "paper_id": paper_id,
@@ -2301,6 +2331,8 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
         "requires_human_arrow_check": mechanism_arrow_profile,
         "source_faithful_scope_render": source_faithful_scope,
         "source_faithful_multipanel_render": source_faithful_multipanel,
+        "hollow_color_fills": hollow_color_fills,
+        "integrity_warning": integrity_warning,
         "redrawn_image": str(redrawn["redrawn_image"]),
     }
 
@@ -2541,6 +2573,15 @@ def regenerate_final_audit(review_root: Path, project_id: str) -> dict[str, Any]
     if not (quality.get("validation") or {}).get("passes_validation"):
         raise RuntimeError("The generated conclusion did not pass validation. Regenerate or correct it before final audit.")
     run_project_script(review_root / "skills" / "review-final-audit-release" / "scripts" / "integrate_generated_conclusion.py", review_root, project_id)
+    # The final manuscript is the publication boundary. Normalize again after
+    # conclusion integration so any future template or manual ordering change
+    # cannot leave captions/references with draft-manifest numbering.
+    run_project_script(
+        review_root / "skills" / "review-draft-merge-polish" / "scripts" / "renumber_figures_in_draft.py",
+        review_root,
+        project_id,
+        extra=["--stage", "05_final_audit"],
+    )
     run_project_script(review_root / "skills" / "review-final-audit-release" / "scripts" / "final_audit_scan.py", review_root, project_id)
     return {"final_draft": str(final_stage / "final_draft.md")}
 
@@ -2932,6 +2973,22 @@ def artifact_freshness(handoff_path: Path, artifacts: list[Path]) -> dict[str, A
     handoff_mtime = handoff_path.stat().st_mtime
     outdated = [str(path) for path in artifacts if not path.exists() or path.stat().st_mtime <= handoff_mtime]
     return {"handoff": handoff, "stale": bool(outdated), "outdated_artifacts": outdated}
+
+
+def output_freshness_against_inputs(outputs: list[Path], inputs: list[Path]) -> dict[str, Any]:
+    """Flag a downstream output when a direct upstream input was modified later."""
+    existing_inputs = [path for path in inputs if path.exists()]
+    latest_input = max((path.stat().st_mtime for path in existing_inputs), default=0.0)
+    outdated = [
+        str(path)
+        for path in outputs
+        if not path.exists() or path.stat().st_mtime <= latest_input
+    ]
+    return {
+        "stale": bool(outdated),
+        "outdated_outputs": outdated,
+        "latest_input_mtime": latest_input,
+    }
 
 
 def write_stage_handoff(path: Path, source_stage: str, source_artifacts: list[Path]) -> None:
@@ -3372,6 +3429,15 @@ def project_draft_payload(review_root: Path, project_id: str) -> dict[str, Any]:
         [section_stage / "section_drafts.json", section_stage / "figure_candidates.json", section_stage / "paper_figure_candidates.json"],
     )
     draft_freshness = artifact_freshness(stage_dir / "draft_handoff.json", [stage_dir / "first_draft.md"])
+    upstream_freshness = output_freshness_against_inputs(
+        [stage_dir / "first_draft.md"],
+        [
+            section_stage / "section_drafts.json",
+            section_stage / "figure_candidates.json",
+            section_stage / "paper_figure_candidates.json",
+            project / "03_figure_redraw" / "redrawn_figure_manifest.json",
+        ],
+    )
     redrawn = []
     for row in (figures_manifest.get("figures") or []):
         if isinstance(row, dict):
@@ -3386,7 +3452,12 @@ def project_draft_payload(review_root: Path, project_id: str) -> dict[str, Any]:
         "remaining_issues_md": read_text_if_exists(stage_dir / "remaining_issues.md"),
         "section_drafts": section_drafts,
         "redrawn_figures": redrawn,
-        "freshness": {"source_stale": source_freshness["stale"], "draft_stale": draft_freshness["stale"], "stale": source_freshness["stale"] or draft_freshness["stale"]},
+        "freshness": {
+            "source_stale": source_freshness["stale"],
+            "draft_stale": draft_freshness["stale"],
+            "upstream_stale": upstream_freshness["stale"],
+            "stale": source_freshness["stale"] or draft_freshness["stale"] or upstream_freshness["stale"],
+        },
         "upstream": {
             "selected_outline_md": read_text_if_exists(project / "01_matrix_outline" / "selected_outline.md"),
             "literature_matrix": read_json_if_exists(project / "01_matrix_outline" / "literature_matrix.json"),

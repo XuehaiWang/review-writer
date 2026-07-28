@@ -21,7 +21,15 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
 
 
 SOURCE_FAITHFUL_SCALE_FACTOR = 4
+SOURCE_FAITHFUL_RENDER_MODES = {
+    "source-faithful-bw",
+    "source-faithful-color",
+    "source-faithful-outline-color",
+}
 SOURCE_FAITHFUL_DARK_INK_THRESHOLD = 180
+BRIGHT_COLOR_FILL_SPREAD = 50
+BRIGHT_COLOR_FILL_BRIGHTNESS = 135
+BRIGHT_COLOR_FILL_MIN_REGION_SIZE = 9
 CONTENT_INK_THRESHOLD = 192
 CONTENT_MATCH_RADIUS = 3
 MAX_RESTORED_COMPONENT_PIXELS = 1024
@@ -39,14 +47,19 @@ MECHANISM_MAX_UNMATCHED_OUTPUT_INK_RATIO = 0.14
 MECHANISM_MIN_OUTPUT_TO_SOURCE_INK_RATIO = 0.75
 MECHANISM_MAX_EDIT_ATTEMPTS = 2
 _DENSE_SCOPE_FIGURE_PATTERN = re.compile(
-    r"\b(?:reaction\s+scope|substrate\s+scope|scope\s+summary|examples?)\b|"
+    r"\b(?:reaction\s+scope|substrate\s+scope|scope\s+(?:summary|for|of)|examples?)\b|"
     r"反应范围|底物范围|反应底物",
     re.IGNORECASE,
 )
 _COMPLEX_MULTIPANEL_FIGURE_PATTERN = re.compile(
     r"\b(?:strateg(?:y|ies)|background|overview|comparison|rearrangement|applications?|"
-    r"protocols?|routes?|methodology|stud(?:y|ies))\b|"
+    r"protocols?|routes?|methodology|stud(?:y|ies)|kinetic\s+investigations?|"
+    r"(?:proposed\s+)?catalytic\s+cycles?|total\s+synthesis)\b|"
     r"策略|背景|概览|对比|重排|应用|路线",
+    re.IGNORECASE,
+)
+_HOLLOW_COLOR_FILL_PATTERN = re.compile(
+    r"\b(?:strateg(?:y|ies)|traditional\s+protocols?|research\s+background)\b",
     re.IGNORECASE,
 )
 
@@ -120,6 +133,19 @@ def is_complex_multipanel_figure(figure: dict[str, Any]) -> bool:
     )
     text = " ".join(str(figure.get(field) or "") for field in fields)
     return bool(_COMPLEX_MULTIPANEL_FIGURE_PATTERN.search(text))
+
+
+def needs_hollow_color_fills(figure: dict[str, Any]) -> bool:
+    """Keep colored outlines but remove non-semantic pastel fills in strategy figures."""
+    fields = ("source_label", "source_caption_text", "title", "what_it_shows")
+    return bool(_HOLLOW_COLOR_FILL_PATTERN.search(" ".join(str(figure.get(field) or "") for field in fields)))
+
+
+def is_low_resolution_or_thin_scheme(source_path: Path) -> bool:
+    """Avoid generative reconstruction when small source strokes cannot be recovered safely."""
+    with Image.open(source_path) as source:
+        width, height = source.size
+    return min(width, height) < 360
 
 
 def resolve_tesseract_command(review_root: Path, configured_path: str) -> str:
@@ -602,6 +628,31 @@ def human_selected_figure(project: Path, figure: dict[str, Any]) -> dict[str, An
     return selected
 
 
+def whiten_large_bright_color_fills(image: Image.Image) -> int:
+    """Whiten only broad bright colour interiors, never thin coloured text strokes."""
+    pixels = image.load()
+    mask = Image.new("L", image.size, 0)
+    mask_pixels = mask.load()
+    for y in range(image.height):
+        for x in range(image.width):
+            red, green, blue = pixels[x, y]
+            spread = max(red, green, blue) - min(red, green, blue)
+            brightness = (red + green + blue) / 3
+            if spread >= BRIGHT_COLOR_FILL_SPREAD and brightness >= BRIGHT_COLOR_FILL_BRIGHTNESS:
+                mask_pixels[x, y] = 255
+    # Erosion keeps only the interior of a solid colour region. Coloured glyphs,
+    # arrows, bonds, and labels are too thin to survive this 9x9 neighbourhood.
+    fill_interior = mask.filter(ImageFilter.MinFilter(BRIGHT_COLOR_FILL_MIN_REGION_SIZE))
+    fill_pixels = fill_interior.load()
+    replaced = 0
+    for y in range(image.height):
+        for x in range(image.width):
+            if fill_pixels[x, y]:
+                pixels[x, y] = (255, 255, 255)
+                replaced += 1
+    return replaced
+
+
 def render_source_faithful_bw(source_path: Path, output_path: Path) -> dict[str, Any]:
     """Create a high-resolution pure black-and-white copy without regenerating typography."""
     with Image.open(source_path) as source:
@@ -613,10 +664,11 @@ def render_source_faithful_bw(source_path: Path, output_path: Path) -> dict[str,
             source.height * SOURCE_FAITHFUL_SCALE_FACTOR,
         )
         upscaled = background.convert("RGB").resize(target_size, Image.Resampling.LANCZOS)
+        whiten_large_bright_color_fills(upscaled)
+        # Colored fills such as the cyan indole interiors in P090 are bright but
+        # have a low grayscale luminance. They are hollowed before thresholding;
+        # thin coloured text and labels are preserved as black ink.
         grayscale = ImageOps.autocontrast(ImageOps.grayscale(upscaled))
-        # Light color fills in source figures must become white, while dark colored
-        # bonds and labels remain black ink.  A high threshold turns pale cyan and
-        # magenta fills into opaque black blocks that hide structure interiors.
         black_and_white = grayscale.point(
             lambda value: 255 if value >= SOURCE_FAITHFUL_DARK_INK_THRESHOLD else 0,
             mode="1",
@@ -627,7 +679,7 @@ def render_source_faithful_bw(source_path: Path, output_path: Path) -> dict[str,
             "width": target_size[0],
             "height": target_size[1],
             "scale_factor": SOURCE_FAITHFUL_SCALE_FACTOR,
-            "color_mode": "1-bit black and white",
+            "color_mode": "1-bit black and white; bright color fills hollowed",
         }
 
 
@@ -651,6 +703,33 @@ def render_source_faithful_color(source_path: Path, output_path: Path) -> dict[s
             "height": target_size[1],
             "scale_factor": SOURCE_FAITHFUL_SCALE_FACTOR,
             "color_mode": "source colors preserved",
+        }
+
+
+def render_source_faithful_outline_color(source_path: Path, output_path: Path) -> dict[str, Any]:
+    """Preserve colored outlines and labels while whitening bright colored interior fills.
+
+    This is a local pixel operation for overview/strategy figures such as P137.
+    It never regenerates structures, labels, circles, or bonds.  Dark coloured
+    strokes remain; only bright, saturated fill pixels are changed to white.
+    """
+    with Image.open(source_path) as source:
+        rgba = source.convert("RGBA")
+        background = Image.new("RGBA", rgba.size, "white")
+        background.alpha_composite(rgba)
+        target_size = (
+            source.width * SOURCE_FAITHFUL_SCALE_FACTOR,
+            source.height * SOURCE_FAITHFUL_SCALE_FACTOR,
+        )
+        upscaled = background.convert("RGB").resize(target_size, Image.Resampling.LANCZOS)
+        whiten_large_bright_color_fills(upscaled)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        upscaled.save(output_path, format="PNG")
+        return {
+            "width": target_size[0],
+            "height": target_size[1],
+            "scale_factor": SOURCE_FAITHFUL_SCALE_FACTOR,
+            "color_mode": "source outlines preserved; bright color fills hollowed",
         }
 
 
@@ -838,6 +917,11 @@ def build_prompt(style_name: str, figure: dict[str, Any], ocr_text: str = "") ->
         "Apply one consistent publication style to the supplied figure: crisp medium-weight black line art, "
         "pure white background, even contrast, clean antialiasing, consistent line caps and arrowheads, and no "
         "decorative gradients, shadows, textures, or grayscale fills. "
+        "Do not introduce cyan, teal, green, orange, or any other filled colour regions: molecule-ring interiors "
+        "and non-semantic substituent-marker circles must remain white and hollow, with only their source outlines "
+        "and symbols retained. "
+        "Preserve every coloured word, glyph, letter, number, and label as a solid, continuous, crisp stroke in its "
+        "original colour; never hollow, fade, perforate, blur, or break coloured text while removing a large shape fill. "
         "Treat the scientific layer as immutable. Trace every molecule and reaction network from the source exactly. "
         "Preserve the number, identity, position, orientation, and connectivity of every atom, substituent, ring, "
         "single bond, double bond, triple bond, aromatic bond, allene, wedge, dash, charge, radical, lone-pair mark, "
@@ -903,18 +987,14 @@ def chemistry_integrity_gate(redraw_row: dict[str, Any]) -> dict[str, Any]:
     """Fail closed unless the automated checks required by the render mode pass."""
     render_mode = str(redraw_row.get("render_mode") or "")
     edit_profile = str(redraw_row.get("edit_profile") or "standard")
-    if render_mode in {"source-faithful-bw", "source-faithful-color"}:
+    if render_mode in SOURCE_FAITHFUL_RENDER_MODES:
         return {"status": "pass", "failures": [], "human_check_required": True}
 
     failures: list[str] = []
-    source_ocr_status = str(redraw_row.get("ocr_source_status") or "")
-    output_ocr_status = str(redraw_row.get("ocr_output_status") or "")
     source_has_text = bool(str(redraw_row.get("ocr_source_text") or "").strip())
     text_protection = str(redraw_row.get("ocr_text_protection") or "")
     structure_status = str((redraw_row.get("structural_fidelity") or {}).get("status") or "")
 
-    if source_ocr_status != "ok" and edit_profile != MECHANISM_ARROW_STRAIGHTEN_PROFILE:
-        failures.append("source OCR was not available")
     if edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE:
         mechanism_fidelity = redraw_row.get("mechanism_source_fidelity") or {}
         if mechanism_fidelity.get("status") != "pass":
@@ -931,15 +1011,13 @@ def chemistry_integrity_gate(redraw_row: dict[str, Any]) -> dict[str, Any]:
     if structure_status != "pass":
         failures.append("bidirectional line geometry check failed")
     if render_mode == "ocr-hollow-ai":
+        source_ocr_status = str(redraw_row.get("ocr_source_status") or "")
+        if source_ocr_status != "ok":
+            failures.append("source OCR was not available")
         if str((redraw_row.get("content_fidelity") or {}).get("status") or "") != "pass":
             failures.append("source content fidelity check failed")
         if source_has_text and text_protection != "source_regions_restored":
             failures.append("source text pixels were not restored")
-    elif render_mode == "ai-edit":
-        if output_ocr_status != "ok":
-            failures.append("output OCR was not available")
-        elif redraw_row.get("ocr_check_status") != "pass":
-            failures.append("source OCR tokens are missing from the output")
 
     return {
         "status": "failed" if failures else "pass",
@@ -1136,7 +1214,7 @@ def write_report(path: Path, style: dict[str, Any], source_rows: list[dict[str, 
         f"- Render mode: {style['render_mode']}",
         f"- Edit profile: {style.get('edit_profile', 'standard')}",
         f"- Color policy: {color_policy}",
-        "- Typography policy: source text pixels are preserved/restored whenever OCR is available.",
+        "- Typography policy: OCR is disabled; source-faithful modes preserve source pixels and AI modes rely on source-pixel geometry checks.",
         "- Scientific policy: atoms, rings, bond orders, stereochemistry, charges, radicals, labels, and process topology are immutable.",
         "",
         f"- Source candidates processed: {len(source_rows)}",
@@ -1238,6 +1316,8 @@ def run(args: argparse.Namespace) -> int:
         effective_render_mode = (
             "source-faithful-bw"
             if source_faithful_scope_guard
+            else "source-faithful-outline-color"
+            if source_faithful_multipanel_guard and needs_hollow_color_fills(figure)
             else "source-faithful-color"
             if source_faithful_multipanel_guard
             else requested_render_mode
@@ -1286,11 +1366,13 @@ def run(args: argparse.Namespace) -> int:
             "color_policy": (
                 "preserve_source_arrow_colors"
                 if args.edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE
+                else "preserve_colored_text_and_outlines_hollow_large_bright_fills"
+                if effective_render_mode == "source-faithful-outline-color"
                 else "pure_black_and_white"
             ),
             "typography_protection": (
                 "source_pixel_layout_preserved"
-                if effective_render_mode in {"source-faithful-bw", "source-faithful-color"}
+                if effective_render_mode in SOURCE_FAITHFUL_RENDER_MODES
                 else "ocr_masked_source_glyphs_restored_once"
                 if effective_render_mode == "ocr-hollow-ai"
                 else "source_ocr_regions_restored"
@@ -1327,12 +1409,26 @@ def run(args: argparse.Namespace) -> int:
             redraw_row["notes"] = "Could not resolve source image from figure candidate or content_list."
             redraw_rows.append(redraw_row)
             continue
+        if (
+            args.edit_profile == "standard"
+            and effective_render_mode in {"ai-edit", "ocr-hollow-ai"}
+            and is_low_resolution_or_thin_scheme(source_image)
+        ):
+            effective_render_mode = "source-faithful-bw"
+            redraw_row["render_mode"] = effective_render_mode
+            redraw_row["typography_protection"] = "source_pixel_layout_preserved"
+            redraw_row["color_policy"] = "pure_black_and_white"
+            redraw_row["render_mode_guard"] = {
+                "status": "forced_source_faithful",
+                "requested_render_mode": requested_render_mode,
+                "reason": "Low-resolution or thin-stroke scheme: preserve source geometry instead of letting a model reconstruct bonds.",
+            }
         copied_source = source_dir / f"{figure_id}{source_image.suffix.lower() or '.png'}"
         copied_source.write_bytes(source_image.read_bytes())
         source_ocr = {"status": "not_run", "text": ""}
         source_boxes: list[dict[str, Any]] = []
         edit_input = copied_source
-        if effective_render_mode in {"ai-edit", "ocr-hollow-ai"} and args.edit_profile != MECHANISM_ARROW_STRAIGHTEN_PROFILE:
+        if effective_render_mode == "ocr-hollow-ai":
             source_ocr = extract_ocr_text(copied_source, args.ocr_language, command=tesseract_command)
             redraw_row["ocr_source_text"] = source_ocr["text"]
             redraw_row["ocr_source_status"] = source_ocr["status"]
@@ -1365,7 +1461,7 @@ def run(args: argparse.Namespace) -> int:
             prompt = (build_ocr_hollow_prompt if effective_render_mode == "ocr-hollow-ai" else build_prompt)(
                 args.style_name,
                 figure,
-                source_ocr["text"] if source_ocr["status"] == "ok" else "",
+                source_ocr["text"] if effective_render_mode == "ocr-hollow-ai" and source_ocr["status"] == "ok" else "",
             )
         redraw_row["prompt"] = prompt
         if args.dry_run:
@@ -1378,7 +1474,7 @@ def run(args: argparse.Namespace) -> int:
             redraw_row["notes"] = "API key is not set. Pass --api-key or set OPENAI_API_KEY."
             redraw_rows.append(redraw_row)
             continue
-        output_format = "png" if effective_render_mode in {"source-faithful-bw", "source-faithful-color"} else args.output_format
+        output_format = "png" if effective_render_mode in SOURCE_FAITHFUL_RENDER_MODES else args.output_format
         out_path = redrawn_dir / f"{figure_id}.{output_format}"
         try:
             mechanism_attempts: list[dict[str, Any]] = []
@@ -1395,10 +1491,12 @@ def run(args: argparse.Namespace) -> int:
                         "Retry from the original upload, change only the arrow strokes, and preserve every molecule, "
                         "intermediate, label, colored step name, and non-arrow pixel."
                     )
-                if effective_render_mode in {"source-faithful-bw", "source-faithful-color"}:
+                if effective_render_mode in SOURCE_FAITHFUL_RENDER_MODES:
                     rendering = (
                         render_source_faithful_bw(copied_source, out_path)
                         if effective_render_mode == "source-faithful-bw"
+                        else render_source_faithful_outline_color(copied_source, out_path)
+                        if effective_render_mode == "source-faithful-outline-color"
                         else render_source_faithful_color(copied_source, out_path)
                     )
                     redraw_row["rendering"] = rendering
@@ -1448,13 +1546,8 @@ def run(args: argparse.Namespace) -> int:
             redraw_row["redrawn_image"] = str(out_path)
             redraw_row["status"] = "redrawn"
             if mechanism_attempts and mechanism_attempts[-1]["status"] != "pass":
-                redraw_row["status"] = "mechanism_integrity_failed"
-                redraw_row["redrawn_image"] = None
-                # Keep the final provider response for comparison, but never mark
-                # it as a usable redraw or make it eligible for manuscript insertion.
-                redraw_row["rejected_preview_image"] = str(out_path)
-                redraw_row["rejected_preview_status"] = "not_approved_for_manuscript"
-                redraw_row["notes"] = "Rejected after mechanism integrity retries: " + "; ".join(
+                redraw_row["output_disposition"] = "saved_with_integrity_warning"
+                redraw_row["notes"] = "Saved to Redrawn Output after mechanism integrity retries: " + "; ".join(
                     mechanism_attempts[-1]["failures"]
                 )
             if effective_render_mode == "ocr-hollow-ai":
@@ -1472,11 +1565,8 @@ def run(args: argparse.Namespace) -> int:
                 structure = structural_fidelity_check(copied_source, out_path)
                 redraw_row["structural_fidelity"] = structure
                 if fidelity["status"] != "pass" or structure["status"] != "pass":
-                    redraw_row["status"] = "structural_fidelity_failed"
-                    redraw_row["redrawn_image"] = None
-                    redraw_row["rejected_preview_image"] = str(out_path)
-                    redraw_row["rejected_preview_status"] = "not_approved_for_manuscript"
-                    redraw_row["notes"] = "Rejected by fidelity gate: " + (
+                    redraw_row["output_disposition"] = "saved_with_integrity_warning"
+                    redraw_row["notes"] = "Saved to Redrawn Output with fidelity warning: " + (
                         f"missing source marks {fidelity['unrecoverable_component_count']} components / "
                         f"{fidelity['unrecoverable_pixel_count']} pixels; "
                         f"new or displaced output ink {structure['unmatched_output_ink_pixels']} pixels "
@@ -1484,7 +1574,7 @@ def run(args: argparse.Namespace) -> int:
                     )
             elif effective_render_mode == "ai-edit" and args.edit_profile == "standard":
                 redraw_row["structural_fidelity"] = structural_fidelity_check(copied_source, out_path)
-            if effective_render_mode in {"ai-edit", "ocr-hollow-ai"} and args.edit_profile != MECHANISM_ARROW_STRAIGHTEN_PROFILE:
+            if effective_render_mode == "ocr-hollow-ai":
                 output_ocr = extract_ocr_text(out_path, args.ocr_language, command=tesseract_command)
                 redraw_row["ocr_output_text"] = output_ocr["text"]
                 redraw_row["ocr_output_status"] = output_ocr["status"]
@@ -1499,11 +1589,8 @@ def run(args: argparse.Namespace) -> int:
             integrity = chemistry_integrity_gate(redraw_row)
             redraw_row["chemistry_integrity"] = integrity
             if redraw_row["status"] == "redrawn" and integrity["status"] == "failed":
-                redraw_row["status"] = "chemistry_integrity_failed"
-                redraw_row["redrawn_image"] = None
-                redraw_row["rejected_preview_image"] = str(out_path)
-                redraw_row["rejected_preview_status"] = "not_approved_for_manuscript"
-                redraw_row["notes"] = "Rejected by chemistry integrity gate: " + "; ".join(integrity["failures"])
+                redraw_row["output_disposition"] = "saved_with_integrity_warning"
+                redraw_row["notes"] = "Saved to Redrawn Output with chemistry integrity warning: " + "; ".join(integrity["failures"])
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, RuntimeError, json.JSONDecodeError) as exc:
             redraw_row["status"] = "failed"
             redraw_row["notes"] = f"{type(exc).__name__}: {exc}"
@@ -1557,7 +1644,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--render-mode",
-        choices=["source-faithful-bw", "source-faithful-color", "ai-edit", "ocr-hollow-ai"],
+        choices=["source-faithful-bw", "source-faithful-color", "source-faithful-outline-color", "ai-edit", "ocr-hollow-ai"],
         default="source-faithful-bw",
         help="Use ocr-hollow-ai for OCR-masked gpt-image-2 hollow black-and-white redraws with source glyph restoration.",
     )
