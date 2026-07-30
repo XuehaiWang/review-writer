@@ -939,8 +939,8 @@ def _load_summary_chart_bundle(md_path: Path, blocks: List[Block]) -> Optional[S
     stats = payload.get("stats") if isinstance(payload, dict) else None
     if not isinstance(stats, dict):
         raise ValueError("summary chart manifest is missing stats")
-    if stats.get("generation_scope") != "both":
-        raise ValueError("summary chart generation_scope must be 'both' for DOCX export")
+    if stats.get("generation_scope") not in {"full", "both"}:
+        raise ValueError("overall review chart generation_scope must be 'full' or 'both' for DOCX export")
     draft_source = stats.get("draft_source")
     if not isinstance(draft_source, str) or not draft_source.strip():
         raise ValueError("summary chart draft_source is missing")
@@ -955,32 +955,10 @@ def _load_summary_chart_bundle(md_path: Path, blocks: List[Block]) -> Optional[S
     if not isinstance(image_manifest, dict):
         raise ValueError("summary chart manifest is missing image_manifest")
     full = _manifest_image(md_path.parent, image_manifest.get("full"), "full")
-    section_entries = image_manifest.get("sections")
-    if not isinstance(section_entries, list):
-        raise ValueError("summary chart section image manifest must be a list")
-    sections: Dict[str, Tuple[str, Path]] = {}
-    for index, entry in enumerate(section_entries, start=1):
-        if not isinstance(entry, dict) or not isinstance(entry.get("heading"), str):
-            raise ValueError(f"summary chart section {index} heading is missing")
-        heading = entry["heading"].strip()
-        key = _normalize_chart_heading(heading)
-        if not key or key in sections:
-            raise ValueError(f"summary chart section heading is empty or duplicated: {heading!r}")
-        sections[key] = (heading, _manifest_image(md_path.parent, entry, f"section {heading}"))
-    expected = _expected_chart_headings(blocks)
-    if set(sections) != set(expected):
-        missing = [expected[key] for key in expected.keys() - sections.keys()]
-        extra = [sections[key][0] for key in sections.keys() - expected.keys()]
-        details = []
-        if missing:
-            details.append("missing=" + ", ".join(sorted(missing)))
-        if extra:
-            details.append("extra=" + ", ".join(sorted(extra)))
-        raise ValueError(
-            "summary chart manifest does not cover manuscript body sections: "
-            + "; ".join(details)
-        )
-    return SummaryChartBundle(full=full, sections=sections)
+    # The final release uses one global overview chart only.  Older manifests
+    # may still include section images, but they are deliberately ignored so
+    # no per-section mini-outline is inserted into the Word document.
+    return SummaryChartBundle(full=full, sections={})
 
 
 def _chart_width_inches(doc: Document, image_path: Path) -> float:
@@ -1005,8 +983,15 @@ def _chart_width_inches(doc: Document, image_path: Path) -> float:
 
 def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
     md_text = normalize_mineru_latex(md_path.read_text(encoding="utf-8"))
+    # Workflow comments carry internal paragraph/figure identifiers.  They are
+    # useful to the dashboard before export, but are never manuscript prose.
+    # Strip all HTML comments before tokenizing so metadata cannot leak into
+    # the opening paragraph of the Word document.
+    md_text = re.sub(r"<!--.*?-->", "", md_text, flags=re.S)
     blocks  = tokenize(md_text)
     toc_entries = _collect_static_toc_entries(blocks)
+    # Only the global review overview is included.  Per-section mini-outline
+    # images are intentionally excluded by _load_summary_chart_bundle().
     chart_bundle = _load_summary_chart_bundle(md_path, blocks)
     doc     = Document(str(template_path))
     _clear_body(doc)

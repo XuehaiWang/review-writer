@@ -103,6 +103,8 @@ def scan_draft(project: Path) -> dict[str, Any]:
             heading_jumps.append({"from": prev, "to": level, "title": h["title"]})
         prev = level
     references_section = detect_references_section(text)
+    references_tail = text[REFERENCES_HEADING_RE.search(text).end() :] if REFERENCES_HEADING_RE.search(text) else ""
+    reference_sup_markup_present = bool(re.search(r"</?sup\b", references_tail, re.I))
     citations_path = project / "04_first_draft" / "citations.json"
     citations_payload = None
     if citations_path.exists():
@@ -175,6 +177,9 @@ def scan_draft(project: Path) -> dict[str, Any]:
     elif references_section["item_count"] == 0:
         issues.append("empty_references_section")
         blocking_issues.append("empty_references_section")
+    if reference_sup_markup_present:
+        issues.append("html_superscript_markup_present_in_references")
+        blocking_issues.append("html_superscript_markup_present_in_references")
     return {
         "project_dir": str(project),
         "draft_path": str(draft),
@@ -193,6 +198,7 @@ def scan_draft(project: Path) -> dict[str, Any]:
         "broken_images": broken_images,
         "source_placeholder_mode": source_placeholder_mode,
         "references_section": references_section,
+        "reference_sup_markup_present": reference_sup_markup_present,
         "figures_skipped_with_reason": figures_skipped_with_reason,
         "citations_payload_present": isinstance(citations_payload, dict),
         "unknown_cited_papers": unknown_cited_papers,

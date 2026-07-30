@@ -25,6 +25,7 @@ import json
 import os
 import re
 import ssl
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -46,6 +47,9 @@ def resolve_api_key(cli_value: str, base_url: str) -> str:
     """Keep text calls aligned with the provider-specific image credential."""
     if cli_value:
         return cli_value
+    dedicated_key = os.environ.get("REVIEW_CONCLUSION_API_KEY", "")
+    if dedicated_key:
+        return dedicated_key
     if "api.xiaoleai.team" in str(base_url).lower():
         return os.environ.get("XIAOLEAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
     return os.environ.get("OPENAI_API_KEY", "") or os.environ.get("XIAOLEAI_API_KEY", "")
@@ -127,11 +131,6 @@ def write_json(path: Path, data: Any) -> None:
 def write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
-
-
-def _invalidate_required_outputs(out_dir: Path) -> None:
-    for filename in ("conclusion_generated.md", "conclusion_quality_report.json"):
-        (out_dir / filename).unlink(missing_ok=True)
 
 
 def _normalize_callout(value: Any) -> str | None:
@@ -675,6 +674,39 @@ def call_llm(prompt: str, api_key: str, base_url: str, model: str, prefer_chat: 
     return str(content).strip()
 
 
+def call_llm_with_retries(
+    prompt: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    prefer_chat: bool = False,
+    max_attempts: int = 4,
+) -> str:
+    """Retry only transient provider failures without discarding prior output."""
+    retryable_statuses = {408, 409, 425, 429, 500, 502, 503, 504}
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return call_llm(prompt, api_key, base_url, model, prefer_chat=prefer_chat)
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            retryable = exc.code in retryable_statuses
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+            retryable = True
+        if not retryable or attempt == max_attempts:
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("LLM request failed without an exception detail")
+        delay = 2 ** attempt
+        print(
+            f"Transient LLM failure ({type(last_error).__name__}: {last_error}); retrying "
+            f"in {delay}s ({attempt}/{max_attempts})..."
+        )
+        time.sleep(delay)
+    raise RuntimeError("LLM retry loop ended unexpectedly")
+
+
 # ── Quality validation ───────────────────────────────────────────────────────
 
 def _word_shingles(text: str, k: int = 5) -> set[tuple[str, ...]]:
@@ -912,10 +944,14 @@ def run(args: argparse.Namespace) -> int:
     base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
     api_key = resolve_api_key(args.api_key, base_url)
     model = args.model or os.environ.get("REVIEW_CONCLUSION_MODEL", "gpt-5.4")
+    prefer_chat = os.environ.get("REVIEW_CONCLUSION_WIRE_API", "").strip().lower() in {
+        "chat",
+        "chat-completions",
+        "chat_completions",
+    }
 
     if not api_key:
         out_dir = project / "04_first_draft"
-        _invalidate_required_outputs(out_dir)
         print("WARN: No API key found. Writing context bundle and prompt for manual use.")
         print("Set OPENAI_API_KEY or pass --api-key to generate conclusion via LLM.")
         write_json(out_dir / "conclusion_context.json", context)
@@ -932,14 +968,14 @@ def run(args: argparse.Namespace) -> int:
 
     raw_response = ""
     try:
-        raw_response = call_llm(prompt, api_key, base_url, model)
+        raw_response = call_llm_with_retries(prompt, api_key, base_url, model, prefer_chat=prefer_chat)
         try:
             result = parse_model_json(raw_response)
         except (json.JSONDecodeError, RuntimeError):
             # Treat malformed Responses output just like an empty one. This is
             # common with relays that expose Responses but do not enforce its
             # structured-output contract.
-            raw_response = call_llm(
+            raw_response = call_llm_with_retries(
                 prompt + "\n\nReturn only the requested JSON object. Do not include analysis, Markdown fences, or any prose.",
                 api_key,
                 base_url,
@@ -949,7 +985,6 @@ def run(args: argparse.Namespace) -> int:
             result = parse_model_json(raw_response)
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
         out_dir = project / "04_first_draft"
-        _invalidate_required_outputs(out_dir)
         if raw_response.strip():
             write_text(out_dir / "conclusion_unparsed_response.txt", raw_response)
         print(f"ERROR: LLM call failed: {type(exc).__name__}: {exc}", file=__import__("sys").stderr)

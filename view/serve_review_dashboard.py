@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
+import hashlib
 import io
 import importlib.util
 import json
@@ -31,7 +32,6 @@ from paragraph_manifest_builder import build_manifest
 
 
 _DISCOVERY_MODULE = None
-_CONCLUSION_INTEGRATION_MODULE = None
 _BATCH_REDRAW_LOCK = threading.RLock()
 _BATCH_REDRAW_JOBS: dict[str, dict[str, object]] = {}
 FULL_SVG_MAX_DIMENSION = 1600
@@ -64,20 +64,6 @@ def discovery_module():
         spec.loader.exec_module(module)
         _DISCOVERY_MODULE = module
     return _DISCOVERY_MODULE
-
-
-def conclusion_integration_module(review_root: Path):
-    """Load the final-audit integration helper without duplicating its placement rules."""
-    global _CONCLUSION_INTEGRATION_MODULE
-    if _CONCLUSION_INTEGRATION_MODULE is None:
-        script = review_root / "skills" / "review-final-audit-release" / "scripts" / "integrate_generated_conclusion.py"
-        spec = importlib.util.spec_from_file_location("review_generated_conclusion_integration", script)
-        if spec is None or spec.loader is None:
-            raise RuntimeError("Could not load the conclusion integration helper.")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        _CONCLUSION_INTEGRATION_MODULE = module
-    return _CONCLUSION_INTEGRATION_MODULE
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -325,6 +311,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not script.exists():
             self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "DOCX export runner not found")
             return
+        try:
+            refresh_final_overview_chart(self.review_root, project_id, md_path)
+        except RuntimeError as exc:
+            self.send_json({"ok": False, "error": f"Could not refresh the overall review chart: {exc}"})
+            return
         def export_to(output_path: Path) -> subprocess.CompletedProcess[str] | None:
             try:
                 return subprocess.run(
@@ -374,6 +365,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "output_path": docx_path.name,
                 "exported_at": now_utc(),
                 "fallback": fallback,
+                "draft_sha256": sha256_file(md_path),
             }, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
@@ -705,8 +697,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif stage_id == "final-conclusion":
                 result = generate_final_conclusion(self.review_root, project_id)
                 next_stage = "final"
-            elif stage_id == "final-outline-chart":
-                result = generate_outline_chart_preview(self.review_root, project_id)
+            elif stage_id == "final-overview-figure":
+                result = generate_final_overview_figure(self.review_root, project_id)
                 next_stage = "final"
             elif stage_id == "final":
                 result = regenerate_final_draft_bundle(self.review_root, project_id)
@@ -1635,6 +1627,39 @@ def run_project_script(script: Path, review_root: Path, project_id: str, timeout
     return (result.stdout or result.stderr or "").strip()
 
 
+def refresh_final_overview_chart(review_root: Path, project_id: str, draft_path: Path) -> str:
+    """Build only the single full-review overview chart for the final manuscript."""
+    chart_script = review_root / "skills" / "review-outline-summary-chart" / "scripts" / "generate_review_summary_chart.py"
+    return run_project_script(
+        chart_script,
+        review_root,
+        project_id,
+        timeout=300,
+        extra=["--scope", "full", "--input-markdown", str(draft_path)],
+    )
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def docx_export_is_current(stage: Path, docx_path: Path) -> bool:
+    """Only expose a Word download when it was made from the current final draft."""
+    draft_path = stage / "final_draft.md"
+    manifest = read_json_if_exists(stage / "docx_export.json") or {}
+    return bool(
+        docx_path.is_file()
+        and draft_path.is_file()
+        and isinstance(manifest, dict)
+        and manifest.get("output_path") == docx_path.name
+        and manifest.get("draft_sha256") == sha256_file(draft_path)
+    )
+
+
 def matrix_rows(project: Path) -> list[dict[str, Any]]:
     matrix = read_json_if_exists(project / "01_matrix_outline" / "literature_matrix.json") or {}
     rows = matrix.get("rows") if isinstance(matrix, dict) else matrix
@@ -2003,13 +2028,57 @@ def build_full_image_vector_svg(base_path: Path, operations: list[dict[str, obje
                 f'{_svg_number(right_x)},{_svg_number(right_y)}" fill="{color}"/>'
             )
     return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        f'data-original-width="{source_rgb.width}" data-original-height="{source_rgb.height}">'
         '<title>Full-image chemistry figure vector trace</title>'
         f'<rect width="{width}" height="{height}" fill="#ffffff"/>'
         f'<g id="full-image-vector-trace">{"".join(vector_objects)}</g>'
         f'<g id="editable-arrow-overlays">{"".join(overlay_paths)}</g>'
         '</svg>'
     )
+
+
+def resolve_redrawn_base_path(
+    review_root: Path,
+    project: Path,
+    stage: Path,
+    row: dict[str, Any] | None,
+) -> Path | None:
+    """Resolve both current and legacy manifest fields to an existing redraw image."""
+    if not isinstance(row, dict):
+        return None
+    fields = (
+        "redrawn_image",
+        "rejected_preview_image",
+        "manual_edit_base_image",
+        "output_path",
+        "redrawn_path",
+        "output_image_path",
+        "image_path",
+        "path",
+    )
+    for field in fields:
+        value = str(row.get(field) or "").strip()
+        if not value:
+            continue
+        raw_path = Path(value)
+        candidates = [raw_path] if raw_path.is_absolute() else [stage / raw_path, project / raw_path, review_root / raw_path, raw_path]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate.resolve()
+    figure_id = str(row.get("figure_id") or "").strip()
+    if figure_id:
+        # The Figures payload already recovers an orphaned AI preview from the
+        # redraw directory when an earlier failed manifest write left the path
+        # fields empty.  The SVG endpoint must use the same recovery rule so the
+        # image shown as Redrawn Output is also the image opened in the editor.
+        recovered = next(
+            (candidate for candidate in (stage / "redrawn").glob(f"{figure_id}.*") if candidate.is_file()),
+            None,
+        )
+        if recovered is not None:
+            return recovered.resolve()
+    return None
 
 
 def create_full_figure_svg(
@@ -2049,27 +2118,72 @@ def create_full_figure_svg(
             (item for item in rows or [] if isinstance(item, dict) and str(item.get("figure_id") or "") == figure_id),
             None,
         )
-        paths = [
-            str((row or {}).get("redrawn_image") or ""),
-            str((row or {}).get("rejected_preview_image") or ""),
-        ]
-        base_path = next((Path(path) for path in paths if path and Path(path).is_file()), Path())
-        if not base_path.is_file():
-            raise ValueError("No AI redraw or preview is available as the SVG base")
+        redrawn_path = resolve_redrawn_base_path(review_root, project, stage, row)
+        if redrawn_path is None:
+            raise ValueError("The selected AI redraw is unavailable. Switch the editor base to the source image or regenerate this figure.")
+        base_path = redrawn_path
     svg = build_full_image_vector_svg(base_path, [])
     if len(svg.encode("utf-8")) > 25 * 1024 * 1024:
         raise ValueError("Full-image vector SVG is larger than the 25 MB editor limit")
     output_path = stage / "manual_arrow_edits" / f"{figure_id}-{base_mode}-full.svg"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(svg, encoding="utf-8")
+    with Image.open(base_path) as base_image:
+        base_width, base_height = base_image.size
     return {
         "figure_id": figure_id,
         "base_mode": base_mode,
         "base_image": str(base_path),
+        "base_width": base_width,
+        "base_height": base_height,
         "full_svg": str(output_path),
         "vectorization": "full-image-pixel-trace",
         "contains_embedded_raster": False,
     }
+
+
+_INSERTED_FIGURE_METADATA_RE = re.compile(r"<!--\s*inserted_figure:\s*(\{.*?\})\s*-->", re.S)
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
+
+
+def sync_edited_figure_to_manuscripts(project: Path, figure_id: str, edited_image: Path) -> dict[str, list[str]]:
+    """Replace existing draft assets that belong to a saved SVG/manual figure edit.
+
+    Stage 8 and Stage 9 Markdown use copied ``figures/`` assets rather than the
+    Stage 7 manifest path.  Updating those copies at save time prevents a
+    correct SVG edit from being stranded in ``03_figure_redraw`` until a full
+    draft rebuild is run.
+    """
+    synced: dict[str, list[str]] = {"04_first_draft": [], "05_final_audit": []}
+    for stage_name, manuscript_name in (("04_first_draft", "first_draft.md"), ("05_final_audit", "final_draft.md")):
+        stage = project / stage_name
+        manuscript_path = stage / manuscript_name
+        if not manuscript_path.is_file():
+            continue
+        manuscript = manuscript_path.read_text(encoding="utf-8", errors="ignore")
+        for marker in _INSERTED_FIGURE_METADATA_RE.finditer(manuscript):
+            try:
+                metadata = json.loads(marker.group(1))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(metadata, dict) or str(metadata.get("figure_id") or "") != figure_id:
+                continue
+            next_marker = _INSERTED_FIGURE_METADATA_RE.search(manuscript, marker.end())
+            search_end = next_marker.start() if next_marker else len(manuscript)
+            image = _MARKDOWN_IMAGE_RE.search(manuscript, marker.end(), search_end)
+            if not image:
+                continue
+            relative_path = Path(image.group(1).replace("\\", "/"))
+            if relative_path.is_absolute() or ".." in relative_path.parts:
+                continue
+            target = (stage / relative_path).resolve()
+            stage_root = stage.resolve()
+            if target != stage_root and stage_root not in target.parents:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(edited_image, target)
+            synced[stage_name].append(str(target))
+    return synced
 
 
 def save_manual_arrow_edit(
@@ -2110,13 +2224,10 @@ def save_manual_arrow_edit(
             (item for item in rows or [] if isinstance(item, dict) and str(item.get("figure_id") or "") == figure_id),
             None,
         )
-        candidate_paths = [
-            str((row or {}).get("redrawn_image") or ""),
-            str((row or {}).get("rejected_preview_image") or ""),
-        ]
-        base_path = next((Path(path) for path in candidate_paths if path and Path(path).is_file()), Path())
-        if not base_path.is_file():
-            raise ValueError("No AI redraw or preview is available as the manual-edit base")
+        redrawn_path = resolve_redrawn_base_path(review_root, project, stage, row)
+        if redrawn_path is None:
+            raise ValueError("The selected AI redraw is unavailable. Switch the editor base to the source image or regenerate this figure.")
+        base_path = redrawn_path
     if editable_svg:
         if len(editable_svg.encode("utf-8")) > 25 * 1024 * 1024:
             raise ValueError("Editable SVG is larger than the 25 MB manual-edit limit")
@@ -2129,11 +2240,38 @@ def save_manual_arrow_edit(
             raise ValueError("full_vector_svg must be SVG markup")
         if "full-image-vector-trace" not in full_vector_svg or re.search(r"<image\b", full_vector_svg, re.IGNORECASE):
             raise ValueError("full_vector_svg must contain the full vector trace and no embedded raster image")
+    submitted_canvas_size: tuple[int, int] | None = None
+    base_canvas_size: tuple[int, int] | None = None
+    normalized_canvas = False
     with Image.open(base_path) as base_image, Image.open(io.BytesIO(image_bytes)) as edited:
         if edited.format != "PNG":
             raise ValueError("Manual edit must be encoded as PNG")
+        submitted_canvas_size = edited.size
+        base_canvas_size = base_image.size
         if edited.size != base_image.size:
-            raise ValueError(f"Canvas size {edited.size} does not match selected base image {base_image.size}")
+            # Full-image SVG tracing intentionally caps its editing coordinate space
+            # at 1600 px.  Older cached editor pages exported that preview-sized PNG
+            # instead of rasterizing the vector document at the source resolution.
+            # Accept only that narrowly identifiable, aspect-ratio-preserving case;
+            # freehand/manual canvas mismatches remain rejected.
+            edited_ratio = edited.width / max(1, edited.height)
+            base_ratio = base_image.width / max(1, base_image.height)
+            scalable_full_svg = bool(
+                full_vector_svg
+                and "full-image-vector-trace" in full_vector_svg
+                and max(edited.size) <= FULL_SVG_MAX_DIMENSION
+                and max(base_image.size) > FULL_SVG_MAX_DIMENSION
+                and abs(edited_ratio - base_ratio) / max(base_ratio, 1e-9) <= 0.005
+            )
+            if not scalable_full_svg:
+                raise ValueError(f"Canvas size {edited.size} does not match selected base image {base_image.size}")
+            normalized = edited.convert("RGBA").resize(base_image.size, Image.Resampling.LANCZOS)
+            normalized_bytes = io.BytesIO()
+            normalized.save(normalized_bytes, format="PNG")
+            image_bytes = normalized_bytes.getvalue()
+            if len(image_bytes) > 25 * 1024 * 1024:
+                raise ValueError("Full-resolution PNG is larger than the 25 MB manual-edit limit")
+            normalized_canvas = True
         edited.load()
     if full_vector_svg:
         editable_svg = full_vector_svg
@@ -2160,6 +2298,9 @@ def save_manual_arrow_edit(
             "output_image": str(output_path),
             "editable_svg": str(editable_svg_path) if editable_svg else None,
             "saved_at": now_utc(),
+            "submitted_canvas_size": list(submitted_canvas_size or ()),
+            "output_canvas_size": list(base_canvas_size or ()),
+            "canvas_normalized_to_base": normalized_canvas,
             "operations": operations,
             "rule": "User-operated local pixel edit: erase only original curved arrows and draw only straight or orthogonal arrows.",
         },
@@ -2216,6 +2357,7 @@ def save_manual_arrow_edit(
     if not any(isinstance(item, dict) and str(item.get("figure_id") or "") == figure_id for item in rows):
         replacement_rows.append(row)
     write_json(manifest_path, {"project_id": project_id, "figures": replacement_rows})
+    synchronized_assets = sync_edited_figure_to_manuscripts(project, figure_id, output_path)
     return {
         "figure_id": figure_id,
         "render_mode": "manual-arrow-edit",
@@ -2224,6 +2366,7 @@ def save_manual_arrow_edit(
         "editable_svg": str(editable_svg_path) if editable_svg else None,
         "manual_edit_base_mode": base_mode,
         "requires_human_arrow_check": True,
+        "synchronized_draft_assets": synchronized_assets,
     }
 
 
@@ -2509,6 +2652,85 @@ def validate_figure_review(project: Path, project_id: str) -> dict[str, Any]:
     return {"reviewed_paper_count": len(reviewable), "redraw_pending": True}
 
 
+REFERENCE_SECTION_HEADING_RE = re.compile(
+    r"^\s*#{1,6}\s*(?:references|reference list|bibliography|cited literature|参考文献)\s*$",
+    re.I | re.M,
+)
+REFERENCE_SUP_ELEMENT_RE = re.compile(r"<sup\b[^>\r\n]*>[^\r\n]*?</sup>", re.I)
+REFERENCE_SUP_TAG_RE = re.compile(r"</?sup\b[^>]*>", re.I)
+
+
+def clean_reference_author_text(authors: object) -> str:
+    """Remove PDF-extraction affiliation markup from bibliography author names."""
+    text = ", ".join(str(author) for author in authors[:3]) if isinstance(authors, list) else str(authors or "")
+    text = REFERENCE_SUP_ELEMENT_RE.sub("", text)
+    text = REFERENCE_SUP_TAG_RE.sub("", text)
+    text = re.sub(r"\[\s*\]", "", text)
+    text = re.sub(r"\s*[§✉†‡*+]\s*", " ", text)
+    text = re.sub(r",\s*,+", ",", text)
+    text = re.sub(r"\s+([,.;])", r"\1", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip(" ,;")
+
+
+def sanitize_reference_section_markup(markdown: str) -> str:
+    """Keep HTML superscript artifacts out of the publication bibliography."""
+    match = REFERENCE_SECTION_HEADING_RE.search(markdown or "")
+    if not match:
+        return markdown
+    prefix, references = markdown[: match.end()], markdown[match.end() :]
+    references = REFERENCE_SUP_ELEMENT_RE.sub("", references)
+    references = REFERENCE_SUP_TAG_RE.sub("", references)
+    references = re.sub(r"\[\s*\]", "", references)
+    references = re.sub(r",\s*,+", ",", references)
+    references = re.sub(r"(?m)^(\s*\[\d+\].*?)[ \t]{2,}", lambda item: re.sub(r"[ \t]{2,}", " ", item.group(0)), references)
+    references = re.sub(r"[ \t]+([,.;])", r"\1", references)
+    return prefix + references
+
+
+def sanitize_reference_file(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    original = path.read_text(encoding="utf-8", errors="ignore")
+    cleaned = sanitize_reference_section_markup(original)
+    if cleaned == original:
+        return False
+    path.write_text(cleaned, encoding="utf-8")
+    return True
+
+
+def render_reference_section(project: Path, citation_entries: list[dict[str, Any]]) -> str:
+    """Build a clean reference list from authoritative citation and matrix data."""
+    rows = {str(row["paper_id"]): row for row in matrix_rows(project)}
+    lines = ["## References", ""]
+    for entry in citation_entries:
+        paper_id = str(entry.get("paper_id") or "")
+        row = rows.get(paper_id, {})
+        author_text = clean_reference_author_text(row.get("authors") or [])
+        lines.append(
+            f"[{entry.get('callout')}] {author_text}. {row.get('title') or paper_id}. "
+            f"{row.get('journal') or ''} ({row.get('year') or 'n.d.'})."
+        )
+    return sanitize_reference_section_markup("\n".join(lines).rstrip() + "\n")
+
+
+def replace_reference_section(markdown: str, reference_section: str) -> str:
+    match = REFERENCE_SECTION_HEADING_RE.search(markdown or "")
+    body = markdown[: match.start()] if match else markdown
+    return body.rstrip() + "\n\n" + reference_section.strip() + "\n"
+
+
+def refresh_reference_file(project: Path, path: Path, citation_entries: list[dict[str, Any]]) -> bool:
+    if not path.is_file() or not citation_entries:
+        return False
+    original = path.read_text(encoding="utf-8", errors="ignore")
+    refreshed = replace_reference_section(original, render_reference_section(project, citation_entries))
+    if refreshed == original:
+        return False
+    path.write_text(refreshed, encoding="utf-8")
+    return True
+
+
 def regenerate_first_draft(review_root: Path, project_id: str) -> dict[str, Any]:
     project = review_root / "review-projects" / project_id
     stage = project / "04_first_draft"
@@ -2543,19 +2765,76 @@ def regenerate_first_draft(review_root: Path, project_id: str) -> dict[str, Any]
     stage.mkdir(parents=True, exist_ok=True)
     citation_entries = [{"callout": index, "paper_id": paper_id} for index, paper_id in enumerate(citations, start=1)]
     write_json(stage / "citations.json", {"project_id": project_id, "entries": citation_entries})
-    rows = {str(row["paper_id"]): row for row in matrix_rows(project)}
-    reference_lines = ["", "## References", ""]
-    for entry in citation_entries:
-        row = rows.get(entry["paper_id"], {})
-        authors = row.get("authors") or []
-        author_text = ", ".join(authors[:3]) if isinstance(authors, list) else str(authors)
-        reference_lines.append(f"[{entry['callout']}] {author_text}. {row.get('title') or entry['paper_id']}. {row.get('journal') or ''} ({row.get('year') or 'n.d.'}).")
     draft_path = stage / "first_draft.md"
-    draft_path.write_text(draft_path.read_text(encoding="utf-8", errors="ignore").rstrip() + "\n\n" + "\n".join(reference_lines) + "\n", encoding="utf-8")
+    draft_text = draft_path.read_text(encoding="utf-8", errors="ignore")
+    draft_path.write_text(replace_reference_section(draft_text, render_reference_section(project, citation_entries)), encoding="utf-8")
     run_project_script(review_root / "skills" / "review-draft-merge-polish" / "scripts" / "insert_figures_into_draft.py", review_root, project_id)
     (stage / "remaining_issues.md").write_text("# Remaining Issues\n\nConfirm the scientific interpretation, scope boundaries, and every redrawn figure before approving the first draft.\n", encoding="utf-8")
     write_stage_handoff(project / "05_final_audit" / "final_handoff.json", "draft", [stage / "first_draft.md", stage / "citations.json"])
     return {"citation_count": len(citations), "first_draft": str(stage / "first_draft.md")}
+
+
+OVERVIEW_FIGURE_ID = "OVERVIEW-F01"
+OVERVIEW_FIGURE_FILENAME = "overview_figure.png"
+OVERVIEW_FIGURE_BLOCK_RE = re.compile(
+    r"\n*<!-- review_overview_figure:start -->.*?<!-- review_overview_figure:end -->\n*",
+    re.S,
+)
+
+
+def final_draft_contains_overview_figure(text: str) -> bool:
+    """Return whether the manuscript contains the managed overview visual."""
+    return OVERVIEW_FIGURE_ID in text and f"figures/{OVERVIEW_FIGURE_FILENAME}" in text
+
+
+def inject_final_overview_figure(review_root: Path, project_id: str) -> dict[str, Any]:
+    """Place the generated overview figure into the publication manuscript.
+
+    The overview is stored next to the final-stage output for previewing, but
+    Markdown and DOCX exports resolve inserted figures from ``figures/``.  This
+    helper keeps those two locations synchronized and uses the same metadata
+    marker as all other manuscript figures so the normal numbering pass sees it.
+    """
+    project = review_root / "review-projects" / project_id
+    final_stage = project / "05_final_audit"
+    source_path = final_stage / OVERVIEW_FIGURE_FILENAME
+    draft_path = final_stage / "final_draft.md"
+    if not source_path.is_file() or source_path.stat().st_size <= 0:
+        return {"available": False, "included": False, "reason": "overview figure is missing"}
+    if not draft_path.is_file():
+        return {"available": True, "included": False, "reason": "final draft is not available yet"}
+
+    figure_dir = final_stage / "figures"
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    figure_path = figure_dir / OVERVIEW_FIGURE_FILENAME
+    shutil.copy2(source_path, figure_path)
+
+    manuscript = draft_path.read_text(encoding="utf-8", errors="ignore")
+    manuscript = OVERVIEW_FIGURE_BLOCK_RE.sub("\n", manuscript)
+    metadata = {
+        "figure_id": OVERVIEW_FIGURE_ID,
+        "target_paragraph_id": "",
+        "source_label": "Figure 1",
+        "published_label": "Figure 1",
+        "role": "review_overview",
+    }
+    block = (
+        "<!-- review_overview_figure:start -->\n"
+        "<!-- inserted_figure: "
+        + json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        + " -->\n\n"
+        "![Figure 1](figures/overview_figure.png)\n\n"
+        "Figure 1. Overview of the substrate classes, transformation logic, and representative reaction platforms covered in this review.\n"
+        "<!-- review_overview_figure:end -->"
+    )
+    first_section = re.search(r"^##\s+", manuscript, re.M)
+    if first_section:
+        insert_at = first_section.start()
+        manuscript = manuscript[:insert_at].rstrip() + "\n\n" + block + "\n\n" + manuscript[insert_at:].lstrip()
+    else:
+        manuscript = manuscript.rstrip() + "\n\n" + block + "\n"
+    draft_path.write_text(manuscript, encoding="utf-8")
+    return {"available": True, "included": True, "asset": str(figure_path)}
 
 
 def regenerate_final_audit(review_root: Path, project_id: str) -> dict[str, Any]:
@@ -2568,11 +2847,50 @@ def regenerate_final_audit(review_root: Path, project_id: str) -> dict[str, Any]
     draft_path = draft_stage / "first_draft.md"
     if not draft_path.exists():
         raise RuntimeError("Create the first draft before generating the final audit.")
-    if not conclusion.exists() or not report.exists() or conclusion.stat().st_mtime <= draft_path.stat().st_mtime:
-        raise RuntimeError("Generate and validate a current conclusion before running the final audit.")
-    if not (quality.get("validation") or {}).get("passes_validation"):
-        raise RuntimeError("The generated conclusion did not pass validation. Regenerate or correct it before final audit.")
-    run_project_script(review_root / "skills" / "review-final-audit-release" / "scripts" / "integrate_generated_conclusion.py", review_root, project_id)
+    conclusion_current = bool(
+        conclusion.exists()
+        and report.exists()
+        and conclusion.stat().st_mtime > draft_path.stat().st_mtime
+        and (quality.get("validation") or {}).get("passes_validation")
+    )
+    if conclusion_current:
+        run_project_script(
+            review_root / "skills" / "review-final-audit-release" / "scripts" / "integrate_generated_conclusion.py",
+            review_root,
+            project_id,
+        )
+        conclusion_mode = "integrated_current_conclusion"
+    else:
+        # Conclusion generation is optional.  The final manuscript can always
+        # be assembled from the current first draft, while a later validated
+        # conclusion simply becomes an optional enhancement on the next run.
+        final_stage.mkdir(parents=True, exist_ok=True)
+        fallback_text = re.sub(
+            r"(?m)^\s*<!--\s*paragraph_id:\s*[A-Za-z0-9_.:-]+\s*-->\s*\n?",
+            "",
+            draft_path.read_text(encoding="utf-8", errors="ignore"),
+        )
+        (final_stage / "final_draft.md").write_text(fallback_text, encoding="utf-8")
+        source_figures = draft_stage / "figures"
+        if source_figures.is_dir():
+            shutil.copytree(source_figures, final_stage / "figures", dirs_exist_ok=True)
+        write_json(
+            final_stage / "conclusion_integration.json",
+            {
+                "schema_version": 1,
+                "mode": "first_draft_without_optional_conclusion",
+                "first_draft_path": str(draft_path.resolve()),
+                "figure_assets_path": str((final_stage / "figures").resolve()) if source_figures.is_dir() else None,
+            },
+        )
+        conclusion_mode = "first_draft_without_optional_conclusion"
+    citations_payload = read_json_if_exists(draft_stage / "citations.json") or {}
+    citation_entries = citations_payload.get("entries") if isinstance(citations_payload, dict) else []
+    if isinstance(citation_entries, list) and citation_entries:
+        refresh_reference_file(project, final_stage / "final_draft.md", citation_entries)
+    else:
+        sanitize_reference_file(final_stage / "final_draft.md")
+    overview = inject_final_overview_figure(review_root, project_id)
     # The final manuscript is the publication boundary. Normalize again after
     # conclusion integration so any future template or manual ordering change
     # cannot leave captions/references with draft-manifest numbering.
@@ -2583,65 +2901,73 @@ def regenerate_final_audit(review_root: Path, project_id: str) -> dict[str, Any]
         extra=["--stage", "05_final_audit"],
     )
     run_project_script(review_root / "skills" / "review-final-audit-release" / "scripts" / "final_audit_scan.py", review_root, project_id)
-    return {"final_draft": str(final_stage / "final_draft.md")}
+    return {
+        "final_draft": str(final_stage / "final_draft.md"),
+        "overview": overview,
+        "conclusion_mode": conclusion_mode,
+    }
 
 
-def generate_outline_chart_preview(review_root: Path, project_id: str) -> dict[str, str]:
-    """Compose the approved conclusion into a first-draft preview and chart it."""
+def generate_final_overview_figure(review_root: Path, project_id: str) -> dict[str, str]:
+    """Generate the template-matched overview figure for the Final workspace."""
     project = review_root / "review-projects" / project_id
-    draft_stage = project / "04_first_draft"
-    selected_outline = project / "01_matrix_outline" / "selected_outline.md"
-    draft_path = draft_stage / "first_draft.md"
-    conclusion_path = draft_stage / "conclusion_generated.md"
-    report_path = draft_stage / "conclusion_quality_report.json"
-    try:
-        selected_outline.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise RuntimeError("Choose a readable selected outline before generating the outline chart preview.") from exc
-    try:
-        first_draft = draft_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise RuntimeError("Create a readable first draft before generating the outline chart preview.") from exc
-    try:
-        conclusion = conclusion_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise RuntimeError("Generate a current conclusion before generating the outline chart preview.") from exc
-    report = read_json_if_exists(report_path) or {}
-    if conclusion_path.stat().st_mtime <= draft_path.stat().st_mtime or not (
-        report.get("validation") or {}
-    ).get("passes_validation"):
-        raise RuntimeError("Generate and validate a current conclusion before generating the outline chart preview.")
-
-    preview_path = draft_stage / "outline_chart_preview.md"
-    integration = conclusion_integration_module(review_root)
-    try:
-        preview_path.write_text(integration.integrate_conclusion(first_draft, conclusion), encoding="utf-8")
-    except ValueError as exc:
-        raise RuntimeError(f"Cannot compose the outline chart preview: {exc}") from exc
-    chart_script = review_root / "skills" / "review-outline-summary-chart" / "scripts" / "generate_review_summary_chart.py"
+    outline_path = project / "01_matrix_outline" / "selected_outline.md"
+    if not outline_path.is_file():
+        raise RuntimeError("Choose a selected outline before generating the overview figure.")
+    final_stage = project / "05_final_audit"
+    output_path = final_stage / "overview_figure.png"
+    overview_script = review_root / "skills" / "review-figure-style-redraw" / "scripts" / "generate_overview_figure.py"
     run_project_script(
-        chart_script,
+        overview_script,
         review_root,
         project_id,
-        extra=["--scope", "both", "--input-markdown", str(preview_path)],
+        timeout=600,
+        extra=["--model", "gpt-image-2", "--output", str(output_path)],
     )
-    full_png = draft_stage / "review_summary_chart.png"
-    if not full_png.is_file():
-        raise RuntimeError("Outline chart preview did not produce the full PNG.")
-    return {"preview_markdown": str(preview_path), "preview_full_png": str(full_png)}
+    if not output_path.is_file() or output_path.stat().st_size <= 0:
+        raise RuntimeError("Overview figure generation did not produce a PNG output.")
+    integration = inject_final_overview_figure(review_root, project_id)
+    if integration.get("included"):
+        # Keep the preview action and the full final-draft action on the same
+        # numbering path.  This is intentionally safe to repeat: the injector
+        # removes its managed block before adding the updated overview figure.
+        run_project_script(
+            review_root / "skills" / "review-draft-merge-polish" / "scripts" / "renumber_figures_in_draft.py",
+            review_root,
+            project_id,
+            extra=["--stage", "05_final_audit"],
+        )
+    return {
+        "overview_figure": str(output_path),
+        "included_in_final_draft": str(bool(integration.get("included"))).lower(),
+    }
 
 
 def regenerate_final_draft_bundle(review_root: Path, project_id: str) -> dict[str, str]:
-    """Regenerate the validated final draft, then its current full chart bundle."""
+    """Regenerate the final manuscript and its single full-review overview chart."""
     audit = regenerate_final_audit(review_root, project_id)
-    project = review_root / "review-projects" / project_id
-    final_stage = project / "05_final_audit"
-    chart_script = review_root / "skills" / "review-outline-summary-chart" / "scripts" / "generate_review_summary_chart.py"
-    run_project_script(chart_script, review_root, project_id, extra=["--scope", "both"])
-    full_png = final_stage / "review_summary_chart.png"
+    final_draft = Path(str(audit["final_draft"]))
+    # Keep this final guard after every audit-side script.  It protects the
+    # overview asset from future integrations that replace final_draft.md
+    # after the first insertion point has run.
+    overview = inject_final_overview_figure(review_root, project_id)
+    if overview.get("available") and not overview.get("included"):
+        raise RuntimeError("The generated overview figure could not be inserted into final_draft.md.")
+    if overview.get("included"):
+        run_project_script(
+            review_root / "skills" / "review-draft-merge-polish" / "scripts" / "renumber_figures_in_draft.py",
+            review_root,
+            project_id,
+            extra=["--stage", "05_final_audit"],
+        )
+        final_text = final_draft.read_text(encoding="utf-8", errors="ignore")
+        if not final_draft_contains_overview_figure(final_text):
+            raise RuntimeError("The generated overview figure was not retained in final_draft.md.")
+    refresh_final_overview_chart(review_root, project_id, final_draft)
+    full_png = final_draft.parent / "review_summary_chart.png"
     if not full_png.is_file():
-        raise RuntimeError("Final chart generation did not produce the full PNG.")
-    return {"final_draft": str(audit["final_draft"]), "final_full_png": str(full_png)}
+        raise RuntimeError("Overall review chart generation did not produce a PNG.")
+    return {"final_draft": str(final_draft), "final_full_png": str(full_png)}
 
 
 def generate_final_conclusion(review_root: Path, project_id: str) -> dict[str, Any]:
@@ -3371,18 +3697,27 @@ def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     stage = project / "05_final_audit"
     draft_stage = project / "04_first_draft"
     docx_path = latest_final_docx_path(stage)
+    docx_current = docx_export_is_current(stage, docx_path)
     section_stage = project / "02_section_drafting"
     source_freshness = artifact_freshness(
         section_stage / "section_handoff.json",
         [section_stage / "section_drafts.json", section_stage / "figure_candidates.json", section_stage / "paper_figure_candidates.json"],
     )
-    final_freshness = artifact_freshness(stage / "final_handoff.json", [stage / "final_draft.md"])
+    final_draft_path = stage / "final_draft.md"
+    final_freshness = artifact_freshness(stage / "final_handoff.json", [final_draft_path])
     draft_path = draft_stage / "first_draft.md"
     conclusion_path = draft_stage / "conclusion_generated.md"
     conclusion_report = read_json_if_exists(draft_stage / "conclusion_quality_report.json") or {}
-    preview_path = draft_stage / "outline_chart_preview.md"
-    preview_full_png = draft_stage / "review_summary_chart.png"
+    overview_figure = stage / "overview_figure.png"
     release_full_png = stage / "review_summary_chart.png"
+    overview_asset = stage / "figures" / OVERVIEW_FIGURE_FILENAME
+    final_draft_text = read_text_if_exists(final_draft_path)
+    overview_included = final_draft_contains_overview_figure(final_draft_text)
+    overview_freshness = output_freshness_against_inputs(
+        [final_draft_path, overview_asset],
+        [overview_figure],
+    ) if overview_figure.exists() else {"stale": False, "outdated_outputs": []}
+    overview_stale = overview_figure.exists() and (not overview_included or overview_freshness["stale"])
     conclusion_current = bool(
         conclusion_path.exists()
         and draft_path.exists()
@@ -3393,7 +3728,7 @@ def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
         "project_id": project_id,
         "topic": infer_project_topic(project),
         "summary": project_summary(review_root, project_id),
-        "final_draft_md": read_text_if_exists(stage / "final_draft.md"),
+        "final_draft_md": final_draft_text,
         "final_audit_report_md": read_text_if_exists(stage / "final_audit_report.md"),
         "release_report_md": read_text_if_exists(stage / "release_report.md"),
         "conclusion_generated_md": read_text_if_exists(conclusion_path),
@@ -3405,14 +3740,19 @@ def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
             "figure_candidates": read_json_if_exists(project / "02_section_drafting" / "figure_candidates.json"),
         },
         "final_draft_docx_path": str(docx_path),
-        "final_draft_docx_exists": docx_path.exists(),
-        "outline_chart_preview_path": str(preview_path),
-        "outline_chart_preview_exists": preview_path.exists(),
-        "outline_chart_preview_full_png_path": str(preview_full_png),
-        "outline_chart_preview_full_png_exists": preview_full_png.exists(),
+        "final_draft_docx_exists": docx_current,
+        "final_draft_docx_stale": docx_path.exists() and not docx_current,
         "release_chart_full_png_path": str(release_full_png),
         "release_chart_full_png_exists": release_full_png.exists(),
-        "freshness": {"source_stale": source_freshness["stale"], "final_stale": final_freshness["stale"], "stale": source_freshness["stale"] or final_freshness["stale"]},
+        "overview_figure_path": str(overview_figure),
+        "overview_figure_exists": overview_figure.exists(),
+        "overview_figure_included": overview_included,
+        "freshness": {
+            "source_stale": source_freshness["stale"],
+            "final_stale": final_freshness["stale"] or overview_stale,
+            "overview_stale": overview_stale,
+            "stale": source_freshness["stale"] or final_freshness["stale"] or overview_stale,
+        },
         "paths": {"stage_dir": str(stage)},
     }
 

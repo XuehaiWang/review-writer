@@ -874,6 +874,9 @@ def resolve_api_key(cli_value: str, base_url: str = "") -> str:
     """Use the dedicated xiaoleai key when its OpenAI-compatible endpoint is selected."""
     if cli_value:
         return cli_value
+    image_key = os.environ.get("IMAGE_OPENAI_API_KEY", "")
+    if image_key:
+        return image_key
     if "api.xiaoleai.team" in base_url:
         return os.environ.get("XIAOLEAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
     return os.environ.get("OPENAI_API_KEY", "")
@@ -889,7 +892,7 @@ def resolve_image_field(configured: str, base_url: str) -> str:
 
 
 def default_base_url() -> str:
-    return os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+    return os.environ.get("IMAGE_OPENAI_BASE_URL", os.environ.get("OPENAI_BASE_URL", "https://api.openai.com"))
 
 
 def openai_api_url(base_url: str, endpoint: str) -> str:
