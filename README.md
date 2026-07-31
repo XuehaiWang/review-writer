@@ -1,135 +1,269 @@
-# review-writer
+# Review Writer
 
-面向化学综述写作的可审计工作流：从自然语言 Topic 出发，生成结构化检索计划，召回并筛选本地 metadata 文献，完成文献矩阵、提纲、分节写作、结论生成、总结图、终审和 Word 导出。
+Review Writer 是一个面向化学综述写作的本地、可审计工作流。它把论文入库、主题检索、文献矩阵、章节规划、分节写作、化学图像审核与重绘、初稿合并、终稿审计和 Word 导出连接成同一个项目流程。
 
-当前 `dy` 分支重点增强了 Topic 检索理解能力：LLM 不再只输出松散关键词，而是先生成可验证的 query plan，将缩写、时间范围、底物、催化剂、反应类型和文章组织方式传递给确定性的检索脚本。
+当前实现以三个基础层保证阶段之间稳定衔接：
 
-> 完整的原版对比、评分规则、回退逻辑、APA 与 axial-chiral allenes 示例，请参阅 [集成说明.txt](./集成说明.txt)。
+1. **持久状态**：SQLite 保存阶段运行、人工放行、失败记录和可恢复批处理进度。
+2. **产物版本**：每个文件按 SHA-256 登记不可变版本，并维护当前版本指针。
+3. **明确依赖**：输出记录它所依赖的输入版本；上游变化后，下游会被标记为过期。
 
-## 检索流程
+Prefect 3 负责可执行阶段的编排、运行记录和有限重试，科学正文与图片仍以普通文件保存，便于检查、复制和归档。
+
+## 工作流总览
 
 ```mermaid
 flowchart LR
-    A[用户 Topic] --> B[LLM 生成 Query Plan]
-    B --> C{结构与概念校验}
-    C -->|仅剩未解析概念| D[请求用户补充]
-    C -->|校验通过| E[年份过滤与 8 类标签检索]
-    E --> F[本地 Metadata 评分]
-    F --> G[可选 SciAtlas / Crossref]
-    G --> H[去重、排序、最多 30 篇]
-    H --> I[按底物或催化剂分组]
-    I --> J[人工确认候选集]
-    J --> K[Matrix / Outline / Draft / DOCX]
+    A["Library<br/>PDF、Markdown、metadata"] --> B["Discovery<br/>主题检索与人工筛选"]
+    B --> C["Matrix<br/>文献矩阵与大纲"]
+    C --> D["Blueprint<br/>章节论证蓝图"]
+    D --> E["Sections<br/>分节草稿与候选图"]
+    E --> F["Figure Review<br/>逐篇确认源图"]
+    F --> G["Figures<br/>AI 重绘与 SVG 编辑"]
+    E --> H["Draft<br/>初稿合并"]
+    G --> H
+    H --> I["Final<br/>终稿、审计与 DOCX"]
+    D -. 可选 .-> J["Overview Figure"]
+    H -. 可选 .-> K["Conclusion"]
+    J -. 合并当前版本 .-> I
+    K -. 合并当前版本 .-> I
 ```
 
-## 修改后的 Topic 检索能力
-
-- **LLM Topic 解析**：通过 `query_plan.draft.json` 连接 LLM 和 `discover.py`，保留概念解析结果、置信度和理由。
-- **缩写安全机制**：只在化学上下文充分时展开 APA 等缩写；证据不足时进入 `unresolved_concepts`，不盲猜、不执行无意义的字面检索。
-- **中英文时间过滤**：将“近 5 年”“past five years”等转换为包含当前年份的闭区间，并在本地 metadata 评分前过滤。
-- **组织意图提取**：将“按照催化剂种类区分”转换为 `group_by: ["catalyst_or_method"]`，而不是把写作指令当关键词。
-- **8 类标签定向召回**：关键词只匹配其声明的 structured tag 类别，减少跨字段弱匹配。
-- **本地优先、外部补充**：本地 metadata 是正式候选来源；SciAtlas 和 Crossref 用于覆盖检查和补充发现。
-- **可审计候选池**：记录命中字段、匹配词、分数、候选角色、过滤统计和分组结果；目标为 20–30 篇，最多保留 30 篇，不用零匹配论文凑数。
-- **人工确认门禁**：discovery 初始状态为 `pending`，确认关键词和候选论文后才进入文献矩阵与正文阶段。
-
-本地召回使用以下 8 类 metadata 标签：
-
-| 标签 | 用途 |
-|---|---|
-| `product` | 目标产物 |
-| `substrate` | 底物类别 |
-| `catalyst_or_method` | 催化剂或方法 |
-| `organometallic_partner` | 有机金属试剂 |
-| `ligand_or_chiral_source` | 配体或手性来源 |
-| `leaving_group` | 离去基团 |
-| `reaction_type` | 反应类型 |
-| `document_scope` | 文献类型或范围 |
-
-## 完整综述工作流
+人工检查页面按以下顺序排列：
 
 ```text
-Topic discovery
-  → literature matrix and outline
-  → section blueprint
-  → section drafting and source-figure selection
-  → first-draft merge
-  → conclusion / challenges / insights
-  → conclusion integration
-  → final audit
-  → review summary chart
-  → DOCX export
+Library -> Discovery -> Matrix -> Blueprint -> Sections
+        -> Figure Review -> Figures -> Draft -> Final
 ```
 
-新增集成能力包括：
+## 主要能力
 
-- `review-conclusion-generator`：根据初稿、文献矩阵和阅读笔记生成结论、挑战、趋势及洞见；
-- `integrate_generated_conclusion.py`：把通过质量检查的结论合并到最终稿；
-- `review-outline-summary-chart`：离线生成全文和全部正文小节结构图，并通过带 SHA-256 的图片清单自动嵌入 Word；
-- final audit / DOCX export：检查引用、图片、占位符和格式后导出 Word。
+- **论文入库与结构化 metadata**
+  - 管理 PDF、MinerU Markdown、图片和论文注册表。
+  - 审核标题、作者、摘要、路径及 8 类化学标签。
+- **联网发现与开放获取下载**
+  - 按主题检索 Crossref。
+  - 结合 Europe PMC、Semantic Scholar 和可选的 Unpaywall 寻找开放获取 PDF。
+  - 在 Library 弹窗内填写主题、年份、数量和可选联系邮箱。
+  - 下载文件先校验 PDF，再登记到本地文献库；不会把 HTML 错误页当作论文。
+- **可审计的主题检索**
+  - 先生成结构化 query plan，再检索本地 metadata 和可选外部来源。
+  - 支持缩写消歧、时间范围、化学概念、反应类型和组织方式。
+  - 人工确认关键词与论文后，才允许进入矩阵阶段。
+- **矩阵、蓝图与分节写作**
+  - 生成逐篇阅读记录、文献矩阵、大纲候选和选定大纲。
+  - 将章节目标、论点、论文角色、逻辑关系和图表需求固化为 blueprint。
+  - 分节草稿与候选图绑定，保留来源关系。
+- **化学图像工作流**
+  - Figure Review 先逐篇选择最终源图，再进入批量重绘。
+  - AI 重绘根据图像类型选择约束，批量进度和停止状态可恢复。
+  - 支持使用原图或 AI 重绘图作为在线 SVG 编辑底图。
+  - 全图转换为可编辑 SVG 路径，支持选择、框选、移动、删除、撤销、
+    橡皮擦、文本、直线和多种箭头。
+  - 保存后的人工编辑会更新重绘 manifest，并同步到已有初稿/终稿图片。
+- **终稿与 Word 导出**
+  - Conclusion 和 Overview Figure 是相互独立的可选产物。
+  - Generate Final Draft 使用当时存在且为当前版本的可选产物，不强制串行点击。
+  - 终稿统一图号及正文引用，清理内部插图标记和异常引用标签。
+  - `Generate & Download Word` 根据当前 `final_draft.md` 重新生成 DOCX；
+    `Download DOCX` 只下载已经确认与当前 Markdown 一致的最新文件。
+
+## 阶段与主要产物
+
+| 页面 | 作用 | 主要产物 |
+|---|---|---|
+| Library | 入库、metadata 审核、联网检索和 OA 下载 | `review-library/metadata/papers/*.metadata.json`、`review-library/registry/papers.jsonl` |
+| Discovery | 主题解析、候选召回、人工筛选 | `00_discovery/query_plan.draft.json`、`selected_discovery_results.json` |
+| Matrix | 深读、矩阵、大纲候选与大纲选择 | `01_matrix_outline/literature_matrix.json`、`paper_reading_notes.json`、`selected_outline.md` |
+| Blueprint | 章节论证计划和写作任务 | `01_matrix_outline/section_blueprint.json`、`02_section_drafting/section_tasks.json` |
+| Sections | 分节草稿和图像候选 | `section_drafts.json`、`section_drafts.md`、`figure_candidates.json` |
+| Figure Review | 逐篇确认最终源图 | `02_section_drafting/human_figure_review.json` |
+| Figures | AI 重绘、人工 SVG 编辑和图片清单 | `03_figure_redraw/redrawn_figure_manifest.json`、`redrawn/*.png`、`manual_arrow_edits/*.svg` |
+| Draft | 合并、润色、插图和引用整理 | `04_first_draft/first_draft.md`、`citations.json`、`figures/*` |
+| Final | 可选结论/总览图、最终审计和 Word 导出 | `05_final_audit/final_draft.md`、`overview_figure.png`、`release_report.md`、`final_draft*.docx` |
 
 ## 快速开始
 
-### 1. 生成结构化 Query Plan
+### 1. 获取 `dy` 分支
 
-由 Codex/编排器依据以下规则解析 Topic：
+```powershell
+git clone --branch dy https://github.com/XuehaiWang/review-writer.git
+Set-Location review-writer
+```
+
+### 2. 创建工作环境
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements-workflow.txt
+```
+
+`requirements-workflow.txt` 包含当前前端工作流所需的 Prefect、Pillow 和
+python-docx。个别准备阶段还可能需要其对应 Skill 文档中列出的外部程序，
+例如 MinerU 或 Tesseract。
+
+### 3. 配置 `.env`
+
+在项目根目录创建 `.env`。下面仅为变量结构示例，请填写自己的服务地址、
+模型名和密钥：
+
+```dotenv
+# 文本模型：OpenAI 或兼容服务
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=replace-with-your-key
+REVIEW_METADATA_MODEL=your-text-model
+REVIEW_WRITING_MODEL=your-text-model
+REVIEW_CONCLUSION_MODEL=your-text-model
+
+# 图像编辑可与文本模型使用不同服务
+IMAGE_OPENAI_BASE_URL=https://api.openai.com/v1
+IMAGE_OPENAI_API_KEY=replace-with-your-image-key
+
+# 可选：文献服务与本地 OCR
+UNPAYWALL_EMAIL=you@example.org
+SEMANTIC_SCHOLAR_API_KEY=
+MINERU_API_TOKEN=
+TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
+```
+
+注意：
+
+- `.env` 已被 Git 忽略，不要把真实密钥写入 README、提交记录或截图。
+- 文本服务需要兼容项目所调用的 `chat/completions` 或 `responses` 接口。
+- 当前 AI 重绘默认使用图像编辑接口；第三方服务必须实际支持
+  `images/edits`，仅在模型列表中显示模型名并不代表接口兼容。
+- Unpaywall 邮箱不是下载的强制条件；未填写时仍会尝试其他合法开放获取来源。
+
+### 4. 启动本地前端
+
+```powershell
+.\.venv\Scripts\python.exe view\serve_review_dashboard.py `
+  --review-root . `
+  --host 127.0.0.1 `
+  --port 8765
+```
+
+浏览器打开：
 
 ```text
-skills/review-topic-paper-discovery/references/keyword_expansion_prompt.md
+http://127.0.0.1:8765
 ```
 
-输出到：
+如需在可信局域网内临时访问，可将 `--host` 改为 `0.0.0.0`，然后让同一局域网
+中的用户访问 `http://<本机局域网IP>:8765`。该前端没有内置多用户认证，
+不要直接暴露到公网，也不要在不可信网络中开放防火墙端口。
+
+## 数据、状态与版本
+
+### 科学产物
+
+科学内容继续保存在普通文件中：
 
 ```text
-review-projects/<project-id>/00_discovery/query_plan.draft.json
+review-library/
+├─ metadata/papers/       规范化论文 metadata
+├─ registry/papers.jsonl  论文注册表
+└─ downloads/             联网下载的本地 PDF（默认不提交 Git）
+
+review-projects/<project-id>/
+├─ 00_discovery/
+├─ 01_matrix_outline/
+├─ 02_section_drafting/
+├─ 03_figure_redraw/
+├─ 04_first_draft/
+└─ 05_final_audit/
 ```
 
-### 2. 执行本地 metadata 检索
+### SQLite 业务状态
 
-```bash
-python skills/review-topic-paper-discovery/scripts/discover.py \
-  --review-root <review-root> \
-  --project-id <project-id> \
-  --topic "<review topic>" \
-  --query-plan review-projects/<project-id>/00_discovery/query_plan.draft.json
-```
-
-可选增加外部覆盖检查：
-
-```bash
---sciatlas-search --web-search
-```
-
-不传 `--query-plan` 时仍保留确定性规则回退，便于兼容旧调用；正式 Codex discovery 流程应使用 query plan。
-
-## Discovery 主要产物
+服务首次启动时创建：
 
 ```text
-00_discovery/
-├── topic_input.md
-├── query_plan.draft.json
-├── keyword_set.draft.json
-├── local_results_by_keyword.json
-├── web_results_by_keyword.json
-├── combined_results_by_keyword.json
-├── selected_discovery_results.json
-├── human_check_state.json
-└── discovery_report.md
+.review-writer/workflow.sqlite3
 ```
+
+它只保存编排 metadata，不存放论文正文或图片二进制：
+
+- 项目和阶段依赖；
+- 阶段 run、状态、错误与 Prefect run ID；
+- 文件 SHA-256、逻辑名称、产物版本和当前版本；
+- 输出版本到输入版本的依赖关系；
+- 批量 AI 重绘等长任务的进度与停止状态。
+
+上游文件发生变化后，依赖旧版本的下游产物会显示为过期，避免把旧图片、
+旧章节或旧 DOCX误当作当前结果。可通过只读接口查看项目状态：
+
+```text
+GET /api/project/<project-id>/workflow-state
+```
+
+### Handoff 文件
+
+各阶段仍保留 JSON handoff，方便人工检查、脚本调用和项目迁移。新 handoff
+会记录内容哈希和版本快照；旧项目会继续兼容，并在下一次成功执行相应阶段后
+升级为新的版本规则。
+
+## Prefect 编排
+
+前端启动时启用 Prefect 3：
+
+- 每个可执行阶段生成独立 flow run 和 task run；
+- HTTP 429、500、502、503、504、连接中断和超时可自动重试一次；
+- 400、401、403、404 和确定性校验错误不会盲目重试；
+- 批量重绘仍按项目逻辑逐张处理，业务进度写入 `workflow.sqlite3`；
+- Prefect 按 Windows 当前账户使用独立目录：
+  `.review-writer/prefect-<account>/`，避免不同账户之间的 ACL 冲突。
+
+默认使用按需启动的本地临时 Prefect 服务。需要持续查看 Prefect UI 时，可以
+单独启动服务：
+
+```powershell
+$env:PREFECT_HOME=(Resolve-Path '.review-writer\prefect-local').Path
+.\.venv\Scripts\prefect.exe server start --host 127.0.0.1 --port 4200
+```
+
+在另一个 PowerShell 窗口中启动 Review Writer：
+
+```powershell
+$env:PREFECT_API_URL='http://127.0.0.1:4200/api'
+.\.venv\Scripts\python.exe view\serve_review_dashboard.py `
+  --review-root . `
+  --host 127.0.0.1 `
+  --port 8765
+```
+
+Prefect UI 地址为 `http://127.0.0.1:4200`。
 
 ## 项目结构
 
 ```text
-skills/          各阶段 Skill、脚本和使用文档
-review-library/  规范化论文 metadata 与注册表
-view/            人工检查界面
-template/        综述与导出参考模板
+skills/                 各阶段 Skill、规则、脚本和校验器
+view/                   本地前端、HTTP API、持久状态和 Prefect flow
+review-library/         论文 metadata、注册表和本地文献
+review-projects/        每个综述项目的阶段产物（本地工作数据）
+template/               综述和导出模板
+prefect.toml            Prefect 本地运行配置
+requirements-workflow.txt
 ```
 
-## 文档
+主要入口：
 
-- [检索优化与工作流集成说明](./集成说明.txt)
-- [Topic 文献发现 Skill](./skills/review-topic-paper-discovery/SKILL.md)
-- [总编排器 Skill](./skills/review-writing-orchestrator/SKILL.md)
-- [结论生成 Skill](./skills/review-conclusion-generator/SKILL.md)
-- [总结图 Skill](./skills/review-outline-summary-chart/SKILL.md)
+- [前端使用说明](view/前端使用说明.md)
+- [Skills 工作流说明](skills/技能工作流说明.md)
+- [总编排器](skills/review-writing-orchestrator/SKILL.md)
+- [联网文献获取](skills/review-literature-acquisition/SKILL.md)
+- [图像统一风格与编辑](skills/review-figure-style-redraw/SKILL.md)
+- [最终审计与发布](skills/review-final-audit-release/SKILL.md)
+- [DOCX 导出](skills/review-export-docx/SKILL.md)
+
+## 安全与使用边界
+
+- 仅下载合法开放获取或用户有权访问的论文，不绕过付费墙、验证码或访问控制。
+- AI 重绘不能代替化学正确性审核；化学键、原子、立体化学、箭头方向和文字
+  必须由人工确认。
+- SVG 编辑保存的是人工修改结果，仍应在 Draft 和 Final 阶段检查实际插图。
+- 删除项目会永久删除 `review-projects/<project-id>` 及其输出，界面要求输入完整
+  project ID 二次确认。
+- `review-projects/`、下载文件、`.env` 和 `.review-writer/` 都属于本地工作数据，
+  推送代码前应再次检查 `git status`，避免提交敏感内容。
