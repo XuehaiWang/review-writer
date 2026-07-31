@@ -57,10 +57,10 @@
     if (!selector || document.querySelector("#delete-project")) return;
     const button = document.createElement("button");
     button.id = "delete-project";
+    button.className = "project-delete";
     button.type = "button";
     button.textContent = "Delete project";
     button.title = "Permanently delete the selected project";
-    button.style.cssText = "margin-left:8px;padding:7px 10px;border:1px solid #a2352c;border-radius:999px;background:#fff7f5;color:#a2352c;cursor:pointer;";
     const updateDisabledState = () => {
       button.disabled = !selector.value;
       button.style.opacity = button.disabled ? "0.5" : "1";

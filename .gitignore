@@ -2,12 +2,15 @@
 !/.gitignore
 !/README.md
 !/集成说明.txt
+!/prefect.toml
+!/requirements-workflow.txt
 !/skills/
 !/skills/**
 !/view/
 !/view/**
 !/review-library/
 !/review-library/**
+/review-library/downloads/
 
 /.env
 /.env.*

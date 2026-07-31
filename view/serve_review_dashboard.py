@@ -10,6 +10,7 @@ import importlib.util
 import json
 import math
 import mimetypes
+import os
 import posixpath
 import re
 import shutil
@@ -24,6 +25,19 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from PIL import Image
 
 
+_VIEW_SCRIPTS = Path(__file__).resolve().parent
+if str(_VIEW_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_VIEW_SCRIPTS))
+from workflow_store import WorkflowStore
+from prefect_runtime import (
+    configure_prefect_environment,
+    prefect_orchestration_enabled,
+    run_batch_redraw_with_prefect,
+    run_literature_acquisition_with_prefect,
+    run_stage_with_prefect,
+)
+
+
 _PARAGRAPH_SCRIPTS = Path(__file__).resolve().parent.parent / "skills" / "review-draft-merge-polish" / "scripts"
 if str(_PARAGRAPH_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_PARAGRAPH_SCRIPTS))
@@ -31,12 +45,83 @@ from paragraph_editor import ParagraphEditor
 from paragraph_manifest_builder import build_manifest
 
 
+_LITERATURE_SCRIPTS = (
+    Path(__file__).resolve().parent.parent
+    / "skills"
+    / "review-literature-acquisition"
+    / "scripts"
+)
+if str(_LITERATURE_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_LITERATURE_SCRIPTS))
+from literature_acquisition import acquire_candidate, load_dotenv_if_present, search_crossref
+
+
 _DISCOVERY_MODULE = None
 _BATCH_REDRAW_LOCK = threading.RLock()
 _BATCH_REDRAW_JOBS: dict[str, dict[str, object]] = {}
+_LITERATURE_JOB_LOCK = threading.RLock()
+_LITERATURE_THREADS: dict[str, threading.Thread] = {}
+_LIBRARY_WORKFLOW_PROJECT = "__library__"
+_WORKFLOW_STORE_LOCK = threading.RLock()
+_WORKFLOW_STORES: dict[str, WorkflowStore] = {}
 FULL_SVG_MAX_DIMENSION = 1600
 FULL_SVG_WHITE_THRESHOLD = 245
 FULL_SVG_COLOR_STEP = 24
+
+
+def workflow_store(review_root: Path) -> WorkflowStore:
+    """Return the durable workflow metadata store for one workspace."""
+    key = str(Path(review_root).resolve())
+    with _WORKFLOW_STORE_LOCK:
+        store = _WORKFLOW_STORES.get(key)
+        if store is None:
+            store = WorkflowStore(Path(review_root))
+            _WORKFLOW_STORES[key] = store
+        return store
+
+
+def workflow_context_for_path(path: Path) -> tuple[WorkflowStore, str] | None:
+    """Infer workspace and project IDs from a path below review-projects."""
+    resolved = Path(path).resolve()
+    parts = resolved.parts
+    try:
+        marker = parts.index("review-projects")
+    except ValueError:
+        return None
+    if marker == 0 or marker + 1 >= len(parts):
+        return None
+    review_root = Path(*parts[:marker])
+    project_id = parts[marker + 1]
+    return workflow_store(review_root), project_id
+
+
+def execute_dashboard_stage(review_root: Path, project_id: str, stage_id: str) -> dict[str, Any]:
+    """Execute one existing scientific stage inside a Prefect task."""
+    project = Path(review_root) / "review-projects" / project_id
+    if stage_id == "sections":
+        result = regenerate_section_drafting(review_root, project_id)
+        next_stage = "figure-review"
+    elif stage_id == "figure-review":
+        result = validate_figure_review(project, project_id)
+        next_stage = "figures"
+    elif stage_id == "figures":
+        result = regenerate_figures_and_first_draft(review_root, project_id)
+        next_stage = "draft"
+    elif stage_id == "draft":
+        result = regenerate_first_draft(review_root, project_id)
+        next_stage = "final"
+    elif stage_id == "final-conclusion":
+        result = generate_final_conclusion(review_root, project_id)
+        next_stage = "final"
+    elif stage_id == "final-overview-figure":
+        result = generate_final_overview_figure(review_root, project_id)
+        next_stage = "final"
+    elif stage_id == "final":
+        result = regenerate_final_draft_bundle(review_root, project_id)
+        next_stage = None
+    else:
+        raise ValueError("This page does not have a runnable generation step.")
+    return {"result": result, "next_stage": next_stage}
 
 
 def discovery_script_path() -> Path:
@@ -119,6 +204,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.handle_projects()
         elif parsed.path == "/api/papers":
             self.handle_papers()
+        elif parsed.path == "/api/literature/search/status":
+            self.handle_literature_job_status("literature-search")
+        elif parsed.path == "/api/literature/download/status":
+            self.handle_literature_job_status("literature-download")
         elif parsed.path == "/api/discovery-projects":
             self.handle_discovery_projects()
         elif parsed.path.startswith("/api/project/") and parsed.path.endswith("/draft"):
@@ -132,6 +221,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.handle_batch_figure_redraw_status(unquote(parts[2]))
             else:
                 self.send_error(HTTPStatus.NOT_FOUND, "batch redraw status not found")
+        elif parsed.path.startswith("/api/project/") and parsed.path.endswith("/workflow-state"):
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) == 4 and parts[0:2] == ["api", "project"]:
+                self.handle_project_workflow_state(unquote(parts[2]))
+            else:
+                self.send_error(HTTPStatus.NOT_FOUND, "workflow state not found")
         elif parsed.path.startswith("/api/project/"):
             parts = parsed.path.strip("/").split("/")
             if len(parts) == 4:
@@ -194,6 +289,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/literature/search":
+            self.handle_literature_search_start()
+            return
+        if parsed.path == "/api/literature/download":
+            self.handle_literature_download_start()
+            return
         if parsed.path == "/api/discovery":
             self.handle_discovery_start()
             return
@@ -408,6 +509,138 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
         self.send_json(papers)
 
+    def handle_literature_job_status(self, job_type: str) -> None:
+        state = current_literature_job(self.review_root, job_type)
+        self.send_json({"ok": True, "job": state})
+
+    def handle_literature_search_start(self) -> None:
+        try:
+            payload = self.read_json_object()
+            topic = re.sub(r"\s+", " ", str(payload.get("topic") or "")).strip()
+            if len(topic) < 3:
+                raise ValueError("Enter a more specific literature topic.")
+            year_from = optional_year(payload.get("year_from"))
+            year_to = optional_year(payload.get("year_to"))
+            if year_from and year_to and year_from > year_to:
+                raise ValueError("The starting year cannot be later than the ending year.")
+            limit = max(1, min(int(payload.get("limit") or 20), 50))
+            email = str(payload.get("email") or "").strip()
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        store = workflow_store(self.review_root)
+        with _LITERATURE_JOB_LOCK:
+            current = current_literature_job(self.review_root, "literature-search")
+            if current and current.get("status") in {"queued", "running"}:
+                self.send_json(
+                    {"ok": False, "error": "A literature search is already running.", "job": current},
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
+            state = store.save_job(
+                _LIBRARY_WORKFLOW_PROJECT,
+                "literature-search",
+                {
+                    "status": "queued",
+                    "operation": "search",
+                    "topic": topic,
+                    "year_from": year_from,
+                    "year_to": year_to,
+                    "limit": limit,
+                    "email_configured": bool(email),
+                    "progress_current": 0,
+                    "progress_total": 1,
+                    "candidates": [],
+                    "error": "",
+                    "started_at": now_utc(),
+                },
+            )
+            thread = threading.Thread(
+                target=run_literature_search_job,
+                args=(self.review_root, state, email),
+                name=f"literature-search-{state['job_id']}",
+                daemon=True,
+            )
+            _LITERATURE_THREADS["literature-search"] = thread
+            thread.start()
+        self.send_json({"ok": True, "job": state}, status=HTTPStatus.ACCEPTED)
+
+    def handle_literature_download_start(self) -> None:
+        try:
+            payload = self.read_json_object()
+            candidate_ids = [
+                str(value)
+                for value in (payload.get("candidate_ids") or [])
+                if str(value).strip()
+            ]
+            candidate_ids = list(dict.fromkeys(candidate_ids))
+            if not candidate_ids:
+                raise ValueError("Select at least one candidate.")
+            if len(candidate_ids) > 30:
+                raise ValueError("Download at most 30 papers in one run.")
+            email = str(payload.get("email") or "").strip()
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        store = workflow_store(self.review_root)
+        search_state = store.load_job(_LIBRARY_WORKFLOW_PROJECT, "literature-search") or {}
+        available = {
+            str(row.get("candidate_id")): row
+            for row in search_state.get("candidates") or []
+            if isinstance(row, dict) and row.get("candidate_id")
+        }
+        missing = [candidate_id for candidate_id in candidate_ids if candidate_id not in available]
+        if missing:
+            self.send_json(
+                {"ok": False, "error": "Some selected candidates are no longer in the current search result."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        selected = [available[candidate_id] for candidate_id in candidate_ids]
+        with _LITERATURE_JOB_LOCK:
+            current = current_literature_job(self.review_root, "literature-download")
+            if current and current.get("status") in {"queued", "running"}:
+                self.send_json(
+                    {"ok": False, "error": "A literature download is already running.", "job": current},
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
+            state = store.save_job(
+                _LIBRARY_WORKFLOW_PROJECT,
+                "literature-download",
+                {
+                    "status": "queued",
+                    "operation": "download",
+                    "candidate_ids": candidate_ids,
+                    "email_configured": bool(email),
+                    "progress_current": 0,
+                    "progress_total": len(selected),
+                    "success_count": 0,
+                    "failed_count": 0,
+                    "results": [],
+                    "error": "",
+                    "started_at": now_utc(),
+                },
+            )
+            thread = threading.Thread(
+                target=run_literature_download_job,
+                args=(self.review_root, state, selected, email),
+                name=f"literature-download-{state['job_id']}",
+                daemon=True,
+            )
+            _LITERATURE_THREADS["literature-download"] = thread
+            thread.start()
+        self.send_json({"ok": True, "job": state}, status=HTTPStatus.ACCEPTED)
+
+    def read_json_object(self) -> dict[str, object]:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > 1024 * 1024:
+            raise ValueError("Request body must be a JSON object smaller than 1 MB.")
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("Request body must be a JSON object.")
+        return payload
+
     def handle_discovery_projects(self) -> None:
         self.send_json([p for p in list_review_projects(self.review_root) if p.get("has_discovery")])
 
@@ -480,6 +713,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         self.send_json(builder(self.review_root, project_id))
 
+    def handle_project_workflow_state(self, project_id: str) -> None:
+        project = self.review_root / "review-projects" / project_id
+        if not project.is_dir():
+            self.send_json({"ok": False, "error": "Project not found."}, status=HTTPStatus.NOT_FOUND)
+            return
+        self.send_json({"ok": True, **workflow_store(self.review_root).workflow_snapshot(project_id)})
+
     def handle_figure_review_post(self, project_id: str, paper_id: str) -> None:
         project = self.review_root / "review-projects" / project_id
         candidates_path = project / "02_section_drafting" / "paper_figure_candidates.json"
@@ -518,6 +758,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         paper["selected_candidate_index"] = candidate_index
         write_json(candidates_path, candidates_data)
         review_path = candidates_path.parent / "human_figure_review.json"
+        figure_review_handoff = project / "03_figure_redraw" / "figure_review_handoff.json"
+        ensure_stage_handoff(
+            figure_review_handoff,
+            "sections",
+            [
+                candidates_path.parent / "section_drafts.json",
+                candidates_path.parent / "figure_candidates.json",
+                candidates_path,
+            ],
+        )
         reviews = read_json_if_exists(review_path) or {"papers": {}}
         reviews.setdefault("papers", {})[paper_id] = {
             "selected_candidate_index": candidate_index,
@@ -525,6 +775,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "reviewed_at": now_utc(),
         }
         write_json(review_path, reviews)
+        record_stage_outputs(figure_review_handoff, [review_path], "figure-review")
         try:
             sync_selected_candidate_for_redraw(project, paper_id, candidate)
         except RuntimeError as exc:
@@ -566,10 +817,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, "project_id": project_id, **result}, status=HTTPStatus.ACCEPTED)
 
     def handle_batch_figure_redraw_status(self, project_id: str) -> None:
-        self.send_json({"ok": True, "project_id": project_id, **batch_figure_redraw_status(project_id)})
+        self.send_json({"ok": True, "project_id": project_id, **batch_figure_redraw_status(project_id, self.review_root)})
 
     def handle_batch_figure_redraw_stop(self, project_id: str) -> None:
-        self.send_json({"ok": True, "project_id": project_id, **stop_batch_figure_redraw(project_id)})
+        self.send_json({"ok": True, "project_id": project_id, **stop_batch_figure_redraw(project_id, self.review_root)})
 
     def handle_manual_arrow_edit(self, project_id: str, figure_id: str) -> None:
         try:
@@ -651,12 +902,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         stage = project / "02_section_drafting"
         generated_at = now_utc()
         write_json(stage / "section_tasks.json", tasks)
-        write_json(
+        write_stage_handoff(
             stage / "section_handoff.json",
-            {
-                "source_stage": "blueprint",
+            "blueprint",
+            [blueprint_path],
+            metadata={
                 "source_blueprint": str(blueprint_path),
-                "generated_at": generated_at,
                 "task_count": len(tasks),
                 "section_ids": [task["section_id"] for task in tasks],
             },
@@ -681,33 +932,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not project.exists():
             self.send_json({"ok": False, "error": "Project not found."}, status=HTTPStatus.NOT_FOUND)
             return
+        store = workflow_store(self.review_root)
+        run_id = store.start_stage_run(project_id, stage_id, metadata={"trigger": "dashboard"})
         try:
-            if stage_id == "sections":
-                result = regenerate_section_drafting(self.review_root, project_id)
-                next_stage = "figure-review"
-            elif stage_id == "figure-review":
-                result = validate_figure_review(project, project_id)
-                next_stage = "figures"
-            elif stage_id == "figures":
-                result = regenerate_figures_and_first_draft(self.review_root, project_id)
-                next_stage = "draft"
-            elif stage_id == "draft":
-                result = regenerate_first_draft(self.review_root, project_id)
-                next_stage = "final"
-            elif stage_id == "final-conclusion":
-                result = generate_final_conclusion(self.review_root, project_id)
-                next_stage = "final"
-            elif stage_id == "final-overview-figure":
-                result = generate_final_overview_figure(self.review_root, project_id)
-                next_stage = "final"
-            elif stage_id == "final":
-                result = regenerate_final_draft_bundle(self.review_root, project_id)
-                next_stage = None
-            else:
-                raise ValueError("This page does not have a runnable generation step.")
+            orchestration = run_stage_with_prefect(
+                self.review_root,
+                project_id,
+                stage_id,
+                lambda: execute_dashboard_stage(self.review_root, project_id, stage_id),
+            )
+            execution = orchestration["result"]
+            result = execution["result"]
+            next_stage = execution["next_stage"]
         except (RuntimeError, ValueError) as exc:
+            store.finish_stage_run(run_id, "failed", error_message=str(exc))
             self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
+        except Exception as exc:
+            store.finish_stage_run(run_id, "failed", error_message=f"{type(exc).__name__}: {exc}")
+            self.send_json(
+                {"ok": False, "error": f"Prefect stage execution failed: {type(exc).__name__}: {exc}"},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        store.finish_stage_run(
+            run_id,
+            "completed",
+            metadata={
+                "result": result,
+                "workflow_engine": "prefect",
+                "prefect_flow_run_id": orchestration.get("prefect_flow_run_id"),
+                "prefect_task_run_id": orchestration.get("prefect_task_run_id"),
+            },
+        )
         self.send_json({
             "ok": True,
             "project_id": project_id,
@@ -804,11 +1061,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif not papers or not isinstance(reviews, dict) or any(str(row.get("paper_id")) not in reviews for row in papers if isinstance(row, dict)):
                 error = "Review and select a figure for every cited paper before continuing to Figures."
             else:
-                write_stage_handoff(
-                    project / "03_figure_redraw" / "figure_review_handoff.json",
-                    "figure-review",
-                    [draft_stage / "section_drafts.json", draft_stage / "figure_candidates.json", draft_stage / "paper_figure_candidates.json", draft_stage / "human_figure_review.json"],
+                figure_review_handoff = project / "03_figure_redraw" / "figure_review_handoff.json"
+                ensure_stage_handoff(
+                    figure_review_handoff,
+                    "sections",
+                    [draft_stage / "section_drafts.json", draft_stage / "figure_candidates.json", draft_stage / "paper_figure_candidates.json"],
                 )
+                record_stage_outputs(figure_review_handoff, [draft_stage / "human_figure_review.json"], "figure-review")
         elif stage_id == "draft":
             draft_stage = project / "02_section_drafting"
             source_freshness = artifact_freshness(
@@ -845,6 +1104,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         state = read_json_if_exists(state_path) or {"project_id": project_id, "stages": {}}
         state.setdefault("stages", {})[stage_id] = {"completed_at": now_utc(), "next_stage": next_stages[stage_id]}
         write_json(state_path, state)
+        workflow_store(self.review_root).set_stage_state(project_id, stage_id, "approved")
         next_stage = next_stages[stage_id]
         self.send_json(
             {
@@ -892,6 +1152,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
             (stage_dir / "remaining_issues.md").write_text(str(data.get("remaining_issues_md") or ""), encoding="utf-8")
         if "draft_bundle" in data and isinstance(data.get("draft_bundle"), dict):
             write_json(stage_dir / "draft_bundle.json", data["draft_bundle"])
+        draft_handoff = stage_dir / "draft_handoff.json"
+        ensure_stage_handoff(
+            draft_handoff,
+            "figures",
+            [
+                project / "02_section_drafting" / "section_drafts.json",
+                project / "02_section_drafting" / "human_figure_review.json",
+                project / "03_figure_redraw" / "redrawn_figure_manifest.json",
+            ],
+        )
+        record_stage_outputs(
+            draft_handoff,
+            [
+                path
+                for path in (
+                    stage_dir / "first_draft.md",
+                    stage_dir / "citations.json",
+                    stage_dir / "merge_report.md",
+                    stage_dir / "remaining_issues.md",
+                    stage_dir / "draft_bundle.json",
+                )
+                if path.exists()
+            ],
+            "draft",
+        )
         self.send_json({"ok": True, "project_id": project_id})
 
     def _paragraph_editor(self, project_id: str) -> ParagraphEditor | None:
@@ -1219,6 +1504,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             size = path.stat().st_size
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
+            if (
+                content_type.startswith("text/html")
+                or content_type.startswith("text/css")
+                or "javascript" in content_type
+            ):
+                self.send_header("Cache-Control", "no-store, max-age=0")
+                self.send_header("Pragma", "no-cache")
             self.send_header("Content-Length", str(size))
             self.end_headers()
             with path.open("rb") as f:
@@ -1432,6 +1724,201 @@ def start_discovery(
         "output": output,
         "query_plan_path": str(query_plan_path),
     }
+
+
+def optional_year(value: object) -> int | None:
+    if value in (None, "", 0, "0"):
+        return None
+    year = int(value)
+    if year < 1600 or year > datetime_year() + 1:
+        raise ValueError(f"Year must be between 1600 and {datetime_year() + 1}.")
+    return year
+
+
+def datetime_year() -> int:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).year
+
+
+def _save_literature_job(review_root: Path, job_type: str, state: dict[str, object]) -> None:
+    workflow_store(review_root).save_job(_LIBRARY_WORKFLOW_PROJECT, job_type, state)
+
+
+def current_literature_job(review_root: Path, job_type: str) -> dict[str, object] | None:
+    store = workflow_store(review_root)
+    state = store.load_job(_LIBRARY_WORKFLOW_PROJECT, job_type)
+    if state and state.get("status") in {"queued", "running"}:
+        thread = _LITERATURE_THREADS.get(job_type)
+        if thread is None or not thread.is_alive():
+            state.update(
+                {
+                    "status": "interrupted",
+                    "error": "The dashboard process stopped before this job finished. Start it again.",
+                    "finished_at": now_utc(),
+                }
+            )
+            store.save_job(_LIBRARY_WORKFLOW_PROJECT, job_type, state)
+    return state
+
+
+def run_literature_search_job(review_root: Path, state: dict[str, object], email: str) -> None:
+    job_type = "literature-search"
+
+    def on_flow_started(flow_run_id: str) -> None:
+        state["prefect_flow_run_id"] = flow_run_id
+        _save_literature_job(review_root, job_type, state)
+
+    def action() -> dict[str, object]:
+        state.update({"status": "running", "progress_current": 0, "error": ""})
+        _save_literature_job(review_root, job_type, state)
+        load_dotenv_if_present(review_root)
+        candidates = search_crossref(
+            str(state.get("topic") or ""),
+            year_from=state.get("year_from") if isinstance(state.get("year_from"), int) else None,
+            year_to=state.get("year_to") if isinstance(state.get("year_to"), int) else None,
+            limit=int(state.get("limit") or 20),
+            mailto=email or os.environ.get("CROSSREF_MAILTO") or os.environ.get("UNPAYWALL_EMAIL") or "",
+        )
+        state.update(
+            {
+                "status": "completed",
+                "progress_current": 1,
+                "candidate_count": len(candidates),
+                "candidates": candidates,
+                "finished_at": now_utc(),
+            }
+        )
+        _save_literature_job(review_root, job_type, state)
+        return {"candidate_count": len(candidates)}
+
+    try:
+        if prefect_orchestration_enabled():
+            try:
+                result = run_literature_acquisition_with_prefect(
+                    review_root,
+                    "search",
+                    1,
+                    action,
+                    on_flow_started=on_flow_started,
+                )
+                state["prefect_task_run_id"] = result.get("prefect_task_run_id")
+                state["orchestration_mode"] = "prefect"
+                _save_literature_job(review_root, job_type, state)
+            except Exception as prefect_exc:
+                state["orchestration_mode"] = "local_fallback"
+                state["prefect_error"] = f"{type(prefect_exc).__name__}: {prefect_exc}"
+                action()
+        else:
+            state["orchestration_mode"] = "local"
+            action()
+    except Exception as exc:
+        state.update(
+            {
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "finished_at": now_utc(),
+            }
+        )
+        _save_literature_job(review_root, job_type, state)
+    finally:
+        with _LITERATURE_JOB_LOCK:
+            _LITERATURE_THREADS.pop(job_type, None)
+
+
+def run_literature_download_job(
+    review_root: Path,
+    state: dict[str, object],
+    candidates: list[dict[str, object]],
+    email: str,
+) -> None:
+    job_type = "literature-download"
+
+    def on_flow_started(flow_run_id: str) -> None:
+        state["prefect_flow_run_id"] = flow_run_id
+        _save_literature_job(review_root, job_type, state)
+
+    def action() -> dict[str, object]:
+        state.update({"status": "running", "error": ""})
+        _save_literature_job(review_root, job_type, state)
+        results: list[dict[str, object]] = []
+        successes = 0
+        failures = 0
+        for index, candidate in enumerate(candidates, start=1):
+            state.update(
+                {
+                    "progress_current": index - 1,
+                    "current_candidate_id": candidate.get("candidate_id"),
+                    "current_title": candidate.get("title"),
+                }
+            )
+            _save_literature_job(review_root, job_type, state)
+            try:
+                result = acquire_candidate(review_root, candidate, email=email)
+            except Exception as exc:
+                result = {
+                    "candidate_id": candidate.get("candidate_id"),
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            result["title"] = candidate.get("title")
+            results.append(result)
+            if result.get("status") in {"downloaded", "already_in_library", "duplicate_file"}:
+                successes += 1
+            else:
+                failures += 1
+            state.update(
+                {
+                    "progress_current": index,
+                    "success_count": successes,
+                    "failed_count": failures,
+                    "results": results,
+                }
+            )
+            _save_literature_job(review_root, job_type, state)
+        state.update(
+            {
+                "status": "completed",
+                "current_candidate_id": "",
+                "current_title": "",
+                "finished_at": now_utc(),
+            }
+        )
+        _save_literature_job(review_root, job_type, state)
+        return {"success_count": successes, "failed_count": failures}
+
+    try:
+        if prefect_orchestration_enabled():
+            try:
+                result = run_literature_acquisition_with_prefect(
+                    review_root,
+                    "download",
+                    len(candidates),
+                    action,
+                    on_flow_started=on_flow_started,
+                )
+                state["prefect_task_run_id"] = result.get("prefect_task_run_id")
+                state["orchestration_mode"] = "prefect"
+                _save_literature_job(review_root, job_type, state)
+            except Exception as prefect_exc:
+                state["orchestration_mode"] = "local_fallback"
+                state["prefect_error"] = f"{type(prefect_exc).__name__}: {prefect_exc}"
+                action()
+        else:
+            state["orchestration_mode"] = "local"
+            action()
+    except Exception as exc:
+        state.update(
+            {
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "finished_at": now_utc(),
+            }
+        )
+        _save_literature_job(review_root, job_type, state)
+    finally:
+        with _LITERATURE_JOB_LOCK:
+            _LITERATURE_THREADS.pop(job_type, None)
 
 
 def rebuild_registry(review_root: Path) -> None:
@@ -1728,6 +2215,16 @@ def regenerate_section_drafting(review_root: Path, project_id: str) -> dict[str,
         if paper_id in paragraph_by_paper:
             figure.update(paragraph_by_paper[paper_id])
     write_json(stage / "figure_candidates.json", figures)
+    record_stage_outputs(
+        stage / "section_handoff.json",
+        [
+            stage / "section_drafts.json",
+            stage / "section_drafts.md",
+            stage / "figure_candidates.json",
+            stage / "paper_figure_candidates.json",
+        ],
+        "sections",
+    )
     return {"section_count": len(generated_sections), "figure_candidate_count": len(figures)}
 
 
@@ -1780,21 +2277,31 @@ def regenerate_figures(review_root: Path, project_id: str) -> dict[str, Any]:
             and previous_output.is_file()
         ):
             missing_figure_ids.append(figure_id)
+    figures_handoff = project / "03_figure_redraw" / "figures_handoff.json"
+    ensure_stage_handoff(
+        figures_handoff,
+        "figure-review",
+        [
+            draft_stage / "section_drafts.json",
+            draft_stage / "figure_candidates.json",
+            draft_stage / "paper_figure_candidates.json",
+            draft_stage / "human_figure_review.json",
+        ],
+    )
     if missing_figure_ids:
-        # The handoff is the input boundary for new redraws. It must precede
-        # only files that will actually be produced; recreating it when all
-        # outputs already exist would make the saved manifest appear stale.
-        write_stage_handoff(
-            project / "03_figure_redraw" / "figures_handoff.json",
-            "figure-review",
-            [draft_stage / "section_drafts.json", draft_stage / "figure_candidates.json", draft_stage / "paper_figure_candidates.json", draft_stage / "human_figure_review.json"],
-        )
         for figure_id in missing_figure_ids:
             redraw_current_figure(review_root, project_id, figure_id)
         manifest = read_json_if_exists(project / "03_figure_redraw" / "redrawn_figure_manifest.json") or {}
     redrawn = [row for row in manifest.get("figures", []) if isinstance(row, dict) and row.get("status") == "redrawn"] if isinstance(manifest, dict) else []
     if not redrawn:
         raise RuntimeError("No figure was redrawn successfully. Resolve source images in Figure Review.")
+    redraw_outputs = [project / "03_figure_redraw" / "redrawn_figure_manifest.json"]
+    redraw_outputs.extend(
+        Path(str(row.get("redrawn_image") or ""))
+        for row in redrawn
+        if row.get("redrawn_image")
+    )
+    record_stage_outputs(figures_handoff, redraw_outputs, "figures")
     write_stage_handoff(
         project / "04_first_draft" / "draft_handoff.json",
         "figures",
@@ -2211,6 +2718,18 @@ def save_manual_arrow_edit(
     if not isinstance(candidate, dict):
         raise ValueError("Current figure candidate was not found")
     stage = project / "03_figure_redraw"
+    draft_stage = project / "02_section_drafting"
+    figures_handoff = stage / "figures_handoff.json"
+    ensure_stage_handoff(
+        figures_handoff,
+        "figure-review",
+        [
+            draft_stage / "section_drafts.json",
+            draft_stage / "figure_candidates.json",
+            draft_stage / "paper_figure_candidates.json",
+            draft_stage / "human_figure_review.json",
+        ],
+    )
     source_path = Path(str(candidate.get("source_image_path") or candidate.get("image_path") or ""))
     if not source_path.exists():
         raise ValueError("The current source image is unavailable")
@@ -2358,6 +2877,10 @@ def save_manual_arrow_edit(
         replacement_rows.append(row)
     write_json(manifest_path, {"project_id": project_id, "figures": replacement_rows})
     synchronized_assets = sync_edited_figure_to_manuscripts(project, figure_id, output_path)
+    versioned_outputs = [manifest_path, output_path, audit_path]
+    if editable_svg:
+        versioned_outputs.append(editable_svg_path)
+    record_stage_outputs(figures_handoff, versioned_outputs, "figures")
     return {
         "figure_id": figure_id,
         "render_mode": "manual-arrow-edit",
@@ -2385,6 +2908,26 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
     paper_id = str(candidate.get("paper_id") or "")
     if not paper_id:
         raise ValueError("Current figure candidate has no paper ID.")
+    draft_stage = project / "02_section_drafting"
+    figures_handoff = project / "03_figure_redraw" / "figures_handoff.json"
+    ensure_stage_handoff(
+        figures_handoff,
+        "figure-review",
+        [
+            draft_stage / "section_drafts.json",
+            draft_stage / "figure_candidates.json",
+            draft_stage / "paper_figure_candidates.json",
+            draft_stage / "human_figure_review.json",
+        ],
+    )
+
+    def persist_redraw_result(result: dict[str, Any]) -> dict[str, Any]:
+        outputs = [project / "03_figure_redraw" / "redrawn_figure_manifest.json"]
+        image_path = str(result.get("redrawn_image") or "")
+        if image_path:
+            outputs.append(Path(image_path))
+        record_stage_outputs(figures_handoff, outputs, "figures")
+        return result
 
     def preview_result(row: dict[str, Any] | None) -> dict[str, Any] | None:
         explicit = str((row or {}).get("rejected_preview_image") or "")
@@ -2438,7 +2981,7 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
         note = str((failed or {}).get("notes") or "").strip()
         preview = preview_result(failed if isinstance(failed, dict) else None)
         if preview:
-            return preview
+            return persist_redraw_result(preview)
         if note:
             if "mechanism integrity retries" in note.lower() or "mechanism-arrow edit" in note.lower():
                 raise RuntimeError(
@@ -2455,7 +2998,7 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
     if not isinstance(redrawn, dict) or redrawn.get("status") != "redrawn" or not redrawn.get("redrawn_image"):
         preview = preview_result(redrawn if isinstance(redrawn, dict) else None)
         if preview:
-            return preview
+            return persist_redraw_result(preview)
         raise RuntimeError("The selected figure did not produce a usable redrawn output.")
     if redrawn.get("render_mode") not in {
         "source-faithful-bw", "source-faithful-color", "source-faithful-outline-color", "ai-edit", "ocr-hollow-ai"
@@ -2466,7 +3009,7 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
         str(redrawn.get("output_disposition") or "") == "saved_with_integrity_warning"
         or (integrity and integrity.get("status") == "failed")
     )
-    return {
+    return persist_redraw_result({
         "figure_id": figure_id,
         "paper_id": paper_id,
         "render_mode": str(redrawn.get("render_mode") or ""),
@@ -2477,13 +3020,38 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
         "hollow_color_fills": hollow_color_fills,
         "integrity_warning": integrity_warning,
         "redrawn_image": str(redrawn["redrawn_image"]),
+    })
+
+
+def persist_batch_redraw_job(review_root: Path, project_id: str, job: dict[str, object]) -> None:
+    saved = workflow_store(review_root).save_job(project_id, "figure-redraw-all", job)
+    job["job_id"] = saved["job_id"]
+
+
+def public_batch_redraw_state(job: dict[str, object]) -> dict[str, object]:
+    result = {
+        key: value
+        for key, value in job.items()
+        if key not in {"figure_ids", "completed_figure_ids"}
     }
+    result["errors"] = [dict(item) for item in job.get("errors", []) if isinstance(item, dict)]
+    return result
 
 
-def batch_figure_redraw_status(project_id: str) -> dict[str, object]:
-    """Return a copy of the persistent in-process batch state for one project."""
+def batch_figure_redraw_status(project_id: str, review_root: Path | None = None) -> dict[str, object]:
+    """Return batch state from memory, falling back to durable SQLite state."""
     with _BATCH_REDRAW_LOCK:
         job = _BATCH_REDRAW_JOBS.get(project_id)
+        if not job and review_root is not None:
+            persisted = workflow_store(review_root).load_job(project_id, "figure-redraw-all")
+            if persisted:
+                job = dict(persisted)
+                if job.get("status") in {"running", "stopping"}:
+                    job["status"] = "interrupted"
+                    job["current_figure_id"] = ""
+                    job["current_source_label"] = ""
+                    job["updated_at"] = now_utc()
+                    persist_batch_redraw_job(review_root, project_id, job)
         if not job:
             return {
                 "status": "idle",
@@ -2496,9 +3064,7 @@ def batch_figure_redraw_status(project_id: str) -> dict[str, object]:
                 "stop_requested": False,
                 "errors": [],
             }
-        result = dict(job)
-        result["errors"] = [dict(item) for item in job.get("errors", []) if isinstance(item, dict)]
-        return result
+        return public_batch_redraw_state(job)
 
 
 def batch_redraw_figure_ids(review_root: Path, project_id: str) -> list[str]:
@@ -2519,7 +3085,7 @@ def batch_redraw_figure_ids(review_root: Path, project_id: str) -> list[str]:
     return figure_ids
 
 
-def stop_batch_figure_redraw(project_id: str) -> dict[str, object]:
+def stop_batch_figure_redraw(project_id: str, review_root: Path | None = None) -> dict[str, object]:
     """Stop a running batch before it starts another provider request.
 
     The active image-edit HTTP request is allowed to return so its output and
@@ -2527,14 +3093,27 @@ def stop_batch_figure_redraw(project_id: str) -> dict[str, object]:
     """
     with _BATCH_REDRAW_LOCK:
         job = _BATCH_REDRAW_JOBS.get(project_id)
+        if not job and review_root is not None:
+            persisted = workflow_store(review_root).load_job(project_id, "figure-redraw-all")
+            job = dict(persisted) if persisted else None
         if not job:
-            return batch_figure_redraw_status(project_id)
+            return batch_figure_redraw_status(project_id, review_root)
         if job.get("status") in {"running", "stopping"}:
             job["status"] = "stopping"
             job["stop_requested"] = True
             job["stop_requested_at"] = now_utc()
             job["updated_at"] = now_utc()
-    return batch_figure_redraw_status(project_id)
+            if review_root is not None:
+                persist_batch_redraw_job(review_root, project_id, job)
+        elif job.get("status") == "interrupted":
+            job["status"] = "stopped"
+            job["stop_requested"] = True
+            job["stop_requested_at"] = now_utc()
+            job["finished_at"] = now_utc()
+            job["updated_at"] = now_utc()
+            if review_root is not None:
+                persist_batch_redraw_job(review_root, project_id, job)
+    return batch_figure_redraw_status(project_id, review_root)
 
 
 def run_batch_figure_redraw(review_root: Path, project_id: str, figure_ids: list[str]) -> None:
@@ -2550,9 +3129,12 @@ def run_batch_figure_redraw(review_root: Path, project_id: str, figure_ids: list
                 job["current_source_label"] = ""
                 job["finished_at"] = now_utc()
                 job["updated_at"] = now_utc()
+                persist_batch_redraw_job(review_root, project_id, job)
                 return
             job["current_figure_id"] = figure_id
             job["current_source_label"] = figure_id
+            job["updated_at"] = now_utc()
+            persist_batch_redraw_job(review_root, project_id, job)
         try:
             result = redraw_current_figure(review_root, project_id, figure_id)
         except (RuntimeError, ValueError) as exc:
@@ -2579,7 +3161,11 @@ def run_batch_figure_redraw(review_root: Path, project_id: str, figure_ids: list
                 job = _BATCH_REDRAW_JOBS.get(project_id)
                 if job:
                     job["completed"] = int(job.get("completed") or 0) + 1
+                    completed_ids = job.setdefault("completed_figure_ids", [])
+                    if isinstance(completed_ids, list) and figure_id not in completed_ids:
+                        completed_ids.append(figure_id)
                     job["updated_at"] = now_utc()
+                    persist_batch_redraw_job(review_root, project_id, job)
     with _BATCH_REDRAW_LOCK:
         job = _BATCH_REDRAW_JOBS.get(project_id)
         if job:
@@ -2588,6 +3174,66 @@ def run_batch_figure_redraw(review_root: Path, project_id: str, figure_ids: list
             job["current_source_label"] = ""
             job["finished_at"] = now_utc()
             job["updated_at"] = now_utc()
+            persist_batch_redraw_job(review_root, project_id, job)
+
+
+def run_batch_figure_redraw_orchestrated(review_root: Path, project_id: str, figure_ids: list[str]) -> None:
+    """Run the durable sequential queue as a Prefect flow/task."""
+
+    if not prefect_orchestration_enabled():
+        with _BATCH_REDRAW_LOCK:
+            job = _BATCH_REDRAW_JOBS.get(project_id)
+            if job:
+                job["workflow_engine"] = "native-fallback"
+                persist_batch_redraw_job(review_root, project_id, job)
+        run_batch_figure_redraw(review_root, project_id, figure_ids)
+        return
+
+    def flow_started(flow_run_id: str) -> None:
+        with _BATCH_REDRAW_LOCK:
+            job = _BATCH_REDRAW_JOBS.get(project_id)
+            if job:
+                job["workflow_engine"] = "prefect"
+                job["prefect_flow_run_id"] = flow_run_id
+                job["updated_at"] = now_utc()
+                persist_batch_redraw_job(review_root, project_id, job)
+
+    def action() -> dict[str, Any]:
+        run_batch_figure_redraw(review_root, project_id, figure_ids)
+        return batch_figure_redraw_status(project_id, review_root)
+
+    try:
+        orchestration = run_batch_redraw_with_prefect(
+            review_root,
+            project_id,
+            len(figure_ids),
+            action,
+            on_flow_started=flow_started,
+        )
+    except Exception as exc:
+        with _BATCH_REDRAW_LOCK:
+            job = _BATCH_REDRAW_JOBS.get(project_id)
+            if not job:
+                return
+            job["status"] = "failed"
+            job["current_figure_id"] = ""
+            job["current_source_label"] = ""
+            job["finished_at"] = now_utc()
+            job["updated_at"] = now_utc()
+            errors = job.setdefault("errors", [])
+            if isinstance(errors, list):
+                errors.append({"figure_id": "", "error": f"Prefect batch execution failed: {type(exc).__name__}: {exc}"})
+                del errors[:-12]
+            persist_batch_redraw_job(review_root, project_id, job)
+        return
+    with _BATCH_REDRAW_LOCK:
+        job = _BATCH_REDRAW_JOBS.get(project_id)
+        if job:
+            job["workflow_engine"] = "prefect"
+            job["prefect_flow_run_id"] = orchestration.get("prefect_flow_run_id")
+            job["prefect_task_run_id"] = orchestration.get("prefect_task_run_id")
+            job["updated_at"] = now_utc()
+            persist_batch_redraw_job(review_root, project_id, job)
 
 
 def start_batch_figure_redraw(review_root: Path, project_id: str) -> dict[str, object]:
@@ -2597,30 +3243,49 @@ def start_batch_figure_redraw(review_root: Path, project_id: str) -> dict[str, o
     figure_ids = batch_redraw_figure_ids(review_root, project_id)
     with _BATCH_REDRAW_LOCK:
         existing = _BATCH_REDRAW_JOBS.get(project_id)
-        if existing and existing.get("status") == "running":
-            return batch_figure_redraw_status(project_id)
+        if existing and existing.get("status") in {"running", "stopping"}:
+            return batch_figure_redraw_status(project_id, review_root)
+        persisted = workflow_store(review_root).load_job(project_id, "figure-redraw-all")
+        resumable = bool(
+            persisted
+            and persisted.get("status") in {"running", "stopping", "interrupted", "stopped"}
+            and list(persisted.get("figure_ids") or []) == figure_ids
+        )
+        completed_ids = list(persisted.get("completed_figure_ids") or []) if resumable and persisted else []
+        remaining_figure_ids = [figure_id for figure_id in figure_ids if figure_id not in completed_ids]
         job: dict[str, object] = {
             "status": "running",
             "total": len(figure_ids),
-            "completed": 0,
-            "succeeded": 0,
-            "preview_succeeded": 0,
-            "failed": 0,
+            "completed": int(persisted.get("completed") or 0) if resumable and persisted else 0,
+            "succeeded": int(persisted.get("succeeded") or 0) if resumable and persisted else 0,
+            "preview_succeeded": int(persisted.get("preview_succeeded") or 0) if resumable and persisted else 0,
+            "failed": int(persisted.get("failed") or 0) if resumable and persisted else 0,
             "current_figure_id": "",
             "current_source_label": "",
             "stop_requested": False,
-            "errors": [],
-            "started_at": now_utc(),
+            "errors": list(persisted.get("errors") or []) if resumable and persisted else [],
+            "figure_ids": figure_ids,
+            "completed_figure_ids": completed_ids,
+            "started_at": str(persisted.get("started_at") or now_utc()) if resumable and persisted else now_utc(),
             "updated_at": now_utc(),
         }
+        if resumable and persisted and persisted.get("job_id"):
+            job["job_id"] = str(persisted["job_id"])
+        persist_batch_redraw_job(review_root, project_id, job)
         _BATCH_REDRAW_JOBS[project_id] = job
+        if not remaining_figure_ids:
+            job["status"] = "completed"
+            job["finished_at"] = now_utc()
+            job["updated_at"] = now_utc()
+            persist_batch_redraw_job(review_root, project_id, job)
+            return batch_figure_redraw_status(project_id, review_root)
     threading.Thread(
-        target=run_batch_figure_redraw,
-        args=(review_root, project_id, figure_ids),
+        target=run_batch_figure_redraw_orchestrated,
+        args=(review_root, project_id, remaining_figure_ids),
         daemon=True,
         name=f"figure-redraw-{project_id}",
     ).start()
-    return batch_figure_redraw_status(project_id)
+    return batch_figure_redraw_status(project_id, review_root)
 
 
 def validate_figure_review(project: Path, project_id: str) -> dict[str, Any]:
@@ -2644,11 +3309,13 @@ def validate_figure_review(project: Path, project_id: str) -> dict[str, Any]:
         if not isinstance(candidate, dict) or candidate.get("source_type") == "table":
             raise RuntimeError(f"{paper_id} needs an image or scheme candidate before it can be redrawn.")
         sync_selected_candidate_for_redraw(project, paper_id, candidate)
-    write_stage_handoff(
-        project / "03_figure_redraw" / "figure_review_handoff.json",
-        "figure-review",
-        [draft_stage / "section_drafts.json", draft_stage / "figure_candidates.json", draft_stage / "paper_figure_candidates.json", draft_stage / "human_figure_review.json"],
+    figure_review_handoff = project / "03_figure_redraw" / "figure_review_handoff.json"
+    ensure_stage_handoff(
+        figure_review_handoff,
+        "sections",
+        [draft_stage / "section_drafts.json", draft_stage / "figure_candidates.json", draft_stage / "paper_figure_candidates.json"],
     )
+    record_stage_outputs(figure_review_handoff, [draft_stage / "human_figure_review.json"], "figure-review")
     return {"reviewed_paper_count": len(reviewable), "redraw_pending": True}
 
 
@@ -2741,6 +3408,16 @@ def regenerate_first_draft(review_root: Path, project_id: str) -> dict[str, Any]
     figures_handoff = project / "03_figure_redraw" / "figures_handoff.json"
     if artifact_freshness(figures_handoff, [project / "03_figure_redraw" / "redrawn_figure_manifest.json"])["stale"]:
         raise RuntimeError("Figure redraw is out of date. Run Figures before building the draft.")
+    draft_handoff = stage / "draft_handoff.json"
+    ensure_stage_handoff(
+        draft_handoff,
+        "figures",
+        [
+            project / "02_section_drafting" / "section_drafts.json",
+            project / "02_section_drafting" / "human_figure_review.json",
+            project / "03_figure_redraw" / "redrawn_figure_manifest.json",
+        ],
+    )
 
     # The merge skill supplies review-level framing and transitions. Do not
     # fall back to concatenating source snippets into a pseudo-manuscript.
@@ -2770,6 +3447,11 @@ def regenerate_first_draft(review_root: Path, project_id: str) -> dict[str, Any]
     draft_path.write_text(replace_reference_section(draft_text, render_reference_section(project, citation_entries)), encoding="utf-8")
     run_project_script(review_root / "skills" / "review-draft-merge-polish" / "scripts" / "insert_figures_into_draft.py", review_root, project_id)
     (stage / "remaining_issues.md").write_text("# Remaining Issues\n\nConfirm the scientific interpretation, scope boundaries, and every redrawn figure before approving the first draft.\n", encoding="utf-8")
+    record_stage_outputs(
+        draft_handoff,
+        [stage / "first_draft.md", stage / "citations.json", stage / "remaining_issues.md"],
+        "draft",
+    )
     write_stage_handoff(project / "05_final_audit" / "final_handoff.json", "draft", [stage / "first_draft.md", stage / "citations.json"])
     return {"citation_count": len(citations), "first_draft": str(stage / "first_draft.md")}
 
@@ -2847,6 +3529,12 @@ def regenerate_final_audit(review_root: Path, project_id: str) -> dict[str, Any]
     draft_path = draft_stage / "first_draft.md"
     if not draft_path.exists():
         raise RuntimeError("Create the first draft before generating the final audit.")
+    final_handoff = final_stage / "final_handoff.json"
+    ensure_stage_handoff(
+        final_handoff,
+        "draft",
+        [draft_path, draft_stage / "citations.json"],
+    )
     conclusion_current = bool(
         conclusion.exists()
         and report.exists()
@@ -2901,6 +3589,11 @@ def regenerate_final_audit(review_root: Path, project_id: str) -> dict[str, Any]
         extra=["--stage", "05_final_audit"],
     )
     run_project_script(review_root / "skills" / "review-final-audit-release" / "scripts" / "final_audit_scan.py", review_root, project_id)
+    final_outputs = [final_stage / "final_draft.md"]
+    if (final_stage / "overview_figure.png").exists():
+        final_outputs.append(final_stage / "overview_figure.png")
+    final_outputs.extend(sorted(path for path in (final_stage / "figures").glob("*") if path.is_file()))
+    record_stage_outputs(final_handoff, final_outputs, "final")
     return {
         "final_draft": str(final_stage / "final_draft.md"),
         "overview": overview,
@@ -2937,6 +3630,12 @@ def generate_final_overview_figure(review_root: Path, project_id: str) -> dict[s
             project_id,
             extra=["--stage", "05_final_audit"],
         )
+    final_handoff = final_stage / "final_handoff.json"
+    if final_handoff.exists():
+        outputs = [output_path]
+        if (final_stage / "final_draft.md").exists():
+            outputs.append(final_stage / "final_draft.md")
+        record_stage_outputs(final_handoff, outputs, "final-overview-figure")
     return {
         "overview_figure": str(output_path),
         "included_in_final_draft": str(bool(integration.get("included"))).lower(),
@@ -2967,6 +3666,11 @@ def regenerate_final_draft_bundle(review_root: Path, project_id: str) -> dict[st
     full_png = final_draft.parent / "review_summary_chart.png"
     if not full_png.is_file():
         raise RuntimeError("Overall review chart generation did not produce a PNG.")
+    record_stage_outputs(
+        final_draft.parent / "final_handoff.json",
+        [final_draft, full_png, final_draft.parent / "overview_figure.png"],
+        "final",
+    )
     return {"final_draft": str(final_draft), "final_full_png": str(full_png)}
 
 
@@ -3284,21 +3988,55 @@ def read_json_if_exists(path: Path) -> Any:
         return None
 
 
+def infer_artifact_stage(path: Path) -> str:
+    """Map a canonical project path to its producing workflow stage."""
+    normalized = Path(path).as_posix()
+    name = Path(path).name
+    if "/00_discovery/" in normalized:
+        return "discovery"
+    if "/01_matrix_outline/" in normalized:
+        return "blueprint" if name in {"selected_outline.md", "section_blueprint.json", "section_writing_plan.md"} else "matrix"
+    if "/02_section_drafting/" in normalized:
+        return "figure-review" if name == "human_figure_review.json" else "sections"
+    if "/03_figure_redraw/" in normalized:
+        return "figures"
+    if "/04_first_draft/" in normalized:
+        return "final-conclusion" if name.startswith("conclusion_") else "draft"
+    if "/05_final_audit/" in normalized:
+        return "final-overview-figure" if name == "overview_figure.png" else "final"
+    return ""
+
+
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
+    context = workflow_context_for_path(path)
+    if context:
+        store, project_id = context
+        store.register_artifact(project_id, path, producer_stage=infer_artifact_stage(path))
 
 
 def artifact_freshness(handoff_path: Path, artifacts: list[Path]) -> dict[str, Any]:
-    """Determine whether artifacts were rebuilt after their most recent handoff."""
+    """Determine whether outputs still match their recorded input versions.
+
+    Versioned handoffs compare SHA-256 snapshots.  Older projects keep the
+    former mtime behavior until their next successful stage execution upgrades
+    the handoff in place.
+    """
     handoff = read_json_if_exists(handoff_path) or {}
     if not handoff_path.exists():
         return {"handoff": handoff, "stale": False, "outdated_artifacts": []}
+    context = workflow_context_for_path(handoff_path)
+    if context and isinstance(handoff, dict) and int(handoff.get("schema_version") or 0) >= 2:
+        store, project_id = context
+        result = store.handoff_freshness(project_id, handoff_path, artifacts)
+        if result.get("versioned"):
+            return result
     handoff_mtime = handoff_path.stat().st_mtime
     outdated = [str(path) for path in artifacts if not path.exists() or path.stat().st_mtime <= handoff_mtime]
-    return {"handoff": handoff, "stale": bool(outdated), "outdated_artifacts": outdated}
+    return {"handoff": handoff, "versioned": False, "stale": bool(outdated), "outdated_artifacts": outdated}
 
 
 def output_freshness_against_inputs(outputs: list[Path], inputs: list[Path]) -> dict[str, Any]:
@@ -3317,16 +4055,59 @@ def output_freshness_against_inputs(outputs: list[Path], inputs: list[Path]) -> 
     }
 
 
-def write_stage_handoff(path: Path, source_stage: str, source_artifacts: list[Path]) -> None:
-    generated_at = now_utc()
-    write_json(
-        path,
-        {
-            "source_stage": source_stage,
-            "generated_at": generated_at,
-            "source_artifacts": [str(artifact) for artifact in source_artifacts],
-        },
+def write_stage_handoff(
+    path: Path,
+    source_stage: str,
+    source_artifacts: list[Path],
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    context = workflow_context_for_path(path)
+    if context:
+        store, project_id = context
+        store.write_handoff(project_id, path, source_stage, source_artifacts, metadata=metadata)
+        return
+    payload = {
+        "source_stage": source_stage,
+        "generated_at": now_utc(),
+        "source_artifacts": [str(artifact) for artifact in source_artifacts],
+    }
+    payload.update(metadata or {})
+    write_json(path, payload)
+
+
+def record_stage_outputs(
+    handoff_path: Path,
+    output_artifacts: list[Path],
+    stage_id: str,
+    *,
+    producer_run_id: str | None = None,
+) -> None:
+    """Attach immutable output versions and their input lineage to a handoff."""
+    context = workflow_context_for_path(handoff_path)
+    if not context or not handoff_path.exists():
+        return
+    store, project_id = context
+    store.complete_handoff(
+        project_id,
+        handoff_path,
+        output_artifacts,
+        producer_stage=stage_id,
+        producer_run_id=producer_run_id,
     )
+
+
+def ensure_stage_handoff(path: Path, source_stage: str, source_artifacts: list[Path]) -> None:
+    """Create a new input boundary only when its content dependencies changed."""
+    context = workflow_context_for_path(path)
+    handoff = read_json_if_exists(path) or {}
+    if not context or not path.exists() or int(handoff.get("schema_version") or 0) < 2:
+        write_stage_handoff(path, source_stage, source_artifacts)
+        return
+    store, project_id = context
+    state = store.handoff_freshness(project_id, path, [])
+    if state.get("outdated_sources"):
+        write_stage_handoff(path, source_stage, source_artifacts)
 
 
 def infer_project_topic(project: Path) -> str:
@@ -3380,6 +4161,9 @@ def delete_review_project(review_root: Path, project_id: str) -> dict[str, str]:
     if not target.is_dir():
         raise FileNotFoundError(project_id)
     shutil.rmtree(target)
+    workflow_store(review_root).delete_project(project_id)
+    with _BATCH_REDRAW_LOCK:
+        _BATCH_REDRAW_JOBS.pop(project_id, None)
     return {"deleted_project_id": project_id}
 
 
@@ -3835,6 +4619,8 @@ def dashboard_assets(view_root: Path) -> tuple[Path, ...]:
 
 def run(args: argparse.Namespace) -> int:
     review_root = Path(args.review_root).resolve()
+    os.environ["REVIEW_WRITER_PREFECT_ENABLED"] = "true"
+    configure_prefect_environment(review_root)
     view_root = Path(__file__).resolve().parent
     (
         library_app_path,
@@ -3850,6 +4636,14 @@ def run(args: argparse.Namespace) -> int:
     if not (review_root / "review-library" / "metadata" / "papers").exists():
         print("ERROR: metadata files not found. Run prepare_metadata.py first.", file=sys.stderr)
         return 2
+    store = workflow_store(review_root)
+    projects_root = review_root / "review-projects"
+    if projects_root.is_dir():
+        for project in sorted(path for path in projects_root.iterdir() if path.is_dir()):
+            try:
+                store.bootstrap_project(project.name)
+            except OSError as exc:
+                print(f"WARNING: workflow metadata bootstrap skipped {project.name}: {exc}", file=sys.stderr)
     DashboardHandler.review_root = review_root
     DashboardHandler.library_app_path = library_app_path
     DashboardHandler.discovery_app_path = discovery_app_path

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Online Literature Acquisition"
+  short_description: "Search and acquire legal open-access journal PDFs"
+  default_prompt: "Use $review-literature-acquisition to find, rank, and safely acquire open-access journal articles for a review topic."

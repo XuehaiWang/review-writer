@@ -277,6 +277,121 @@
       max-width: 420px;
     }
     .message.show { display: block; }
+    .brand-actions { margin-top: 12px; }
+    .acquire-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 80;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(23, 33, 27, .52);
+      backdrop-filter: blur(3px);
+    }
+    .acquire-modal.open { display: flex; }
+    .acquire-dialog {
+      width: min(980px, 96vw);
+      max-height: 90vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: #fffaf0;
+      box-shadow: 0 30px 80px rgba(15, 24, 19, .32);
+    }
+    .acquire-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    .acquire-head h2 { margin: 0 0 5px; font-size: 22px; }
+    .acquire-head p { margin: 0; color: var(--muted); font-size: 13px; }
+    .acquire-form {
+      display: grid;
+      grid-template-columns: minmax(280px, 1fr) 110px 110px 90px minmax(230px, .6fr);
+      gap: 10px;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--line);
+      align-items: end;
+    }
+    .acquire-form label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; }
+    .acquire-form input {
+      min-width: 0;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 9px 10px;
+      background: #fffdf7;
+      color: var(--ink);
+      outline: none;
+    }
+    .acquire-actions {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 11px 20px;
+      border-bottom: 1px solid var(--line);
+      background: #fbf4e5;
+    }
+    .acquire-status { flex: 1; color: var(--muted); font-size: 13px; }
+    .candidate-list { overflow: auto; padding: 12px 20px 20px; }
+    .candidate-row {
+      display: grid;
+      grid-template-columns: 28px 1fr 95px;
+      gap: 10px;
+      align-items: start;
+      padding: 12px 8px;
+      border-bottom: 1px solid #e8ddca;
+    }
+    .candidate-row input { margin-top: 5px; }
+    .candidate-name { font-size: 14px; line-height: 1.35; }
+    .candidate-detail { margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .candidate-score { text-align: right; color: var(--accent); font-size: 12px; font-weight: 700; }
+    .candidate-result { margin-top: 5px; color: #7b4f24; font-size: 12px; }
+    .candidate-manual-link { display: block; width: fit-content; margin-top: 5px; color: var(--accent); font-size: 12px; }
+    .acquire-empty { padding: 36px; color: var(--muted); text-align: center; }
+    .email-gate {
+      position: absolute;
+      inset: 0;
+      z-index: 90;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(23, 33, 27, .62);
+    }
+    .email-gate.open { display: flex; }
+    .email-gate-card {
+      width: min(470px, 92vw);
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #fffaf0;
+      box-shadow: 0 24px 70px rgba(15, 24, 19, .34);
+    }
+    .email-gate-card h3 { margin: 0 0 7px; font-size: 19px; }
+    .email-gate-card p { margin: 0 0 13px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .email-gate-card input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 11px;
+      background: #fffdf7;
+      color: var(--ink);
+      outline: none;
+    }
+    .email-gate-error { min-height: 20px; padding-top: 5px; color: #a14225; font-size: 12px; }
+    .email-gate-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+    @media (max-width: 900px) {
+      .acquire-form { grid-template-columns: 1fr 1fr; }
+      .acquire-form label:first-child,
+      .acquire-form label:last-child { grid-column: 1 / -1; }
+    }
   </style>
   <link rel="stylesheet" href="/assets/dashboard/review-ui.css">
 </head>
@@ -302,6 +417,9 @@
       <div class="brand">
         <h1>Paper Audit Desk</h1>
         <p>Review PDFs, MinerU Markdown, and structured metadata before topic-specific writing.</p>
+        <div class="brand-actions">
+          <button class="btn primary" id="openAcquireBtn">Find &amp; Download OA</button>
+        </div>
       </div>
       <div class="search"><input id="search" placeholder="Search title, author, keyword, tag"></div>
       <div id="papers" class="papers"></div>
@@ -333,11 +451,66 @@
     </section>
   </main>
   <div id="message" class="message"></div>
+  <div id="acquireModal" class="acquire-modal" aria-hidden="true">
+    <section class="acquire-dialog" role="dialog" aria-modal="true" aria-labelledby="acquireTitle">
+      <div class="acquire-head">
+        <div>
+          <h2 id="acquireTitle">Find open-access journal articles</h2>
+          <p>PDF lookup falls back through Crossref, Europe PMC, Semantic Scholar, and optional Unpaywall. Selection is always manual.</p>
+        </div>
+        <button class="btn" id="closeAcquireBtn" aria-label="Close">Close</button>
+      </div>
+      <div class="acquire-form">
+        <label>English topic
+          <input id="acquireTopic" placeholder="e.g. enantioselective synthesis of axially chiral allenes">
+        </label>
+        <label>From year
+          <input id="acquireYearFrom" type="number" min="1600" placeholder="Any">
+        </label>
+        <label>To year
+          <input id="acquireYearTo" type="number" min="1600" placeholder="Any">
+        </label>
+        <label>Results
+          <input id="acquireLimit" type="number" min="1" max="50" value="20">
+        </label>
+        <label>Unpaywall email (optional)
+          <input id="acquireEmail" type="email" autocomplete="email" placeholder="Leave blank to use the other providers">
+        </label>
+      </div>
+      <div class="acquire-actions">
+        <button class="btn primary" id="acquireSearchBtn">Search Crossref</button>
+        <button class="btn orange" id="acquireDownloadBtn" disabled>Download selected</button>
+        <div id="acquireStatus" class="acquire-status">Enter a topic to start.</div>
+      </div>
+      <div id="candidateList" class="candidate-list">
+        <div class="acquire-empty">No online search has been run in this workspace.</div>
+      </div>
+    </section>
+    <div id="acquireEmailGate" class="email-gate" aria-hidden="true">
+      <section class="email-gate-card" role="dialog" aria-modal="true" aria-labelledby="emailGateTitle">
+        <h3 id="emailGateTitle">Optional Unpaywall lookup</h3>
+        <p>Add an email to include Unpaywall, or continue without it. Crossref, Europe PMC, and Semantic Scholar will still be tried.</p>
+        <label class="label" for="downloadEmailInput">Unpaywall email (optional)</label>
+        <input id="downloadEmailInput" type="email" autocomplete="email" placeholder="researcher@example.org">
+        <div id="downloadEmailError" class="email-gate-error"></div>
+        <div class="email-gate-actions">
+          <button class="btn" id="cancelEmailGateBtn">Cancel</button>
+          <button class="btn" id="skipEmailGateBtn">Continue without Unpaywall</button>
+          <button class="btn primary" id="confirmEmailGateBtn">Use email and download</button>
+        </div>
+      </section>
+    </div>
+  </div>
   <script src="/assets/dashboard/review-ui.js"></script>
   <script>
     let papers = [];
     let selected = null;
     let currentMeta = null;
+    let acquisitionCandidates = [];
+    let acquisitionSearchTimer = null;
+    let acquisitionDownloadTimer = null;
+    let acquisitionDownloadBusy = false;
+    let emailGateResolver = null;
     const els = {
       globalProjectSelect: document.getElementById('globalProjectSelect'),
       papers: document.getElementById('papers'),
@@ -346,8 +519,21 @@
       markdown: document.getElementById('markdown'),
       jsonEditor: document.getElementById('jsonEditor'),
       metaSummary: document.getElementById('metaSummary'),
-      message: document.getElementById('message')
+      message: document.getElementById('message'),
+      acquireModal: document.getElementById('acquireModal'),
+      acquireTopic: document.getElementById('acquireTopic'),
+      acquireYearFrom: document.getElementById('acquireYearFrom'),
+      acquireYearTo: document.getElementById('acquireYearTo'),
+      acquireLimit: document.getElementById('acquireLimit'),
+      acquireEmail: document.getElementById('acquireEmail'),
+      acquireSearchBtn: document.getElementById('acquireSearchBtn'),
+      acquireDownloadBtn: document.getElementById('acquireDownloadBtn'),
+      acquireStatus: document.getElementById('acquireStatus'),
+      candidateList: document.getElementById('candidateList')
     };
+    els.acquireEmailGate = document.getElementById('acquireEmailGate');
+    els.downloadEmailInput = document.getElementById('downloadEmailInput');
+    els.downloadEmailError = document.getElementById('downloadEmailError');
     function field(meta, key, fallback = '') {
       const value = meta?.[key];
       if (value && typeof value === 'object' && 'value' in value) return value.value ?? fallback;
@@ -505,6 +691,207 @@
       els.jsonEditor.value = JSON.stringify(parsed, null, 2);
       await saveMeta();
     }
+    async function readJsonResponse(response) {
+      const text = await response.text();
+      let data;
+      try { data = text ? JSON.parse(text) : {}; }
+      catch (_) { throw new Error(`Server returned a non-JSON response (HTTP ${response.status}).`); }
+      if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
+      return data;
+    }
+    function setAcquireBusy(operation, busy) {
+      if (operation === 'search') els.acquireSearchBtn.disabled = busy;
+      if (operation === 'download') {
+        acquisitionDownloadBusy = busy;
+        updateDownloadButton();
+      }
+    }
+    function updateDownloadButton() {
+      const hasSelection = Boolean(document.querySelector('.candidate-check:checked'));
+      els.acquireDownloadBtn.disabled = acquisitionDownloadBusy || !hasSelection;
+    }
+    function friendlyDownloadStatus(status) {
+      return ({
+        no_open_access_pdf: 'no OA PDF found',
+        no_doi: 'DOI missing',
+        all_sources_failed: 'OA links failed validation',
+        already_in_library: 'already in Library',
+        duplicate_file: 'duplicate PDF',
+        downloaded: 'downloaded',
+        failed: 'failed'
+      })[status] || status || '';
+    }
+    function resultForCandidate(downloadJob, candidateId) {
+      return (downloadJob?.results || []).find(row => row.candidate_id === candidateId);
+    }
+    function renderAcquisitionCandidates(searchJob, downloadJob = null) {
+      const checkedIds = new Set(
+        [...document.querySelectorAll('.candidate-check:checked')].map(node => node.value)
+      );
+      acquisitionCandidates = Array.isArray(searchJob?.candidates) ? searchJob.candidates : [];
+      if (!acquisitionCandidates.length) {
+        els.candidateList.innerHTML = `<div class="acquire-empty">${
+          searchJob?.status === 'completed' ? 'No matching journal articles were returned.' : 'Search results will appear here.'
+        }</div>`;
+        els.acquireDownloadBtn.disabled = true;
+        return;
+      }
+      els.candidateList.innerHTML = acquisitionCandidates.map(row => {
+        const result = resultForCandidate(downloadJob, row.candidate_id);
+        const resultText = result
+          ? `${friendlyDownloadStatus(result.status)}${result.provider ? ` · ${result.provider}` : ''}${result.paper_id ? ` · ${result.paper_id}` : ''}${result.error ? ` · ${result.error}` : ''}`
+          : '';
+        const manualLink = row.landing_url
+          ? `<a class="candidate-manual-link" href="${escapeHtml(row.landing_url)}" target="_blank" rel="noopener noreferrer">Open article page</a>`
+          : '';
+        return `<label class="candidate-row">
+          <input type="checkbox" class="candidate-check" value="${escapeHtml(row.candidate_id)}" ${checkedIds.has(String(row.candidate_id)) ? 'checked' : ''}>
+          <span>
+            <span class="candidate-name">${escapeHtml(row.title || '(untitled)')}</span>
+            <span class="candidate-detail">${escapeHtml([
+              row.year, row.journal, row.doi ? `DOI ${row.doi}` : 'No DOI'
+            ].filter(Boolean).join(' · '))}</span>
+            ${resultText ? `<span class="candidate-result">${escapeHtml(resultText)}</span>` : ''}
+            ${manualLink}
+          </span>
+          <span class="candidate-score">match ${Math.round(Number(row.score || 0) * 100)}%</span>
+        </label>`;
+      }).join('');
+      updateDownloadButton();
+    }
+    function renderSearchState(job) {
+      if (!job) return;
+      if (job.topic && !els.acquireTopic.value) els.acquireTopic.value = job.topic;
+      if (job.status === 'queued' || job.status === 'running') {
+        els.acquireStatus.textContent = 'Searching Crossref…';
+        setAcquireBusy('search', true);
+      } else if (job.status === 'failed') {
+        els.acquireStatus.textContent = `Search failed: ${job.error || 'unknown error'}`;
+        setAcquireBusy('search', false);
+      } else if (job.status === 'completed') {
+        els.acquireStatus.textContent = `Found ${job.candidate_count ?? (job.candidates || []).length} ranked candidates. Select papers to download.`;
+        setAcquireBusy('search', false);
+      }
+      renderAcquisitionCandidates(job, window.currentAcquisitionDownloadJob || null);
+    }
+    function renderDownloadState(job) {
+      window.currentAcquisitionDownloadJob = job || null;
+      if (!job) return;
+      const busy = job.status === 'queued' || job.status === 'running';
+      if (job.status === 'queued' || job.status === 'running') {
+        els.acquireStatus.textContent = `Downloading ${job.progress_current || 0}/${job.progress_total || 0}` +
+          (job.current_title ? ` · ${job.current_title}` : '');
+      } else if (job.status === 'failed') {
+        els.acquireStatus.textContent = `Download job failed: ${job.error || 'unknown error'}`;
+      } else if (job.status === 'completed') {
+        els.acquireStatus.textContent = `Download finished: ${job.success_count || 0} added/already present, ${job.failed_count || 0} unavailable or failed.`;
+      }
+      const currentSearch = window.currentAcquisitionSearchJob || {candidates: acquisitionCandidates, status:'completed'};
+      renderAcquisitionCandidates(currentSearch, job);
+      setAcquireBusy('download', busy);
+    }
+    async function refreshSearchStatus(schedule = false) {
+      const data = await readJsonResponse(await fetch('/api/literature/search/status'));
+      window.currentAcquisitionSearchJob = data.job || null;
+      renderSearchState(data.job);
+      clearTimeout(acquisitionSearchTimer);
+      if (schedule && ['queued','running'].includes(data.job?.status)) {
+        acquisitionSearchTimer = setTimeout(() => refreshSearchStatus(true).catch(err => {
+          els.acquireStatus.textContent = err.message;
+        }), 1100);
+      }
+    }
+    async function refreshDownloadStatus(schedule = false) {
+      const data = await readJsonResponse(await fetch('/api/literature/download/status'));
+      renderDownloadState(data.job);
+      clearTimeout(acquisitionDownloadTimer);
+      if (schedule && ['queued','running'].includes(data.job?.status)) {
+        acquisitionDownloadTimer = setTimeout(() => refreshDownloadStatus(true).catch(err => {
+          els.acquireStatus.textContent = err.message;
+        }), 1100);
+      } else if (data.job?.status === 'completed') {
+        await loadPapers();
+      }
+    }
+    async function startOnlineSearch() {
+      const topic = els.acquireTopic.value.trim();
+      if (!topic) { els.acquireStatus.textContent = 'Enter an English literature topic.'; return; }
+      setAcquireBusy('search', true);
+      const response = await fetch('/api/literature/search', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+          topic,
+          year_from: els.acquireYearFrom.value || null,
+          year_to: els.acquireYearTo.value || null,
+          limit: Number(els.acquireLimit.value || 20),
+          email: els.acquireEmail.value.trim()
+        })
+      });
+      const data = await readJsonResponse(response);
+      renderSearchState(data.job);
+      await refreshSearchStatus(true);
+    }
+    async function startOnlineDownload() {
+      const candidateIds = [...document.querySelectorAll('.candidate-check:checked')].map(node => node.value);
+      if (!candidateIds.length) { els.acquireStatus.textContent = 'Select at least one candidate.'; return; }
+      let email = els.acquireEmail.value.trim();
+      if (!email) {
+        email = await requestDownloadEmail();
+        if (email === null) {
+          els.acquireStatus.textContent = 'Download cancelled.';
+          return;
+        }
+        if (email) els.acquireEmail.value = email;
+      }
+      setAcquireBusy('download', true);
+      const response = await fetch('/api/literature/download', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({candidate_ids: candidateIds, email})
+      });
+      const data = await readJsonResponse(response);
+      renderDownloadState(data.job);
+      await refreshDownloadStatus(true);
+    }
+    function requestDownloadEmail() {
+      if (emailGateResolver) return Promise.resolve('');
+      els.downloadEmailInput.value = els.acquireEmail.value.trim();
+      els.downloadEmailError.textContent = '';
+      els.acquireEmailGate.classList.add('open');
+      els.acquireEmailGate.setAttribute('aria-hidden', 'false');
+      setTimeout(() => els.downloadEmailInput.focus(), 0);
+      return new Promise(resolve => { emailGateResolver = resolve; });
+    }
+    function closeEmailGate(value = null) {
+      els.acquireEmailGate.classList.remove('open');
+      els.acquireEmailGate.setAttribute('aria-hidden', 'true');
+      const resolve = emailGateResolver;
+      emailGateResolver = null;
+      if (resolve) resolve(value);
+    }
+    function confirmEmailGate() {
+      const email = els.downloadEmailInput.value.trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        els.downloadEmailError.textContent = 'Enter a valid email address.';
+        els.downloadEmailInput.focus();
+        return;
+      }
+      closeEmailGate(email);
+    }
+    async function openAcquisition() {
+      els.acquireModal.classList.add('open');
+      els.acquireModal.setAttribute('aria-hidden', 'false');
+      try {
+        await Promise.all([refreshSearchStatus(true), refreshDownloadStatus(true)]);
+      } catch (err) {
+        els.acquireStatus.textContent = err.message;
+      }
+    }
+    function closeAcquisition() {
+      els.acquireModal.classList.remove('open');
+      els.acquireModal.setAttribute('aria-hidden', 'true');
+    }
     els.search.addEventListener('input', renderList);
     els.papers.addEventListener('click', e => { const card = e.target.closest('.paper-card'); if (card) selectPaper(card.dataset.id); });
     document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => {
@@ -517,6 +904,33 @@
     document.getElementById('saveBtn').addEventListener('click', saveMeta);
     document.getElementById('reloadBtn').addEventListener('click', () => selected && selectPaper(selected));
     document.getElementById('reviewBtn').addEventListener('click', markReviewed);
+    document.getElementById('openAcquireBtn').addEventListener('click', openAcquisition);
+    document.getElementById('closeAcquireBtn').addEventListener('click', closeAcquisition);
+    els.acquireModal.addEventListener('click', event => {
+      if (event.target === els.acquireModal) closeAcquisition();
+    });
+    els.acquireSearchBtn.addEventListener('click', () => startOnlineSearch().catch(err => {
+      setAcquireBusy('search', false); els.acquireStatus.textContent = err.message;
+    }));
+    els.acquireDownloadBtn.addEventListener('click', () => startOnlineDownload().catch(err => {
+      setAcquireBusy('download', false); els.acquireStatus.textContent = err.message;
+    }));
+    els.candidateList.addEventListener('change', event => {
+      if (event.target.classList.contains('candidate-check')) updateDownloadButton();
+    });
+    els.candidateList.addEventListener('click', event => {
+      if (event.target.classList.contains('candidate-manual-link')) event.stopPropagation();
+    });
+    document.getElementById('cancelEmailGateBtn').addEventListener('click', () => closeEmailGate(null));
+    document.getElementById('skipEmailGateBtn').addEventListener('click', () => closeEmailGate(''));
+    document.getElementById('confirmEmailGateBtn').addEventListener('click', confirmEmailGate);
+    els.downloadEmailInput.addEventListener('keydown', event => {
+      if (event.key === 'Enter') { event.preventDefault(); confirmEmailGate(); }
+      if (event.key === 'Escape') { event.preventDefault(); closeEmailGate(null); }
+    });
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && els.acquireModal.classList.contains('open')) closeAcquisition();
+    });
     els.globalProjectSelect.addEventListener('change', e => {
       if (e.target.value) window.location.href = `/discovery?project=${encodeURIComponent(e.target.value)}`;
     });
