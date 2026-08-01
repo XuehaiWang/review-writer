@@ -60,6 +60,8 @@ Low-resolution or thin-stroke schemes are forced to `source-faithful-bw`, even w
 
 Tall portrait multi-step figures are forced to `source-faithful-bw`. Their full source canvas and every stacked panel are preserved at 4x resolution; broad bright colour interiors are whitened and all remaining chemical strokes, labels, and symbols are rendered as black line art. Do not use a generative edit for these figures: it can retain the nominal aspect ratio while reflowing or clipping the lowest panel.
 
+Generative edits must preserve the source aspect ratio even when the provider only returns a square image. Before upload, place every non-square source unchanged inside a centered square white wrapper; explicitly require the model to leave those technical padding bands blank. After generation, crop the recorded content rectangle back out and save the result at the exact source width and height. Never stretch a square provider response directly into a wide or tall chemistry canvas. The normalized PNG remains the single base image used by the online SVG editor, so SVG coordinates and saved raster dimensions continue to match.
+
 Every provider result is saved directly to Stage 7 **Redrawn Output**. The chemistry-integrity gate remains diagnostic metadata: a warning is recorded beside a saved image but it does not require a separate confirmation action or suppress the output path.
 
 ## OCR Policy
@@ -183,7 +185,7 @@ source/
 redrawn/
 ```
 
-`redrawn_figure_manifest.json` must keep `needs_human_check: true` for redrawn images. New AI outputs record `chemistry_integrity`. Stage 8 inserts every Stage 7 row whose status is `redrawn` and whose `redrawn_image` file exists; it must never filter by a hard-coded render-mode list, so future safe profiles remain coupled to the draft. Mechanism-arrow edits remain blocked from automatic manuscript insertion until their arrow topology is checked by a human.
+`redrawn_figure_manifest.json` must keep `needs_human_check: true` for redrawn images. New AI outputs record `chemistry_integrity`, the exact Stage 6 `source_image`, and its SHA-256 identity. Stage 8 inserts completed Stage 7 rows with an existing `redrawn_image`, but an output with `chemistry_integrity: failed`, `needs_human_arrow_check`, or `output_disposition: saved_with_integrity_warning` remains preview-only until an explicit `human_approval` is stored. That approval must be bound to the current source-image and output-image hashes, and it must be invalidated whenever Stage 6 selects a different source. Do not filter otherwise-safe outputs by a hard-coded render-mode list, so future safe profiles remain coupled to the draft.
 
 If no figure is redrawn successfully, return to `review-section-drafting-figure-picking` and fix `source_image_path`, `source_caption_text`, or the selected candidate list instead of moving to draft merge. To intentionally produce a no-figure manuscript (only when the user explicitly approves), create `03_figure_redraw/skip_reason.md` with a one-line justification. The orchestrator and final audit treat this file as the only valid opt-out; without it, drafts with zero figures fail the hard gate.
 

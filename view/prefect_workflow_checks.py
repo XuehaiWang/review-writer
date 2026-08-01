@@ -8,8 +8,62 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from prefect_runtime import run_batch_redraw_with_prefect, run_stage_with_prefect
+try:
+    from . import prefect_runtime
+    from .prefect_runtime import run_batch_redraw_with_prefect, run_stage_with_prefect
+except ImportError:
+    import prefect_runtime
+    from prefect_runtime import run_batch_redraw_with_prefect, run_stage_with_prefect
+
+
+class PrefectStartupRetryChecks(unittest.TestCase):
+    def test_retries_one_local_transient_health_failure(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def flow(**kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise RuntimeError(
+                    "Server error '502 Bad Gateway' for url "
+                    "'http://127.0.0.1:8784/api/health'"
+                )
+            return {"ok": True}
+
+        with patch.object(prefect_runtime, "_wait_for_local_health", return_value=True) as wait:
+            result = prefect_runtime._run_flow_with_ephemeral_health_retry(flow, project_id="test")
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(calls), 2)
+        wait.assert_called_once_with("http://127.0.0.1:8784/api/health")
+
+    def test_does_not_retry_business_or_remote_failures(self) -> None:
+        failures = (
+            RuntimeError("scientific stage failed"),
+            RuntimeError(
+                "Server error '502 Bad Gateway' for url "
+                "'https://provider.example/v1/chat/completions'"
+            ),
+            RuntimeError(
+                "Client error '401 Unauthorized' for url "
+                "'http://127.0.0.1:8784/api/health'"
+            ),
+        )
+        for failure in failures:
+            calls = 0
+
+            def flow() -> dict[str, object]:
+                nonlocal calls
+                calls += 1
+                raise failure
+
+            with self.subTest(failure=str(failure)):
+                with patch.object(prefect_runtime, "_wait_for_local_health") as wait:
+                    with self.assertRaises(RuntimeError):
+                        prefect_runtime._run_flow_with_ephemeral_health_retry(flow)
+                self.assertEqual(calls, 1)
+                wait.assert_not_called()
 
 
 class PrefectWorkflowChecks(unittest.TestCase):

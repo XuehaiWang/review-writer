@@ -25,25 +25,41 @@ def openai_endpoint(base_url: str, endpoint: str) -> str:
     return f"{base}{prefix}/{endpoint.lstrip('/')}"
 
 
-def resolve_api_key(cli_value: str, base_url: str) -> str:
+def resolve_api_key(cli_value: str, base_url: str, dotenv: dict[str, str] | None = None) -> str:
     if cli_value:
         return cli_value
+    values = dotenv or {}
+    dedicated = os.environ.get("REVIEW_WRITING_API_KEY", "") or values.get("REVIEW_WRITING_API_KEY", "")
+    if dedicated:
+        return dedicated
     if "api.xiaoleai.team" in str(base_url).lower():
-        return os.environ.get("XIAOLEAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
-    return os.environ.get("OPENAI_API_KEY", "") or os.environ.get("XIAOLEAI_API_KEY", "")
+        return (
+            values.get("XIAOLEAI_API_KEY", "")
+            or values.get("OPENAI_API_KEY", "")
+            or os.environ.get("XIAOLEAI_API_KEY", "")
+            or os.environ.get("OPENAI_API_KEY", "")
+        )
+    return (
+        values.get("OPENAI_API_KEY", "")
+        or os.environ.get("OPENAI_API_KEY", "")
+        or values.get("XIAOLEAI_API_KEY", "")
+        or os.environ.get("XIAOLEAI_API_KEY", "")
+    )
 
 
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def load_dotenv(root: Path) -> None:
+def load_dotenv(root: Path) -> dict[str, str]:
     path = root / ".env"
+    values: dict[str, str] = {}
     if path.exists():
         for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
             if "=" in line and not line.lstrip().startswith("#"):
                 key, value = line.split("=", 1)
-                os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+                values[key.strip()] = value.strip().strip("'\"")
+    return values
 
 
 def response_json(response: Any, endpoint: str) -> dict[str, Any]:
@@ -95,7 +111,13 @@ def make_request(url: str, payload: dict[str, Any], api_key: str) -> urllib.requ
     )
 
 
-def call_llm(prompt: str, api_key: str, base_url: str, model: str) -> dict[str, Any]:
+def call_llm(
+    prompt: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    wire_api: str = "responses",
+) -> dict[str, Any]:
     schema = {
         "type": "object", "additionalProperties": False,
         "required": ["title", "introduction", "transitions"],
@@ -105,27 +127,29 @@ def call_llm(prompt: str, api_key: str, base_url: str, model: str) -> dict[str, 
             "transitions": {"type": "object", "additionalProperties": {"type": "string"}},
         },
     }
-    endpoint = openai_endpoint(base_url, "responses")
-    payload = {"model": model, "input": [{"role": "user", "content": prompt}], "text": {"format": {"type": "json_schema", "name": "review_merge", "schema": schema, "strict": True}}}
-    request = make_request(endpoint, payload, api_key)
+    wire = str(wire_api or "responses").strip().lower().replace("_", "-")
     response_error: Exception | None = None
-    # A relay can occasionally return a transient gateway error or an empty body
-    # for an otherwise valid Responses request. Retry both transport and payload
-    # failures before using the broadly supported Chat Completions compatibility path.
-    for attempt in range(3):
-        try:
-            with urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=300) as response:
-                data = response_json(response, endpoint)
-            text = data.get("output_text") or "\n".join(content.get("text", "") for output in data.get("output", []) for content in output.get("content", []) if content.get("type") in {"output_text", "text"})
-            return parse_framing(text, endpoint)
-        except urllib.error.HTTPError as exc:
-            response_error = exc
-            if exc.code not in {429, 500, 502, 503, 504}:
-                break
-        except (urllib.error.URLError, ModelResponseError) as exc:
-            response_error = exc
-        if attempt < 2:
-            time.sleep(2 * (attempt + 1))
+    if wire not in {"chat", "chat-completion", "chat-completions"}:
+        endpoint = openai_endpoint(base_url, "responses")
+        payload = {"model": model, "input": [{"role": "user", "content": prompt}], "text": {"format": {"type": "json_schema", "name": "review_merge", "schema": schema, "strict": True}}}
+        request = make_request(endpoint, payload, api_key)
+        # A relay can occasionally return a transient gateway error or an empty body
+        # for an otherwise valid Responses request. Retry both transport and payload
+        # failures before using the broadly supported Chat Completions compatibility path.
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=300) as response:
+                    data = response_json(response, endpoint)
+                text = data.get("output_text") or "\n".join(content.get("text", "") for output in data.get("output", []) for content in output.get("content", []) if content.get("type") in {"output_text", "text"})
+                return parse_framing(text, endpoint)
+            except urllib.error.HTTPError as exc:
+                response_error = exc
+                if exc.code not in {429, 500, 502, 503, 504}:
+                    break
+            except (urllib.error.URLError, ModelResponseError) as exc:
+                response_error = exc
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
 
     chat_endpoint = openai_endpoint(base_url, "chat/completions")
     chat_prompt = f"{prompt}\n\nReturn only one JSON object with the keys title, introduction, and transitions."
@@ -202,14 +226,33 @@ def main() -> int:
     parser.add_argument("--api-key", default="")
     parser.add_argument("--base-url", default="")
     parser.add_argument("--model", default="")
+    parser.add_argument("--wire-api", default="")
     args = parser.parse_args()
     root = Path(args.review_root).resolve()
-    load_dotenv(root)
-    base_url = args.base_url or os.environ.get("REVIEW_WRITING_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
-    api_key = resolve_api_key(args.api_key, base_url)
+    dotenv = load_dotenv(root)
+    base_url = (
+        args.base_url
+        or os.environ.get("REVIEW_WRITING_BASE_URL")
+        or dotenv.get("REVIEW_WRITING_BASE_URL")
+        or dotenv.get("OPENAI_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or "https://api.openai.com"
+    )
+    api_key = resolve_api_key(args.api_key, base_url, dotenv)
     if not api_key:
         raise SystemExit("Missing OPENAI_API_KEY. Configure it before merging the draft.")
-    model = args.model or os.environ.get("REVIEW_WRITING_MODEL", "gpt-5.4")
+    model = (
+        args.model
+        or os.environ.get("REVIEW_WRITING_MODEL")
+        or dotenv.get("REVIEW_WRITING_MODEL")
+        or "gpt-5.4"
+    )
+    wire_api = (
+        args.wire_api
+        or os.environ.get("REVIEW_WRITING_WIRE_API")
+        or dotenv.get("REVIEW_WRITING_WIRE_API")
+        or ("chat-completions" if "micuapi.ai" in base_url.lower() else "responses")
+    )
     project = root / "review-projects" / args.project_id
     sections_data = read_json(project / "02_section_drafting" / "section_drafts.json")
     sections = sections_data.get("sections") if isinstance(sections_data, dict) else []
@@ -225,7 +268,7 @@ Write a concise review title, a 2-3 paragraph Introduction, and one bridging tra
 Section evidence summaries:\n{json.dumps(summaries, ensure_ascii=False)}"""
     fallback_reason = ""
     try:
-        framing = call_llm(prompt, api_key, base_url, model)
+        framing = call_llm(prompt, api_key, base_url, model, wire_api)
     except urllib.error.HTTPError as exc:
         fallback_reason = f"HTTP {exc.code}"
         framing = fallback_framing(topic, sections)

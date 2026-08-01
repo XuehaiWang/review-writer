@@ -702,6 +702,52 @@ def resolve_api_key(cli_value: str, base_url: str) -> str:
     return os.environ.get("OPENAI_API_KEY", "") or os.environ.get("XIAOLEAI_API_KEY", "")
 
 
+TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+
+
+def decode_json_object(raw: bytes | str, context: str) -> dict[str, Any]:
+    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+    text = text.strip()
+    if not text:
+        raise RuntimeError(f"{context} returned an empty response")
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        preview = re.sub(r"\s+", " ", text)[:240]
+        raise RuntimeError(f"{context} returned non-JSON content: {preview}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{context} returned {type(value).__name__}; expected a JSON object")
+    return value
+
+
+def open_json_request(
+    request: urllib.request.Request,
+    *,
+    timeout: int,
+    context: str,
+    attempts: int = 3,
+) -> dict[str, Any]:
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=timeout) as response:
+                return decode_json_object(response.read(), context)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace").strip()
+            preview = re.sub(r"\s+", " ", detail)[:240]
+            last_error = RuntimeError(
+                f"{context} was rejected (HTTP {exc.code})" + (f": {preview}" if preview else "")
+            )
+            if exc.code not in TRANSIENT_HTTP_CODES or attempt == attempts:
+                raise last_error from exc
+        except (urllib.error.URLError, TimeoutError, OSError, RuntimeError) as exc:
+            last_error = exc
+            if attempt == attempts:
+                raise RuntimeError(f"{context} failed after {attempts} attempts: {exc}") from exc
+        time.sleep(min(2 ** (attempt - 1), 4))
+    raise RuntimeError(f"{context} failed: {last_error}")
+
+
 def call_openai_responses(payload: dict[str, Any], api_key: str, base_url: str = "https://api.openai.com") -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -715,9 +761,7 @@ def call_openai_responses(payload: dict[str, Any], api_key: str, base_url: str =
         },
         method="POST",
     )
-    ctx = ssl.create_default_context()
-    with urllib.request.urlopen(req, context=ctx, timeout=120) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    data = open_json_request(req, timeout=120, context="Metadata model request")
     text = data.get("output_text")
     if not text:
         parts: list[str] = []
@@ -728,7 +772,7 @@ def call_openai_responses(payload: dict[str, Any], api_key: str, base_url: str =
         text = "\n".join(parts)
     if not text:
         raise RuntimeError("OpenAI response did not contain output_text")
-    return json.loads(text)
+    return decode_json_object(text, "Metadata model output")
 
 
 def merge_llm(base: dict[str, Any], llm: dict[str, Any]) -> dict[str, Any]:

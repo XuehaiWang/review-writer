@@ -1,0 +1,267 @@
+"""Focused checks for the Stage 6 selection to Stage 7 redraw handoff."""
+
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from PIL import Image
+
+from serve_review_dashboard import (
+    approve_figure_for_manuscript,
+    artifact_freshness,
+    project_figures_payload,
+    refresh_figure_review_handoff,
+    section_candidate_freshness,
+    section_source_freshness,
+    sync_selected_candidate_for_redraw,
+)
+
+
+class FigureReviewHandoffChecks(unittest.TestCase):
+    def build_project(self, root: Path) -> tuple[Path, Path, Path, Path]:
+        project = root / "review-projects" / "demo"
+        section_stage = project / "02_section_drafting"
+        redraw_stage = project / "03_figure_redraw"
+        section_stage.mkdir(parents=True)
+        redraw_stage.mkdir(parents=True)
+        first = section_stage / "first.png"
+        second = section_stage / "second.png"
+        Image.new("RGB", (120, 60), "white").save(first)
+        Image.new("RGB", (120, 60), "white").save(second)
+        (section_stage / "section_drafts.json").write_text(
+            json.dumps(
+                {
+                    "sections": [
+                        {
+                            "section_id": "sec1",
+                            "paragraphs": [{"paragraph_id": "sec1-p1", "paper_id": "P001"}],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (section_stage / "figure_candidates.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "figure_id": "P001-F01",
+                        "paper_id": "P001",
+                        "source_image_path": str(first),
+                        "target_paragraph_id": "sec1-p1",
+                        "manuscript_selected": True,
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (redraw_stage / "redrawn_figure_manifest.json").write_text(
+            json.dumps(
+                {
+                    "project_id": "demo",
+                    "figures": [
+                        {
+                            "figure_id": "P001-F01",
+                            "paper_id": "P001",
+                            "source_image": str(first),
+                            "redrawn_image": str(redraw_stage / "old.png"),
+                            "status": "redrawn",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return project, section_stage, redraw_stage, second
+
+    def test_changed_selection_is_promoted_and_old_redraw_is_invalidated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project, section_stage, redraw_stage, second = self.build_project(Path(temp_dir))
+
+            sync_selected_candidate_for_redraw(
+                project,
+                "P001",
+                {
+                    "candidate_index": 1,
+                    "paper_id": "P001",
+                    "source_image_path": str(second),
+                    "target_paragraph_id": "sec1-p1",
+                },
+            )
+
+            candidate = json.loads(
+                (section_stage / "figure_candidates.json").read_text(encoding="utf-8")
+            )[0]
+            output = json.loads(
+                (redraw_stage / "redrawn_figure_manifest.json").read_text(encoding="utf-8")
+            )["figures"][0]
+            self.assertEqual(candidate["source_image_path"], str(second))
+            self.assertEqual(output["status"], "source_changed")
+            self.assertNotIn("redrawn_image", output)
+            self.assertTrue(output["superseded_output"]["redrawn_image"])
+
+    def test_human_approval_is_bound_to_current_source_and_output_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, _, redraw_stage, _ = self.build_project(root)
+            manifest_path = redraw_stage / "redrawn_figure_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            output_path = redraw_stage / "preview.png"
+            Image.new("RGB", (240, 120), "white").save(output_path)
+            manifest["figures"][0].update(
+                {
+                    "redrawn_image": str(output_path),
+                    "chemistry_integrity": {"status": "failed", "failures": ["test gate"]},
+                    "output_disposition": "saved_with_integrity_warning",
+                }
+            )
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            result = approve_figure_for_manuscript(root, "demo", "P001-F01")
+
+            approved = json.loads(manifest_path.read_text(encoding="utf-8"))["figures"][0]
+            self.assertEqual(result["figure_id"], "P001-F01")
+            self.assertEqual(approved["human_approval"]["status"], "approved")
+            self.assertEqual(approved["human_approval"]["source_sha256"], approved["source_image_sha256"])
+            self.assertEqual(approved["human_approval"]["output_sha256"], approved["output_image_sha256"])
+            self.assertEqual(approved["output_disposition"], "human_approved_for_manuscript")
+
+    def test_human_approval_rejects_an_old_candidate_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, section_stage, redraw_stage, second = self.build_project(root)
+            output_path = redraw_stage / "preview.png"
+            output_path.write_bytes(b"preview")
+            manifest_path = redraw_stage / "redrawn_figure_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["figures"][0]["redrawn_image"] = str(output_path)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            candidates = json.loads((section_stage / "figure_candidates.json").read_text(encoding="utf-8"))
+            candidates[0]["source_image_path"] = str(second)
+            (section_stage / "figure_candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "older source candidate"):
+                approve_figure_for_manuscript(root, "demo", "P001-F01")
+
+    def test_human_approval_rejects_a_stretched_canvas(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _, _, redraw_stage, _ = self.build_project(root)
+            output_path = redraw_stage / "square-preview.png"
+            Image.new("RGB", (1024, 1024), "white").save(output_path)
+            manifest_path = redraw_stage / "redrawn_figure_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["figures"][0]["redrawn_image"] = str(output_path)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "aspect ratio does not match"):
+                approve_figure_for_manuscript(root, "demo", "P001-F01")
+
+    def test_legacy_section_handoff_migrates_without_timestamp_expiry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, section_stage, _, _ = self.build_project(root)
+            blueprint = project / "01_matrix_outline" / "section_blueprint.json"
+            blueprint.parent.mkdir(parents=True)
+            blueprint.write_text('{"sections":["sec1"]}', encoding="utf-8")
+            handoff = section_stage / "section_handoff.json"
+            handoff.write_text(
+                json.dumps({"source_stage": "blueprint", "source_blueprint": str(blueprint)}),
+                encoding="utf-8",
+            )
+
+            self.assertFalse(section_source_freshness(section_stage)["stale"])
+            self.assertFalse(section_candidate_freshness(section_stage)["stale"])
+            migrated = json.loads(handoff.read_text(encoding="utf-8"))
+            self.assertEqual(migrated["schema_version"], 2)
+            self.assertEqual(migrated["dependency_profile"], "section-candidate-routing-v1")
+
+    def test_prose_edit_does_not_expire_candidates_but_routing_edit_does(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, section_stage, _, _ = self.build_project(root)
+            blueprint = project / "01_matrix_outline" / "section_blueprint.json"
+            blueprint.parent.mkdir(parents=True)
+            blueprint.write_text('{"sections":["sec1"]}', encoding="utf-8")
+            handoff = section_stage / "section_handoff.json"
+            handoff.write_text(
+                json.dumps({"source_stage": "blueprint", "source_blueprint": str(blueprint)}),
+                encoding="utf-8",
+            )
+            section_candidate_freshness(section_stage)
+
+            drafts_path = section_stage / "section_drafts.json"
+            drafts = json.loads(drafts_path.read_text(encoding="utf-8"))
+            drafts["sections"][0]["paragraphs"][0]["text"] = "format-only cleanup"
+            drafts_path.write_text(json.dumps(drafts), encoding="utf-8")
+            self.assertTrue(section_source_freshness(section_stage)["stale"])
+            self.assertFalse(section_candidate_freshness(section_stage)["stale"])
+
+            drafts["sections"][0]["paragraphs"][0]["paper_id"] = "P002"
+            drafts_path.write_text(json.dumps(drafts), encoding="utf-8")
+            self.assertTrue(section_candidate_freshness(section_stage)["stale"])
+
+    def test_source_image_change_expires_existing_figure_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, section_stage, _, _ = self.build_project(root)
+            source = section_stage / "first.png"
+            (section_stage / "paper_figure_candidates.json").write_text(
+                json.dumps(
+                    {
+                        "papers": [
+                            {
+                                "paper_id": "P001",
+                                "candidates": [
+                                    {
+                                        "candidate_index": 1,
+                                        "source_image_path": str(source),
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            review = section_stage / "human_figure_review.json"
+            review.write_text(
+                json.dumps({"papers": {"P001": {"selected_candidate_index": 1}}}),
+                encoding="utf-8",
+            )
+            refresh_figure_review_handoff(section_stage, accept_current=True)
+            handoff = project / "03_figure_redraw" / "figure_review_handoff.json"
+            self.assertFalse(artifact_freshness(handoff, [review])["stale"])
+
+            source.write_bytes(b"changed source")
+            state = artifact_freshness(handoff, [review])
+            self.assertTrue(state["stale"])
+            self.assertIn(str(source.resolve()), state["outdated_sources"])
+
+    def test_missing_handoff_is_untracked_and_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "output.json"
+            output.write_text("{}", encoding="utf-8")
+            state = artifact_freshness(Path(temp_dir) / "missing_handoff.json", [output])
+            self.assertTrue(state["stale"])
+            self.assertTrue(state["untracked"])
+
+    def test_manifest_without_a_current_output_is_semantically_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, _, redraw_stage, _ = self.build_project(root)
+            (redraw_stage / "figures_handoff.json").write_text(
+                json.dumps({"source_stage": "figure-review"}),
+                encoding="utf-8",
+            )
+            freshness = project_figures_payload(root, project.name)["freshness"]
+            self.assertTrue(freshness["semantic_redraw_stale"])
+            self.assertEqual(freshness["selected_count"], 1)
+            self.assertEqual(freshness["usable_count"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

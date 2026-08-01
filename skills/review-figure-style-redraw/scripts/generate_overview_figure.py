@@ -26,11 +26,44 @@ import os
 import re
 import ssl
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
+
+
+TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+
+
+def decode_json_object(raw: bytes, label: str) -> dict[str, Any]:
+    if not raw.strip():
+        raise RuntimeError(f"{label} returned an empty response body")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        preview = raw.decode("utf-8", "replace")[:300].replace("\r", " ").replace("\n", " ")
+        raise RuntimeError(f"{label} returned non-JSON content: {preview or '<empty>'}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{label} returned JSON {type(data).__name__}, expected an object")
+    return data
+
+
+def open_json_request(request: urllib.request.Request, label: str, timeout: int = 300) -> dict[str, Any]:
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=timeout) as response:
+                return decode_json_object(response.read(), label)
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "replace")[:500].replace("\r", " ").replace("\n", " ")
+            if exc.code not in TRANSIENT_HTTP_CODES or attempt == 2:
+                raise RuntimeError(f"{label} failed with HTTP {exc.code}: {body or exc.reason}") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt == 2:
+                raise RuntimeError(f"{label} transport failed: {exc}") from exc
+        time.sleep(2 ** attempt)
+    raise RuntimeError(f"{label} failed after retries")
 
 
 def load_dotenv(review_root: Path) -> None:
@@ -1060,8 +1093,7 @@ def _try_images_edits(base: str, api_key: str, reference_image: Path, prompt: st
         "Accept": "application/json",
     }
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=300) as resp:
-        result = json.loads(resp.read().decode("utf-8"))
+    result = open_json_request(req, "Overview image edit request")
     return _extract_image_bytes(result)
 
 
@@ -1082,8 +1114,7 @@ def _try_images_generations_text_only(base: str, api_key: str, prompt: str, mode
         "Accept": "application/json",
     }
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=300) as resp:
-        result = json.loads(resp.read().decode("utf-8"))
+    result = open_json_request(req, "Overview image generation request")
     return _extract_image_bytes(result)
 
 

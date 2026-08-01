@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import shutil
 from pathlib import Path
@@ -22,14 +24,60 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def has_saved_redrawn_output(project: Path, figure: dict[str, Any]) -> bool:
-    """Stage 8 accepts every completed Stage 7 mode when its output exists."""
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def has_saved_redrawn_output(
+    project: Path,
+    figure: dict[str, Any],
+    current_candidate: dict[str, Any] | None = None,
+) -> bool:
+    """Accept a completed output, requiring human approval after a failed gate."""
     if figure.get("status") != "redrawn" or not figure.get("redrawn_image"):
+        return False
+    integrity_status = str((figure.get("chemistry_integrity") or {}).get("status") or "")
+    requires_approval = bool(
+        integrity_status in {"failed", "needs_human_arrow_check"}
+        or str(figure.get("output_disposition") or "") == "saved_with_integrity_warning"
+    )
+    approval = figure.get("human_approval") or {}
+    if requires_approval and not (
+        approval.get("status") == "approved"
+        and approval.get("current_source_match", True)
+        and approval.get("current_output_match", True)
+    ):
         return False
     output = Path(str(figure["redrawn_image"]))
     if not output.is_absolute():
         output = project / output
-    return output.is_file()
+    if not output.is_file():
+        return False
+    if requires_approval:
+        source_value = str(
+            (current_candidate or {}).get("source_image_path")
+            or (current_candidate or {}).get("source_path")
+            or (current_candidate or {}).get("image_path")
+            or ""
+        )
+        source = Path(source_value)
+        if not source.is_absolute():
+            source = project / source
+        approval_source = str(approval.get("source_image") or "")
+        if (
+            not source.is_file()
+            or not approval_source
+            or os.path.normcase(os.path.abspath(source))
+            != os.path.normcase(os.path.abspath(approval_source))
+            or file_sha256(source) != str(approval.get("source_sha256") or "")
+            or file_sha256(output) != str(approval.get("output_sha256") or "")
+        ):
+            return False
+    return True
 
 
 def load_available_figures(project: Path) -> tuple[str, list[dict[str, Any]]]:
@@ -50,7 +98,12 @@ def load_available_figures(project: Path) -> tuple[str, list[dict[str, Any]]]:
             # render modes here: doing so silently loses figures whenever a new
             # safe rendering profile is added. A completed row with an existing
             # output file is the single inclusion criterion.
-            redrawn = [f for f in figures if isinstance(f, dict) and has_saved_redrawn_output(project, f)]
+            redrawn = [
+                f
+                for f in figures
+                if isinstance(f, dict)
+                and has_saved_redrawn_output(project, f, candidate_by_id.get(str(f.get("figure_id") or "")))
+            ]
             if redrawn:
                 # The redraw manifest can retain only a label ("Scheme 2") as
                 # its caption. Recover the descriptive MinerU caption from the

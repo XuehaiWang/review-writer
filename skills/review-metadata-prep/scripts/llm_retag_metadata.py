@@ -20,6 +20,8 @@ from prepare_metadata import (
     load_blocks,
     markdown_head,
     merge_llm,
+    decode_json_object,
+    open_json_request,
     openai_endpoint,
     resolve_api_key,
     read_json,
@@ -40,8 +42,7 @@ def call_responses(payload: dict[str, Any], api_key: str, base_url: str, timeout
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    data = open_json_request(req, timeout=timeout, context="Metadata retag model request")
     text = data.get("output_text")
     if not text:
         parts = []
@@ -55,7 +56,7 @@ def call_responses(payload: dict[str, Any], api_key: str, base_url: str, timeout
         text = "\n".join(parts)
     if not text:
         raise RuntimeError("response missing output_text")
-    return json.loads(text)
+    return decode_json_object(text, "Metadata retag model output")
 
 
 def retag_one(

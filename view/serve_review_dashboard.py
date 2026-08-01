@@ -321,6 +321,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if len(parts) == 6 and parts[0:2] == ["api", "project"] and parts[3] == "figures" and parts[5] == "redraw":
                 self.handle_current_figure_redraw(unquote(parts[2]), unquote(parts[4]))
                 return
+            if len(parts) == 6 and parts[0:2] == ["api", "project"] and parts[3] == "figures" and parts[5] == "human-approve":
+                self.handle_figure_human_approval(unquote(parts[2]), unquote(parts[4]))
+                return
             if len(parts) == 6 and parts[0:2] == ["api", "project"] and parts[3] == "figures" and parts[5] == "manual-arrow-edit":
                 self.handle_manual_arrow_edit(unquote(parts[2]), unquote(parts[4]))
                 return
@@ -758,16 +761,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         paper["selected_candidate_index"] = candidate_index
         write_json(candidates_path, candidates_data)
         review_path = candidates_path.parent / "human_figure_review.json"
-        figure_review_handoff = project / "03_figure_redraw" / "figure_review_handoff.json"
-        ensure_stage_handoff(
-            figure_review_handoff,
-            "sections",
-            [
-                candidates_path.parent / "section_drafts.json",
-                candidates_path.parent / "figure_candidates.json",
-                candidates_path,
-            ],
-        )
         reviews = read_json_if_exists(review_path) or {"papers": {}}
         reviews.setdefault("papers", {})[paper_id] = {
             "selected_candidate_index": candidate_index,
@@ -775,17 +768,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "reviewed_at": now_utc(),
         }
         write_json(review_path, reviews)
-        record_stage_outputs(figure_review_handoff, [review_path], "figure-review")
+        sync_error = ""
         try:
             sync_selected_candidate_for_redraw(project, paper_id, candidate)
         except RuntimeError as exc:
+            sync_error = str(exc)
+        # Candidate selection changes both candidate manifests. Capture the
+        # handoff only after those writes, otherwise the just-saved selection
+        # immediately makes the entire Figure Review globally stale.
+        refresh_figure_review_handoff(candidates_path.parent, accept_current=True)
+        if sync_error:
             self.send_json(
                 {
                     "ok": False,
                     "project_id": project_id,
                     "paper_id": paper_id,
                     "selected_candidate_index": candidate_index,
-                    "error": f"Candidate was saved, but could not be prepared for the batch redraw: {exc}",
+                    "error": f"Candidate was saved, but could not be prepared for the batch redraw: {sync_error}",
                 },
                 status=HTTPStatus.BAD_GATEWAY,
             )
@@ -804,6 +803,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             result = redraw_current_figure(self.review_root, project_id, figure_id)
         except (RuntimeError, ValueError) as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        self.send_json({"ok": True, "project_id": project_id, **result})
+
+    def handle_figure_human_approval(self, project_id: str, figure_id: str) -> None:
+        try:
+            result = approve_figure_for_manuscript(self.review_root, project_id, figure_id)
+        except (RuntimeError, ValueError, OSError) as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
         self.send_json({"ok": True, "project_id": project_id, **result})
@@ -865,63 +872,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, "project_id": project_id, **result})
 
     def handle_section_tasks_start(self, project_id: str) -> None:
-        project = self.review_root / "review-projects" / project_id
-        blueprint_path = project / "01_matrix_outline" / "section_blueprint.json"
-        blueprint = read_json_if_exists(blueprint_path)
-        sections = blueprint.get("sections") if isinstance(blueprint, dict) else None
-        if not project.exists():
-            self.send_json({"ok": False, "error": "Project not found."}, status=HTTPStatus.NOT_FOUND)
+        try:
+            result = regenerate_section_tasks(self.review_root, project_id)
+        except FileNotFoundError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.NOT_FOUND)
             return
-        if not isinstance(sections, list) or not sections:
-            self.send_json(
-                {"ok": False, "error": "No Blueprint sections are available. Select an outline and generate Blueprint first."},
-                status=HTTPStatus.CONFLICT,
-            )
+        except RuntimeError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
-        tasks = []
-        for section in sections:
-            if not isinstance(section, dict) or not section.get("section_id"):
-                continue
-            claims = section.get("review_claims") or []
-            tasks.append(
-                {
-                    "section_id": str(section["section_id"]),
-                    "heading": str(section.get("title") or section["section_id"]),
-                    "core_argument": str(section.get("section_thesis") or section.get("review_problem") or ""),
-                    "allowed_papers": [str(paper_id) for paper_id in section.get("major_papers") or []],
-                    "must_cover_points": [str(claim.get("claim") or "") for claim in claims if isinstance(claim, dict) and claim.get("claim")],
-                    "avoid_points": [str(item) for item in section.get("avoid_patterns") or []],
-                    "figure_need": section.get("figure_or_table_needs") or [],
-                    "source_blueprint": str(blueprint_path),
-                    "created_at": now_utc(),
-                }
-            )
-        if not tasks:
-            self.send_json({"ok": False, "error": "Blueprint contains no usable sections."}, status=HTTPStatus.CONFLICT)
-            return
-        stage = project / "02_section_drafting"
-        generated_at = now_utc()
-        write_json(stage / "section_tasks.json", tasks)
-        write_stage_handoff(
-            stage / "section_handoff.json",
-            "blueprint",
-            [blueprint_path],
-            metadata={
-                "source_blueprint": str(blueprint_path),
-                "task_count": len(tasks),
-                "section_ids": [task["section_id"] for task in tasks],
-            },
-        )
-        (stage / "section_tasks_handoff.md").write_text(
-            "# Blueprint to Sections Handoff\n\n"
-            f"Generated {len(tasks)} section tasks from `01_matrix_outline/section_blueprint.json` at {generated_at}.\n",
-            encoding="utf-8",
-        )
         self.send_json(
             {
                 "ok": True,
                 "project_id": project_id,
-                "task_count": len(tasks),
+                "task_count": result["task_count"],
                 "next_path": f"/sections?project={quote(project_id)}",
             }
         )
@@ -1011,10 +974,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     error = f"Blueprint could not be regenerated: {exc}"
         elif stage_id == "sections":
             stage = project / "02_section_drafting"
-            freshness = artifact_freshness(
-                stage / "section_handoff.json",
-                [stage / "section_drafts.json", stage / "figure_candidates.json", stage / "paper_figure_candidates.json"],
-            )
+            freshness = section_candidate_freshness(stage)
             if freshness["stale"]:
                 error = "Blueprint has changed. Regenerate section drafts and figure candidates before continuing to Figure Review."
             elif not (stage / "section_drafts.json").exists() or not (stage / "figure_candidates.json").exists():
@@ -1023,18 +983,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 write_stage_handoff(
                     project / "03_figure_redraw" / "figure_review_handoff.json",
                     "sections",
-                    [stage / "section_drafts.json", stage / "figure_candidates.json", stage / "paper_figure_candidates.json"],
+                    figure_review_dependency_paths(stage),
+                    metadata={"dependency_profile": FIGURE_REVIEW_DEPENDENCY_PROFILE},
                 )
         elif stage_id == "figures":
             draft_stage = project / "02_section_drafting"
-            freshness = artifact_freshness(
-                draft_stage / "section_handoff.json",
-                [draft_stage / "section_drafts.json", draft_stage / "figure_candidates.json", draft_stage / "paper_figure_candidates.json"],
-            )
+            freshness = section_source_freshness(draft_stage)
+            figure_state = project_figures_payload(self.review_root, project_id)
+            figure_freshness = figure_state["freshness"]
             if freshness["stale"]:
                 error = "Sections are out of date with Blueprint. Regenerate sections and figure candidates before Draft."
             elif not (project / "03_figure_redraw" / "redrawn_figure_manifest.json").exists():
                 error = "Run the selected-figure batch redraw before continuing to Draft."
+            elif not figure_freshness["selected_count"]:
+                error = "No manuscript figure is selected. Select figures in Figure Review before continuing to Draft."
+            elif figure_freshness["stale"]:
+                error = (
+                    "Figure redraw outputs are incomplete or no longer match the current selections "
+                    f"({figure_freshness['usable_count']}/{figure_freshness['selected_count']} usable). "
+                    "Redraw the missing figures or approve warning outputs before continuing to Draft."
+                )
             else:
                 write_stage_handoff(
                     project / "04_first_draft" / "draft_handoff.json",
@@ -1043,10 +1011,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
         elif stage_id == "figure-review":
             draft_stage = project / "02_section_drafting"
-            source_freshness = artifact_freshness(
-                draft_stage / "section_handoff.json",
-                [draft_stage / "section_drafts.json", draft_stage / "figure_candidates.json", draft_stage / "paper_figure_candidates.json"],
-            )
+            source_freshness = section_candidate_freshness(draft_stage)
             review_freshness = artifact_freshness(
                 project / "03_figure_redraw" / "figure_review_handoff.json",
                 [draft_stage / "human_figure_review.json"],
@@ -1061,19 +1026,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif not papers or not isinstance(reviews, dict) or any(str(row.get("paper_id")) not in reviews for row in papers if isinstance(row, dict)):
                 error = "Review and select a figure for every cited paper before continuing to Figures."
             else:
-                figure_review_handoff = project / "03_figure_redraw" / "figure_review_handoff.json"
-                ensure_stage_handoff(
-                    figure_review_handoff,
-                    "sections",
-                    [draft_stage / "section_drafts.json", draft_stage / "figure_candidates.json", draft_stage / "paper_figure_candidates.json"],
-                )
-                record_stage_outputs(figure_review_handoff, [draft_stage / "human_figure_review.json"], "figure-review")
+                refresh_figure_review_handoff(draft_stage, accept_current=True)
         elif stage_id == "draft":
             draft_stage = project / "02_section_drafting"
-            source_freshness = artifact_freshness(
-                draft_stage / "section_handoff.json",
-                [draft_stage / "section_drafts.json", draft_stage / "figure_candidates.json", draft_stage / "paper_figure_candidates.json"],
-            )
+            source_freshness = section_source_freshness(draft_stage)
             draft_freshness = artifact_freshness(
                 project / "04_first_draft" / "draft_handoff.json",
                 [project / "04_first_draft" / "first_draft.md"],
@@ -1480,7 +1436,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "file not found")
             return
         ctype = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
-        self.send_file(path, ctype)
+        # Files exposed through this route are mutable project artifacts. SVG
+        # saves deliberately replace the same PNG path, so browser caching can
+        # hide the just-saved pixels until a later navigation or hard refresh.
+        self.send_file(path, ctype, no_store=True)
 
     def load_meta(self, paper_id: str) -> dict | None:
         path = self.metadata_dir / f"{paper_id}.metadata.json"
@@ -1499,12 +1458,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def send_file(self, path: Path, content_type: str) -> None:
+    def send_file(self, path: Path, content_type: str, *, no_store: bool = False) -> None:
         try:
             size = path.stat().st_size
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
-            if (
+            if no_store or (
                 content_type.startswith("text/html")
                 or content_type.startswith("text/css")
                 or "javascript" in content_type
@@ -1977,6 +1936,58 @@ def figure_redraw_script_path() -> Path:
     return Path(__file__).resolve().parents[1] / "skills" / "review-figure-style-redraw" / "scripts" / "redraw_figures.py"
 
 
+def invalidate_redrawn_output_for_source_change(
+    project: Path,
+    figure_id: str,
+    previous_source: str,
+    selected_source: str,
+) -> bool:
+    """Keep a redraw made from an old Stage 6 choice out of Stage 7."""
+    manifest_path = project / "03_figure_redraw" / "redrawn_figure_manifest.json"
+    manifest = read_json_if_exists(manifest_path) or {}
+    rows = manifest.get("figures") if isinstance(manifest, dict) else []
+    if not isinstance(rows, list):
+        return False
+    changed = False
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("figure_id") or "") != figure_id:
+            continue
+        output_fields = (
+            "redrawn_image",
+            "output_path",
+            "redrawn_path",
+            "output_image_path",
+            "image_path",
+            "path",
+            "rejected_preview_image",
+            "editable_svg",
+        )
+        superseded = {
+            field: row.get(field)
+            for field in output_fields
+            if row.get(field)
+        }
+        if superseded:
+            row["superseded_output"] = {
+                "reason": "stage6_source_selection_changed",
+                "previous_source_image": previous_source,
+                "replaced_at": now_utc(),
+                **superseded,
+            }
+        for field in output_fields:
+            row.pop(field, None)
+        row.pop("human_approval", None)
+        row.pop("output_disposition", None)
+        row["source_image"] = selected_source
+        row["status"] = "source_changed"
+        row["notes"] = "Stage 6 selected a different source candidate; redraw this figure again."
+        changed = True
+        break
+    if changed:
+        write_json(manifest_path, {"project_id": manifest.get("project_id"), "figures": rows})
+    return changed
+
+
 def sync_selected_candidate_for_redraw(project: Path, paper_id: str, candidate: dict[str, Any]) -> None:
     """Promote a Figure Review choice into the redraw skill's actual input list."""
     candidates_path = project / "02_section_drafting" / "figure_candidates.json"
@@ -1988,6 +1999,18 @@ def sync_selected_candidate_for_redraw(project: Path, paper_id: str, candidate: 
     existing = next(
         (row for row in figures if isinstance(row, dict) and str(row.get("paper_id") or "") == paper_id),
         {},
+    )
+    previous_source = str(
+        existing.get("source_image_path")
+        or existing.get("source_path")
+        or existing.get("image_path")
+        or ""
+    )
+    selected_source = str(
+        candidate.get("source_image_path")
+        or candidate.get("source_path")
+        or candidate.get("image_path")
+        or ""
     )
     selected = {**existing, **candidate}
     selected["paper_id"] = paper_id
@@ -2012,9 +2035,22 @@ def sync_selected_candidate_for_redraw(project: Path, paper_id: str, candidate: 
                 break
     if not selected.get("target_paragraph_id"):
         raise RuntimeError("The selected candidate has no matching manuscript paragraph anchor.")
+    source_changed = bool(
+        previous_source
+        and selected_source
+        and os.path.normcase(os.path.abspath(previous_source))
+        != os.path.normcase(os.path.abspath(selected_source))
+    )
     figures = [row for row in figures if not (isinstance(row, dict) and str(row.get("paper_id") or "") == paper_id)]
     figures.append(selected)
     write_json(candidates_path, figures)
+    if source_changed:
+        invalidate_redrawn_output_for_source_change(
+            project,
+            selected["figure_id"],
+            previous_source,
+            selected_source,
+        )
 
 
 def generate_reference_outline(
@@ -2215,8 +2251,14 @@ def regenerate_section_drafting(review_root: Path, project_id: str) -> dict[str,
         if paper_id in paragraph_by_paper:
             figure.update(paragraph_by_paper[paper_id])
     write_json(stage / "figure_candidates.json", figures)
+    section_handoff = stage / "section_handoff.json"
+    ensure_stage_handoff(
+        section_handoff,
+        "blueprint",
+        [project / "01_matrix_outline" / "section_blueprint.json"],
+    )
     record_stage_outputs(
-        stage / "section_handoff.json",
+        section_handoff,
         [
             stage / "section_drafts.json",
             stage / "section_drafts.md",
@@ -2231,7 +2273,7 @@ def regenerate_section_drafting(review_root: Path, project_id: str) -> dict[str,
 def regenerate_figures(review_root: Path, project_id: str) -> dict[str, Any]:
     project = review_root / "review-projects" / project_id
     draft_stage = project / "02_section_drafting"
-    freshness = artifact_freshness(draft_stage / "section_handoff.json", [draft_stage / "section_drafts.json", draft_stage / "figure_candidates.json", draft_stage / "paper_figure_candidates.json"])
+    freshness = section_candidate_freshness(draft_stage)
     if freshness["stale"]:
         raise RuntimeError("Blueprint has changed. Regenerate Sections before redrawing figures.")
     figures = read_json_if_exists(draft_stage / "figure_candidates.json")
@@ -2312,6 +2354,60 @@ def regenerate_figures(review_root: Path, project_id: str) -> dict[str, Any]:
         "reused_count": len(target_figures) - len(missing_figure_ids),
         "generated_count": len(missing_figure_ids),
     }
+
+
+def regenerate_section_tasks(review_root: Path, project_id: str) -> dict[str, Any]:
+    project = review_root / "review-projects" / project_id
+    if not project.is_dir():
+        raise FileNotFoundError("Project not found.")
+    blueprint_path = project / "01_matrix_outline" / "section_blueprint.json"
+    blueprint = read_json_if_exists(blueprint_path)
+    sections = blueprint.get("sections") if isinstance(blueprint, dict) else None
+    if not isinstance(sections, list) or not sections:
+        raise RuntimeError("No Blueprint sections are available. Select an outline and generate Blueprint first.")
+    tasks: list[dict[str, Any]] = []
+    for section in sections:
+        if not isinstance(section, dict) or not section.get("section_id"):
+            continue
+        claims = section.get("review_claims") or []
+        tasks.append(
+            {
+                "section_id": str(section["section_id"]),
+                "heading": str(section.get("title") or section["section_id"]),
+                "core_argument": str(section.get("section_thesis") or section.get("review_problem") or ""),
+                "allowed_papers": [str(paper_id) for paper_id in section.get("major_papers") or []],
+                "must_cover_points": [
+                    str(claim.get("claim") or "")
+                    for claim in claims
+                    if isinstance(claim, dict) and claim.get("claim")
+                ],
+                "avoid_points": [str(item) for item in section.get("avoid_patterns") or []],
+                "figure_need": section.get("figure_or_table_needs") or [],
+                "source_blueprint": str(blueprint_path),
+                "created_at": now_utc(),
+            }
+        )
+    if not tasks:
+        raise RuntimeError("Blueprint contains no usable sections.")
+    stage = project / "02_section_drafting"
+    generated_at = now_utc()
+    write_json(stage / "section_tasks.json", tasks)
+    write_stage_handoff(
+        stage / "section_handoff.json",
+        "blueprint",
+        [blueprint_path],
+        metadata={
+            "source_blueprint": str(blueprint_path),
+            "task_count": len(tasks),
+            "section_ids": [task["section_id"] for task in tasks],
+        },
+    )
+    (stage / "section_tasks_handoff.md").write_text(
+        "# Blueprint to Sections Handoff\n\n"
+        f"Generated {len(tasks)} section tasks from `01_matrix_outline/section_blueprint.json` at {generated_at}.\n",
+        encoding="utf-8",
+    )
+    return {"task_count": len(tasks), "section_ids": [task["section_id"] for task in tasks]}
 
 
 def regenerate_figures_and_first_draft(review_root: Path, project_id: str) -> dict[str, Any]:
@@ -2586,6 +2682,28 @@ def resolve_redrawn_base_path(
         if recovered is not None:
             return recovered.resolve()
     return None
+
+
+def figure_aspect_ratio_integrity(source_path: Path, output_path: Path, tolerance: float = 0.015) -> dict[str, Any]:
+    """Reject redraws whose canvas shape no longer matches the selected source."""
+    try:
+        with Image.open(source_path) as source, Image.open(output_path) as output:
+            source_size = source.size
+            output_size = output.size
+    except (OSError, ValueError) as exc:
+        return {"status": "unavailable", "error": f"{type(exc).__name__}: {exc}"}
+    source_ratio = source_size[0] / max(1, source_size[1])
+    output_ratio = output_size[0] / max(1, output_size[1])
+    relative_difference = abs(output_ratio - source_ratio) / max(source_ratio, 1e-9)
+    return {
+        "status": "pass" if relative_difference <= tolerance else "failed",
+        "source_size": list(source_size),
+        "output_size": list(output_size),
+        "source_aspect_ratio": source_ratio,
+        "output_aspect_ratio": output_ratio,
+        "relative_difference": relative_difference,
+        "tolerance": tolerance,
+    }
 
 
 def create_full_figure_svg(
@@ -2893,10 +3011,36 @@ def save_manual_arrow_edit(
     }
 
 
+def _normalized_figure_path(path: str | Path) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+def _resolve_candidate_source(review_root: Path, project: Path, candidate: dict[str, Any]) -> Path:
+    value = str(
+        candidate.get("source_image_path")
+        or candidate.get("source_path")
+        or candidate.get("image_path")
+        or ""
+    ).strip()
+    if not value:
+        raise ValueError("Current figure candidate has no source image.")
+    raw = Path(value)
+    paths = [raw] if raw.is_absolute() else [project / raw, review_root / raw, raw]
+    source = next((path for path in paths if path.is_file()), None)
+    if source is None:
+        raise ValueError("The current figure candidate source image is unavailable.")
+    return source.resolve()
+
+
 def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) -> dict[str, Any]:
     """Create one gated AI line-art redraw and reject altered chemical geometry."""
     project = review_root / "review-projects" / project_id
-    figures = read_json_if_exists(project / "02_section_drafting" / "figure_candidates.json") or []
+    draft_stage = project / "02_section_drafting"
+    # Reconcile the Stage 6 human choice immediately before every redraw.  This
+    # closes the gap where a browser tab retained an older figure_candidates
+    # entry after the reviewer selected a different source image.
+    ensure_default_figure_reviews(draft_stage)
+    figures = read_json_if_exists(draft_stage / "figure_candidates.json") or []
     if isinstance(figures, dict):
         figures = figures.get("figures") or figures.get("candidates") or []
     candidate = next(
@@ -2908,7 +3052,8 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
     paper_id = str(candidate.get("paper_id") or "")
     if not paper_id:
         raise ValueError("Current figure candidate has no paper ID.")
-    draft_stage = project / "02_section_drafting"
+    current_source = _resolve_candidate_source(review_root, project, candidate)
+    source_sha256_before = sha256_file(current_source)
     figures_handoff = project / "03_figure_redraw" / "figures_handoff.json"
     ensure_stage_handoff(
         figures_handoff,
@@ -2995,6 +3140,43 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
         (row for row in rows if isinstance(row, dict) and str(row.get("figure_id") or "") == figure_id),
         None,
     )
+    manifest_source = str((redrawn or {}).get("source_image") or "")
+    source_unchanged = current_source.is_file() and sha256_file(current_source) == source_sha256_before
+    if (
+        not isinstance(redrawn, dict)
+        or not manifest_source
+        or _normalized_figure_path(manifest_source) != _normalized_figure_path(current_source)
+        or not source_unchanged
+    ):
+        if isinstance(redrawn, dict):
+            redrawn["status"] = "source_mismatch"
+            redrawn["notes"] = (
+                "The redraw output was rejected because it was not produced from "
+                "the current Stage 6 source candidate."
+            )
+            redrawn.pop("redrawn_image", None)
+            redrawn.pop("human_approval", None)
+            write_json(
+                project / "03_figure_redraw" / "redrawn_figure_manifest.json",
+                {"project_id": project_id, "figures": rows},
+            )
+        raise RuntimeError(
+            "The Stage 6 source candidate changed during redraw. Reload Stage 7 and redraw this figure again."
+        )
+    redrawn["source_image"] = str(current_source)
+    redrawn["source_image_sha256"] = source_sha256_before
+    redrawn["source_selection"] = {
+        "status": "current_stage6_candidate",
+        "verified_at": now_utc(),
+        "source_image": str(current_source),
+        "source_sha256": source_sha256_before,
+    }
+    if redrawn.get("redrawn_image") and Path(str(redrawn["redrawn_image"])).is_file():
+        redrawn["output_image_sha256"] = sha256_file(Path(str(redrawn["redrawn_image"])))
+    write_json(
+        project / "03_figure_redraw" / "redrawn_figure_manifest.json",
+        {"project_id": project_id, "figures": rows},
+    )
     if not isinstance(redrawn, dict) or redrawn.get("status") != "redrawn" or not redrawn.get("redrawn_image"):
         preview = preview_result(redrawn if isinstance(redrawn, dict) else None)
         if preview:
@@ -3021,6 +3203,118 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
         "integrity_warning": integrity_warning,
         "redrawn_image": str(redrawn["redrawn_image"]),
     })
+
+
+def approve_figure_for_manuscript(review_root: Path, project_id: str, figure_id: str) -> dict[str, Any]:
+    """Record an explicit human override for a current Stage 7 output.
+
+    The failed automated gate is retained for audit.  Approval is bound to the
+    exact current Stage 6 source and output hashes so it cannot follow a stale
+    redraw after the source candidate or preview changes.
+    """
+    project = review_root / "review-projects" / project_id
+    draft_stage = project / "02_section_drafting"
+    stage = project / "03_figure_redraw"
+    ensure_default_figure_reviews(draft_stage)
+    candidates = read_json_if_exists(draft_stage / "figure_candidates.json") or []
+    if isinstance(candidates, dict):
+        candidates = candidates.get("figures") or candidates.get("candidates") or []
+    candidate = next(
+        (
+            row
+            for row in candidates
+            if isinstance(row, dict) and str(row.get("figure_id") or "") == figure_id
+        ),
+        None,
+    )
+    if not isinstance(candidate, dict):
+        raise ValueError("Current figure candidate was not found.")
+    source_path = _resolve_candidate_source(review_root, project, candidate)
+
+    manifest_path = stage / "redrawn_figure_manifest.json"
+    manifest = read_json_if_exists(manifest_path) or {}
+    rows = manifest.get("figures") if isinstance(manifest, dict) else []
+    if not isinstance(rows, list):
+        rows = []
+    row = next(
+        (
+            item
+            for item in rows
+            if isinstance(item, dict) and str(item.get("figure_id") or "") == figure_id
+        ),
+        None,
+    )
+    if not isinstance(row, dict):
+        raise ValueError("No AI redraw or preview is available for human approval.")
+    recorded_source = str(row.get("source_image") or "").strip()
+    if (
+        not recorded_source
+        or _normalized_figure_path(recorded_source) != _normalized_figure_path(source_path)
+    ):
+        raise ValueError(
+            "The preview was generated from an older source candidate. Redraw the current Stage 6 selection before approval."
+        )
+    output_path = resolve_redrawn_base_path(review_root, project, stage, row)
+    if output_path is None:
+        raise ValueError("No AI redraw or preview file is available for human approval.")
+    aspect_integrity = figure_aspect_ratio_integrity(source_path, output_path)
+    if aspect_integrity.get("status") != "pass":
+        source_size = aspect_integrity.get("source_size") or []
+        output_size = aspect_integrity.get("output_size") or []
+        raise ValueError(
+            "The redraw canvas aspect ratio does not match the selected source "
+            f"({source_size} versus {output_size}). Redraw it with the current aspect-ratio guard before approval."
+        )
+
+    source_hash = sha256_file(source_path)
+    recorded_source_hash = str(row.get("source_image_sha256") or "")
+    if recorded_source_hash and recorded_source_hash != source_hash:
+        raise ValueError(
+            "The source image contents changed after this redraw. Redraw the current source before approval."
+        )
+    output_hash = sha256_file(output_path)
+    row["source_image"] = str(source_path)
+    row["source_image_sha256"] = source_hash
+    row["redrawn_image"] = str(output_path)
+    row["output_image_sha256"] = output_hash
+    row["aspect_ratio_integrity"] = aspect_integrity
+    row["status"] = "redrawn"
+    row["output_disposition"] = "human_approved_for_manuscript"
+    row["human_approval"] = {
+        "status": "approved",
+        "approved_at": now_utc(),
+        "source_image": str(source_path),
+        "source_sha256": source_hash,
+        "output_image": str(output_path),
+        "output_sha256": output_hash,
+        "current_source_match": True,
+        "current_output_match": True,
+        "acknowledgement": (
+            "A human reviewer inspected the chemistry, labels, bonds, arrows, "
+            "layout, and output quality and explicitly allowed manuscript use."
+        ),
+    }
+    write_json(manifest_path, {"project_id": project_id, "figures": rows})
+
+    figures_handoff = stage / "figures_handoff.json"
+    ensure_stage_handoff(
+        figures_handoff,
+        "figure-review",
+        [
+            draft_stage / "section_drafts.json",
+            draft_stage / "figure_candidates.json",
+            draft_stage / "paper_figure_candidates.json",
+            draft_stage / "human_figure_review.json",
+        ],
+    )
+    synchronized_assets = sync_edited_figure_to_manuscripts(project, figure_id, output_path)
+    record_stage_outputs(figures_handoff, [manifest_path, output_path], "figures")
+    return {
+        "figure_id": figure_id,
+        "redrawn_image": str(output_path),
+        "human_approval": row["human_approval"],
+        "synchronized_draft_assets": synchronized_assets,
+    }
 
 
 def persist_batch_redraw_job(review_root: Path, project_id: str, job: dict[str, object]) -> None:
@@ -3309,13 +3603,7 @@ def validate_figure_review(project: Path, project_id: str) -> dict[str, Any]:
         if not isinstance(candidate, dict) or candidate.get("source_type") == "table":
             raise RuntimeError(f"{paper_id} needs an image or scheme candidate before it can be redrawn.")
         sync_selected_candidate_for_redraw(project, paper_id, candidate)
-    figure_review_handoff = project / "03_figure_redraw" / "figure_review_handoff.json"
-    ensure_stage_handoff(
-        figure_review_handoff,
-        "sections",
-        [draft_stage / "section_drafts.json", draft_stage / "figure_candidates.json", draft_stage / "paper_figure_candidates.json"],
-    )
-    record_stage_outputs(figure_review_handoff, [draft_stage / "human_figure_review.json"], "figure-review")
+    refresh_figure_review_handoff(draft_stage, accept_current=True)
     return {"reviewed_paper_count": len(reviewable), "redraw_pending": True}
 
 
@@ -3405,9 +3693,15 @@ def regenerate_first_draft(review_root: Path, project_id: str) -> dict[str, Any]
     sections = drafts.get("sections") if isinstance(drafts, dict) else drafts
     if not isinstance(sections, list) or not sections:
         raise RuntimeError("Section drafts are missing. Regenerate Sections first.")
-    figures_handoff = project / "03_figure_redraw" / "figures_handoff.json"
-    if artifact_freshness(figures_handoff, [project / "03_figure_redraw" / "redrawn_figure_manifest.json"])["stale"]:
-        raise RuntimeError("Figure redraw is out of date. Run Figures before building the draft.")
+    figure_freshness = project_figures_payload(review_root, project_id)["freshness"]
+    if not figure_freshness["selected_count"]:
+        raise RuntimeError("No manuscript figure is selected. Complete Figure Review before building the draft.")
+    if figure_freshness["stale"]:
+        raise RuntimeError(
+            "Figure redraw is incomplete or out of date "
+            f"({figure_freshness['usable_count']}/{figure_freshness['selected_count']} current outputs are usable). "
+            "Redraw missing figures or approve warning outputs before building the draft."
+        )
     draft_handoff = stage / "draft_handoff.json"
     ensure_stage_handoff(
         draft_handoff,
@@ -3535,12 +3829,7 @@ def regenerate_final_audit(review_root: Path, project_id: str) -> dict[str, Any]
         "draft",
         [draft_path, draft_stage / "citations.json"],
     )
-    conclusion_current = bool(
-        conclusion.exists()
-        and report.exists()
-        and conclusion.stat().st_mtime > draft_path.stat().st_mtime
-        and (quality.get("validation") or {}).get("passes_validation")
-    )
+    conclusion_current = conclusion_artifacts_current(draft_path, conclusion, quality)
     if conclusion_current:
         run_project_script(
             review_root / "skills" / "review-final-audit-release" / "scripts" / "integrate_generated_conclusion.py",
@@ -3609,6 +3898,17 @@ def generate_final_overview_figure(review_root: Path, project_id: str) -> dict[s
         raise RuntimeError("Choose a selected outline before generating the overview figure.")
     final_stage = project / "05_final_audit"
     output_path = final_stage / "overview_figure.png"
+    overview_handoff = final_stage / "overview_figure_handoff.json"
+    ensure_stage_handoff(
+        overview_handoff,
+        "blueprint",
+        [
+            project / "00_discovery" / "query_plan.draft.json",
+            project / "00_discovery" / "selected_discovery_results.json",
+            outline_path,
+            project / "04_first_draft" / "first_draft.md",
+        ],
+    )
     overview_script = review_root / "skills" / "review-figure-style-redraw" / "scripts" / "generate_overview_figure.py"
     run_project_script(
         overview_script,
@@ -3619,6 +3919,7 @@ def generate_final_overview_figure(review_root: Path, project_id: str) -> dict[s
     )
     if not output_path.is_file() or output_path.stat().st_size <= 0:
         raise RuntimeError("Overview figure generation did not produce a PNG output.")
+    record_stage_outputs(overview_handoff, [output_path], "final-overview-figure")
     integration = inject_final_overview_figure(review_root, project_id)
     if integration.get("included"):
         # Keep the preview action and the full final-draft action on the same
@@ -3808,7 +4109,121 @@ def write_matrix_reading_artifacts(stage: Path, matrix: dict[str, Any], saved_at
     })
 
 
-def outline_groups(review_root: Path, rows: list[dict[str, Any]], tag_key: str) -> dict[str, list[str]]:
+def discovery_topic(project: Path) -> str:
+    candidates = (
+        project / "00_discovery" / "selected_discovery_results.json",
+        project / "00_discovery" / "combined_results_by_keyword.json",
+        project / "00_discovery" / "keyword_set.draft.json",
+    )
+    for path in candidates:
+        data = read_json_if_exists(path) or {}
+        if not isinstance(data, dict):
+            continue
+        for key in ("review_topic", "topic", "user_topic", "raw_topic"):
+            value = str(data.get(key) or "").strip()
+            if value:
+                return value
+    topic_path = project / "00_discovery" / "topic_input.md"
+    if topic_path.is_file():
+        text = read_text_if_exists(topic_path)
+        text = re.sub(r"(?m)^#+\s*", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if text:
+            return text
+    return project.name.replace("-", " ")
+
+
+def discovery_outline_hints(project: Path, tag_key: str) -> list[str]:
+    data = read_json_if_exists(project / "00_discovery" / "keyword_set.draft.json") or {}
+    if not isinstance(data, dict):
+        return []
+    topic = discovery_topic(project).casefold()
+    accepted = {
+        "substrate": {"substrate"},
+        "catalyst_or_method": {"catalyst_or_method"},
+        "reaction_type": {"reaction_type"},
+    }.get(tag_key, {tag_key})
+    hints: list[str] = []
+    if tag_key == "substrate" and "substrate" in topic:
+        hints.extend(str(item).strip() for item in data.get("user_keywords") or [])
+    for item in data.get("merged_keywords") or []:
+        if not isinstance(item, dict) or item.get("keep") is False:
+            continue
+        if str(item.get("category") or "") not in accepted:
+            continue
+        hints.append(str(item.get("keyword") or "").strip())
+    result: list[str] = []
+    for hint in hints:
+        normalized = re.sub(r"\s+", " ", hint).strip(" .")
+        if not normalized or normalized.casefold() in {"allene", "allenes", "method", "methods"}:
+            continue
+        if normalized.casefold() not in {item.casefold() for item in result}:
+            result.append(normalized)
+    return result[:10]
+
+
+def _outline_search_text(row: dict[str, Any]) -> str:
+    # This path is used specifically when structured classification has
+    # collapsed into one label. Do not feed those same derived keywords back
+    # into the fallback classifier; use paper evidence fields only.
+    values = [row.get("title"), row.get("abstract"), row.get("main_content")]
+    return re.sub(r"[^a-z0-9]+", " ", " ".join(str(value or "") for value in values).casefold()).strip()
+
+
+def _outline_hint_score(hint: str, text: str) -> int:
+    normalized = re.sub(r"[^a-z0-9]+", " ", hint.casefold()).strip()
+    if not normalized:
+        return 0
+    score = 100 + len(normalized) if re.search(rf"\b{re.escape(normalized)}\b", text) else 0
+    if "propargylic" in normalized and "derivative" in normalized:
+        derivative_markers = (
+            "acetate", "carbonate", "phosphate", "ester", "ether", "halide", "bromide",
+            "chloride", "carbamate", "sulfinate", "sulfonate", "mesylate", "tosylate",
+            "epoxide", "derivative", "alkynyl carbonate",
+        )
+        if ("propargylic" in text or "propargyl" in text or "alkynyl" in text) and any(
+            marker in text for marker in derivative_markers
+        ):
+            score = max(score, 180)
+    elif "propargylic alcohol" in normalized:
+        if "propargylic alcohol" in text or "propargyl alcohol" in text or "tertiary alcohol" in text:
+            score = max(score, 190)
+    elif "terminal alkyne" in normalized:
+        if "terminal alkyne" in text or "1 alkyne" in text or "acetylene" in text:
+            score = max(score, 190)
+    elif "enyne" in normalized:
+        if any(marker in text for marker in ("enyne", "enynone", "1 6 addition", "1 6 conjugate")):
+            score = max(score, 185)
+    return score
+
+
+def semantic_outline_groups(rows: list[dict[str, Any]], hints: list[str]) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {hint: [] for hint in hints}
+    related: list[str] = []
+    for row in rows:
+        paper_id = str(row.get("paper_id") or "")
+        if not paper_id:
+            continue
+        text = _outline_search_text(row)
+        title_text = re.sub(r"[^a-z0-9]+", " ", str(row.get("title") or "").casefold()).strip()
+        ranked = sorted(
+            (
+                (_outline_hint_score(hint, title_text) * 10 + _outline_hint_score(hint, text), index, hint)
+                for index, hint in enumerate(hints)
+            ),
+            key=lambda item: (-item[0], item[1]),
+        )
+        if ranked and ranked[0][0] > 0:
+            groups[ranked[0][2]].append(paper_id)
+        else:
+            related.append(paper_id)
+    result = {label: paper_ids for label, paper_ids in groups.items() if paper_ids}
+    if related:
+        result["Other and related methods"] = related
+    return result
+
+
+def outline_groups(review_root: Path, project_id: str, rows: list[dict[str, Any]], tag_key: str) -> dict[str, list[str]]:
     groups: dict[str, list[str]] = {}
     for row in rows:
         paper_id = str(row["paper_id"])
@@ -3818,7 +4233,15 @@ def outline_groups(review_root: Path, rows: list[dict[str, Any]], tag_key: str) 
         if not label or label.casefold() == "not specified":
             label = "Other or unspecified"
         groups.setdefault(label, []).append(paper_id)
-    return groups
+    meaningful = [paper_ids for label, paper_ids in groups.items() if not label.casefold().startswith("other")]
+    largest_share = max((len(paper_ids) for paper_ids in meaningful), default=0) / max(1, len(rows))
+    if len(rows) < 6 or (len(meaningful) >= 2 and largest_share < 0.85):
+        return groups
+    project = review_root / "review-projects" / project_id
+    hints = discovery_outline_hints(project, tag_key)
+    semantic = semantic_outline_groups(rows, hints) if len(hints) >= 2 else {}
+    semantic_meaningful = [paper_ids for label, paper_ids in semantic.items() if not label.casefold().startswith("other")]
+    return semantic if len(semantic_meaningful) >= 2 else groups
 
 
 def outline_sections(groups: dict[str, list[str]]) -> list[str]:
@@ -3873,7 +4296,7 @@ def selected_outline_document(
     generated_at: str,
 ) -> str:
     definition = outline_style_definition(outline_style)
-    groups = outline_groups(review_root, rows, definition["tag_key"])
+    groups = outline_groups(review_root, project_id, rows, definition["tag_key"])
     return "\n".join(
         [
             "# Selected Outline",
@@ -3910,7 +4333,7 @@ def write_matrix_outline_documents(review_root: Path, project_id: str, rows: lis
                 "## Introduction",
                 definition["introduction"],
                 "",
-                *outline_sections(outline_groups(review_root, rows, definition["tag_key"])),
+                *outline_sections(outline_groups(review_root, project_id, rows, definition["tag_key"])),
             ]
         )
     (stage / "outline_options.md").write_text("\n".join(options), encoding="utf-8")
@@ -3942,7 +4365,12 @@ def sync_matrix_from_discovery(review_root: Path, project_id: str) -> dict[str, 
 
     stage.mkdir(parents=True, exist_ok=True)
     synced_at = now_utc()
+    topic = discovery_topic(project)
+    comparison_axes = discovery_outline_hints(project, "substrate")
     matrix = {
+        "project_id": project_id,
+        "review_topic": topic,
+        "comparison_axes": comparison_axes,
         "rows": rows,
         "sync": {
             "source": "00_discovery/selected_discovery_results.json",
@@ -4019,39 +4447,200 @@ def write_json(path: Path, data: Any) -> None:
 
 
 def artifact_freshness(handoff_path: Path, artifacts: list[Path]) -> dict[str, Any]:
-    """Determine whether outputs still match their recorded input versions.
+    """Determine whether outputs still match their recorded SHA-256 versions.
 
-    Versioned handoffs compare SHA-256 snapshots.  Older projects keep the
-    former mtime behavior until their next successful stage execution upgrades
-    the handoff in place.
+    Legacy handoffs are upgraded in place against their current files.  The
+    former timestamp fallback was inherently ambiguous: a correctly produced
+    output is normally older than its handoff file, which made old projects
+    appear stale immediately after loading them.
     """
     handoff = read_json_if_exists(handoff_path) or {}
     if not handoff_path.exists():
-        return {"handoff": handoff, "stale": False, "outdated_artifacts": []}
+        return {
+            "handoff": handoff,
+            "versioned": False,
+            "untracked": True,
+            "stale": True,
+            "outdated_artifacts": [str(path) for path in artifacts],
+        }
     context = workflow_context_for_path(handoff_path)
-    if context and isinstance(handoff, dict) and int(handoff.get("schema_version") or 0) >= 2:
-        store, project_id = context
-        result = store.handoff_freshness(project_id, handoff_path, artifacts)
-        if result.get("versioned"):
-            return result
-    handoff_mtime = handoff_path.stat().st_mtime
-    outdated = [str(path) for path in artifacts if not path.exists() or path.stat().st_mtime <= handoff_mtime]
-    return {"handoff": handoff, "versioned": False, "stale": bool(outdated), "outdated_artifacts": outdated}
+    if not context:
+        return {
+            "handoff": handoff,
+            "versioned": False,
+            "stale": True,
+            "migration_required": True,
+            "outdated_artifacts": [str(path) for path in artifacts],
+        }
+    store, project_id = context
+    if not isinstance(handoff, dict) or int(handoff.get("schema_version") or 0) < 2:
+        producer_stage = infer_artifact_stage(artifacts[0]) if artifacts else str(handoff.get("source_stage") or "")
+        store.complete_handoff(
+            project_id,
+            handoff_path,
+            artifacts,
+            producer_stage=producer_stage,
+        )
+    return store.handoff_freshness(project_id, handoff_path, artifacts)
 
 
-def output_freshness_against_inputs(outputs: list[Path], inputs: list[Path]) -> dict[str, Any]:
-    """Flag a downstream output when a direct upstream input was modified later."""
-    existing_inputs = [path for path in inputs if path.exists()]
-    latest_input = max((path.stat().st_mtime for path in existing_inputs), default=0.0)
-    outdated = [
-        str(path)
-        for path in outputs
-        if not path.exists() or path.stat().st_mtime <= latest_input
+def conclusion_artifacts_current(
+    draft_path: Path,
+    conclusion_path: Path,
+    report: dict[str, Any],
+) -> bool:
+    """Validate conclusion lineage by content hash instead of file timestamps."""
+    expected = str(report.get("first_draft_sha256") or "")
+    return bool(
+        draft_path.is_file()
+        and conclusion_path.is_file()
+        and re.fullmatch(r"[0-9a-f]{64}", expected)
+        and sha256_file(draft_path) == expected
+        and (report.get("validation") or {}).get("passes_validation") is True
+    )
+
+
+def section_candidate_dependency_fingerprint(section_drafts_path: Path) -> str:
+    """Hash only the section structure that controls figure candidate routing."""
+    def id_list(value: Any) -> list[str]:
+        if isinstance(value, (list, tuple, set)):
+            return [str(item) for item in value if item]
+        return [str(value)] if value else []
+
+    payload = read_json_if_exists(section_drafts_path)
+    sections = payload.get("sections") if isinstance(payload, dict) else payload
+    if not isinstance(sections, list):
+        return ""
+    normalized: list[dict[str, Any]] = []
+    for section_index, section in enumerate(sections):
+        if not isinstance(section, dict):
+            continue
+        paragraphs: list[dict[str, Any]] = []
+        for paragraph_index, paragraph in enumerate(section.get("paragraphs") or []):
+            if not isinstance(paragraph, dict):
+                continue
+            paper_ids = id_list(paragraph.get("cited_paper_ids")) or id_list(paragraph.get("paper_id"))
+            paragraphs.append(
+                {
+                    "index": paragraph_index,
+                    "paragraph_id": str(paragraph.get("paragraph_id") or ""),
+                    "paper_ids": paper_ids,
+                }
+            )
+        normalized.append(
+            {
+                "index": section_index,
+                "section_id": str(section.get("section_id") or ""),
+                "heading": str(section.get("heading") or section.get("title") or ""),
+                "paper_ids": id_list(section.get("paper_ids")),
+                "paragraph_markers": section.get("paragraph_markers") or [],
+                "paragraphs": paragraphs,
+            }
+        )
+    serialized = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _section_handoff_output_paths(section_stage: Path, handoff: dict[str, Any]) -> list[Path]:
+    recorded = [
+        Path(str(item.get("path") or ""))
+        for item in handoff.get("output_versions") or []
+        if isinstance(item, dict) and item.get("path")
     ]
+    defaults = [
+        section_stage / "section_drafts.json",
+        section_stage / "section_drafts.md",
+        section_stage / "figure_candidates.json",
+        section_stage / "paper_figure_candidates.json",
+    ]
+    return list(dict.fromkeys([*recorded, *defaults]))
+
+
+def ensure_versioned_section_handoff(section_stage: Path) -> dict[str, Any]:
+    """Upgrade an old Section handoff once and establish candidate lineage."""
+    handoff_path = section_stage / "section_handoff.json"
+    handoff = read_json_if_exists(handoff_path) or {}
+    if not handoff_path.exists():
+        return handoff
+    context = workflow_context_for_path(handoff_path)
+    if not context:
+        return handoff
+    store, project_id = context
+    fingerprint = section_candidate_dependency_fingerprint(section_stage / "section_drafts.json")
+    has_recorded_outputs = bool(isinstance(handoff, dict) and handoff.get("output_versions"))
+    needs_upgrade = (
+        not isinstance(handoff, dict)
+        or int(handoff.get("schema_version") or 0) < 2
+        or not isinstance(handoff.get("source_versions"), list)
+        or (has_recorded_outputs and not str(handoff.get("candidate_dependency_fingerprint") or ""))
+    )
+    if needs_upgrade:
+        store.complete_handoff(
+            project_id,
+            handoff_path,
+            _section_handoff_output_paths(section_stage, handoff if isinstance(handoff, dict) else {}),
+            producer_stage="sections",
+        )
+        handoff = store.update_handoff_metadata(
+            project_id,
+            handoff_path,
+            {
+                "candidate_dependency_fingerprint": fingerprint,
+                "dependency_profile": "section-candidate-routing-v1",
+            },
+            producer_stage="sections",
+        )
+    return handoff
+
+
+def section_source_freshness(section_stage: Path) -> dict[str, Any]:
+    """Check the full Section output used by Draft and later stages.
+
+    ``figure_candidates.json`` and ``paper_figure_candidates.json`` are updated
+    when Stage 6 stores automatic or manual candidate selections. They are
+    mutable Figure Review state, so only the authored Section JSON is checked.
+    """
+    ensure_versioned_section_handoff(section_stage)
+    return artifact_freshness(
+        section_stage / "section_handoff.json",
+        [section_stage / "section_drafts.json"],
+    )
+
+
+def section_candidate_freshness(section_stage: Path) -> dict[str, Any]:
+    """Check only changes that can invalidate candidate-to-paragraph routing."""
+    handoff_path = section_stage / "section_handoff.json"
+    handoff = ensure_versioned_section_handoff(section_stage)
+    if not handoff_path.exists():
+        return {
+            "handoff": handoff,
+            "versioned": False,
+            "untracked": True,
+            "stale": True,
+            "outdated_artifacts": [str(section_stage / "section_drafts.json")],
+        }
+    context = workflow_context_for_path(handoff_path)
+    if not context:
+        return {
+            "handoff": handoff,
+            "versioned": False,
+            "stale": True,
+            "migration_required": True,
+            "outdated_artifacts": [str(section_stage / "section_drafts.json")],
+        }
+    store, project_id = context
+    state = store.handoff_freshness(project_id, handoff_path, [])
+    recorded = str(handoff.get("candidate_dependency_fingerprint") or "")
+    current = section_candidate_dependency_fingerprint(section_stage / "section_drafts.json")
+    routing_changed = not current or current != recorded
+    outdated = list(state.get("outdated_artifacts") or [])
+    if routing_changed:
+        outdated.append(str(section_stage / "section_drafts.json"))
     return {
-        "stale": bool(outdated),
-        "outdated_outputs": outdated,
-        "latest_input_mtime": latest_input,
+        **state,
+        "stale": bool(state.get("outdated_sources") or routing_changed),
+        "outdated_artifacts": list(dict.fromkeys(outdated)),
+        "candidate_dependency_fingerprint": current,
     }
 
 
@@ -4095,13 +4684,31 @@ def record_stage_outputs(
         producer_stage=stage_id,
         producer_run_id=producer_run_id,
     )
+    if stage_id == "sections":
+        section_stage = handoff_path.parent
+        store.update_handoff_metadata(
+            project_id,
+            handoff_path,
+            {
+                "candidate_dependency_fingerprint": section_candidate_dependency_fingerprint(
+                    section_stage / "section_drafts.json"
+                ),
+                "dependency_profile": "section-candidate-routing-v1",
+            },
+            producer_stage="sections",
+        )
 
 
 def ensure_stage_handoff(path: Path, source_stage: str, source_artifacts: list[Path]) -> None:
     """Create a new input boundary only when its content dependencies changed."""
     context = workflow_context_for_path(path)
     handoff = read_json_if_exists(path) or {}
-    if not context or not path.exists() or int(handoff.get("schema_version") or 0) < 2:
+    if (
+        not context
+        or not path.exists()
+        or int(handoff.get("schema_version") or 0) < 2
+        or not isinstance(handoff.get("source_versions"), list)
+    ):
         write_stage_handoff(path, source_stage, source_artifacts)
         return
     store, project_id = context
@@ -4227,23 +4834,15 @@ def project_sections_payload(review_root: Path, project_id: str) -> dict[str, An
         for path in sorted(sections_dir.glob("*.md")):
             section_files.append({"name": path.name, "path": str(path), "content": read_text_if_exists(path)})
     handoff_path = stage / "section_handoff.json"
+    freshness = section_source_freshness(stage)
     handoff = read_json_if_exists(handoff_path) or {}
-    draft_artifacts = [
-        stage / "section_drafts.json",
-        stage / "section_drafts.md",
-        stage / "section_drafting_report.md",
-        *[Path(item["path"]) for item in section_files],
-    ]
-    latest_draft_artifact = max(
-        (path.stat().st_mtime for path in draft_artifacts if path.exists()),
-        default=0,
-    )
-    drafts_stale = bool(handoff_path.exists() and handoff_path.stat().st_mtime > latest_draft_artifact)
+    has_existing_drafts = (stage / "section_drafts.json").is_file()
     if isinstance(handoff, dict):
         handoff = {
             **handoff,
-            "drafts_stale": drafts_stale,
-            "has_existing_drafts": bool(latest_draft_artifact),
+            "drafts_stale": bool(freshness.get("stale")),
+            "has_existing_drafts": has_existing_drafts,
+            "freshness_mode": "sha256",
         }
     return {
         "project_id": project_id,
@@ -4269,44 +4868,153 @@ def project_sections_payload(review_root: Path, project_id: str) -> dict[str, An
 def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     project = review_root / "review-projects" / project_id
     draft_stage = project / "02_section_drafting"
+    ensure_default_figure_reviews(draft_stage)
     stage = project / "03_figure_redraw"
-    source_freshness = artifact_freshness(
-        draft_stage / "section_handoff.json",
-        [draft_stage / "section_drafts.json", draft_stage / "figure_candidates.json", draft_stage / "paper_figure_candidates.json"],
-    )
+    source_freshness = section_candidate_freshness(draft_stage)
     redraw_freshness = artifact_freshness(stage / "figures_handoff.json", [stage / "redrawn_figure_manifest.json"])
+    candidate_data = read_json_if_exists(draft_stage / "figure_candidates.json") or []
+    candidate_rows = (
+        candidate_data.get("figures") or candidate_data.get("candidates") or []
+        if isinstance(candidate_data, dict)
+        else candidate_data
+    )
+    candidate_by_id = {
+        str(row.get("figure_id") or ""): row
+        for row in candidate_rows or []
+        if isinstance(row, dict) and row.get("figure_id")
+    }
     redrawn_manifest = read_json_if_exists(stage / "redrawn_figure_manifest.json")
     if isinstance(redrawn_manifest, dict):
         redrawn_manifest = dict(redrawn_manifest)
         rows: list[dict[str, Any]] = []
         for raw_row in redrawn_manifest.get("figures") or []:
             row = dict(raw_row) if isinstance(raw_row, dict) else raw_row
-            if isinstance(row, dict) and not row.get("redrawn_image") and not row.get("rejected_preview_image"):
+            if isinstance(row, dict):
                 figure_id = str(row.get("figure_id") or "")
-                previews = list((stage / "redrawn").glob(f"{figure_id}.*")) if figure_id else []
-                preview = next((path for path in previews if path.is_file()), None)
-                if preview:
-                    row["rejected_preview_image"] = str(preview)
-                    row["rejected_preview_status"] = "not_approved_for_manuscript"
+                candidate = candidate_by_id.get(figure_id)
+                approval = dict(row.get("human_approval") or {})
+                if approval and isinstance(candidate, dict):
+                    try:
+                        current_source = _resolve_candidate_source(review_root, project, candidate)
+                        current_source_hash = sha256_file(current_source)
+                        source_match = bool(
+                            _normalized_figure_path(str(approval.get("source_image") or ""))
+                            == _normalized_figure_path(current_source)
+                            and str(approval.get("source_sha256") or "") == current_source_hash
+                        )
+                    except (OSError, ValueError):
+                        source_match = False
+                    output = resolve_redrawn_base_path(review_root, project, stage, row)
+                    output_match = bool(
+                        output
+                        and str(approval.get("output_sha256") or "")
+                        and sha256_file(output) == str(approval.get("output_sha256") or "")
+                    )
+                    approval["current_source_match"] = source_match
+                    approval["current_output_match"] = output_match
+                    row["human_approval"] = approval
+                elif approval:
+                    approval["current_source_match"] = False
+                    approval["current_output_match"] = False
+                    row["human_approval"] = approval
+                if isinstance(candidate, dict):
+                    try:
+                        ratio_source = _resolve_candidate_source(review_root, project, candidate)
+                        ratio_output = resolve_redrawn_base_path(review_root, project, stage, row)
+                        if ratio_output:
+                            row["aspect_ratio_integrity"] = figure_aspect_ratio_integrity(
+                                ratio_source,
+                                ratio_output,
+                            )
+                    except (OSError, ValueError):
+                        row["aspect_ratio_integrity"] = {"status": "unavailable"}
+                integrity_status = str((row.get("chemistry_integrity") or {}).get("status") or "")
+                requires_approval = bool(
+                    integrity_status in {"failed", "needs_human_arrow_check"}
+                    or str(row.get("output_disposition") or "") == "saved_with_integrity_warning"
+                )
+                human_approved = bool(
+                    approval.get("status") == "approved"
+                    and approval.get("current_source_match")
+                    and approval.get("current_output_match")
+                )
+                if requires_approval and not human_approved:
+                    preview = resolve_redrawn_base_path(review_root, project, stage, row)
+                    if preview:
+                        row["rejected_preview_image"] = str(preview)
+                        row["rejected_preview_status"] = "awaiting_human_approval"
+                elif not row.get("redrawn_image") and not row.get("rejected_preview_image"):
+                    previews = list((stage / "redrawn").glob(f"{figure_id}.*")) if figure_id else []
+                    preview = next((path for path in previews if path.is_file()), None)
+                    if preview:
+                        row["rejected_preview_image"] = str(preview)
+                        row["rejected_preview_status"] = "not_approved_for_manuscript"
             rows.append(row)
         redrawn_manifest["figures"] = rows
+    selected_ids = {
+        str(row.get("figure_id") or "")
+        for row in candidate_rows or []
+        if isinstance(row, dict)
+        and row.get("figure_id")
+        and row.get("manuscript_selected") is not False
+    }
+    usable_ids: set[str] = set()
+    for row in (redrawn_manifest or {}).get("figures") or []:
+        if not isinstance(row, dict) or str(row.get("status") or "") != "redrawn":
+            continue
+        figure_id = str(row.get("figure_id") or "")
+        candidate = candidate_by_id.get(figure_id)
+        if not figure_id or not isinstance(candidate, dict):
+            continue
+        try:
+            current_source = _resolve_candidate_source(review_root, project, candidate)
+        except (OSError, ValueError):
+            continue
+        recorded_source = str(row.get("source_image") or "")
+        if not recorded_source or _normalized_figure_path(recorded_source) != _normalized_figure_path(current_source):
+            continue
+        recorded_source_hash = str(row.get("source_image_sha256") or "")
+        if recorded_source_hash and sha256_file(current_source) != recorded_source_hash:
+            continue
+        output = resolve_redrawn_base_path(review_root, project, stage, row)
+        if output is None:
+            continue
+        if figure_aspect_ratio_integrity(current_source, output).get("status") != "pass":
+            continue
+        integrity_status = str((row.get("chemistry_integrity") or {}).get("status") or "")
+        requires_approval = bool(
+            integrity_status in {"failed", "needs_human_arrow_check"}
+            or str(row.get("output_disposition") or "") == "saved_with_integrity_warning"
+        )
+        approval = row.get("human_approval") or {}
+        if requires_approval and not (
+            approval.get("status") == "approved"
+            and approval.get("current_source_match")
+            and approval.get("current_output_match")
+        ):
+            continue
+        usable_ids.add(figure_id)
+    semantic_redraw_stale = bool(selected_ids - usable_ids)
     return {
         "project_id": project_id,
         "topic": infer_project_topic(project),
         "summary": project_summary(review_root, project_id),
-        "figure_candidates": read_json_if_exists(draft_stage / "figure_candidates.json"),
+        "figure_candidates": candidate_data,
         "redrawn_manifest": redrawn_manifest,
         "batch_redraw": batch_figure_redraw_status(project_id),
         "figure_redraw_report_md": read_text_if_exists(stage / "figure_redraw_report.md"),
         "freshness": {
             "source_stale": source_freshness["stale"],
-            "redraw_stale": redraw_freshness["stale"],
-            "stale": source_freshness["stale"] or redraw_freshness["stale"],
+            "redraw_stale": redraw_freshness["stale"] or semantic_redraw_stale,
+            "semantic_redraw_stale": semantic_redraw_stale,
+            "selected_count": len(selected_ids),
+            "usable_count": len(usable_ids & selected_ids),
+            "stale": source_freshness["stale"] or redraw_freshness["stale"] or semantic_redraw_stale,
         },
         "upstream": {
             "section_drafts": read_json_if_exists(draft_stage / "section_drafts.json"),
             "section_drafts_md": read_text_if_exists(draft_stage / "section_drafts.md"),
-            "figure_candidates": read_json_if_exists(draft_stage / "figure_candidates.json"),
+            "figure_candidates": candidate_data,
         },
         "paths": {"stage_dir": str(stage), "draft_stage_dir": str(draft_stage)},
     }
@@ -4328,17 +5036,18 @@ def default_redrawable_candidate(paper: dict[str, Any]) -> dict[str, Any] | None
     return max(candidates, default=(0.0, 0, None), key=lambda item: (item[0], item[1]))[2]
 
 
-def sync_reviewed_figure_candidates(stage: Path, candidates_data: dict[str, Any], reviews: dict[str, Any]) -> None:
+def sync_reviewed_figure_candidates(stage: Path, candidates_data: dict[str, Any], reviews: dict[str, Any]) -> bool:
     """Make Stage 7 immediately reflect every saved Stage 6 selection."""
     papers = candidates_data.get("papers") if isinstance(candidates_data, dict) else []
     if not isinstance(papers, list) or not isinstance(reviews, dict):
-        return
+        return False
     manifest_path = stage / "figure_candidates.json"
     manifest = read_json_if_exists(manifest_path) or []
     if isinstance(manifest, dict):
         manifest = manifest.get("figures") or manifest.get("candidates") or []
     if not isinstance(manifest, list):
         manifest = []
+    changed = False
     for paper in papers:
         if not isinstance(paper, dict):
             continue
@@ -4358,6 +5067,7 @@ def sync_reviewed_figure_candidates(stage: Path, candidates_data: dict[str, Any]
             continue
         try:
             sync_selected_candidate_for_redraw(stage.parent, paper_id, candidate)
+            changed = True
         except RuntimeError:
             # A candidate without a paragraph anchor remains available for a manual
             # review; do not make the whole Figure Review page unavailable.
@@ -4367,6 +5077,82 @@ def sync_reviewed_figure_candidates(stage: Path, candidates_data: dict[str, Any]
             manifest = manifest.get("figures") or manifest.get("candidates") or []
         if not isinstance(manifest, list):
             manifest = []
+    return changed
+
+
+FIGURE_REVIEW_DEPENDENCY_PROFILE = "candidate-manifests-and-selected-sources-v2"
+
+
+def figure_review_dependency_paths(stage: Path) -> list[Path]:
+    """Return candidate manifests plus only the sources selected by Stage 6."""
+    paths = [stage / "figure_candidates.json", stage / "paper_figure_candidates.json"]
+    raw_sources: list[str] = []
+    reviews_data = read_json_if_exists(stage / "human_figure_review.json") or {}
+    reviews = reviews_data.get("papers") if isinstance(reviews_data, dict) else {}
+    selected_by_paper = (
+        {
+            str(paper_id): review.get("selected_candidate_index")
+            for paper_id, review in reviews.items()
+            if isinstance(review, dict)
+        }
+        if isinstance(reviews, dict)
+        else {}
+    )
+    figures = read_json_if_exists(paths[0]) or []
+    if isinstance(figures, dict):
+        figures = figures.get("figures") or figures.get("candidates") or []
+    for candidate in figures if isinstance(figures, list) else []:
+        if isinstance(candidate, dict) and candidate.get("manuscript_selected"):
+            raw = candidate.get("source_image_path") or candidate.get("source_path") or candidate.get("image_path")
+            if raw:
+                raw_sources.append(str(raw))
+    paper_candidates = read_json_if_exists(paths[1]) or {}
+    papers = paper_candidates.get("papers") if isinstance(paper_candidates, dict) else []
+    for paper in papers if isinstance(papers, list) else []:
+        if not isinstance(paper, dict):
+            continue
+        paper_id = str(paper.get("paper_id") or "")
+        selected_index = selected_by_paper.get(paper_id)
+        for candidate in paper.get("candidates") or []:
+            if not isinstance(candidate, dict) or candidate.get("candidate_index") != selected_index:
+                continue
+            raw = candidate.get("source_image_path") or candidate.get("source_path") or candidate.get("image_path")
+            if raw:
+                raw_sources.append(str(raw))
+    project = stage.parent
+    review_root = project.parent.parent
+    for raw in raw_sources:
+        candidate = Path(raw)
+        if candidate.is_absolute():
+            paths.append(candidate)
+            continue
+        options = [stage / candidate, project / candidate, review_root / candidate]
+        paths.append(next((item for item in options if item.is_file()), options[0]))
+    return list(dict.fromkeys(Path(item).resolve() for item in paths))
+
+
+def refresh_figure_review_handoff(stage: Path, *, accept_current: bool = False) -> None:
+    """Migrate or deliberately rebase the Stage 6 review dependency boundary."""
+    review_path = stage / "human_figure_review.json"
+    if not review_path.is_file():
+        return
+    handoff_path = stage.parent / "03_figure_redraw" / "figure_review_handoff.json"
+    handoff = read_json_if_exists(handoff_path) or {}
+    migration_required = (
+        not handoff_path.is_file()
+        or not isinstance(handoff, dict)
+        or int(handoff.get("schema_version") or 0) < 2
+        or handoff.get("dependency_profile") != FIGURE_REVIEW_DEPENDENCY_PROFILE
+    )
+    if not migration_required and not accept_current:
+        return
+    write_stage_handoff(
+        handoff_path,
+        "sections",
+        figure_review_dependency_paths(stage),
+        metadata={"dependency_profile": FIGURE_REVIEW_DEPENDENCY_PROFILE},
+    )
+    record_stage_outputs(handoff_path, [review_path], "figure-review")
 
 
 def ensure_default_figure_reviews(stage: Path) -> dict[str, Any]:
@@ -4414,20 +5200,23 @@ def ensure_default_figure_reviews(stage: Path) -> dict[str, Any]:
         reviews_data.setdefault("source", "automatic_top_score")
         reviews_data["generated_at"] = now_utc()
         write_json(review_path, reviews_data)
-    sync_reviewed_figure_candidates(stage, candidates_data, reviews)
+    redraw_inputs_changed = sync_reviewed_figure_candidates(stage, candidates_data, reviews)
+    if candidates_changed or reviews_changed or redraw_inputs_changed:
+        refresh_figure_review_handoff(stage, accept_current=True)
     return reviews_data
 
 
 def project_figure_review_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     project = review_root / "review-projects" / project_id
     stage = project / "02_section_drafting"
-    source_freshness = artifact_freshness(
-        stage / "section_handoff.json",
-        [stage / "section_drafts.json", stage / "figure_candidates.json", stage / "paper_figure_candidates.json"],
-    )
-    review_freshness = artifact_freshness(project / "03_figure_redraw" / "figure_review_handoff.json", [stage / "human_figure_review.json"])
-    candidates_data = read_json_if_exists(stage / "paper_figure_candidates.json") or {}
+    source_freshness = section_candidate_freshness(stage)
     reviews = ensure_default_figure_reviews(stage)
+    refresh_figure_review_handoff(stage)
+    candidates_data = read_json_if_exists(stage / "paper_figure_candidates.json") or {}
+    review_freshness = artifact_freshness(
+        project / "03_figure_redraw" / "figure_review_handoff.json",
+        [stage / "human_figure_review.json"],
+    )
     review_rows = reviews.get("papers") if isinstance(reviews, dict) else {}
     papers: list[dict[str, Any]] = []
     for row in candidates_data.get("papers", []) if isinstance(candidates_data, dict) else []:
@@ -4437,7 +5226,11 @@ def project_figure_review_payload(review_root: Path, project_id: str) -> dict[st
         meta = read_json_if_exists(review_root / "review-library" / "metadata" / "papers" / f"{paper_id}.metadata.json") or {}
         item = dict(row)
         item["title"] = value_of(meta.get("title")) or paper_id
-        item["human_review"] = review_rows.get(paper_id, {}) if isinstance(review_rows, dict) else {}
+        human_review = review_rows.get(paper_id, {}) if isinstance(review_rows, dict) else {}
+        item["human_review"] = human_review
+        selected_index = human_review.get("selected_candidate_index") if isinstance(human_review, dict) else None
+        if isinstance(selected_index, int) and not isinstance(selected_index, bool):
+            item["selected_candidate_index"] = selected_index
         papers.append(item)
     return {
         "project_id": project_id,
@@ -4483,10 +5276,8 @@ def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     docx_path = latest_final_docx_path(stage)
     docx_current = docx_export_is_current(stage, docx_path)
     section_stage = project / "02_section_drafting"
-    source_freshness = artifact_freshness(
-        section_stage / "section_handoff.json",
-        [section_stage / "section_drafts.json", section_stage / "figure_candidates.json", section_stage / "paper_figure_candidates.json"],
-    )
+    source_freshness = section_source_freshness(section_stage)
+    draft_dependency_freshness = project_draft_payload(review_root, project_id)["freshness"]
     final_draft_path = stage / "final_draft.md"
     final_freshness = artifact_freshness(stage / "final_handoff.json", [final_draft_path])
     draft_path = draft_stage / "first_draft.md"
@@ -4494,19 +5285,17 @@ def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     conclusion_report = read_json_if_exists(draft_stage / "conclusion_quality_report.json") or {}
     overview_figure = stage / "overview_figure.png"
     release_full_png = stage / "review_summary_chart.png"
-    overview_asset = stage / "figures" / OVERVIEW_FIGURE_FILENAME
     final_draft_text = read_text_if_exists(final_draft_path)
     overview_included = final_draft_contains_overview_figure(final_draft_text)
-    overview_freshness = output_freshness_against_inputs(
-        [final_draft_path, overview_asset],
+    overview_freshness = artifact_freshness(
+        stage / "overview_figure_handoff.json",
         [overview_figure],
-    ) if overview_figure.exists() else {"stale": False, "outdated_outputs": []}
+    ) if overview_figure.exists() else {"stale": False, "outdated_artifacts": []}
     overview_stale = overview_figure.exists() and (not overview_included or overview_freshness["stale"])
-    conclusion_current = bool(
-        conclusion_path.exists()
-        and draft_path.exists()
-        and conclusion_path.stat().st_mtime > draft_path.stat().st_mtime
-        and (conclusion_report.get("validation") or {}).get("passes_validation")
+    conclusion_current = conclusion_artifacts_current(
+        draft_path,
+        conclusion_path,
+        conclusion_report,
     )
     return {
         "project_id": project_id,
@@ -4533,9 +5322,10 @@ def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
         "overview_figure_included": overview_included,
         "freshness": {
             "source_stale": source_freshness["stale"],
+            "draft_stale": draft_dependency_freshness["stale"],
             "final_stale": final_freshness["stale"] or overview_stale,
             "overview_stale": overview_stale,
-            "stale": source_freshness["stale"] or final_freshness["stale"] or overview_stale,
+            "stale": source_freshness["stale"] or draft_dependency_freshness["stale"] or final_freshness["stale"] or overview_stale,
         },
         "paths": {"stage_dir": str(stage)},
     }
@@ -4548,20 +5338,9 @@ def project_draft_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     draft_bundle = read_json_if_exists(stage_dir / "draft_bundle.json")
     section_drafts = read_json_if_exists(project / "02_section_drafting" / "section_drafts.json")
     section_stage = project / "02_section_drafting"
-    source_freshness = artifact_freshness(
-        section_stage / "section_handoff.json",
-        [section_stage / "section_drafts.json", section_stage / "figure_candidates.json", section_stage / "paper_figure_candidates.json"],
-    )
+    source_freshness = section_source_freshness(section_stage)
     draft_freshness = artifact_freshness(stage_dir / "draft_handoff.json", [stage_dir / "first_draft.md"])
-    upstream_freshness = output_freshness_against_inputs(
-        [stage_dir / "first_draft.md"],
-        [
-            section_stage / "section_drafts.json",
-            section_stage / "figure_candidates.json",
-            section_stage / "paper_figure_candidates.json",
-            project / "03_figure_redraw" / "redrawn_figure_manifest.json",
-        ],
-    )
+    figures_freshness = project_figures_payload(review_root, project_id)["freshness"]
     redrawn = []
     for row in (figures_manifest.get("figures") or []):
         if isinstance(row, dict):
@@ -4579,8 +5358,9 @@ def project_draft_payload(review_root: Path, project_id: str) -> dict[str, Any]:
         "freshness": {
             "source_stale": source_freshness["stale"],
             "draft_stale": draft_freshness["stale"],
-            "upstream_stale": upstream_freshness["stale"],
-            "stale": source_freshness["stale"] or draft_freshness["stale"] or upstream_freshness["stale"],
+            "figures_stale": figures_freshness["stale"],
+            "upstream_stale": source_freshness["stale"] or figures_freshness["stale"],
+            "stale": source_freshness["stale"] or draft_freshness["stale"] or figures_freshness["stale"],
         },
         "upstream": {
             "selected_outline_md": read_text_if_exists(project / "01_matrix_outline" / "selected_outline.md"),

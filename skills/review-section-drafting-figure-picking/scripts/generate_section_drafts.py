@@ -7,6 +7,7 @@ import json
 import os
 import re
 import ssl
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -20,12 +21,56 @@ def openai_endpoint(base_url: str, endpoint: str) -> str:
     return f"{base}{prefix}/{endpoint.lstrip('/')}"
 
 
-def resolve_api_key(cli_value: str, base_url: str) -> str:
+TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+
+
+def open_json_response(request: urllib.request.Request, *, label: str, timeout: int = 300) -> dict[str, Any]:
+    """Open an API request with bounded transient retries and useful JSON errors."""
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=timeout) as response:
+                raw = response.read()
+                if not raw.strip():
+                    raise RuntimeError(f"{label} returned an empty response body")
+                try:
+                    data = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    preview = raw.decode("utf-8", "replace")[:300].replace("\r", " ").replace("\n", " ")
+                    raise RuntimeError(f"{label} returned non-JSON content: {preview or '<empty>'}") from exc
+                if not isinstance(data, dict):
+                    raise RuntimeError(f"{label} returned JSON {type(data).__name__}, expected an object")
+                return data
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "replace")[:500].replace("\r", " ").replace("\n", " ")
+            if exc.code not in TRANSIENT_HTTP_CODES or attempt == 2:
+                raise RuntimeError(f"{label} failed with HTTP {exc.code}: {body or exc.reason}") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt == 2:
+                raise RuntimeError(f"{label} transport failed: {exc}") from exc
+        time.sleep(2 ** attempt)
+    raise RuntimeError(f"{label} failed after retries")
+
+
+def resolve_api_key(cli_value: str, base_url: str, dotenv: dict[str, str] | None = None) -> str:
     if cli_value:
         return cli_value
+    values = dotenv or {}
+    dedicated = os.environ.get("REVIEW_WRITING_API_KEY", "") or values.get("REVIEW_WRITING_API_KEY", "")
+    if dedicated:
+        return dedicated
     if "api.xiaoleai.team" in str(base_url).lower():
-        return os.environ.get("XIAOLEAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
-    return os.environ.get("OPENAI_API_KEY", "") or os.environ.get("XIAOLEAI_API_KEY", "")
+        return (
+            values.get("XIAOLEAI_API_KEY", "")
+            or values.get("OPENAI_API_KEY", "")
+            or os.environ.get("XIAOLEAI_API_KEY", "")
+            or os.environ.get("OPENAI_API_KEY", "")
+        )
+    return (
+        values.get("OPENAI_API_KEY", "")
+        or os.environ.get("OPENAI_API_KEY", "")
+        or values.get("XIAOLEAI_API_KEY", "")
+        or os.environ.get("XIAOLEAI_API_KEY", "")
+    )
 
 
 def read_json(path: Path) -> Any:
@@ -37,15 +82,20 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def load_dotenv(root: Path) -> None:
+def load_dotenv(root: Path) -> dict[str, str]:
     path = root / ".env"
+    values: dict[str, str] = {}
     if not path.exists():
-        return
+        return values
     for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         if "=" not in raw or raw.lstrip().startswith("#"):
             continue
         key, value = raw.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+        # Match conventional dotenv behavior inside one file: the last
+        # occurrence wins. Keep the values local so a dashboard process that
+        # loaded an older duplicate cannot silently override this stage.
+        values[key.strip()] = value.strip().strip("'\"")
+    return values
 
 
 def value(item: Any) -> Any:
@@ -75,7 +125,66 @@ def paper_evidence(root: Path, rows: dict[str, dict[str, Any]], paper_id: str) -
     }
 
 
-def call_llm(prompt: str, api_key: str, base_url: str, model: str) -> dict[str, Any]:
+def parse_json_object(text: Any) -> dict[str, Any]:
+    value = str(text or "").strip()
+    if value.startswith("```"):
+        value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.IGNORECASE)
+        value = re.sub(r"\s*```$", "", value).strip()
+    parsed = json.loads(value)
+    parsed = repair_model_unicode(parsed)
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("paragraphs"), list):
+        raise RuntimeError("Section-writing model returned an invalid response.")
+    return parsed
+
+
+_TRUNCATED_GREEK_ESCAPE_RE = re.compile(r"\x03([0-9a-fA-F]{2})")
+_KNOWN_TRUNCATED_UNICODE = {
+    "\x02": "\u2032",  # U+2032 PRIME, seen in SN2\u2032
+    "\x13": "\u2013",  # U+2013 EN DASH
+    "\x14": "\u2014",  # U+2014 EM DASH
+}
+
+
+def repair_model_unicode(value: Any) -> Any:
+    """Recover relay-truncated Unicode and reject no XML-incompatible text.
+
+    Some OpenAI-compatible relays have returned ``\\u03b1`` as
+    ``\\u0003b1`` and ``\\u2014`` as ``\\u0014`` inside an otherwise valid
+    JSON response.  ``json.loads`` correctly decodes those malformed escapes,
+    leaving control characters that later make a DOCX XML part invalid.
+    """
+    if isinstance(value, dict):
+        return {str(key): repair_model_unicode(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [repair_model_unicode(item) for item in value]
+    if not isinstance(value, str):
+        return value
+    repaired = re.sub(r"(?<=C)\x03(?=C)", "\u2013", value)
+    repaired = _TRUNCATED_GREEK_ESCAPE_RE.sub(
+        lambda match: chr(int("03" + match.group(1), 16)),
+        repaired,
+    )
+    repaired = "".join(_KNOWN_TRUNCATED_UNICODE.get(char, char) for char in repaired)
+    return "".join(
+        char
+        if (
+            ord(char) in {0x09, 0x0A, 0x0D}
+            or 0x20 <= ord(char) <= 0xD7FF
+            or 0xE000 <= ord(char) <= 0xFFFD
+            or 0x10000 <= ord(char) <= 0x10FFFF
+        )
+        else "\uFFFD"
+        for char in repaired
+    )
+
+
+def call_llm(
+    prompt: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    wire_api: str = "responses",
+) -> dict[str, Any]:
     schema = {
         "type": "object", "additionalProperties": False,
         "required": ["overview", "paragraphs"],
@@ -94,13 +203,27 @@ def call_llm(prompt: str, api_key: str, base_url: str, model: str) -> dict[str, 
             },
         },
     }
-    payload = {
-        "model": model,
-        "input": [{"role": "user", "content": prompt}],
-        "text": {"format": {"type": "json_schema", "name": "review_section", "schema": schema, "strict": True}},
-    }
+    wire = str(wire_api or "responses").strip().lower().replace("_", "-")
+    if wire in {"chat", "chat-completion", "chat-completions"}:
+        endpoint = openai_endpoint(base_url, "chat/completions")
+        schema_prompt = (
+            f"{prompt}\n\nReturn only one JSON object matching this JSON Schema exactly:\n"
+            f"{json.dumps(schema, ensure_ascii=False)}"
+        )
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": schema_prompt}],
+            "response_format": {"type": "json_object"},
+        }
+    else:
+        endpoint = openai_endpoint(base_url, "responses")
+        payload = {
+            "model": model,
+            "input": [{"role": "user", "content": prompt}],
+            "text": {"format": {"type": "json_schema", "name": "review_section", "schema": schema, "strict": True}},
+        }
     request = urllib.request.Request(
-        openai_endpoint(base_url, "responses"),
+        endpoint,
         data=json.dumps(payload).encode("utf-8"), method="POST",
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -111,19 +234,26 @@ def call_llm(prompt: str, api_key: str, base_url: str, model: str) -> dict[str, 
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         },
     )
-    with urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=300) as response:
-        data = json.loads(response.read().decode("utf-8"))
-    text = data.get("output_text") or ""
-    if not text:
-        text = "\n".join(
-            content.get("text", "")
-            for output in data.get("output", []) for content in output.get("content", [])
-            if content.get("type") in {"output_text", "text"}
-        )
-    parsed = json.loads(text)
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("paragraphs"), list):
-        raise RuntimeError("Section-writing model returned an invalid response.")
-    return parsed
+    data = open_json_response(request, label="Section-writing model request")
+    if wire in {"chat", "chat-completion", "chat-completions"}:
+        choices = data.get("choices") if isinstance(data.get("choices"), list) else []
+        message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+        text = message.get("content") if isinstance(message, dict) else ""
+        if isinstance(text, list):
+            text = "\n".join(
+                str(part.get("text") or "")
+                for part in text
+                if isinstance(part, dict)
+            )
+    else:
+        text = data.get("output_text") or ""
+        if not text:
+            text = "\n".join(
+                content.get("text", "")
+                for output in data.get("output", []) for content in output.get("content", [])
+                if content.get("type") in {"output_text", "text"}
+            )
+    return parse_json_object(text)
 
 
 def main() -> int:
@@ -133,14 +263,33 @@ def main() -> int:
     parser.add_argument("--api-key", default="")
     parser.add_argument("--base-url", default="")
     parser.add_argument("--model", default="")
+    parser.add_argument("--wire-api", default="")
     args = parser.parse_args()
     root = Path(args.review_root).resolve()
-    load_dotenv(root)
-    base_url = args.base_url or os.environ.get("REVIEW_WRITING_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
-    api_key = resolve_api_key(args.api_key, base_url)
+    dotenv = load_dotenv(root)
+    base_url = (
+        args.base_url
+        or os.environ.get("REVIEW_WRITING_BASE_URL")
+        or dotenv.get("REVIEW_WRITING_BASE_URL")
+        or dotenv.get("OPENAI_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or "https://api.openai.com"
+    )
+    api_key = resolve_api_key(args.api_key, base_url, dotenv)
     if not api_key:
         raise SystemExit("Missing OPENAI_API_KEY. Configure it in the environment or local .env before generating sections.")
-    model = args.model or os.environ.get("REVIEW_WRITING_MODEL", "gpt-5.4")
+    model = (
+        args.model
+        or os.environ.get("REVIEW_WRITING_MODEL")
+        or dotenv.get("REVIEW_WRITING_MODEL")
+        or "gpt-5.4"
+    )
+    wire_api = (
+        args.wire_api
+        or os.environ.get("REVIEW_WRITING_WIRE_API")
+        or dotenv.get("REVIEW_WRITING_WIRE_API")
+        or ("chat-completions" if "micuapi.ai" in base_url.lower() else "responses")
+    )
     project = root / "review-projects" / args.project_id
     stage = project / "02_section_drafting"
     tasks = read_json(stage / "section_tasks.json")
@@ -186,7 +335,7 @@ Writing rules:\n{rules}
 Source evidence (only use claims supported here):\n{json.dumps(evidence, ensure_ascii=False)}
 """
         try:
-            generated = call_llm(prompt, api_key, base_url, model)
+            generated = call_llm(prompt, api_key, base_url, model, wire_api)
         except urllib.error.HTTPError as exc:
             raise SystemExit(
                 f"Section-writing model request was rejected (HTTP {exc.code}). "

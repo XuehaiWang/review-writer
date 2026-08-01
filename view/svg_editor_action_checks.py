@@ -167,6 +167,31 @@ class SvgEditorResolutionChecks(unittest.TestCase):
                 with Image.open(result["redrawn_image"]) as saved:
                     self.assertEqual(saved.size, base_size)
 
+    def test_figures_page_has_no_shadowed_function_declarations(self) -> None:
+        html = (Path(__file__).parent / "assets" / "dashboard" / "figures.html").read_text(
+            encoding="utf-8"
+        )
+        import re
+
+        names = re.findall(
+            r"^\s*(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)\b",
+            html,
+            re.MULTILINE,
+        )
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        self.assertEqual(duplicates, [])
+        self.assertIn("$('projectSelect').addEventListener('change'", html)
+        self.assertIn("event.target.closest('#openSvgEditor')", html)
+        self.assertIn("loadProjects();", html)
+        self.assertIn("assetRevision+=1", html)
+        self.assertIn("&v=${assetRevision}", html)
+        self.assertIn("{cache:'no-store'}", html)
+
+    def test_mutable_project_files_disable_http_caching(self) -> None:
+        source = Path(dashboard.__file__).read_text(encoding="utf-8")
+        self.assertIn("self.send_file(path, ctype, no_store=True)", source)
+        self.assertIn("def send_file(self, path: Path, content_type: str, *, no_store: bool = False)", source)
+
 
 if __name__ == "__main__":
     unittest.main()

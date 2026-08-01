@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -67,6 +68,39 @@ class WorkflowStoreChecks(unittest.TestCase):
             state = store.handoff_freshness("demo", handoff, [output])
             self.assertTrue(state["stale"])
             self.assertEqual(state["outdated_sources"], [str(source.resolve())])
+
+    def test_complete_handoff_upgrades_legacy_named_source_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = self.project(root)
+            source = project / "01_matrix_outline" / "section_blueprint.json"
+            output = project / "02_section_drafting" / "section_drafts.json"
+            handoff = project / "02_section_drafting" / "section_handoff.json"
+            source.parent.mkdir(parents=True)
+            output.parent.mkdir(parents=True)
+            source.write_text('{"sections":[1]}', encoding="utf-8")
+            output.write_text('{"drafts":[1]}', encoding="utf-8")
+            handoff.write_text(
+                json.dumps(
+                    {
+                        "source_stage": "blueprint",
+                        "source_blueprint": str(source.resolve()),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            store = WorkflowStore(root)
+
+            upgraded = store.complete_handoff(
+                "demo",
+                handoff,
+                [output],
+                producer_stage="sections",
+            )
+
+            self.assertEqual(upgraded["schema_version"], 2)
+            self.assertEqual(len(upgraded["source_versions"]), 1)
+            self.assertFalse(store.handoff_freshness("demo", handoff, [output])["stale"])
 
     def test_stage_runs_and_jobs_survive_a_new_store_instance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -152,6 +152,38 @@ _RAW_GREEK_COMMAND_RE = re.compile(
 )
 _RAW_LATEX_COMMAND_RE = re.compile(r"\\(?!figure_[A-Za-z0-9_-]+\.[A-Za-z0-9]+)[A-Za-z]+")
 
+_TRUNCATED_GREEK_ESCAPE_RE = re.compile(r"\x03([0-9a-fA-F]{2})")
+_KNOWN_TRUNCATED_UNICODE = {
+    "\x02": "\u2032",  # U+2032 PRIME
+    "\x13": "\u2013",  # U+2013 EN DASH
+    "\x14": "\u2014",  # U+2014 EM DASH
+}
+
+
+def make_xml_compatible(text: str) -> Tuple[str, int]:
+    """Recover known relay damage and replace remaining XML-invalid chars."""
+    repaired = re.sub(r"(?<=C)\x03(?=C)", "\u2013", str(text or ""))
+    repaired = _TRUNCATED_GREEK_ESCAPE_RE.sub(
+        lambda match: chr(int("03" + match.group(1), 16)),
+        repaired,
+    )
+    repaired = "".join(_KNOWN_TRUNCATED_UNICODE.get(char, char) for char in repaired)
+    output: List[str] = []
+    replaced = 0
+    for char in repaired:
+        number = ord(char)
+        if (
+            number in {0x09, 0x0A, 0x0D}
+            or 0x20 <= number <= 0xD7FF
+            or 0xE000 <= number <= 0xFFFD
+            or 0x10000 <= number <= 0x10FFFF
+        ):
+            output.append(char)
+        else:
+            output.append("\uFFFD")
+            replaced += 1
+    return "".join(output), replaced
+
 
 def normalize_mineru_latex(md_text: str) -> str:
     """Turn known raw MinerU LaTex into Math-delimited expressions for DOCX."""
@@ -982,7 +1014,15 @@ def _chart_width_inches(doc: Document, image_path: Path) -> float:
 # ---------------------------------------------------------------------------
 
 def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
-    md_text = normalize_mineru_latex(md_path.read_text(encoding="utf-8"))
+    md_text, invalid_character_count = make_xml_compatible(
+        md_path.read_text(encoding="utf-8")
+    )
+    if invalid_character_count:
+        print(
+            f"[md2docx] WARNING: replaced {invalid_character_count} unsupported "
+            "control character(s) before XML generation."
+        )
+    md_text = normalize_mineru_latex(md_text)
     # Workflow comments carry internal paragraph/figure identifiers.  They are
     # useful to the dashboard before export, but are never manuscript prose.
     # Strip all HTML comments before tokenizing so metadata cannot leak into

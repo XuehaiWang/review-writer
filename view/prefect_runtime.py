@@ -11,6 +11,9 @@ import importlib.util
 import os
 import re
 import threading
+import time
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,10 +28,27 @@ class _RegisteredAction:
 
 _ACTION_LOCK = threading.RLock()
 _ACTIONS: dict[str, _RegisteredAction] = {}
+_LOCAL_HEALTH_URL_RE = re.compile(
+    r"(http://(?:127\.0\.0\.1|localhost|\[::1\]):\d+/api/health)",
+    re.IGNORECASE,
+)
+_TRANSIENT_HEALTH_STATUS_RE = re.compile(r"\b(?:502|503|504)\b")
+
+
+def _ensure_localhost_proxy_bypass() -> None:
+    """Prevent a system proxy from intercepting Prefect's local API."""
+    required = ("127.0.0.1", "localhost", "::1")
+    for name in ("NO_PROXY", "no_proxy"):
+        current = os.environ.get(name, "")
+        values = [item.strip() for item in current.split(",") if item.strip()]
+        normalized = {item.casefold() for item in values}
+        values.extend(item for item in required if item.casefold() not in normalized)
+        os.environ[name] = ",".join(values)
 
 
 def configure_prefect_environment(review_root: Path) -> None:
     """Keep Prefect runtime files inside the review-writer workspace."""
+    _ensure_localhost_proxy_bypass()
     root = Path(review_root).resolve()
     account = _effective_account_name()
     account_key = re.sub(r"[^a-z0-9_-]+", "-", account.casefold()).strip("-") or "local"
@@ -121,6 +141,51 @@ def _release_action(token: str) -> None:
         _ACTIONS.pop(token, None)
 
 
+def _transient_local_health_url(error: BaseException) -> str:
+    """Return a failed local Prefect health URL only for startup-safe statuses."""
+    message = str(error)
+    if not _TRANSIENT_HEALTH_STATUS_RE.search(message):
+        return ""
+    match = _LOCAL_HEALTH_URL_RE.search(message)
+    return match.group(1) if match else ""
+
+
+def _wait_for_local_health(url: str, timeout_seconds: float = 45.0) -> bool:
+    """Poll the local Prefect health endpoint without using configured proxies."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    deadline = time.monotonic() + max(float(timeout_seconds), 1.0)
+    while time.monotonic() < deadline:
+        try:
+            request = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with opener.open(request, timeout=3) as response:
+                if 200 <= int(response.status) < 300:
+                    return True
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError):
+            pass
+        time.sleep(0.5)
+    return False
+
+
+def _run_flow_with_ephemeral_health_retry(
+    flow_function: Callable[..., dict[str, Any]],
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Retry once only when Prefect's local server is still becoming healthy.
+
+    A failure at ``/api/health`` happens before Prefect creates the flow run and
+    before ``execute_registered_action`` can invoke the scientific stage.  It is
+    therefore safe to retry this narrow startup failure without duplicating a
+    model call or overwriting a completed stage.
+    """
+    try:
+        return flow_function(**kwargs)
+    except Exception as exc:
+        health_url = _transient_local_health_url(exc)
+        if not health_url or not _wait_for_local_health(health_url):
+            raise
+        return flow_function(**kwargs)
+
+
 def run_stage_with_prefect(
     review_root: Path,
     project_id: str,
@@ -134,7 +199,8 @@ def run_stage_with_prefect(
     try:
         from prefect_flows import review_stage_flow
 
-        return review_stage_flow(
+        return _run_flow_with_ephemeral_health_retry(
+            review_stage_flow,
             review_root=str(Path(review_root).resolve()),
             project_id=project_id,
             stage_id=stage_id,
@@ -157,7 +223,8 @@ def run_batch_redraw_with_prefect(
     try:
         from prefect_flows import figure_redraw_batch_flow
 
-        return figure_redraw_batch_flow(
+        return _run_flow_with_ephemeral_health_retry(
+            figure_redraw_batch_flow,
             review_root=str(Path(review_root).resolve()),
             project_id=project_id,
             figure_count=figure_count,
@@ -180,7 +247,8 @@ def run_literature_acquisition_with_prefect(
     try:
         from prefect_flows import literature_acquisition_flow
 
-        return literature_acquisition_flow(
+        return _run_flow_with_ephemeral_health_retry(
+            literature_acquisition_flow,
             review_root=str(Path(review_root).resolve()),
             operation=operation,
             item_count=max(int(item_count), 0),

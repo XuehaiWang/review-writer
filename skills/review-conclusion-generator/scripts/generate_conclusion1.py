@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -1015,6 +1016,7 @@ def run(args: argparse.Namespace) -> int:
         "topic": topic,
         "model": model,
         "created_at": utc_now(),
+        "first_draft_sha256": hashlib.sha256(draft_path.read_bytes()).hexdigest(),
         "paragraphs": result.get("paragraphs", []),
         "total_words": validation["total_words"],
         "quality_notes": result.get("quality_notes", []),

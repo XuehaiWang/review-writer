@@ -11,6 +11,7 @@ import re
 import shutil
 import ssl
 import subprocess
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -29,10 +30,12 @@ SOURCE_FAITHFUL_RENDER_MODES = {
 SOURCE_FAITHFUL_DARK_INK_THRESHOLD = 180
 BRIGHT_COLOR_FILL_SPREAD = 50
 BRIGHT_COLOR_FILL_BRIGHTNESS = 135
-# At 4x output, a 9px erosion can still classify thick coloured aromatic
-# double bonds as fill interiors. Require a genuinely broad colour region so
-# ring bonds and other chemical strokes remain available to the black-ink pass.
-BRIGHT_COLOR_FILL_MIN_REGION_SIZE = 17
+# A seven-pixel native-resolution neighbourhood is wide enough to reject
+# coloured glyphs/arrows, while still finding cyan-filled aromatic rings and
+# label boxes in low-resolution source figures.  The former 17px window missed
+# those fills completely, so the subsequent minimum-channel conversion turned
+# them into solid black blocks.
+BRIGHT_COLOR_FILL_MIN_REGION_SIZE = 7
 CONTENT_INK_THRESHOLD = 192
 CONTENT_MATCH_RADIUS = 3
 MAX_RESTORED_COMPONENT_PIXELS = 1024
@@ -49,6 +52,7 @@ MECHANISM_MAX_UNMATCHED_SOURCE_INK_RATIO = 0.28
 MECHANISM_MAX_UNMATCHED_OUTPUT_INK_RATIO = 0.14
 MECHANISM_MIN_OUTPUT_TO_SOURCE_INK_RATIO = 0.75
 MECHANISM_MAX_EDIT_ATTEMPTS = 2
+AI_EDIT_MAX_INPUT_SIDE = 2048
 _DENSE_SCOPE_FIGURE_PATTERN = re.compile(
     r"\b(?:reaction\s+scope|substrate\s+scope|scope\s+(?:summary|for|of)|examples?)\b|"
     r"反应范围|底物范围|反应底物",
@@ -639,22 +643,19 @@ def human_selected_figure(project: Path, figure: dict[str, Any]) -> dict[str, An
 
 
 def whiten_large_bright_color_fills(image: Image.Image) -> int:
-    """Whiten only broad bright colour interiors, never thin coloured text strokes."""
-    # Pastel cyan/magenta fills can coexist with darker strokes of exactly the
-    # same hue (for example aromatic double bonds). If a substantial pastel
-    # layer is present, use a higher brightness cutoff so only the fill, not
-    # its darker chemical linework, enters the erosion mask.
-    pastel_pixels = 0
-    for red, green, blue in image.get_flattened_data():
-        spread = max(red, green, blue) - min(red, green, blue)
-        brightness = (red + green + blue) / 3
-        if spread >= BRIGHT_COLOR_FILL_SPREAD and brightness >= 205:
-            pastel_pixels += 1
-    brightness_cutoff = (
-        190
-        if pastel_pixels >= max(200, image.width * image.height // 1000)
-        else BRIGHT_COLOR_FILL_BRIGHTNESS
-    )
+    """Turn broad colour components into one-pixel hollow outlines.
+
+    Thin coloured labels, arrows, bonds, and glyphs do not contain a 7x7
+    interior and therefore remain available to the later black-ink conversion.
+    Broad components are reconstructed from their eroded seeds, which lets us
+    remove the whole cyan fill instead of leaving a several-pixel cyan rim that
+    would itself become an excessively thick black bond.
+    """
+    # Cyan scientific fills are often highly saturated but only medium-bright
+    # (for example RGB 1,255,255 has mean brightness 170).  Brightness must not
+    # be raised merely because paler antialias pixels also occur in the image,
+    # otherwise the cyan interior survives and becomes a black block.
+    brightness_cutoff = BRIGHT_COLOR_FILL_BRIGHTNESS
     pixels = image.load()
     mask = Image.new("L", image.size, 0)
     mask_pixels = mask.load()
@@ -665,16 +666,47 @@ def whiten_large_bright_color_fills(image: Image.Image) -> int:
             brightness = (red + green + blue) / 3
             if spread >= BRIGHT_COLOR_FILL_SPREAD and brightness >= brightness_cutoff:
                 mask_pixels[x, y] = 255
-    # Erosion keeps only the interior of a solid colour region. Coloured glyphs,
-    # arrows, bonds, and labels are too thin to survive this broad neighbourhood.
-    fill_interior = mask.filter(ImageFilter.MinFilter(BRIGHT_COLOR_FILL_MIN_REGION_SIZE))
-    fill_pixels = fill_interior.load()
+    # Erosion keeps only seed pixels inside a broad solid colour region.
+    seeds = mask.filter(ImageFilter.MinFilter(BRIGHT_COLOR_FILL_MIN_REGION_SIZE))
+    seed_pixels = seeds.load()
+    broad = bytearray(image.width * image.height)
+    queue: deque[tuple[int, int]] = deque()
+    for y in range(image.height):
+        for x in range(image.width):
+            if seed_pixels[x, y]:
+                offset = y * image.width + x
+                broad[offset] = 1
+                queue.append((x, y))
+    # Reconstruct each complete colour component from its seed. This avoids the
+    # thick residual rim produced by whitening only the eroded interior.
+    while queue:
+        x, y = queue.popleft()
+        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if nx < 0 or ny < 0 or nx >= image.width or ny >= image.height:
+                continue
+            offset = ny * image.width + nx
+            if broad[offset] or not mask_pixels[nx, ny]:
+                continue
+            broad[offset] = 1
+            queue.append((nx, ny))
     replaced = 0
     for y in range(image.height):
         for x in range(image.width):
-            if fill_pixels[x, y]:
-                pixels[x, y] = (255, 255, 255)
-                replaced += 1
+            offset = y * image.width + x
+            if not broad[offset]:
+                continue
+            boundary = (
+                x == 0
+                or y == 0
+                or x == image.width - 1
+                or y == image.height - 1
+                or not broad[offset - 1]
+                or not broad[offset + 1]
+                or not broad[offset - image.width]
+                or not broad[offset + image.width]
+            )
+            pixels[x, y] = (0, 0, 0) if boundary else (255, 255, 255)
+            replaced += 1
     return replaced
 
 
@@ -689,17 +721,16 @@ def render_source_faithful_bw(source_path: Path, output_path: Path) -> dict[str,
             source.height * SOURCE_FAITHFUL_SCALE_FACTOR,
         )
         rgb = background.convert("RGB")
+        hollowed_color_pixels = whiten_large_bright_color_fills(rgb)
         if min(source.size) < 360:
             # Grayscale thresholding after LANCZOS interpolation can split thin
-            # red and blue chemical strokes into dots. Work at native resolution:
-            # the minimum RGB channel retains black and saturated coloured ink.
-            # Hollow broad bright fills first so they cannot become black blocks.
-            whiten_large_bright_color_fills(rgb)
-            red, green, blue = rgb.split()
-            chromatic_ink = ImageChops.darker(ImageChops.darker(red, green), blue)
-            native_binary = chromatic_ink.point(
-                # 220 excludes light JPEG background noise while retaining the
-                # dark cores of black, red, and blue scientific strokes.
+            # red and blue chemical strokes into dots. Work at native resolution
+            # after hollowing broad fills. A high luminance cutoff retains
+            # saturated scientific strokes but excludes their pale antialias
+            # fringe; the old minimum-channel rule made every pale red/cyan
+            # fringe black and merged small labels into blobs.
+            native_luminance = ImageOps.grayscale(rgb)
+            native_binary = native_luminance.point(
                 lambda value: 255 if value >= 220 else 0,
                 mode="L",
             )
@@ -708,14 +739,17 @@ def render_source_faithful_bw(source_path: Path, output_path: Path) -> dict[str,
             # nearest-neighbour enlargement while retaining clear connected
             # strokes and a pure white background.
             black_and_white = native_binary.resize(target_size, Image.Resampling.LANCZOS)
-            black_and_white = black_and_white.filter(ImageFilter.MinFilter(3))
+            # A broad fill has just been replaced with a one-pixel outline.
+            # Expanding all black pixels at this point would thicken that outline
+            # and low-resolution label text back into an unreadable block.
+            if not hollowed_color_pixels:
+                black_and_white = black_and_white.filter(ImageFilter.MinFilter(3))
             black_and_white = black_and_white.filter(
                 ImageFilter.UnsharpMask(radius=1.2, percent=175, threshold=3)
             )
             conversion_note = "native chromatic-ink threshold with sharpened neutral antialiased enlargement"
         else:
             upscaled = rgb.resize(target_size, Image.Resampling.LANCZOS)
-            whiten_large_bright_color_fills(upscaled)
             grayscale = ImageOps.autocontrast(ImageOps.grayscale(upscaled))
             black_and_white = grayscale.point(
                 lambda value: 255 if value >= SOURCE_FAITHFUL_DARK_INK_THRESHOLD else 0,
@@ -771,8 +805,9 @@ def render_source_faithful_outline_color(source_path: Path, output_path: Path) -
             source.width * SOURCE_FAITHFUL_SCALE_FACTOR,
             source.height * SOURCE_FAITHFUL_SCALE_FACTOR,
         )
-        upscaled = background.convert("RGB").resize(target_size, Image.Resampling.LANCZOS)
-        whiten_large_bright_color_fills(upscaled)
+        rgb = background.convert("RGB")
+        whiten_large_bright_color_fills(rgb)
+        upscaled = rgb.resize(target_size, Image.Resampling.LANCZOS)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         upscaled.save(output_path, format="PNG")
         return {
@@ -929,6 +964,38 @@ def build_headers(api_key: str, content_type: str | None = None) -> dict[str, st
     if content_type:
         headers["Content-Type"] = content_type
     return headers
+
+
+TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+
+
+def decode_json_object(raw: bytes, label: str) -> dict[str, Any]:
+    if not raw.strip():
+        raise RuntimeError(f"{label} returned an empty response body")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        preview = raw.decode("utf-8", "replace")[:300].replace("\r", " ").replace("\n", " ")
+        raise RuntimeError(f"{label} returned non-JSON content: {preview or '<empty>'}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{label} returned JSON {type(data).__name__}, expected an object")
+    return data
+
+
+def open_json_request(request: urllib.request.Request, label: str, timeout: int = 300) -> dict[str, Any]:
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=timeout) as response:
+                return decode_json_object(response.read(), label)
+        except urllib.error.HTTPError as exc:
+            details = http_error_details(exc)
+            if exc.code not in TRANSIENT_HTTP_CODES or attempt == 2:
+                raise RuntimeError(f"{label} rejected: {details}") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt == 2:
+                raise RuntimeError(f"{label} transport failed: {exc}") from exc
+        time.sleep(2 ** attempt)
+    raise RuntimeError(f"{label} failed after retries")
 
 
 def build_multipart_form(fields: dict[str, Any], file_fields: list[tuple[str, Path]]) -> tuple[str, bytes]:
@@ -1122,11 +1189,7 @@ def call_images_edit(
         headers=build_headers(api_key, content_type),
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=300) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"Image edit request rejected: {http_error_details(exc)}") from exc
+    return open_json_request(req, "Image edit request")
 
 
 def call_images_edit_curl(
@@ -1172,7 +1235,7 @@ def call_images_edit_curl(
     response_text = response_bytes.decode("utf-8", "replace")
     if result.returncode != 0:
         raise RuntimeError(f"curl image edit failed (exit {result.returncode}): {response_text[:500]}")
-    return json.loads(response_text)
+    return decode_json_object(response_bytes, "curl image edit request")
 
 
 def call_responses_image_edit(
@@ -1203,8 +1266,7 @@ def call_responses_image_edit(
         headers=build_headers(api_key, "application/json"),
         method="POST",
     )
-    with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=300) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    return open_json_request(req, "Responses image edit request")
 
 
 def extract_response_image_base64(response: dict[str, Any]) -> str | None:
@@ -1236,6 +1298,134 @@ def save_response_redrawn_image(response: dict[str, Any], out_path: Path) -> Non
         raise RuntimeError("responses image edit response missing image_generation result")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(base64.b64decode(b64))
+
+
+def prepare_aspect_preserving_edit_input(source_path: Path, framed_path: Path) -> dict[str, Any]:
+    """Letterbox a non-square edit source so square-only providers cannot reflow it.
+
+    Several OpenAI-compatible relays return a 1024x1024 edit even when the
+    uploaded chemistry figure is wide or tall.  Uploading the unframed source
+    lets the model reinterpret the layout to fill that square.  A white square
+    wrapper keeps the original content rectangle geometrically unchanged; the
+    same rectangle is cropped back out after generation.
+    """
+    with Image.open(source_path) as opened:
+        source = ImageOps.exif_transpose(opened).convert("RGBA")
+        background = Image.new("RGBA", source.size, "white")
+        background.alpha_composite(source)
+        source_rgb = background.convert("RGB")
+
+    source_width, source_height = source_rgb.size
+    longest_side = max(source_width, source_height)
+    scale = min(1.0, AI_EDIT_MAX_INPUT_SIDE / max(1, longest_side))
+    content_width = max(1, round(source_width * scale))
+    content_height = max(1, round(source_height * scale))
+    if (content_width, content_height) != source_rgb.size:
+        content = source_rgb.resize((content_width, content_height), Image.Resampling.LANCZOS)
+    else:
+        content = source_rgb
+
+    canvas_side = max(content_width, content_height)
+    left = (canvas_side - content_width) // 2
+    top = (canvas_side - content_height) // 2
+    applied = content_width != content_height
+    if applied:
+        canvas = Image.new("RGB", (canvas_side, canvas_side), "white")
+        canvas.paste(content, (left, top))
+        framed_path.parent.mkdir(parents=True, exist_ok=True)
+        canvas.save(framed_path, format="PNG", optimize=True)
+        input_path = framed_path
+    else:
+        input_path = source_path
+
+    return {
+        "status": "letterboxed" if applied else "square_source",
+        "applied": applied,
+        "input_path": str(input_path),
+        "source_size": [source_width, source_height],
+        "source_aspect_ratio": source_width / max(1, source_height),
+        "canvas_size": [canvas_side, canvas_side],
+        "content_box": [left, top, content_width, content_height],
+    }
+
+
+def append_aspect_ratio_prompt(prompt: str, framing: dict[str, Any]) -> str:
+    """Tell the model that the technical padding is not editable content."""
+    if not framing.get("applied"):
+        return prompt
+    width, height = framing["source_size"]
+    return (
+        prompt
+        + f" The upload is a technical square wrapper around an original {width}x{height} figure. "
+        "Keep the centered content rectangle at exactly its current scale, aspect ratio, and position. "
+        "Leave every outer white padding band completely blank; do not expand, stretch, redistribute, "
+        "or move any chemistry into that padding."
+    )
+
+
+def normalize_generated_aspect(
+    generated_path: Path,
+    source_path: Path,
+    framing: dict[str, Any],
+) -> dict[str, Any]:
+    """Crop the provider's padded canvas and save at the exact source dimensions."""
+    with Image.open(source_path) as opened_source:
+        source = ImageOps.exif_transpose(opened_source)
+        source_size = source.size
+    with Image.open(generated_path) as opened_generated:
+        generated = ImageOps.exif_transpose(opened_generated).convert("RGB")
+        provider_size = generated.size
+
+    source_ratio = source_size[0] / max(1, source_size[1])
+    provider_ratio = provider_size[0] / max(1, provider_size[1])
+    crop_box = (0, 0, provider_size[0], provider_size[1])
+    crop_mode = "provider_already_matches_source"
+
+    # A relay may honour the source ratio despite receiving the wrapper.  In
+    # that case cropping by square-wrapper coordinates would incorrectly cut
+    # valid content, so use the full response.
+    ratio_delta = abs(provider_ratio - source_ratio) / max(source_ratio, 1e-9)
+    if framing.get("applied") and ratio_delta > 0.015:
+        canvas_width, canvas_height = framing["canvas_size"]
+        left, top, width, height = framing["content_box"]
+        scale_x = provider_size[0] / max(1, canvas_width)
+        scale_y = provider_size[1] / max(1, canvas_height)
+        crop_box = (
+            max(0, round(left * scale_x)),
+            max(0, round(top * scale_y)),
+            min(provider_size[0], round((left + width) * scale_x)),
+            min(provider_size[1], round((top + height) * scale_y)),
+        )
+        crop_mode = "letterbox_content_box"
+    elif ratio_delta > 0.015:
+        # Defensive fallback for callers that do not have framing metadata.
+        if provider_ratio > source_ratio:
+            target_width = max(1, round(provider_size[1] * source_ratio))
+            offset = (provider_size[0] - target_width) // 2
+            crop_box = (offset, 0, offset + target_width, provider_size[1])
+        else:
+            target_height = max(1, round(provider_size[0] / source_ratio))
+            offset = (provider_size[1] - target_height) // 2
+            crop_box = (0, offset, provider_size[0], offset + target_height)
+        crop_mode = "center_crop_fallback"
+
+    cropped = generated.crop(crop_box)
+    normalized = cropped.resize(source_size, Image.Resampling.LANCZOS) if cropped.size != source_size else cropped
+    suffix = generated_path.suffix.lower()
+    image_format = {".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP"}.get(suffix, "PNG")
+    temporary = generated_path.with_name(f"{generated_path.stem}.aspect-normalized{generated_path.suffix}")
+    save_options = {"quality": 95} if image_format != "PNG" else {"optimize": True}
+    normalized.save(temporary, format=image_format, **save_options)
+    temporary.replace(generated_path)
+    return {
+        "status": "normalized",
+        "crop_mode": crop_mode,
+        "provider_size": list(provider_size),
+        "provider_aspect_ratio": provider_ratio,
+        "crop_box": list(crop_box),
+        "normalized_size": list(source_size),
+        "normalized_aspect_ratio": source_ratio,
+    }
 
 
 def write_report(path: Path, style: dict[str, Any], source_rows: list[dict[str, Any]], redraw_rows: list[dict[str, Any]]) -> None:
@@ -1530,6 +1720,14 @@ def run(args: argparse.Namespace) -> int:
                 figure,
                 source_ocr["text"] if effective_render_mode == "ocr-hollow-ai" and source_ocr["status"] == "ok" else "",
             )
+        aspect_framing: dict[str, Any] = {}
+        api_edit_input = edit_input
+        if effective_render_mode not in SOURCE_FAITHFUL_RENDER_MODES:
+            framed_input = source_dir / f"{figure_id}-ai-edit-framed.png"
+            aspect_framing = prepare_aspect_preserving_edit_input(edit_input, framed_input)
+            api_edit_input = Path(str(aspect_framing["input_path"]))
+            prompt = append_aspect_ratio_prompt(prompt, aspect_framing)
+            redraw_row["aspect_ratio_input"] = aspect_framing
         redraw_row["prompt"] = prompt
         if args.dry_run:
             redraw_row["status"] = "dry_run"
@@ -1571,7 +1769,7 @@ def run(args: argparse.Namespace) -> int:
                     response = call_responses_image_edit(
                         api_key,
                         args.base_url,
-                        edit_input,
+                        api_edit_input,
                         attempt_prompt,
                         args.model,
                         args.quality,
@@ -1583,7 +1781,7 @@ def run(args: argparse.Namespace) -> int:
                     response = call_images_edit(
                         api_key,
                         args.base_url,
-                        edit_input,
+                        api_edit_input,
                         attempt_prompt,
                         args.model,
                         args.quality,
@@ -1593,6 +1791,12 @@ def run(args: argparse.Namespace) -> int:
                         images_transport,
                     )
                     save_redrawn_image(response, out_path)
+                if effective_render_mode not in SOURCE_FAITHFUL_RENDER_MODES:
+                    redraw_row["aspect_ratio_normalization"] = normalize_generated_aspect(
+                        out_path,
+                        copied_source,
+                        aspect_framing,
+                    )
                 if args.edit_profile != MECHANISM_ARROW_STRAIGHTEN_PROFILE:
                     break
                 source_fidelity = mechanism_source_fidelity_check(copied_source, out_path)

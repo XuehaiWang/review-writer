@@ -91,6 +91,7 @@ STAGE_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
         "inputs": (
             "02_section_drafting/section_drafts.json",
             "02_section_drafting/figure_candidates.json",
+            "02_section_drafting/paper_figure_candidates.json",
             "02_section_drafting/human_figure_review.json",
         ),
         "outputs": (
@@ -104,6 +105,7 @@ STAGE_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
         "optional_depends_on": (),
         "inputs": (
             "02_section_drafting/section_drafts.json",
+            "02_section_drafting/human_figure_review.json",
             "03_figure_redraw/redrawn_figure_manifest.json",
         ),
         "outputs": (
@@ -125,6 +127,8 @@ STAGE_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
         "depends_on": ("blueprint",),
         "optional_depends_on": ("draft",),
         "inputs": (
+            "00_discovery/query_plan.draft.json",
+            "00_discovery/selected_discovery_results.json",
             "01_matrix_outline/selected_outline.md",
             "04_first_draft/first_draft.md",
         ),
@@ -135,6 +139,7 @@ STAGE_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
         "optional_depends_on": ("final-conclusion", "final-overview-figure"),
         "inputs": (
             "04_first_draft/first_draft.md",
+            "04_first_draft/citations.json",
             "04_first_draft/conclusion_generated.md",
             "05_final_audit/overview_figure.png",
         ),
@@ -629,7 +634,33 @@ class WorkflowStore:
         payload = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
         source_snapshot = payload.get("source_versions") if isinstance(payload, dict) else []
         if not isinstance(source_snapshot, list):
-            source_snapshot = []
+            source_paths = payload.get("source_artifacts") if isinstance(payload, dict) else []
+            if not isinstance(source_paths, list):
+                source_paths = []
+            if not source_paths and isinstance(payload, dict):
+                # Legacy handoffs commonly stored a named path such as
+                # ``source_blueprint`` but no version snapshot. Upgrade those
+                # records before declaring them schema v2.
+                source_paths = [
+                    value
+                    for key, value in payload.items()
+                    if key.startswith("source_")
+                    and key not in {"source_stage", "source_fingerprint", "source_versions"}
+                    and isinstance(value, str)
+                    and Path(value).is_file()
+                ]
+            source_snapshot = self.capture_paths(
+                project_id,
+                [Path(item) for item in source_paths],
+            )
+            payload.update(
+                {
+                    "handoff_id": str(payload.get("handoff_id") or uuid.uuid4()),
+                    "source_artifacts": [str(Path(item).resolve()) for item in source_paths],
+                    "source_fingerprint": _fingerprint(source_snapshot),
+                    "source_versions": source_snapshot,
+                }
+            )
         dependencies = [
             str(item["artifact_version_id"])
             for item in source_snapshot
@@ -655,6 +686,32 @@ class WorkflowStore:
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         temporary.replace(path)
         self.register_artifact(project_id, path, producer_stage=producer_stage, dependencies=dependencies)
+        return payload
+
+    def update_handoff_metadata(
+        self,
+        project_id: str,
+        path: Path,
+        metadata: Mapping[str, Any],
+        *,
+        producer_stage: str = "",
+    ) -> dict[str, Any]:
+        """Update orchestration-only handoff metadata without rebasing lineage."""
+        path = Path(path)
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"Handoff payload must be an object: {path}")
+        payload.update(dict(metadata))
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+        self.register_artifact(
+            project_id,
+            path,
+            producer_stage=producer_stage or str(payload.get("source_stage") or ""),
+        )
         return payload
 
     def handoff_freshness(
