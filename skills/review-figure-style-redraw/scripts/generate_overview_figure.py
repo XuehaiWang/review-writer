@@ -33,6 +33,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
+
 
 TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 LANDSCAPE_OVERVIEW_IMAGE_SIZE = "1536x1024"
@@ -1234,7 +1237,7 @@ def _build_report(args, template: dict, features: dict, prompt: str,
 
 def main():
     parser = argparse.ArgumentParser(description="Generate review overview figure from template")
-    parser.add_argument("--review-root", required=True, help="Path to review-writer project root")
+    parser.add_argument("--review-root", default=None, help="Path to review project root")
     parser.add_argument("--project-id", required=True, help="Project ID")
     parser.add_argument("--api-key", default="", help="API key (or set XIAOLEAI_API_KEY / OPENAI_API_KEY)")
     parser.add_argument("--base-url", default="", help="API base URL")
@@ -1248,7 +1251,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Only show template matching, don't call API")
     args = parser.parse_args()
 
-    review_root = Path(args.review_root).resolve()
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     project_dir = review_root / "review-projects" / args.project_id
     load_dotenv(review_root)
 

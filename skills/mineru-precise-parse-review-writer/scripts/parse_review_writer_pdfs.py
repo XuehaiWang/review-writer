@@ -17,6 +17,9 @@ from typing import Any, Dict, Iterable, List
 
 import requests
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_mineru_output_root, resolve_pdf_root, resolve_review_root
+
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -24,17 +27,9 @@ if hasattr(sys.stdout, "reconfigure"):
 
 MINERU_BASE_URL = "https://mineru.net"
 SKILL_ROOT = Path(__file__).resolve().parents[1]
-
-
-def default_review_root() -> Path:
-    if SKILL_ROOT.parent.name == "skills":
-        return SKILL_ROOT.parent.parent
-    return SKILL_ROOT.parent
-
-
-REVIEW_ROOT = default_review_root()
-DEFAULT_INPUT_DIR = REVIEW_ROOT / "Progargylic"
-DEFAULT_OUTPUT_DIR = REVIEW_ROOT / "mineru-outputs"
+REVIEW_ROOT = resolve_review_root(anchor=Path(__file__))
+DEFAULT_INPUT_DIR = resolve_pdf_root(review_root=REVIEW_ROOT, anchor=Path(__file__)) or (REVIEW_ROOT / "source-paper")
+DEFAULT_OUTPUT_DIR = resolve_mineru_output_root(review_root=REVIEW_ROOT, anchor=Path(__file__))
 DEFAULT_TOKEN_FILE = SKILL_ROOT / "config" / "mineru_api_token.txt"
 DEFAULT_TIMEOUT_MINUTES = 30
 DEFAULT_POLL_INTERVAL_SECONDS = 5

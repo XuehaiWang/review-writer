@@ -1,9 +1,21 @@
----
+﻿---
 name: review-metadata-prep
 description: Prepare a MinerU-parsed review-writing paper library for metadata review. Use when Codex needs to extract or validate required paper metadata and eight fixed LLM classification tags from PDF/Markdown/content_list outputs.
 ---
 
 # Review Metadata Prep
+
+## FounDryClaw Location Rules
+
+When this skill runs inside FounDryClaw, do not assume the old `review-writer` repository path. Resolve locations in this order:
+
+1. Use environment variables when present: `FOUNDRYCLAW_REVIEW_ROOT`, `FOUNDRYCLAW_REVIEW_LIBRARY_ROOT`, `FOUNDRYCLAW_REVIEW_PROJECTS_ROOT`, `FOUNDRYCLAW_MINERU_OUTPUT_ROOT`, `FOUNDRYCLAW_REVIEW_PDF_ROOT`, `FOUNDRYCLAW_REVIEW_SKILLS_ROOT`.
+2. If the user provides `--review-root`, use it.
+3. Otherwise treat the current FounDryClaw Claude workdir as the review root.
+4. Store project artifacts under `<review-root>/review-projects/<project_id>/` and library metadata under `<review-root>/review-library/`.
+5. Run bundled scripts by path relative to this skill folder, for example `python scripts/<script>.py`; the scripts contain a shared resolver for the paths above.
+
+For lower-capability backend models: before running a script, identify `review_root` explicitly and pass `--review-root <review_root>` when uncertain. Never use `<review-root>` as a real path in FounDryClaw.
 
 Use this skill to implement the writing-preparation stage for a review-writing agent.
 
@@ -14,10 +26,10 @@ The skill assumes PDFs have already been parsed by MinerU and that a `mineru-out
 1. Build paper metadata:
 
 ```bash
-python /home/ps/review-writer/skills/review-metadata-prep/scripts/prepare_metadata.py \
-  --review-root /home/ps/review-writer \
-  --mineru-output /home/ps/review-writer/mineru-outputs \
-  --pdf-root /home/ps/review-writer/source-paper/<your-subfolder> \
+python scripts/prepare_metadata.py \
+  --review-root <review-root> \
+  --mineru-output <review-root>/mineru-outputs \
+  --pdf-root <review-root>/source-paper/<your-subfolder> \
   --discover-from-pdf-root \
   --append-registry
 ```
@@ -28,15 +40,15 @@ Use `--append-registry` when adding a new source-paper folder to an existing lib
 2. Validate metadata:
 
 ```bash
-python /home/ps/review-writer/skills/review-metadata-prep/scripts/validate_metadata.py \
-  --review-root /home/ps/review-writer
+python scripts/validate_metadata.py \
+  --review-root <review-root>
 ```
 
 3. Launch the local review dashboard from the separate view module when human audit is needed:
 
 ```bash
-python /home/ps/review-writer/view/serve_review_dashboard.py \
-  --review-root /home/ps/review-writer \
+python <review-root>/view/serve_review_dashboard.py \
+  --review-root <review-root> \
   --host 127.0.0.1 \
   --port 8765
 ```
@@ -64,7 +76,7 @@ reaction_type
 document_scope
 ```
 
-Each tag value must be selected from your project's classification rules file (e.g. `<your-classification-rules>.py`) under the matching category, or `not specified`. This repo ships `/home/ps/review-writer/allene_classification_rules.py` as the default example.
+Each tag value must be selected from your project's classification rules file (e.g. `<your-classification-rules>.py`) under the matching category, or `not specified`. This repo ships `<review-root>/allene_classification_rules.py` as the default example.
 
 To enable LLM enhancement, set:
 
@@ -75,10 +87,10 @@ export OPENAI_API_KEY=...
 Then run:
 
 ```bash
-python /home/ps/review-writer/skills/review-metadata-prep/scripts/prepare_metadata.py \
-  --review-root /home/ps/review-writer \
-  --mineru-output /home/ps/review-writer/mineru-outputs \
-  --pdf-root /home/ps/review-writer/source-paper/<your-subfolder> \
+python scripts/prepare_metadata.py \
+  --review-root <review-root> \
+  --mineru-output <review-root>/mineru-outputs \
+  --pdf-root <review-root>/source-paper/<your-subfolder> \
   --discover-from-pdf-root \
   --append-registry \
   --use-llm \
@@ -92,8 +104,8 @@ LLM extraction is constrained to the first-page blocks, title/author/abstract ca
 To refresh only the eight LLM tags on an existing library without rebuilding paper IDs or paths:
 
 ```bash
-python /home/ps/review-writer/skills/review-metadata-prep/scripts/llm_retag_metadata.py \
-  --review-root /home/ps/review-writer \
+python scripts/llm_retag_metadata.py \
+  --review-root <review-root> \
   --model gpt-5.4 \
   --base-url https://naiccc.com \
   --reasoning-effort high \
@@ -103,8 +115,8 @@ python /home/ps/review-writer/skills/review-metadata-prep/scripts/llm_retag_meta
 For a full-library refresh, prefer the resumable batch runner. It processes three papers per round by default, skips already successful LLM-tagged papers, writes progress after every paper, and retries failures:
 
 ```bash
-python /home/ps/review-writer/skills/review-metadata-prep/scripts/batch_llm_retag_metadata.py \
-  --review-root /home/ps/review-writer \
+python scripts/batch_llm_retag_metadata.py \
+  --review-root <review-root> \
   --batch-size 3 \
   --max-attempts 5 \
   --retry-delay 30 \
@@ -136,8 +148,8 @@ review-library/metadata/llm_retag_batch_report.md
 If old metadata files need the new `structured_tags` field before LLM retagging:
 
 ```bash
-python /home/ps/review-writer/skills/review-metadata-prep/scripts/backfill_structured_tags.py \
-  --review-root /home/ps/review-writer
+python scripts/backfill_structured_tags.py \
+  --review-root <review-root>
 ```
 
 This only writes `not specified` placeholders for schema compatibility. It does not replace LLM tagging.
@@ -195,7 +207,7 @@ Use `human_review` for audit status and notes. Local paper retrieval uses only t
 The dashboard code lives outside this skill:
 
 ```text
-/home/ps/review-writer/view/
+<review-root>/view/
 ```
 
 The dashboard is a local review console, not the source of truth. The source of truth is the JSON file on disk.

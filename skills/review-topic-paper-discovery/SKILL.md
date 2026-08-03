@@ -1,9 +1,21 @@
----
+﻿---
 name: review-topic-paper-discovery
 description: Start a review project from a user topic, expand keywords against the eight LLM allene classification tags, retrieve local candidates from the metadata library, and optionally enrich with the hosted SciAtlas knowledge-graph search; produce 20-30 candidate papers for human check.
 ---
 
 # Review Topic Paper Discovery
+
+## FounDryClaw Location Rules
+
+When this skill runs inside FounDryClaw, do not assume the old `review-writer` repository path. Resolve locations in this order:
+
+1. Use environment variables when present: `FOUNDRYCLAW_REVIEW_ROOT`, `FOUNDRYCLAW_REVIEW_LIBRARY_ROOT`, `FOUNDRYCLAW_REVIEW_PROJECTS_ROOT`, `FOUNDRYCLAW_MINERU_OUTPUT_ROOT`, `FOUNDRYCLAW_REVIEW_PDF_ROOT`, `FOUNDRYCLAW_REVIEW_SKILLS_ROOT`.
+2. If the user provides `--review-root`, use it.
+3. Otherwise treat the current FounDryClaw Claude workdir as the review root.
+4. Store project artifacts under `<review-root>/review-projects/<project_id>/` and library metadata under `<review-root>/review-library/`.
+5. Run bundled scripts by path relative to this skill folder, for example `python scripts/<script>.py`; the scripts contain a shared resolver for the paths above.
+
+For lower-capability backend models: before running a script, identify `review_root` explicitly and pass `--review-root <review_root>` when uncertain. Never use `<review-root>` as a real path in FounDryClaw.
 
 Goal: from the user review topic, select `20-30` local candidate papers and
 keep an external evidence pool from SciAtlas for the matrix stage.
@@ -22,7 +34,7 @@ reaction_type
 document_scope
 ```
 
-Use `/home/ps/review-writer/allene_classification_rules.py` as the tag
+Use `<review-root>/allene_classification_rules.py` as the tag
 vocabulary and synonym source. Do not rank local papers by metadata abstract.
 
 External retrieval (both run in parallel when requested):

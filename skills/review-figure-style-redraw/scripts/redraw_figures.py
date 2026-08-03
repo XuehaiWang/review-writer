@@ -11,6 +11,7 @@ import re
 import shutil
 import ssl
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -19,6 +20,9 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
 
 
 SOURCE_FAITHFUL_SCALE_FACTOR = 4
@@ -1532,7 +1536,7 @@ def merge_manifest_rows(existing: list[dict[str, Any]], updates: list[dict[str, 
 
 def run(args: argparse.Namespace) -> int:
     force_standard_ai_edit = bool(getattr(args, "force_standard_ai_edit", False))
-    review_root = Path(args.review_root).resolve()
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     args.edit_profile = getattr(args, "edit_profile", "standard")
     load_dotenv(review_root)
     if not args.base_url:
@@ -1970,7 +1974,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Redraw review figure candidates into a unified style.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=None)
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--figure-id", default="", help="Redraw exactly one figure candidate without paper-level source substitution.")
     parser.add_argument("--paper-id", default="", help="Redraw one paper after a Figure Review selection and preserve other manifest rows.")

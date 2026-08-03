@@ -17,6 +17,9 @@ from typing import Any
 
 from sciatlas_client import SciAtlasClient, load_config, papers_from_response
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -1160,7 +1163,7 @@ def _load_dotenv_if_present(review_root: Path) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    review_root = Path(args.review_root).resolve()
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     project_id = args.project_id or slugify(args.topic)
     project = resolve_project_path(review_root, project_id)
     _load_dotenv_if_present(review_root)
@@ -1350,7 +1353,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Discover local and web papers by expanded topic keywords.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=None)
     parser.add_argument("--project-id", default="")
     parser.add_argument("--topic", required=True)
     parser.add_argument("--keywords", default="")

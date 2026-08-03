@@ -9,7 +9,13 @@ import re
 import sys
 from typing import Any
 
-from PIL import Image as PILImage
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
+
+try:
+    from PIL import Image as PILImage
+except ModuleNotFoundError:
+    PILImage = None
 
 
 STAGES: list[dict[str, Any]] = [
@@ -634,14 +640,15 @@ def summary_chart_semantic_issues(project: Path) -> list[str]:
             if "summary_chart_image_stale" not in issues:
                 issues.append("summary_chart_image_stale")
             continue
-        try:
-            with PILImage.open(image_path) as image:
-                if image.format != "PNG":
-                    raise ValueError
-                image.verify()
-        except Exception:
-            if "summary_chart_image_invalid" not in issues:
-                issues.append("summary_chart_image_invalid")
+        if PILImage is not None:
+            try:
+                with PILImage.open(image_path) as image:
+                    if image.format != "PNG":
+                        raise ValueError
+                    image.verify()
+            except Exception:
+                if "summary_chart_image_invalid" not in issues:
+                    issues.append("summary_chart_image_invalid")
 
     if not manifest_valid:
         issues.append("summary_chart_image_manifest_invalid")
@@ -1036,7 +1043,7 @@ def print_text(summary: dict[str, Any]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Inspect review project workflow status.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=None)
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     return parser.parse_args()
@@ -1044,7 +1051,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    summary = summarize(Path(args.review_root).resolve(), args.project_id)
+    summary = summarize(resolve_review_root(args.review_root, anchor=Path(__file__)), args.project_id)
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     else:

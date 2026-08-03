@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
 
 
 LEGACY_FIELDS = [
@@ -44,14 +48,15 @@ def clean_quality(meta: dict[str, Any]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Remove legacy tag fields from review metadata JSON files.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=None)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    meta_dir = Path(args.review_root).resolve() / "review-library" / "metadata" / "papers"
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
+    meta_dir = review_root / "review-library" / "metadata" / "papers"
     changed = 0
     removed = {field: 0 for field in LEGACY_FIELDS}
     for path in sorted(meta_dir.glob("*.metadata.json")):

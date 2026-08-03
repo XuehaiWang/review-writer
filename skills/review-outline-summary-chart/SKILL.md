@@ -1,9 +1,21 @@
----
+﻿---
 name: review-outline-summary-chart
 description: Use when an approved final review Markdown needs a full-review and per-section summary chart before document export.
 ---
 
 # Review Outline Summary Chart
+
+## FounDryClaw Location Rules
+
+When this skill runs inside FounDryClaw, do not assume the old `review-writer` repository path. Resolve locations in this order:
+
+1. Use environment variables when present: `FOUNDRYCLAW_REVIEW_ROOT`, `FOUNDRYCLAW_REVIEW_LIBRARY_ROOT`, `FOUNDRYCLAW_REVIEW_PROJECTS_ROOT`, `FOUNDRYCLAW_MINERU_OUTPUT_ROOT`, `FOUNDRYCLAW_REVIEW_PDF_ROOT`, `FOUNDRYCLAW_REVIEW_SKILLS_ROOT`.
+2. If the user provides `--review-root`, use it.
+3. Otherwise treat the current FounDryClaw Claude workdir as the review root.
+4. Store project artifacts under `<review-root>/review-projects/<project_id>/` and library metadata under `<review-root>/review-library/`.
+5. Run bundled scripts by path relative to this skill folder, for example `python scripts/<script>.py`; the scripts contain a shared resolver for the paths above.
+
+For lower-capability backend models: before running a script, identify `review_root` explicitly and pass `--review-root <review_root>` when uncertain. Never use `<review-root>` as a real path in FounDryClaw.
 
 Generate the full-review and per-section Mermaid summaries only after the
 final-audit checkpoint has approved the final draft.

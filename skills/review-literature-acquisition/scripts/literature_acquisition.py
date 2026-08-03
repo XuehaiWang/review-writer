@@ -14,12 +14,16 @@ import socket
 import ssl
 import tempfile
 import threading
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
 
 
 CROSSREF_API = "https://api.crossref.org/works"
@@ -911,17 +915,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     search = subparsers.add_parser("search")
-    search.add_argument("--review-root", type=Path, default=Path.cwd())
+    search.add_argument("--review-root", type=Path, default=None)
     search.add_argument("--topic", required=True)
     search.add_argument("--year-from", type=int)
     search.add_argument("--year-to", type=int)
     search.add_argument("--limit", type=int, default=20)
     search.add_argument("--mailto", default="")
     download = subparsers.add_parser("download")
-    download.add_argument("--review-root", type=Path, default=Path.cwd())
+    download.add_argument("--review-root", type=Path, default=None)
     download.add_argument("--candidate-json", type=Path, required=True)
     download.add_argument("--email", default="")
     args = parser.parse_args()
+    args.review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     if args.command == "search":
         load_dotenv_if_present(args.review_root)
         rows = search_crossref(

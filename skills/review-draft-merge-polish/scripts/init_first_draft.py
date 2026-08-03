@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
 
 
 def read_json(path: Path) -> Any:
@@ -60,7 +64,7 @@ def infer_topic(project: Path) -> str:
 
 
 def run(args: argparse.Namespace) -> int:
-    review_root = Path(args.review_root).resolve()
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     project = review_root / "review-projects" / args.project_id
     if not project.exists():
         raise SystemExit(f"Project not found: {project}")
@@ -93,7 +97,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Initialize first-draft merge bundle for a review project.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=None)
     parser.add_argument("--project-id", required=True)
     return parser.parse_args()
 

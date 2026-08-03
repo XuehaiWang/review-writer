@@ -39,6 +39,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 from dataclasses import dataclass, field
@@ -47,6 +48,8 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
 
 
 # ── Data structures ──────────────────────────────────────────────────────────
@@ -871,7 +874,7 @@ def resolve_draft(project: Path, input_markdown: str | None = None) -> tuple[Pat
 
 
 def run(args: argparse.Namespace) -> int:
-    review_root = Path(args.review_root).resolve()
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     project = review_root / "review-projects" / args.project_id
     if not project.exists():
         print(f"ERROR: Project not found: {project}", file=__import__("sys").stderr)
@@ -987,7 +990,7 @@ def run(args: argparse.Namespace) -> int:
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="Generate a content summary chart for a generated review article.")
-    ap.add_argument("--review-root", default=".",
+    ap.add_argument("--review-root", default=None,
                     help="Review project root (contains review-projects/). Default: cwd.")
     ap.add_argument("--project-id", required=True,
                     help="Project ID (directory under review-projects/)")

@@ -1,9 +1,21 @@
----
+﻿---
 name: review-figure-style-redraw
 description: Redraw selected source figures or schemes into a unified organic review style while preserving chemistry and content, using approved figure candidates and a configurable OpenAI-compatible image edit API. Use after section drafting has produced figure_candidates.json and before manuscript merge.
 ---
 
 # Review Figure Style Redraw
+
+## FounDryClaw Location Rules
+
+When this skill runs inside FounDryClaw, do not assume the old `review-writer` repository path. Resolve locations in this order:
+
+1. Use environment variables when present: `FOUNDRYCLAW_REVIEW_ROOT`, `FOUNDRYCLAW_REVIEW_LIBRARY_ROOT`, `FOUNDRYCLAW_REVIEW_PROJECTS_ROOT`, `FOUNDRYCLAW_MINERU_OUTPUT_ROOT`, `FOUNDRYCLAW_REVIEW_PDF_ROOT`, `FOUNDRYCLAW_REVIEW_SKILLS_ROOT`.
+2. If the user provides `--review-root`, use it.
+3. Otherwise treat the current FounDryClaw Claude workdir as the review root.
+4. Store project artifacts under `<review-root>/review-projects/<project_id>/` and library metadata under `<review-root>/review-library/`.
+5. Run bundled scripts by path relative to this skill folder, for example `python scripts/<script>.py`; the scripts contain a shared resolver for the paths above.
+
+For lower-capability backend models: before running a script, identify `review_root` explicitly and pass `--review-root <review_root>` when uncertain. Never use `<review-root>` as a real path in FounDryClaw.
 
 Use this skill after `figure_candidates.json` has been human-checked.
 
@@ -93,8 +105,8 @@ When a reviewer changes a candidate in Figure Review, the next redraw run reads 
 For a supplied chemical reaction mechanism figure that must retain its exact source appearance, use the dedicated profile below. It is a strict local edit, not a redraw:
 
 ```bash
-python /home/ps/review-writer/skills/review-figure-style-redraw/scripts/redraw_figures.py \
-  --review-root /home/ps/review-writer \
+python scripts/redraw_figures.py \
+  --review-root <review-root> \
   --project-id <project_id> \
   --figure-id <figure_id> \
   --render-mode ai-edit \
@@ -137,8 +149,8 @@ Use `wire_api: images` only for explicitly approved experimental image editing. 
 ## Run
 
 ```bash
-python /home/ps/review-writer/skills/review-figure-style-redraw/scripts/redraw_figures.py \
-  --review-root /home/ps/review-writer \
+python scripts/redraw_figures.py \
+  --review-root <review-root> \
   --project-id <project_id> \
   --render-mode source-faithful-bw \
   --require-redrawn
@@ -165,8 +177,8 @@ If `--api-key` is omitted, the script uses `XIAOLEAI_API_KEY` for the xiaoleai e
 Validate source resolution first when needed:
 
 ```bash
-python /home/ps/review-writer/skills/review-figure-style-redraw/scripts/redraw_figures.py \
-  --review-root /home/ps/review-writer \
+python scripts/redraw_figures.py \
+  --review-root <review-root> \
   --project-id <project_id> \
   --dry-run
 ```

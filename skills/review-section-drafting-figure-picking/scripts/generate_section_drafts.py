@@ -7,11 +7,15 @@ import json
 import os
 import re
 import ssl
+import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
 
 
 def openai_endpoint(base_url: str, endpoint: str) -> str:
@@ -258,14 +262,14 @@ def call_llm(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate review sections with an OpenAI-compatible writing model.")
-    parser.add_argument("--review-root", default=".")
+    parser.add_argument("--review-root", default=None)
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--api-key", default="")
     parser.add_argument("--base-url", default="")
     parser.add_argument("--model", default="")
     parser.add_argument("--wire-api", default="")
     args = parser.parse_args()
-    root = Path(args.review_root).resolve()
+    root = resolve_review_root(args.review_root, anchor=Path(__file__))
     dotenv = load_dotenv(root)
     base_url = (
         args.base_url

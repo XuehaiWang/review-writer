@@ -10,6 +10,9 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
+
 
 HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$", re.MULTILINE)
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
@@ -188,7 +191,8 @@ def strip_internal_workflow_markers(markdown: str) -> str:
 
 
 def run(args: argparse.Namespace) -> int:
-    project = Path(args.review_root).resolve() / "review-projects" / args.project_id
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
+    project = review_root / "review-projects" / args.project_id
     input_dir = project / "04_first_draft"
     first_draft_path = input_dir / "first_draft.md"
     conclusion_path = input_dir / "conclusion_generated.md"
@@ -255,7 +259,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Integrate a generated conclusion into a review draft."
     )
-    parser.add_argument("--review-root", default=".")
+    parser.add_argument("--review-root", default=None)
     parser.add_argument("--project-id", required=True)
     return parser.parse_args()
 

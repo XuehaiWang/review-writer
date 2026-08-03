@@ -4,10 +4,14 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
 
 
 STOPWORDS = {
@@ -451,7 +455,7 @@ def write_plan(path: Path, blueprint: dict[str, Any]) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    review_root = Path(args.review_root).resolve()
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     skill_root = Path(__file__).resolve().parents[1]
     project_dir = review_root / "review-projects" / args.project_id
     stage_dir = project_dir / "01_matrix_outline"
@@ -499,7 +503,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Initialize section_blueprint.json from selected outline and literature matrix.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=None)
     parser.add_argument("--project-id", required=True)
     return parser.parse_args()
 

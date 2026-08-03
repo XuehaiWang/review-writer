@@ -1,9 +1,21 @@
----
+﻿---
 name: mineru-precise-parse-review-writer
-description: Parse local literature PDFs under /home/ps/review-writer into Markdown with the MinerU precise parsing batch API. Use when Codex needs to batch-convert a review paper library, preserve full MinerU zip sidecars, keep extracted images and JSON outputs, and skip files that were already parsed unless a force rerun is explicitly requested.
+description: Parse local literature PDFs under <review-root> into Markdown with the MinerU precise parsing batch API. Use when Codex needs to batch-convert a review paper library, preserve full MinerU zip sidecars, keep extracted images and JSON outputs, and skip files that were already parsed unless a force rerun is explicitly requested.
 ---
 
 # MinerU Precise Parse For Review Writer
+
+## FounDryClaw Location Rules
+
+When this skill runs inside FounDryClaw, do not assume the old `review-writer` repository path. Resolve locations in this order:
+
+1. Use environment variables when present: `FOUNDRYCLAW_REVIEW_ROOT`, `FOUNDRYCLAW_REVIEW_LIBRARY_ROOT`, `FOUNDRYCLAW_REVIEW_PROJECTS_ROOT`, `FOUNDRYCLAW_MINERU_OUTPUT_ROOT`, `FOUNDRYCLAW_REVIEW_PDF_ROOT`, `FOUNDRYCLAW_REVIEW_SKILLS_ROOT`.
+2. If the user provides `--review-root`, use it.
+3. Otherwise treat the current FounDryClaw Claude workdir as the review root.
+4. Store project artifacts under `<review-root>/review-projects/<project_id>/` and library metadata under `<review-root>/review-library/`.
+5. Run bundled scripts by path relative to this skill folder, for example `python scripts/<script>.py`; the scripts contain a shared resolver for the paths above.
+
+For lower-capability backend models: before running a script, identify `review_root` explicitly and pass `--review-root <review_root>` when uncertain. Never use `<review-root>` as a real path in FounDryClaw.
 
 Use this skill when the task is to convert a local PDF library into review-ready Markdown with the MinerU precise parsing API.
 
@@ -11,9 +23,8 @@ This skill is for batch parsing only. It uploads local PDFs to MinerU, waits for
 
 ## Default Paths
 
-- input root: `/home/ps/review-writer`
-- skill root: `/home/ps/review-writer/skills/mineru-precise-parse-review-writer`
-- output root: `/home/ps/review-writer/mineru-outputs`
+- input root: `<review-root>`
+- skill root: `this skill folder<review-root>/mineru-outputs`
 
 The parser scans the input root recursively for `*.pdf` files and ignores the skill directory and output directory.
 
@@ -57,13 +68,13 @@ python3 scripts/parse_review_writer_pdfs.py --force
 Parse a specific subtree:
 
 ```bash
-python3 scripts/parse_review_writer_pdfs.py --input-dir /home/ps/review-writer/source-paper/Progargylic
+python3 scripts/parse_review_writer_pdfs.py --input-dir <review-root>/source-paper/Progargylic
 ```
 
 Parse one specific PDF:
 
 ```bash
-python3 scripts/parse_review_writer_pdfs.py --pdf /home/ps/review-writer/source-paper/Progargylic/1-s2.0-S004040202400526X-main.pdf
+python3 scripts/parse_review_writer_pdfs.py --pdf <review-root>/source-paper/Progargylic/1-s2.0-S004040202400526X-main.pdf
 ```
 
 ## Outputs

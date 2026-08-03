@@ -1,9 +1,21 @@
----
+﻿---
 name: review-literature-matrix-outline
 description: Read the 20-30 selected papers, build a concise fixed-field literature matrix, and draft review outline options using the writing-rule skill.
 ---
 
 # Review Literature Matrix Outline
+
+## FounDryClaw Location Rules
+
+When this skill runs inside FounDryClaw, do not assume the old `review-writer` repository path. Resolve locations in this order:
+
+1. Use environment variables when present: `FOUNDRYCLAW_REVIEW_ROOT`, `FOUNDRYCLAW_REVIEW_LIBRARY_ROOT`, `FOUNDRYCLAW_REVIEW_PROJECTS_ROOT`, `FOUNDRYCLAW_MINERU_OUTPUT_ROOT`, `FOUNDRYCLAW_REVIEW_PDF_ROOT`, `FOUNDRYCLAW_REVIEW_SKILLS_ROOT`.
+2. If the user provides `--review-root`, use it.
+3. Otherwise treat the current FounDryClaw Claude workdir as the review root.
+4. Store project artifacts under `<review-root>/review-projects/<project_id>/` and library metadata under `<review-root>/review-library/`.
+5. Run bundled scripts by path relative to this skill folder, for example `python scripts/<script>.py`; the scripts contain a shared resolver for the paths above.
+
+For lower-capability backend models: before running a script, identify `review_root` explicitly and pass `--review-root <review_root>` when uncertain. Never use `<review-root>` as a real path in FounDryClaw.
 
 Goal: read selected papers and create the literature matrix plus outline options.
 
@@ -16,9 +28,9 @@ per-claim constraints; that is `review-section-blueprint`'s job.
 ```text
 review-projects/<project_id>/00_discovery/selected_discovery_results.json
 review-projects/<project_id>/00_discovery/topic_input.md
-/home/ps/review-writer/skills/review-section-blueprint/SKILL.md
-/home/ps/review-writer/skills/review-section-blueprint/references/rule_packs.json
-/home/ps/review-writer/template/综述模板写作方式与风格总结.md
+this skill folder/SKILL.md
+this skill folder/references/rule_packs.json
+<review-root>/template/综述模板写作方式与风格总结.md
 ```
 
 For each paper, open:

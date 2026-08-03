@@ -8,6 +8,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
+
 
 BLOCKING_FIELDS = ["paper_id", "slug", "title", "authors", "year", "abstract", "source_paths", "structured_tags"]
 WARNING_FIELDS = ["journal", "doi"]
@@ -179,7 +182,7 @@ def write_reports(review_root: Path, reports: list[dict[str, Any]]) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    review_root = Path(args.review_root).resolve()
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     meta_dir = review_root / "review-library" / "metadata" / "papers"
     if not meta_dir.exists():
         print(f"ERROR: metadata directory not found: {meta_dir}", file=sys.stderr)
@@ -195,7 +198,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate review metadata JSON files.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=None)
     return parser.parse_args()
 
 

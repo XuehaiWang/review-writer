@@ -4,8 +4,12 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
 
 
 PLACEHOLDER_RE = re.compile(
@@ -252,14 +256,15 @@ def write_reports(out_dir: Path, scan: dict[str, Any]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run deterministic final format scan for a review project.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=None)
     parser.add_argument("--project-id", required=True)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    project = Path(args.review_root).resolve() / "review-projects" / args.project_id
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
+    project = review_root / "review-projects" / args.project_id
     out_dir = project / "05_final_audit"
     scan = scan_draft(project)
     write_reports(out_dir, scan)

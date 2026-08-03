@@ -1,9 +1,21 @@
----
+﻿---
 name: review-literature-acquisition
 description: Search Crossref from a review topic, rank journal-article candidates, resolve lawful open-access PDFs through a Crossref/Europe PMC/Semantic Scholar/optional Unpaywall fallback chain, validate downloads, and register them in review-library. Use when the user asks to find papers by topic, download accessible journal articles, or grow the shared Library from online sources.
 ---
 
 # Review Literature Acquisition
+
+## FounDryClaw Location Rules
+
+When this skill runs inside FounDryClaw, do not assume the old `review-writer` repository path. Resolve locations in this order:
+
+1. Use environment variables when present: `FOUNDRYCLAW_REVIEW_ROOT`, `FOUNDRYCLAW_REVIEW_LIBRARY_ROOT`, `FOUNDRYCLAW_REVIEW_PROJECTS_ROOT`, `FOUNDRYCLAW_MINERU_OUTPUT_ROOT`, `FOUNDRYCLAW_REVIEW_PDF_ROOT`, `FOUNDRYCLAW_REVIEW_SKILLS_ROOT`.
+2. If the user provides `--review-root`, use it.
+3. Otherwise treat the current FounDryClaw Claude workdir as the review root.
+4. Store project artifacts under `<review-root>/review-projects/<project_id>/` and library metadata under `<review-root>/review-library/`.
+5. Run bundled scripts by path relative to this skill folder, for example `python scripts/<script>.py`; the scripts contain a shared resolver for the paths above.
+
+For lower-capability backend models: before running a script, identify `review_root` explicitly and pass `--review-root <review_root>` when uncertain. Never use `<review-root>` as a real path in FounDryClaw.
 
 Use this skill for the acquisition boundary before the normal review stages. It complements
 `review-online-paper-discovery`: discovery builds a project-specific shortlist; acquisition
@@ -51,7 +63,7 @@ For a command-line search:
 
 ```powershell
 python scripts/literature_acquisition.py search `
-  --review-root D:\path\to\review-writer `
+  --review-root <review-root> `
   --topic "enantioselective synthesis of axially chiral allenes" `
   --year-from 2015 --limit 20
 ```
@@ -60,7 +72,7 @@ For a selected download:
 
 ```powershell
 python scripts/literature_acquisition.py download `
-  --review-root D:\path\to\review-writer `
+  --review-root <review-root> `
   --candidate-json candidate.json
 ```
 

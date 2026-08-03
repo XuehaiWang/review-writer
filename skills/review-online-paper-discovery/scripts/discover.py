@@ -17,6 +17,9 @@ from typing import Any
 
 from sciatlas_client import SciAtlasClient, load_config as load_sciatlas_config, papers_from_response
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -927,7 +930,7 @@ def write_download_list_report(out_dir: Path, results: list[dict[str, Any]]) -> 
 
 
 def run_search(args: argparse.Namespace) -> int:
-    review_root = Path(args.review_root).resolve()
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     _load_dotenv_if_present(review_root)
     if not args.web_search and not args.sciatlas_search:
         raise SystemExit(
@@ -1110,7 +1113,7 @@ def run_list_for_download(args: argparse.Namespace) -> int:
     servers, so the only thing it reliably did was add failure modes. The
     resolution logic (Unpaywall lookup, direct-link check) is still useful --
     it tells a human where to look -- so it's kept."""
-    review_root = Path(args.review_root).resolve()
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     _load_dotenv_if_present(review_root)
     out_dir, candidates = _load_candidates_for_download(args, review_root)
     if args.limit:
@@ -1211,7 +1214,7 @@ def run_register_pdfs(args: argparse.Namespace) -> int:
     convention, since it holds derived/processed data (parsed markdown,
     extracted content) that belongs with the rest of the review-library
     workspace rather than wherever the raw PDFs happen to live."""
-    review_root = Path(args.review_root).resolve()
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     _load_dotenv_if_present(review_root)
     out_dir, candidates = _load_candidates_for_download(args, review_root)
 
@@ -1294,7 +1297,7 @@ def run_probe(args: argparse.Namespace) -> int:
     topic_decomposition_prompt.md): run a quick search on a candidate
     meaning and see what the actual literature returns, instead of resolving
     it from general/training-data knowledge alone."""
-    _load_dotenv_if_present(Path(args.review_root).resolve())
+    _load_dotenv_if_present(resolve_review_root(args.review_root, anchor=Path(__file__)))
     if not args.web_search and not args.sciatlas_search:
         raise SystemExit("At least one of --web-search or --sciatlas-search is required for a probe.")
 
@@ -1339,7 +1342,7 @@ def parse_args() -> argparse.Namespace:
     search = subparsers.add_parser(
         "search", help="Search Crossref/SciAtlas for candidate papers and write a report for human review."
     )
-    search.add_argument("--review-root", default=str(Path.cwd()))
+    search.add_argument("--review-root", default=None)
     search.add_argument(
         "--output-dir", default="",
         help="Override output folder. Defaults to <review-root>/review-projects/<project-id>/00_discovery/",
@@ -1383,7 +1386,7 @@ def parse_args() -> argparse.Namespace:
         help="Resolve a PDF source (Unpaywall/direct link) for every confirmed candidate and write "
         "a report for manual download -- no fetch, no file writes into any paper directory.",
     )
-    list_for_download.add_argument("--review-root", default=str(Path.cwd()))
+    list_for_download.add_argument("--review-root", default=None)
     list_for_download.add_argument("--project-id", required=True)
     list_for_download.add_argument(
         "--candidates-file", default="",
@@ -1405,7 +1408,7 @@ def parse_args() -> argparse.Namespace:
         "candidate metadata into review-library. --paper-pdf-dir is never assumed -- it can be "
         "anywhere on disk (a Downloads folder, another drive, wherever the PDFs actually are).",
     )
-    register_pdfs.add_argument("--review-root", default=str(Path.cwd()))
+    register_pdfs.add_argument("--review-root", default=None)
     register_pdfs.add_argument("--project-id", required=True)
     register_pdfs.add_argument(
         "--paper-pdf-dir", required=True,
@@ -1438,7 +1441,7 @@ def parse_args() -> argparse.Namespace:
         "Use to gather evidence when disambiguating an ambiguous topic term before "
         "committing to full keyword expansion (see references/topic_decomposition_prompt.md).",
     )
-    probe.add_argument("--review-root", default=str(Path.cwd()))
+    probe.add_argument("--review-root", default=None)
     probe.add_argument("--query", required=True, help="The ambiguous term or a candidate expansion of it.")
     probe.add_argument("--web-search", action="store_true", help="Query Crossref. At least one source is required.")
     probe.add_argument("--sciatlas-search", action="store_true", help="Query SciAtlas.")

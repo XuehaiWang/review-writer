@@ -4,8 +4,12 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
 
 
 FIGURE_TYPES = {"image", "chart", "table"}
@@ -163,14 +167,14 @@ def build_inventory(review_root: Path, project_id: str) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a MinerU figure/table inventory for selected review papers.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=None)
     parser.add_argument("--project-id", required=True)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    review_root = Path(args.review_root).resolve()
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     project = review_root / "review-projects" / args.project_id
     if not project.exists():
         raise SystemExit(f"Project not found: {project}")

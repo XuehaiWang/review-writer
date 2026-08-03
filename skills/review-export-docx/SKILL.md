@@ -1,9 +1,21 @@
----
+﻿---
 name: review-export-docx
 description: Convert a finalized review Markdown draft into a Word DOCX that matches the bundled ACS-style review_template.docx. Use after the review writing pipeline has produced a stable first_draft.md or final_draft.md and the user wants a deliverable .docx with proper section styles, captions, tables, and math.
 ---
 
 # Review Export DOCX
+
+## FounDryClaw Location Rules
+
+When this skill runs inside FounDryClaw, do not assume the old `review-writer` repository path. Resolve locations in this order:
+
+1. Use environment variables when present: `FOUNDRYCLAW_REVIEW_ROOT`, `FOUNDRYCLAW_REVIEW_LIBRARY_ROOT`, `FOUNDRYCLAW_REVIEW_PROJECTS_ROOT`, `FOUNDRYCLAW_MINERU_OUTPUT_ROOT`, `FOUNDRYCLAW_REVIEW_PDF_ROOT`, `FOUNDRYCLAW_REVIEW_SKILLS_ROOT`.
+2. If the user provides `--review-root`, use it.
+3. Otherwise treat the current FounDryClaw Claude workdir as the review root.
+4. Store project artifacts under `<review-root>/review-projects/<project_id>/` and library metadata under `<review-root>/review-library/`.
+5. Run bundled scripts by path relative to this skill folder, for example `python scripts/<script>.py`; the scripts contain a shared resolver for the paths above.
+
+For lower-capability backend models: before running a script, identify `review_root` explicitly and pass `--review-root <review_root>` when uncertain. Never use `<review-root>` as a real path in FounDryClaw.
 
 Convert a finalized review Markdown into Word DOCX using the bundled ACS-style template.
 
@@ -39,29 +51,29 @@ printed.
 Default (final draft):
 
 ```bash
-python3 /home/ps/review-writer/skills/review-export-docx/scripts/md2docx.py \
-  --input  /home/ps/review-writer/review-projects/<project_id>/05_final_audit/final_draft.md \
-  --output /home/ps/review-writer/review-projects/<project_id>/05_final_audit/final_draft.docx
+python3 scripts/md2docx.py \
+  --input  <review-root>/review-projects/<project_id>/05_final_audit/final_draft.md \
+  --output <review-root>/review-projects/<project_id>/05_final_audit/final_draft.docx
 ```
 
 First draft:
 
 ```bash
-python3 /home/ps/review-writer/skills/review-export-docx/scripts/md2docx.py \
-  --input  /home/ps/review-writer/review-projects/<project_id>/04_first_draft/first_draft.md \
-  --output /home/ps/review-writer/review-projects/<project_id>/04_first_draft/first_draft.docx
+python3 scripts/md2docx.py \
+  --input  <review-root>/review-projects/<project_id>/04_first_draft/first_draft.md \
+  --output <review-root>/review-projects/<project_id>/04_first_draft/first_draft.docx
 ```
 
 Custom template:
 
 ```bash
-python3 /home/ps/review-writer/skills/review-export-docx/scripts/md2docx.py \
+python3 scripts/md2docx.py \
   --input    /abs/path/review.md \
   --output   /abs/path/review.docx \
   --template /abs/path/custom_template.docx
 ```
 
-The default template is `/home/ps/review-writer/skills/review-export-docx/review_template.docx`.
+The default template is `this skill folder/review_template.docx`.
 
 ## Style Mapping
 

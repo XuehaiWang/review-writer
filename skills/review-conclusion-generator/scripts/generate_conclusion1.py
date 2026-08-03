@@ -26,12 +26,16 @@ import json
 import os
 import re
 import ssl
+import sys
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
 
 
 _NUMERIC_CITATION_RE = re.compile(r"\[\d+(?:\s*[-,]\s*\d+)*\]")
@@ -856,7 +860,7 @@ def validate_conclusion(
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def run(args: argparse.Namespace) -> int:
-    review_root = Path(args.review_root).resolve()
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     _load_dotenv_if_present(review_root)
     project = review_root / "review-projects" / args.project_id
 
@@ -1054,7 +1058,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate high-quality conclusion/challenges/insights for a review project."
     )
-    parser.add_argument("--review-root", default=".",
+    parser.add_argument("--review-root", default=None,
                         help="Review project root (contains review-projects/). Default: cwd.")
     parser.add_argument("--project-id", required=True, help="Project ID (directory name under review-projects/)")
     parser.add_argument(

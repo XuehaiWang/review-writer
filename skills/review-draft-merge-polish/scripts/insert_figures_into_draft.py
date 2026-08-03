@@ -7,8 +7,12 @@ import json
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
 
 
 def read_json(path: Path) -> Any:
@@ -387,7 +391,7 @@ def figure_anchor_position(text: str, figure: dict[str, Any]) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Insert available figures into the first draft.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=None)
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--max-per-section", type=int, default=0,
                         help="Maximum figures per section; 0 keeps every human-selected figure.")
@@ -396,7 +400,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    project = Path(args.review_root).resolve() / "review-projects" / args.project_id
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
+    project = review_root / "review-projects" / args.project_id
     draft_path = project / "04_first_draft" / "first_draft.md"
     if not draft_path.exists():
         raise SystemExit(f"Missing first draft: {draft_path}")

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from prepare_metadata import (
@@ -13,17 +14,21 @@ from prepare_metadata import (
     write_json,
 )
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Backfill empty eight-category structured_tags into existing metadata files.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=None)
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing structured_tags.")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    meta_dir = Path(args.review_root).resolve() / "review-library" / "metadata" / "papers"
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
+    meta_dir = review_root / "review-library" / "metadata" / "papers"
     count = 0
     for path in sorted(meta_dir.glob("*.metadata.json")):
         meta = read_json(path)

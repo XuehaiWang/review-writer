@@ -1,9 +1,21 @@
----
+﻿---
 name: review-section-drafting-figure-picking
 description: Draft each review section from section_blueprint.json, literature matrix, and writing rules; each section is a separate output file and should be written by a separate subagent when possible.
 ---
 
 # Review Section Drafting Figure Picking
+
+## FounDryClaw Location Rules
+
+When this skill runs inside FounDryClaw, do not assume the old `review-writer` repository path. Resolve locations in this order:
+
+1. Use environment variables when present: `FOUNDRYCLAW_REVIEW_ROOT`, `FOUNDRYCLAW_REVIEW_LIBRARY_ROOT`, `FOUNDRYCLAW_REVIEW_PROJECTS_ROOT`, `FOUNDRYCLAW_MINERU_OUTPUT_ROOT`, `FOUNDRYCLAW_REVIEW_PDF_ROOT`, `FOUNDRYCLAW_REVIEW_SKILLS_ROOT`.
+2. If the user provides `--review-root`, use it.
+3. Otherwise treat the current FounDryClaw Claude workdir as the review root.
+4. Store project artifacts under `<review-root>/review-projects/<project_id>/` and library metadata under `<review-root>/review-library/`.
+5. Run bundled scripts by path relative to this skill folder, for example `python scripts/<script>.py`; the scripts contain a shared resolver for the paths above.
+
+For lower-capability backend models: before running a script, identify `review_root` explicitly and pass `--review-root <review_root>` when uncertain. Never use `<review-root>` as a real path in FounDryClaw.
 
 Goal: write each section as a separate file, with figures tied to paragraphs.
 
@@ -14,8 +26,8 @@ review-projects/<project_id>/01_matrix_outline/selected_outline.md
 review-projects/<project_id>/01_matrix_outline/literature_matrix.json
 review-projects/<project_id>/01_matrix_outline/section_blueprint.json
 review-projects/<project_id>/01_matrix_outline/section_writing_plan.md
-/home/ps/review-writer/skills/review-section-blueprint/references/rule_packs.json
-/home/ps/review-writer/template/综述模板写作方式与风格总结.md
+this skill folder/references/rule_packs.json
+<review-root>/template/综述模板写作方式与风格总结.md
 ```
 
 For every assigned paper, reopen:
@@ -98,8 +110,8 @@ audit's hard gate (`draft_has_no_figures`,
 Before writing, run:
 
 ```bash
-python /home/ps/review-writer/skills/review-section-drafting-figure-picking/scripts/build_paper_figure_inventory.py \
-  --review-root /home/ps/review-writer \
+python scripts/build_paper_figure_inventory.py \
+  --review-root <review-root> \
   --project-id <project_id>
 ```
 

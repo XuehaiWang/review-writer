@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 import urllib.error
 from pathlib import Path
@@ -11,6 +12,9 @@ from typing import Any
 
 from llm_retag_metadata import retag_one, write_markdown_report
 from prepare_metadata import STRUCTURED_TAG_KEYS, load_classification_rules, load_dotenv, read_json, write_json
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
 
 
 def field_value(meta: dict[str, Any], key: str) -> Any:
@@ -98,7 +102,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Batch-refresh metadata with LLM-extracted eight-category tags, three papers per round by default."
     )
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=None)
     parser.add_argument("--model", default="")
     parser.add_argument("--base-url", default="")
     parser.add_argument("--api-key", default="")
@@ -121,7 +125,7 @@ def main() -> int:
     if args.max_attempts < 1:
         raise SystemExit("--max-attempts must be >= 1")
 
-    review_root = Path(args.review_root).resolve()
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     load_dotenv(review_root / ".env")
     api_key = args.api_key or os.environ.get("OPENAI_API_KEY", "")
     base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")

@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import ssl
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -28,6 +29,9 @@ from prepare_metadata import (
     update_quality,
     write_json,
 )
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_review_root
 
 
 def call_responses(payload: dict[str, Any], api_key: str, base_url: str, timeout: int) -> dict[str, Any]:
@@ -95,7 +99,7 @@ def retag_one(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Refresh existing metadata with LLM-extracted eight-category tags.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=None)
     parser.add_argument("--model", default="")
     parser.add_argument("--base-url", default="")
     parser.add_argument("--api-key", default="")
@@ -109,14 +113,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    review_root = Path(args.review_root).resolve()
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     load_dotenv(review_root / ".env")
     base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
     api_key = resolve_api_key(args.api_key, base_url)
     model = args.model or os.environ.get("REVIEW_METADATA_MODEL", "gpt-5.4")
     reasoning_effort = args.reasoning_effort or os.environ.get("REVIEW_METADATA_REASONING_EFFORT", "high")
     if not api_key:
-        raise SystemExit("Missing API key. Pass --api-key, set OPENAI_API_KEY, or write it to /home/ps/review-writer/.env.")
+        raise SystemExit("Missing API key. Pass --api-key, set OPENAI_API_KEY, or write it to <review-root>/.env.")
     skill_root = Path(__file__).resolve().parents[1]
     system_prompt = (skill_root / "references" / "metadata_extraction_system.md").read_text(encoding="utf-8")
     classification_labels = load_classification_rules(review_root / "allene_classification_rules.py")

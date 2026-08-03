@@ -16,6 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _review_runtime.paths import resolve_mineru_output_root, resolve_pdf_root, resolve_review_root
+
 
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Za-z0-9]+\b")
 YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
@@ -1083,10 +1086,10 @@ def copy_references(skill_root: Path, review_root: Path) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    review_root = Path(args.review_root).resolve()
+    review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     load_dotenv(review_root / ".env")
-    mineru_output = Path(args.mineru_output).resolve()
-    pdf_root = Path(args.pdf_root).resolve() if args.pdf_root else None
+    mineru_output = resolve_mineru_output_root(args.mineru_output, review_root=review_root, anchor=Path(__file__))
+    pdf_root = resolve_pdf_root(args.pdf_root, review_root=review_root, anchor=Path(__file__))
     skill_root = Path(__file__).resolve().parents[1]
     out_meta_dir = review_root / "review-library" / "metadata" / "papers"
     out_registry = review_root / "review-library" / "registry" / "papers.jsonl"
@@ -1191,9 +1194,9 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare review paper metadata from MinerU outputs.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
-    parser.add_argument("--mineru-output", default="/home/ps/review-writer/mineru-outputs")
-    parser.add_argument("--pdf-root", default="/home/ps/review-writer/source-paper/Progargylic")
+    parser.add_argument("--review-root", default=None)
+    parser.add_argument("--mineru-output", default=None)
+    parser.add_argument("--pdf-root", default=None)
     parser.add_argument(
         "--discover-from-pdf-root",
         action="store_true",
