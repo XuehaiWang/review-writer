@@ -41,11 +41,13 @@ Use one unified style preset: `organic-review-structure-locked-v2`. The presenta
 
 Scientific content is immutable. Every atom, substituent, ring, bond order, allene, wedge/dash, charge, radical, stereochemical descriptor, reaction arrow, process branch, reagent, condition, yield, label, panel, and table value must remain scientifically and topologically identical to the source. Permitted presentation changes are limited to stroke appearance, background cleanup, contrast, and non-scientific borders within their existing bounds.
 
-Default to `source-faithful-bw` when exact source geometry is required. It creates a 4x-resolution, pure black-and-white PNG without regenerating or relocating raster text. Before thresholding, bright saturated coloured fills are made white so cyan/magenta/yellow ring interiors do not become solid black blocks; dark coloured strokes and labels become black ink.
+Default to `source-faithful-bw` when exact source geometry is required. It creates a 4x-resolution, pure black-and-white PNG without regenerating or relocating raster text. Before conversion, only uniform eroded 3x3 seeds proven to lie inside broad bright saturated fills are made white; cleanup must never propagate across the connected colour component. The black-and-white conversion is colour-aware—strongly chromatic pale strokes count as ink even when their grayscale luminance is high—so aromatic bonds, ring outlines, atom labels, and substituent strokes remain continuous black lines instead of disappearing into dots. After masking, only isolated chromatic-only components of at most five native pixels may be removed as JPEG noise; any component that is also dark in grayscale must be retained so radical dots, punctuation, stereochemical marks, and genuine scientific strokes survive.
 
 Dense reaction-scope figures with many products, substituent grids, yields, or example panels must use `source-faithful-bw`, not a generative redraw. Reconstructing dozens of chemical structures from a raster scope image can alter bond order, ring topology, and substituents. The source-faithful path preserves those pixels and only normalizes resolution, contrast, and black-and-white presentation.
 
 Complex multi-panel reaction-overview, strategy, background, comparison, or rearrangement figures must use `source-faithful-color`. This creates a 4x PNG while retaining every source pixel's geometry and scientific color encoding. Do not use a generative redraw for these figures: broad image-level ink checks can miss a chemically serious local mutation in one panel.
+
+For the generated full-review overview figure, negotiate image size per provider instead of hard-coding a landscape size. Geek2API-backed xiaoleai routes use `1024x1024`; other compatible routes may prefer `1536x1024` and must fall back to `1024x1024` after an unsupported-size response. On a square-only route, keep the template's complete landscape reading order within balanced white margins and never crop or omit a panel.
 
 For the `source-faithful-outline-color` profile, whiten only the broad interior of a bright coloured filled shape. Never whiten, hollow, fade, blur, or break a coloured word, glyph, label, arrow, bond, or symbol: coloured typography must remain solid, continuous, crisp, and in its original colour.
 
@@ -56,13 +58,15 @@ Use this routing order:
 3. A complex multi-panel overview, strategy, comparison, background, rearrangement, catalytic-cycle, kinetic-investigation, or total-synthesis figure: `source-faithful-color`. Strategy figures with bright cyan/green/orange interior fills use `source-faithful-outline-color`: retain dark coloured outlines and all symbols, but whiten only bright saturated interiors.
 4. A simple single-transformation scheme without the above indicators: gated `ai-edit`, with no OCR extraction, OCR prompt injection, OCR masking, OCR text restoration, or OCR comparison.
 
+Keep this routing as the default safety policy. When a reviewer explicitly requests an AI comparison for a figure that the router classified as dense, complex, tall, or low-resolution, run standard `ai-edit` with `--force-standard-ai-edit`. Never apply this override automatically or in batch mode, and never use it for `mechanism-arrow-straighten`. Preserve the provider's complete canvas, save the result as a Stage 7 preview, bind it to the current Stage 6 source hash, and require explicit human chemistry approval before Stage 8 or manuscript insertion.
+
 Low-resolution or thin-stroke schemes are forced to `source-faithful-bw`, even when their caption suggests a simple transformation. The black-and-white renderer detects saturated red/blue/other coloured source ink at native resolution before enlargement, converts it to continuous black strokes, and uses sharpened neutral-grey antialiasing only to smooth their black edges. It hollows only broad bright fills before conversion. A generative model must never infer missing thin bonds, labels, or stereochemical marks from a small raster.
 
 Tall portrait multi-step figures are forced to `source-faithful-bw`. Their full source canvas and every stacked panel are preserved at 4x resolution; broad bright colour interiors are whitened and all remaining chemical strokes, labels, and symbols are rendered as black line art. Do not use a generative edit for these figures: it can retain the nominal aspect ratio while reflowing or clipping the lowest panel.
 
-Generative edits must preserve the source aspect ratio even when the provider only returns a square image. Before upload, place every non-square source unchanged inside a centered square white wrapper; explicitly require the model to leave those technical padding bands blank. After generation, crop the recorded content rectangle back out and save the result at the exact source width and height. Never stretch a square provider response directly into a wide or tall chemistry canvas. The normalized PNG remains the single base image used by the online SVG editor, so SVG coordinates and saved raster dimensions continue to match.
+Standard `ai-edit` redraws retain the image provider's complete output canvas and native aspect ratio. A square-only result must not be cropped or stretched back to the source ratio, because doing so can delete generated structures and labels at the canvas edges. Require safe white margins and complete source content in the prompt, then use the returned image dimensions as the SVG editor base. Exact source dimensions remain mandatory only for pixel-local workflows such as `mechanism-arrow-straighten` and OCR-coordinate restoration.
 
-Every provider result is saved directly to Stage 7 **Redrawn Output**. The chemistry-integrity gate remains diagnostic metadata: a warning is recorded beside a saved image but it does not require a separate confirmation action or suppress the output path.
+Every provider result is saved directly to Stage 7 **Redrawn Output**. The chemistry-integrity gate remains diagnostic metadata: failed outputs stay available for viewing and download, but require explicit human approval before manuscript insertion.
 
 ## OCR Policy
 
@@ -150,6 +154,7 @@ Useful options:
 --output-format
 --style-name
 --edit-profile
+--force-standard-ai-edit
 --limit
 --dry-run
 --require-redrawn

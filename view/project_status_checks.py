@@ -69,6 +69,37 @@ class ProjectStatusChecks(unittest.TestCase):
             }
         )
 
+    def test_orphan_optional_outputs_are_not_reported_as_completed(self) -> None:
+        summarize = self.module["summarize"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "review-projects" / "demo"
+            (project / "04_first_draft").mkdir(parents=True)
+            (project / "05_final_audit").mkdir(parents=True)
+            (project / "04_first_draft" / "conclusion_generated.md").write_text(
+                "Old conclusion", encoding="utf-8"
+            )
+            (project / "05_final_audit" / "review_summary_chart.html").write_text(
+                "old", encoding="utf-8"
+            )
+            (project / "05_final_audit" / "review_summary_chart.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            (project / "05_final_audit" / "review_summary_chart.png").write_bytes(b"old")
+
+            result = summarize(root, "demo")
+
+            self.assertNotIn("conclusion_generation", result["completed_stage_ids"])
+            self.assertNotIn("summary_chart", result["completed_stage_ids"])
+            self.assertEqual(result["next_stage"]["id"], "discovery")
+            final_stage = next(
+                stage for stage in result["stages"] if stage["id"] == "final_audit"
+            )
+            self.assertNotIn(
+                "generated_conclusion_missing_from_final_draft",
+                final_stage["semantic_issues"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

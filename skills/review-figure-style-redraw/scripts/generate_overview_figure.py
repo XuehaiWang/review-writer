@@ -35,6 +35,40 @@ from typing import Any
 
 
 TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+LANDSCAPE_OVERVIEW_IMAGE_SIZE = "1536x1024"
+SQUARE_COMPATIBLE_IMAGE_SIZE = "1024x1024"
+
+
+def overview_image_size_candidates(base_url: str, preferred_size: str = "") -> list[str]:
+    """Return image sizes in provider-compatible retry order.
+
+    Geek2API-backed xiaoleai image routes reject the OpenAI landscape size
+    before generation starts.  Use their square size directly instead of
+    repeating a known-invalid request.  Other OpenAI-compatible providers keep
+    the landscape request first and can still fall back to the widely supported
+    square size.  ``OVERVIEW_IMAGE_SIZE`` and ``--size`` remain explicit
+    operator overrides, while the compatible fallback is always retained.
+    """
+    configured = preferred_size.strip() or os.environ.get("OVERVIEW_IMAGE_SIZE", "").strip()
+    provider_default = (
+        SQUARE_COMPATIBLE_IMAGE_SIZE
+        if "api.xiaoleai.team" in base_url.lower()
+        else LANDSCAPE_OVERVIEW_IMAGE_SIZE
+    )
+    candidates = [configured, provider_default, SQUARE_COMPATIBLE_IMAGE_SIZE]
+    return list(dict.fromkeys(size for size in candidates if size))
+
+
+def prompt_for_overview_size(prompt: str, size: str) -> str:
+    """Keep a landscape reading order when a provider only emits a square."""
+    if size != SQUARE_COMPATIBLE_IMAGE_SIZE:
+        return prompt
+    return (
+        prompt
+        + " The image service uses a square canvas. Preserve the template's landscape reading order "
+        "inside the square: keep every panel fully visible, use balanced white margins, do not crop, "
+        "stretch, stack, or omit any title, category, reaction, label, legend, or conclusion block."
+    )
 
 
 def decode_json_object(raw: bytes, label: str) -> dict[str, Any]:
@@ -967,10 +1001,14 @@ def call_image_edit_api(
     reference_image: Path,
     prompt: str,
     model: str = "gpt-image-1",
+    preferred_size: str = "",
+    request_metadata: dict[str, str] | None = None,
 ) -> bytes:
     """Call image generation API. Supports both OpenAI-compatible and DashScope native format."""
     # Detect if this is an Alibaba Cloud / DashScope endpoint
     if "maas.aliyuncs.com" in base_url or "dashscope" in base_url:
+        if request_metadata is not None:
+            request_metadata.update({"endpoint": "dashscope-native", "image_size": "2K"})
         return _call_dashscope_native(api_key, base_url, reference_image, prompt, model)
 
     # OpenAI-compatible endpoints
@@ -978,14 +1016,29 @@ def call_image_edit_api(
     if not base.endswith("/v1"):
         base = f"{base}/v1"
 
-    # Strategy 1: Try /images/edits
-    try:
-        return _try_images_edits(base, api_key, reference_image, prompt, model)
-    except Exception as edit_err:
-        print(f"  /images/edits failed ({edit_err}), trying /images/generations...")
+    errors: list[str] = []
+    for size in overview_image_size_candidates(base_url, preferred_size):
+        sized_prompt = prompt_for_overview_size(prompt, size)
+        try:
+            image = _try_images_edits(base, api_key, reference_image, sized_prompt, model, size)
+            if request_metadata is not None:
+                request_metadata.update({"endpoint": "/images/edits", "image_size": size})
+            return image
+        except Exception as edit_err:
+            errors.append(f"/images/edits size={size}: {edit_err}")
+            print(f"  /images/edits size={size} failed ({edit_err})")
 
-    # Strategy 2: Text-only /images/generations
-    return _try_images_generations_text_only(base, api_key, prompt, model)
+        try:
+            image = _try_images_generations_text_only(base, api_key, sized_prompt, model, size)
+            if request_metadata is not None:
+                request_metadata.update({"endpoint": "/images/generations", "image_size": size})
+            return image
+        except Exception as generation_err:
+            errors.append(f"/images/generations size={size}: {generation_err}")
+            print(f"  /images/generations size={size} failed ({generation_err})")
+
+    summary = "; ".join(errors[-4:])
+    raise RuntimeError(f"All overview image generation routes failed: {summary}")
 
 
 def _call_dashscope_native(
@@ -1075,13 +1128,20 @@ def _extract_dashscope_image(result: dict) -> bytes:
     raise RuntimeError(f"Unexpected DashScope response: {json.dumps(result)[:800]}")
 
 
-def _try_images_edits(base: str, api_key: str, reference_image: Path, prompt: str, model: str) -> bytes:
+def _try_images_edits(
+    base: str,
+    api_key: str,
+    reference_image: Path,
+    prompt: str,
+    model: str,
+    size: str,
+) -> bytes:
     """Try the /images/edits endpoint."""
     url = f"{base}/images/edits"
     fields = {
         "model": model,
         "prompt": prompt,
-        "size": "1536x1024",
+        "size": size,
         "quality": "high",
         "output_format": "png",
     }
@@ -1097,14 +1157,20 @@ def _try_images_edits(base: str, api_key: str, reference_image: Path, prompt: st
     return _extract_image_bytes(result)
 
 
-def _try_images_generations_text_only(base: str, api_key: str, prompt: str, model: str) -> bytes:
+def _try_images_generations_text_only(
+    base: str,
+    api_key: str,
+    prompt: str,
+    model: str,
+    size: str,
+) -> bytes:
     """Try /images/generations with text-only prompt (no reference image)."""
     url = f"{base}/images/generations"
     payload = {
         "model": model,
         "prompt": prompt,
         "n": 1,
-        "size": "1536x1024",
+        "size": size,
         "response_format": "b64_json",
     }
     body = json.dumps(payload).encode("utf-8")
@@ -1140,7 +1206,8 @@ def _extract_image_bytes(result: dict) -> bytes:
 def _build_report(args, template: dict, features: dict, prompt: str,
                          reference_image: Path, base_url: str, model: str,
                          status: str = "pending", output_path: str = "",
-                         output_size: int = 0, error: str = "") -> dict:
+                         output_size: int = 0, error: str = "",
+                         request_metadata: dict[str, str] | None = None) -> dict:
     """Build a single report dict (replaces 3 duplicate blocks in main)."""
     report = {
         "project_id": args.project_id,
@@ -1152,8 +1219,11 @@ def _build_report(args, template: dict, features: dict, prompt: str,
         "adapted_prompt": prompt,
         "api_base_url": base_url,
         "model": model,
+        "image_size_candidates": overview_image_size_candidates(base_url, args.size),
         "status": status,
     }
+    if request_metadata:
+        report["image_request"] = dict(request_metadata)
     if output_path:
         report["output_path"] = output_path
         report["output_size_bytes"] = output_size
@@ -1169,6 +1239,11 @@ def main():
     parser.add_argument("--api-key", default="", help="API key (or set XIAOLEAI_API_KEY / OPENAI_API_KEY)")
     parser.add_argument("--base-url", default="", help="API base URL")
     parser.add_argument("--model", default="gpt-image-1", help="Image generation model")
+    parser.add_argument(
+        "--size",
+        default="",
+        help="Preferred image size; incompatible providers automatically fall back to a supported size.",
+    )
     parser.add_argument("--output", default="", help="Output path for generated figure")
     parser.add_argument("--dry-run", action="store_true", help="Only show template matching, don't call API")
     args = parser.parse_args()
@@ -1249,14 +1324,24 @@ def main():
     print(f"  Base URL: {base_url}")
     print(f"  Model: {args.model}")
 
+    request_metadata: dict[str, str] = {}
     try:
-        image_bytes = call_image_edit_api(api_key, base_url, reference_image, adapted_prompt, args.model)
+        image_bytes = call_image_edit_api(
+            api_key,
+            base_url,
+            reference_image,
+            adapted_prompt,
+            args.model,
+            preferred_size=args.size,
+            request_metadata=request_metadata,
+        )
     except Exception as exc:
         print(f"\nERROR: API call failed: {exc}", file=sys.stderr)
         out_dir = project_dir / "03_figure_redraw"
         out_dir.mkdir(parents=True, exist_ok=True)
         report = _build_report(args, best_template, features, adapted_prompt,
-                               reference_image, base_url, args.model, status="api_error", error=str(exc))
+                               reference_image, base_url, args.model, status="api_error", error=str(exc),
+                               request_metadata=request_metadata)
         write_json(out_dir / "overview_template_match.json", report)
         sys.exit(3)
 
@@ -1273,7 +1358,7 @@ def main():
     report = _build_report(args, best_template, features, adapted_prompt,
                            reference_image, base_url, args.model,
                            status="success", output_path=str(output_path),
-                           output_size=len(image_bytes))
+                           output_size=len(image_bytes), request_metadata=request_metadata)
     write_json(out_dir / "overview_template_match.json", report)
     print(f"  Match report saved to: {out_dir / 'overview_template_match.json'}")
 

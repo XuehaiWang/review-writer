@@ -60,7 +60,7 @@ class SvgEditorResolutionChecks(unittest.TestCase):
                 base_mode="redrawn",
             )
 
-    def test_orphaned_redraw_file_is_recovered_as_svg_base(self) -> None:
+    def test_orphaned_redraw_file_is_not_recovered_without_manifest_lineage(self) -> None:
         stage = self.project / "03_figure_redraw"
         redraw = stage / "redrawn" / "P137-F01.png"
         redraw.parent.mkdir(parents=True)
@@ -70,16 +70,13 @@ class SvgEditorResolutionChecks(unittest.TestCase):
             encoding="utf-8",
         )
 
-        result = dashboard.create_full_figure_svg(
-            self.review_root,
-            self.project_id,
-            "P137-F01",
-            base_mode="redrawn",
-        )
-
-        self.assertEqual(result["base_mode"], "redrawn")
-        self.assertEqual(Path(result["base_image"]), redraw.resolve())
-        self.assertEqual((result["base_width"], result["base_height"]), (900, 700))
+        with self.assertRaisesRegex(ValueError, "selected AI redraw is unavailable"):
+            dashboard.create_full_figure_svg(
+                self.review_root,
+                self.project_id,
+                "P137-F01",
+                base_mode="redrawn",
+            )
 
     def test_legacy_redraw_path_field_is_accepted_as_svg_base(self) -> None:
         stage = self.project / "03_figure_redraw"

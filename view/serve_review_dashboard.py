@@ -319,7 +319,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/project/") and "/figures/" in parsed.path:
             parts = parsed.path.strip("/").split("/")
             if len(parts) == 6 and parts[0:2] == ["api", "project"] and parts[3] == "figures" and parts[5] == "redraw":
-                self.handle_current_figure_redraw(unquote(parts[2]), unquote(parts[4]))
+                force_ai = str(parse_qs(parsed.query).get("force_ai", [""])[0]).lower() in {
+                    "1", "true", "yes"
+                }
+                self.handle_current_figure_redraw(
+                    unquote(parts[2]),
+                    unquote(parts[4]),
+                    force_ai_edit=force_ai,
+                )
                 return
             if len(parts) == 6 and parts[0:2] == ["api", "project"] and parts[3] == "figures" and parts[5] == "human-approve":
                 self.handle_figure_human_approval(unquote(parts[2]), unquote(parts[4]))
@@ -721,6 +728,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not project.is_dir():
             self.send_json({"ok": False, "error": "Project not found."}, status=HTTPStatus.NOT_FOUND)
             return
+        reconcile_project_semantic_states(self.review_root, project_id)
         self.send_json({"ok": True, **workflow_store(self.review_root).workflow_snapshot(project_id)})
 
     def handle_figure_review_post(self, project_id: str, paper_id: str) -> None:
@@ -799,9 +807,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             }
         )
 
-    def handle_current_figure_redraw(self, project_id: str, figure_id: str) -> None:
+    def handle_current_figure_redraw(
+        self,
+        project_id: str,
+        figure_id: str,
+        *,
+        force_ai_edit: bool = False,
+    ) -> None:
         try:
-            result = redraw_current_figure(self.review_root, project_id, figure_id)
+            result = redraw_current_figure(
+                self.review_root,
+                project_id,
+                figure_id,
+                force_ai_edit=force_ai_edit,
+            )
         except (RuntimeError, ValueError) as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
@@ -1042,7 +1061,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 write_stage_handoff(
                     project / "05_final_audit" / "final_handoff.json",
                     "draft",
-                    [project / "04_first_draft" / "first_draft.md"],
+                    [
+                        project / "04_first_draft" / "first_draft.md",
+                        project / "04_first_draft" / "citations.json",
+                    ],
                 )
         elif stage_id == "final":
             final_freshness = artifact_freshness(
@@ -1056,10 +1078,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if error:
             self.send_json({"ok": False, "error": error}, status=HTTPStatus.CONFLICT)
             return
-        state_path = project / "pipeline_handoffs.json"
-        state = read_json_if_exists(state_path) or {"project_id": project_id, "stages": {}}
-        state.setdefault("stages", {})[stage_id] = {"completed_at": now_utc(), "next_stage": next_stages[stage_id]}
-        write_json(state_path, state)
         workflow_store(self.review_root).set_stage_state(project_id, stage_id, "approved")
         next_stage = next_stages[stage_id]
         self.send_json(
@@ -2126,6 +2144,18 @@ def regenerate_section_blueprint(review_root: Path, project_id: str) -> dict[str
     stage = review_root / "review-projects" / project_id / "01_matrix_outline"
     blueprint_path = stage / "section_blueprint.json"
     blueprint = read_json_if_exists(blueprint_path) or {}
+    blueprint_handoff = stage / "blueprint_handoff.json"
+    write_stage_handoff(
+        blueprint_handoff,
+        "matrix",
+        [stage / "literature_matrix.json", stage / "selected_outline.md"],
+        metadata={"dependency_profile": "matrix-outline-to-blueprint-v1"},
+    )
+    record_stage_outputs(
+        blueprint_handoff,
+        [blueprint_path, stage / "section_writing_plan.md"],
+        "blueprint",
+    )
     return {
         "status": "generated",
         "generated_at": now_utc(),
@@ -2647,7 +2677,7 @@ def resolve_redrawn_base_path(
     stage: Path,
     row: dict[str, Any] | None,
 ) -> Path | None:
-    """Resolve both current and legacy manifest fields to an existing redraw image."""
+    """Resolve only an explicitly recorded redraw or preview path."""
     if not isinstance(row, dict):
         return None
     fields = (
@@ -2669,18 +2699,6 @@ def resolve_redrawn_base_path(
         for candidate in candidates:
             if candidate.is_file():
                 return candidate.resolve()
-    figure_id = str(row.get("figure_id") or "").strip()
-    if figure_id:
-        # The Figures payload already recovers an orphaned AI preview from the
-        # redraw directory when an earlier failed manifest write left the path
-        # fields empty.  The SVG endpoint must use the same recovery rule so the
-        # image shown as Redrawn Output is also the image opened in the editor.
-        recovered = next(
-            (candidate for candidate in (stage / "redrawn").glob(f"{figure_id}.*") if candidate.is_file()),
-            None,
-        )
-        if recovered is not None:
-            return recovered.resolve()
     return None
 
 
@@ -2704,6 +2722,18 @@ def figure_aspect_ratio_integrity(source_path: Path, output_path: Path, toleranc
         "relative_difference": relative_difference,
         "tolerance": tolerance,
     }
+
+
+def ai_edit_allows_provider_canvas(row: dict[str, Any]) -> bool:
+    """Return whether a redraw may intentionally differ from the source ratio."""
+    return bool(
+        str(row.get("render_mode") or "") == "ai-edit"
+        and str(row.get("edit_profile") or "standard") == "standard"
+    )
+
+
+def figure_aspect_policy_matches(row: dict[str, Any], integrity: dict[str, Any]) -> bool:
+    return bool(integrity.get("status") == "pass" or ai_edit_allows_provider_canvas(row))
 
 
 def create_full_figure_svg(
@@ -3032,8 +3062,14 @@ def _resolve_candidate_source(review_root: Path, project: Path, candidate: dict[
     return source.resolve()
 
 
-def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) -> dict[str, Any]:
-    """Create one gated AI line-art redraw and reject altered chemical geometry."""
+def redraw_current_figure(
+    review_root: Path,
+    project_id: str,
+    figure_id: str,
+    *,
+    force_ai_edit: bool = False,
+) -> dict[str, Any]:
+    """Create one redraw, optionally exposing a reviewer-requested AI alternative."""
     project = review_root / "review-projects" / project_id
     draft_stage = project / "02_section_drafting"
     # Reconcile the Stage 6 human choice immediately before every redraw.  This
@@ -3078,9 +3114,6 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
         explicit = str((row or {}).get("rejected_preview_image") or "")
         preview = Path(explicit) if explicit else None
         if not preview or not preview.is_file():
-            previews = list((project / "03_figure_redraw" / "redrawn").glob(f"{figure_id}.*"))
-            preview = next((path for path in previews if path.is_file()), None)
-        if not preview:
             return None
         return {
             "figure_id": figure_id,
@@ -3092,9 +3125,19 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
             "preview_only": True,
         }
     mechanism_arrow_profile = use_mechanism_arrow_straighten_profile(candidate)
-    source_faithful_scope = not mechanism_arrow_profile and use_source_faithful_scope_render(candidate)
+    if force_ai_edit and mechanism_arrow_profile:
+        raise ValueError(
+            "Mechanism-arrow figures must keep the constrained local-edit workflow; "
+            "an unconstrained standard AI redraw is not available for this figure."
+        )
+    source_faithful_scope = (
+        not force_ai_edit
+        and not mechanism_arrow_profile
+        and use_source_faithful_scope_render(candidate)
+    )
     source_faithful_multipanel = (
-        not mechanism_arrow_profile
+        not force_ai_edit
+        and not mechanism_arrow_profile
         and not source_faithful_scope
         and use_source_faithful_multipanel_render(candidate)
     )
@@ -3108,6 +3151,8 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
         extra.extend(["--render-mode", "source-faithful-outline-color" if hollow_color_fills else "source-faithful-color"])
     else:
         extra.extend(["--render-mode", "ai-edit"])
+        if force_ai_edit:
+            extra.append("--force-standard-ai-edit")
     try:
         run_project_script(
             figure_redraw_script_path(),
@@ -3200,6 +3245,7 @@ def redraw_current_figure(review_root: Path, project_id: str, figure_id: str) ->
         "source_faithful_scope_render": source_faithful_scope,
         "source_faithful_multipanel_render": source_faithful_multipanel,
         "hollow_color_fills": hollow_color_fills,
+        "human_ai_override": force_ai_edit,
         "integrity_warning": integrity_warning,
         "redrawn_image": str(redrawn["redrawn_image"]),
     })
@@ -3258,7 +3304,7 @@ def approve_figure_for_manuscript(review_root: Path, project_id: str, figure_id:
     if output_path is None:
         raise ValueError("No AI redraw or preview file is available for human approval.")
     aspect_integrity = figure_aspect_ratio_integrity(source_path, output_path)
-    if aspect_integrity.get("status") != "pass":
+    if not figure_aspect_policy_matches(row, aspect_integrity):
         source_size = aspect_integrity.get("source_size") or []
         output_size = aspect_integrity.get("output_size") or []
         raise ValueError(
@@ -3278,6 +3324,9 @@ def approve_figure_for_manuscript(review_root: Path, project_id: str, figure_id:
     row["redrawn_image"] = str(output_path)
     row["output_image_sha256"] = output_hash
     row["aspect_ratio_integrity"] = aspect_integrity
+    row["aspect_ratio_policy"] = (
+        "provider_canvas_allowed" if ai_edit_allows_provider_canvas(row) else "source_ratio_required"
+    )
     row["status"] = "redrawn"
     row["output_disposition"] = "human_approved_for_manuscript"
     row["human_approval"] = {
@@ -3763,6 +3812,60 @@ def final_draft_contains_overview_figure(text: str) -> bool:
     return OVERVIEW_FIGURE_ID in text and f"figures/{OVERVIEW_FIGURE_FILENAME}" in text
 
 
+def overview_figure_is_current(project: Path) -> bool:
+    overview = project / "05_final_audit" / OVERVIEW_FIGURE_FILENAME
+    if not overview.is_file() or overview.stat().st_size <= 0:
+        return False
+    state = artifact_freshness(
+        project / "05_final_audit" / "overview_figure_handoff.json",
+        [overview],
+    )
+    return not state.get("stale", True)
+
+
+def conclusion_integration_is_current(project: Path, conclusion_current: bool) -> bool:
+    """Verify that a currently valid optional conclusion is in the final draft."""
+    if not conclusion_current:
+        return True
+    draft = project / "04_first_draft" / "first_draft.md"
+    conclusion = project / "04_first_draft" / "conclusion_generated.md"
+    final_draft = project / "05_final_audit" / "final_draft.md"
+    receipt = read_json_if_exists(project / "05_final_audit" / "conclusion_integration.json") or {}
+    if not final_draft.is_file() or not isinstance(receipt, dict):
+        return False
+    if receipt.get("mode") == "first_draft_without_optional_conclusion":
+        return False
+    return bool(
+        str(receipt.get("first_draft_sha256") or "") == sha256_file(draft)
+        and str(receipt.get("generated_conclusion_sha256") or "") == sha256_file(conclusion)
+        and str(receipt.get("inserted_conclusion_heading") or "")
+        and str(receipt.get("inserted_conclusion_heading") or "")
+        in final_draft.read_text(encoding="utf-8", errors="ignore")
+    )
+
+
+def final_source_artifacts(project: Path, *, include_conclusion: bool, include_overview: bool) -> list[Path]:
+    sources = [
+        project / "04_first_draft" / "first_draft.md",
+        project / "04_first_draft" / "citations.json",
+    ]
+    if include_conclusion:
+        sources.extend(
+            [
+                project / "04_first_draft" / "conclusion_generated.md",
+                project / "04_first_draft" / "conclusion_quality_report.json",
+            ]
+        )
+    if include_overview:
+        sources.extend(
+            [
+                project / "05_final_audit" / OVERVIEW_FIGURE_FILENAME,
+                project / "05_final_audit" / "overview_figure_handoff.json",
+            ]
+        )
+    return sources
+
+
 def inject_final_overview_figure(review_root: Path, project_id: str) -> dict[str, Any]:
     """Place the generated overview figure into the publication manuscript.
 
@@ -3777,6 +3880,8 @@ def inject_final_overview_figure(review_root: Path, project_id: str) -> dict[str
     draft_path = final_stage / "final_draft.md"
     if not source_path.is_file() or source_path.stat().st_size <= 0:
         return {"available": False, "included": False, "reason": "overview figure is missing"}
+    if not overview_figure_is_current(project):
+        return {"available": False, "included": False, "reason": "overview figure is out of date"}
     if not draft_path.is_file():
         return {"available": True, "included": False, "reason": "final draft is not available yet"}
 
@@ -3823,13 +3928,23 @@ def regenerate_final_audit(review_root: Path, project_id: str) -> dict[str, Any]
     draft_path = draft_stage / "first_draft.md"
     if not draft_path.exists():
         raise RuntimeError("Create the first draft before generating the final audit.")
+    conclusion_current = conclusion_artifacts_current(draft_path, conclusion, quality)
+    overview_current = overview_figure_is_current(project)
     final_handoff = final_stage / "final_handoff.json"
-    ensure_stage_handoff(
+    write_stage_handoff(
         final_handoff,
         "draft",
-        [draft_path, draft_stage / "citations.json"],
+        final_source_artifacts(
+            project,
+            include_conclusion=conclusion_current,
+            include_overview=overview_current,
+        ),
+        metadata={
+            "dependency_profile": "final-publication-boundary-v2",
+            "includes_current_conclusion": conclusion_current,
+            "includes_current_overview": overview_current,
+        },
     )
-    conclusion_current = conclusion_artifacts_current(draft_path, conclusion, quality)
     if conclusion_current:
         run_project_script(
             review_root / "skills" / "review-final-audit-release" / "scripts" / "integrate_generated_conclusion.py",
@@ -3879,7 +3994,7 @@ def regenerate_final_audit(review_root: Path, project_id: str) -> dict[str, Any]
     )
     run_project_script(review_root / "skills" / "review-final-audit-release" / "scripts" / "final_audit_scan.py", review_root, project_id)
     final_outputs = [final_stage / "final_draft.md"]
-    if (final_stage / "overview_figure.png").exists():
+    if overview.get("included"):
         final_outputs.append(final_stage / "overview_figure.png")
     final_outputs.extend(sorted(path for path in (final_stage / "figures").glob("*") if path.is_file()))
     record_stage_outputs(final_handoff, final_outputs, "final")
@@ -3932,11 +4047,33 @@ def generate_final_overview_figure(review_root: Path, project_id: str) -> dict[s
             extra=["--stage", "05_final_audit"],
         )
     final_handoff = final_stage / "final_handoff.json"
-    if final_handoff.exists():
-        outputs = [output_path]
-        if (final_stage / "final_draft.md").exists():
-            outputs.append(final_stage / "final_draft.md")
-        record_stage_outputs(final_handoff, outputs, "final-overview-figure")
+    if final_handoff.exists() and integration.get("included"):
+        draft_path = project / "04_first_draft" / "first_draft.md"
+        conclusion_path = project / "04_first_draft" / "conclusion_generated.md"
+        conclusion_report = read_json_if_exists(
+            project / "04_first_draft" / "conclusion_quality_report.json"
+        ) or {}
+        conclusion_current = conclusion_artifacts_current(
+            draft_path,
+            conclusion_path,
+            conclusion_report,
+        )
+        write_stage_handoff(
+            final_handoff,
+            "draft",
+            final_source_artifacts(
+                project,
+                include_conclusion=conclusion_current,
+                include_overview=True,
+            ),
+            metadata={
+                "dependency_profile": "final-publication-boundary-v2",
+                "includes_current_conclusion": conclusion_current,
+                "includes_current_overview": True,
+            },
+        )
+        outputs = [output_path, final_stage / "final_draft.md"]
+        record_stage_outputs(final_handoff, outputs, "final")
     return {
         "overview_figure": str(output_path),
         "included_in_final_draft": str(bool(integration.get("included"))).lower(),
@@ -3967,11 +4104,10 @@ def regenerate_final_draft_bundle(review_root: Path, project_id: str) -> dict[st
     full_png = final_draft.parent / "review_summary_chart.png"
     if not full_png.is_file():
         raise RuntimeError("Overall review chart generation did not produce a PNG.")
-    record_stage_outputs(
-        final_draft.parent / "final_handoff.json",
-        [final_draft, full_png, final_draft.parent / "overview_figure.png"],
-        "final",
-    )
+    outputs = [final_draft, full_png]
+    if overview.get("included"):
+        outputs.append(final_draft.parent / "overview_figure.png")
+    record_stage_outputs(final_draft.parent / "final_handoff.json", outputs, "final")
     return {"final_draft": str(final_draft), "final_full_png": str(full_png)}
 
 
@@ -4449,10 +4585,10 @@ def write_json(path: Path, data: Any) -> None:
 def artifact_freshness(handoff_path: Path, artifacts: list[Path]) -> dict[str, Any]:
     """Determine whether outputs still match their recorded SHA-256 versions.
 
-    Legacy handoffs are upgraded in place against their current files.  The
-    former timestamp fallback was inherently ambiguous: a correctly produced
-    output is normally older than its handoff file, which made old projects
-    appear stale immediately after loading them.
+    A legacy handoff cannot prove which input version produced an existing
+    output.  It must therefore stay stale until the owning stage is explicitly
+    rerun; silently baselining the files that happen to exist would bless old
+    content as current.
     """
     handoff = read_json_if_exists(handoff_path) or {}
     if not handoff_path.exists():
@@ -4474,13 +4610,16 @@ def artifact_freshness(handoff_path: Path, artifacts: list[Path]) -> dict[str, A
         }
     store, project_id = context
     if not isinstance(handoff, dict) or int(handoff.get("schema_version") or 0) < 2:
-        producer_stage = infer_artifact_stage(artifacts[0]) if artifacts else str(handoff.get("source_stage") or "")
-        store.complete_handoff(
-            project_id,
-            handoff_path,
-            artifacts,
-            producer_stage=producer_stage,
-        )
+        return {
+            "handoff": handoff,
+            "versioned": False,
+            "stale": True,
+            "migration_required": True,
+            "outdated_artifacts": [str(path) for path in artifacts],
+            "outdated_sources": [str(path) for path in handoff.get("source_artifacts", [])]
+            if isinstance(handoff, dict)
+            else [],
+        }
     return store.handoff_freshness(project_id, handoff_path, artifacts)
 
 
@@ -4808,6 +4947,10 @@ def project_blueprint_payload(review_root: Path, project_id: str) -> dict[str, A
     project = review_root / "review-projects" / project_id
     stage = project / "01_matrix_outline"
     matrix = read_json_if_exists(stage / "literature_matrix.json")
+    freshness = artifact_freshness(
+        stage / "blueprint_handoff.json",
+        [stage / "section_blueprint.json", stage / "section_writing_plan.md"],
+    )
     return {
         "project_id": project_id,
         "topic": infer_project_topic(project),
@@ -4815,6 +4958,7 @@ def project_blueprint_payload(review_root: Path, project_id: str) -> dict[str, A
         "section_blueprint": read_json_if_exists(stage / "section_blueprint.json"),
         "section_writing_plan_md": read_text_if_exists(stage / "section_writing_plan.md"),
         "selected_outline_md": read_text_if_exists(stage / "selected_outline.md"),
+        "freshness": freshness,
         "upstream": {
             "selected_outline_md": read_text_if_exists(stage / "selected_outline.md"),
             "literature_matrix": matrix,
@@ -4917,6 +5061,7 @@ def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any
                     approval["current_source_match"] = False
                     approval["current_output_match"] = False
                     row["human_approval"] = approval
+                aspect_status = "unavailable"
                 if isinstance(candidate, dict):
                     try:
                         ratio_source = _resolve_candidate_source(review_root, project, candidate)
@@ -4926,8 +5071,14 @@ def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any
                                 ratio_source,
                                 ratio_output,
                             )
+                            aspect_status = str(row["aspect_ratio_integrity"].get("status") or "unavailable")
                     except (OSError, ValueError):
                         row["aspect_ratio_integrity"] = {"status": "unavailable"}
+                if approval:
+                    approval["current_policy_match"] = bool(
+                        aspect_status == "pass" or ai_edit_allows_provider_canvas(row)
+                    )
+                    row["human_approval"] = approval
                 integrity_status = str((row.get("chemistry_integrity") or {}).get("status") or "")
                 requires_approval = bool(
                     integrity_status in {"failed", "needs_human_arrow_check"}
@@ -4937,18 +5088,13 @@ def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any
                     approval.get("status") == "approved"
                     and approval.get("current_source_match")
                     and approval.get("current_output_match")
+                    and approval.get("current_policy_match")
                 )
                 if requires_approval and not human_approved:
                     preview = resolve_redrawn_base_path(review_root, project, stage, row)
                     if preview:
                         row["rejected_preview_image"] = str(preview)
                         row["rejected_preview_status"] = "awaiting_human_approval"
-                elif not row.get("redrawn_image") and not row.get("rejected_preview_image"):
-                    previews = list((stage / "redrawn").glob(f"{figure_id}.*")) if figure_id else []
-                    preview = next((path for path in previews if path.is_file()), None)
-                    if preview:
-                        row["rejected_preview_image"] = str(preview)
-                        row["rejected_preview_status"] = "not_approved_for_manuscript"
             rows.append(row)
         redrawn_manifest["figures"] = rows
     selected_ids = {
@@ -4979,7 +5125,8 @@ def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any
         output = resolve_redrawn_base_path(review_root, project, stage, row)
         if output is None:
             continue
-        if figure_aspect_ratio_integrity(current_source, output).get("status") != "pass":
+        aspect_integrity = figure_aspect_ratio_integrity(current_source, output)
+        if not figure_aspect_policy_matches(row, aspect_integrity):
             continue
         integrity_status = str((row.get("chemistry_integrity") or {}).get("status") or "")
         requires_approval = bool(
@@ -4991,6 +5138,7 @@ def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any
             approval.get("status") == "approved"
             and approval.get("current_source_match")
             and approval.get("current_output_match")
+            and approval.get("current_policy_match")
         ):
             continue
         usable_ids.add(figure_id)
@@ -5291,12 +5439,20 @@ def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
         stage / "overview_figure_handoff.json",
         [overview_figure],
     ) if overview_figure.exists() else {"stale": False, "outdated_artifacts": []}
-    overview_stale = overview_figure.exists() and (not overview_included or overview_freshness["stale"])
+    overview_current = bool(
+        overview_figure.exists()
+        and not overview_freshness["stale"]
+    )
+    overview_stale = bool(
+        (overview_figure.exists() or overview_included)
+        and not (overview_current and overview_included)
+    )
     conclusion_current = conclusion_artifacts_current(
         draft_path,
         conclusion_path,
         conclusion_report,
     )
+    conclusion_integration_current = conclusion_integration_is_current(project, conclusion_current)
     return {
         "project_id": project_id,
         "topic": infer_project_topic(project),
@@ -5306,6 +5462,7 @@ def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
         "release_report_md": read_text_if_exists(stage / "release_report.md"),
         "conclusion_generated_md": read_text_if_exists(conclusion_path),
         "conclusion_current": conclusion_current,
+        "conclusion_integration_current": conclusion_integration_current,
         "upstream": {
             "first_draft_md": read_text_if_exists(project / "04_first_draft" / "first_draft.md"),
             "selected_outline_md": read_text_if_exists(project / "01_matrix_outline" / "selected_outline.md"),
@@ -5319,13 +5476,21 @@ def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
         "release_chart_full_png_exists": release_full_png.exists(),
         "overview_figure_path": str(overview_figure),
         "overview_figure_exists": overview_figure.exists(),
+        "overview_figure_current": overview_current,
         "overview_figure_included": overview_included,
         "freshness": {
             "source_stale": source_freshness["stale"],
             "draft_stale": draft_dependency_freshness["stale"],
-            "final_stale": final_freshness["stale"] or overview_stale,
+            "final_stale": final_freshness["stale"] or overview_stale or not conclusion_integration_current,
             "overview_stale": overview_stale,
-            "stale": source_freshness["stale"] or draft_dependency_freshness["stale"] or final_freshness["stale"] or overview_stale,
+            "conclusion_integration_stale": not conclusion_integration_current,
+            "stale": (
+                source_freshness["stale"]
+                or draft_dependency_freshness["stale"]
+                or final_freshness["stale"]
+                or overview_stale
+                or not conclusion_integration_current
+            ),
         },
         "paths": {"stage_dir": str(stage)},
     }
@@ -5380,6 +5545,62 @@ def project_draft_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     }
 
 
+def reconcile_project_semantic_states(review_root: Path, project_id: str) -> None:
+    """Persist the same semantic freshness gates exposed by the dashboard."""
+    store = workflow_store(review_root)
+    project = review_root / "review-projects" / project_id
+    if not project.is_dir():
+        return
+    discovery_selection = read_json_if_exists(
+        project / "00_discovery" / "selected_discovery_results.json"
+    ) or {}
+    matrix_stage = project / "01_matrix_outline"
+    matrix_data = read_json_if_exists(matrix_stage / "literature_matrix.json") or {}
+    blueprint = project_blueprint_payload(review_root, project_id).get("freshness") or {}
+    sections = project_sections_payload(review_root, project_id).get("handoff") or {}
+    figure_review = project_figure_review_payload(review_root, project_id).get("freshness") or {}
+    figures = project_figures_payload(review_root, project_id).get("freshness") or {}
+    draft = project_draft_payload(review_root, project_id).get("freshness") or {}
+    final = project_final_payload(review_root, project_id)
+    final_freshness = final.get("freshness") or {}
+    stale_states = {
+        "blueprint": bool(blueprint.get("stale", True)),
+        "sections": bool(sections.get("drafts_stale")),
+        "figure-review": bool(figure_review.get("stale")),
+        "figures": bool(figures.get("stale")),
+        "draft": bool(draft.get("stale")),
+        "final-conclusion": bool(
+            (project / "04_first_draft" / "conclusion_generated.md").exists()
+            and not final.get("conclusion_current")
+        ),
+        "final-overview-figure": bool(
+            final.get("overview_figure_exists") and not final.get("overview_figure_current")
+        ),
+        "final": bool(final_freshness.get("stale")),
+    }
+    for stage_id, stale in stale_states.items():
+        if stale:
+            store.mark_stage_stale(
+                project_id,
+                stage_id,
+                error_message="Current artifact lineage or semantic integrity check is stale.",
+            )
+    verified_states = {
+        "discovery": bool(discovery_selection.get("human_confirmed")),
+        "matrix": matrix_outline_ready(matrix_stage, matrix_data),
+        "blueprint": bool(blueprint.get("versioned")) and not stale_states["blueprint"],
+        "sections": bool(sections.get("schema_version") == 2) and not stale_states["sections"],
+        "figure-review": not stale_states["figure-review"],
+    }
+    for stage_id, verified in verified_states.items():
+        if verified:
+            store.set_stage_state(
+                project_id,
+                stage_id,
+                "approved" if stage_id == "matrix" else "completed",
+            )
+
+
 def dashboard_assets(view_root: Path) -> tuple[Path, ...]:
     dashboard = view_root / "assets" / "dashboard"
     library_path = dashboard / "library.html"
@@ -5395,6 +5616,54 @@ def dashboard_assets(view_root: Path) -> tuple[Path, ...]:
     if any(not path.exists() for path in paths):
         raise FileNotFoundError(f"dashboard assets not found under {view_root / 'assets' / 'dashboard'}")
     return tuple(paths)
+
+
+def acquire_dashboard_instance_lock(review_root: Path, host: str, port: int):
+    """Hold an OS-level lock so one workspace cannot run duplicate servers."""
+    lock_dir = review_root / ".review-writer"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    safe_host = re.sub(r"[^A-Za-z0-9_.-]+", "_", host)
+    lock_path = lock_dir / f"dashboard-{safe_host}-{port}.lock"
+    handle = lock_path.open("a+b")
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"0")
+        handle.flush()
+    handle.seek(0)
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, BlockingIOError):
+        handle.close()
+        return None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()).encode("ascii"))
+    handle.flush()
+    return handle
+
+
+def release_dashboard_instance_lock(handle) -> None:
+    if handle is None or handle.closed:
+        return
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 def run(args: argparse.Namespace) -> int:
@@ -5416,12 +5685,20 @@ def run(args: argparse.Namespace) -> int:
     if not (review_root / "review-library" / "metadata" / "papers").exists():
         print("ERROR: metadata files not found. Run prepare_metadata.py first.", file=sys.stderr)
         return 2
+    instance_lock = acquire_dashboard_instance_lock(review_root, args.host, args.port)
+    if instance_lock is None:
+        print(
+            f"ERROR: a dashboard instance is already running for {args.host}:{args.port} in this workspace.",
+            file=sys.stderr,
+        )
+        return 3
     store = workflow_store(review_root)
     projects_root = review_root / "review-projects"
     if projects_root.is_dir():
         for project in sorted(path for path in projects_root.iterdir() if path.is_dir()):
             try:
                 store.bootstrap_project(project.name)
+                reconcile_project_semantic_states(review_root, project.name)
             except OSError as exc:
                 print(f"WARNING: workflow metadata bootstrap skipped {project.name}: {exc}", file=sys.stderr)
     DashboardHandler.review_root = review_root
@@ -5434,15 +5711,18 @@ def run(args: argparse.Namespace) -> int:
     DashboardHandler.figure_review_app_path = figure_review_app_path
     DashboardHandler.draft_app_path = draft_app_path
     DashboardHandler.final_app_path = final_app_path
-    server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
-    print(f"Serving dashboard at http://{args.host}:{args.port}")
-    print("Press Ctrl+C to stop.")
+    server = None
     try:
+        server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
+        print(f"Serving dashboard at http://{args.host}:{args.port}")
+        print("Press Ctrl+C to stop.")
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
-        server.server_close()
+        if server is not None:
+            server.server_close()
+        release_dashboard_instance_lock(instance_lock)
     return 0
 
 

@@ -1,6 +1,8 @@
 """Behavior checks for Final-stage actions without summary-chart output."""
 
 import importlib.util
+import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -80,6 +82,13 @@ class FinalStageActionTests(unittest.TestCase):
             )
             (draft_stage / "figures" / "figure_01.png").write_bytes(b"draft-image")
             (final_stage / "overview_figure.png").write_bytes(b"overview-image")
+            overview_handoff = final_stage / "overview_figure_handoff.json"
+            dashboard.write_stage_handoff(overview_handoff, "blueprint", [])
+            dashboard.record_stage_outputs(
+                overview_handoff,
+                [final_stage / "overview_figure.png"],
+                "final-overview-figure",
+            )
             calls: list[str] = []
 
             def fake_run(script: Path, review_root: Path, project_id: str, **kwargs: object) -> str:
@@ -95,6 +104,75 @@ class FinalStageActionTests(unittest.TestCase):
             self.assertIn("figures/overview_figure.png", final_text)
             self.assertTrue((final_stage / "figures" / "overview_figure.png").is_file())
             self.assertNotIn("integrate_generated_conclusion.py", calls)
+
+    def test_final_audit_does_not_reuse_an_unversioned_overview(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "review-projects" / "demo"
+            draft_stage = project / "04_first_draft"
+            final_stage = project / "05_final_audit"
+            draft_stage.mkdir(parents=True)
+            final_stage.mkdir(parents=True)
+            (draft_stage / "first_draft.md").write_text(
+                "# Review\n\n## Introduction\n\nCurrent draft body.\n",
+                encoding="utf-8",
+            )
+            (final_stage / "overview_figure.png").write_bytes(b"legacy-overview")
+
+            with patch.object(dashboard, "run_project_script", return_value="ok"):
+                result = dashboard.regenerate_final_audit(root, "demo")
+
+            final_text = (final_stage / "final_draft.md").read_text(encoding="utf-8")
+            self.assertFalse(result["overview"]["included"])
+            self.assertNotIn("OVERVIEW-F01", final_text)
+
+    def test_dashboard_instance_lock_rejects_a_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = dashboard.acquire_dashboard_instance_lock(root, "127.0.0.1", 8765)
+            self.assertIsNotNone(first)
+            try:
+                self.assertIsNone(dashboard.acquire_dashboard_instance_lock(root, "127.0.0.1", 8765))
+            finally:
+                dashboard.release_dashboard_instance_lock(first)
+
+    def test_current_conclusion_requires_a_matching_final_integration_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir)
+            draft_stage = project / "04_first_draft"
+            final_stage = project / "05_final_audit"
+            draft_stage.mkdir(parents=True)
+            final_stage.mkdir(parents=True)
+            draft = draft_stage / "first_draft.md"
+            conclusion = draft_stage / "conclusion_generated.md"
+            final = final_stage / "final_draft.md"
+            draft.write_text("# Review\n", encoding="utf-8")
+            conclusion.write_text("## Conclusion\n\nCurrent conclusion.\n", encoding="utf-8")
+            final.write_text("# Review\n", encoding="utf-8")
+            (final_stage / "conclusion_integration.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "mode": "first_draft_without_optional_conclusion",
+                        "first_draft_path": str(draft),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertFalse(dashboard.conclusion_integration_is_current(project, True))
+
+            receipt = {
+                "schema_version": 1,
+                "first_draft_sha256": hashlib.sha256(draft.read_bytes()).hexdigest(),
+                "generated_conclusion_sha256": hashlib.sha256(conclusion.read_bytes()).hexdigest(),
+                "inserted_conclusion_heading": "## Conclusion",
+            }
+            (final_stage / "conclusion_integration.json").write_text(
+                json.dumps(receipt), encoding="utf-8"
+            )
+            final.write_text("# Review\n\n## Conclusion\n\nCurrent conclusion.\n", encoding="utf-8")
+
+            self.assertTrue(dashboard.conclusion_integration_is_current(project, True))
 
     def test_final_audit_removes_superscript_artifacts_only_from_references(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

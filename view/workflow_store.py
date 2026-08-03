@@ -15,6 +15,7 @@ import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -375,6 +376,13 @@ class WorkflowStore:
         version_id = str(uuid.uuid4())
         now = utc_now()
         with self._lock, self._connection() as connection:
+            previous = connection.execute(
+                """
+                SELECT artifact_version_id FROM current_artifacts
+                WHERE project_id=? AND logical_name=?
+                """,
+                (project_id, logical_name),
+            ).fetchone()
             connection.execute(
                 """
                 INSERT OR IGNORE INTO artifact_versions(
@@ -426,7 +434,51 @@ class WorkflowStore:
                     """,
                     (version_id, dependency_id),
                 )
+            if previous is not None and str(previous["artifact_version_id"]) != version_id:
+                self._invalidate_dependent_stage_states(
+                    connection,
+                    project_id,
+                    logical_name,
+                    now,
+                )
             return dict(row)
+
+    @staticmethod
+    def _stages_depending_on_artifact(logical_name: str) -> set[str]:
+        """Return direct and transitive consumers of one canonical artifact."""
+        affected = {
+            stage_id
+            for stage_id, spec in STAGE_SPECS.items()
+            if any(fnmatchcase(logical_name, pattern) for pattern in spec.get("inputs", ()))
+        }
+        changed = True
+        while changed:
+            changed = False
+            for stage_id, spec in STAGE_SPECS.items():
+                dependencies = set(spec.get("depends_on", ())) | set(spec.get("optional_depends_on", ()))
+                if stage_id not in affected and dependencies & affected:
+                    affected.add(stage_id)
+                    changed = True
+        return affected
+
+    def _invalidate_dependent_stage_states(
+        self,
+        connection: sqlite3.Connection,
+        project_id: str,
+        logical_name: str,
+        now: str,
+    ) -> None:
+        for stage_id in self._stages_depending_on_artifact(logical_name):
+            connection.execute(
+                """
+                UPDATE stage_state
+                SET status=CASE WHEN status='running' THEN status ELSE 'stale' END,
+                    error_message=CASE WHEN status='running' THEN error_message ELSE ? END,
+                    updated_at=?
+                WHERE project_id=? AND stage_id=?
+                """,
+                (f"Input artifact changed: {logical_name}", now, project_id, stage_id),
+            )
 
     def capture_paths(
         self,
@@ -536,6 +588,7 @@ class WorkflowStore:
         ]
         output_snapshot: list[dict[str, Any]] = []
         output_fingerprint = ""
+        final_status = status
         if status == "completed":
             patterns = STAGE_SPECS.get(stage_id, {}).get("outputs", ())
             output_snapshot = self.capture_paths(
@@ -546,6 +599,10 @@ class WorkflowStore:
                 dependencies=dependency_ids,
             )
             output_fingerprint = _fingerprint(output_snapshot)
+            current_input_fingerprint = _fingerprint(self.stage_input_snapshot(project_id, stage_id))
+            if current_input_fingerprint != str(run["input_fingerprint"]):
+                final_status = "stale"
+                error_message = "Stage inputs changed while this run was executing. Run the stage again."
         with self._lock, self._connection() as connection:
             connection.execute(
                 """
@@ -554,7 +611,7 @@ class WorkflowStore:
                 WHERE run_id=?
                 """,
                 (
-                    status,
+                    final_status,
                     output_fingerprint,
                     _json(output_snapshot),
                     error_message,
@@ -569,21 +626,66 @@ class WorkflowStore:
                 UPDATE stage_state SET status=?, output_fingerprint=?, error_message=?, updated_at=?
                 WHERE project_id=? AND stage_id=?
                 """,
-                (status, output_fingerprint, error_message, now, project_id, stage_id),
+                (final_status, output_fingerprint, error_message, now, project_id, stage_id),
             )
 
     def set_stage_state(self, project_id: str, stage_id: str, status: str, *, error_message: str = "") -> None:
         self.ensure_project(project_id)
         now = utc_now()
+        if status in {"completed", "approved"}:
+            input_snapshot = self.stage_input_snapshot(project_id, stage_id)
+            output_snapshot = self.capture_paths(
+                project_id,
+                self.expand_stage_paths(project_id, STAGE_SPECS.get(stage_id, {}).get("outputs", ())),
+                producer_stage=stage_id,
+            )
+            input_fingerprint = _fingerprint(input_snapshot)
+            output_fingerprint = _fingerprint(output_snapshot)
+        else:
+            input_fingerprint = ""
+            output_fingerprint = ""
         with self._lock, self._connection() as connection:
             connection.execute(
                 """
-                INSERT INTO stage_state(project_id, stage_id, status, error_message, updated_at)
-                VALUES(?, ?, ?, ?, ?)
+                INSERT INTO stage_state(
+                    project_id, stage_id, status, input_fingerprint,
+                    output_fingerprint, error_message, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project_id, stage_id) DO UPDATE SET
-                    status=excluded.status, error_message=excluded.error_message, updated_at=excluded.updated_at
+                    status=excluded.status,
+                    input_fingerprint=CASE
+                        WHEN excluded.status IN ('completed', 'approved') THEN excluded.input_fingerprint
+                        ELSE stage_state.input_fingerprint
+                    END,
+                    output_fingerprint=CASE
+                        WHEN excluded.status IN ('completed', 'approved') THEN excluded.output_fingerprint
+                        ELSE stage_state.output_fingerprint
+                    END,
+                    error_message=excluded.error_message,
+                    updated_at=excluded.updated_at
                 """,
-                (project_id, stage_id, status, error_message, now),
+                (
+                    project_id,
+                    stage_id,
+                    status,
+                    input_fingerprint,
+                    output_fingerprint,
+                    error_message,
+                    now,
+                ),
+            )
+
+    def mark_stage_stale(self, project_id: str, stage_id: str, *, error_message: str) -> None:
+        """Persist semantic invalidation without interrupting an active run."""
+        now = utc_now()
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE stage_state
+                SET status='stale', error_message=?, updated_at=?
+                WHERE project_id=? AND stage_id=? AND status<>'running'
+                """,
+                (error_message, now, project_id, stage_id),
             )
 
     def write_handoff(
@@ -800,7 +902,7 @@ class WorkflowStore:
         return json.loads(str(row["payload_json"])) if row else None
 
     def bootstrap_project(self, project_id: str) -> None:
-        """Register existing canonical files without rewriting project content."""
+        """Register existing files without claiming unverified legacy lineage."""
         self.ensure_project(project_id)
         for stage_id, spec in STAGE_SPECS.items():
             input_snapshot = self.capture_paths(
@@ -824,16 +926,46 @@ class WorkflowStore:
             with self._lock, self._connection() as connection:
                 connection.execute(
                     """
-                    INSERT OR IGNORE INTO stage_state(
+                    INSERT INTO stage_state(
                         project_id, stage_id, status, input_fingerprint,
                         output_fingerprint, updated_at
-                    ) VALUES(?, ?, 'materialized', ?, ?, ?)
+                    ) VALUES(?, ?, 'legacy_unverified', ?, ?, ?)
+                    ON CONFLICT(project_id, stage_id) DO UPDATE SET
+                        status=CASE
+                            WHEN stage_state.status='materialized' THEN 'legacy_unverified'
+                            ELSE stage_state.status
+                        END,
+                        updated_at=CASE
+                            WHEN stage_state.status='materialized' THEN excluded.updated_at
+                            ELSE stage_state.updated_at
+                        END
                     """,
                     (project_id, stage_id, _fingerprint(input_snapshot), _fingerprint(output_snapshot), now),
                 )
 
+    def reconcile_stage_states(self, project_id: str) -> None:
+        """Mark completed states stale when their recorded inputs no longer match."""
+        with self._lock, self._connection() as connection:
+            rows = [dict(row) for row in connection.execute(
+                "SELECT stage_id, status, input_fingerprint FROM stage_state WHERE project_id=?",
+                (project_id,),
+            )]
+        for row in rows:
+            if row["status"] not in {"completed", "approved"}:
+                continue
+            current = _fingerprint(self.stage_input_snapshot(project_id, str(row["stage_id"])))
+            recorded = str(row.get("input_fingerprint") or "")
+            if recorded and current != recorded:
+                self.set_stage_state(
+                    project_id,
+                    str(row["stage_id"]),
+                    "stale",
+                    error_message="Current input versions no longer match the completed stage run.",
+                )
+
     def workflow_snapshot(self, project_id: str) -> dict[str, Any]:
         self.bootstrap_project(project_id)
+        self.reconcile_stage_states(project_id)
         with self._lock, self._connection() as connection:
             states = [dict(row) for row in connection.execute(
                 "SELECT * FROM stage_state WHERE project_id=? ORDER BY updated_at",

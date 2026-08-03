@@ -13,10 +13,13 @@ from serve_review_dashboard import (
     approve_figure_for_manuscript,
     artifact_freshness,
     project_figures_payload,
+    record_stage_outputs,
     refresh_figure_review_handoff,
     section_candidate_freshness,
     section_source_freshness,
+    sha256_file,
     sync_selected_candidate_for_redraw,
+    write_stage_handoff,
 )
 
 
@@ -249,6 +252,24 @@ class FigureReviewHandoffChecks(unittest.TestCase):
             self.assertTrue(state["stale"])
             self.assertTrue(state["untracked"])
 
+    def test_legacy_handoff_is_not_silently_rebased(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, section_stage, redraw_stage, _ = self.build_project(root)
+            output = section_stage / "human_figure_review.json"
+            output.write_text(json.dumps({"papers": {}}), encoding="utf-8")
+            handoff = redraw_stage / "figure_review_handoff.json"
+            handoff.write_text(
+                json.dumps({"source_stage": "sections", "source_artifacts": []}),
+                encoding="utf-8",
+            )
+
+            state = artifact_freshness(handoff, [output])
+
+            self.assertTrue(state["stale"])
+            self.assertTrue(state["migration_required"])
+            self.assertNotIn("schema_version", json.loads(handoff.read_text(encoding="utf-8")))
+
     def test_manifest_without_a_current_output_is_semantically_stale(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -261,6 +282,87 @@ class FigureReviewHandoffChecks(unittest.TestCase):
             self.assertTrue(freshness["semantic_redraw_stale"])
             self.assertEqual(freshness["selected_count"], 1)
             self.assertEqual(freshness["usable_count"], 0)
+
+    def test_old_human_approval_does_not_override_current_aspect_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, section_stage, redraw_stage, _ = self.build_project(root)
+            source = section_stage / "first.png"
+            output = redraw_stage / "approved-square.png"
+            Image.new("RGB", (100, 100), "white").save(output)
+            manifest_path = redraw_stage / "redrawn_figure_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["figures"][0].update(
+                {
+                    "redrawn_image": str(output),
+                    "render_mode": "source-faithful-bw",
+                    "source_image_sha256": sha256_file(source),
+                    "chemistry_integrity": {"status": "failed", "failures": ["legacy"]},
+                    "output_disposition": "human_approved_for_manuscript",
+                    "human_approval": {
+                        "status": "approved",
+                        "source_image": str(source),
+                        "source_sha256": sha256_file(source),
+                        "output_image": str(output),
+                        "output_sha256": sha256_file(output),
+                    },
+                }
+            )
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            handoff = redraw_stage / "figures_handoff.json"
+            write_stage_handoff(handoff, "figure-review", [])
+            record_stage_outputs(handoff, [manifest_path, output], "figures")
+
+            payload = project_figures_payload(root, project.name)
+            row = payload["redrawn_manifest"]["figures"][0]
+
+            self.assertEqual(payload["freshness"]["usable_count"], 0)
+            self.assertFalse(row["human_approval"]["current_policy_match"])
+            self.assertEqual(row["aspect_ratio_integrity"]["status"], "failed")
+
+    def test_standard_ai_edit_can_use_provider_canvas_after_human_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, _, redraw_stage, _ = self.build_project(root)
+            source = project / "02_section_drafting" / "first.png"
+            output = redraw_stage / "provider-square.png"
+            Image.new("RGB", (100, 100), "white").save(output)
+            manifest_path = redraw_stage / "redrawn_figure_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["figures"][0].update(
+                {
+                    "redrawn_image": str(output),
+                    "render_mode": "ai-edit",
+                    "edit_profile": "standard",
+                    "chemistry_integrity": {"status": "failed", "failures": ["manual review"]},
+                    "output_disposition": "saved_with_integrity_warning",
+                }
+            )
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            approve_figure_for_manuscript(root, "demo", "P001-F01")
+            handoff = redraw_stage / "figures_handoff.json"
+            record_stage_outputs(handoff, [manifest_path, output], "figures")
+            payload = project_figures_payload(root, project.name)
+            row = payload["redrawn_manifest"]["figures"][0]
+
+            self.assertEqual(row["aspect_ratio_integrity"]["status"], "failed")
+            self.assertEqual(row["aspect_ratio_policy"], "provider_canvas_allowed")
+            self.assertTrue(row["human_approval"]["current_policy_match"])
+            self.assertEqual(payload["freshness"]["usable_count"], 1)
+
+    def test_figures_ui_exposes_explicit_ai_comparison_without_weakening_default_route(self) -> None:
+        html = (
+            Path(__file__).resolve().parent
+            / "assets"
+            / "dashboard"
+            / "figures.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("redrawCurrentAiOverride", html)
+        self.assertIn("force_ai=1", html)
+        self.assertIn("standardAiProviderCanvas", html)
+        self.assertIn("humanApproveFigure", html)
 
 
 if __name__ == "__main__":

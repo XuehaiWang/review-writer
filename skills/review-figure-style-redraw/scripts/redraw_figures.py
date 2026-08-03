@@ -30,12 +30,14 @@ SOURCE_FAITHFUL_RENDER_MODES = {
 SOURCE_FAITHFUL_DARK_INK_THRESHOLD = 180
 BRIGHT_COLOR_FILL_SPREAD = 50
 BRIGHT_COLOR_FILL_BRIGHTNESS = 135
-# A seven-pixel native-resolution neighbourhood is wide enough to reject
-# coloured glyphs/arrows, while still finding cyan-filled aromatic rings and
-# label boxes in low-resolution source figures.  The former 17px window missed
-# those fills completely, so the subsequent minimum-channel conversion turned
-# them into solid black blocks.
-BRIGHT_COLOR_FILL_MIN_REGION_SIZE = 7
+# Only pixels with a solid 3x3 bright-colour neighbourhood are fill interiors.
+# Chemical outlines, aromatic bonds, labels, and substituent strokes are
+# usually thinner than this and must survive even when they touch a filled
+# ring.  Reconstructed bright fill pixels must be whitened, never converted
+# into synthetic black boundaries around every internal bond or glyph.
+BRIGHT_COLOR_FILL_MIN_REGION_SIZE = 3
+BRIGHT_COLOR_FILL_MAX_LOCAL_CHANNEL_RANGE = 80
+MAX_ISOLATED_CHROMATIC_NOISE_PIXELS = 5
 CONTENT_INK_THRESHOLD = 192
 CONTENT_MATCH_RADIUS = 3
 MAX_RESTORED_COMPONENT_PIXELS = 1024
@@ -643,13 +645,13 @@ def human_selected_figure(project: Path, figure: dict[str, Any]) -> dict[str, An
 
 
 def whiten_large_bright_color_fills(image: Image.Image) -> int:
-    """Turn broad colour components into one-pixel hollow outlines.
+    """Whiten only proven broad colour interiors, preserving chemical strokes.
 
-    Thin coloured labels, arrows, bonds, and glyphs do not contain a 7x7
-    interior and therefore remain available to the later black-ink conversion.
-    Broad components are reconstructed from their eroded seeds, which lets us
-    remove the whole cyan fill instead of leaving a several-pixel cyan rim that
-    would itself become an excessively thick black bond.
+    The eroded seed is the safe interior of a coloured region.  Only that seed
+    is whitened.  Its one-pixel native boundary remains available to the
+    colour-aware black-ink conversion, while thin chemical bonds, ring lines,
+    atom labels, and substituent strokes never contain a 3x3 fill seed and are
+    therefore retained.
     """
     # Cyan scientific fills are often highly saturated but only medium-bright
     # (for example RGB 1,255,255 has mean brightness 170).  Brightness must not
@@ -666,46 +668,35 @@ def whiten_large_bright_color_fills(image: Image.Image) -> int:
             brightness = (red + green + blue) / 3
             if spread >= BRIGHT_COLOR_FILL_SPREAD and brightness >= brightness_cutoff:
                 mask_pixels[x, y] = 255
-    # Erosion keeps only seed pixels inside a broad solid colour region.
-    seeds = mask.filter(ImageFilter.MinFilter(BRIGHT_COLOR_FILL_MIN_REGION_SIZE))
+    # Erosion keeps only pixels safely inside a broad solid colour region.
+    # Do not reconstruct or flood the component: pale magenta/cyan chemical
+    # strokes can be connected to the fill and must remain source pixels.
+    radius = BRIGHT_COLOR_FILL_MIN_REGION_SIZE // 2
+    seeds = Image.new("L", image.size, 0)
     seed_pixels = seeds.load()
-    broad = bytearray(image.width * image.height)
-    queue: deque[tuple[int, int]] = deque()
-    for y in range(image.height):
-        for x in range(image.width):
-            if seed_pixels[x, y]:
-                offset = y * image.width + x
-                broad[offset] = 1
-                queue.append((x, y))
-    # Reconstruct each complete colour component from its seed. This avoids the
-    # thick residual rim produced by whitening only the eroded interior.
-    while queue:
-        x, y = queue.popleft()
-        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
-            if nx < 0 or ny < 0 or nx >= image.width or ny >= image.height:
+    for y in range(radius, image.height - radius):
+        for x in range(radius, image.width - radius):
+            neighbourhood = [
+                pixels[nx, ny]
+                for ny in range(y - radius, y + radius + 1)
+                for nx in range(x - radius, x + radius + 1)
+                if mask_pixels[nx, ny]
+            ]
+            if len(neighbourhood) != BRIGHT_COLOR_FILL_MIN_REGION_SIZE**2:
                 continue
-            offset = ny * image.width + nx
-            if broad[offset] or not mask_pixels[nx, ny]:
-                continue
-            broad[offset] = 1
-            queue.append((nx, ny))
+            if all(
+                max(color[channel] for color in neighbourhood)
+                - min(color[channel] for color in neighbourhood)
+                <= BRIGHT_COLOR_FILL_MAX_LOCAL_CHANNEL_RANGE
+                for channel in range(3)
+            ):
+                seed_pixels[x, y] = 255
     replaced = 0
     for y in range(image.height):
         for x in range(image.width):
-            offset = y * image.width + x
-            if not broad[offset]:
+            if not seed_pixels[x, y]:
                 continue
-            boundary = (
-                x == 0
-                or y == 0
-                or x == image.width - 1
-                or y == image.height - 1
-                or not broad[offset - 1]
-                or not broad[offset + 1]
-                or not broad[offset - image.width]
-                or not broad[offset + image.width]
-            )
-            pixels[x, y] = (0, 0, 0) if boundary else (255, 255, 255)
+            pixels[x, y] = (255, 255, 255)
             replaced += 1
     return replaced
 
@@ -722,48 +713,80 @@ def render_source_faithful_bw(source_path: Path, output_path: Path) -> dict[str,
         )
         rgb = background.convert("RGB")
         hollowed_color_pixels = whiten_large_bright_color_fills(rgb)
+        # Work at native resolution.  Luminance-only conversion makes pale
+        # magenta/cyan bonds (for example P091 RGB≈254,185,250) disappear even
+        # though they are strongly chromatic.  Treat any sufficiently saturated
+        # non-white source pixel as ink, then enlarge the binary geometry with
+        # neutral antialiasing.
+        grayscale_bytes = ImageOps.grayscale(rgb).tobytes()
+        native_binary = Image.new("L", rgb.size, 255)
+        binary_pixels = native_binary.load()
+        chromatic_mask = Image.new("L", rgb.size, 255)
+        chromatic_pixels = chromatic_mask.load()
+        rgb_pixels = rgb.load()
+        for y in range(rgb.height):
+            for x in range(rgb.width):
+                red, green, blue = rgb_pixels[x, y]
+                spread = max(red, green, blue) - min(red, green, blue)
+                grayscale_value = grayscale_bytes[y * rgb.width + x]
+                chromatic_ink = spread >= 35 and min(red, green, blue) < 248
+                if chromatic_ink:
+                    chromatic_pixels[x, y] = 0
+                if grayscale_value < SOURCE_FAITHFUL_DARK_INK_THRESHOLD or chromatic_ink:
+                    binary_pixels[x, y] = 0
+        # JPEG colour noise often appears as tiny isolated saturated islands
+        # inside a formerly filled ring.  Remove only those small islands
+        # chromatic-only components.  Anything also dark in grayscale remains,
+        # preserving radical dots, punctuation, stereochemical marks, and true
+        # atom/bond strokes.
+        chromatic_ink_image = ImageOps.invert(chromatic_mask)
+        removed_chromatic_noise_pixels = 0
+        for component in missing_ink_components(chromatic_ink_image.tobytes(), rgb.size):
+            if len(component) > MAX_ISOLATED_CHROMATIC_NOISE_PIXELS:
+                continue
+            for index in component:
+                x, y = index % rgb.width, index // rgb.width
+                chromatic_pixels[x, y] = 255
+                if grayscale_bytes[index] >= SOURCE_FAITHFUL_DARK_INK_THRESHOLD:
+                    binary_pixels[x, y] = 255
+                removed_chromatic_noise_pixels += 1
         if min(source.size) < 360:
-            # Grayscale thresholding after LANCZOS interpolation can split thin
-            # red and blue chemical strokes into dots. Work at native resolution
-            # after hollowing broad fills. A high luminance cutoff retains
-            # saturated scientific strokes but excludes their pale antialias
-            # fringe; the old minimum-channel rule made every pale red/cyan
-            # fringe black and merged small labels into blobs.
-            native_luminance = ImageOps.grayscale(rgb)
-            native_binary = native_luminance.point(
-                lambda value: 255 if value >= 220 else 0,
-                mode="L",
-            )
-            # Keep black line cores but use neutral (not coloured) antialiasing
-            # at 4x. This avoids the stair-stepped appearance of a 1-bit
-            # nearest-neighbour enlargement while retaining clear connected
-            # strokes and a pure white background.
             black_and_white = native_binary.resize(target_size, Image.Resampling.LANCZOS)
-            # A broad fill has just been replaced with a one-pixel outline.
-            # Expanding all black pixels at this point would thicken that outline
-            # and low-resolution label text back into an unreadable block.
             if not hollowed_color_pixels:
                 black_and_white = black_and_white.filter(ImageFilter.MinFilter(3))
             black_and_white = black_and_white.filter(
                 ImageFilter.UnsharpMask(radius=1.2, percent=175, threshold=3)
             )
-            conversion_note = "native chromatic-ink threshold with sharpened neutral antialiased enlargement"
         else:
+            # Preserve the former clean grayscale geometry for ordinary black
+            # structures, then add only the chromatic scientific strokes that
+            # luminance thresholding would otherwise lose.  This avoids making
+            # every black bond four-pixel-native and excessively bold.
             upscaled = rgb.resize(target_size, Image.Resampling.LANCZOS)
             grayscale = ImageOps.autocontrast(ImageOps.grayscale(upscaled))
-            black_and_white = grayscale.point(
+            grayscale_binary = grayscale.point(
                 lambda value: 255 if value >= SOURCE_FAITHFUL_DARK_INK_THRESHOLD else 0,
-                mode="1",
+                mode="L",
             )
-            conversion_note = "LANCZOS grayscale threshold"
+            chromatic_upscaled = chromatic_mask.resize(target_size, Image.Resampling.LANCZOS)
+            chromatic_upscaled = chromatic_upscaled.filter(
+                ImageFilter.UnsharpMask(radius=0.8, percent=120, threshold=3)
+            )
+            black_and_white = ImageChops.darker(grayscale_binary, chromatic_upscaled)
+        black_and_white = black_and_white.point(
+            lambda value: 255 if value >= 250 else 0 if value <= 90 else value,
+            mode="L",
+        )
+        conversion_note = "native color-aware ink mask with sharpened neutral antialiased enlargement"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         black_and_white.save(output_path, format="PNG")
         return {
             "width": target_size[0],
             "height": target_size[1],
             "scale_factor": SOURCE_FAITHFUL_SCALE_FACTOR,
-            "color_mode": "black and white with neutral antialiasing; bright color fills hollowed",
+            "color_mode": "black and white with neutral antialiasing; only proven bright-fill interiors hollowed",
             "conversion": conversion_note,
+            "removed_isolated_chromatic_noise_pixels": removed_chromatic_noise_pixels,
         }
 
 
@@ -1363,6 +1386,30 @@ def append_aspect_ratio_prompt(prompt: str, framing: dict[str, Any]) -> str:
     )
 
 
+def standard_ai_edit_uses_provider_canvas(render_mode: str, edit_profile: str) -> bool:
+    """Allow ordinary generative redraws to keep the provider's native canvas.
+
+    Pixel-local mechanism edits and OCR-coordinate workflows still require the
+    exact source canvas.  A normal AI redraw is a newly rendered illustration,
+    so cropping a square provider response back to a tall or wide source can
+    delete valid generated content.
+    """
+    return render_mode == "ai-edit" and edit_profile == "standard"
+
+
+def append_provider_canvas_prompt(prompt: str, framing: dict[str, Any]) -> str:
+    """Require complete content while permitting the provider output ratio."""
+    if not framing.get("applied"):
+        return prompt
+    width, height = framing["source_size"]
+    return (
+        prompt
+        + f" The upload contains a complete original {width}x{height} figure inside a square technical canvas. "
+        "The output may use the image provider's native canvas and aspect ratio. Keep every source panel, molecule, "
+        "label, arrow, and boundary fully visible with safe white margins; do not crop any source content."
+    )
+
+
 def normalize_generated_aspect(
     generated_path: Path,
     source_path: Path,
@@ -1484,6 +1531,7 @@ def merge_manifest_rows(existing: list[dict[str, Any]], updates: list[dict[str, 
 
 
 def run(args: argparse.Namespace) -> int:
+    force_standard_ai_edit = bool(getattr(args, "force_standard_ai_edit", False))
     review_root = Path(args.review_root).resolve()
     args.edit_profile = getattr(args, "edit_profile", "standard")
     load_dotenv(review_root)
@@ -1546,11 +1594,15 @@ def run(args: argparse.Namespace) -> int:
             figure = human_selected_figure(project, figure)
         requested_render_mode = args.render_mode
         source_faithful_scope_guard = (
+            not force_standard_ai_edit
+            and
             args.edit_profile == "standard"
             and requested_render_mode in {"ai-edit", "ocr-hollow-ai"}
             and is_dense_scope_figure(figure)
         )
         source_faithful_multipanel_guard = (
+            not force_standard_ai_edit
+            and
             args.edit_profile == "standard"
             and requested_render_mode in {"ai-edit", "ocr-hollow-ai"}
             and not source_faithful_scope_guard
@@ -1635,6 +1687,15 @@ def run(args: argparse.Namespace) -> int:
             "ocr_text_protection": "not_run",
             "notes": "",
         }
+        if force_standard_ai_edit:
+            redraw_row["render_mode_override"] = {
+                "status": "human_requested_ai_comparison",
+                "requested_render_mode": requested_render_mode,
+                "reason": (
+                    "Reviewer explicitly requested a standard AI-edit alternative; "
+                    "the generated output remains subject to manual chemistry approval."
+                ),
+            }
         if source_faithful_scope_guard:
             redraw_row["render_mode_guard"] = {
                 "status": "forced_source_faithful",
@@ -1653,6 +1714,8 @@ def run(args: argparse.Namespace) -> int:
             redraw_rows.append(redraw_row)
             continue
         if (
+            not force_standard_ai_edit
+            and
             args.edit_profile == "standard"
             and effective_render_mode in {"ai-edit", "ocr-hollow-ai"}
             and is_tall_multistep_source(source_image)
@@ -1667,6 +1730,8 @@ def run(args: argparse.Namespace) -> int:
                 "reason": "Tall multi-step figure: preserve the complete source canvas and every panel as black line art with hollow colour regions instead of allowing a generative edit to crop or reflow the lower content.",
             }
         if (
+            not force_standard_ai_edit
+            and
             args.edit_profile == "standard"
             and effective_render_mode in {"ai-edit", "ocr-hollow-ai"}
             and is_low_resolution_or_thin_scheme(source_image)
@@ -1722,11 +1787,19 @@ def run(args: argparse.Namespace) -> int:
             )
         aspect_framing: dict[str, Any] = {}
         api_edit_input = edit_input
+        provider_canvas_allowed = standard_ai_edit_uses_provider_canvas(
+            effective_render_mode,
+            args.edit_profile,
+        )
         if effective_render_mode not in SOURCE_FAITHFUL_RENDER_MODES:
             framed_input = source_dir / f"{figure_id}-ai-edit-framed.png"
             aspect_framing = prepare_aspect_preserving_edit_input(edit_input, framed_input)
             api_edit_input = Path(str(aspect_framing["input_path"]))
-            prompt = append_aspect_ratio_prompt(prompt, aspect_framing)
+            prompt = (
+                append_provider_canvas_prompt(prompt, aspect_framing)
+                if provider_canvas_allowed
+                else append_aspect_ratio_prompt(prompt, aspect_framing)
+            )
             redraw_row["aspect_ratio_input"] = aspect_framing
         redraw_row["prompt"] = prompt
         if args.dry_run:
@@ -1791,12 +1864,21 @@ def run(args: argparse.Namespace) -> int:
                         images_transport,
                     )
                     save_redrawn_image(response, out_path)
-                if effective_render_mode not in SOURCE_FAITHFUL_RENDER_MODES:
+                if effective_render_mode not in SOURCE_FAITHFUL_RENDER_MODES and not provider_canvas_allowed:
                     redraw_row["aspect_ratio_normalization"] = normalize_generated_aspect(
                         out_path,
                         copied_source,
                         aspect_framing,
                     )
+                elif provider_canvas_allowed:
+                    with Image.open(out_path) as provider_output:
+                        provider_size = list(provider_output.size)
+                    redraw_row["aspect_ratio_normalization"] = {
+                        "status": "provider_canvas_preserved",
+                        "provider_size": provider_size,
+                        "source_size": list(aspect_framing.get("source_size") or []),
+                        "reason": "Standard ai-edit outputs retain the complete provider canvas without cropping or stretching.",
+                    }
                 if args.edit_profile != MECHANISM_ARROW_STRAIGHTEN_PROFILE:
                     break
                 source_fidelity = mechanism_source_fidelity_check(copied_source, out_path)
@@ -1924,6 +2006,14 @@ def parse_args() -> argparse.Namespace:
         choices=["standard", MECHANISM_ARROW_STRAIGHTEN_PROFILE],
         default="standard",
         help="Use mechanism-arrow-straighten for a strict local edit that converts only curved process arrows.",
+    )
+    parser.add_argument(
+        "--force-standard-ai-edit",
+        action="store_true",
+        help=(
+            "Generate a reviewer-requested standard AI-edit alternative even when the "
+            "default safety router would select a source-faithful mode."
+        ),
     )
     parser.add_argument("--style-name", default=DEFAULT_STYLE_NAME)
     parser.add_argument("--limit", type=int, default=0)

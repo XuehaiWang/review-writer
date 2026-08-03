@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import sys
 from typing import Any
 
 from PIL import Image as PILImage
@@ -890,6 +891,83 @@ def summarize(review_root: Path, project_id: str) -> dict[str, Any]:
         }
 
     stages = [stage_status(project, stage) for stage in STAGES]
+    by_id = {stage["id"]: stage for stage in stages}
+
+    def invalidate(stage_id: str, issue: str) -> None:
+        stage = by_id.get(stage_id)
+        if not stage:
+            return
+        if issue not in stage["semantic_issues"]:
+            stage["semantic_issues"].append(issue)
+        stage["complete"] = False
+
+    # Use the same SHA-256 handoff resolvers as the dashboard. File existence
+    # alone is not evidence that an artifact belongs to the current upstream
+    # version.
+    view_dir = Path(__file__).resolve().parents[3] / "view"
+    if str(view_dir) not in sys.path:
+        sys.path.insert(0, str(view_dir))
+    try:
+        import serve_review_dashboard as dashboard
+
+        blueprint_state = dashboard.project_blueprint_payload(review_root, project_id).get("freshness") or {}
+        sections_state = dashboard.project_sections_payload(review_root, project_id).get("handoff") or {}
+        figures_state = dashboard.project_figures_payload(review_root, project_id).get("freshness") or {}
+        draft_state = dashboard.project_draft_payload(review_root, project_id).get("freshness") or {}
+        final_payload = dashboard.project_final_payload(review_root, project_id)
+        final_state = final_payload.get("freshness") or {}
+        if blueprint_state.get("stale"):
+            invalidate("section_blueprint", "blueprint_handoff_stale")
+        if sections_state.get("drafts_stale"):
+            invalidate("section_drafting", "section_handoff_stale")
+        if figures_state.get("stale"):
+            invalidate(
+                "figure_redraw",
+                f"figure_handoff_stale_{figures_state.get('usable_count', 0)}_of_{figures_state.get('selected_count', 0)}_usable",
+            )
+        if draft_state.get("stale"):
+            invalidate("first_draft", "draft_handoff_stale")
+        conclusion_current = bool(final_payload.get("conclusion_current"))
+        if by_id["conclusion_generation"].get("optional_skipped"):
+            by_id["conclusion_generation"]["complete"] = False
+        elif not conclusion_current:
+            invalidate("conclusion_generation", "conclusion_source_stale")
+        # A generated conclusion is optional.  When its lineage is stale, it
+        # must not make the current base-draft-only final invalid merely
+        # because an obsolete conclusion file still exists on disk.
+        if not conclusion_current:
+            by_id["final_audit"]["semantic_issues"] = [
+                issue
+                for issue in by_id["final_audit"]["semantic_issues"]
+                if issue != "generated_conclusion_missing_from_final_draft"
+            ]
+        elif not final_payload.get("conclusion_integration_current"):
+            invalidate(
+                "final_audit",
+                "generated_conclusion_missing_from_final_draft",
+            )
+        if final_state.get("stale"):
+            invalidate("final_audit", "final_handoff_stale")
+        if not final_payload.get("final_draft_docx_exists"):
+            invalidate("docx_export", "docx_source_stale")
+    except Exception as exc:
+        invalidate("section_drafting", f"lineage_check_failed:{type(exc).__name__}")
+
+    prerequisites = {
+        "matrix_outline": ("discovery",),
+        "section_blueprint": ("matrix_outline",),
+        "section_drafting": ("section_blueprint",),
+        "figure_redraw": ("section_drafting",),
+        "first_draft": ("figure_redraw",),
+        "conclusion_generation": ("first_draft",),
+        "final_audit": ("first_draft",),
+        "summary_chart": ("final_audit",),
+        "docx_export": ("final_audit",),
+    }
+    for stage in stages:
+        if any(not by_id[dependency]["complete"] for dependency in prerequisites.get(stage["id"], ())):
+            invalidate(stage["id"], "upstream_stage_incomplete")
+
     completed = [s for s in stages if s["complete"]]
     # Skip stages explicitly opted out by the user (skip_reason.md present).
     next_stage = next(

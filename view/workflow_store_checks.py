@@ -141,6 +141,42 @@ class WorkflowStoreChecks(unittest.TestCase):
                 )
             )
 
+    def test_changed_artifact_invalidates_transitive_downstream_states(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = self.project(root)
+            source = project / "02_section_drafting" / "section_drafts.json"
+            source.parent.mkdir(parents=True)
+            source.write_text('{"sections":[1]}', encoding="utf-8")
+            store = WorkflowStore(root)
+            store.register_artifact("demo", source, producer_stage="sections")
+            for stage_id in ("figures", "draft", "final"):
+                store.set_stage_state("demo", stage_id, "completed")
+
+            source.write_text('{"sections":[2]}', encoding="utf-8")
+            store.register_artifact("demo", source, producer_stage="sections")
+            snapshot = store.workflow_snapshot("demo")
+            states = {row["stage_id"]: row["status"] for row in snapshot["stage_state"]}
+
+            self.assertEqual(states["figures"], "stale")
+            self.assertEqual(states["draft"], "stale")
+            self.assertEqual(states["final"], "stale")
+
+    def test_bootstrap_marks_existing_outputs_as_legacy_unverified(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = self.project(root)
+            output = project / "01_matrix_outline" / "literature_matrix.json"
+            output.parent.mkdir(parents=True)
+            output.write_text('{"rows":[1]}', encoding="utf-8")
+            store = WorkflowStore(root)
+
+            store.bootstrap_project("demo")
+            snapshot = store.workflow_snapshot("demo")
+            matrix = next(row for row in snapshot["stage_state"] if row["stage_id"] == "matrix")
+
+            self.assertEqual(matrix["status"], "legacy_unverified")
+
 
 if __name__ == "__main__":
     unittest.main()

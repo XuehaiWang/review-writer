@@ -35,6 +35,32 @@ async function loadProject(id){selectedProject=id;payload=await(await fetch('/ap
 function render(){const item=docs().find(x=>x.id===doc)||docs()[0];let content=item.text?renderMarkdown(item.text):'<p>This file has not been generated.</p>';if(item.id==='overview-figure'){content=payload?.overview_figure_exists?'<figure><img src="'+esc(fileUrl(payload.overview_figure_path))+'" alt="Overview figure"><figcaption>Template-matched overview figure generated for this project.</figcaption></figure>':'<p>Generate the overview figure to view the template-matched visual.</p>'}else if(item.id==='final'&&payload?.release_chart_full_png_exists){const chart='<figure><img src="'+esc(fileUrl(payload.release_chart_full_png_path))+'" alt="Overall review outline"><figcaption>Overall review outline.</figcaption></figure>';content=insertChartAfterIntroduction(content,chart)}else if(item.id==='final'&&stale()){content='<p>Upstream content changed. Regenerate the final draft first.</p>'}$('mainTitle').textContent=item.title;$('mainMeta').textContent=item.file;$('main').innerHTML=content;$('projectInfo').textContent=selectedProject+' · '+(payload?.topic||'');$('docList').innerHTML=docs().map(x=>'<button class="item '+(x.id===doc?'active':'')+'" data-doc="'+x.id+'"><strong>'+esc(x.title)+'</strong><div class="meta">'+esc(x.file)+'</div></button>').join('');$('summary').innerHTML='<div class="field"><div class="label">Conclusion</div><div>'+(payload?.conclusion_current?'Validated conclusion will be merged.':'Optional — Final Draft can be generated from First Draft without it.')+'</div></div><div class="field"><div class="label">Overview figure</div><div>'+(payload?.overview_figure_exists?'Available — it will be merged into Final Draft.':'Optional — generate it before or after Final Draft.')+'</div></div><div class="field"><div class="label">Final Audit</div><div>'+(payload?.final_draft_md&&!stale()?'ready':'not ready')+'</div></div>'+(payload?.final_draft_docx_exists?'<a class="btn" href="'+fileUrl(payload.final_draft_docx_path)+'" download>Download DOCX</a>':payload?.final_draft_docx_stale?'<div class="sub">The existing Word file is out of date. Use Generate &amp; Download Word.</div>':'');document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.doc===doc))}
 async function runFinalAction(stageId){const status=$('finalActionStatus'),controls=[...document.querySelectorAll('[data-final-stage]')];if(!selectedProject){status.textContent='Select a project before generating outputs.';return}const paths={'final-conclusion':'/run/final-conclusion','final-overview-figure':'/run/final-overview-figure',final:'/run/final'};controls.forEach(control=>control.disabled=true);status.textContent='Generating…';try{const response=await fetch('/api/project/'+encodeURIComponent(selectedProject)+paths[stageId],{method:'POST'});const result=await response.json().catch(()=>({ok:false,error:'Server returned '+response.status+'.'}));if(!response.ok||!result.ok)throw new Error(result.error||'Server returned '+response.status+'.');await loadProject(selectedProject);if(stageId==='final-overview-figure')doc='overview-figure';status.textContent='Generation complete.'}catch(error){status.textContent=error.message||String(error)}finally{document.querySelectorAll('[data-final-stage]').forEach(control=>control.disabled=false)}}
 async function exportDocx(){const status=$('finalActionStatus'),button=$('export-docx');if(!selectedProject){status.textContent='Select a project before exporting.';return}button.disabled=true;status.textContent='Generating Word document…';try{const response=await fetch('/api/project/'+encodeURIComponent(selectedProject)+'/export-docx',{method:'POST'});const result=await response.json().catch(()=>({ok:false,error:'Server returned '+response.status+'.'}));if(!response.ok||!result.ok)throw new Error(result.error||'Word export failed.');await loadProject(selectedProject);status.textContent=result.message||'Word document generated. Download started.';if(result.path){const link=document.createElement('a');link.href=fileUrl(result.path);link.download='';document.body.appendChild(link);link.click();link.remove()}}catch(error){status.textContent=error.message||String(error)}finally{button.disabled=false}}
+const renderBeforeOptionalArtifactFreshness=render;
+render=function(){
+  renderBeforeOptionalArtifactFreshness();
+  if(doc==='overview-figure'&&payload?.overview_figure_exists&&!payload?.overview_figure_current){
+    $('main').innerHTML='<p>The existing overview figure is out of date. Generate it again before using it in the Final Draft.</p>';
+  }
+  if(doc==='final'&&stale()){
+    $('main').innerHTML='<p>Upstream content or an optional artifact changed. Regenerate the Final Draft first.</p>';
+  }
+  const fields=[...$('summary').querySelectorAll('.field')];
+  for(const field of fields){
+    const label=field.querySelector('.label')?.textContent?.trim();
+    const value=field.querySelector('div:nth-child(2)');
+    if(!value)continue;
+    if(label==='Conclusion'&&payload?.conclusion_current&&!payload?.conclusion_integration_current){
+      value.textContent='Validated conclusion exists, but the Final Draft has not integrated this version.';
+    }
+    if(label==='Overview figure'){
+      value.textContent=payload?.overview_figure_current
+        ?'Current and available — it will be merged into the Final Draft.'
+        :payload?.overview_figure_exists
+          ?'Out of date — generate the overview figure again before Final Draft.'
+          :'Optional — generate it before or after Final Draft.';
+    }
+  }
+};
 $('projectSelect').onchange=e=>loadProject(e.target.value);$('docList').onclick=e=>{const b=e.target.closest('[data-doc]');if(b){doc=b.dataset.doc;render()}};document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{doc=b.dataset.doc;render()});document.addEventListener('click',e=>{const exportButton=e.target.closest('#export-docx');if(exportButton){exportDocx();return}const button=e.target.closest('[data-final-stage]');if(button)runFinalAction(button.dataset.finalStage)});loadProjects();
 </script>
 </body>
