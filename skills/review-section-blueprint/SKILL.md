@@ -17,7 +17,7 @@ does not re-derive section structure or paper assignments.
 review-projects/<project_id>/01_matrix_outline/selected_outline.md
 review-projects/<project_id>/01_matrix_outline/literature_matrix.json
 review-projects/<project_id>/01_matrix_outline/paper_reading_notes.json
-/home/ps/review-writer/skills/review-section-blueprint/references/rule_packs.json
+<review-root>/skills/review-section-blueprint/references/rule_packs.json
 ```
 
 Default rule pack:
@@ -33,8 +33,8 @@ Use the rule pack as writing constraints only. Do not import facts from it.
 Run initializer if useful:
 
 ```bash
-python /home/ps/review-writer/skills/review-section-blueprint/scripts/init_section_blueprint.py \
-  --review-root /home/ps/review-writer \
+python <review-root>/skills/review-section-blueprint/scripts/init_section_blueprint.py \
+  --review-root <review-root> \
   --project-id <project_id>
 ```
 

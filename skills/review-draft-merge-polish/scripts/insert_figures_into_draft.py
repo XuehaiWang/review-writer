@@ -387,7 +387,7 @@ def figure_anchor_position(text: str, figure: dict[str, Any]) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Insert available figures into the first draft.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--max-per-section", type=int, default=0,
                         help="Maximum figures per section; 0 keeps every human-selected figure.")

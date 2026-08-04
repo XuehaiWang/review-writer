@@ -14,8 +14,8 @@ review-projects/<project_id>/01_matrix_outline/selected_outline.md
 review-projects/<project_id>/01_matrix_outline/literature_matrix.json
 review-projects/<project_id>/01_matrix_outline/section_blueprint.json
 review-projects/<project_id>/01_matrix_outline/section_writing_plan.md
-/home/ps/review-writer/skills/review-section-blueprint/references/rule_packs.json
-/home/ps/review-writer/template/综述模板写作方式与风格总结.md
+<review-root>/skills/review-section-blueprint/references/rule_packs.json
+<review-root>/examples/reference-reviews/template_summary.md (optional reference-review example)
 ```
 
 For every assigned paper, reopen:
@@ -98,8 +98,8 @@ audit's hard gate (`draft_has_no_figures`,
 Before writing, run:
 
 ```bash
-python /home/ps/review-writer/skills/review-section-drafting-figure-picking/scripts/build_paper_figure_inventory.py \
-  --review-root /home/ps/review-writer \
+python <review-root>/skills/review-section-drafting-figure-picking/scripts/build_paper_figure_inventory.py \
+  --review-root <review-root> \
   --project-id <project_id>
 ```
 

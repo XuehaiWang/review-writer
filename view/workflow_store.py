@@ -832,7 +832,12 @@ class WorkflowStore:
         for record in source_versions:
             if not isinstance(record, dict):
                 continue
-            path = Path(str(record.get("path") or ""))
+            logical_name = str(record.get("logical_name") or "").strip()
+            logical_path = Path(logical_name) if logical_name else None
+            if logical_path is not None and not logical_path.is_absolute():
+                path = (self.project_root(project_id) / logical_path).resolve()
+            else:
+                path = Path(str(record.get("path") or "")).resolve()
             if not path.is_file() or sha256_file(path) != str(record.get("sha256") or ""):
                 outdated_sources.append(str(path))
 

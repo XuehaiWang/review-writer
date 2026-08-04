@@ -12,7 +12,7 @@ from insert_figures_into_draft import read_text, renumber_figures_in_manuscript,
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Renumber inserted visuals in manuscript order.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument("--project-id", required=True)
     parser.add_argument(
         "--stage",

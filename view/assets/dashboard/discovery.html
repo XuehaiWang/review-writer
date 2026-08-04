@@ -149,7 +149,16 @@
       cursor: pointer;
     }
     .card:hover, .card.active { border-color: var(--green); background: #f2faf0; }
-    .card.deleted, .result.drop { opacity: .45; background: #f5eadf; }
+    .result { position: relative; cursor: pointer; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease, transform .16s ease; }
+    .result:hover { border-color: #8bb4a9; background: #f7fcf9; transform: translateY(-1px); }
+    .result.active { border-color: var(--green); background: linear-gradient(135deg, #eef9f5, #fffdf7); box-shadow: 0 0 0 2px rgba(30,106,88,.12), 0 6px 16px rgba(30,106,88,.08); }
+    .result:focus-visible { border-color: var(--green); outline: 3px solid rgba(30,106,88,.18); outline-offset: 2px; }
+    .result-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .result-heading .r-title { min-width: 0; }
+    .selected-indicator { flex: 0 0 auto; padding: 4px 8px; color: #fff; border-radius: 999px; background: var(--green); font: 700 10px/1 Arial,sans-serif; white-space: nowrap; }
+    .result-hint { display: block; margin-top: 8px; color: #4d766c; font-size: 11px; }
+    .card.deleted, .result.drop { opacity: .55; background: #f5eadf; }
+    .result.drop.active { opacity: .78; border-color: #9b6957; box-shadow: 0 0 0 2px rgba(155,105,87,.11); }
     .k-title, .r-title { font-weight: 700; font-size: 15px; line-height: 1.25; }
     .meta { color: var(--muted); font-size: 12px; margin-top: 5px; line-height: 1.35; }
     .pill {
@@ -262,7 +271,7 @@
       .app > .panel:first-child { height: calc(100dvh - 180px); }
     }
   </style>
-  <link rel="stylesheet" href="/assets/dashboard/review-ui.css">
+  <link rel="stylesheet" href="/assets/dashboard/review-ui.css?v=20260803">
 </head>
 <body>
   <nav class="nav">
@@ -348,9 +357,10 @@
     </section>
   </main>
   <div id="message" class="message"></div>
-  <script src="/assets/dashboard/review-ui.js"></script>
+  <script src="/assets/dashboard/review-i18n.js?v=20260803"></script>
+  <script src="/assets/dashboard/review-ui.js?v=20260803"></script>
   <script>
-    let projects = [], selected = null, data = null, selectedKeyword = null, selectedPaper = null;
+    let projects = [], selected = null, data = null, selectedKeyword = null, selectedPaper = null, detailRequestToken = 0;
     const requestedProject = new URLSearchParams(window.location.search).get('project') || '';
     const els = {
       globalProjectSelect: document.getElementById('globalProjectSelect'),
@@ -574,16 +584,17 @@
       const rows = [...(g.local_results||[]).map(r => ({...r, kind:'local'})), ...(g.web_results||[]).map((r,i) => ({...r, kind:'web', webIndex:i}))];
       els.results.innerHTML = rows.map(r => {
         const id = r.kind === 'local' ? r.paper_id : `web-${r.webIndex}`;
-        return `<div class="result ${r.keep===false?'drop':''}">
-          <div class="r-title">${esc(r.title || '(untitled)')}</div>
+        const active = selectedPaper?.kind === r.kind && selectedPaper?.id === id;
+        return `<article class="result ${r.keep===false?'drop':''} ${active?'active':''}" data-result-kind="${esc(r.kind)}" data-result-id="${esc(id)}" tabindex="0" aria-label="${esc(`View details: ${r.title || '(untitled)'}`)}" aria-current="${active?'true':'false'}">
+          <div class="result-heading"><div class="r-title">${esc(r.title || '(untitled)')}</div>${active?'<span class="selected-indicator">Selected</span>':''}</div>
           <div class="meta">${esc([r.paper_id, r.year, r.journal, `score=${r.score}`, (Array.isArray(r.sources) && r.sources.length) ? `source=${r.sources.join('+')}` : (r.source ? `source=${r.source}` : null)].filter(Boolean).join(' · '))}</div>
           <div class="meta">${esc(r.reason || '')} ${r.url ? `<a href="${esc(r.url)}" target="_blank">Open link</a>` : ''}</div>
           <div class="r-actions">
             <button class="btn ${r.keep===false?'primary':'red'}" data-action="toggle" data-kind="${r.kind}" data-id="${esc(id)}">${r.keep===false?'Restore':'Delete'}</button>
             ${r.kind==='local' ? `<select data-role="${esc(id)}">${['core_candidate','supporting_candidate','background','uncertain','excluded'].map(x=>`<option ${r.role===x?'selected':''}>${x}</option>`).join('')}</select>` : ''}
-            <button class="btn" data-action="view" data-kind="${r.kind}" data-id="${esc(id)}">View</button>
           </div>
-        </div>`;
+          ${active?'<span class="result-hint">Details are displayed in the right panel.</span>':''}
+        </article>`;
       }).join('');
     }
     function findRow(kind, id) {
@@ -592,6 +603,7 @@
       return (g.web_results || [])[Number(id.replace('web-', ''))];
     }
     async function renderDetail() {
+      const requestToken = ++detailRequestToken;
       if (!selectedPaper) {
         els.detailTitle.textContent = 'Paper Detail';
         els.detailMeta.textContent = 'Select a paper result.';
@@ -605,8 +617,10 @@
       els.summary.innerHTML = `<h3>${esc(r.title)}</h3><p><strong>Score:</strong> ${esc(r.score)}</p><p><strong>Reason:</strong> ${esc(r.reason || '')}</p><p><strong>Role:</strong> ${esc(r.role || 'web_candidate')}</p>${r.url ? `<p><a href="${esc(r.url)}" target="_blank">Open web result</a></p>` : ''}`;
       if (selectedPaper.kind === 'local') {
         const meta = await (await fetch(`/api/local/metadata/${encodeURIComponent(r.paper_id)}`)).json();
+        if (requestToken !== detailRequestToken) return;
         els.metadata.textContent = JSON.stringify(meta, null, 2);
         const md = await (await fetch(`/api/local/markdown/${encodeURIComponent(r.paper_id)}`)).text();
+        if (requestToken !== detailRequestToken) return;
         els.markdown.innerHTML = renderMarkdown(md, r.paper_id);
         els.pdfFrame.src = meta.source_paths?.pdf ? `/file?path=${encodeURIComponent(meta.source_paths.pdf)}` : 'about:blank';
       } else {
@@ -643,11 +657,32 @@
     els.keywordList.addEventListener('click', e => { const card = e.target.closest('[data-keyword]'); if (card) { selectedKeyword = card.dataset.keyword; selectedPaper = null; renderAll(); } });
     els.results.addEventListener('click', async e => {
       const btn = e.target.closest('[data-action]');
-      if (!btn) return;
-      const row = findRow(btn.dataset.kind, btn.dataset.id);
-      if (btn.dataset.action === 'toggle') row.keep = row.keep === false;
-      if (btn.dataset.action === 'view') selectedPaper = {kind: btn.dataset.kind, id: btn.dataset.id, row};
-      renderResults(); await renderDetail();
+      if (btn) {
+        const row = findRow(btn.dataset.kind, btn.dataset.id);
+        if (row && btn.dataset.action === 'toggle') row.keep = row.keep === false;
+        renderResults();
+        if (selectedPaper) await renderDetail();
+        return;
+      }
+      if (e.target.closest('a, select')) return;
+      const card = e.target.closest('[data-result-kind]');
+      if (!card) return;
+      const row = findRow(card.dataset.resultKind, card.dataset.resultId);
+      if (!row) return;
+      selectedPaper = {kind: card.dataset.resultKind, id: card.dataset.resultId, row};
+      renderResults();
+      await renderDetail();
+    });
+    els.results.addEventListener('keydown', async e => {
+      if (!['Enter', ' '].includes(e.key) || e.target.closest('button, a, select')) return;
+      const card = e.target.closest('[data-result-kind]');
+      if (!card) return;
+      e.preventDefault();
+      const row = findRow(card.dataset.resultKind, card.dataset.resultId);
+      if (!row) return;
+      selectedPaper = {kind: card.dataset.resultKind, id: card.dataset.resultId, row};
+      renderResults();
+      await renderDetail();
     });
     els.results.addEventListener('change', e => { const sel = e.target.closest('[data-role]'); if (sel) findRow('local', sel.dataset.role).role = sel.value; });
     document.getElementById('projectSelect').addEventListener('change', e => loadProject(e.target.value));

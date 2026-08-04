@@ -1,0 +1,82 @@
+[
+  {
+    "id": 1,
+    "name": "top-reaction-5col-table",
+    "description": "Top reaction + 5 vertical columns",
+    "layout_type": "top-reaction-5col-table",
+    "prompt": "Place a small label below the arrow:\n“allenylation conditions”\n\nUse only generic line-angle chemistry placeholders. Do not invent an exact molecular structure, catalyst structure, ligand structure, stereochemistry, reaction condition, yield, or enantiomeric excess.\n\nBelow the reaction scheme, create five equal-width vertical catalyst-family columns labeled:\n\n1. Cu\n2. Pd\n3. Au\n4. Rh/Ir\n5. Other metals\n\nEach column should contain four compact sub-blocks:\n\n- Catalyst / ligand\n- Representative case\n- Key selectivity\n- Synthetic note\n\nFor “Representative case”, show a generic substrate-to-allene reaction placeholder and a blank field such as:\n“up to ___ % ee”\n\nFor text fields, use short dotted placeholders rather than long paragraphs.\n\nAt the bottom, add a full-width ribbon labeled:\n\n“Shared themes & outlook”\n\nInside this ribbon, include four concise icon-and-label modules:\n\n- scope\n- mechanism\n- utility\n- future directions\n\nThe figure should communicate the central reaction, metal-centered classification, representative chemistry, selectivity, and common conclusions within approximately 20 seconds.\n\nMake the layout reusable for other overview figures in the allene chemistry field.",
+    "reference_image": "template_1.png"
+  },
+  {
+    "id": 2,
+    "name": "center-radial-classification",
+    "description": "Center radial with 5 branches",
+    "layout_type": "center-radial-classification",
+    "prompt": "Use only abstract chemical line placeholders. Do not invent or approximate exact chemical structures, ligands, mechanisms, stereochemical assignments, reaction conditions, yields, or ee values.\n\nFrom the central panel, create five balanced branches leading to outer catalyst-family panels:\n\n- Cu\n- Pd\n- Au\n- Rh/Ir\n- Other metals\n\nEach outer panel should contain three short information rows:\n\n- typical catalyst system\n- representative transformation\n- key message\n\nUse simple academic icons:\n- flask for catalyst system\n- reaction arrow for transformation\n- star for key message\n\nUse dotted placeholder lines for information that will later be filled from the review outline.\n\nAround the outer boundary, place four small global-theme callouts:\n\n- reactivity control\n- enantioselectivity\n- substrate scope\n- applications / outlook\n\nConnect these themes using a subtle dashed oval or open boundary, without making the figure look like the supplied reference images.\n\nThe figure should be symmetric, easy to scan, and suitable as a reusable metal-centered overview template for allene chemistry reviews.",
+    "reference_image": "template_2.png"
+  },
+  {
+    "id": 3,
+    "name": "route-map-start-strategy-result",
+    "description": "Horizontal lanes: start-strategy-result",
+    "layout_type": "route-map-start-strategy-result",
+    "prompt": "CENTER PANEL:\nCreate five horizontal catalyst lanes:\n\n- Cu\n- Pd\n- Au\n- Rh/Ir\n- Other metals\n\nFor each lane, arrange three sequential information boxes:\n\n1. Catalyst / ligand\n2. Reaction pattern\n3. Key result\n\nUse small chevron arrows between the boxes.\n\nThe “Catalyst / ligand” box may contain an abstract ligand icon such as:\nL–M–L\n\nThe “Reaction pattern” box should show only a generic alkyne/alcohol-to-allene transformation.\n\nThe “Key result” box should contain short placeholders for:\n- enantioselectivity\n- yield\n- scope highlights\n\nDo not insert fabricated catalyst structures, mechanisms, chemical structures, yields, or selectivity data.\n\nRIGHT PANEL:\nTitle:\n“Outcome”\n\nSubtitle:\n“Enantioenriched allenylated products”\n\nInclude a generic chiral allene product and three compact outcome boxes:\n\n- reactivity\n- selectivity\n- synthetic value\n\nUse a bold arrow from the central metal strategies panel to the outcome panel.\n\nBOTTOM BAND:\nTitle:\n“Challenges & outlook”\n\nInclude four modules:\n\n- mechanism\n- broader scope\n- milder systems\n- scalability\n\nThe final figure should read clearly from starting materials and scientific challenges, through metal-dependent strategies, to reaction outcomes and future directions.",
+    "reference_image": "template_3.png"
+  },
+  {
+    "id": 4,
+    "name": "metal-x-dimension-matrix",
+    "description": "Matrix: metals x dimensions",
+    "layout_type": "metal-x-dimension-matrix",
+    "prompt": "Do not invent exact structures, substrate scopes, catalyst oxidation states, mechanistic pathways, yields, ee values, or reaction conditions.\n\nCreate a main matrix with five catalyst-family columns:\n\n- Cu\n- Pd\n- Au\n- Rh/Ir\n- Other metals\n\nCreate four information rows:\n\n- Catalyst system\n- Representative chemistry\n- Selectivity features\n- Utility / note\n\nIn each cell, use concise visual placeholders, small chemistry icons, generic reaction fragments, or short bullet lists.\n\nFor example:\n\nCatalyst system:\n- metal source\n- chiral ligand\n- additives / base\n\nRepresentative chemistry:\n- generic reaction placeholder\n- pathway label placeholder\n\nSelectivity features:\n- ee\n- dr\n- regioselectivity\n- chemoselectivity\n\nUtility / note:\n- synthetic application\n- scope advantage\n- scalability\n- mechanistic relevance\n\nAt the bottom, add a horizontal footer titled:\n“Shared conclusions”\n\nInclude four short summary blocks:\n- high enantioselectivity\n- complementary reactivity\n- practical and scalable\n- ongoing opportunities\n\nThe figure should function as a reusable comparison matrix for metal-centered allene chemistry reviews.",
+    "reference_image": "template_4.png"
+  },
+  {
+    "id": 5,
+    "name": "module-cards-crosscut-sidebar",
+    "description": "5 tall cards + cross-cut sidebar",
+    "layout_type": "module-cards-crosscut-sidebar",
+    "prompt": "Below the reaction strip, arrange five tall rounded cards:\n\n- Cu\n- Pd\n- Au\n- Rh/Ir\n- Other metals\n\nEach card should have a colored header and contain four mini-sections:\n\n1. Design logic\n2. Representative case\n3. Selectivity\n4. Take-home point\n\nUse the following types of placeholder descriptions:\n\nDesign logic:\n“Key idea of ligand/catalyst design and activation mode.”\n\nRepresentative case:\n“Catalyst/ligand, allenyl source, conditions, substrate type.”\n\nSelectivity:\n“Typical enantioselectivity, diastereoselectivity, and yield range.”\n\nTake-home point:\n“One-line key takeaway or advantage.”\n\nUse dotted lines for information that will later be filled by an intelligent planner.\n\nOn the far right, add a narrow vertical panel titled:\n“Cross-cutting issues”\n\nInclude four modules:\n\n- Scope\n- Mechanism\n- Late-stage utility\n- Future opportunities\n\nAt the bottom of the sidebar, add:\n“Time window: 2020–2025”\n\nAt the bottom of the main card area, add a short abbreviations line:\n“APA = propargyl alcohol-type compound; [M] = metal catalyst.”\n\nThe final layout should be modular, easy to populate automatically from keywords and an outline, and suitable for general use in allene mini-reviews.",
+    "reference_image": "template_5.png"
+  },
+  {
+    "id": 6,
+    "name": "tree-metal-classification",
+    "description": "Tree diagram with metal nodes",
+    "layout_type": "tree-metal-classification",
+    "prompt": "Below the reaction, create a central dark rounded node labeled:\n\n“Metal-centered classification”\n\nFrom this central node, draw five major branches leading to circular metal nodes:\n\n- Cu\n- Pd\n- Au\n- Rh/Ir\n- Other metals\n\nBelow each metal node, place three vertically stacked leaf boxes:\n\n1. Substrate class\n2. Stereocontrol mode\n3. Synthetic highlight\n\nIn “Substrate class”, show a generic alkyne–alcohol motif.\n\nIn “Stereocontrol mode”, use an abstract metal–ligand or chiral-pocket diagram, not an exact transition state.\n\nIn “Synthetic highlight”, use a simple icon and a short placeholder such as:\n“Key result or advantage”\n\nAt the bottom, connect the five metal branches into a shared rounded conclusion box titled:\n\n“General lessons”\n\nInside, place four icon-and-label sections:\n\n- Catalyst choice\n- Selectivity logic\n- Scope considerations\n- Outlook and opportunities\n\nThe figure should resemble a scientific taxonomy tree rather than a biological tree, and should be reusable for different allene reaction themes.",
+    "reference_image": "template_6.png"
+  },
+  {
+    "id": 7,
+    "name": "why-strategy-what",
+    "description": "3-section: why/strategies/outcomes",
+    "layout_type": "why-strategy-what",
+    "prompt": "SECTION 2:\nTitle:\n“Metal strategies”\n\nThis should be the largest central section.\n\nCreate five horizontal modules labeled:\n\n- Cu\n- Pd\n- Au\n- Rh/Ir\n- Other metals\n\nEach module contains three columns:\n\n- Catalyst system\n- Representative case\n- Selectivity logic\n\nCatalyst system may contain:\n- L* ligand\n- metal source\n- additives\n- solvent\n\nRepresentative case should contain a generic propargyl alcohol-to-allene reaction.\n\nSelectivity logic should use short placeholder items such as:\n- axial induction\n- ligand pocket\n- steric control\n- migratory sequence\n- chiral environment\n- transition-state bias\n\nThese labels are conceptual placeholders and must not be treated as factual claims for every metal family.\n\nDo not fabricate real catalyst structures, catalytic cycles, exact mechanisms, structures, yields, or selectivity data.\n\nSECTION 3:\nTitle:\n“What do we learn?”\n\nShow several generic chiral allene product motifs and four summary blocks:\n\n- Scope\n- Selectivity\n- Applications\n- Future outlook\n\nUse bold arrows between Sections 1, 2, and 3.\n\nAt the bottom, add a shared summary band with three concise messages:\n\n- recent metal strategies\n- mechanistic and ligand-design insights\n- future opportunities\n\nThe result should look like a review-level conceptual overview rather than a reaction database table.",
+    "reference_image": "template_7.png"
+  },
+  {
+    "id": 8,
+    "name": "asymmetric-ring-right-sidebar",
+    "description": "Ring + right summary sidebar",
+    "layout_type": "asymmetric-ring-right-sidebar",
+    "prompt": "- Cu\n- Pd\n- Au\n- Rh/Ir\n- Other metals\n\nEach arc should contain:\n- a simple abstract catalyst icon\n- a small information box with:\n  - representative case\n  - catalyst feature\n  - key selectivity\n\nDo not use exact catalyst structures or ligand structures unless they are supplied as verified external assets.\n\nDo not invent substrate structures, product structures, yields, ee values, conditions, or mechanisms.\n\nOn the right, create a tall vertical sidebar titled:\n\n“Shared insights”\n\nDivide it into four stacked panels:\n\n1. Common substrate motifs\n2. Stereocontrol principles\n3. Synthetic value\n4. Future opportunities\n\nIn “Common substrate motifs”, show only generic structural placeholders.\n\nIn “Stereocontrol principles”, use a generic chiral catalyst pocket and a generic product schematic.\n\nIn “Synthetic value”, use three simple icons:\n- molecular diversity\n- stereocenter installation\n- functional group tolerance\n\nIn “Future opportunities”, use:\n- new catalysts\n- mechanistic understanding\n- broader applications\n\nKeep the ring intentionally asymmetrical and visually different from conventional evenly divided radial charts.",
+    "reference_image": "template_8.png"
+  },
+  {
+    "id": 9,
+    "name": "dual-page-spread",
+    "description": "Two-page spread layout",
+    "layout_type": "dual-page-spread",
+    "prompt": "Do not invent exact structures, stereochemistry, catalyst systems, ligands, conditions, yields, or mechanisms.\n\nBelow the reaction scheme, add a block titled:\n\n“Classification rule”\n\nInside it, place:\n“By catalyst center metal”\n\nAdd the explanatory sentence:\n“Organized by the identity of the catalytically active metal center.”\n\nAdd a short statement at the bottom:\n“The scope, selectivity, and features of recent asymmetric allenylation reactions are summarized.”\n\nRIGHT PAGE TITLE:\n“Representative metal families”\n\nCreate five stacked horizontal metal-family panels:\n\n- Cu\n- Pd\n- Au\n- Rh/Ir\n- Other metals\n\nEach panel should contain three small placeholder fields:\n\n- case\n- selectivity\n- note\n\nUse simple icons:\n- clipboard for case\n- target for selectivity\n- note or pencil for note\n\nAcross the bottom of both pages, add a unified band titled:\n\n“Take-home messages”\n\nInclude six concise icon-based items:\n\n- Timely overview\n- Metal-centered\n- Enantioselectivity\n- Diverse scope\n- Mechanistic insight\n- Future directions\n\nThe final figure should look like a structured review summary spread rather than an ordinary data table.",
+    "reference_image": "template_9.png"
+  },
+  {
+    "id": 10,
+    "name": "mosaic-infographic",
+    "description": "Mosaic tiles infographic",
+    "layout_type": "mosaic-infographic",
+    "prompt": "In the center, create a large mosaic composed of five aligned tiles:\n\n- Cu\n- Pd\n- Au\n- Rh/Ir\n- Other metals\n\nEach tile should contain four organized zones:\n\n1. Catalyst\n2. Chemistry\n3. Selectivity\n4. Highlight\n\nSuggested placeholder content:\n\nCatalyst:\n- chiral ligand\n- metal source\n\nChemistry:\n- allenyl source\n- reaction mode\n\nSelectivity:\n- ee\n- dr\n- regioselectivity\n\nHighlight:\n- key innovation\n- representative scope\n- notable example\n\nUse abstract catalyst icons and generic molecular motifs only.\n\nAdd a smaller support tile on the lower left titled:\n“Key trends”\n\nInclude:\n- broader substrate scope\n- higher stereoselectivity\n- diverse allenyl sources\n- greener conditions\n- mechanistic insights\n\nAdd a smaller support tile on the lower right titled:\n“Outlook”\n\nInclude:\n- new catalyst systems\n- untapped reactivity\n- enantiodivergent control\n- late-stage applications\n- sustainability and scalability\n\nAt the bottom, add a compact legend:\n\n- M = metal center\n- L* = chiral ligand\n- LG = leaving group\n- X = halide or pseudohalide\n- er = enantiomeric ratio\n- trophy = key advance\n- diamond = value or impact\n\nThe final figure should be visually distinctive, publication-friendly, and suitable as a reusable template for allene-field review overview figures.",
+    "reference_image": "template_10.png"
+  }
+]

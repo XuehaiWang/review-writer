@@ -1,23 +1,22 @@
 ---
 name: review-outline-summary-chart
-description: Use when an approved final review Markdown needs a full-review and per-section summary chart before document export.
+description: Use when an approved final review Markdown needs one current full-review summary chart before document export.
 ---
 
 # Review Outline Summary Chart
 
-Generate the full-review and per-section Mermaid summaries only after the
+Generate the single full-review Mermaid summary only after the
 final-audit checkpoint has approved the final draft.
 
 ## Orchestrated Contract
 
-- Orchestrated use requires `05_final_audit/final_draft.md` and `--scope both`.
-- Write HTML, JSON, one full-review PNG, and one PNG for every manuscript body
-  section next to the selected draft.
+- Orchestrated use requires `05_final_audit/final_draft.md` and `--scope full`.
+- Write HTML, JSON, and one full-review PNG next to the selected draft.
 - JSON records the resolved source in `stats.draft_source` and its exact-byte
   SHA-256 in `stats.draft_sha256`, plus scope in `stats.generation_scope` and
   the exact HTML bytes in `stats.html_sha256`.
-- Orchestrated completion requires scope `both`, the JSON/current-draft hash,
-  and the exact HTML-byte hash to match the current dual chart bundle.
+- Orchestrated completion requires scope `full`, the JSON/current-draft hash,
+  and the exact HTML-byte hash to match the current chart bundle.
 - JSON-only/HTML-only output cannot satisfy the stage.
 - Fallback artifacts do not satisfy the orchestrated summary stage;
   standalone selection remains final > first > section draft.
@@ -38,13 +37,10 @@ The selected draft directory receives:
 review_summary_chart.html
 review_summary_chart.json
 review_summary_chart.png
-review_section_chart_<nn>_<section>.png
 ```
 
-`--scope both` is mandatory for orchestrated use because it produces the
-full-review chart and all manuscript-body section charts in HTML, JSON, and
-offline PNG form. Abstract, Keywords, References, and Supporting Information
-remain in the full-review chart but do not receive separate DOCX section PNGs.
+`--scope full` is mandatory for orchestrated use because the publication flow
+keeps one overall chart and does not generate per-section summary images.
 
 ## Run
 
@@ -52,7 +48,7 @@ remain in the full-review chart but do not receive separate DOCX section PNGs.
 python skills/review-outline-summary-chart/scripts/generate_review_summary_chart.py \
   --review-root <review-root> \
   --project-id <project_id> \
-  --scope both
+  --scope full
 ```
 
 For standalone inspection, the selector may fall back to
@@ -62,7 +58,7 @@ selected draft and are not accepted as final-stage artifacts.
 
 ## Chart Contents
 
-The HTML contains metadata, statistics, a full-review Mermaid flowchart, and
-per-section cards/charts. JSON contains the same outline, summaries, callouts,
+The HTML contains metadata, statistics, and a full-review Mermaid flowchart.
+JSON contains the same outline, summaries, callouts,
 mapped paper IDs, source path, draft digest, generation scope, and HTML digest. Citation callouts remain countable
 when `citations.json` is absent, but paper leaves cannot then be resolved.

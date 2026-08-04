@@ -12,5 +12,5 @@ interface:
     through --query-plan. Stop for clarification before invoking discover.py if
     the plan is unresolved-only or has no meaningful keyword; otherwise review
     unresolved concepts before searching local and optional web sources. Use
-    /home/ps/review-writer/view/serve_review_dashboard.py only when the
+    <review-root>/view/serve_review_dashboard.py only when the
     human-check UI is needed.

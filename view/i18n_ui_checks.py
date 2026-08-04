@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+import re
+import unittest
+from pathlib import Path
+
+
+ASSET_DIR = Path(__file__).resolve().parent / "assets" / "dashboard"
+STAGE_PAGES = (
+    "library.html",
+    "discovery.html",
+    "matrix.html",
+    "blueprint.html",
+    "sections.html",
+    "figure-review.html",
+    "figures.html",
+    "draft.html",
+    "final.html",
+)
+
+
+class DashboardI18nChecks(unittest.TestCase):
+    def test_every_stage_loads_i18n_before_shared_ui(self) -> None:
+        for page_name in STAGE_PAGES:
+            with self.subTest(page=page_name):
+                html = (ASSET_DIR / page_name).read_text(encoding="utf-8")
+                i18n = re.search(r'review-i18n\.js\?v=([0-9]+)', html)
+                ui = re.search(r'review-ui\.js\?v=([0-9]+)', html)
+                self.assertIsNotNone(i18n)
+                self.assertIsNotNone(ui)
+                self.assertEqual(i18n.group(1), ui.group(1))
+                self.assertLess(i18n.start(), ui.start())
+
+    def test_language_switch_is_persistent_and_content_safe(self) -> None:
+        source = (ASSET_DIR / "review-i18n.js").read_text(encoding="utf-8")
+        self.assertIn('const STORAGE_KEY = "review-writer-ui-language"', source)
+        self.assertIn('localStorage.setItem(STORAGE_KEY, language)', source)
+        self.assertIn(".markdown, .draft-view, .article-content", source)
+        self.assertIn('window.dispatchEvent(new CustomEvent("review-language-change"', source)
+
+    def test_switch_has_shared_responsive_styling(self) -> None:
+        css = (ASSET_DIR / "review-ui.css").read_text(encoding="utf-8")
+        self.assertIn(".rw-language-switch", css)
+        self.assertIn(".rw-language-option.active", css)
+        self.assertIn('html[lang="zh-CN"] body', css)
+
+    def test_stage_actions_mount_by_stable_dom_contract_in_every_language(self) -> None:
+        source = (ASSET_DIR / "review-ui.js").read_text(encoding="utf-8")
+        self.assertIn("function stageActionHost(current)", source)
+        for selector in ('library: "#libraryStageAction"', 'matrix: "#summary"', 'blueprint: "#summary"', '"figure-review": "#savedStatus"', 'draft: "#summaryBox"'):
+            self.assertIn(selector, source)
+        library_html = (ASSET_DIR / "library.html").read_text(encoding="utf-8")
+        self.assertIn('id="libraryStageAction"', library_html)
+        self.assertIn("data-stage-action-host", library_html)
+        self.assertIn("const reviewGate = stageActionHost(current);", source)
+
+
+if __name__ == "__main__":
+    unittest.main()

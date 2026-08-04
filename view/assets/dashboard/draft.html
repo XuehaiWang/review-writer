@@ -234,7 +234,7 @@
     .para-inline-editor { width:100%; min-height:150px; resize:vertical; padding:10px; border:1px solid var(--green); border-radius:8px; font:inherit; line-height:1.55; }
     .para-inline-controls { display:flex; gap:8px; margin-top:8px; }
   </style>
-  <link rel="stylesheet" href="/assets/dashboard/review-ui.css">
+  <link rel="stylesheet" href="/assets/dashboard/review-ui.css?v=20260803">
 </head>
 <body>
   <nav class="nav">
@@ -296,7 +296,8 @@
     </section>
   </main>
   <div id="message" class="message"></div>
-  <script src="/assets/dashboard/review-ui.js"></script>
+  <script src="/assets/dashboard/review-i18n.js?v=20260803"></script>
+  <script src="/assets/dashboard/review-ui.js?v=20260803"></script>
   <script>
     let projects = [];
     let selectedProject = '';
@@ -422,7 +423,7 @@
       return parts.length ? parts.join('') : renderMarkdown(body, baseDir);
     }
     async function paragraphRequest(path, method, body) {
-      if (payload?.freshness?.stale) { msg('初稿已过期，无法修改。'); return null; }
+      if (payload?.freshness?.editing_blocked) { msg('上游章节或审核图片已更新，请先重新生成初稿。'); return null; }
       const res = await fetch(`/api/project/${encodeURIComponent(selectedProject)}${path}`, {method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
       const data = await res.json();
       if (!res.ok) { msg(data.error || '段落操作失败'); return null; }
@@ -464,10 +465,10 @@
     async function loadProject(projectId) {
       selectedProject = projectId;
       payload = await (await fetch(`/api/project/${encodeURIComponent(projectId)}/draft`)).json();
-      const stale = Boolean(payload?.freshness?.stale);
-      els.draftEditor.value = stale ? '' : (payload.first_draft_md || '');
-      els.draftEditor.disabled = stale;
-      document.getElementById('saveBtn').disabled = stale;
+      const editingBlocked = Boolean(payload?.freshness?.editing_blocked);
+      els.draftEditor.value = editingBlocked ? '' : (payload.first_draft_md || '');
+      els.draftEditor.disabled = editingBlocked;
+      document.getElementById('saveBtn').disabled = editingBlocked;
       renderLeft();
       renderSummary();
       renderCurrent();
@@ -491,8 +492,9 @@
       const s = payload?.summary || {};
       const redrawn = payload?.redrawn_figures || [];
       const stale = Boolean(payload?.freshness?.stale);
+      const editingBlocked = Boolean(payload?.freshness?.editing_blocked);
       els.summaryBox.innerHTML = `
-        <div class="field"><div class="label">Current Draft</div><div class="value">${stale ? '已过期：请基于当前章节和已审核图片重新生成初稿。' : 'current'}</div></div>
+        <div class="field"><div class="label">Current Draft</div><div class="value">${editingBlocked ? '已过期：请基于当前章节和已审核图片重新生成初稿。' : stale ? '当前文件包含尚未登记的修改，可以检查后保存。' : 'current'}</div></div>
         <div class="field"><div class="label">Project</div><div class="value">${esc(selectedProject)}</div></div>
         <div class="field"><div class="label">Topic</div><div class="value">${esc(payload?.topic || '')}</div></div>
         <div class="field"><div class="label">Stage Status</div><div class="value">
@@ -507,9 +509,9 @@
       `;
     }
     function renderCurrent() {
-      if (payload?.freshness?.stale) {
+      if (payload?.freshness?.editing_blocked) {
         els.detailTitle.textContent = '初稿已过期';
-        els.detailMeta.textContent = '当前 Blueprint 或章节内容已更新。';
+        els.detailMeta.textContent = '当前 Blueprint、章节或审核图片已经更新。';
         els.preview.innerHTML = '<div class="empty">请重新生成初稿。旧初稿保留在磁盘中，但不会作为当前流程内容显示或保存。</div>';
         els.report.innerHTML = '';
         els.issues.innerHTML = '';

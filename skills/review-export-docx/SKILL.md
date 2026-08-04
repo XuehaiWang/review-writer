@@ -39,29 +39,29 @@ printed.
 Default (final draft):
 
 ```bash
-python3 /home/ps/review-writer/skills/review-export-docx/scripts/md2docx.py \
-  --input  /home/ps/review-writer/review-projects/<project_id>/05_final_audit/final_draft.md \
-  --output /home/ps/review-writer/review-projects/<project_id>/05_final_audit/final_draft.docx
+python <review-root>/skills/review-export-docx/scripts/md2docx.py \
+  --input  <review-root>/review-projects/<project_id>/05_final_audit/final_draft.md \
+  --output <review-root>/review-projects/<project_id>/05_final_audit/final_draft.docx
 ```
 
 First draft:
 
 ```bash
-python3 /home/ps/review-writer/skills/review-export-docx/scripts/md2docx.py \
-  --input  /home/ps/review-writer/review-projects/<project_id>/04_first_draft/first_draft.md \
-  --output /home/ps/review-writer/review-projects/<project_id>/04_first_draft/first_draft.docx
+python <review-root>/skills/review-export-docx/scripts/md2docx.py \
+  --input  <review-root>/review-projects/<project_id>/04_first_draft/first_draft.md \
+  --output <review-root>/review-projects/<project_id>/04_first_draft/first_draft.docx
 ```
 
 Custom template:
 
 ```bash
-python3 /home/ps/review-writer/skills/review-export-docx/scripts/md2docx.py \
+python <review-root>/skills/review-export-docx/scripts/md2docx.py \
   --input    /abs/path/review.md \
   --output   /abs/path/review.docx \
   --template /abs/path/custom_template.docx
 ```
 
-The default template is `/home/ps/review-writer/skills/review-export-docx/review_template.docx`.
+The default template is `<review-root>/skills/review-export-docx/review_template.docx`.
 
 ## Style Mapping
 
@@ -105,11 +105,11 @@ Relative image paths in the Markdown are resolved against the Markdown file's di
 ## Summary-chart bridge
 
 When `review_summary_chart.json` exists beside the selected Markdown, validate
-that it was generated from the current draft with `generation_scope: both`.
-Validate every PNG path and SHA-256 in `stats.image_manifest`, then insert the
-full-review chart before the manuscript body and each section chart immediately
-after its matching section heading. Missing, stale, unsafe, or unmatched chart
-entries stop export with a clear error instead of being skipped.
+that it was generated from the current draft with `generation_scope: full` or
+the legacy-compatible `both`. Validate every PNG path and SHA-256 in
+`stats.image_manifest`, then insert the full-review chart at the managed
+manuscript position. Missing, stale, or unsafe chart entries stop export with a
+clear error instead of being skipped.
 
 ## Boundary
 

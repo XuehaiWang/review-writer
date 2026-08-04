@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import os
 import re
@@ -14,6 +13,17 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+REVIEW_ROOT = Path(__file__).resolve().parents[3]
+if str(REVIEW_ROOT) not in sys.path:
+    sys.path.insert(0, str(REVIEW_ROOT))
+
+from review_writer_core.taxonomy import (  # noqa: E402
+    aliases_by_category,
+    load_taxonomy_rules,
+    taxonomy_identity,
+)
 
 from sciatlas_client import SciAtlasClient, load_config, papers_from_response
 
@@ -336,29 +346,7 @@ def load_query_plan(path: Path, topic: str) -> dict[str, Any]:
 
 
 def load_classification_rules(review_root: Path) -> dict[str, dict[str, list[str]]]:
-    labels = {key: {} for key in STRUCTURED_TAG_KEYS}
-    path = review_root / "allene_classification_rules.py"
-    if not path.exists():
-        return labels
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    rules_node = None
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "rules":
-                    rules_node = node.value
-                    break
-        if rules_node is not None:
-            break
-    if rules_node is None:
-        return labels
-    for item in ast.literal_eval(rules_node):
-        if not isinstance(item, tuple) or len(item) < 3:
-            continue
-        label, category, aliases = str(item[0]).strip(), str(item[1]).strip(), item[2]
-        if category in labels and label:
-            labels[category][label] = [str(alias).strip() for alias in aliases if str(alias).strip()]
-    return labels
+    return aliases_by_category(load_taxonomy_rules(review_root), STRUCTURED_TAG_KEYS)
 
 
 def markdown_signal(meta: dict[str, Any], max_chars: int = 12000) -> str:
@@ -1194,6 +1182,7 @@ def run(args: argparse.Namespace) -> int:
         "unresolved_concepts": unresolved_concepts,
         "filters": filters,
         "group_by": group_by,
+        "taxonomy": taxonomy_identity(review_root),
     }
     if effective_query_plan_path is not None:
         query_context["query_plan_path"] = effective_query_plan_path
@@ -1350,7 +1339,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Discover local and web papers by expanded topic keywords.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument("--project-id", default="")
     parser.add_argument("--topic", required=True)
     parser.add_argument("--keywords", default="")

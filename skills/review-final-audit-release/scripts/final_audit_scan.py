@@ -130,7 +130,10 @@ def scan_draft(project: Path) -> dict[str, Any]:
         for entry in entries if isinstance(entries, list) else []:
             if not isinstance(entry, dict):
                 continue
-            for pid in entry.get("cited_paper_ids") or entry.get("paper_ids") or []:
+            paper_ids = entry.get("cited_paper_ids") or entry.get("paper_ids") or []
+            if entry.get("paper_id"):
+                paper_ids = [entry.get("paper_id"), *paper_ids]
+            for pid in paper_ids:
                 if pid and matrix_paper_ids and str(pid) not in matrix_paper_ids:
                     unknown_cited_papers.append(str(pid))
     unknown_cited_papers = sorted(set(unknown_cited_papers))
@@ -252,7 +255,7 @@ def write_reports(out_dir: Path, scan: dict[str, Any]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run deterministic final format scan for a review project.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=str(Path(__file__).resolve().parents[3]))
     parser.add_argument("--project-id", required=True)
     return parser.parse_args()
 

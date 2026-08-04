@@ -2,11 +2,17 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import sys
 from pathlib import Path
 from typing import Any
+
+
+REVIEW_ROOT = Path(__file__).resolve().parents[3]
+if str(REVIEW_ROOT) not in sys.path:
+    sys.path.insert(0, str(REVIEW_ROOT))
+
+from review_writer_core.taxonomy import labels_by_category, load_taxonomy_rules  # noqa: E402
 
 
 BLOCKING_FIELDS = ["paper_id", "slug", "title", "authors", "year", "abstract", "source_paths", "structured_tags"]
@@ -24,28 +30,8 @@ STRUCTURED_TAG_KEYS = [
 
 
 def load_allowed_labels(review_root: Path) -> dict[str, set[str]]:
-    labels = {key: {"not specified"} for key in STRUCTURED_TAG_KEYS}
-    path = review_root / "allene_classification_rules.py"
-    if not path.exists():
-        return labels
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    rules_node = None
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "rules":
-                    rules_node = node.value
-                    break
-        if rules_node is not None:
-            break
-    if rules_node is None:
-        return labels
-    for item in ast.literal_eval(rules_node):
-        if isinstance(item, tuple) and len(item) >= 2:
-            label, category = str(item[0]).strip(), str(item[1]).strip()
-            if category in labels and label:
-                labels[category].add(label)
-    return labels
+    labels = labels_by_category(load_taxonomy_rules(review_root), STRUCTURED_TAG_KEYS)
+    return {key: set(values) for key, values in labels.items()}
 
 
 def read_json(path: Path) -> Any:
@@ -195,7 +181,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate review metadata JSON files.")
-    parser.add_argument("--review-root", default="/home/ps/review-writer")
+    parser.add_argument("--review-root", default=str(Path(__file__).resolve().parents[3]))
     return parser.parse_args()
 
 

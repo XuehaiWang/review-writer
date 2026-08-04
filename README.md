@@ -38,8 +38,15 @@ Library -> Discovery -> Matrix -> Blueprint -> Sections
 
 ## 主要能力
 
+- **全局中英文界面**
+  - 顶部语言切换器覆盖九个阶段，选择结果保存在浏览器并跨页面保持。
+  - 仅翻译系统控件和运行状态，不改写论文正文、Markdown、JSON 或化学内容。
 - **论文入库与结构化 metadata**
   - 管理 PDF、MinerU Markdown、图片和论文注册表。
+  - Library 支持一次选择最多 30 个本地 PDF；逐篇校验、按 SHA-256 去重、
+    提取全文并生成统一的 `Pxxx` metadata 与 Markdown。
+  - 可检索文本 PDF 会立即供 Discovery 召回和 Sections 内容生成使用；
+    扫描版 PDF 会登记入库并提示后续 OCR。
   - 审核标题、作者、摘要、路径及 8 类化学标签。
 - **联网发现与开放获取下载**
   - 按主题检索 Crossref。
@@ -72,7 +79,7 @@ Library -> Discovery -> Matrix -> Blueprint -> Sections
 
 | 页面 | 作用 | 主要产物 |
 |---|---|---|
-| Library | 入库、metadata 审核、联网检索和 OA 下载 | `review-library/metadata/papers/*.metadata.json`、`review-library/registry/papers.jsonl` |
+| Library | 本地批量 PDF 入库、metadata 审核、联网检索和 OA 下载 | `review-library/uploads/Pxxx.{pdf,md}`、`review-library/metadata/papers/*.metadata.json`、`review-library/registry/papers.jsonl` |
 | Discovery | 主题解析、候选召回、人工筛选 | `00_discovery/query_plan.draft.json`、`selected_discovery_results.json` |
 | Matrix | 深读、矩阵、大纲候选与大纲选择 | `01_matrix_outline/literature_matrix.json`、`paper_reading_notes.json`、`selected_outline.md` |
 | Blueprint | 章节论证计划和写作任务 | `01_matrix_outline/section_blueprint.json`、`02_section_drafting/section_tasks.json` |
@@ -99,8 +106,8 @@ py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-workflow.txt
 ```
 
-`requirements-workflow.txt` 包含当前前端工作流所需的 Prefect、Pillow 和
-python-docx。个别准备阶段还可能需要其对应 Skill 文档中列出的外部程序，
+`requirements-workflow.txt` 包含当前前端工作流所需的 Prefect、Pillow、
+python-docx 和 pypdf。个别准备阶段还可能需要其对应 Skill 文档中列出的外部程序，
 例如 MinerU 或 Tesseract。
 
 ### 3. 配置 `.env`
@@ -116,9 +123,10 @@ REVIEW_METADATA_MODEL=your-text-model
 REVIEW_WRITING_MODEL=your-text-model
 REVIEW_CONCLUSION_MODEL=your-text-model
 
-# 图像编辑可与文本模型使用不同服务
-IMAGE_OPENAI_BASE_URL=https://api.openai.com/v1
-IMAGE_OPENAI_API_KEY=replace-with-your-image-key
+# 图像编辑可与文本模型使用不同令牌和传输接口
+IMAGE_OPENAI_BASE_URL=https://www.micuapi.ai/v1
+IMAGE_OPENAI_WIRE_API=chat-completions
+IMAGE_OPENAI_API_KEY=replace-with-your-vip_2_image-key
 
 # 可选：文献服务与本地 OCR
 UNPAYWALL_EMAIL=you@example.org
@@ -131,8 +139,9 @@ TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
 
 - `.env` 已被 Git 忽略，不要把真实密钥写入 README、提交记录或截图。
 - 文本服务需要兼容项目所调用的 `chat/completions` 或 `responses` 接口。
-- 当前 AI 重绘默认使用图像编辑接口；第三方服务必须实际支持
-  `images/edits`，仅在模型列表中显示模型名并不代表接口兼容。
+- 标准 AI 重绘按 `IMAGE_OPENAI_WIRE_API` 使用 `images/edits` 或
+  `chat/completions`，并把当前 Stage 6 源图随请求发送。严格机理箭头编辑固定使用
+  `images/edits`，因为它不能降低为普通聊天图像通道。
 - Unpaywall 邮箱不是下载的强制条件；未填写时仍会尝试其他合法开放获取来源。
 
 ### 4. 启动本地前端
@@ -164,7 +173,8 @@ http://127.0.0.1:8765
 review-library/
 ├─ metadata/papers/       规范化论文 metadata
 ├─ registry/papers.jsonl  论文注册表
-└─ downloads/             联网下载的本地 PDF（默认不提交 Git）
+├─ downloads/             联网下载的本地 PDF（默认不提交 Git）
+└─ uploads/               本地上传的 PDF 与提取出的全文 Markdown
 
 review-projects/<project-id>/
 ├─ 00_discovery/
@@ -174,6 +184,25 @@ review-projects/<project-id>/
 ├─ 04_first_draft/
 └─ 05_final_audit/
 ```
+
+`review-library/` 是运行时文献库：除占位文件外不会提交到 Git。干净克隆首次启动时
+会自动创建上述目录；每个用户的 metadata、注册表、PDF 和 Markdown 都只保留在其
+本地部署中。
+
+### 共享 taxonomy profile
+
+metadata 构建、校验和第二阶段检索统一通过
+`review_writer_core/taxonomy.py` 加载同一套分类规则。默认 profile 为
+`review_writer_core/taxonomies/allene.py`，也可配置：
+
+```dotenv
+REVIEW_TAXONOMY_PROFILE=allene
+# 或使用自定义文件（绝对路径或相对项目根目录）
+REVIEW_CLASSIFICATION_RULES=review_writer_core/taxonomies/my_topic.py
+```
+
+生成的 metadata 与 Discovery 产物会记录 taxonomy 文件路径和 SHA-256，便于判断
+后续结果是否仍依赖当前规则版本。
 
 ### SQLite 业务状态
 
@@ -240,9 +269,10 @@ Prefect UI 地址为 `http://127.0.0.1:4200`。
 ```text
 skills/                 各阶段 Skill、规则、脚本和校验器
 view/                   本地前端、HTTP API、持久状态和 Prefect flow
-review-library/         论文 metadata、注册表和本地文献
+review_writer_core/      跨阶段共享代码与可配置 taxonomy profiles
+review-library/         本地运行时 metadata、注册表和文献（Git 忽略）
 review-projects/        每个综述项目的阶段产物（本地工作数据）
-template/               综述和导出模板
+examples/reference-reviews/  示例综述、参考 PDF 和测试夹具
 prefect.toml            Prefect 本地运行配置
 requirements-workflow.txt
 ```

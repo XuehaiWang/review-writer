@@ -16,9 +16,9 @@ per-claim constraints; that is `review-section-blueprint`'s job.
 ```text
 review-projects/<project_id>/00_discovery/selected_discovery_results.json
 review-projects/<project_id>/00_discovery/topic_input.md
-/home/ps/review-writer/skills/review-section-blueprint/SKILL.md
-/home/ps/review-writer/skills/review-section-blueprint/references/rule_packs.json
-/home/ps/review-writer/template/综述模板写作方式与风格总结.md
+<review-root>/skills/review-section-blueprint/SKILL.md
+<review-root>/skills/review-section-blueprint/references/rule_packs.json
+<review-root>/examples/reference-reviews/template_summary.md (optional reference-review example)
 ```
 
 For each paper, open:

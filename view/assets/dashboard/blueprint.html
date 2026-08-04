@@ -17,7 +17,7 @@
     .main{background:#fffdf7;padding:24px 30px;line-height:1.58;font-size:15px}.tabs{display:flex;gap:8px;flex-wrap:wrap}.tab{border:1px solid var(--line);border-radius:999px;background:#fffdf7;padding:7px 10px;cursor:pointer}.tab.active{background:var(--green);color:white;border-color:var(--green)}.tab.command,.handoff-status{display:none}
     .field{margin-bottom:14px}.label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}.value{line-height:1.45;white-space:pre-wrap}.side{padding:14px}pre{white-space:pre-wrap;margin:0;font-family:Consolas,monospace;font-size:12px}
   </style>
-  <link rel="stylesheet" href="/assets/dashboard/review-ui.css">
+  <link rel="stylesheet" href="/assets/dashboard/review-ui.css?v=20260803">
 </head>
 <body>
   <nav class="nav">
@@ -29,7 +29,8 @@
     <section class="panel"><div class="head"><h2 id="mainTitle">Blueprint Detail</h2><div id="mainMeta" class="sub"></div></div><div class="tabs"><button class="tab active" data-tab="section">Section</button><button class="tab" data-tab="plan">Writing Plan</button><button class="tab" data-tab="outline">Selected Outline</button><button class="tab" data-tab="json">Raw JSON</button><button id="enterSections" class="tab command">Generate Section Tasks and Enter Sections</button></div><div id="handoffStatus" class="handoff-status"></div><div id="main" class="main"></div></section>
     <section class="panel"><div class="head"><h2>Review Gate</h2><div class="sub">Confirm every section has papers, claims, and figure/table needs.</div></div><div id="summary" class="side"></div></section>
   </main>
-  <script src="/assets/dashboard/review-ui.js"></script>
+  <script src="/assets/dashboard/review-i18n.js?v=20260803"></script>
+  <script src="/assets/dashboard/review-ui.js?v=20260803"></script>
   <script>
     let projects=[], selectedProject='', payload=null, selectedSection='', tab='section';
     const $=id=>document.getElementById(id); const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));

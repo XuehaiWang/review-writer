@@ -14,10 +14,10 @@ The skill assumes PDFs have already been parsed by MinerU and that a `mineru-out
 1. Build paper metadata:
 
 ```bash
-python /home/ps/review-writer/skills/review-metadata-prep/scripts/prepare_metadata.py \
-  --review-root /home/ps/review-writer \
-  --mineru-output /home/ps/review-writer/mineru-outputs \
-  --pdf-root /home/ps/review-writer/source-paper/<your-subfolder> \
+python <review-root>/skills/review-metadata-prep/scripts/prepare_metadata.py \
+  --review-root <review-root> \
+  --mineru-output <review-root>/mineru-outputs \
+  --pdf-root <review-root>/source-paper/<your-subfolder> \
   --discover-from-pdf-root \
   --append-registry
 ```
@@ -28,15 +28,15 @@ Use `--append-registry` when adding a new source-paper folder to an existing lib
 2. Validate metadata:
 
 ```bash
-python /home/ps/review-writer/skills/review-metadata-prep/scripts/validate_metadata.py \
-  --review-root /home/ps/review-writer
+python <review-root>/skills/review-metadata-prep/scripts/validate_metadata.py \
+  --review-root <review-root>
 ```
 
 3. Launch the local review dashboard from the separate view module when human audit is needed:
 
 ```bash
-python /home/ps/review-writer/view/serve_review_dashboard.py \
-  --review-root /home/ps/review-writer \
+python <review-root>/view/serve_review_dashboard.py \
+  --review-root <review-root> \
   --host 127.0.0.1 \
   --port 8765
 ```
@@ -64,7 +64,7 @@ reaction_type
 document_scope
 ```
 
-Each tag value must be selected from your project's classification rules file (e.g. `<your-classification-rules>.py`) under the matching category, or `not specified`. This repo ships `/home/ps/review-writer/allene_classification_rules.py` as the default example.
+Each tag value must be selected from the active shared taxonomy profile under the matching category, or `not specified`. The built-in default is `<review-root>/review_writer_core/taxonomies/allene.py`. Select another built-in profile with `REVIEW_TAXONOMY_PROFILE`, or point `REVIEW_CLASSIFICATION_RULES` at an absolute or workspace-relative Python rules file. Metadata must record the active taxonomy path and SHA-256 identity.
 
 To enable LLM enhancement, set:
 
@@ -75,10 +75,10 @@ export OPENAI_API_KEY=...
 Then run:
 
 ```bash
-python /home/ps/review-writer/skills/review-metadata-prep/scripts/prepare_metadata.py \
-  --review-root /home/ps/review-writer \
-  --mineru-output /home/ps/review-writer/mineru-outputs \
-  --pdf-root /home/ps/review-writer/source-paper/<your-subfolder> \
+python <review-root>/skills/review-metadata-prep/scripts/prepare_metadata.py \
+  --review-root <review-root> \
+  --mineru-output <review-root>/mineru-outputs \
+  --pdf-root <review-root>/source-paper/<your-subfolder> \
   --discover-from-pdf-root \
   --append-registry \
   --use-llm \
@@ -92,8 +92,8 @@ LLM extraction is constrained to the first-page blocks, title/author/abstract ca
 To refresh only the eight LLM tags on an existing library without rebuilding paper IDs or paths:
 
 ```bash
-python /home/ps/review-writer/skills/review-metadata-prep/scripts/llm_retag_metadata.py \
-  --review-root /home/ps/review-writer \
+python <review-root>/skills/review-metadata-prep/scripts/llm_retag_metadata.py \
+  --review-root <review-root> \
   --model gpt-5.4 \
   --base-url https://naiccc.com \
   --reasoning-effort high \
@@ -103,8 +103,8 @@ python /home/ps/review-writer/skills/review-metadata-prep/scripts/llm_retag_meta
 For a full-library refresh, prefer the resumable batch runner. It processes three papers per round by default, skips already successful LLM-tagged papers, writes progress after every paper, and retries failures:
 
 ```bash
-python /home/ps/review-writer/skills/review-metadata-prep/scripts/batch_llm_retag_metadata.py \
-  --review-root /home/ps/review-writer \
+python <review-root>/skills/review-metadata-prep/scripts/batch_llm_retag_metadata.py \
+  --review-root <review-root> \
   --batch-size 3 \
   --max-attempts 5 \
   --retry-delay 30 \
@@ -136,8 +136,8 @@ review-library/metadata/llm_retag_batch_report.md
 If old metadata files need the new `structured_tags` field before LLM retagging:
 
 ```bash
-python /home/ps/review-writer/skills/review-metadata-prep/scripts/backfill_structured_tags.py \
-  --review-root /home/ps/review-writer
+python <review-root>/skills/review-metadata-prep/scripts/backfill_structured_tags.py \
+  --review-root <review-root>
 ```
 
 This only writes `not specified` placeholders for schema compatibility. It does not replace LLM tagging.
@@ -195,7 +195,7 @@ Use `human_review` for audit status and notes. Local paper retrieval uses only t
 The dashboard code lives outside this skill:
 
 ```text
-/home/ps/review-writer/view/
+<review-root>/view/
 ```
 
 The dashboard is a local review console, not the source of truth. The source of truth is the JSON file on disk.

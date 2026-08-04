@@ -129,7 +129,7 @@ query_plan.draft.json 使用 schema_version 1，核心字段如下：
   reaction_type
   document_scope
 
-分类规则和别名来自根目录 allene_classification_rules.py。类别权重为：
+分类规则和别名由 review_writer_core/taxonomy.py 统一加载。默认使用 review_writer_core/taxonomies/allene.py；可通过 REVIEW_TAXONOMY_PROFILE 或 REVIEW_CLASSIFICATION_RULES 切换。类别权重为：
 
   product 5.0
   substrate 5.0
