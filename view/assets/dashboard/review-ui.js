@@ -104,6 +104,23 @@
     updateDisabledState();
   }
 
+  function mountWorkspaceChrome() {
+    const app = document.querySelector(".app");
+    if (!app) return;
+    const panels = Array.from(app.children).filter((child) => child.classList.contains("panel"));
+    const workspace = panels[1];
+    if (!workspace) return;
+    workspace.classList.add("rw-workspace-panel");
+    const heading = Array.from(workspace.children).find((child) =>
+      child.matches(".head, .meta-head, .brand")
+    );
+    heading?.classList.add("rw-workspace-head");
+    const tabs = Array.from(workspace.children).find((child) =>
+      child.matches(".tabs, .detail-tabs")
+    );
+    tabs?.classList.add("rw-workspace-tabs");
+  }
+
   async function executeStage(current) {
     const button = document.querySelector("#stageExecute");
     const status = document.querySelector("#stageExecuteStatus");
@@ -206,6 +223,7 @@
   function init() {
     const id = currentId();
     document.body.classList.add(`page-${id}`);
+    mountWorkspaceChrome();
     const nav = document.querySelector(".nav");
     if (!nav) return;
     mountProjectDeleteControl();

@@ -54,6 +54,21 @@ class DashboardI18nChecks(unittest.TestCase):
         self.assertIn("data-stage-action-host", library_html)
         self.assertIn("const reviewGate = stageActionHost(current);", source)
 
+    def test_middle_workspace_style_is_shared_and_blueprint_has_one_stage_action(self) -> None:
+        source = (ASSET_DIR / "review-ui.js").read_text(encoding="utf-8")
+        css = (ASSET_DIR / "review-ui.css").read_text(encoding="utf-8")
+        blueprint = (ASSET_DIR / "blueprint.html").read_text(encoding="utf-8")
+        self.assertIn("function mountWorkspaceChrome()", source)
+        self.assertIn('workspace.classList.add("rw-workspace-panel")', source)
+        self.assertIn('heading?.classList.add("rw-workspace-head")', source)
+        self.assertIn('tabs?.classList.add("rw-workspace-tabs")', source)
+        self.assertIn(".head.rw-workspace-head", css)
+        self.assertIn(".tabs.rw-workspace-tabs", css)
+        self.assertNotIn('id="enterSections"', blueprint)
+        self.assertNotIn("function enterSections()", blueprint)
+        self.assertIn('current.id === "blueprint"', source)
+        self.assertIn("/section-tasks`", source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -288,6 +288,85 @@ html[lang="zh-CN"] textarea {
   color: var(--rw-ink);
   letter-spacing: -.035em;
 }
+.rw-workspace-panel {
+  background: linear-gradient(180deg, rgba(255,253,247,.98), rgba(249,243,231,.92)) !important;
+}
+.head.rw-workspace-head,
+.meta-head.rw-workspace-head,
+.brand.rw-workspace-head {
+  position: relative;
+  overflow: hidden;
+  min-height: 72px;
+  padding: 18px 22px 16px !important;
+  color: #fff;
+  border-bottom: 0 !important;
+  background: linear-gradient(135deg, #174f44 0%, #267662 100%) !important;
+}
+.rw-workspace-head::after {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: -66px;
+  right: -42px;
+  width: 178px;
+  height: 178px;
+  border: 27px solid rgba(255,255,255,.07);
+  border-radius: 50%;
+  pointer-events: none;
+}
+.rw-workspace-head > * {
+  position: relative;
+  z-index: 1;
+}
+.rw-workspace-head h1,
+.rw-workspace-head h2 {
+  max-width: 780px;
+  color: #fff !important;
+  font-size: 22px !important;
+  line-height: 1.25;
+}
+.rw-workspace-head .sub,
+.rw-workspace-head .meta {
+  margin-top: 7px;
+  color: #d9eee7 !important;
+  font: 600 12px/1.4 Arial, sans-serif;
+  letter-spacing: .02em;
+}
+.tabs.rw-workspace-tabs,
+.detail-tabs.rw-workspace-tabs {
+  counter-reset: rw-workspace-tab;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 14px !important;
+  border-bottom: 1px solid #dfd3c0 !important;
+  background: rgba(247,241,229,.96) !important;
+}
+.rw-workspace-tabs .tab {
+  counter-increment: rw-workspace-tab;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 38px;
+  padding: 8px 12px !important;
+  border-radius: 8px !important;
+}
+.rw-workspace-tabs .tab::before {
+  content: counter(rw-workspace-tab, decimal-leading-zero);
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  border-radius: 6px;
+  color: #675e50;
+  background: #eee6d8;
+  font: 700 10px/1 Arial, sans-serif;
+}
+.rw-workspace-tabs .tab.active::before {
+  color: #fff;
+  background: rgba(255,255,255,.2);
+}
 .sub,
 .brand p,
 .item-meta,
