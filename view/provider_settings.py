@@ -40,6 +40,23 @@ def _read_document(review_root: Path) -> dict[str, Any]:
     return data
 
 
+def _read_dotenv_values(review_root: Path) -> dict[str, str]:
+    """Read a workspace .env without mutating the dashboard process."""
+    path = Path(review_root).resolve() / ".env"
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+    for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key:
+            values[key] = value.strip().strip("'\"")
+    return values
+
+
 def _write_document(review_root: Path, values: dict[str, str]) -> Path:
     path = settings_path(review_root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -153,8 +170,34 @@ def apply_saved_provider_settings(review_root: Path) -> dict[str, str]:
     return values
 
 
+def provider_subprocess_environment(review_root: Path) -> dict[str, str]:
+    """Build a fresh environment for every workflow subprocess.
+
+    Workspace .env values override stale inherited variables, while settings
+    saved through the UI take final precedence. This keeps later stages tied to
+    the workspace shown in Settings instead of to whichever shell launched the
+    dashboard.
+    """
+    root = Path(review_root).resolve()
+    environment = dict(os.environ)
+    environment.update(_read_dotenv_values(root))
+    saved = {
+        str(key): str(value)
+        for key, value in (_read_document(root).get("values") or {}).items()
+        if str(key).strip() and isinstance(value, str)
+    }
+    environment.update(saved)
+    if not str(environment.get("MINERU_API_TOKEN") or "").strip():
+        legacy_key = _legacy_mineru_key(root)
+        if legacy_key:
+            environment["MINERU_API_TOKEN"] = legacy_key
+    return environment
+
+
 def public_provider_settings(review_root: Path) -> dict[str, Any]:
-    values = apply_saved_provider_settings(review_root)
+    root = Path(review_root).resolve()
+    path = settings_path(root)
+    values = apply_saved_provider_settings(root)
     mineru_key = _effective(values, "MINERU_API_TOKEN")
     mineru_source = _source(values, ("MINERU_API_TOKEN",))
     if not mineru_key:
@@ -168,7 +211,10 @@ def public_provider_settings(review_root: Path) -> dict[str, Any]:
         "storage": {
             "scope": "local-workspace",
             "git_ignored": True,
-            "updated_at": _read_document(review_root).get("updated_at"),
+            "workspace_root": str(root),
+            "settings_path": str(path),
+            "settings_file_exists": path.is_file(),
+            "updated_at": _read_document(root).get("updated_at"),
         },
         "mineru": {
             "key_configured": bool(mineru_key),
@@ -237,6 +283,20 @@ def save_provider_settings(review_root: Path, payload: dict[str, Any]) -> dict[s
     mineru_key = _validate_key(mineru.get("api_key"), "MinerU key")
     text_key = _validate_key(text.get("api_key"), "Text API key")
     image_key = _validate_key(image.get("api_key"), "Image API key")
+    # Blank secret fields mean "keep the current key". Persist the effective
+    # environment/.env key into the Git-ignored settings document so later
+    # workflow subprocesses are not coupled to the dashboard launch shell.
+    effective_environment = provider_subprocess_environment(review_root)
+    if not mineru_key:
+        mineru_key = str(effective_environment.get("MINERU_API_TOKEN") or "").strip()
+    if not text_key:
+        text_key = str(
+            effective_environment.get("REVIEW_WRITING_API_KEY")
+            or effective_environment.get("OPENAI_API_KEY")
+            or ""
+        ).strip()
+    if not image_key:
+        image_key = str(effective_environment.get("IMAGE_OPENAI_API_KEY") or "").strip()
     if mineru_key:
         values["MINERU_API_TOKEN"] = mineru_key
     if text_key:

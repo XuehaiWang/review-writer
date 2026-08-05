@@ -83,6 +83,38 @@ class ProviderSettingsChecks(unittest.TestCase):
             self.assertEqual(os.environ["OPENAI_API_KEY"], "text-existing")
             self.assertEqual(os.environ["IMAGE_OPENAI_API_KEY"], "image-existing")
 
+    def test_first_save_preserves_effective_dotenv_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, patch.dict(os.environ, RELEVANT_ENV, clear=False):
+            root = Path(raw)
+            (root / ".env").write_text(
+                "MINERU_API_TOKEN=mineru-dotenv-123456\n"
+                "OPENAI_API_KEY=text-dotenv-123456\n"
+                "IMAGE_OPENAI_API_KEY=image-dotenv-123456\n",
+                encoding="utf-8",
+            )
+            settings.save_provider_settings(
+                root,
+                {
+                    "mineru": {"api_key": ""},
+                    "text": {
+                        "base_url": "https://text.example/v1",
+                        "api_key": "",
+                        "model": "gpt-a",
+                        "wire_api": "chat-completions",
+                    },
+                    "image": {
+                        "base_url": "https://image.example/v1",
+                        "api_key": "",
+                        "model": "image-a",
+                        "wire_api": "images",
+                    },
+                },
+            )
+            stored = json.loads(settings.settings_path(root).read_text(encoding="utf-8"))["values"]
+            self.assertEqual(stored["MINERU_API_TOKEN"], "mineru-dotenv-123456")
+            self.assertEqual(stored["REVIEW_WRITING_API_KEY"], "text-dotenv-123456")
+            self.assertEqual(stored["IMAGE_OPENAI_API_KEY"], "image-dotenv-123456")
+
     def test_rejects_invalid_provider_url(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             with self.assertRaisesRegex(ValueError, "complete HTTP or HTTPS URL"):
@@ -95,6 +127,39 @@ class ProviderSettingsChecks(unittest.TestCase):
                     },
                 )
 
+    def test_subprocess_environment_refreshes_workspace_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, patch.dict(os.environ, RELEVANT_ENV, clear=False):
+            root = Path(raw)
+            (root / ".env").write_text(
+                "REVIEW_WRITING_BASE_URL=https://dotenv.example/v1\n"
+                "REVIEW_WRITING_API_KEY=dotenv-secret-123456\n"
+                "REVIEW_WRITING_MODEL=dotenv-model\n",
+                encoding="utf-8",
+            )
+            os.environ["REVIEW_WRITING_BASE_URL"] = "https://stale-process.example/v1"
+            environment = settings.provider_subprocess_environment(root)
+            self.assertEqual(environment["REVIEW_WRITING_BASE_URL"], "https://dotenv.example/v1")
+            self.assertEqual(environment["REVIEW_WRITING_API_KEY"], "dotenv-secret-123456")
+            settings.save_provider_settings(
+                root,
+                {
+                    "mineru": {},
+                    "text": {
+                        "base_url": "https://saved.example/v1",
+                        "api_key": "saved-secret-123456",
+                        "model": "saved-model",
+                        "wire_api": "chat-completions",
+                    },
+                    "image": {"wire_api": "images"},
+                },
+            )
+            environment = settings.provider_subprocess_environment(root)
+            self.assertEqual(environment["REVIEW_WRITING_BASE_URL"], "https://saved.example/v1")
+            self.assertEqual(environment["REVIEW_WRITING_API_KEY"], "saved-secret-123456")
+            public = settings.public_provider_settings(root)
+            self.assertEqual(public["storage"]["workspace_root"], str(root.resolve()))
+            self.assertTrue(public["storage"]["settings_file_exists"])
+
     def test_settings_page_and_routes_are_wired(self) -> None:
         root = Path(__file__).resolve().parents[1]
         html = (root / "view" / "assets" / "dashboard" / "settings.html").read_text(encoding="utf-8")
@@ -105,8 +170,11 @@ class ProviderSettingsChecks(unittest.TestCase):
         self.assertIn("mountSettingsLink", i18n)
         self.assertIn("rw-settings-shortcut", i18n)
         self.assertIn('id="backToWorkspace"', html)
+        self.assertIn('id="workspaceRoot"', html)
+        self.assertIn("keyState('text',data.text,true)", html)
+        self.assertIn("provider_subprocess_environment(review_root)", server)
         self.assertIn("returnTarget()", html)
-        self.assertIn("20260805c", html)
+        self.assertIn("20260805d", html)
 
 
 if __name__ == "__main__":

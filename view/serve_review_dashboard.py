@@ -58,6 +58,7 @@ from literature_acquisition import acquire_candidate, load_dotenv_if_present, se
 from local_pdf_ingestion import MAX_LOCAL_PDF_BYTES, ingest_local_pdf
 from provider_settings import (
     apply_saved_provider_settings,
+    provider_subprocess_environment,
     public_provider_settings,
     save_provider_settings,
 )
@@ -2407,8 +2408,17 @@ def run_project_script(script: Path, review_root: Path, project_id: str, timeout
     command = [sys.executable, str(script), "--review-root", str(review_root), "--project-id", project_id]
     if extra:
         command.extend(extra)
+    environment = provider_subprocess_environment(review_root)
     try:
-        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            env=environment,
+        )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"Workflow script timed out: {script.name}") from exc
     if result.returncode != 0:
