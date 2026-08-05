@@ -17,12 +17,16 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _review_runtime.paths import resolve_mineru_output_root, resolve_pdf_root, resolve_review_root
+from _review_runtime.paths import (
+    resolve_mineru_output_root,
+    resolve_pdf_root,
+    resolve_review_root,
+    resolve_review_writer_core_root,
+)
 
-
-REVIEW_ROOT = Path(__file__).resolve().parents[3]
-if str(REVIEW_ROOT) not in sys.path:
-    sys.path.insert(0, str(REVIEW_ROOT))
+_CORE_ROOT = resolve_review_writer_core_root(anchor=Path(__file__))
+if _CORE_ROOT is not None and str(_CORE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_CORE_ROOT))
 
 from review_writer_core.taxonomy import (  # noqa: E402
     labels_by_category,

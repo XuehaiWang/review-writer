@@ -159,6 +159,38 @@ def resolve_review_skills_root(value: object = None, *, anchor: Path | None = No
     return (resolve_review_root(anchor=anchor) / "skills").resolve()
 
 
+def resolve_review_writer_core_root(anchor: Path | None = None) -> Path | None:
+    """Find the directory to sys.path-insert so `import review_writer_core` works.
+
+    review_writer_core (the shared taxonomy module) lives at the review-writer
+    repo root as a sibling of skills/. A FounDryClaw deployment only copies
+    skills/, so that layout doesn't hold there. Tries, in order:
+
+    1. FOUNDRYCLAW_REVIEW_WRITER_CORE_ROOT / REVIEW_WRITER_CORE_ROOT env var
+       (the directory that CONTAINS review_writer_core/, not the package itself).
+    2. review_writer_core/ vendored as a sibling of this _review_runtime package
+       (i.e. directly under skills/) -- the FounDryClaw deployment layout.
+    3. review-writer's own repo layout: walk up from anchor looking for a
+       directory containing review_writer_core/taxonomy.py.
+
+    Returns None if review_writer_core cannot be located anywhere.
+    """
+    env = _env_path("FOUNDRYCLAW_REVIEW_WRITER_CORE_ROOT", "REVIEW_WRITER_CORE_ROOT")
+    if env is not None:
+        return env
+    skills_dir = Path(__file__).resolve().parent.parent
+    if (skills_dir / "review_writer_core" / "taxonomy.py").exists():
+        return skills_dir
+    for raw_anchor in _candidate_anchors(anchor):
+        current = raw_anchor.resolve()
+        if current.is_file():
+            current = current.parent
+        for path in (current, *current.parents):
+            if (path / "review_writer_core" / "taxonomy.py").exists():
+                return path
+    return None
+
+
 def project_dir(review_root: Path, project_id: str) -> Path:
     projects_root = resolve_review_projects_root(review_root=review_root)
     candidate = (projects_root / project_id).resolve()
