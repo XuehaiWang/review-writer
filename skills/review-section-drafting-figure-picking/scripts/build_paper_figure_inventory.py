@@ -70,6 +70,28 @@ def field_value(meta: dict[str, Any], key: str) -> Any:
     return value
 
 
+def resolve_recorded_path(review_root: Path, raw_value: Any) -> Path | None:
+    """Resolve current and relocated workspace paths without treating an empty value as '.'."""
+    value = str(raw_value or "").strip()
+    if not value:
+        return None
+    recorded = Path(value)
+    candidates = [recorded] if recorded.is_absolute() else [review_root / recorded]
+    if recorded.is_absolute() and not recorded.exists():
+        folded = [part.casefold() for part in recorded.parts]
+        for marker in ("mineru-outputs", "review-library"):
+            if marker in folded:
+                marker_index = folded.index(marker)
+                candidates.append(review_root.joinpath(*recorded.parts[marker_index:]))
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return candidate.resolve()
+        except OSError:
+            continue
+    return None
+
+
 def block_caption(block: dict[str, Any]) -> str:
     parts = []
     for key in ["image_caption", "table_caption", "caption", "text"]:
@@ -122,17 +144,21 @@ def build_inventory(review_root: Path, project_id: str) -> dict[str, Any]:
             papers.append({"paper_id": paper_id, "status": "missing_metadata", "candidates": []})
             continue
         source_paths = meta.get("source_paths") or {}
-        content_path = Path(str(source_paths.get("content_list") or ""))
-        extracted_dir = Path(str(source_paths.get("extracted_dir") or ""))
+        content_path = resolve_recorded_path(review_root, source_paths.get("content_list"))
+        extracted_dir = resolve_recorded_path(review_root, source_paths.get("extracted_dir"))
         candidates = []
-        if content_path.exists():
+        if content_path and content_path.is_file():
             blocks = read_json(content_path)
             if isinstance(blocks, list):
                 for idx, block in enumerate(blocks, start=1):
                     if not isinstance(block, dict) or block.get("type") not in FIGURE_TYPES:
                         continue
                     img_rel = block.get("img_path") or block.get("image_path") or block.get("path")
-                    source_image_path = str((extracted_dir / str(img_rel)).resolve()) if img_rel and extracted_dir.exists() else ""
+                    source_image_path = (
+                        str((extracted_dir / str(img_rel)).resolve())
+                        if img_rel and extracted_dir and extracted_dir.is_dir()
+                        else ""
+                    )
                     caption = block_caption(block)
                     source_type = str(block.get("type") or "")
                     candidates.append(
@@ -154,6 +180,11 @@ def build_inventory(review_root: Path, project_id: str) -> dict[str, Any]:
         papers.append(
             {
                 "paper_id": paper_id,
+                "status": (
+                    "ready"
+                    if content_path and content_path.is_file() and extracted_dir and extracted_dir.is_dir()
+                    else "mineru_not_ready"
+                ),
                 "title": field_value(meta, "title"),
                 "source_pdf": source_paths.get("pdf"),
                 "markdown": source_paths.get("markdown"),

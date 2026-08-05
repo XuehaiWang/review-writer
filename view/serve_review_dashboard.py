@@ -56,6 +56,12 @@ if str(_LITERATURE_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_LITERATURE_SCRIPTS))
 from literature_acquisition import acquire_candidate, load_dotenv_if_present, search_crossref
 from local_pdf_ingestion import MAX_LOCAL_PDF_BYTES, ingest_local_pdf
+from provider_settings import (
+    apply_saved_provider_settings,
+    provider_subprocess_environment,
+    public_provider_settings,
+    save_provider_settings,
+)
 
 
 _DISCOVERY_MODULE = None
@@ -164,6 +170,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     figure_review_app_path: Path
     draft_app_path: Path
     final_app_path: Path
+    settings_app_path: Path
     external_file_allowlist: frozenset[Path] = frozenset()
     external_directory_allowlist: frozenset[Path] = frozenset()
 
@@ -204,8 +211,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_file(self.draft_app_path, "text/html; charset=utf-8")
         elif parsed.path == "/final":
             self.send_file(self.final_app_path, "text/html; charset=utf-8")
+        elif parsed.path == "/settings":
+            self.send_file(self.settings_app_path, "text/html; charset=utf-8")
         elif parsed.path.startswith("/assets/"):
             self.handle_static_asset(parsed.path)
+        elif parsed.path == "/api/settings":
+            self.handle_provider_settings_get()
         elif parsed.path == "/api/projects":
             self.handle_projects()
         elif parsed.path == "/api/papers":
@@ -267,6 +278,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
         if not self.validate_route_identifiers(parsed.path):
+            return
+        if parsed.path == "/api/settings":
+            self.handle_provider_settings_put()
             return
         if parsed.path.startswith("/api/metadata/"):
             paper_id = unquote(parsed.path.rsplit("/", 1)[-1])
@@ -624,8 +638,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             result = ingest_local_pdf(self.review_root, filename, staged_path)
             status = HTTPStatus.OK if result.get("status") == "duplicate_file" else HTTPStatus.CREATED
             self.send_json({"ok": True, **result}, status=status)
-        except (ValueError, RuntimeError) as exc:
+        except ValueError as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except RuntimeError as exc:
+            status = HTTPStatus.BAD_GATEWAY if "MinerU" in str(exc) else HTTPStatus.INTERNAL_SERVER_ERROR
+            self.send_json({"ok": False, "error": str(exc)}, status=status)
         except Exception as exc:
             self.send_json(
                 {"ok": False, "error": f"Local PDF ingestion failed: {type(exc).__name__}: {exc}"},
@@ -766,6 +783,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise ValueError("Request body must be a JSON object.")
         return payload
+
+    def handle_provider_settings_get(self) -> None:
+        try:
+            self.send_json(public_provider_settings(self.review_root))
+        except RuntimeError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def handle_provider_settings_put(self) -> None:
+        try:
+            payload = self.read_json_object()
+            result = save_provider_settings(self.review_root, payload)
+            self.send_json({**result, "message": "API settings saved and applied to new tasks."})
+        except (ValueError, json.JSONDecodeError) as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except RuntimeError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def handle_discovery_projects(self) -> None:
         self.send_json([p for p in list_review_projects(self.review_root) if p.get("has_discovery")])
@@ -2375,8 +2408,17 @@ def run_project_script(script: Path, review_root: Path, project_id: str, timeout
     command = [sys.executable, str(script), "--review-root", str(review_root), "--project-id", project_id]
     if extra:
         command.extend(extra)
+    environment = provider_subprocess_environment(review_root)
     try:
-        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            env=environment,
+        )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"Workflow script timed out: {script.name}") from exc
     if result.returncode != 0:
@@ -3347,7 +3389,8 @@ def redraw_current_figure(
         and use_source_faithful_multipanel_render(candidate)
     )
     hollow_color_fills = source_faithful_multipanel and use_hollow_color_fill_render(candidate)
-    extra = ["--figure-id", figure_id, "--model", "gpt-image-2", "--require-redrawn"]
+    image_model = os.environ.get("IMAGE_OPENAI_MODEL", "gpt-image-2").strip() or "gpt-image-2"
+    extra = ["--figure-id", figure_id, "--model", image_model, "--require-redrawn"]
     if mechanism_arrow_profile:
         extra.extend(
             [
@@ -4453,7 +4496,12 @@ def generate_final_overview_figure(review_root: Path, project_id: str) -> dict[s
         review_root,
         project_id,
         timeout=600,
-        extra=["--model", "gpt-image-2", "--output", str(output_path)],
+        extra=[
+            "--model",
+            os.environ.get("IMAGE_OPENAI_MODEL", "gpt-image-2").strip() or "gpt-image-2",
+            "--output",
+            str(output_path),
+        ],
     )
     if not output_path.is_file() or output_path.stat().st_size <= 0:
         raise RuntimeError("Overview figure generation did not produce a PNG output.")
@@ -6027,7 +6075,8 @@ def dashboard_assets(view_root: Path) -> tuple[Path, ...]:
     figure_review_path = dashboard / "figure-review.html"
     draft_path = dashboard / "draft.html"
     final_path = dashboard / "final.html"
-    paths = [library_path, discovery_path, matrix_path, blueprint_path, sections_path, figures_path, figure_review_path, draft_path, final_path]
+    settings_path = dashboard / "settings.html"
+    paths = [library_path, discovery_path, matrix_path, blueprint_path, sections_path, figures_path, figure_review_path, draft_path, final_path, settings_path]
     if any(not path.exists() for path in paths):
         raise FileNotFoundError(f"dashboard assets not found under {view_root / 'assets' / 'dashboard'}")
     return tuple(paths)
@@ -6098,6 +6147,8 @@ def ensure_review_library_workspace(review_root: Path) -> list[Path]:
 
 def run(args: argparse.Namespace) -> int:
     review_root = Path(args.review_root).resolve()
+    load_dotenv_if_present(review_root)
+    apply_saved_provider_settings(review_root)
     os.environ["REVIEW_WRITER_PREFECT_ENABLED"] = "true"
     configure_prefect_environment(review_root)
     view_root = Path(__file__).resolve().parent
@@ -6111,6 +6162,7 @@ def run(args: argparse.Namespace) -> int:
         figure_review_app_path,
         draft_app_path,
         final_app_path,
+        settings_app_path,
     ) = dashboard_assets(view_root)
     ensure_review_library_workspace(review_root)
     instance_lock = acquire_dashboard_instance_lock(review_root, args.host, args.port)
@@ -6139,6 +6191,7 @@ def run(args: argparse.Namespace) -> int:
     DashboardHandler.figure_review_app_path = figure_review_app_path
     DashboardHandler.draft_app_path = draft_app_path
     DashboardHandler.final_app_path = final_app_path
+    DashboardHandler.settings_app_path = settings_app_path
     (
         DashboardHandler.external_file_allowlist,
         DashboardHandler.external_directory_allowlist,

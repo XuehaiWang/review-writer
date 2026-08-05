@@ -241,6 +241,8 @@ def registry_key(row: dict[str, Any]) -> str:
 
 def content_list_path(extracted_dir: Path) -> Path | None:
     candidates = sorted(extracted_dir.glob("*_content_list.json"))
+    if not candidates:
+        candidates = sorted(extracted_dir.rglob("*_content_list.json"))
     return candidates[0] if candidates else None
 
 

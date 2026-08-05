@@ -6,8 +6,11 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
+import subprocess
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +19,7 @@ from typing import Any
 
 MAX_LOCAL_PDF_BYTES = 80 * 1024 * 1024
 MAX_EXTRACTED_TEXT_CHARS = 2_000_000
+MINERU_UPLOAD_TIMEOUT_SECONDS = 35 * 60
 _INGEST_LOCK = threading.RLock()
 _METADATA_MODULE: Any | None = None
 _DOI_RE = re.compile(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.I)
@@ -274,8 +278,141 @@ def _rebuild_registry(review_root: Path) -> None:
     rebuild_registry(Path(review_root))
 
 
+def _load_dotenv_if_present(review_root: Path) -> None:
+    path = Path(review_root) / ".env"
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key:
+            os.environ.setdefault(key, value.strip().strip("'\""))
+
+
+def _mineru_content_list(extracted_dir: Path) -> Path | None:
+    direct = sorted(extracted_dir.glob("*_content_list.json"))
+    if direct:
+        return direct[0]
+    nested = sorted(extracted_dir.rglob("*_content_list.json"))
+    return nested[0] if nested else None
+
+
+def _mineru_artifact_paths(review_root: Path, slug: str) -> dict[str, Path]:
+    output_dir = Path(review_root) / "mineru-outputs"
+    return {
+        "output_dir": output_dir,
+        "markdown": output_dir / "markdown" / f"{slug}.md",
+        "extracted_dir": output_dir / "extracted" / slug,
+        "raw_zip": output_dir / "raw_zips" / f"{slug}.zip",
+        "manifest": output_dir / "manifests" / f"{slug}.json",
+    }
+
+
+def _remove_mineru_artifacts(review_root: Path, slug: str) -> None:
+    artifacts = _mineru_artifact_paths(review_root, slug)
+    for key in ("markdown", "raw_zip", "manifest"):
+        artifacts[key].unlink(missing_ok=True)
+    extracted_dir = artifacts["extracted_dir"]
+    if extracted_dir.is_dir():
+        shutil.rmtree(extracted_dir)
+
+
+def _process_error_detail(completed: subprocess.CompletedProcess[str]) -> str:
+    text = "\n".join([completed.stderr or "", completed.stdout or ""])
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return " | ".join(lines[-8:])[:1800]
+
+
+def _run_mineru_parser(review_root: Path, pdf_path: Path, slug: str) -> dict[str, Any]:
+    """Run the canonical MinerU single-PDF workflow and validate its required outputs."""
+    root = Path(review_root).resolve()
+    script = (
+        root
+        / "skills"
+        / "mineru-precise-parse-review-writer"
+        / "scripts"
+        / "parse_review_writer_pdfs.py"
+    )
+    if not script.is_file():
+        raise RuntimeError(f"MinerU parser script is missing: {script}")
+    artifacts = _mineru_artifact_paths(root, slug)
+    artifacts["manifest"].parent.mkdir(parents=True, exist_ok=True)
+    _load_dotenv_if_present(root)
+    command = [
+        sys.executable,
+        str(script),
+        "--input-dir",
+        str(pdf_path.parent),
+        "--pdf",
+        str(pdf_path),
+        "--output-dir",
+        str(artifacts["output_dir"]),
+        "--manifest-path",
+        str(artifacts["manifest"]),
+        "--force",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=MINERU_UPLOAD_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "MinerU precise parsing timed out after 35 minutes; the PDF was not admitted to Library."
+        ) from exc
+    if completed.returncode != 0:
+        detail = _process_error_detail(completed)
+        raise RuntimeError(
+            "MinerU precise parsing failed; the PDF was not admitted to Library."
+            + (f" {detail}" if detail else "")
+        )
+
+    markdown_path = artifacts["markdown"]
+    extracted_dir = artifacts["extracted_dir"]
+    content_path = _mineru_content_list(extracted_dir) if extracted_dir.is_dir() else None
+    missing: list[str] = []
+    if not markdown_path.is_file():
+        missing.append("Markdown")
+    if not extracted_dir.is_dir():
+        missing.append("extracted directory")
+    if not content_path or not content_path.is_file():
+        missing.append("content_list.json")
+    if missing:
+        raise RuntimeError(
+            "MinerU returned an incomplete parse (missing " + ", ".join(missing) + "); the PDF was not admitted to Library."
+        )
+    try:
+        blocks = json.loads(content_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("MinerU content_list.json is unreadable; the PDF was not admitted to Library.") from exc
+    if not isinstance(blocks, list):
+        raise RuntimeError("MinerU content_list.json has an invalid structure; the PDF was not admitted to Library.")
+    full_md = extracted_dir / "full.md"
+    if not full_md.is_file():
+        full_candidates = sorted(extracted_dir.rglob("*.md"))
+        full_md = full_candidates[0] if full_candidates else markdown_path
+    return {
+        "slug": slug,
+        "markdown_copy": markdown_path,
+        "extracted_dir": extracted_dir,
+        "content_list": content_path,
+        "full_md": full_md,
+        "manifest_path": artifacts["manifest"],
+        "content_block_count": len(blocks),
+    }
+
+
 def ingest_local_pdf(review_root: Path, original_filename: object, staged_pdf: Path) -> dict[str, Any]:
-    """Copy one staged PDF into the library and build searchable/generative metadata."""
+    """Run MinerU for one uploaded PDF, then admit its complete artifacts to Library."""
     root = Path(review_root).resolve()
     filename = sanitize_pdf_filename(original_filename)
     staged_pdf = Path(staged_pdf).resolve()
@@ -284,7 +421,10 @@ def ingest_local_pdf(review_root: Path, original_filename: object, staged_pdf: P
     with _INGEST_LOCK:
         rows = _existing_metadata(root)
         duplicate = _duplicate_for_digest(rows, digest)
-        if duplicate:
+        duplicate_mode = str((duplicate or {}).get("extraction", {}).get("mode") or "")
+        duplicate_paths = (duplicate or {}).get("source_paths") or {}
+        duplicate_content = Path(str(duplicate_paths.get("content_list") or "").strip()) if duplicate else None
+        if duplicate and "mineru" in duplicate_mode.casefold() and duplicate_content and duplicate_content.is_file():
             return {
                 "status": "duplicate_file",
                 "paper_id": duplicate.get("paper_id"),
@@ -293,59 +433,65 @@ def ingest_local_pdf(review_root: Path, original_filename: object, staged_pdf: P
                 "message": "This PDF is already registered in Library.",
             }
 
-        paper_id = _next_paper_id(rows)
+        upgrading_existing = bool(duplicate)
+        paper_id = str(duplicate.get("paper_id")) if duplicate else _next_paper_id(rows)
         upload_dir = root / "review-library" / "uploads"
         metadata_dir = root / "review-library" / "metadata" / "papers"
         upload_dir.mkdir(parents=True, exist_ok=True)
         metadata_dir.mkdir(parents=True, exist_ok=True)
         final_pdf = upload_dir / f"{paper_id}.pdf"
-        final_md = upload_dir / f"{paper_id}.md"
         meta_path = metadata_dir / f"{paper_id}.metadata.json"
-        copied = final_pdf.with_suffix(".pdf.tmp")
-        shutil.copyfile(staged_pdf, copied)
-        copied.replace(final_pdf)
+        created_pdf = False
+        if not final_pdf.is_file():
+            copied = final_pdf.with_suffix(".pdf.tmp")
+            shutil.copyfile(staged_pdf, copied)
+            copied.replace(final_pdf)
+            created_pdf = True
+        prep = _metadata_module(root)
+        slug = prep.slugify_mineru(final_pdf.stem)
         try:
+            mineru = _run_mineru_parser(root, final_pdf, slug)
             reader = _pdf_reader(final_pdf)
             info = _document_info(reader)
-            page_texts, warnings = _extract_pages(reader)
-            extracted_text = "\n\n".join(text for text in page_texts if text)
-            title = info.get("title", "")
-            if _looks_like_generated_title(title):
-                title = _title_from_text(extracted_text, filename)
-            title = _clean_text(title) or Path(filename).stem
-            markdown = _markdown_document(title, page_texts)
-            md_tmp = final_md.with_suffix(".md.tmp")
-            md_tmp.write_text(markdown, encoding="utf-8")
-            md_tmp.replace(final_md)
-
-            prep = _metadata_module(root)
+            final_md = Path(mineru["markdown_copy"])
+            content_path = Path(mineru["content_list"])
+            extracted_text = final_md.read_text(encoding="utf-8", errors="replace")
             job = {
-                "slug": prep.slugify(Path(filename).stem),
+                "slug": slug,
                 "pdf_name": filename,
                 "relative_pdf_path": str(final_pdf.relative_to(root)),
-                "extracted_dir": None,
+                "extracted_dir": str(mineru["extracted_dir"]),
+                "markdown_copy": str(final_md),
+                "full_md": str(mineru["full_md"]),
             }
             metadata, _, _, _ = prep.build_metadata(
                 paper_id,
                 job,
                 final_pdf,
                 final_md,
-                None,
-                None,
+                content_path,
+                duplicate,
                 root,
             )
-            metadata["title"] = _field(title, "pdf_document_info" if info.get("title") else "pdf_first_page", 0.88)
+            title = str((metadata.get("title") or {}).get("value") or "").strip()
+            info_title = info.get("title", "")
+            if (not title or _looks_like_generated_title(title)) and not _looks_like_generated_title(info_title):
+                title = _clean_text(info_title)
+                metadata["title"] = _field(title, "pdf_document_info", 0.88)
+            title = title or _title_from_text(extracted_text, filename) or Path(filename).stem
+            if not (metadata.get("title") or {}).get("value"):
+                metadata["title"] = _field(title, "mineru_markdown_front_matter", 0.82)
             authors = _authors_from_info(info.get("author", ""))
-            if authors:
+            if authors and not (metadata.get("authors") or {}).get("value"):
                 metadata["authors"] = _field(authors, "pdf_document_info", 0.72)
             year = _year_from_info(info, extracted_text)
-            if year:
+            if year and not (metadata.get("year") or {}).get("value"):
                 metadata["year"] = _field(year, "pdf_document_info_or_front_matter", 0.68)
             doi = _doi_from_text(extracted_text)
-            if doi:
+            if doi and not (metadata.get("doi") or {}).get("value"):
                 metadata["doi"] = _field(doi, "pdf_text_regex", 0.9)
             abstract = _abstract_from_text(extracted_text)
-            if abstract:
+            if abstract and not (metadata.get("abstract") or {}).get("value"):
                 metadata["abstract"] = _field(abstract, "pdf_text_abstract_region", 0.78)
             metadata["source_file"].update(
                 {
@@ -362,43 +508,48 @@ def ingest_local_pdf(review_root: Path, original_filename: object, staged_pdf: P
                 "acquired_at": utc_now(),
             }
             metadata["extraction"] = {
-                "mode": "local_pdf_upload+pypdf",
-                "model": None,
+                "mode": "local_pdf_upload+mineru_precise",
+                "model": "mineru-vlm",
                 "created_at": utc_now(),
                 "inputs": {
                     "page_count": len(reader.pages),
-                    "pages_with_text": sum(bool(text) for text in page_texts),
                     "extracted_text_chars": len(extracted_text),
                     "original_upload_name": filename,
+                    "content_blocks": int(mineru["content_block_count"]),
+                    "content_list": str(content_path),
+                    "extracted_dir": str(mineru["extracted_dir"]),
+                    "manifest": str(mineru["manifest_path"]),
                 },
-                "notes": warnings,
+                "notes": ["mineru_precise_parse_completed_before_library_admission"],
             }
             prep.apply_structured_tags_to_compat_fields(metadata)
             prep.update_quality(metadata)
-            metadata["quality"]["warnings"] = list(
-                dict.fromkeys(list(metadata["quality"].get("warnings") or []) + warnings)
-            )
             metadata["quality"]["needs_human_check"] = True
             meta_tmp = meta_path.with_suffix(".json.tmp")
             meta_tmp.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             meta_tmp.replace(meta_path)
             _rebuild_registry(root)
         except Exception:
-            final_pdf.unlink(missing_ok=True)
-            final_md.unlink(missing_ok=True)
-            meta_path.unlink(missing_ok=True)
+            _remove_mineru_artifacts(root, slug)
+            if created_pdf:
+                final_pdf.unlink(missing_ok=True)
+            if not upgrading_existing:
+                meta_path.unlink(missing_ok=True)
             raise
 
     return {
-        "status": "uploaded",
+        "status": "upgraded_to_mineru" if upgrading_existing else "uploaded",
         "paper_id": paper_id,
         "filename": filename,
         "title": title,
         "page_count": len(reader.pages),
         "extracted_text_chars": len(extracted_text),
-        "needs_ocr": any("OCR is recommended" in warning for warning in warnings),
-        "warnings": warnings,
+        "mineru_ready": True,
+        "content_block_count": int(mineru["content_block_count"]),
+        "warnings": list(metadata.get("quality", {}).get("warnings") or []),
         "metadata_path": str(meta_path),
         "pdf_path": str(final_pdf),
         "markdown_path": str(final_md),
+        "content_list_path": str(content_path),
+        "extracted_dir": str(mineru["extracted_dir"]),
     }

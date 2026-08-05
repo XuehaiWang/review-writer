@@ -84,6 +84,21 @@ python <review-root>/skills/mineru-precise-parse-review-writer/scripts/parse_rev
   --pdf <pdf-library-folder>/paper.pdf
 ```
 
+Write a separate manifest for an independent single-PDF job:
+
+```bash
+python <review-root>/skills/mineru-precise-parse-review-writer/scripts/parse_review_writer_pdfs.py \
+  --input-dir <pdf-library-folder> \
+  --pdf <pdf-library-folder>/paper.pdf \
+  --manifest-path <review-root>/mineru-outputs/manifests/paper.json
+```
+
+The stage-1 local upload route uses this single-PDF mode. It admits a PDF to
+the Library only after MinerU Markdown, the extracted directory, and
+`*_content_list.json` all exist and canonical metadata has been rebuilt from
+those outputs. A failed or incomplete MinerU run is not exposed as a ready
+paper to retrieval, drafting, or figure inventory stages.
+
 ## Outputs
 
 The skill writes:

@@ -340,6 +340,17 @@ Source evidence (only use claims supported here):\n{json.dumps(evidence, ensure_
 """
         try:
             generated = call_llm(prompt, api_key, base_url, model, wire_api)
+        except RuntimeError as exc:
+            message = str(exc)
+            if "transport failed" in message.casefold():
+                raise SystemExit(
+                    "Section-writing provider could not be reached after three retries. "
+                    f"Configured endpoint: {base_url}. Open API Settings from this deployment, "
+                    "confirm that the displayed active workspace is correct, save the text provider again, "
+                    "and retry the stage. "
+                    f"Details: {message}"
+                ) from None
+            raise SystemExit(message) from None
         except urllib.error.HTTPError as exc:
             raise SystemExit(
                 f"Section-writing model request was rejected (HTTP {exc.code}). "

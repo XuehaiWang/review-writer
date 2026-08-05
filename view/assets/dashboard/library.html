@@ -457,7 +457,7 @@
           <button class="btn" id="openUploadBtn">Upload local PDFs</button>
           <input id="localPdfInput" type="file" accept=".pdf,application/pdf" multiple hidden>
         </div>
-        <div id="uploadStatus" class="upload-status">Batch upload builds searchable metadata and full-text Markdown.</div>
+        <div id="uploadStatus" class="upload-status">Batch upload runs MinerU precise parsing, then builds searchable metadata and full-text Markdown.</div>
       </div>
       <div class="search"><input id="search" placeholder="Search title, author, keyword, tag"></div>
       <div id="papers" class="papers"></div>
@@ -540,8 +540,8 @@
       </section>
     </div>
   </div>
-  <script src="/assets/dashboard/review-i18n.js?v=20260804"></script>
-  <script src="/assets/dashboard/review-ui.js?v=20260804"></script>
+  <script src="/assets/dashboard/review-i18n.js?v=20260805d"></script>
+  <script src="/assets/dashboard/review-ui.js?v=20260805d"></script>
   <script>
     let papers = [];
     let selected = null;
@@ -755,7 +755,7 @@
       try {
         for (let index = 0; index < files.length; index += 1) {
           const file = files[index];
-          els.uploadStatus.textContent = `Uploading and extracting metadata ${index + 1}/${files.length}: ${file.name}`;
+          els.uploadStatus.textContent = `Uploading and running MinerU precise parsing ${index + 1}/${files.length}: ${file.name}`;
           try {
             const response = await fetch(`/api/library/upload-pdf?filename=${encodeURIComponent(file.name)}`, {
               method: 'POST',
@@ -777,12 +777,11 @@
         }
         await loadPapers();
         if (lastPaperId) await selectPaper(lastPaperId);
-        const ocrCount = results.filter(result => result.needs_ocr).length;
         const firstError = results.find(result => result.error)?.error || '';
         els.uploadStatus.textContent = `Batch complete: ${added} added, ${duplicate} duplicate, ${failed} failed.` +
-          (ocrCount ? ` ${ocrCount} PDF(s) need OCR.` : '') +
+          (added ? ` ${added} PDF(s) completed MinerU parsing and are ready downstream.` : '') +
           (firstError ? ` First error: ${firstError}` : '');
-        showMessage(failed ? 'PDF batch completed with errors' : 'PDF metadata is ready');
+        showMessage(failed ? 'PDF batch completed with MinerU errors' : 'MinerU PDF artifacts and metadata are ready');
       } finally {
         els.openUploadBtn.disabled = false;
         els.localPdfInput.value = '';

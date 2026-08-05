@@ -4,6 +4,46 @@
   const STORAGE_KEY = "review-writer-ui-language";
   const SUPPORTED = new Set(["en", "zh-CN"]);
   const EN_ZH = Object.freeze({
+    "← Back to workspace": "← 返回工作台",
+    "Back to workspace": "返回工作台",
+    "Settings": "设置",
+    "⚙ Settings": "⚙ 设置",
+    "Local provider configuration": "本地服务商配置",
+    "Local workspace settings": "本地工作区设置",
+    "Active workspace": "当前工作区",
+    "Checking settings": "正在检查设置",
+    "Settings saved locally": "设置已保存到本地",
+    "Not saved locally": "尚未保存到本地",
+    "Unknown workspace": "未知工作区",
+    "API Provider Settings": "API 服务商设置",
+    "Configure MinerU parsing, text generation, and image generation providers. Saved values apply to newly started tasks in this workspace.": "配置 MinerU 解析、文本生成和图像生成服务商。保存后将应用于此工作区中新启动的任务。",
+    "MinerU parsing": "MinerU 解析",
+    "Required for uploaded PDF Markdown, content blocks, and figure extraction.": "用于生成上传 PDF 的 Markdown、内容块和图像提取结果。",
+    "Text generation": "文本生成",
+    "Used by section writing, conclusion generation, metadata AI, and final draft merging.": "用于章节撰写、结论生成、元数据 AI 和最终稿合并。",
+    "Image generation": "图像生成",
+    "Used by AI figure redraw and the review overview figure.": "用于 AI 图像重绘和综述总览图。",
+    "MinerU key": "MinerU 密钥",
+    "Text API URL": "文本 API 地址",
+    "Text API key": "文本 API 密钥",
+    "Image API URL": "图像 API 地址",
+    "Image API key": "图像 API 密钥",
+    "Model": "模型",
+    "API format": "接口格式",
+    "Show": "显示",
+    "Hide": "隐藏",
+    "Reload": "重新加载",
+    "Save settings": "保存设置",
+    "Secrets stay on this computer": "密钥仅保存在这台电脑",
+    "Local settings": "本地设置",
+    "Environment / .env": "环境变量 / .env",
+    "Legacy token file": "旧令牌文件",
+    "Not configured": "未配置",
+    "Loading": "加载中",
+    "Loading settings…": "正在加载设置…",
+    "Saving and applying settings…": "正在保存并应用设置…",
+    "Settings loaded. Blank key fields preserve existing secrets.": "设置已加载。密钥输入框留空将保留已有密钥。",
+    "API settings saved and applied.": "API 设置已保存并应用。",
     "Step 1 · Choose a structure": "步骤 1 · 选择组织结构",
     "Choose your review structure": "选择综述大纲结构",
     "Start from the literature metadata and the current Matrix, or upload a reference review to derive its organization.": "可基于文献元数据与当前矩阵选择大纲，也可上传参考综述并提取其组织结构。",
@@ -588,6 +628,41 @@
     });
   }
 
+  function mountSettingsLink() {
+    const nav = document.querySelector(".nav");
+    const navRight = document.querySelector(".nav-right");
+    if (!nav) return;
+    if (!document.querySelector("#rw-settings-shortcut-style")) {
+      const style = document.createElement("style");
+      style.id = "rw-settings-shortcut-style";
+      style.textContent = `
+        .nav .rw-settings-shortcut{display:inline-flex!important;align-items:center;gap:5px;flex:0 0 auto;padding:7px 10px;border:1px solid rgba(29,102,85,.22);border-radius:8px;background:#fffdf7;color:#1d6655;text-decoration:none;font-size:12px;font-weight:700;white-space:nowrap}
+        .nav .rw-settings-shortcut.active{color:#fff;background:#1d6655;border-color:#1d6655}
+        @media(max-width:720px){.nav .rw-settings-shortcut{position:absolute;top:9px;right:116px;padding:6px 8px}}
+      `;
+      document.head.appendChild(style);
+    }
+    const onSettingsPage = window.location.pathname === "/settings";
+    const currentLocation = window.location.pathname + window.location.search;
+    const settingsHref = onSettingsPage ? "/settings" : `/settings?return=${encodeURIComponent(currentLocation)}`;
+    if (!onSettingsPage && !nav.querySelector(".rw-settings-shortcut")) {
+      const shortcut = document.createElement("a");
+      shortcut.className = "rw-settings-shortcut";
+      shortcut.href = settingsHref;
+      shortcut.textContent = "⚙ Settings";
+      shortcut.title = "API Provider Settings";
+      if (navRight) nav.insertBefore(shortcut, navRight);
+      else nav.appendChild(shortcut);
+    }
+    if (navRight && !navRight.querySelector('a[href="/settings"]')) {
+      const link = document.createElement("a");
+      link.href = settingsHref;
+      link.textContent = "Settings";
+      if (window.location.pathname === "/settings") link.classList.add("active");
+      navRight.appendChild(link);
+    }
+  }
+
   function observeDynamicUi() {
     const observer = new MutationObserver((records) => {
       const roots = new Set();
@@ -608,6 +683,7 @@
   }
 
   function init() {
+    mountSettingsLink();
     mountSwitch();
     applyLanguage();
     observeDynamicUi();
