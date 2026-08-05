@@ -79,6 +79,19 @@ python skills/review-topic-paper-discovery/scripts/discover.py \
   --query-plan review-projects/<project-id>/00_discovery/query_plan.draft.json
 ```
 
+By default the script selects up to 30 local candidate papers (the skill's documented
+20-30 range). Pass `--target-count <N>` to raise or lower that cap, e.g. when the user
+explicitly asks for more candidates than the default range:
+
+```bash
+python skills/review-topic-paper-discovery/scripts/discover.py \
+  --review-root <review-root> \
+  --topic "<review topic>" \
+  --project-id <project-id> \
+  --query-plan review-projects/<project-id>/00_discovery/query_plan.draft.json \
+  --target-count 40
+```
+
 Add `--sciatlas-search`, `--web-search`, or both to that command when external
 coverage is requested. For SciAtlas KG, configure the service and append its
 search controls:
@@ -167,7 +180,8 @@ human_check_state.json
 
 `web_results_by_keyword.json.source` is `sciatlas`, `crossref`, `sciatlas+crossref`, or `none`. Per-result rows carry a `sources` array so you can see which sources contributed.
 `selected_discovery_results.json` should contain `20-30` kept local papers
-when enough matches exist. External (SciAtlas/Crossref) papers go into
+when enough matches exist (or up to whatever `--target-count` was set to, if
+overridden). External (SciAtlas/Crossref) papers go into
 `web_papers`; they are a topic-coverage check pool only. They never enter
 the local `paper_id` registry and the matrix stage may cite them only as
 references without assigning a `paper_id`. If fewer than 20 local papers

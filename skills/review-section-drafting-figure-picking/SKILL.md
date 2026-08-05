@@ -117,6 +117,55 @@ python <review-root>/skills/review-section-drafting-figure-picking/scripts/build
 
 Use real source figures/schemes/tables from MinerU/PDF. Do not invent figures.
 
+## Automated Script Path
+
+This skill also ships two scripts that automate the manual writing workflow above.
+Run them in this exact order — the later scripts depend on files the earlier ones
+produce:
+
+```bash
+# 1. Build the figure inventory (see Figure Rules above).
+python <review-root>/skills/review-section-drafting-figure-picking/scripts/build_paper_figure_inventory.py \
+  --review-root <review-root> --project-id <project_id>
+
+# 2. Create section_tasks.json from section_blueprint.json before running either
+#    script below. This is not auto-generated; build it directly from
+#    section_blueprint.json.sections[] (section_id, title->heading,
+#    section_thesis->core_argument, major_papers->allowed_papers,
+#    review_claims[].claim->must_cover_points, avoid_patterns->avoid_points,
+#    figure_or_table_needs[0].purpose->figure_need).
+
+# 3. Rank figure candidates per paper (writes figure_candidates.json).
+python <review-root>/skills/review-section-drafting-figure-picking/scripts/select_initial_figure_candidates.py \
+  --review-root <review-root> --project-id <project_id>
+
+# 4. Draft every section with an LLM and auto-embed the ranked figures + a
+#    References list into each section file.
+python <review-root>/skills/review-section-drafting-figure-picking/scripts/generate_section_drafts.py \
+  --review-root <review-root> \
+  --project-id <project_id> \
+  --model gpt-4.1-mini \
+  --base-url <openai-compatible-base-url> \
+  --wire-api chat-completions \
+  --api-key <key>
+```
+
+Step 4 must run after step 3, not before: `generate_section_drafts.py` reads
+`figure_candidates.json` (if present) to embed the best-ranked figure for each
+paper right before that paragraph's `<!-- paragraph_id: ... -->` marker, and
+writes a `## References` list per section using a shared global citation
+numbering (the same paper always gets the same `[n]` across every section).
+Running step 4 before step 3 still produces valid prose, but with zero figures
+embedded — check `section_drafting_report.md`'s "Figures embedded" line to
+confirm this didn't happen silently; if it shows `0/0`, run step 3 and re-run
+step 4.
+
+`--wire-api chat-completions` with a mini model (e.g. `gpt-4.1-mini`) is the
+tested-working configuration for this relay/model combination — strict
+`json_schema` mode on `/v1/responses` was found unreliable for this task (see
+`review-metadata-prep/SKILL.md`'s remediation notes for the same underlying
+issue in a different skill).
+
 ## Outputs
 
 Write under:

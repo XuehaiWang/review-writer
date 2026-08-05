@@ -35,9 +35,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _review_runtime.paths import resolve_review_root
 
 
-def call_responses(payload: dict[str, Any], api_key: str, base_url: str, timeout: int) -> dict[str, Any]:
+def call_responses(
+    payload: dict[str, Any], api_key: str, base_url: str, timeout: int, wire_api: str = "responses"
+) -> dict[str, Any]:
+    endpoint = "chat/completions" if wire_api == "chat-completions" else "responses"
     req = urllib.request.Request(
-        openai_endpoint(base_url, "responses"),
+        openai_endpoint(base_url, endpoint),
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -48,6 +51,12 @@ def call_responses(payload: dict[str, Any], api_key: str, base_url: str, timeout
         method="POST",
     )
     data = open_json_request(req, timeout=timeout, context="Metadata retag model request")
+    if wire_api == "chat-completions":
+        try:
+            text = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError("Chat completions response did not contain choices[0].message.content") from exc
+        return decode_json_object(text, "Metadata retag model output")
     text = data.get("output_text")
     if not text:
         parts = []
@@ -73,6 +82,7 @@ def retag_one(
     timeout: int,
     reasoning_effort: str,
     classification_labels: dict[str, list[str]],
+    wire_api: str = "responses",
 ) -> dict[str, Any]:
     meta = read_json(meta_path)
     source_paths = meta.get("source_paths") or {}
@@ -80,8 +90,10 @@ def retag_one(
     markdown_path = Path(str(source_paths.get("markdown") or ""))
     blocks = load_blocks(content_path if content_path.exists() else None)
     md = markdown_head(markdown_path if markdown_path.exists() else None)
-    payload = build_llm_payload(meta, blocks, md, system_prompt, model, reasoning_effort, classification_labels)
-    llm_data = call_responses(payload, api_key, base_url, timeout)
+    payload = build_llm_payload(
+        meta, blocks, md, system_prompt, model, reasoning_effort, classification_labels, wire_api
+    )
+    llm_data = call_responses(payload, api_key, base_url, timeout, wire_api)
     merge_llm(meta, llm_data)
     apply_structured_tags_to_compat_fields(meta)
     meta.setdefault("extraction", {}).setdefault("notes", [])
@@ -105,6 +117,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default="")
     parser.add_argument("--api-key", default="")
     parser.add_argument("--reasoning-effort", default="", choices=["", "none", "low", "medium", "high"])
+    parser.add_argument("--wire-api", default="", choices=["", "responses", "chat-completions"])
     parser.add_argument("--paper-id", action="append", default=[], help="Retag only selected paper_id. Repeatable.")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--sleep-seconds", type=float, default=0.0)
@@ -120,6 +133,7 @@ def main() -> int:
     api_key = resolve_api_key(args.api_key, base_url)
     model = args.model or os.environ.get("REVIEW_METADATA_MODEL", "gpt-5.4")
     reasoning_effort = args.reasoning_effort or os.environ.get("REVIEW_METADATA_REASONING_EFFORT", "high")
+    wire_api = args.wire_api or os.environ.get("REVIEW_METADATA_WIRE_API", "responses")
     if not api_key:
         raise SystemExit("Missing API key. Pass --api-key, set OPENAI_API_KEY, or write it to <review-root>/.env.")
     skill_root = Path(__file__).resolve().parents[1]
@@ -135,7 +149,10 @@ def main() -> int:
     reports = []
     for path in paths:
         try:
-            report = retag_one(path, system_prompt, api_key, base_url, model, args.timeout, reasoning_effort, classification_labels)
+            report = retag_one(
+                path, system_prompt, api_key, base_url, model, args.timeout, reasoning_effort,
+                classification_labels, wire_api=wire_api,
+            )
             print(f"{report['paper_id']} ok")
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
             report = {

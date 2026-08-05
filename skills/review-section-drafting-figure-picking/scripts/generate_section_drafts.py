@@ -81,6 +81,47 @@ def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def load_figure_lookup(stage: Path) -> tuple[list[dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
+    """Best-effort load of figure_candidates.json (written by
+    select_initial_figure_candidates.py, which normally runs before this script).
+    Returns (raw_list, lookup by (section_id, paper_id) -> best candidate by
+    inventory_score). Missing file yields empty results rather than an error, since
+    figure selection is optional at this stage."""
+    path = stage / "figure_candidates.json"
+    if not path.exists():
+        return [], {}
+    try:
+        candidates = read_json(path)
+    except (OSError, json.JSONDecodeError):
+        return [], {}
+    if not isinstance(candidates, list):
+        return [], {}
+    lookup: dict[tuple[str, str], dict[str, Any]] = {}
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        key = (str(cand.get("section_id")), str(cand.get("paper_id")))
+        current = lookup.get(key)
+        if current is None or (cand.get("inventory_score") or 0) > (current.get("inventory_score") or 0):
+            lookup[key] = cand
+    return candidates, lookup
+
+
+def load_paper_reference_fields(root: Path, paper_id: str) -> dict[str, Any]:
+    path = root / "review-library" / "metadata" / "papers" / f"{paper_id}.metadata.json"
+    if not path.exists():
+        return {}
+    try:
+        meta = read_json(path)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {
+        "authors": (meta.get("authors") or {}).get("value") or [],
+        "year": (meta.get("year") or {}).get("value"),
+        "journal": (meta.get("journal") or {}).get("value"),
+    }
+
+
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -310,6 +351,7 @@ def main() -> int:
     citation_map = {paper_id: index for index, paper_id in enumerate(dict.fromkeys(paper_order), start=1)}
     sections_dir = stage / "sections"
     sections_dir.mkdir(parents=True, exist_ok=True)
+    figure_candidates_raw, figure_lookup = load_figure_lookup(stage)
     output_sections = []
     for task in tasks:
         section_id = str(task.get("section_id"))
@@ -386,19 +428,69 @@ Source evidence (only use claims supported here):\n{json.dumps(evidence, ensure_
                 "",
                 text,
                 "",
+            ])
+            # Embed the best available figure candidate for this paper right before
+            # the paragraph_id marker, satisfying the Hard Output Requirement that
+            # every section carry at least one ![](...) reference. Best-effort: only
+            # runs when figure_candidates.json (from select_initial_figure_candidates.py)
+            # was already generated; otherwise this loop contributes nothing and the
+            # requirement must be satisfied by a later manual/automated pass.
+            cand = figure_lookup.get((section_id, paper_id))
+            if cand and cand.get("source_image_path"):
+                img_abs = Path(cand["source_image_path"])
+                if img_abs.exists():
+                    # Use an absolute path, not one relative to sections_dir: this
+                    # markdown gets copied/merged into files at other directory
+                    # depths later (04_first_draft/, 05_final_audit/), and a path
+                    # relative to the original sections/ location silently breaks
+                    # (resolves to a nonexistent location) once the depth changes.
+                    img_path = str(img_abs.resolve())
+                    caption = cand.get("source_caption_text") or cand.get("source_label") or "Figure"
+                    markdown.extend([
+                        f"![{caption}]({img_path})",
+                        f"*{cand.get('source_label', '')} ({paper_id}) -- {caption}*",
+                        "",
+                    ])
+                    cand["target_paragraph_id"] = paragraph_id
+            markdown.extend([
                 f"<!-- paragraph_id: {paragraph_id} -->",
                 "",
             ])
             paragraphs.append({"paragraph_id": paragraph_id, "paper_id": paper_id, "cited_paper_ids": [paper_id], "text": text})
+
+        # Append a numbered References section using the same global citation_map
+        # used for inline [n] callouts, so this Hard Output Requirement is satisfied
+        # without a separate manual pass.
+        markdown.extend(["", "## References", ""])
+        for paper_id in allowed:
+            ref_fields = load_paper_reference_fields(root, paper_id)
+            authors = ref_fields.get("authors") or []
+            author_str = (authors[0] + " et al.") if len(authors) > 1 else (authors[0] if authors else "Unknown")
+            year = ref_fields.get("year") or "n.d."
+            journal = ref_fields.get("journal")
+            tail = f", {journal}" if journal else ""
+            title = str(rows[paper_id].get("title") or paper_id).strip()
+            markdown.append(f"[{citation_map[paper_id]}] {author_str} {title}{tail} ({year}). [{paper_id}]")
+
         section_text = "\n".join(markdown).strip() + "\n"
         (sections_dir / f"{section_id}.md").write_text(section_text, encoding="utf-8")
         output_sections.append({"section_id": section_id, "heading": task.get("heading"), "overview": overview, "paragraphs": paragraphs, "draft_md": section_text})
     write_json(stage / "section_drafts.json", {"project_id": args.project_id, "sections": output_sections})
     (stage / "section_drafts.md").write_text("\n\n".join(section["draft_md"] for section in output_sections), encoding="utf-8")
+    if figure_candidates_raw:
+        # Persist target_paragraph_id assignments made during embedding above.
+        write_json(stage / "figure_candidates.json", figure_candidates_raw)
+    figures_embedded = sum(1 for c in figure_candidates_raw if c.get("target_paragraph_id"))
     (stage / "section_drafting_report.md").write_text(
-        f"# Section Drafting Report\n\nGenerated {len(output_sections)} source-grounded sections with model `{model}`.\n", encoding="utf-8"
+        f"# Section Drafting Report\n\n"
+        f"Generated {len(output_sections)} source-grounded sections with model `{model}`.\n\n"
+        f"Figures embedded: {figures_embedded}/{len(figure_candidates_raw)} available candidates "
+        f"({'figure_candidates.json found' if figure_candidates_raw else 'no figure_candidates.json found -- run select_initial_figure_candidates.py first to enable figure embedding'}).\n\n"
+        f"Each section's References list uses the shared global citation numbering "
+        f"(same paper always gets the same [n] across every section).\n",
+        encoding="utf-8",
     )
-    print(f"Generated {len(output_sections)} sections.")
+    print(f"Generated {len(output_sections)} sections. Figures embedded: {figures_embedded}/{len(figure_candidates_raw)}.")
     return 0
 
 

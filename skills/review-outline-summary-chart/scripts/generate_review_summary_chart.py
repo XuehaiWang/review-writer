@@ -636,7 +636,15 @@ def render_full_mermaid_png(full_mermaid: str, path: Path) -> dict[str, str]:
     if edge is None:
         raise RuntimeError("Microsoft Edge is required to render the Mermaid full-review chart PNG.")
 
-    with tempfile.TemporaryDirectory(prefix=".review-summary-chart-", dir=path.parent) as temp_dir:
+    # ignore_cleanup_errors=True: headless Edge on Windows can leave a crashpad
+    # child process holding file handles in edge-profile/ for a brief moment
+    # after the main msedge.exe process (and this subprocess.run call) has
+    # already returned. Without this flag, that race intermittently raises
+    # PermissionError/WinError 32 during the automatic rmtree cleanup below,
+    # even though the actual PNG output was already written successfully.
+    with tempfile.TemporaryDirectory(
+        prefix=".review-summary-chart-", dir=path.parent, ignore_cleanup_errors=True
+    ) as temp_dir:
         temp = Path(temp_dir)
         html_path = temp / "full-review-structure-chart.html"
         profile_path = temp / "edge-profile"

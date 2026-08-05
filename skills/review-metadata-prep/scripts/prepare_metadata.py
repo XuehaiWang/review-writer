@@ -11,6 +11,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -561,6 +562,7 @@ def build_llm_payload(
     model: str,
     reasoning_effort: str = "",
     classification_labels: dict[str, list[str]] | None = None,
+    wire_api: str = "responses",
 ) -> dict[str, Any]:
     classification_labels = classification_labels or DEFAULT_CLASSIFICATION_LABELS
     front_blocks = []
@@ -618,6 +620,23 @@ def build_llm_payload(
             "warnings": {"type": "array", "items": {"type": "string"}},
         },
     }
+    nonce = uuid.uuid4().hex
+    if wire_api == "chat-completions":
+        schema_prompt = (
+            f"{system_prompt}\n\nReturn only one JSON object matching this JSON Schema exactly "
+            f"(no markdown fences, no explanations):\n{json.dumps(schema, ensure_ascii=False)}"
+        )
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": schema_prompt},
+                {"role": "user", "content": json.dumps(user_content, ensure_ascii=False)},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.2,
+            "metadata": {"request_nonce": nonce},
+        }
+        return payload
     payload = {
         "model": model,
         "input": [
@@ -632,6 +651,8 @@ def build_llm_payload(
                 "strict": True,
             }
         },
+        "prompt_cache_key": nonce,
+        "metadata": {"request_nonce": nonce},
     }
     if reasoning_effort and reasoning_effort.lower() != "none":
         payload["reasoning"] = {"effort": reasoning_effort}
@@ -744,10 +765,13 @@ def open_json_request(
     raise RuntimeError(f"{context} failed: {last_error}")
 
 
-def call_openai_responses(payload: dict[str, Any], api_key: str, base_url: str = "https://api.openai.com") -> dict[str, Any]:
+def call_openai_responses(
+    payload: dict[str, Any], api_key: str, base_url: str = "https://api.openai.com", wire_api: str = "responses"
+) -> dict[str, Any]:
+    endpoint = "chat/completions" if wire_api == "chat-completions" else "responses"
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        openai_endpoint(base_url, "responses"),
+        openai_endpoint(base_url, endpoint),
         data=body,
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -758,6 +782,12 @@ def call_openai_responses(payload: dict[str, Any], api_key: str, base_url: str =
         method="POST",
     )
     data = open_json_request(req, timeout=120, context="Metadata model request")
+    if wire_api == "chat-completions":
+        try:
+            text = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError("Chat completions response did not contain choices[0].message.content") from exc
+        return decode_json_object(text, "Metadata model output")
     text = data.get("output_text")
     if not text:
         parts: list[str] = []
@@ -1090,6 +1120,7 @@ def run(args: argparse.Namespace) -> int:
     api_key = resolve_api_key(args.api_key, base_url)
     model = args.model or os.environ.get("REVIEW_METADATA_MODEL", "gpt-5.4")
     reasoning_effort = args.reasoning_effort or os.environ.get("REVIEW_METADATA_REASONING_EFFORT", "high")
+    wire_api = args.wire_api or os.environ.get("REVIEW_METADATA_WIRE_API", "responses")
     classification_labels = load_classification_rules(resolve_taxonomy_path(review_root))
     use_llm = bool(args.use_llm)
     if use_llm and not api_key:
@@ -1129,8 +1160,10 @@ def run(args: argparse.Namespace) -> int:
         meta, blocks, md, reg_rows = build_metadata(paper_id, job, pdf_path, md_path, cpath, existing, review_root)
         if use_llm:
             try:
-                payload = build_llm_payload(meta, blocks, md, system_prompt, model, reasoning_effort, classification_labels)
-                llm_data = call_openai_responses(payload, api_key or "", base_url)
+                payload = build_llm_payload(
+                    meta, blocks, md, system_prompt, model, reasoning_effort, classification_labels, wire_api
+                )
+                llm_data = call_openai_responses(payload, api_key or "", base_url, wire_api)
                 merge_llm(meta, llm_data)
                 meta["extraction"]["mode"] = "rules+llm"
                 meta["extraction"]["model"] = model
@@ -1188,9 +1221,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default="")
     parser.add_argument("--api-key", default="")
     parser.add_argument("--reasoning-effort", default="", choices=["", "none", "low", "medium", "high"])
+    parser.add_argument("--wire-api", default="", choices=["", "responses", "chat-completions"])
     parser.add_argument("--sleep-seconds", type=float, default=0.0)
     args = parser.parse_args()
-    root = Path(args.review_root).resolve()
+    root = resolve_review_root(args.review_root, anchor=Path(__file__))
     args.mineru_output = args.mineru_output or str(root / "mineru-outputs")
     args.pdf_root = args.pdf_root or str(root / "source-paper")
     return args

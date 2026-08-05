@@ -21,6 +21,8 @@ Use this skill to implement the writing-preparation stage for a review-writing a
 
 The skill assumes PDFs have already been parsed by MinerU and that a `mineru-outputs/manifest.json` exists.
 
+Do not enter plan mode for this skill. Go directly into the Workflow steps below and start running them.
+
 ## Workflow
 
 1. Build paper metadata:
@@ -36,15 +38,22 @@ python <review-root>/skills/review-metadata-prep/scripts/prepare_metadata.py \
 
 Use `--discover-from-pdf-root` when `manifest.json` only records the latest MinerU batch.
 Use `--append-registry` when adding a new source-paper folder to an existing library.
+`review-library/metadata/extraction_prompts/` and the `papers/`/`registry/` scaffold
+are created automatically on first run; no manual seeding is needed.
 
-2. Validate metadata:
+2. Generate the eight structured tags. This step is mandatory, not optional —
+`prepare_metadata.py` alone (even with `--use-llm`) only fills bibliographic fields
+well; the eight `structured_tags` must be produced by `batch_llm_retag_metadata.py`
+(see LLM Mode below).
+
+3. Validate metadata:
 
 ```bash
 python <review-root>/skills/review-metadata-prep/scripts/validate_metadata.py \
   --review-root <review-root>
 ```
 
-3. Launch the local review dashboard from the separate view module when human audit is needed:
+4. Launch the local review dashboard from the separate view module when human audit is needed:
 
 ```bash
 python <review-root>/view/serve_review_dashboard.py \
@@ -96,8 +105,12 @@ python <review-root>/skills/review-metadata-prep/scripts/prepare_metadata.py \
   --use-llm \
   --base-url https://naiccc.com \
   --model gpt-5.4 \
-  --reasoning-effort high
+  --reasoning-effort high \
+  --wire-api responses
 ```
+
+Use `--wire-api chat-completions` instead of the default `responses` if the configured
+base URL does not support the Responses API for this model.
 
 LLM extraction is constrained to the first-page blocks, title/author/abstract candidates, and early Markdown context. Do not send full papers unless explicitly needed.
 
@@ -109,8 +122,12 @@ python <review-root>/skills/review-metadata-prep/scripts/llm_retag_metadata.py \
   --model gpt-5.4 \
   --base-url https://naiccc.com \
   --reasoning-effort high \
+  --wire-api responses \
   --api-key "$OPENAI_API_KEY"
 ```
+
+Use `--paper-id <paper_id>` (repeatable) to retag one or a few specific papers instead of the
+whole library — useful when remediating a small number of failures (see Remediation below).
 
 For a full-library refresh, prefer the resumable batch runner. It processes three papers per round by default, skips already successful LLM-tagged papers, writes progress after every paper, and retries failures:
 
@@ -120,7 +137,8 @@ python <review-root>/skills/review-metadata-prep/scripts/batch_llm_retag_metadat
   --batch-size 3 \
   --max-attempts 5 \
   --retry-delay 30 \
-  --sleep-seconds 0.5
+  --sleep-seconds 0.5 \
+  --wire-api responses
 ```
 
 Use `--force` only when existing successful LLM tags should be overwritten. Use `--retry-forever` only when the API failures are known to be transient.
@@ -133,6 +151,7 @@ Useful options:
 --base-url <openai-compatible-base-url>
 --api-key <key>
 --reasoning-effort high
+--wire-api responses|chat-completions
 --sleep-seconds 0.5
 ```
 
@@ -254,3 +273,23 @@ low confidence title
 low confidence abstract
 not human reviewed
 ```
+
+### Remediation
+
+When `metadata_validation.md` lists blocking issues for specific papers:
+
+- `missing_authors` / `missing_year` / `missing_abstract`: re-run LLM extraction for just
+  that paper with `llm_retag_metadata.py --paper-id <paper_id>`. If the field is genuinely
+  absent from the source PDF (e.g. a preprint with no formal abstract), edit the paper's
+  metadata JSON by hand and set `human_checked: true` on that field so validation stops
+  flagging it, then set `human_review.status` accordingly.
+- `invalid_structured_tag_<key>`: the LLM returned a label that is not in the active
+  taxonomy profile's allowed list for that category. Re-run `llm_retag_metadata.py
+  --paper-id <paper_id>`; if it recurs, the paper may need a `human_review` entry marking
+  it `needs_manual_entry` so it is not silently skipped in downstream stages.
+- If every structured tag for every paper reads `not specified`, check first that the
+  active taxonomy profile actually resolved: confirm `REVIEW_TAXONOMY_PROFILE` or
+  `REVIEW_CLASSIFICATION_RULES` points at a real profile (the default is
+  `review_writer_core/taxonomies/allene.py`), and that `structured_tags.source` in a
+  sample metadata file starts with `llm` rather than a deterministic fallback — a
+  fallback-only run without `--use-llm` will legitimately leave every tag `not specified`.

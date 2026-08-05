@@ -970,7 +970,7 @@ def combine_results(local_grouped: list[dict[str, Any]], web_grouped: list[dict[
     return combined
 
 
-def selected_from_combined(combined: list[dict[str, Any]]) -> dict[str, Any]:
+def selected_from_combined(combined: list[dict[str, Any]], target_count: int = 30) -> dict[str, Any]:
     selected = {"keywords": [], "local_papers": {}, "web_papers": []}
     for group in combined:
         if not group.get("keep", True):
@@ -1004,7 +1004,7 @@ def selected_from_combined(combined: list[dict[str, Any]]) -> dict[str, Any]:
                 selected["web_papers"].append({**result, "matched_keyword": group["keyword"]})
     selected["local_papers"] = list(selected["local_papers"].values())
     selected["local_papers"].sort(key=lambda r: (r["best_score"], r.get("year") or 0), reverse=True)
-    selected["local_papers"] = selected["local_papers"][:30]
+    selected["local_papers"] = selected["local_papers"][:target_count]
     return selected
 
 
@@ -1292,7 +1292,7 @@ def run(args: argparse.Namespace) -> int:
     })
     web_grouped = external_grouped
     combined = combine_results(local_grouped, web_grouped)
-    selected = selected_from_combined(combined)
+    selected = selected_from_combined(combined, target_count=args.target_count)
     groups = group_selected_papers(selected, papers, group_by)
     output_context = {
         **query_context,
@@ -1357,6 +1357,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sciatlas-timeout", type=int, default=0, help="HTTP timeout in seconds. 0 = use env/default.")
     parser.add_argument("--sciatlas-time-range", default="", help="Optional year range like 2018-2025.")
     parser.add_argument("--sciatlas-domain", default="", help="Optional domain hint, e.g. 'organic chemistry'.")
+    parser.add_argument(
+        "--target-count",
+        type=int,
+        default=30,
+        help="Maximum number of local candidate papers to select, sorted by match score/year. Default: 30 (the "
+        "skill's documented 20-30 range). Raise this for topics that legitimately need more candidates.",
+    )
     return parser.parse_args()
 
 

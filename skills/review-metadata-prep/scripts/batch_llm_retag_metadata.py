@@ -114,6 +114,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default="")
     parser.add_argument("--api-key", default="")
     parser.add_argument("--reasoning-effort", default="", choices=["", "none", "low", "medium", "high"])
+    parser.add_argument("--wire-api", default="", choices=["", "responses", "chat-completions"])
     parser.add_argument("--paper-id", action="append", default=[], help="Retag only selected paper_id. Repeatable.")
     parser.add_argument("--batch-size", type=int, default=3)
     parser.add_argument("--max-attempts", type=int, default=5)
@@ -138,6 +139,7 @@ def main() -> int:
     base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
     model = args.model or os.environ.get("REVIEW_METADATA_MODEL", "gpt-5.4")
     reasoning_effort = args.reasoning_effort or os.environ.get("REVIEW_METADATA_REASONING_EFFORT", "high")
+    wire_api = args.wire_api or os.environ.get("REVIEW_METADATA_WIRE_API", "responses")
     if not api_key:
         raise SystemExit("Missing API key. Pass --api-key, set OPENAI_API_KEY, or write it to .env.")
 
@@ -187,6 +189,7 @@ def main() -> int:
                     args.timeout,
                     reasoning_effort,
                     classification_labels,
+                    wire_api=wire_api,
                 )
                 report["attempt"] = attempts[pid]
                 reports.append(report)
