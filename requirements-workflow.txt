@@ -2,3 +2,4 @@
 prefect>=3.8,<4
 Pillow>=12,<13
 python-docx>=1.2,<2
+pypdf>=6,<7

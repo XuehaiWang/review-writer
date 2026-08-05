@@ -126,7 +126,12 @@ class ParagraphEditor:
         if not path.exists():
             return []
         value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, list) else []
+        # ``regenerate_first_draft`` writes the versioned canonical envelope,
+        # while older projects stored the entries as a bare list.  Accept both
+        # on read so opening the paragraph editor cannot silently discard the
+        # current citation map.
+        entries = value.get("entries") if isinstance(value, dict) else value
+        return entries if isinstance(entries, list) else []
 
     def _normalize_citations(
         self, body: str, references: str
@@ -151,7 +156,7 @@ class ParagraphEditor:
         normalized = []
         for old in order:
             item = dict(by_callout[old])
-            item["callout"] = str(replacement[old])
+            item["callout"] = replacement[old]
             normalized.append(item)
 
         entry_re = re.compile(r"(?m)^\[(\d+)\]\s*(.*?)(?=^\[\d+\]\s*|\Z)", re.DOTALL)
@@ -171,7 +176,10 @@ class ParagraphEditor:
         temporary = self.draft_path.with_suffix(".md.tmp")
         temporary.write_text(normalized_body + normalized_references, encoding="utf-8")
         temporary.replace(self.draft_path)
-        _write_json(self.stage_dir / "citations.json", citations)
+        _write_json(
+            self.stage_dir / "citations.json",
+            {"project_id": self.project_id, "entries": citations},
+        )
         build_manifest(self.review_root, self.project_id)
 
     def update_paragraph(self, paragraph_id: str, text: str, reason: str = "") -> dict[str, Any]:

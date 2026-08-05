@@ -45,7 +45,7 @@ pause only at the established human checkpoints.
 6. Merge and polish the section files into `04_first_draft/first_draft.md`.
 7. Generate and validate the grounded conclusion without adding a checkpoint.
 8. Integrate that conclusion, then audit and release `05_final_audit/final_draft.md`.
-9. Generate full-review and per-section charts without adding a checkpoint.
+9. Generate the single full-review chart without adding a checkpoint.
 10. Export DOCX only from the approved, current final-draft artifacts.
 
 ## Human Check Points
@@ -78,13 +78,12 @@ Do not skip a human check unless the user explicitly says to continue.
 - Summary chart: both HTML and JSON must be generated from the current
   `05_final_audit/final_draft.md`; `stats.draft_source` must resolve to that
   file and `stats.draft_sha256` must be a matching SHA-256 of its exact bytes.
-  The dual chart bundle additionally requires `stats.generation_scope` equal
-  to `both`, `stats.html_sha256` matching the exact HTML bytes, and a complete
-  `stats.image_manifest` covering the full-review PNG and every body-section
-  PNG with matching exact-byte SHA-256 values.
-- DOCX: a missing, wrong-source, stale, hash-mismatched, or unmatched chart
-  blocks export. The exporter inserts the full chart before the body and each
-  section chart after its matching heading.
+  The chart bundle additionally requires `stats.generation_scope` equal to
+  `full`, `stats.html_sha256` matching the exact HTML bytes, and a complete
+  `stats.image_manifest` covering the full-review PNG with a matching
+  exact-byte SHA-256 value.
+- DOCX: a missing, wrong-source, stale, or hash-mismatched chart blocks export.
+  The exporter inserts the full chart at the managed manuscript position.
 
 The existing manuscript gates remain binding: a figure (or approved
 `03_figure_redraw/skip_reason.md`), inline citations, a non-empty References

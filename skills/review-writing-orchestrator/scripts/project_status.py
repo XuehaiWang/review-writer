@@ -567,8 +567,9 @@ def summary_chart_semantic_issues(project: Path) -> list[str]:
     if not digest_matches:
         issues.append("summary_chart_stale")
 
-    if not isinstance(stats, dict) or stats.get("generation_scope") != "both":
-        issues.append("summary_chart_not_generated_with_both")
+    generation_scope = stats.get("generation_scope") if isinstance(stats, dict) else None
+    if generation_scope not in {"full", "both"}:
+        issues.append("summary_chart_missing_full_review_output")
 
     html_digest_matches = False
     if isinstance(stats, dict):
@@ -653,7 +654,7 @@ def summary_chart_semantic_issues(project: Path) -> list[str]:
     if not manifest_valid:
         issues.append("summary_chart_image_manifest_invalid")
 
-    if final_draft.exists():
+    if final_draft.exists() and generation_scope == "both":
         expected_headings = expected_chart_heading_keys(
             final_draft.read_text(encoding="utf-8", errors="ignore")
         )

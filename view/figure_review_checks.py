@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -15,6 +16,7 @@ from serve_review_dashboard import (
     project_figures_payload,
     record_stage_outputs,
     refresh_figure_review_handoff,
+    redraw_current_figure,
     section_candidate_freshness,
     section_source_freshness,
     sha256_file,
@@ -106,6 +108,35 @@ class FigureReviewHandoffChecks(unittest.TestCase):
             self.assertNotIn("redrawn_image", output)
             self.assertTrue(output["superseded_output"]["redrawn_image"])
 
+    def test_redraw_timeout_does_not_report_the_old_source_changed_note(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _, _, redraw_stage, _ = self.build_project(root)
+            manifest_path = redraw_stage / "redrawn_figure_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["figures"][0].update(
+                {
+                    "status": "source_changed",
+                    "notes": "Stage 6 selected a different source candidate; redraw this figure again.",
+                }
+            )
+            manifest["figures"][0].pop("redrawn_image", None)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with patch(
+                "serve_review_dashboard.run_project_script",
+                side_effect=RuntimeError("Workflow script timed out: redraw_figures.py"),
+            ) as runner:
+                with self.assertRaisesRegex(RuntimeError, "Workflow script timed out"):
+                    redraw_current_figure(root, "demo", "P001-F01", force_ai_edit=True)
+
+            self.assertEqual(runner.call_args.kwargs["timeout"], 1200)
+            failed = json.loads(manifest_path.read_text(encoding="utf-8"))["figures"][0]
+            self.assertEqual(failed["status"], "failed")
+            self.assertIn("current Stage 6 source candidate", failed["notes"])
+            self.assertNotIn("selected a different source candidate", failed["notes"])
+            self.assertEqual(failed["last_redraw_attempt"]["source_sha256"], failed["source_image_sha256"])
+
     def test_human_approval_is_bound_to_current_source_and_output_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -163,7 +194,7 @@ class FigureReviewHandoffChecks(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "aspect ratio does not match"):
                 approve_figure_for_manuscript(root, "demo", "P001-F01")
 
-    def test_legacy_section_handoff_migrates_without_timestamp_expiry(self) -> None:
+    def test_legacy_section_handoff_requires_explicit_regeneration(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             project, section_stage, _, _ = self.build_project(root)
@@ -176,11 +207,14 @@ class FigureReviewHandoffChecks(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertFalse(section_source_freshness(section_stage)["stale"])
-            self.assertFalse(section_candidate_freshness(section_stage)["stale"])
-            migrated = json.loads(handoff.read_text(encoding="utf-8"))
-            self.assertEqual(migrated["schema_version"], 2)
-            self.assertEqual(migrated["dependency_profile"], "section-candidate-routing-v1")
+            source_state = section_source_freshness(section_stage)
+            candidate_state = section_candidate_freshness(section_stage)
+            self.assertTrue(source_state["stale"])
+            self.assertTrue(source_state["migration_required"])
+            self.assertTrue(candidate_state["stale"])
+            self.assertTrue(candidate_state["migration_required"])
+            unchanged = json.loads(handoff.read_text(encoding="utf-8"))
+            self.assertNotIn("schema_version", unchanged)
 
     def test_prose_edit_does_not_expire_candidates_but_routing_edit_does(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -190,11 +224,12 @@ class FigureReviewHandoffChecks(unittest.TestCase):
             blueprint.parent.mkdir(parents=True)
             blueprint.write_text('{"sections":["sec1"]}', encoding="utf-8")
             handoff = section_stage / "section_handoff.json"
-            handoff.write_text(
-                json.dumps({"source_stage": "blueprint", "source_blueprint": str(blueprint)}),
-                encoding="utf-8",
+            write_stage_handoff(handoff, "blueprint", [blueprint])
+            record_stage_outputs(
+                handoff,
+                [section_stage / "section_drafts.json"],
+                "sections",
             )
-            section_candidate_freshness(section_stage)
 
             drafts_path = section_stage / "section_drafts.json"
             drafts = json.loads(drafts_path.read_text(encoding="utf-8"))

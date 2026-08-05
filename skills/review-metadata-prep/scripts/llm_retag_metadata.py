@@ -25,6 +25,7 @@ from prepare_metadata import (
     open_json_request,
     openai_endpoint,
     resolve_api_key,
+    resolve_taxonomy_path,
     read_json,
     update_quality,
     write_json,
@@ -123,7 +124,7 @@ def main() -> int:
         raise SystemExit("Missing API key. Pass --api-key, set OPENAI_API_KEY, or write it to <review-root>/.env.")
     skill_root = Path(__file__).resolve().parents[1]
     system_prompt = (skill_root / "references" / "metadata_extraction_system.md").read_text(encoding="utf-8")
-    classification_labels = load_classification_rules(review_root / "allene_classification_rules.py")
+    classification_labels = load_classification_rules(resolve_taxonomy_path(review_root))
     meta_dir = review_root / "review-library" / "metadata" / "papers"
     paths = sorted(meta_dir.glob("*.metadata.json"))
     if args.paper_id:

@@ -34,8 +34,7 @@ reaction_type
 document_scope
 ```
 
-Use `<review-root>/allene_classification_rules.py` as the tag
-vocabulary and synonym source. Do not rank local papers by metadata abstract.
+Use the shared taxonomy loader as the tag vocabulary and synonym source. The default profile is `<review-root>/review_writer_core/taxonomies/allene.py`; `REVIEW_TAXONOMY_PROFILE` selects a built-in profile and `REVIEW_CLASSIFICATION_RULES` selects a custom rules file. Discovery outputs must record the active taxonomy path and SHA-256 identity. Do not rank local papers by metadata abstract.
 
 External retrieval (both run in parallel when requested):
 

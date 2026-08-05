@@ -2,19 +2,18 @@
 
 ## Purpose
 
-Summarize an approved final review as a full-review Mermaid flowchart and
-per-section evidence charts before document export.
+Summarize an approved final review as one full-review Mermaid flowchart before
+document export.
 
 ## Orchestrated Contract
 
-- Orchestrated use requires `05_final_audit/final_draft.md` and `--scope both`.
-- Write HTML, JSON, a full-review PNG, and all manuscript-body section PNGs
-  next to the selected draft.
+- Orchestrated use requires `05_final_audit/final_draft.md` and `--scope full`.
+- Write HTML, JSON, and a full-review PNG next to the selected draft.
 - JSON includes resolved `stats.draft_source`, `stats.draft_sha256`,
   `stats.generation_scope`, and `stats.html_sha256`; the draft digest is an
   exact-byte SHA-256.
-- Orchestrated completion requires scope `both`, the JSON/current-draft hash,
-  and the exact HTML-byte hash to match the current dual chart bundle.
+- Orchestrated completion requires scope `full`, the JSON/current-draft hash,
+  and the exact HTML-byte hash to match the current chart bundle.
 - JSON-only/HTML-only output cannot satisfy the stage.
 - Fallback artifacts do not satisfy the orchestrated summary stage;
   standalone selection remains final > first > section draft.
@@ -28,9 +27,9 @@ per-section evidence charts before document export.
 2. Parse Markdown headings into a section hierarchy.
 3. Classify sections and extract concise summaries.
 4. Resolve numeric callouts through `citations.json` when available.
-5. Generate the full-review and per-section Mermaid definitions.
-6. Render an offline full-review PNG and one PNG per manuscript body section.
-7. Save HTML, JSON, PNGs, and exact-byte provenance beside the selected draft.
+5. Generate the full-review Mermaid definition.
+6. Render one offline full-review PNG.
+7. Save HTML, JSON, PNG, and exact-byte provenance beside the selected draft.
 
 ## JSON Provenance
 

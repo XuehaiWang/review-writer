@@ -213,7 +213,33 @@
       justify-content: space-between;
       gap: 10px;
     }
-    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .meta-head .actions {
+      min-width: 0;
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .library-stage-action {
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,253,247,.72);
+    }
+    .library-stage-action:empty { display: none; }
+    .library-stage-action .stage-execute-wrap {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 6px;
+      margin: 0;
+    }
+    .library-stage-action .stage-execute {
+      width: 100%;
+      white-space: normal;
+      line-height: 1.3;
+    }
+    .library-stage-action .stage-execute-status {
+      max-width: none;
+    }
     .meta-summary {
       padding: 15px;
       border-bottom: 1px solid var(--line);
@@ -277,7 +303,16 @@
       max-width: 420px;
     }
     .message.show { display: block; }
-    .brand-actions { margin-top: 12px; }
+    .brand-actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .brand-actions .btn { flex: 1 1 150px; }
+    .upload-status {
+      margin-top: 8px;
+      min-height: 17px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+    }
     .acquire-modal {
       position: fixed;
       inset: 0;
@@ -393,7 +428,7 @@
       .acquire-form label:last-child { grid-column: 1 / -1; }
     }
   </style>
-  <link rel="stylesheet" href="/assets/dashboard/review-ui.css">
+  <link rel="stylesheet" href="/assets/dashboard/review-ui.css?v=20260804">
 </head>
 <body>
   <nav class="nav">
@@ -419,7 +454,10 @@
         <p>Review PDFs, MinerU Markdown, and structured metadata before topic-specific writing.</p>
         <div class="brand-actions">
           <button class="btn primary" id="openAcquireBtn">Find &amp; Download OA</button>
+          <button class="btn" id="openUploadBtn">Upload local PDFs</button>
+          <input id="localPdfInput" type="file" accept=".pdf,application/pdf" multiple hidden>
         </div>
+        <div id="uploadStatus" class="upload-status">Batch upload builds searchable metadata and full-text Markdown.</div>
       </div>
       <div class="search"><input id="search" placeholder="Search title, author, keyword, tag"></div>
       <div id="papers" class="papers"></div>
@@ -443,6 +481,7 @@
           <button class="btn orange" id="reviewBtn">Mark reviewed</button>
         </div>
       </div>
+      <div id="libraryStageAction" class="library-stage-action" data-stage-action-host></div>
       <div id="metaSummary" class="meta-summary"></div>
       <div class="editor-wrap">
         <div class="editor-label">Editable JSON source of truth</div>
@@ -501,7 +540,8 @@
       </section>
     </div>
   </div>
-  <script src="/assets/dashboard/review-ui.js"></script>
+  <script src="/assets/dashboard/review-i18n.js?v=20260804"></script>
+  <script src="/assets/dashboard/review-ui.js?v=20260804"></script>
   <script>
     let papers = [];
     let selected = null;
@@ -529,7 +569,10 @@
       acquireSearchBtn: document.getElementById('acquireSearchBtn'),
       acquireDownloadBtn: document.getElementById('acquireDownloadBtn'),
       acquireStatus: document.getElementById('acquireStatus'),
-      candidateList: document.getElementById('candidateList')
+      candidateList: document.getElementById('candidateList'),
+      openUploadBtn: document.getElementById('openUploadBtn'),
+      localPdfInput: document.getElementById('localPdfInput'),
+      uploadStatus: document.getElementById('uploadStatus')
     };
     els.acquireEmailGate = document.getElementById('acquireEmailGate');
     els.downloadEmailInput = document.getElementById('downloadEmailInput');
@@ -690,6 +733,60 @@
       parsed.human_review.reviewer = parsed.human_review.reviewer || 'human';
       els.jsonEditor.value = JSON.stringify(parsed, null, 2);
       await saveMeta();
+    }
+    async function uploadLocalPdfs(fileList) {
+      const files = [...(fileList || [])];
+      if (!files.length) return;
+      if (files.length > 30) {
+        els.uploadStatus.textContent = 'Select at most 30 PDFs per batch.';
+        return;
+      }
+      const invalid = files.find(file => !file.name.toLowerCase().endsWith('.pdf'));
+      if (invalid) {
+        els.uploadStatus.textContent = `${invalid.name} is not a PDF.`;
+        return;
+      }
+      els.openUploadBtn.disabled = true;
+      const results = [];
+      let added = 0;
+      let duplicate = 0;
+      let failed = 0;
+      let lastPaperId = '';
+      try {
+        for (let index = 0; index < files.length; index += 1) {
+          const file = files[index];
+          els.uploadStatus.textContent = `Uploading and extracting metadata ${index + 1}/${files.length}: ${file.name}`;
+          try {
+            const response = await fetch(`/api/library/upload-pdf?filename=${encodeURIComponent(file.name)}`, {
+              method: 'POST',
+              headers: {'Content-Type': 'application/pdf'},
+              body: file
+            });
+            const result = await readJsonResponse(response);
+            results.push(result);
+            if (result.status === 'duplicate_file') {
+              duplicate += 1;
+            } else {
+              added += 1;
+              lastPaperId = result.paper_id || lastPaperId;
+            }
+          } catch (error) {
+            failed += 1;
+            results.push({filename: file.name, error: error.message || 'Upload failed.'});
+          }
+        }
+        await loadPapers();
+        if (lastPaperId) await selectPaper(lastPaperId);
+        const ocrCount = results.filter(result => result.needs_ocr).length;
+        const firstError = results.find(result => result.error)?.error || '';
+        els.uploadStatus.textContent = `Batch complete: ${added} added, ${duplicate} duplicate, ${failed} failed.` +
+          (ocrCount ? ` ${ocrCount} PDF(s) need OCR.` : '') +
+          (firstError ? ` First error: ${firstError}` : '');
+        showMessage(failed ? 'PDF batch completed with errors' : 'PDF metadata is ready');
+      } finally {
+        els.openUploadBtn.disabled = false;
+        els.localPdfInput.value = '';
+      }
     }
     async function readJsonResponse(response) {
       const text = await response.text();
@@ -905,6 +1002,8 @@
     document.getElementById('reloadBtn').addEventListener('click', () => selected && selectPaper(selected));
     document.getElementById('reviewBtn').addEventListener('click', markReviewed);
     document.getElementById('openAcquireBtn').addEventListener('click', openAcquisition);
+    els.openUploadBtn.addEventListener('click', () => els.localPdfInput.click());
+    els.localPdfInput.addEventListener('change', () => uploadLocalPdfs(els.localPdfInput.files));
     document.getElementById('closeAcquireBtn').addEventListener('click', closeAcquisition);
     els.acquireModal.addEventListener('click', event => {
       if (event.target === els.acquireModal) closeAcquisition();

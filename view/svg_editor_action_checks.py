@@ -184,6 +184,19 @@ class SvgEditorResolutionChecks(unittest.TestCase):
         self.assertIn("&v=${assetRevision}", html)
         self.assertIn("{cache:'no-store'}", html)
 
+    def test_orthogonal_arrow_adapts_to_initial_drag_axis(self) -> None:
+        html = (Path(__file__).parent / "assets" / "dashboard" / "figures.html").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("function svgAdaptOrthogonalRoute", html)
+        self.assertIn("Math.abs(dy)>Math.abs(dx)?'vertical-first':'horizontal-first'", html)
+        self.assertIn(
+            "orthogonalRoute==='vertical-first'?{x:start.x,y:end.y}:{x:end.x,y:start.y}",
+            html,
+        )
+        self.assertIn("routePending:style==='orthogonal'", html)
+
     def test_mutable_project_files_disable_http_caching(self) -> None:
         source = Path(dashboard.__file__).read_text(encoding="utf-8")
         self.assertIn("self.send_file(path, ctype, no_store=True)", source)

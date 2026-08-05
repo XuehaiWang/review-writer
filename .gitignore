@@ -9,8 +9,13 @@
 !/view/
 !/view/**
 !/review-library/
-!/review-library/**
-/review-library/downloads/
+!/review-library/.gitkeep
+/review-library/**
+!/review-library/.gitkeep
+!/examples/
+!/examples/**
+!/review_writer_core/
+!/review_writer_core/**
 
 /.env
 /.env.*
@@ -18,6 +23,7 @@
 /skills/**/__pycache__/
 /view/**/__pycache__/
 /skills/review-export-docx/.deps/
+/skills/mineru-precise-parse-review-writer/config/mineru_api_token.txt
 
 # Local tests and generated test caches are not part of the release package.
 **/tests/
@@ -35,13 +41,3 @@
 /.codex/
 /.superpowers/
 /docs/superpowers/
-
-# LLM retag run logs; canonical paper metadata remains tracked.
-/review-library/metadata/llm_retag_report.json
-/review-library/metadata/llm_retag_report.md
-/review-library/metadata/llm_retag_batch_report.json
-/review-library/metadata/llm_retag_batch_report.md
-
-!/allene_classification_rules.py
-!/template/
-!/template/**

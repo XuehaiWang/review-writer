@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 from collections import deque
+import io
 import json
 import mimetypes
 import os
@@ -933,10 +934,16 @@ def guess_mime(path: Path) -> str:
 
 
 def resolve_api_key(cli_value: str, base_url: str = "") -> str:
-    """Use the dedicated xiaoleai key when its OpenAI-compatible endpoint is selected."""
+    """Prefer the dedicated image credential over text-provider credentials."""
     if cli_value:
         return cli_value
     image_key = os.environ.get("IMAGE_OPENAI_API_KEY", "")
+    if "micuapi.ai" in base_url.lower():
+        return (
+            image_key
+            or os.environ.get("IMAGE_FALLBACK_API_KEY", "")
+            or os.environ.get("OPENAI_API_KEY", "")
+        )
     if image_key:
         return image_key
     if "api.xiaoleai.team" in base_url:
@@ -955,6 +962,33 @@ def resolve_image_field(configured: str, base_url: str) -> str:
 
 def default_base_url() -> str:
     return os.environ.get("IMAGE_OPENAI_BASE_URL", os.environ.get("OPENAI_BASE_URL", "https://api.openai.com"))
+
+
+def default_wire_api() -> str:
+    configured = os.environ.get("IMAGE_OPENAI_WIRE_API", "images").strip().lower().replace("_", "-")
+    aliases = {
+        "chat": "chat-completions",
+        "chat-completion": "chat-completions",
+    }
+    configured = aliases.get(configured, configured)
+    return configured if configured in {"images", "responses", "chat-completions"} else "images"
+
+
+def image_fallback_config() -> dict[str, str]:
+    """Return an explicitly enabled secondary image provider configuration."""
+    base_url = os.environ.get("IMAGE_FALLBACK_BASE_URL", "").strip()
+    wire_api = os.environ.get("IMAGE_FALLBACK_WIRE_API", "").strip().lower().replace("_", "-")
+    if not base_url or wire_api not in {"chat", "chat-completion", "chat-completions"}:
+        return {}
+    return {
+        "base_url": base_url,
+        "wire_api": "chat-completions",
+        "model": os.environ.get("IMAGE_FALLBACK_MODEL", "gpt-image-2").strip() or "gpt-image-2",
+        "api_key": (
+            os.environ.get("IMAGE_FALLBACK_API_KEY", "").strip()
+            or os.environ.get("OPENAI_API_KEY", "").strip()
+        ),
+    }
 
 
 def openai_api_url(base_url: str, endpoint: str) -> str:
@@ -994,6 +1028,18 @@ def build_headers(api_key: str, content_type: str | None = None) -> dict[str, st
 
 
 TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+GENERIC_TRANSIENT_RETRY_DELAYS = (1, 2)
+CHANNEL_FAILURE_RETRY_DELAYS = (15, 45)
+
+
+def transient_retry_delay(details: str, attempt: int) -> int:
+    """Give an exhausted provider channel enough time to recover before retrying."""
+    delays = (
+        CHANNEL_FAILURE_RETRY_DELAYS
+        if "ALL_CHANNELS_FAILED" in details.upper()
+        else GENERIC_TRANSIENT_RETRY_DELAYS
+    )
+    return delays[min(max(attempt, 0), len(delays) - 1)]
 
 
 def decode_json_object(raw: bytes, label: str) -> dict[str, Any]:
@@ -1011,6 +1057,9 @@ def decode_json_object(raw: bytes, label: str) -> dict[str, Any]:
 
 def open_json_request(request: urllib.request.Request, label: str, timeout: int = 300) -> dict[str, Any]:
     for attempt in range(3):
+        retry_delay = GENERIC_TRANSIENT_RETRY_DELAYS[
+            min(attempt, len(GENERIC_TRANSIENT_RETRY_DELAYS) - 1)
+        ]
         try:
             with urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=timeout) as response:
                 return decode_json_object(response.read(), label)
@@ -1018,10 +1067,11 @@ def open_json_request(request: urllib.request.Request, label: str, timeout: int 
             details = http_error_details(exc)
             if exc.code not in TRANSIENT_HTTP_CODES or attempt == 2:
                 raise RuntimeError(f"{label} rejected: {details}") from exc
+            retry_delay = transient_retry_delay(details, attempt)
         except (urllib.error.URLError, TimeoutError) as exc:
             if attempt == 2:
                 raise RuntimeError(f"{label} transport failed: {exc}") from exc
-        time.sleep(2 ** attempt)
+        time.sleep(retry_delay)
     raise RuntimeError(f"{label} failed after retries")
 
 
@@ -1296,6 +1346,116 @@ def call_responses_image_edit(
     return open_json_request(req, "Responses image edit request")
 
 
+def call_chat_completions_image_edit(
+    api_key: str,
+    base_url: str,
+    image_path: Path,
+    prompt: str,
+    model: str,
+) -> dict[str, Any]:
+    """Edit one image through a provider's multimodal Chat Completions route.
+
+    Some OpenAI-compatible image relays expose GPT Image through
+    /v1/chat/completions instead of multipart /v1/images/edits.  The current
+    Stage 6 source image is embedded directly in the request as a data URI, so
+    the fallback cannot accidentally reuse a stale remote image.
+    """
+    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{guess_mime(image_path)};base64,{encoded}",
+                            "detail": "high",
+                        },
+                    },
+                ],
+            }
+        ],
+        # The relay's image jobs can exceed a reverse proxy's non-streaming
+        # timeout.  Streaming gives it a chance to send progress/keepalive
+        # events while the final image URL or data URI is being produced.
+        "stream": True,
+    }
+    req = urllib.request.Request(
+        openai_api_url(base_url, "/chat/completions"),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=build_headers(api_key, "application/json; charset=utf-8"),
+        method="POST",
+    )
+    return open_chat_completion_request(req, "Chat Completions image edit request")
+
+
+def open_chat_completion_request(
+    request: urllib.request.Request,
+    label: str,
+    timeout: int = 600,
+) -> dict[str, Any]:
+    """Read either a normal JSON response or an OpenAI-compatible SSE stream."""
+    for attempt in range(3):
+        retry_delay = GENERIC_TRANSIENT_RETRY_DELAYS[
+            min(attempt, len(GENERIC_TRANSIENT_RETRY_DELAYS) - 1)
+        ]
+        try:
+            with urllib.request.urlopen(
+                request,
+                context=ssl.create_default_context(),
+                timeout=timeout,
+            ) as response:
+                content_type = str(response.headers.get("Content-Type") or "").lower()
+                if "text/event-stream" not in content_type:
+                    return decode_json_object(response.read(), label)
+                content_parts: list[str] = []
+                image_items: list[Any] = []
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    event_text = line[5:].strip()
+                    if not event_text or event_text == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(event_text)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = event.get("choices") if isinstance(event, dict) else None
+                    if isinstance(choices, list) and choices:
+                        delta = (choices[0] or {}).get("delta") or {}
+                        content = delta.get("content") if isinstance(delta, dict) else None
+                        if isinstance(content, str):
+                            content_parts.append(content)
+                        elif isinstance(content, list):
+                            image_items.extend(content)
+                        images = delta.get("images") if isinstance(delta, dict) else None
+                        if isinstance(images, list):
+                            image_items.extend(images)
+                    if isinstance(event, dict) and isinstance(event.get("delta"), str):
+                        content_parts.append(event["delta"])
+                message: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": "".join(content_parts),
+                }
+                if image_items:
+                    message["images"] = image_items
+                return {"choices": [{"message": message}]}
+        except urllib.error.HTTPError as exc:
+            details = http_error_details(exc)
+            if exc.code not in TRANSIENT_HTTP_CODES or attempt == 2:
+                raise RuntimeError(f"{label} rejected: {details}") from exc
+            retry_delay = transient_retry_delay(details, attempt)
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt == 2:
+                raise RuntimeError(f"{label} transport failed: {exc}") from exc
+        time.sleep(retry_delay)
+    raise RuntimeError(f"{label} failed after retries")
+
+
 def extract_response_image_base64(response: dict[str, Any]) -> str | None:
     for item in response.get("output", []) or []:
         if not isinstance(item, dict):
@@ -1325,6 +1485,146 @@ def save_response_redrawn_image(response: dict[str, Any], out_path: Path) -> Non
         raise RuntimeError("responses image edit response missing image_generation result")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(base64.b64decode(b64))
+
+
+_DATA_IMAGE_PATTERN = re.compile(
+    r"data:image/[A-Za-z0-9.+-]+;base64,([A-Za-z0-9+/=\s]+)",
+    re.IGNORECASE,
+)
+_MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[[^\]]*\]\((https?://[^)\s]+)\)", re.IGNORECASE)
+_HTTP_IMAGE_PATTERN = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+
+
+def _decode_image_base64(value: str) -> bytes | None:
+    compact = re.sub(r"\s+", "", value)
+    if len(compact) < 32:
+        return None
+    try:
+        decoded = base64.b64decode(compact, validate=True)
+    except (ValueError, base64.binascii.Error):
+        return None
+    signatures = (
+        decoded.startswith(b"\x89PNG\r\n\x1a\n"),
+        decoded.startswith(b"\xff\xd8\xff"),
+        decoded.startswith((b"GIF87a", b"GIF89a")),
+        decoded.startswith(b"RIFF") and decoded[8:12] == b"WEBP",
+    )
+    return decoded if any(signatures) else None
+
+
+def _image_reference_from_string(value: str, allow_plain_url: bool = True) -> tuple[str, Any] | None:
+    data_match = _DATA_IMAGE_PATTERN.search(value)
+    if data_match:
+        decoded = _decode_image_base64(data_match.group(1))
+        if decoded:
+            return "bytes", decoded
+    markdown_match = _MARKDOWN_IMAGE_PATTERN.search(value)
+    if markdown_match:
+        return "url", markdown_match.group(1)
+    if allow_plain_url:
+        url_match = _HTTP_IMAGE_PATTERN.search(value)
+        if url_match:
+            return "url", url_match.group(0).rstrip(".,;)")
+    decoded = _decode_image_base64(value)
+    if decoded:
+        return "bytes", decoded
+    return None
+
+
+def _image_reference_from_node(node: Any) -> tuple[str, Any] | None:
+    if isinstance(node, str):
+        return _image_reference_from_string(node)
+    if isinstance(node, list):
+        for item in node:
+            found = _image_reference_from_node(item)
+            if found:
+                return found
+        return None
+    if not isinstance(node, dict):
+        return None
+    for key in ("b64_json", "image_base64", "base64", "result"):
+        value = node.get(key)
+        if isinstance(value, str):
+            found = _image_reference_from_string(value, allow_plain_url=False)
+            if found:
+                return found
+    for key in ("image_url", "url", "image", "images", "content"):
+        if key not in node:
+            continue
+        found = _image_reference_from_node(node[key])
+        if found:
+            return found
+    return None
+
+
+def extract_chat_completion_image_reference(response: dict[str, Any]) -> tuple[str, Any] | None:
+    """Accept common New API / relay response shapes without binding to one vendor."""
+    data = response.get("data")
+    found = _image_reference_from_node(data)
+    if found:
+        return found
+    choices = response.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message") or choice.get("delta")
+            found = _image_reference_from_node(message)
+            if found:
+                return found
+    return _image_reference_from_node(response.get("output"))
+
+
+def _write_validated_image(raw: bytes, out_path: Path) -> None:
+    try:
+        with Image.open(io.BytesIO(raw)) as opened:
+            image = ImageOps.exif_transpose(opened)
+            image.load()
+            suffix = out_path.suffix.lower()
+            image_format = {".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP"}.get(suffix, "PNG")
+            if image_format == "JPEG":
+                image = image.convert("RGB")
+            elif image.mode not in {"RGB", "RGBA", "L", "LA"}:
+                image = image.convert("RGBA")
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            options = {"quality": 95} if image_format != "PNG" else {"optimize": True}
+            image.save(out_path, format=image_format, **options)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Chat Completions returned bytes that are not a valid image") from exc
+
+
+def save_chat_completion_redrawn_image(response: dict[str, Any], out_path: Path) -> None:
+    reference = extract_chat_completion_image_reference(response)
+    if not reference:
+        raise RuntimeError("Chat Completions image edit response did not contain an image")
+    kind, value = reference
+    if kind == "bytes":
+        raw = value
+    else:
+        request = urllib.request.Request(
+            str(value),
+            headers={
+                "Accept": "image/*",
+                "User-Agent": "review-writer-figure-redraw/1.0",
+            },
+        )
+        try:
+            with urllib.request.urlopen(
+                request,
+                context=ssl.create_default_context(),
+                timeout=180,
+            ) as response_stream:
+                raw = response_stream.read()
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+            raise RuntimeError(f"Could not download the Chat Completions image: {exc}") from exc
+    _write_validated_image(raw, out_path)
+
+
+def should_fail_over_image_provider(error: BaseException) -> bool:
+    details = str(error).upper()
+    return "ALL_CHANNELS_FAILED" in details or any(
+        marker in details for marker in ("HTTP 502", "HTTP 503", "HTTP 504")
+    )
 
 
 def prepare_aspect_preserving_edit_input(source_path: Path, framed_path: Path) -> dict[str, Any]:
@@ -1541,6 +1841,9 @@ def run(args: argparse.Namespace) -> int:
     load_dotenv(review_root)
     if not args.base_url:
         args.base_url = default_base_url()
+    if not args.wire_api:
+        args.wire_api = default_wire_api()
+    fallback_provider = image_fallback_config()
     project = ensure_project_dir(review_root, args.project_id)
     tesseract_command = resolve_tesseract_command(review_root, args.tesseract_cmd)
     image_field = resolve_image_field(getattr(args, "image_field", ""), args.base_url)
@@ -1576,6 +1879,12 @@ def run(args: argparse.Namespace) -> int:
         "tesseract_command": tesseract_command,
         "image_field": image_field,
         "images_transport": images_transport,
+        "fallback_provider": {
+            "enabled": bool(fallback_provider.get("api_key")),
+            "base_url": fallback_provider.get("base_url", ""),
+            "wire_api": fallback_provider.get("wire_api", ""),
+            "model": fallback_provider.get("model", ""),
+        },
         "dry_run": bool(args.dry_run),
     }
     write_json(out_dir / "style_config.json", style)
@@ -1854,20 +2163,61 @@ def run(args: argparse.Namespace) -> int:
                         args.output_format,
                     )
                     save_response_redrawn_image(response, out_path)
-                else:
-                    response = call_images_edit(
+                elif args.wire_api == "chat-completions":
+                    response = call_chat_completions_image_edit(
                         api_key,
                         args.base_url,
                         api_edit_input,
                         attempt_prompt,
                         args.model,
-                        args.quality,
-                        args.background,
-                        args.output_format,
-                        image_field,
-                        images_transport,
                     )
-                    save_redrawn_image(response, out_path)
+                    save_chat_completion_redrawn_image(response, out_path)
+                else:
+                    try:
+                        response = call_images_edit(
+                            api_key,
+                            args.base_url,
+                            api_edit_input,
+                            attempt_prompt,
+                            args.model,
+                            args.quality,
+                            args.background,
+                            args.output_format,
+                            image_field,
+                            images_transport,
+                        )
+                        save_redrawn_image(response, out_path)
+                    except RuntimeError as primary_error:
+                        can_fail_over = (
+                            args.edit_profile == "standard"
+                            and fallback_provider.get("api_key")
+                            and should_fail_over_image_provider(primary_error)
+                        )
+                        if not can_fail_over:
+                            raise
+                        try:
+                            fallback_response = call_chat_completions_image_edit(
+                                fallback_provider["api_key"],
+                                fallback_provider["base_url"],
+                                api_edit_input,
+                                attempt_prompt,
+                                fallback_provider["model"],
+                            )
+                            save_chat_completion_redrawn_image(fallback_response, out_path)
+                        except RuntimeError as fallback_error:
+                            raise RuntimeError(
+                                "Primary image provider was unavailable and the configured "
+                                f"Chat Completions fallback also failed: {fallback_error}"
+                            ) from fallback_error
+                        redraw_row["provider_failover"] = {
+                            "status": "used",
+                            "reason": "primary_provider_unavailable",
+                            "primary_base_url": args.base_url,
+                            "primary_wire_api": args.wire_api,
+                            "fallback_base_url": fallback_provider["base_url"],
+                            "fallback_wire_api": fallback_provider["wire_api"],
+                            "fallback_model": fallback_provider["model"],
+                        }
                 if effective_render_mode not in SOURCE_FAITHFUL_RENDER_MODES and not provider_canvas_allowed:
                     redraw_row["aspect_ratio_normalization"] = normalize_generated_aspect(
                         out_path,
@@ -1980,7 +2330,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--paper-id", default="", help="Redraw one paper after a Figure Review selection and preserve other manifest rows.")
     parser.add_argument("--figures-file", default="")
     parser.add_argument("--base-url", default="", help="Overrides OPENAI_BASE_URL from the process or project .env.")
-    parser.add_argument("--wire-api", choices=["images", "responses"], default="images")
+    parser.add_argument(
+        "--wire-api",
+        choices=["images", "responses", "chat-completions"],
+        default="",
+        help="Image API transport; defaults to IMAGE_OPENAI_WIRE_API or images.",
+    )
     parser.add_argument("--api-key", default="")
     parser.add_argument("--model", default="gpt-image-2")
     parser.add_argument("--quality", default="high")

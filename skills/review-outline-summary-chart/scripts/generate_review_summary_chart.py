@@ -29,7 +29,7 @@ Usage:
     python generate_review_summary_chart.py \
         --review-root <review-root> \
         --project-id <project_id> \
-        --scope both
+        --scope full
 """
 from __future__ import annotations
 
@@ -277,6 +277,8 @@ def load_citation_map(citations_path: Path) -> dict[str, str]:
     """
     data = read_json(citations_path)
     mapping: dict[str, str] = {}
+    if isinstance(data, dict) and isinstance(data.get("entries") or data.get("citations"), list):
+        data = data.get("entries") or data.get("citations") or []
     if isinstance(data, dict):
         for k, v in data.items():
             key = str(k).strip()

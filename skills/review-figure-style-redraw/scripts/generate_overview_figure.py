@@ -11,7 +11,7 @@ Usage:
 
 The script:
 1. Reads the review outline and selected_discovery_results to extract structure.
-2. Scores each template in references/templates/overview_templates.json.
+2. Scores each template bundled under this skill's assets directory.
 3. Selects the best-matching template.
 4. Adapts the template prompt with review-specific content.
 5. Calls the OpenAI-compatible image edit API with the template reference image.
@@ -40,6 +40,30 @@ from _review_runtime.paths import resolve_review_root
 TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 LANDSCAPE_OVERVIEW_IMAGE_SIZE = "1536x1024"
 SQUARE_COMPATIBLE_IMAGE_SIZE = "1024x1024"
+
+
+def normalize_image_wire_api(value: str = "") -> str:
+    """Resolve the configured image transport without silently changing endpoints."""
+    configured = (
+        value.strip()
+        or os.environ.get("IMAGE_OPENAI_WIRE_API", "images").strip()
+    ).lower().replace("_", "-")
+    aliases = {
+        "chat": "chat-completions",
+        "chat-completion": "chat-completions",
+        "image": "images",
+        "image-api": "images",
+    }
+    configured = aliases.get(configured, configured)
+    return configured if configured in {"images", "chat-completions"} else "images"
+
+
+def openai_api_url(base_url: str, endpoint: str) -> str:
+    """Build an OpenAI-compatible endpoint without duplicating /v1."""
+    base = base_url.rstrip("/")
+    if base.endswith("/v1"):
+        return f"{base}{endpoint}"
+    return f"{base}/v1{endpoint}"
 
 
 def overview_image_size_candidates(base_url: str, preferred_size: str = "") -> list[str]:
@@ -120,6 +144,26 @@ def load_dotenv(review_root: Path) -> None:
 def read_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def overview_template_catalog_path() -> Path:
+    """Return the skill-owned overview template catalog."""
+    return Path(__file__).resolve().parents[1] / "assets" / "overview-templates" / "overview_templates.json"
+
+
+def resolve_overview_template_image(templates_path: Path, template: dict[str, Any]) -> Path:
+    """Resolve one catalog image without allowing it to escape the asset directory."""
+    asset_root = templates_path.resolve().parent
+    configured = Path(str(template.get("reference_image") or "").strip())
+    if not configured.name:
+        raise ValueError("Overview template is missing reference_image")
+    candidate = configured if configured.is_absolute() else asset_root / configured
+    candidate = candidate.resolve()
+    try:
+        candidate.relative_to(asset_root)
+    except ValueError as exc:
+        raise ValueError(f"Overview template image escapes the skill asset directory: {candidate}") from exc
+    return candidate
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -1005,6 +1049,7 @@ def call_image_edit_api(
     prompt: str,
     model: str = "gpt-image-1",
     preferred_size: str = "",
+    wire_api: str = "",
     request_metadata: dict[str, str] | None = None,
 ) -> bytes:
     """Call image generation API. Supports both OpenAI-compatible and DashScope native format."""
@@ -1014,7 +1059,33 @@ def call_image_edit_api(
             request_metadata.update({"endpoint": "dashscope-native", "image_size": "2K"})
         return _call_dashscope_native(api_key, base_url, reference_image, prompt, model)
 
-    # OpenAI-compatible endpoints
+    # OpenAI-compatible endpoints.  Some New API relays expose gpt-image-2
+    # only through multimodal /chat/completions.  When that transport is
+    # configured, do not probe /images/*: doing so can trigger provider-side
+    # access controls and can never reach the model assigned to the chat route.
+    resolved_wire_api = normalize_image_wire_api(wire_api)
+    if resolved_wire_api == "chat-completions":
+        size = overview_image_size_candidates(base_url, preferred_size)[0]
+        sized_prompt = prompt_for_overview_size(prompt, size)
+        image = _try_chat_completions_image_edit(
+            base_url,
+            api_key,
+            reference_image,
+            sized_prompt,
+            model,
+        )
+        if request_metadata is not None:
+            request_metadata.update(
+                {
+                    "endpoint": "/chat/completions",
+                    "wire_api": resolved_wire_api,
+                    "image_size": "provider-controlled",
+                    "requested_layout_size": size,
+                }
+            )
+        return image
+
+    # Standard OpenAI Images endpoints.
     base = base_url.rstrip("/")
     if not base.endswith("/v1"):
         base = f"{base}/v1"
@@ -1042,6 +1113,224 @@ def call_image_edit_api(
 
     summary = "; ".join(errors[-4:])
     raise RuntimeError(f"All overview image generation routes failed: {summary}")
+
+
+def _try_chat_completions_image_edit(
+    base_url: str,
+    api_key: str,
+    reference_image: Path,
+    prompt: str,
+    model: str,
+) -> bytes:
+    """Generate the overview through a multimodal Chat Completions relay."""
+    encoded = base64.b64encode(reference_image.read_bytes()).decode("ascii")
+    suffix = reference_image.suffix.lower()
+    mime = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+    }.get(suffix, "image/png")
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime};base64,{encoded}",
+                            "detail": "high",
+                        },
+                    },
+                ],
+            }
+        ],
+        "stream": True,
+    }
+    request = urllib.request.Request(
+        openai_api_url(base_url, "/chat/completions"),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json; charset=utf-8",
+            "Accept": "application/json, text/event-stream",
+            "User-Agent": "review-writer-overview-figure/1.0",
+        },
+        method="POST",
+    )
+    result = _open_chat_completion_request(request)
+    return _extract_chat_completion_image_bytes(result)
+
+
+def _open_chat_completion_request(
+    request: urllib.request.Request,
+    timeout: int = 600,
+) -> dict[str, Any]:
+    """Read either a normal JSON response or an OpenAI-compatible SSE stream."""
+    label = "Overview Chat Completions image request"
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(
+                request,
+                context=ssl.create_default_context(),
+                timeout=timeout,
+            ) as response:
+                content_type = str(response.headers.get("Content-Type") or "").lower()
+                if "text/event-stream" not in content_type:
+                    return decode_json_object(response.read(), label)
+                content_parts: list[str] = []
+                image_items: list[Any] = []
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    event_text = line[5:].strip()
+                    if not event_text or event_text == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(event_text)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = event.get("choices") if isinstance(event, dict) else None
+                    if isinstance(choices, list) and choices:
+                        delta = (choices[0] or {}).get("delta") or {}
+                        content = delta.get("content") if isinstance(delta, dict) else None
+                        if isinstance(content, str):
+                            content_parts.append(content)
+                        elif isinstance(content, list):
+                            image_items.extend(content)
+                        images = delta.get("images") if isinstance(delta, dict) else None
+                        if isinstance(images, list):
+                            image_items.extend(images)
+                    if isinstance(event, dict) and isinstance(event.get("delta"), str):
+                        content_parts.append(event["delta"])
+                message: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": "".join(content_parts),
+                }
+                if image_items:
+                    message["images"] = image_items
+                return {"choices": [{"message": message}]}
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "replace")[:500].replace("\r", " ").replace("\n", " ")
+            if exc.code not in TRANSIENT_HTTP_CODES or attempt == 2:
+                raise RuntimeError(
+                    f"{label} failed with HTTP {exc.code}: {body or exc.reason}"
+                ) from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt == 2:
+                raise RuntimeError(f"{label} transport failed: {exc}") from exc
+        time.sleep(2 ** attempt)
+    raise RuntimeError(f"{label} failed after retries")
+
+
+_DATA_IMAGE_PATTERN = re.compile(
+    r"data:image/[A-Za-z0-9.+-]+;base64,([A-Za-z0-9+/=\s]+)",
+    re.IGNORECASE,
+)
+_MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[[^\]]*\]\((https?://[^)\s]+)\)", re.IGNORECASE)
+_HTTP_IMAGE_PATTERN = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+
+
+def _valid_image_bytes(raw: bytes) -> bool:
+    return any(
+        (
+            raw.startswith(b"\x89PNG\r\n\x1a\n"),
+            raw.startswith(b"\xff\xd8\xff"),
+            raw.startswith((b"GIF87a", b"GIF89a")),
+            raw.startswith(b"RIFF") and raw[8:12] == b"WEBP",
+        )
+    )
+
+
+def _decode_image_base64(value: str) -> bytes | None:
+    compact = re.sub(r"\s+", "", value)
+    if len(compact) < 32:
+        return None
+    try:
+        raw = base64.b64decode(compact, validate=True)
+    except (ValueError, base64.binascii.Error):
+        return None
+    return raw if _valid_image_bytes(raw) else None
+
+
+def _image_reference_from_node(node: Any) -> tuple[str, Any] | None:
+    if isinstance(node, str):
+        data_match = _DATA_IMAGE_PATTERN.search(node)
+        if data_match:
+            raw = _decode_image_base64(data_match.group(1))
+            if raw:
+                return "bytes", raw
+        markdown_match = _MARKDOWN_IMAGE_PATTERN.search(node)
+        if markdown_match:
+            return "url", markdown_match.group(1)
+        url_match = _HTTP_IMAGE_PATTERN.search(node)
+        if url_match:
+            return "url", url_match.group(0).rstrip(".,;)")
+        raw = _decode_image_base64(node)
+        return ("bytes", raw) if raw else None
+    if isinstance(node, list):
+        for item in node:
+            found = _image_reference_from_node(item)
+            if found:
+                return found
+        return None
+    if not isinstance(node, dict):
+        return None
+    for key in (
+        "b64_json",
+        "image_base64",
+        "base64",
+        "result",
+        "message",
+        "delta",
+        "image_url",
+        "url",
+        "image",
+        "images",
+        "content",
+    ):
+        if key not in node:
+            continue
+        found = _image_reference_from_node(node[key])
+        if found:
+            return found
+    return None
+
+
+def _extract_chat_completion_image_bytes(result: dict[str, Any]) -> bytes:
+    reference = _image_reference_from_node(result.get("data"))
+    if not reference:
+        reference = _image_reference_from_node(result.get("choices"))
+    if not reference:
+        reference = _image_reference_from_node(result.get("output"))
+    if not reference:
+        raise RuntimeError("Overview Chat Completions response did not contain an image")
+    kind, value = reference
+    if kind == "bytes":
+        return value
+    request = urllib.request.Request(
+        str(value),
+        headers={
+            "Accept": "image/*",
+            "User-Agent": "review-writer-overview-figure/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(
+            request,
+            context=ssl.create_default_context(),
+            timeout=180,
+        ) as response:
+            raw = response.read()
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError(f"Could not download the overview image: {exc}") from exc
+    if not _valid_image_bytes(raw):
+        raise RuntimeError("Overview Chat Completions returned a URL that was not a valid image")
+    return raw
 
 
 def _call_dashscope_native(
@@ -1221,6 +1510,7 @@ def _build_report(args, template: dict, features: dict, prompt: str,
         "features": {k: v for k, v in features.items() if not k.startswith("_")},
         "adapted_prompt": prompt,
         "api_base_url": base_url,
+        "wire_api": normalize_image_wire_api(args.wire_api),
         "model": model,
         "image_size_candidates": overview_image_size_candidates(base_url, args.size),
         "status": status,
@@ -1243,6 +1533,12 @@ def main():
     parser.add_argument("--base-url", default="", help="API base URL")
     parser.add_argument("--model", default="gpt-image-1", help="Image generation model")
     parser.add_argument(
+        "--wire-api",
+        default="",
+        choices=["", "images", "chat-completions"],
+        help="Image transport; defaults to IMAGE_OPENAI_WIRE_API or images.",
+    )
+    parser.add_argument(
         "--size",
         default="",
         help="Preferred image size; incompatible providers automatically fall back to a supported size.",
@@ -1261,9 +1557,10 @@ def main():
         os.environ.get("OPENAI_BASE_URL", "https://api.xiaoleai.team"),
     )
     api_key = resolve_api_key(args.api_key, base_url)
+    wire_api = normalize_image_wire_api(args.wire_api)
 
     # Load templates
-    templates_path = review_root / "references" / "templates" / "overview_templates.json"
+    templates_path = overview_template_catalog_path()
     if not templates_path.exists():
         print(f"ERROR: Templates file not found: {templates_path}", file=sys.stderr)
         sys.exit(1)
@@ -1283,7 +1580,7 @@ def main():
     print(f"\nMatching templates...")
     best_template = select_best_template(templates, features)
     template_id = best_template["id"]
-    reference_image = review_root / best_template["reference_image"]
+    reference_image = resolve_overview_template_image(templates_path, best_template)
     print(f"\n  Best match: template_{template_id} ({best_template['name']})")
     print(f"  Reference image: {reference_image}")
 
@@ -1299,7 +1596,9 @@ def main():
         print("\n[DRY RUN] Would generate figure with above settings.")
         print(f"  Template: {template_id}")
         print(f"  Reference: {reference_image}")
-        print(f"  API: {base_url}/v1/images/edits")
+        endpoint = "/chat/completions" if wire_api == "chat-completions" else "/images/edits"
+        print(f"  API: {openai_api_url(base_url, endpoint)}")
+        print(f"  Wire API: {wire_api}")
         print(f"  Model: {args.model}")
         out_dir = project_dir / "03_figure_redraw"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1325,6 +1624,7 @@ def main():
 
     print(f"\nCalling image edit API...")
     print(f"  Base URL: {base_url}")
+    print(f"  Wire API: {wire_api}")
     print(f"  Model: {args.model}")
 
     request_metadata: dict[str, str] = {}
@@ -1336,6 +1636,7 @@ def main():
             adapted_prompt,
             args.model,
             preferred_size=args.size,
+            wire_api=wire_api,
             request_metadata=request_metadata,
         )
     except Exception as exc:

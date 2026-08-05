@@ -62,7 +62,7 @@ scripts/literature_acquisition.py
 For a command-line search:
 
 ```powershell
-python scripts/literature_acquisition.py search `
+python <review-root>/skills/review-literature-acquisition/scripts/literature_acquisition.py search `
   --review-root <review-root> `
   --topic "enantioselective synthesis of axially chiral allenes" `
   --year-from 2015 --limit 20
@@ -71,7 +71,7 @@ python scripts/literature_acquisition.py search `
 For a selected download:
 
 ```powershell
-python scripts/literature_acquisition.py download `
+python <review-root>/skills/review-literature-acquisition/scripts/literature_acquisition.py download `
   --review-root <review-root> `
   --candidate-json candidate.json
 ```

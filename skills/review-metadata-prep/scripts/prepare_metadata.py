@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import hashlib
 import json
 import os
@@ -18,6 +17,19 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _review_runtime.paths import resolve_mineru_output_root, resolve_pdf_root, resolve_review_root
+
+
+REVIEW_ROOT = Path(__file__).resolve().parents[3]
+if str(REVIEW_ROOT) not in sys.path:
+    sys.path.insert(0, str(REVIEW_ROOT))
+
+from review_writer_core.taxonomy import (  # noqa: E402
+    labels_by_category,
+    load_rules_from_path,
+    load_taxonomy_rules,
+    resolve_taxonomy_path,
+    taxonomy_identity,
+)
 
 
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Za-z0-9]+\b")
@@ -100,28 +112,7 @@ def load_dotenv(path: Path) -> None:
 
 
 def load_classification_rules(path: Path) -> dict[str, list[str]]:
-    labels = {key: ["not specified"] for key in STRUCTURED_TAG_KEYS}
-    if not path.exists():
-        return labels
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    rules_node = None
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "rules":
-                    rules_node = node.value
-                    break
-        if rules_node is not None:
-            break
-    if rules_node is None:
-        return labels
-    for item in ast.literal_eval(rules_node):
-        if not isinstance(item, tuple) or len(item) < 2:
-            continue
-        label, category = str(item[0]).strip(), str(item[1]).strip()
-        if category in labels and label:
-            labels[category].append(label)
-    return {key: dedupe(value) for key, value in labels.items()}
+    return labels_by_category(load_rules_from_path(path), STRUCTURED_TAG_KEYS)
 
 
 def classification_rules_prompt(labels: dict[str, list[str]]) -> str:
@@ -845,31 +836,13 @@ def structured_tags_from_legacy(
 def structured_tags_from_classification_rules(review_root: Path, text: str) -> dict[str, str]:
     """Assign only labels defined by the repository's active taxonomy."""
     values = {key: "not specified" for key in STRUCTURED_TAG_KEYS}
-    rules_path = review_root / "allene_classification_rules.py"
-    if not rules_path.exists():
-        return values
-    tree = ast.parse(rules_path.read_text(encoding="utf-8"), filename=str(rules_path))
-    rules_node = next(
-        (
-            node.value
-            for node in tree.body
-            if isinstance(node, ast.Assign)
-            and any(isinstance(target, ast.Name) and target.id == "rules" for target in node.targets)
-        ),
-        None,
-    )
-    if rules_node is None:
-        return values
-    try:
-        rules = ast.literal_eval(rules_node)
-    except (ValueError, SyntaxError):
-        return values
+    rules = load_taxonomy_rules(review_root)
     haystack = text.casefold()
     for item in rules:
         if not isinstance(item, tuple) or len(item) < 3:
             continue
         label, category, needles = item[0], item[1], item[2]
-        if category not in values or values[category] != "not specified" or not isinstance(needles, list):
+        if category not in values or values[category] != "not specified":
             continue
         if any(str(needle).casefold() in haystack for needle in needles if str(needle).strip()):
             values[category] = str(label)
@@ -1027,6 +1000,7 @@ def build_metadata(
                 "manifest": str(review_root / "mineru-outputs" / "manifest.json"),
                 "content_blocks": len(blocks),
                 "markdown_chars_used": min(len(md), 14000),
+                "taxonomy": taxonomy_identity(review_root),
             },
             "notes": [],
         },
@@ -1114,7 +1088,7 @@ def run(args: argparse.Namespace) -> int:
     api_key = resolve_api_key(args.api_key, base_url)
     model = args.model or os.environ.get("REVIEW_METADATA_MODEL", "gpt-5.4")
     reasoning_effort = args.reasoning_effort or os.environ.get("REVIEW_METADATA_REASONING_EFFORT", "high")
-    classification_labels = load_classification_rules(review_root / "allene_classification_rules.py")
+    classification_labels = load_classification_rules(resolve_taxonomy_path(review_root))
     use_llm = bool(args.use_llm)
     if use_llm and not api_key:
         print("WARN: --use-llm was set but OPENAI_API_KEY is missing; using rules only.", file=sys.stderr)
@@ -1213,7 +1187,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-key", default="")
     parser.add_argument("--reasoning-effort", default="", choices=["", "none", "low", "medium", "high"])
     parser.add_argument("--sleep-seconds", type=float, default=0.0)
-    return parser.parse_args()
+    args = parser.parse_args()
+    root = Path(args.review_root).resolve()
+    args.mineru_output = args.mineru_output or str(root / "mineru-outputs")
+    args.pdf_root = args.pdf_root or str(root / "source-paper")
+    return args
 
 
 if __name__ == "__main__":

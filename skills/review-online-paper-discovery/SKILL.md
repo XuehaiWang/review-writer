@@ -207,7 +207,7 @@ python3 <skill-root>/scripts/discover.py register-pdfs \
   --mineru-output-dir <folder with this batch's MinerU markdown/extracted output>
 ```
 
-`--paper-pdf-dir` is required, with no default — always ask the human where they put the files rather than assuming `review-library/paper_pdf/`. `--mineru-output-dir` defaults to `<review-root>/review-library/mineru-outputs`: unlike the raw PDFs, MinerU's parsed output is derived/processed data that belongs inside the review-library workspace, so a predictable default is appropriate there even though it isn't for the PDFs themselves.
+`--paper-pdf-dir` is required, with no default — always ask the human where they put the files rather than assuming a Library subdirectory. `--mineru-output-dir` defaults to `<review-root>/mineru-outputs`, matching `mineru-precise-parse-review-writer` and metadata preparation. Override it when that PDF batch was parsed elsewhere.
 
 For each PDF in `--paper-pdf-dir` not already in the registry:
 

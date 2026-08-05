@@ -1,6 +1,6 @@
 ﻿---
 name: mineru-precise-parse-review-writer
-description: Parse local literature PDFs under <review-root> into Markdown with the MinerU precise parsing batch API. Use when Codex needs to batch-convert a review paper library, preserve full MinerU zip sidecars, keep extracted images and JSON outputs, and skip files that were already parsed unless a force rerun is explicitly requested.
+description: Parse local literature PDFs under the active review-writer root into Markdown with the MinerU precise parsing batch API. Use when Codex needs to batch-convert a review paper library, preserve full MinerU zip sidecars, keep extracted images and JSON outputs, and skip files that were already parsed unless a force rerun is explicitly requested.
 ---
 
 # MinerU Precise Parse For Review Writer
@@ -24,7 +24,8 @@ This skill is for batch parsing only. It uploads local PDFs to MinerU, waits for
 ## Default Paths
 
 - input root: `<review-root>`
-- skill root: `this skill folder<review-root>/mineru-outputs`
+- skill root: `<review-root>/skills/mineru-precise-parse-review-writer`
+- output root: `<review-root>/mineru-outputs`
 
 The parser scans the input root recursively for `*.pdf` files and ignores the skill directory and output directory.
 
@@ -36,7 +37,8 @@ Token resolution order:
 2. `MINERU_API_TOKEN`
 3. `config/mineru_api_token.txt`
 
-This skill already includes a local token file. Rotate it by editing `config/mineru_api_token.txt`.
+Keep credentials outside version control. Prefer `MINERU_API_TOKEN`; an optional
+local `config/mineru_api_token.txt` may be used only when it is ignored by Git.
 
 ## Default Behavior
 
@@ -50,31 +52,36 @@ Parsing is incremental by default:
 Parse the whole local library:
 
 ```bash
-python3 scripts/parse_review_writer_pdfs.py
+python <review-root>/skills/mineru-precise-parse-review-writer/scripts/parse_review_writer_pdfs.py \
+  --input-dir <pdf-library-folder>
 ```
 
 Parse only one or two files as a smoke test:
 
 ```bash
-python3 scripts/parse_review_writer_pdfs.py --limit 2
+python <review-root>/skills/mineru-precise-parse-review-writer/scripts/parse_review_writer_pdfs.py \
+  --input-dir <pdf-library-folder> --limit 2
 ```
 
 Force a full rerun:
 
 ```bash
-python3 scripts/parse_review_writer_pdfs.py --force
+python <review-root>/skills/mineru-precise-parse-review-writer/scripts/parse_review_writer_pdfs.py \
+  --input-dir <pdf-library-folder> --force
 ```
 
 Parse a specific subtree:
 
 ```bash
-python3 scripts/parse_review_writer_pdfs.py --input-dir <review-root>/source-paper/Progargylic
+python <review-root>/skills/mineru-precise-parse-review-writer/scripts/parse_review_writer_pdfs.py \
+  --input-dir <pdf-library-folder>/<subfolder>
 ```
 
 Parse one specific PDF:
 
 ```bash
-python3 scripts/parse_review_writer_pdfs.py --pdf <review-root>/source-paper/Progargylic/1-s2.0-S004040202400526X-main.pdf
+python <review-root>/skills/mineru-precise-parse-review-writer/scripts/parse_review_writer_pdfs.py \
+  --pdf <pdf-library-folder>/paper.pdf
 ```
 
 ## Outputs

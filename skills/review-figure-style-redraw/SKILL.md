@@ -61,6 +61,8 @@ Complex multi-panel reaction-overview, strategy, background, comparison, or rear
 
 For the generated full-review overview figure, negotiate image size per provider instead of hard-coding a landscape size. Geek2API-backed xiaoleai routes use `1024x1024`; other compatible routes may prefer `1536x1024` and must fall back to `1024x1024` after an unsupported-size response. On a square-only route, keep the template's complete landscape reading order within balanced white margins and never crop or omit a panel.
 
+Overview layout references are versioned assets owned by this skill under `assets/overview-templates/`. Resolve the catalog and its images relative to the skill directory, independently of runtime Library contents.
+
 For the `source-faithful-outline-color` profile, whiten only the broad interior of a bright coloured filled shape. Never whiten, hollow, fade, blur, or break a coloured word, glyph, label, arrow, bond, or symbol: coloured typography must remain solid, continuous, crisp, and in its original colour.
 
 Use this routing order:
@@ -105,7 +107,7 @@ When a reviewer changes a candidate in Figure Review, the next redraw run reads 
 For a supplied chemical reaction mechanism figure that must retain its exact source appearance, use the dedicated profile below. It is a strict local edit, not a redraw:
 
 ```bash
-python scripts/redraw_figures.py \
+python <review-root>/skills/review-figure-style-redraw/scripts/redraw_figures.py \
   --review-root <review-root> \
   --project-id <project_id> \
   --figure-id <figure_id> \
@@ -137,19 +139,30 @@ Stage 7 also provides an **online SVG editor**. It first creates that complete S
 Default recommendation for this project:
 
 ```text
-base_url: https://api.xiaoleai.team/v1
-wire_api: images
+base_url: https://www.micuapi.ai/v1
+wire_api: chat-completions
 model: gpt-image-2
-endpoint: /v1/images/edits
-multipart image field: image
+endpoint: /v1/chat/completions
+credential: IMAGE_OPENAI_API_KEY (vip_2_image group)
 ```
 
-Use `wire_api: images` only for explicitly approved experimental image editing. Do not use `responses` for chemistry-preserving redraw unless the relay demonstrably supports image input and image editing through `/v1/responses`; otherwise it can generate a new figure without faithfully editing the source.
+For standard AI comparisons, embed the exact current Stage 6 image as a base64 `image_url`, accept either SSE or JSON, and validate the returned image before saving it. The strict mechanism-arrow profile must override the default and use `wire_api: images` with `/v1/images/edits`; do not weaken it to Chat Completions. Do not use `responses` for chemistry-preserving redraw unless the relay demonstrably supports image input and image editing through `/v1/responses`; otherwise it can generate a new figure without faithfully editing the source.
+
+An explicitly configured secondary provider may expose image editing through `/v1/chat/completions`:
+
+```text
+IMAGE_FALLBACK_BASE_URL=https://www.micuapi.ai/v1
+IMAGE_FALLBACK_WIRE_API=chat-completions
+IMAGE_FALLBACK_MODEL=gpt-image-2
+IMAGE_FALLBACK_API_KEY=<optional; otherwise reuse OPENAI_API_KEY>
+```
+
+This optional availability fallback is for the standard AI comparison path only. Activate it after a primary `images/edits` provider returns `ALL_CHANNELS_FAILED` or HTTP 502/503/504. Do not fail over on 400/401 errors, and do not route the strict mechanism-arrow profile through Chat Completions. Record any provider switch in `redrawn_figure_manifest.json`.
 
 ## Run
 
 ```bash
-python scripts/redraw_figures.py \
+python <review-root>/skills/review-figure-style-redraw/scripts/redraw_figures.py \
   --review-root <review-root> \
   --project-id <project_id> \
   --render-mode source-faithful-bw \
@@ -172,12 +185,12 @@ Useful options:
 --require-redrawn
 ```
 
-If `--api-key` is omitted, the script uses `XIAOLEAI_API_KEY` for the xiaoleai endpoint, otherwise `OPENAI_API_KEY`.
+If `--api-key` is omitted, the script first uses `IMAGE_OPENAI_API_KEY`; text-model credentials are only compatibility fallbacks.
 
 Validate source resolution first when needed:
 
 ```bash
-python scripts/redraw_figures.py \
+python <review-root>/skills/review-figure-style-redraw/scripts/redraw_figures.py \
   --review-root <review-root> \
   --project-id <project_id> \
   --dry-run

@@ -11,7 +11,14 @@ from pathlib import Path
 from typing import Any
 
 from llm_retag_metadata import retag_one, write_markdown_report
-from prepare_metadata import STRUCTURED_TAG_KEYS, load_classification_rules, load_dotenv, read_json, write_json
+from prepare_metadata import (
+    STRUCTURED_TAG_KEYS,
+    load_classification_rules,
+    load_dotenv,
+    read_json,
+    resolve_taxonomy_path,
+    write_json,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _review_runtime.paths import resolve_review_root
@@ -136,7 +143,7 @@ def main() -> int:
 
     skill_root = Path(__file__).resolve().parents[1]
     system_prompt = (skill_root / "references" / "metadata_extraction_system.md").read_text(encoding="utf-8")
-    classification_labels = load_classification_rules(review_root / "allene_classification_rules.py")
+    classification_labels = load_classification_rules(resolve_taxonomy_path(review_root))
     meta_dir = review_root / "review-library" / "metadata" / "papers"
     out_dir = review_root / "review-library" / "metadata"
     paths = selected_paths(meta_dir, args.paper_id)

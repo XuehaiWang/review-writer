@@ -26,7 +26,7 @@ The skill assumes PDFs have already been parsed by MinerU and that a `mineru-out
 1. Build paper metadata:
 
 ```bash
-python scripts/prepare_metadata.py \
+python <review-root>/skills/review-metadata-prep/scripts/prepare_metadata.py \
   --review-root <review-root> \
   --mineru-output <review-root>/mineru-outputs \
   --pdf-root <review-root>/source-paper/<your-subfolder> \
@@ -40,7 +40,7 @@ Use `--append-registry` when adding a new source-paper folder to an existing lib
 2. Validate metadata:
 
 ```bash
-python scripts/validate_metadata.py \
+python <review-root>/skills/review-metadata-prep/scripts/validate_metadata.py \
   --review-root <review-root>
 ```
 
@@ -76,7 +76,7 @@ reaction_type
 document_scope
 ```
 
-Each tag value must be selected from your project's classification rules file (e.g. `<your-classification-rules>.py`) under the matching category, or `not specified`. This repo ships `<review-root>/allene_classification_rules.py` as the default example.
+Each tag value must be selected from the active shared taxonomy profile under the matching category, or `not specified`. The built-in default is `<review-root>/review_writer_core/taxonomies/allene.py`. Select another built-in profile with `REVIEW_TAXONOMY_PROFILE`, or point `REVIEW_CLASSIFICATION_RULES` at an absolute or workspace-relative Python rules file. Metadata must record the active taxonomy path and SHA-256 identity.
 
 To enable LLM enhancement, set:
 
@@ -87,7 +87,7 @@ export OPENAI_API_KEY=...
 Then run:
 
 ```bash
-python scripts/prepare_metadata.py \
+python <review-root>/skills/review-metadata-prep/scripts/prepare_metadata.py \
   --review-root <review-root> \
   --mineru-output <review-root>/mineru-outputs \
   --pdf-root <review-root>/source-paper/<your-subfolder> \
@@ -104,7 +104,7 @@ LLM extraction is constrained to the first-page blocks, title/author/abstract ca
 To refresh only the eight LLM tags on an existing library without rebuilding paper IDs or paths:
 
 ```bash
-python scripts/llm_retag_metadata.py \
+python <review-root>/skills/review-metadata-prep/scripts/llm_retag_metadata.py \
   --review-root <review-root> \
   --model gpt-5.4 \
   --base-url https://naiccc.com \
@@ -115,7 +115,7 @@ python scripts/llm_retag_metadata.py \
 For a full-library refresh, prefer the resumable batch runner. It processes three papers per round by default, skips already successful LLM-tagged papers, writes progress after every paper, and retries failures:
 
 ```bash
-python scripts/batch_llm_retag_metadata.py \
+python <review-root>/skills/review-metadata-prep/scripts/batch_llm_retag_metadata.py \
   --review-root <review-root> \
   --batch-size 3 \
   --max-attempts 5 \
@@ -148,7 +148,7 @@ review-library/metadata/llm_retag_batch_report.md
 If old metadata files need the new `structured_tags` field before LLM retagging:
 
 ```bash
-python scripts/backfill_structured_tags.py \
+python <review-root>/skills/review-metadata-prep/scripts/backfill_structured_tags.py \
   --review-root <review-root>
 ```
 

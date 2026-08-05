@@ -19,6 +19,155 @@ REVIEW_UI_PATH = Path(__file__).resolve().parent / "assets" / "dashboard" / "rev
 
 
 class FinalStageActionTests(unittest.TestCase):
+    def test_overview_generation_does_not_rebase_a_stale_final_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "review-projects" / "demo"
+            discovery = project / "00_discovery"
+            outline = project / "01_matrix_outline"
+            draft_stage = project / "04_first_draft"
+            final_stage = project / "05_final_audit"
+            for directory in (discovery, outline, draft_stage, final_stage):
+                directory.mkdir(parents=True)
+            (discovery / "query_plan.draft.json").write_text("{}", encoding="utf-8")
+            (discovery / "selected_discovery_results.json").write_text("{}", encoding="utf-8")
+            (outline / "selected_outline.md").write_text("# Outline\n", encoding="utf-8")
+            first_draft = draft_stage / "first_draft.md"
+            first_draft.write_text("# Review\n\nOld Stage 8 text.\n", encoding="utf-8")
+            final_draft = final_stage / "final_draft.md"
+            final_draft.write_text("# Review\n\nOld Stage 8 text.\n", encoding="utf-8")
+            final_handoff = final_stage / "final_handoff.json"
+            dashboard.write_stage_handoff(final_handoff, "draft", [first_draft])
+            dashboard.record_stage_outputs(final_handoff, [final_draft], "final")
+            first_draft.write_text("# Review\n\nCurrent custom Stage 8 text.\n", encoding="utf-8")
+
+            def fake_run(
+                script: Path,
+                review_root: Path,
+                project_id: str,
+                **kwargs: object,
+            ) -> str:
+                if script.name == "generate_overview_figure.py":
+                    output_index = list(kwargs["extra"]).index("--output") + 1
+                    Path(list(kwargs["extra"])[output_index]).write_bytes(b"overview")
+                return "ok"
+
+            with patch.object(dashboard, "run_project_script", side_effect=fake_run):
+                result = dashboard.generate_final_overview_figure(root, "demo")
+
+            self.assertFalse(result["included_in_final_draft"])
+            self.assertTrue(result["final_draft_requires_regeneration"])
+            self.assertEqual(final_draft.read_text(encoding="utf-8"), "# Review\n\nOld Stage 8 text.\n")
+            self.assertTrue(dashboard.artifact_freshness(final_handoff, [final_draft])["stale"])
+
+    def test_final_integrity_gate_detects_lost_stage8_custom_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            stage = root / "review-projects" / "demo" / "04_first_draft"
+            final_stage = root / "review-projects" / "demo" / "05_final_audit"
+            stage.mkdir(parents=True)
+            final_stage.mkdir(parents=True)
+            (stage / "first_draft.md").write_text(
+                "# Demo\n\n## Section\n\n1Custom text [1].\n\n"
+                "<!-- paragraph_id: sec1-p1 -->\n\n## References\n\n[1] Reference.\n",
+                encoding="utf-8",
+            )
+            final_path = final_stage / "final_draft.md"
+            final_path.write_text(
+                "# Demo\n\n## Section\n\nCustom text [1].\n\n## References\n\n[1] Reference.\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                dashboard.missing_final_draft_paragraphs(root, "demo", final_path),
+                ["sec1-p1"],
+            )
+            final_path.write_text(
+                "# Demo\n\n## Section\n\n1Custom text [1].\n\n## References\n\n[1] Reference.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                dashboard.missing_final_draft_paragraphs(root, "demo", final_path),
+                [],
+            )
+
+    def test_final_audit_report_falls_back_to_generated_format_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stage = Path(temp_dir)
+            (stage / "format_scan.md").write_text("# Final Audit\n\nPassed.\n", encoding="utf-8")
+
+            self.assertEqual(
+                dashboard.final_audit_report_text(stage),
+                "# Final Audit\n\nPassed.\n",
+            )
+
+    def test_final_audit_recovers_empty_legacy_citations_from_current_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "review-projects" / "demo"
+            matrix = project / "01_matrix_outline"
+            sections = project / "02_section_drafting"
+            draft_stage = project / "04_first_draft"
+            final_stage = project / "05_final_audit"
+            matrix.mkdir(parents=True)
+            sections.mkdir(parents=True)
+            draft_stage.mkdir(parents=True)
+            final_stage.mkdir(parents=True)
+            (sections / "section_drafts.json").write_text(
+                json.dumps(
+                    {
+                        "sections": [
+                            {
+                                "paragraphs": [
+                                    {"paper_id": "P001", "cited_paper_ids": ["P001"]},
+                                    {"paper_id": "P002", "cited_paper_ids": ["P002"]},
+                                ]
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (matrix / "literature_matrix.json").write_text(
+                json.dumps(
+                    {
+                        "rows": [
+                            {"paper_id": "P001", "authors": ["A. Author"], "title": "First paper", "journal": "J1", "year": 2024},
+                            {"paper_id": "P002", "authors": ["B. Author"], "title": "Second paper", "journal": "J2", "year": 2025},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (draft_stage / "first_draft.md").write_text(
+                "# Review\n\nBody [1]. More [2].\n\n## References\n",
+                encoding="utf-8",
+            )
+            (draft_stage / "citations.json").write_text("[]\n", encoding="utf-8")
+            (final_stage / "overview_figure.png").write_bytes(b"current-overview")
+            overview_handoff = final_stage / "overview_figure_handoff.json"
+            dashboard.write_stage_handoff(
+                overview_handoff,
+                "blueprint",
+                [draft_stage / "first_draft.md"],
+            )
+            dashboard.record_stage_outputs(
+                overview_handoff,
+                [final_stage / "overview_figure.png"],
+                "final-overview-figure",
+            )
+
+            with patch.object(dashboard, "run_project_script", return_value="ok"):
+                dashboard.regenerate_final_audit(root, "demo")
+
+            citations = json.loads((draft_stage / "citations.json").read_text(encoding="utf-8"))
+            final_text = (final_stage / "final_draft.md").read_text(encoding="utf-8")
+            self.assertEqual([entry["paper_id"] for entry in citations["entries"]], ["P001", "P002"])
+            self.assertIn("[1] A. Author. First paper. J1 (2024).", final_text)
+            self.assertIn("[2] B. Author. Second paper. J2 (2025).", final_text)
+            self.assertIn("OVERVIEW-F01", final_text)
+            self.assertTrue(dashboard.overview_figure_is_current(project))
+
     def test_final_page_has_only_current_actions_in_order(self) -> None:
         final_page = FINAL_PAGE_PATH.read_text(encoding="utf-8")
         labels = ["Generate Conclusion", "Generate Overview Figure", "Generate Final Draft"]

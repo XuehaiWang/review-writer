@@ -746,8 +746,8 @@ def register_pdf(
     candidate: dict[str, Any],
     notes: list[str],
 ) -> str:
-    """Register one PDF already sitting in paper_pdf_dir (agent-chosen, not
-    assumed to be review-library/paper_pdf/) against candidate metadata, and
+    """Register one PDF already sitting in the explicitly selected paper_pdf_dir
+    against candidate metadata, and
     seed source_paths.markdown/content_list from mineru_output_dir (also
     agent-chosen, not assumed to be <review-root>/mineru-outputs) if that
     directory already has this PDF's slug parsed."""
@@ -1209,11 +1209,9 @@ def run_register_pdfs(args: argparse.Namespace) -> int:
     an unmatched file is reported, not silently skipped or force-registered
     under a wrong title.
 
-    --mineru-output-dir defaults to <review-root>/review-library/mineru-outputs
-    -- unlike --paper-pdf-dir, this one nests inside review-library by
-    convention, since it holds derived/processed data (parsed markdown,
-    extracted content) that belongs with the rest of the review-library
-    workspace rather than wherever the raw PDFs happen to live."""
+    --mineru-output-dir defaults to <review-root>/mineru-outputs, matching the
+    MinerU parsing and metadata-preparation stages. --paper-pdf-dir remains an
+    explicit user-selected source folder."""
     review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     _load_dotenv_if_present(review_root)
     out_dir, candidates = _load_candidates_for_download(args, review_root)
@@ -1224,7 +1222,7 @@ def run_register_pdfs(args: argparse.Namespace) -> int:
     mineru_output_dir = (
         Path(args.mineru_output_dir).resolve()
         if args.mineru_output_dir
-        else review_root / "review-library" / "mineru-outputs"
+        else review_root / "mineru-outputs"
     )
 
     download_list_path = (
@@ -1419,8 +1417,8 @@ def parse_args() -> argparse.Namespace:
         "--mineru-output-dir", default="",
         help="Folder with this PDF batch's MinerU output (markdown/, extracted/), used to seed "
         "source_paths and to resolve a title-match fallback for files not matched by filename. "
-        "Defaults to <review-root>/review-library/mineru-outputs -- unlike --paper-pdf-dir, this "
-        "one belongs inside the review-library workspace since it's derived/processed data.",
+        "Defaults to <review-root>/mineru-outputs, matching the MinerU parser and metadata "
+        "preparation stages. Override it when the selected PDFs were parsed elsewhere.",
     )
     register_pdfs.add_argument(
         "--candidates-file", default="",
