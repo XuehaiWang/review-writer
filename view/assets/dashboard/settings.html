@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Review Writer API Settings</title>
+  <link rel="stylesheet" href="/assets/dashboard/review-ui.css?v=20260805">
+  <style>
+    :root{--ink:#22231f;--muted:#6f746d;--line:#d9cdb8;--green:#1e6a58;--green2:#2f8872;--paper:#fffdf8;--panel:#fff9ef;--orange:#b7652d;--shadow:0 16px 44px rgba(73,53,28,.10)}
+    *{box-sizing:border-box}body{margin:0;color:var(--ink);background:radial-gradient(circle at 12% 0,#fff8e8 0,transparent 32%),linear-gradient(145deg,#eee0c6,#f7efdf 52%,#e8dcc6);font:14px Georgia,"Times New Roman",serif;min-height:100vh}
+    .nav{padding:9px 14px;display:flex;gap:12px;align-items:center;background:rgba(255,250,241,.96);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}.nav-title{font-weight:700;font-size:18px}.nav-center{flex:1;text-align:center;color:var(--muted)}.nav-right{display:flex;gap:7px;flex-wrap:wrap}.nav a{padding:7px 10px;border:1px solid var(--line);border-radius:7px;color:var(--ink);text-decoration:none;background:var(--paper)}.nav a.active{color:#fff;background:var(--green);border-color:var(--green)}.nav .back-link{display:inline-flex!important;align-items:center;gap:5px;color:var(--green);font-weight:700;white-space:nowrap}
+    main{width:min(1180px,calc(100% - 32px));margin:24px auto 48px}.hero{position:relative;overflow:hidden;padding:26px 28px;border:1px solid #b6cbbf;border-radius:18px;color:#fff;background:linear-gradient(135deg,#174f44,#26745f 62%,#348973);box-shadow:var(--shadow)}.hero:after{content:"";position:absolute;width:230px;height:230px;border:42px solid rgba(255,255,255,.08);border-radius:50%;right:-72px;top:-104px}.hero h1{margin:0 0 8px;font-size:28px}.hero p{margin:0;max-width:760px;line-height:1.65;color:#edf8f3}.hero-badge{display:inline-flex;align-items:center;gap:7px;margin-bottom:12px;padding:5px 9px;border:1px solid rgba(255,255,255,.28);border-radius:999px;background:rgba(255,255,255,.11);font-size:12px}
+    .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:18px}.card{padding:20px;border:1px solid var(--line);border-radius:16px;background:rgba(255,253,248,.94);box-shadow:0 9px 26px rgba(73,53,28,.06)}.card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:17px}.card h2{margin:0;font-size:20px}.card p{margin:5px 0 0;color:var(--muted);font-size:12px;line-height:1.45}.provider-icon{display:grid;place-items:center;width:38px;height:38px;border-radius:12px;color:#fff;background:linear-gradient(145deg,var(--green),var(--green2));font:700 16px Arial}.source{display:inline-flex;padding:4px 8px;border-radius:999px;background:#eee7da;color:#675d50;font:11px Arial,sans-serif}.source.configured{background:#dcefe7;color:#175b49}.field{margin-top:13px}.field label{display:flex;justify-content:space-between;gap:8px;margin-bottom:6px;font-weight:700;font-size:12px}.field small{font-weight:400;color:var(--muted)}input,select{width:100%;border:1px solid #d5c8b2;border-radius:9px;background:#fffefb;color:var(--ink);padding:10px 11px;font:13px Arial,sans-serif;outline:none;transition:.16s}input:focus,select:focus{border-color:var(--green2);box-shadow:0 0 0 3px rgba(46,132,109,.12)}.key-row{display:grid;grid-template-columns:1fr auto;gap:7px}.key-toggle{border:1px solid var(--line);border-radius:9px;background:#fffaf1;padding:0 11px;cursor:pointer;color:var(--green);font-weight:700}.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .footer{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:18px;padding:18px 20px;border:1px solid var(--line);border-radius:15px;background:rgba(255,253,248,.94);box-shadow:var(--shadow)}.security{display:flex;gap:11px;align-items:flex-start;max-width:720px}.security-mark{flex:0 0 auto;display:grid;place-items:center;width:35px;height:35px;border-radius:50%;background:#efe4ce;color:var(--orange);font-size:18px}.security strong{display:block;margin-bottom:4px}.security span{color:var(--muted);font-size:12px;line-height:1.5}.actions{display:flex;gap:8px}.btn{border:1px solid var(--line);border-radius:9px;background:var(--paper);padding:10px 15px;font:700 13px Georgia,serif;cursor:pointer}.btn.primary{color:#fff;background:var(--green);border-color:var(--green)}.btn:disabled{opacity:.55;cursor:wait}.status{min-height:22px;margin-top:11px;padding:0 4px;color:var(--muted)}.status.error{color:#a33b28}.status.success{color:#17604c}.loading{opacity:.65;pointer-events:none}
+    @media(max-width:980px){.grid{grid-template-columns:1fr}.footer{align-items:flex-start;flex-direction:column}.nav{flex-wrap:wrap}.nav-center{order:3;flex-basis:100%}}@media(max-width:560px){main{width:min(100% - 18px,1180px);margin-top:10px}.hero{padding:20px}.two{grid-template-columns:1fr}.actions{width:100%}.actions .btn{flex:1}}
+  </style>
+</head>
+<body>
+  <nav class="nav"><div class="nav-title">Review Writer</div><a id="backToWorkspace" class="back-link" href="/library">&larr; Back to workspace</a><div class="nav-center">Local provider configuration</div><div class="nav-right"><a href="/library">Library</a><a href="/discovery">Discovery</a><a href="/matrix">Matrix</a><a href="/blueprint">Blueprint</a><a href="/sections">Sections</a><a href="/figures">Figures</a><a href="/draft">Draft</a><a href="/final">Final</a><a class="active" href="/settings">Settings</a></div></nav>
+  <main>
+    <section class="hero">
+      <div class="hero-badge">⚙ Local workspace settings</div>
+      <h1>API Provider Settings</h1>
+      <p>Configure MinerU parsing, text generation, and image generation providers. Saved values apply to newly started tasks in this workspace.</p>
+    </section>
+    <section id="settingsGrid" class="grid loading">
+      <article class="card">
+        <div class="card-head"><div><h2>MinerU parsing</h2><p>Required for uploaded PDF Markdown, content blocks, and figure extraction.</p></div><div class="provider-icon">M</div></div>
+        <span id="mineruSource" class="source">Loading</span>
+        <div class="field"><label for="mineruKey">MinerU key <small id="mineruHint">Not configured</small></label><div class="key-row"><input id="mineruKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="Enter MinerU API token"><button class="key-toggle" type="button" data-toggle="mineruKey">Show</button></div></div>
+      </article>
+      <article class="card">
+        <div class="card-head"><div><h2>Text generation</h2><p>Used by section writing, conclusion generation, metadata AI, and final draft merging.</p></div><div class="provider-icon">T</div></div>
+        <span id="textSource" class="source">Loading</span>
+        <div class="field"><label for="textUrl">Text API URL</label><input id="textUrl" type="url" spellcheck="false" placeholder="https://provider.example/v1"></div>
+        <div class="field"><label for="textKey">Text API key <small id="textHint">Not configured</small></label><div class="key-row"><input id="textKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="Enter text API key"><button class="key-toggle" type="button" data-toggle="textKey">Show</button></div></div>
+        <div class="two"><div class="field"><label for="textModel">Model</label><input id="textModel" spellcheck="false" placeholder="gpt-5.4"></div><div class="field"><label for="textWire">API format</label><select id="textWire"><option value="chat-completions">Chat Completions</option><option value="responses">Responses</option></select></div></div>
+      </article>
+      <article class="card">
+        <div class="card-head"><div><h2>Image generation</h2><p>Used by AI figure redraw and the review overview figure.</p></div><div class="provider-icon">I</div></div>
+        <span id="imageSource" class="source">Loading</span>
+        <div class="field"><label for="imageUrl">Image API URL</label><input id="imageUrl" type="url" spellcheck="false" placeholder="https://provider.example/v1"></div>
+        <div class="field"><label for="imageKey">Image API key <small id="imageHint">Not configured</small></label><div class="key-row"><input id="imageKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="Enter image API key"><button class="key-toggle" type="button" data-toggle="imageKey">Show</button></div></div>
+        <div class="two"><div class="field"><label for="imageModel">Model</label><input id="imageModel" spellcheck="false" placeholder="gpt-image-2"></div><div class="field"><label for="imageWire">API format</label><select id="imageWire"><option value="images">Images API</option><option value="chat-completions">Chat Completions</option></select></div></div>
+      </article>
+    </section>
+    <section class="footer">
+      <div class="security"><div class="security-mark">◆</div><div><strong>Secrets stay on this computer</strong><span>Keys are stored in the Git-ignored <code>.review-writer</code> runtime directory. Existing keys are never returned to the browser; leave a key field blank to keep the current value.</span></div></div>
+      <div class="actions"><button id="reloadBtn" class="btn" type="button">Reload</button><button id="saveBtn" class="btn primary" type="button">Save settings</button></div>
+    </section>
+    <div id="status" class="status" role="status" aria-live="polite"></div>
+  </main>
+  <script src="/assets/dashboard/review-i18n.js?v=20260805c"></script>
+  <script>
+    const $=id=>document.getElementById(id);
+    function returnTarget(){const requested=new URLSearchParams(location.search).get('return');if(requested&&requested.startsWith('/')&&!requested.startsWith('//')&&!requested.startsWith('/settings'))return requested;try{const previous=new URL(document.referrer);if(previous.origin===location.origin&&previous.pathname!=='/settings')return previous.pathname+previous.search+previous.hash}catch(_){}return '/library'}
+    $('backToWorkspace').href=returnTarget();
+    const sourceLabel=value=>({'local-settings':'Local settings','environment':'Environment / .env','legacy-token-file':'Legacy token file','unset':'Not configured'})[value]||value||'Not configured';
+    function setSource(id,source){const node=$(id);node.textContent=sourceLabel(source);node.classList.toggle('configured',source!=='unset')}
+    function keyState(name,data){const hint=$(name+'Hint'),input=$(name+'Key');hint.textContent=data.key_configured?`Configured (${data.key_hint})`:'Not configured';input.value='';input.placeholder=data.key_configured?'Leave blank to keep the current key':'Enter API key'}
+    async function readJson(response){const text=await response.text();let data={};try{data=text?JSON.parse(text):{}}catch(_){throw new Error(`Server returned non-JSON data (HTTP ${response.status}).`)}if(!response.ok||data.ok===false)throw new Error(data.error||`HTTP ${response.status}`);return data}
+    async function loadSettings(){const grid=$('settingsGrid'),status=$('status');grid.classList.add('loading');status.className='status';status.textContent='Loading settings…';try{const data=await readJson(await fetch('/api/settings',{cache:'no-store'}));$('textUrl').value=data.text.base_url||'';$('textModel').value=data.text.model||'';$('textWire').value=data.text.wire_api||'chat-completions';$('imageUrl').value=data.image.base_url||'';$('imageModel').value=data.image.model||'';$('imageWire').value=data.image.wire_api||'images';keyState('mineru',data.mineru);keyState('text',data.text);keyState('image',data.image);setSource('mineruSource',data.mineru.source);setSource('textSource',data.text.source);setSource('imageSource',data.image.source);status.textContent='Settings loaded. Blank key fields preserve existing secrets.'}catch(error){status.className='status error';status.textContent=error.message||String(error)}finally{grid.classList.remove('loading')}}
+    async function saveSettings(){const button=$('saveBtn'),status=$('status');button.disabled=true;status.className='status';status.textContent='Saving and applying settings…';const payload={mineru:{api_key:$('mineruKey').value.trim()},text:{base_url:$('textUrl').value.trim(),api_key:$('textKey').value.trim(),model:$('textModel').value.trim(),wire_api:$('textWire').value},image:{base_url:$('imageUrl').value.trim(),api_key:$('imageKey').value.trim(),model:$('imageModel').value.trim(),wire_api:$('imageWire').value}};try{const data=await readJson(await fetch('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}));keyState('mineru',data.mineru);keyState('text',data.text);keyState('image',data.image);setSource('mineruSource',data.mineru.source);setSource('textSource',data.text.source);setSource('imageSource',data.image.source);status.className='status success';status.textContent=data.message||'API settings saved and applied.'}catch(error){status.className='status error';status.textContent=error.message||String(error)}finally{button.disabled=false}}
+    document.querySelectorAll('[data-toggle]').forEach(button=>button.addEventListener('click',()=>{const input=$(button.dataset.toggle),show=input.type==='password';input.type=show?'text':'password';button.textContent=show?'Hide':'Show'}));
+    $('reloadBtn').addEventListener('click',loadSettings);$('saveBtn').addEventListener('click',saveSettings);loadSettings();
+  </script>
+</body>
+</html>

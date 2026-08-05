@@ -96,6 +96,14 @@ def parse_args() -> argparse.Namespace:
         help=f"Output directory. Default: {DEFAULT_OUTPUT_DIR}",
     )
     parser.add_argument(
+        "--manifest-path",
+        type=Path,
+        help=(
+            "Optional path for this run's manifest. Default: "
+            "<output-dir>/manifest.json. Useful for independent single-PDF upload jobs."
+        ),
+    )
+    parser.add_argument(
         "--token",
         help="MinerU API token. If omitted, MINERU_API_TOKEN and then config/mineru_api_token.txt are used.",
     )
@@ -537,6 +545,11 @@ def main() -> int:
     args = parse_args()
     input_dir = args.input_dir.resolve()
     output_dir = args.output_dir.resolve()
+    manifest_path = (
+        args.manifest_path.resolve()
+        if args.manifest_path
+        else output_dir / "manifest.json"
+    )
     token = resolve_token(args)
 
     if not input_dir.is_dir():
@@ -585,7 +598,7 @@ def main() -> int:
     manifest["finished_at"] = now_utc()
     manifest["completed_count"] = len(manifest["completed"])
     manifest["failed_count"] = len(manifest["failed"])
-    write_json(output_dir / "manifest.json", manifest)
+    write_json(manifest_path, manifest)
 
     print(
         json.dumps(
@@ -593,7 +606,7 @@ def main() -> int:
                 "output_dir": str(output_dir),
                 "completed_count": manifest["completed_count"],
                 "failed_count": manifest["failed_count"],
-                "manifest_path": str(output_dir / "manifest.json"),
+                "manifest_path": str(manifest_path),
             },
             ensure_ascii=False,
             indent=2,
