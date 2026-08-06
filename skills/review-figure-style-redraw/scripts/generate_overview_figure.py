@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import os
 import re
 import ssl
@@ -37,6 +38,26 @@ from typing import Any
 TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 LANDSCAPE_OVERVIEW_IMAGE_SIZE = "1536x1024"
 SQUARE_COMPATIBLE_IMAGE_SIZE = "1024x1024"
+
+_ENGLISH_NUM_WORDS = {
+    2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+    7: "seven", 8: "eight", 9: "nine", 10: "ten",
+}
+
+# Category panel lists baked into the template prompts (allene-field originals)
+_CATEGORY_PANEL_RE = re.compile(
+    r"(?:-\s*|(?:(\d+)\.\s*))?Cu\s*\n(?:-\s*|(?:(\d+)\.\s*))?Pd\s*\n"
+    r"(?:-\s*|(?:(\d+)\.\s*))?Au\s*\n(?:-\s*|(?:(\d+)\.\s*))?Rh/Ir\s*\n"
+    r"(?:-\s*|(?:(\d+)\.\s*))?Other metals",
+    re.IGNORECASE,
+)
+_INLINE_CATEGORIES_RE = re.compile(r"Cu\s*/\s*Pd\s*/\s*Au\s*/\s*Rh/Ir", re.IGNORECASE)
+
+_TEXT_INTEGRITY_GUARD = (
+    "TEXT INTEGRITY (strict): render every cell EXACTLY as given; never copy or repeat "
+    "words between panels; no invented, gibberish, hyphen-split, or placeholder text; "
+    "fill every panel, leave no blank areas unless specified above."
+)
 
 
 def normalize_image_wire_api(value: str = "") -> str:
@@ -93,6 +114,51 @@ def prompt_for_overview_size(prompt: str, size: str) -> str:
         "inside the square: keep every panel fully visible, use balanced white margins, do not crop, "
         "stretch, stack, or omit any title, category, reaction, label, legend, or conclusion block."
     )
+
+
+def condense_overview_prompt(prompt: str, max_chars: int = 3900) -> str:
+    """Trim the prompt to provider limits without losing the adaptation data.
+
+    Providers such as micuapi gpt-image-2 reject prompts over ~4000 chars.
+    Removal order (least to most important): FORBIDDEN BEHAVIOR,
+    APPROVED TERMINOLOGY, BALL-AND-STICK rendering detail, then the
+    reference template preamble before DOMAIN OVERRIDE.
+    """
+    if len(prompt) <= max_chars:
+        return prompt
+
+    def _drop(pattern: str, text: str) -> str:
+        return re.sub(pattern, "", text, count=1, flags=re.DOTALL)
+
+    condensed = prompt
+    # Replace FORBIDDEN BEHAVIOR with a compact one-liner (never drop the
+    # anti-repetition / anti-gibberish guard entirely)
+    condensed = re.sub(
+        r"FORBIDDEN BEHAVIOR \(strictly enforced\):.*",
+        _TEXT_INTEGRITY_GUARD,
+        condensed, flags=re.DOTALL,
+    )
+    if len(condensed) <= max_chars:
+        return condensed
+    condensed = _drop(r"APPROVED TERMINOLOGY.*?(?=TEXT INTEGRITY|CRITICAL|\Z)", condensed)
+    if len(condensed) <= max_chars:
+        return condensed
+    condensed = _drop(r"BALL-AND-STICK RENDERING RULES:.*?(?=STEREOCHEMISTRY|QUALITY CHECK|\Z)", condensed)
+    condensed = _drop(r"STEREOCHEMISTRY \(must be visually prominent\):.*?(?=QUALITY CHECK|\Z)", condensed)
+    condensed = _drop(r"QUALITY CHECK:.*?(?=\n\n|\Z)", condensed)
+    if len(condensed) <= max_chars:
+        return condensed
+    # Keep only the adaptation block (everything from the reference usage note on)
+    idx = condensed.find("REFERENCE IMAGE USAGE")
+    if idx > 0:
+        condensed = condensed[idx:]
+    if len(condensed) <= max_chars:
+        return condensed
+    # Last resort: hard-truncate but always keep the integrity guard
+    guard = _TEXT_INTEGRITY_GUARD
+    if guard in condensed:
+        condensed = condensed.replace(guard, "").rstrip()
+    return condensed[: max_chars - len(guard) - 2].rstrip() + "\n\n" + guard
 
 
 def decode_json_object(raw: bytes, label: str) -> dict[str, Any]:
@@ -168,6 +234,613 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def build_layout_skeleton(reference_image: Path, output_path: Path, skeleton_width: int = 72) -> Path:
+    """Create a layout-only version of the template reference image.
+
+    Aggressively downscales then upscales so panel shapes, colors, and the
+    overall layout survive, while ALL text and chemistry glyphs become
+    unreadable.  The reference image then serves purely as a layout/style
+    guide (round vs square panels, column structure, color scheme) and the
+    model cannot copy template content into the generated overview.
+    Falls back to the original image when Pillow is unavailable.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return reference_image
+    try:
+        with Image.open(reference_image) as img:
+            img = img.convert("RGB")
+            width, height = img.size
+            ratio = max(1, width // skeleton_width)
+            small = img.resize((max(1, width // ratio), max(1, height // ratio)), Image.LANCZOS)
+            skeleton = small.resize((width, height), Image.BILINEAR)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            skeleton.save(output_path, format="PNG")
+        return output_path
+    except Exception as exc:  # never block generation on preprocessing
+        print(f"  WARNING: layout skeleton failed ({exc}); using original reference")
+        return reference_image
+
+
+# ---------------------------------------------------------------------------
+# Chemically accurate ball-and-stick skeleton rendering.
+# Coordinates are built from hybridization rules (sp 180°, sp2 120°, ring 120°,
+# perpendicular allene planes), so geometry is correct BY CONSTRUCTION and no
+# chemistry DLL (RDKit/OpenBabel) is required.
+# ---------------------------------------------------------------------------
+
+_CPK_COLORS = {
+    "C": (35, 35, 35), "H": (245, 245, 245), "O": (220, 30, 30),
+    "N": (40, 80, 220), "S": (230, 200, 40), "P": (250, 140, 30),
+    "Si": (200, 170, 120), "B": (240, 150, 180), "R": (70, 130, 200),
+}
+_ATOM_RADIUS = {"C": 20, "H": 12, "O": 19, "N": 19, "S": 22, "P": 22,
+                "Si": 22, "B": 19, "R": 24}
+
+
+# Generic SMILES -> accurate 3D geometry.  Any review topic can supply its
+# core motif as SMILES (query_plan "skeleton_smiles"), otherwise a keyword map
+# picks a built-in SMILES.  Geometry is exact by construction:
+# rings = regular polygons, substituents grow with ideal hybridization angles
+# (sp 180 / sp2 120 / sp3 109.5), cumulated double bonds get perpendicular
+# planes (allene chirality).
+
+_VALENCE = {"C": 4, "N": 3, "O": 2, "S": 2, "P": 3, "B": 3, "H": 1,
+            "F": 1, "Cl": 1, "Br": 1, "I": 1, "Si": 4, "R": 0}
+_AROMATIC_EL = {"c": "C", "n": "N", "o": "O", "s": "S"}
+_TWO_LETTER = ("Cl", "Br", "Si")
+_LABEL_SMILES = [
+    ("allenoate", "*C(*)=C=C(C(=O)O*)*"),
+    ("biaryl", "*c1ccccc1-c2ccccc2*"),
+    ("atropisomer", "*c1ccccc1-c2ccccc2*"),
+    ("indole", "c1ccc2[nH]ccc2c1"),
+    ("cyclopropane", "*C1(*)CC1"),
+    ("propargyl", "OCC#C*"),
+    ("alkyne", "*C#C*"),
+    ("alkene", "*C(*)=C(*)*"),
+    ("allene", "*C(*)=C=C(*)*"),
+]
+
+
+def _smiles_for_label(label: str) -> str | None:
+    low = (label or "").lower()
+    for key, smi in _LABEL_SMILES:
+        if key in low:
+            return smi
+    return None
+
+
+def parse_smiles(smiles: str):
+    """Parse an organic-subset SMILES into atoms/bonds (aromatic bond = 1.5)."""
+    atoms: list[dict[str, Any]] = []
+    bonds: list[tuple[int, int, float]] = []
+    stack: list[int] = []
+    ring_open: dict[int, tuple[int, float]] = {}
+    prev = -1
+    pending = 0.0
+    i, n = 0, len(smiles)
+    while i < n:
+        ch = smiles[i]
+        if ch == "(":
+            stack.append(prev); i += 1; continue
+        if ch == ")":
+            prev = stack.pop(); i += 1; continue
+        if ch in "=#-":
+            pending = {"=": 2.0, "#": 3.0, "-": 1.0}[ch]; i += 1; continue
+        num = None
+        if ch == "%":
+            num = int(smiles[i + 1:i + 3]); i += 2
+        elif ch.isdigit():
+            num = int(ch)
+        if num is not None:
+            if num in ring_open:
+                a, o = ring_open.pop(num)
+                bonds.append((a, prev, max(o, pending or 1.0)))
+            else:
+                ring_open[num] = (prev, pending or 1.0)
+            pending = 0.0
+            i += 1
+            continue
+        aromatic, bracket_h = False, 0
+        if ch == "[":
+            j = smiles.index("]", i)
+            tok = smiles[i + 1:j]
+            m = re.match(r"([A-Za-z][a-z]?)", tok)
+            raw = m.group(1) if m else "C"
+            aromatic = raw in _AROMATIC_EL
+            el = _AROMATIC_EL.get(raw, raw[0].upper() + raw[1:])
+            hm = re.search(r"H(\d*)", tok)
+            bracket_h = 1 if hm and hm.group(1) == "" else (int(hm.group(1)) if hm else 0)
+            i = j + 1
+        elif ch in _AROMATIC_EL:
+            el, aromatic = _AROMATIC_EL[ch], True
+            i += 1
+        elif smiles[i:i + 2] in _TWO_LETTER:
+            el = smiles[i:i + 2]; i += 2
+        elif ch in "CNOSPFIBH*":
+            el = "R" if ch == "*" else ch
+            i += 1
+        else:
+            i += 1
+            continue
+        atoms.append({"el": el, "aromatic": aromatic, "h": bracket_h})
+        idx = len(atoms) - 1
+        if prev >= 0:
+            order = pending or 1.0
+            if order == 1.0 and aromatic and atoms[prev]["aromatic"]:
+                order = 1.5
+            bonds.append((prev, idx, order))
+        pending = 0.0
+        prev = idx
+    for idx, a in enumerate(atoms):
+        if a["el"] in ("R", "H"):
+            continue
+        order_sum = sum(o for (x, y, o) in bonds if x == idx or y == idx)
+        a["h"] = max(a["h"], int(round(_VALENCE.get(a["el"], 4) - order_sum)))
+    return atoms, bonds
+
+
+def _assign_hybrid(atoms, bonds):
+    hyb = []
+    for i, a in enumerate(atoms):
+        orders = [o for (x, y, o) in bonds if x == i or y == i]
+        if a["el"] in ("H", "R"):
+            hyb.append("sp3")
+        elif 3.0 in orders or orders.count(2.0) >= 2:
+            hyb.append("sp")
+        elif a["aromatic"] or 1.5 in orders or 2.0 in orders:
+            hyb.append("sp2")
+        else:
+            hyb.append("sp3")
+    return hyb
+
+
+def _vadd(a, b): return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+def _vsub(a, b): return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+def _vscale(a, s): return (a[0] * s, a[1] * s, a[2] * s)
+def _vdot(a, b): return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+def _vcross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def _vnorm(a):
+    ln = math.sqrt(_vdot(a, a))
+    return (a[0] / ln, a[1] / ln, a[2] / ln) if ln > 1e-9 else None
+
+
+def _regular_polygon(m, edge):
+    r = edge / (2 * math.sin(math.pi / m))
+    return [(r * math.cos(2 * math.pi * k / m), r * math.sin(2 * math.pi * k / m), 0.0)
+            for k in range(m)]
+
+
+def _order_cycle(verts, adj):
+    """Order a cycle's vertex set along actual bonds (2 neighbors each)."""
+    vs = set(verts)
+    emap = {v: [w for w in adj[v] if w in vs] for v in vs}
+    if any(len(emap[v]) != 2 for v in vs):
+        return None
+    ordered, cur, prv = [], next(iter(vs)), None
+    for _ in vs:
+        ordered.append(cur)
+        nxts = [w for w in emap[cur] if w != prv]
+        if not nxts:
+            return None
+        prv, cur = cur, nxts[0]
+    return ordered
+
+
+def _find_rings(n, bonds):
+    """Return ring cycles (3-7 members). Fused rings are recovered by
+    reducing large perimeter cycles against accepted small rings via
+    undirected edge-set symmetric difference."""
+    from collections import deque
+    adj = [[] for _ in range(n)]
+    for a, b, _o in bonds:
+        adj[a].append(b)
+        adj[b].append(a)
+    parent = [-1] * n
+    seen = [False] * n
+    raw = []
+    for root in range(n):
+        if seen[root]:
+            continue
+        seen[root] = True
+        q = deque([root])
+        while q:
+            u = q.popleft()
+            for v in adj[u]:
+                if not seen[v]:
+                    seen[v] = True
+                    parent[v] = u
+                    q.append(v)
+                elif v != parent[u] and u != parent[v]:
+                    anc = set()
+                    x = u
+                    while x != -1:
+                        anc.add(x)
+                        x = parent[x]
+                    y = v
+                    while y not in anc:
+                        y = parent[y]
+                    cyc, x = [], u
+                    while x != y:
+                        cyc.append(x)
+                        x = parent[x]
+                    cyc.append(y)
+                    x = v
+                    tail = []
+                    while x != y:
+                        tail.append(x)
+                        x = parent[x]
+                    cyc += list(reversed(tail))  # lca -> v direction
+                    if len(cyc) >= 3:
+                        raw.append(cyc)
+
+    cycles: list[list[int]] = []
+    seen_sets: set[frozenset] = set()
+    for cyc in sorted(raw, key=len):
+        if len(cyc) <= 7 and frozenset(cyc) not in seen_sets:
+            seen_sets.add(frozenset(cyc))
+            cycles.append(cyc)
+
+    def _edge_set(cyc):
+        es = {frozenset((cyc[i], cyc[(i + 1) % len(cyc)])) for i in range(len(cyc))}
+        return es
+
+    def _order(diff):
+        emap: dict[int, list[int]] = {}
+        for e in diff:
+            x, y = tuple(e)
+            emap.setdefault(x, []).append(y)
+            emap.setdefault(y, []).append(x)
+        verts = set(emap)
+        ordered, cur, prv = [], next(iter(verts)), None
+        for _ in verts:
+            ordered.append(cur)
+            nxts = [w for w in emap[cur] if w != prv]
+            prv, cur = cur, nxts[0]
+        return ordered
+
+    for cyc in sorted(raw, key=len):
+        if len(cyc) <= 7:
+            continue
+        big = _edge_set(cyc)
+        for small in list(cycles):
+            diff = big ^ _edge_set(small)
+            verts = set()
+            for e in diff:
+                verts |= set(e)
+            if not (3 <= len(verts) <= 7 and len(diff) == len(verts)):
+                continue
+            if all(sum(1 for e in diff if v in e) == 2 for v in verts) \
+                    and frozenset(verts) not in seen_sets:
+                seen_sets.add(frozenset(verts))
+                cycles.append(_order(diff))
+                break
+    cycles.sort(key=len)
+    return cycles
+
+
+_SINGLE_LEN = {
+    ("C", "C"): 1.50, ("C", "O"): 1.43, ("C", "N"): 1.47, ("C", "S"): 1.82,
+    ("C", "F"): 1.35, ("C", "Cl"): 1.77, ("C", "Br"): 1.94, ("C", "I"): 2.14,
+    ("C", "Si"): 1.86, ("C", "P"): 1.87, ("C", "H"): 1.09, ("O", "H"): 0.96,
+    ("N", "H"): 1.01, ("N", "O"): 1.40, ("O", "O"): 1.48, ("N", "N"): 1.45,
+    ("S", "O"): 1.58, ("C", "B"): 1.56,
+}
+
+
+def _bond_len(el_a, el_b, order):
+    if "R" in (el_a, el_b):
+        return 1.5
+    key = (el_a, el_b) if (el_a, el_b) in _SINGLE_LEN else (el_b, el_a)
+    base = _SINGLE_LEN.get(key, 1.5)
+    if order >= 3.0:
+        return base - 0.3
+    if order == 2.0:
+        return base - 0.2
+    if order == 1.5:
+        return 1.39 if {el_a, el_b} == {"C"} else base
+    return base
+
+
+_SLOTS = {
+    "sp": [(1, 0, 0), (-1, 0, 0)],
+    "sp2": [(1, 0, 0), (-0.5, 0.8660254, 0), (-0.5, -0.8660254, 0)],
+    "sp3": [(1, 0, 0), (-0.3333, 0.9428, 0), (-0.3333, -0.4714, 0.8165),
+            (-0.3333, -0.4714, -0.8165)],
+}
+
+
+def build_3d(atoms, bonds):
+    """Deterministic exact-geometry 3D embedding (rings + hybridization growth)."""
+    from collections import deque
+    n = len(atoms)
+    if n == 0:
+        return []
+    hyb = _assign_hybrid(atoms, bonds)
+    coords: list = [None] * n
+    frames: list = [None] * n
+    used: list = [[] for _ in range(n)]
+    order_of = {}
+    adj = [[] for _ in range(n)]
+    for a, b, o in bonds:
+        order_of[(a, b)] = o
+        order_of[(b, a)] = o
+        adj[a].append(b)
+        adj[b].append(a)
+
+    def mark_used(i, d):
+        nd = _vnorm(d)
+        if nd:
+            used[i].append(nd)
+
+    for ring in _find_rings(n, bonds):
+        m = len(ring)
+        aromatic = any(atoms[i]["aromatic"] for i in ring)
+        edge = 1.39 if aromatic else (1.51 if m == 3 else 1.5)
+        poly = _regular_polygon(m, edge)
+        pair = None
+        for k in range(m):
+            a, b = ring[k], ring[(k + 1) % m]
+            if coords[a] is not None and coords[b] is not None:
+                pair = k
+                break
+        if pair is not None:  # fused ring: align polygon edge, keep plane
+            a, b = ring[pair], ring[(pair + 1) % m]
+            A, B = coords[a], coords[b]
+            normal = frames[a][2]
+            t = _vnorm(_vsub(B, A))
+            w = _vnorm(_vcross(normal, t))
+            pa, pb = poly[pair], poly[(pair + 1) % m]
+            tl = _vnorm(_vsub(pb, pa))
+            wl = _vcross((0.0, 0.0, 1.0), tl)
+            old_placed = [coords[i] for i in range(n) if coords[i] is not None]
+            mid = _vscale(_vadd(A, B), 0.5)
+
+            def _place(wvec):
+                out = {}
+                for k, i in enumerate(ring):
+                    if coords[i] is None:
+                        q = _vsub(poly[k], pa)
+                        out[i] = _vadd(A, _vadd(_vscale(t, _vdot(q, tl)), _vscale(wvec, _vdot(q, wl))))
+                return out
+
+            cand = _place(w)
+            new_c = [cand[i] for i in cand]
+            old_c = old_placed
+            def _centroid(pts):
+                return (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts),
+                        sum(p[2] for p in pts) / len(pts))
+            # new ring must extend AWAY from the already-placed structure
+            if _vdot(_vsub(_centroid(new_c), mid), _vsub(_centroid(old_c), mid)) > 0:
+                cand = _place(_vscale(w, -1.0))
+            for i, p in cand.items():
+                coords[i] = p
+        else:
+            k0 = next(k for k, i in enumerate(ring) if coords[i] is not None) if any(
+                coords[i] is not None for i in ring) else 0
+            if coords[ring[k0]] is None:  # first ring at origin, xy plane
+                for k, i in enumerate(ring):
+                    coords[i] = poly[k]
+                normal = (0.0, 0.0, 1.0)
+            else:  # spiro-like single shared atom: perpendicular plane
+                a = ring[k0]
+                A = coords[a]
+                e3p = frames[a][2] if frames[a] else (0.0, 0.0, 1.0)
+                e1p = frames[a][0] if frames[a] else (1.0, 0.0, 0.0)
+                normal = _vnorm(e1p)
+                t = _vnorm(_vcross(normal, e3p)) or _vnorm(e3p)
+                w = _vnorm(_vcross(normal, t))
+                pa = poly[k0]
+                tl = _vnorm(_vsub(poly[(k0 + 1) % m], pa))
+                wl = _vcross((0.0, 0.0, 1.0), tl)
+                for k, i in enumerate(ring):
+                    if coords[i] is None:
+                        q = _vsub(poly[k], pa)
+                        coords[i] = _vadd(A, _vadd(_vscale(t, _vdot(q, tl)), _vscale(w, _vdot(q, wl))))
+        for k, i in enumerate(ring):
+            nxt, prv = ring[(k + 1) % m], ring[(k - 1) % m]
+            e1 = _vnorm(_vsub(coords[nxt], coords[i]))
+            e3 = _vnorm(normal)
+            frames[i] = (e1, _vcross(e3, e1), e3)
+            mark_used(i, _vsub(coords[nxt], coords[i]))
+            mark_used(i, _vsub(coords[prv], coords[i]))
+
+    if coords[0] is None:
+        coords[0] = (0.0, 0.0, 0.0)
+        frames[0] = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+
+    def local_to_global(i, v):
+        e1, e2, e3 = frames[i]
+        return _vadd(_vadd(_vscale(e1, v[0]), _vscale(e2, v[1])), _vscale(e3, v[2]))
+
+    def next_slot(i):
+        for s in _SLOTS[hyb[i]]:
+            g = local_to_global(i, s)
+            if all(_vdot(g, u) < 0.9 for u in used[i]):
+                return g
+        for s in [(0, 1, 0), (0, 0, 1), (0, -1, 0), (0, 0, -1)]:
+            g = local_to_global(i, s)
+            if all(_vdot(g, u) < 0.9 for u in used[i]):
+                return g
+        return local_to_global(i, (0, 1, 0))
+
+    q = deque(i for i in range(n) if coords[i] is not None)
+    while q:
+        u = q.popleft()
+        for v in adj[u]:
+            if coords[v] is not None:
+                continue
+            o = order_of[(u, v)]
+            d = next_slot(u)
+            coords[v] = _vadd(coords[u], _vscale(d, _bond_len(atoms[u]["el"], atoms[v]["el"], o)))
+            mark_used(u, d)
+            back = _vscale(d, -1.0)
+            e1 = back
+            e3p = frames[u][2]
+            if o == 2.0 and hyb[u] == "sp":  # cumulated double bond: perpendicular plane
+                e3 = _vcross(e3p, d)
+                e3 = _vnorm(e3) if _vdot(e3, e3) > 1e-6 else e3p
+            else:
+                e3 = e3p
+            e3 = _vnorm(_vsub(e3, _vscale(e1, _vdot(e3, e1)))) or _vnorm(frames[u][0])
+            frames[v] = (e1, _vcross(e3, e1), e3)
+            mark_used(v, back)
+            q.append(v)
+    return coords
+
+
+def _expand_hydrogens(atoms, bonds):
+    """Turn implicit H counts into explicit atoms so they render as spheres."""
+    atoms = [dict(a) for a in atoms]
+    bonds = list(bonds)
+    for i, a in enumerate(list(atoms)):
+        for _ in range(a.get("h", 0)):
+            atoms.append({"el": "H", "aromatic": False, "h": 0})
+            bonds.append((i, len(atoms) - 1, 1.0))
+        a["h"] = 0
+    return atoms, bonds
+
+
+def _rotate(p, rx, ry):
+    x, y, z = p
+    cy, sy = math.cos(ry), math.sin(ry)
+    x, z = cy * x + sy * z, -sy * x + cy * z
+    cx, sx = math.cos(rx), math.sin(rx)
+    y, z = cx * y - sx * z, sx * y + cx * z
+    return (x, y, z)
+
+
+def render_smiles_ball_and_stick(smiles: str, output_path: Path,
+                                 img_size: tuple[int, int] = (900, 640)) -> Path | None:
+    """Render a SMILES string as a chemically accurate ball-and-stick PNG."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return None
+    try:
+        atoms, bonds = parse_smiles(smiles)
+        if not atoms:
+            return None
+        atoms, bonds = _expand_hydrogens(atoms, bonds)
+        coords = build_3d(atoms, bonds)
+        if any(c is None for c in coords):
+            return None
+    except Exception as exc:
+        print(f"  WARNING: skeleton build failed for {smiles!r}: {exc}")
+        return None
+    pts = [_rotate(p, math.radians(18), math.radians(28)) for p in coords]
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    span = max(max(xs) - min(xs), max(ys) - min(ys), 1e-6)
+    scale = min(img_size) * 0.62 / span
+    ox, oy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+    px = [(img_size[0] / 2 + (p[0] - ox) * scale, img_size[1] / 2 + (p[1] - oy) * scale, p[2])
+          for p in pts]
+
+    img = Image.new("RGB", img_size, (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    items = []
+    for i, j, order in bonds:
+        items.append(((px[i][2] + px[j][2]) / 2, ("bond", i, j, order)))
+    for i, a in enumerate(atoms):
+        items.append((px[i][2] + 0.01, ("atom", i, a["el"])))
+    items.sort(key=lambda t: t[0])
+    r_idx = 0
+    for _, item in items:
+        if item[0] == "bond":
+            _, i, j, order = item
+            x1, y1, x2, y2 = px[i][0], px[i][1], px[j][0], px[j][1]
+            dx, dy = x2 - x1, y2 - y1
+            ln = math.hypot(dx, dy) or 1.0
+            nx, ny = -dy / ln, dx / ln
+            offsets = {1.0: [0.0], 2.0: [-4.0, 4.0], 3.0: [-6.0, 0.0, 6.0],
+                       1.5: [-3.0, 3.0]}[order]
+            for off in offsets:
+                draw.line([(x1 + nx * off, y1 + ny * off), (x2 + nx * off, y2 + ny * off)],
+                          fill=(120, 120, 120), width=8)
+        else:
+            _, i, el = item
+            r = _ATOM_RADIUS.get(el, 20)
+            color = _CPK_COLORS.get(el, (150, 150, 150))
+            x, y = px[i][0], px[i][1]
+            draw.ellipse([x - r, y - r, x + r, y + r], fill=color, outline=(20, 20, 20), width=2)
+            draw.ellipse([x - r * 0.55, y - r * 0.65, x - r * 0.05, y - r * 0.15],
+                         fill=tuple(min(255, c + 90) for c in color))
+            if el == "R":
+                r_idx += 1
+                draw.text((x - 6, y - 8), f"R{r_idx}", fill=(255, 255, 255))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(output_path, format="PNG")
+    return output_path
+
+
+# Normalized (x0, y0, x1, y1) structure-panel regions per layout for
+# pixel-exact programmatic skeleton compositing.  Layouts not listed keep the
+# model-drawn molecule (extra reference image mode).
+_COMPOSITE_REGIONS = {
+    "why-strategy-what": (0.16, 0.31, 0.415, 0.65),
+    "module-cards-crosscut-sidebar": (0.02, 0.17, 0.35, 0.52),
+}
+
+
+def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layout: str) -> bool:
+    """Paste the exact ball-and-stick model into the layout's structure panel.
+
+    Guarantees pixel-exact molecular geometry: the panel is cleared to white
+    and the programmatically rendered model is centered into it.
+    """
+    box = _COMPOSITE_REGIONS.get(layout)
+    if not box or not skeleton_path.exists():
+        return False
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return False
+    with Image.open(figure_path) as fig:
+        fig = fig.convert("RGB")
+        W, H = fig.size
+        x0, y0, x1, y1 = (int(W * box[0]), int(H * box[1]), int(W * box[2]), int(H * box[3]))
+        draw = ImageDraw.Draw(fig)
+        draw.rounded_rectangle([x0, y0, x1, y1], radius=24, fill=(255, 255, 255))
+        with Image.open(skeleton_path) as sk:
+            sk = sk.convert("RGB")
+            sk.thumbnail((x1 - x0 - 30, y1 - y0 - 30))
+            sx = x0 + (x1 - x0 - sk.width) // 2
+            sy = y0 + (y1 - y0 - sk.height) // 2
+            fig.paste(sk, (sx, sy))
+        fig.save(figure_path, format="PNG")
+    return True
+
+
+def render_skeleton_model(features: dict[str, Any], output_path: Path,
+                          img_size: tuple[int, int] = (900, 640)) -> Path | None:
+    """Render the review's core motif as an accurate ball-and-stick PNG.
+
+    SMILES resolution order: explicit project override (query_plan
+    "skeleton_smiles"/"smiles") -> product keyword map -> title/outline/draft
+    keyword scan.  Returns None when no motif can be determined (caller then
+    falls back to the text description).
+    """
+    smiles = features.get("skeleton_smiles", "") or ""
+    if not smiles:
+        products = features.get("product_keywords", [])
+        smiles = _smiles_for_label(products[0] if products else "") or ""
+    if not smiles:
+        blob_parts = [features.get("review_title", ""), features.get("_outline_text", "")[:800]]
+        project_dir = features.get("_project_dir")
+        if project_dir:
+            draft_path = Path(project_dir) / "04_first_draft" / "first_draft.md"
+            if draft_path.exists():
+                blob_parts.append(draft_path.read_text(encoding="utf-8", errors="ignore")[:1200])
+        smiles = _smiles_for_label(" ".join(blob_parts)) or ""
+    if not smiles:
+        return None
+    return render_smiles_ball_and_stick(smiles, output_path, img_size)
+
+
 def resolve_api_key(cli_value: str, base_url: str) -> str:
     """Use the matching credential when text and image providers differ."""
     if cli_value:
@@ -190,6 +863,8 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
         "num_sections": 0,
         "has_metal_classification": False,
         "has_organocatalysis": False,
+        "has_chirality": False,
+        "has_reaction_focus": False,
         "metal_categories": [],
         "time_window": "",
         "reaction_type": "",
@@ -199,6 +874,7 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
         "product_keywords": [],
         "substrate_keywords": [],
         "catalyst_keywords": [],
+        "skeleton_smiles": "",
     }
 
     # Read query plan for group_by, filters, keywords, and topic
@@ -236,7 +912,7 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
                 "document_scope": "By document type",
             }
             features["classification_rule"] = rule_map.get(gb[0], f"By {gb[0]}")
-
+        features["skeleton_smiles"] = str(qp.get("skeleton_smiles", "") or qp.get("smiles", "") or "")
     # Read selected outline for section structure
     outline_path = project_dir / "01_matrix_outline" / "selected_outline.md"
     if outline_path.exists():
@@ -260,28 +936,24 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
         if features["has_organocatalysis"]:
             features["metal_categories"].append("Organocatalysis")
 
+        # Theme-level signals used for template scoring
+        outline_lower = text.lower()
+        features["has_chirality"] = bool(
+            re.search(r"chiral|enantio|asymmetric|atropisomer|stereoselect", outline_lower)
+        )
+        features["has_reaction_focus"] = bool(
+            re.search(
+                r"reaction|synthesis|synthetic|catalytic|cataly[sz]ed|coupling|functionalization",
+                outline_lower,
+            )
+        )
+
         # Generic category extraction from section headings (for non-metal reviews)
-        # Extract ## N. Title lines, skip Introduction and Conclusion
         section_titles = re.findall(r"^## \d+\.\s*(.+)$", text, re.MULTILINE)
         generic_cats = []
-        skip_words = {"introduction", "conclusion", "outlook", "summary"}
         for title in section_titles:
-            title_clean = title.strip()
-            if title_clean.lower().split()[0] in skip_words or title_clean.lower() in skip_words:
-                continue
-            # Extract a short category label (first 2-3 meaningful words)
-            # Remove common prefixes like "Allenylation via", "Synthesis from"
-            short = re.sub(r"^(alleny?lation|synthesis|reactions?)\s+(via|from|of|through)\s+", "", title_clean, flags=re.IGNORECASE)
-            # Also remove trailing generic words
-            short = re.sub(r"\s+(leaving groups?|and other.*|\(.*\))$", "", short, flags=re.IGNORECASE)
-            # If still contains 'via'/'from', the prefix wasn't stripped - take words after it
-            if re.search(r"\b(via|from)\b", short, re.IGNORECASE):
-                parts = re.split(r"\b(via|from)\b", short, flags=re.IGNORECASE)
-                short = parts[-1].strip() if len(parts) > 1 else short
-            # Take first 2 words max as the category label (keep it short for hexagon)
-            words = short.split()[:2]
-            label = " ".join(words)
-            if label and len(label) <= 30:
+            label = _heading_to_category(title)
+            if label and label not in generic_cats:
                 generic_cats.append(label)
 
         # If metal_categories is mostly empty or only has Organocatalysis,
@@ -289,6 +961,14 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
         real_metals = [m for m in features["metal_categories"] if m != "Organocatalysis"]
         if len(real_metals) < 3 and generic_cats:
             features["metal_categories"] = generic_cats
+
+    # Backfill categories from first_draft.md section headings when the
+    # outline is too sparse to fill the figure (avoids empty panels)
+    real_cats = [c for c in features["metal_categories"] if c != "Organocatalysis"]
+    if len(real_cats) < 3:
+        draft_cats = _categories_from_draft(project_dir)
+        if len(draft_cats) > len(real_cats):
+            features["metal_categories"] = draft_cats
 
     # Read discovery results for group stats
     sel_path = project_dir / "00_discovery" / "selected_discovery_results.json"
@@ -302,59 +982,144 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
     return features
 
 
+def _heading_to_category(title: str) -> str:
+    """Convert a section heading into a short, clean category label."""
+    title_clean = " ".join(title.split())
+    low = title_clean.lower()
+    skip_words = {
+        "introduction", "conclusion", "conclusions", "outlook", "summary",
+        "abstract", "keywords", "references", "acknowledgment", "acknowledgments",
+    }
+    words_low = low.split()
+    if not words_low or words_low[0] in skip_words or low in skip_words:
+        return ""
+    if "comparison" in low or "landscape" in low or "method selection" in low:
+        return ""
+    # Normalize catch-all sections to a single clean label
+    if words_low[0] == "other":
+        return "Others"
+    # Remove common prefixes like "Allenylation via", "Synthesis from"
+    short = re.sub(r"^(alleny?lation|synthesis|reactions?)\s+(via|from|of|through)\s+", "", title_clean, flags=re.IGNORECASE)
+    # Remove trailing generic words
+    short = re.sub(r"\s+(leaving groups?|and other.*|\(.*\))$", "", short, flags=re.IGNORECASE)
+    # If still contains 'via'/'from', take the words after it
+    if re.search(r"\b(via|from)\b", short, flags=re.IGNORECASE):
+        parts = re.split(r"\b(via|from)\b", short, flags=re.IGNORECASE)
+        short = parts[-1].strip() if len(parts) > 1 else short
+    # 'X and Y' compound headings: keep the first chunk
+    short = re.split(r"\s+and\s+", short, flags=re.IGNORECASE)[0].strip()
+    # Take first 2 words max (keep it short for a hexagon label)
+    label = " ".join(short.split()[:2])
+    return label if label and len(label) <= 30 else ""
+
+
+def _categories_from_draft(project_dir: Path) -> list[str]:
+    """Extract category labels from first_draft.md headings when the outline
+    is too sparse, so the overview figure always has enough panels."""
+    if not project_dir:
+        return []
+    draft_path = project_dir / "04_first_draft" / "first_draft.md"
+    if not draft_path.exists():
+        return []
+    text = draft_path.read_text(encoding="utf-8", errors="ignore")
+    cats: list[str] = []
+    for title in re.findall(r"^##\s+(?:\d+\.\s*)?(.+)$", text, re.MULTILINE):
+        label = _heading_to_category(title)
+        if label and label not in cats:
+            cats.append(label)
+    return cats
+
+
 def score_template(template: dict[str, Any], features: dict[str, Any]) -> float:
-    """Score a template against review features. Higher = better match."""
+    """Score a template against review features. Higher = better match.
+
+    The score is driven by theme-dependent features (classification
+    dimension, category count, chirality, reaction focus, section count)
+    so that different review topics select different templates instead of
+    always converging on one layout.
+    """
     score = 0.0
     layout = template.get("layout_type", "")
     prompt = template.get("prompt", "").lower()
     desc = template.get("description", "").lower()
 
-    # Bonus: template explicitly mentions "by catalyst center metal" or metal classification
-    if "catalyst center metal" in prompt or "metal-centered" in prompt:
-        score += 3.0
-    if features["has_metal_classification"]:
-        if "metal" in layout or "metal" in desc:
+    group_by = (features.get("group_by") or [""])[0]
+    categories = features.get("metal_categories", [])
+    num_categories = len(categories)
+    num_sections = features.get("num_sections", 0)
+    has_metal = bool(features.get("has_metal_classification"))
+    has_chirality = bool(features.get("has_chirality"))
+    has_reaction_focus = bool(features.get("has_reaction_focus"))
+
+    # 1. Classification dimension: match layout semantics to group_by
+    if group_by == "catalyst_or_method":
+        if ("catalyst center metal" in prompt or "metal-centered" in prompt
+                or "metal" in layout or "catal" in prompt):
+            score += 4.0
+    elif group_by in {"substrate", "leaving_group", "product", "ligand_or_chiral_source",
+                      "organometallic_partner", "reaction_type", "document_scope"}:
+        # Non-catalyst dimensions: penalize metal-centric framing, reward
+        # layouts that generalize to arbitrary category families
+        if "metal-centered" in prompt or "metal" in layout:
+            score -= 2.5
+        if layout in {"module-cards-crosscut-sidebar", "route-map-start-strategy-result",
+                      "tree-metal-classification", "mosaic-infographic",
+                      "metal-x-dimension-matrix"}:
             score += 2.0
-
-    # Bonus: template has 5 categories (matching our 5 sections)
-    if "five" in prompt or "5 " in prompt:
-        score += 1.0
-
-    # Bonus: template has classification rule panel
-    if "classification rule" in prompt or "classification" in desc:
-        score += 2.0
-
-    # Bonus: template has take-home messages / outlook section
-    if "take-home" in prompt or "outlook" in prompt or "conclusion" in prompt:
-        score += 1.0
-
-    # Bonus: template has reaction scheme at top/center
-    if "reaction" in prompt and ("scheme" in prompt or "top" in prompt or "center" in prompt):
-        score += 1.0
-
-    # Bonus: layout types that work well for metal-classified reviews
-    preferred_layouts = [
-        "dual-page-spread",           # Best: shows classification + metal rows
-        "module-cards-crosscut-sidebar",  # Good: modular cards per metal
-        "top-reaction-5col-table",    # Good: reaction + columns
-        "route-map-start-strategy-result",  # OK: horizontal lanes
-        "metal-x-dimension-matrix",   # OK: comparison matrix
-    ]
-    for i, pref in enumerate(preferred_layouts):
-        if layout == pref:
-            score += (5 - i) * 0.5
-            break
-
-    # Bonus: template mentions time window / recent years
-    if "time window" in prompt or "recent" in prompt or "last five" in prompt:
-        score += 1.0
-
-    # Bonus: template has cross-cutting / shared themes sidebar
-    if "cross-cut" in prompt or "shared" in prompt or "sidebar" in layout:
+    else:
         score += 0.5
 
-    # Penalty: if review has organocatalysis but template doesn't mention it
-    # (not a big penalty since "Other metals" can cover it)
+    # 2. Category count fit: templates are drawn with 5 slots; layouts that
+    # flex to other counts are rewarded when the topic has != 5 categories
+    if num_categories:
+        if num_categories == 5:
+            score += 1.0
+        else:
+            flexible = {"metal-x-dimension-matrix", "mosaic-infographic",
+                        "module-cards-crosscut-sidebar", "route-map-start-strategy-result",
+                        "asymmetric-ring-right-sidebar", "why-strategy-what"}
+            if layout in flexible:
+                score += 1.5
+            else:
+                score -= 1.0
+
+    # 3. Chirality / selectivity emphasis
+    selectivity_heavy = ("enantio" in prompt or "chiral" in prompt
+                         or "axial induction" in prompt)
+    if has_chirality:
+        if selectivity_heavy:
+            score += 1.5
+    else:
+        if selectivity_heavy:
+            score -= 1.5
+        if layout in {"mosaic-infographic", "metal-x-dimension-matrix", "why-strategy-what"}:
+            score += 1.0
+
+    # 4. Reaction focus: reward reaction-strip layouts only when the review
+    # is actually about reactions/synthesis
+    if "reaction" in prompt and ("scheme" in prompt or "top" in prompt or "center" in prompt):
+        score += 1.0 if has_reaction_focus else -1.0
+
+    # 5. Section count: dense layouts for many sections, compact ones for few
+    if num_sections >= 7:
+        if layout in {"metal-x-dimension-matrix", "mosaic-infographic",
+                      "module-cards-crosscut-sidebar", "dual-page-spread"}:
+            score += 1.0
+    elif 0 < num_sections <= 4:
+        if layout in {"center-radial-classification", "tree-metal-classification"}:
+            score += 1.0
+
+    # 6. Structural bonuses (theme-independent quality signals)
+    if has_metal and ("metal" in layout or "metal" in desc):
+        score += 1.0
+    if "classification rule" in prompt or "classification" in desc:
+        score += 1.5
+    if "take-home" in prompt or "outlook" in prompt or "conclusion" in prompt:
+        score += 1.0
+    if "time window" in prompt or "recent" in prompt or "last five" in prompt:
+        score += 0.5
+    if "cross-cut" in prompt or "shared" in prompt or "sidebar" in layout:
+        score += 0.5
 
     return score
 
@@ -375,9 +1140,93 @@ def select_best_template(templates: list[dict[str, Any]], features: dict[str, An
 # Prompt adaptation
 # ---------------------------------------------------------------------------
 
+def _clean_categories(categories: list[str]) -> list[str]:
+    """Normalize category labels: collapse whitespace, drop empties."""
+    cleaned: list[str] = []
+    for cat in categories:
+        label = " ".join(str(cat).split())
+        if label and label not in cleaned:
+            cleaned.append(label)
+    return cleaned
+
+
+def _retheme_base_prompt(base_prompt: str, features: dict[str, Any]) -> str:
+    """Replace the allene-field content baked into template prompts with the
+    current review's categories, counts, and classification dimension."""
+    categories = _clean_categories(features.get("metal_categories", []))
+    cats = categories[:5] if categories else ["Category 1", "Category 2",
+                                              "Category 3", "Category 4", "Category 5"]
+
+    def _panel_replacement(match: re.Match) -> str:
+        numbered = any(match.groups())
+        if numbered:
+            return "\n".join(f"{i}. {c}" for i, c in enumerate(cats, 1))
+        return "\n".join(f"- {c}" for c in cats)
+
+    base_prompt = _CATEGORY_PANEL_RE.sub(_panel_replacement, base_prompt)
+    base_prompt = _INLINE_CATEGORIES_RE.sub(" / ".join(cats), base_prompt)
+
+    # Adjust slot counts ("five columns/lanes/cards...") to the real count
+    n = len(cats)
+    if n != 5:
+        word = _ENGLISH_NUM_WORDS.get(n, str(n))
+        base_prompt = re.sub(r"\bfive\b", word, base_prompt, flags=re.IGNORECASE)
+
+    # Replace metal-centric wording for non-catalyst classification schemes
+    gb = features.get("group_by", [])
+    if gb and gb[0] != "catalyst_or_method":
+        gb_word = gb[0].replace("_", " ")
+        classification_rule = features.get("classification_rule", f"By {gb_word}")
+        for old, new in [
+            ("catalyst center metal", gb_word),
+            ("catalytically active metal center", f"{gb_word} identity"),
+            ("classification by metal centers", f"classification by {gb_word}"),
+            ("By catalyst center metal", classification_rule),
+            ("metal-catalyzed", f"{gb_word}-based"),
+            ("Metal-centered classification", classification_rule),
+            ("metal-centered", f"{gb_word}-centered"),
+            ("metal families", f"{gb_word} families"),
+            ("metal-family", f"{gb_word}-family"),
+            ("metal nodes", "category nodes"),
+            ("metal strategies", f"{gb_word} strategies"),
+            ("catalyst-family", f"{gb_word}-family"),
+        ]:
+            base_prompt = base_prompt.replace(old, new)
+    return base_prompt
+
+
+def _build_approved_terminology(features: dict[str, Any]) -> str:
+    """Build the approved-terminology list from the review's own keywords
+    plus generic academic phrasing, instead of a fixed allene wordlist."""
+    terms: list[str] = []
+    for key in ("product_keywords", "substrate_keywords", "catalyst_keywords"):
+        for kw in features.get(key, []):
+            kw = kw.strip().lower()
+            if kw and kw not in terms:
+                terms.append(kw)
+    review_title = features.get("review_title", "")
+    if review_title and not re.search(r"[\u4e00-\u9fff]", review_title):
+        title_lower = review_title.strip().lower()
+        if title_lower and title_lower not in terms:
+            terms.append(title_lower)
+    generic = [
+        "recent advances", "key developments", "research trends", "future directions",
+        "substrate scope", "substrate class", "product class", "reaction mode",
+        "catalytic strategy", "key feature", "key advantage", "main limitation",
+        "key challenge", "selectivity", "enantioselectivity", "regioselectivity",
+        "diastereoselectivity", "chemoselectivity", "stereoselectivity",
+        "mild conditions", "broad scope", "representative transformation",
+        "representative reaction", "classification rule", "opportunities and challenges",
+    ]
+    for g_term in generic:
+        if g_term not in terms:
+            terms.append(g_term)
+    return ", ".join(terms) + "."
+
+
 def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any]) -> str:
     """Adapt the template prompt with review-specific content (fully generic)."""
-    base_prompt = template.get("prompt", "")
+    base_prompt = _retheme_base_prompt(template.get("prompt", ""), features)
 
     # Build English title: if original is non-English, construct from keywords
     gb = features.get("group_by", [])
@@ -390,19 +1239,7 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any]) -> 
     else:
         english_title = review_title
 
-    # Replace hardcoded 'metal' terms for non-metal classification schemes
-    if gb and gb[0] != "catalyst_or_method":
-        gb_word = gb[0].replace("_", " ")
-        for old, new in [
-            ("catalyst center metal", gb_word),
-            ("catalytically active metal center", f"{gb_word} identity"),
-            ("classification by metal centers", f"classification by {gb_word}"),
-            ("metal-catalyzed", f"{gb_word}-based"),
-            ("By catalyst center metal", features.get("classification_rule", "")),
-        ]:
-            base_prompt = base_prompt.replace(old, new)
-
-    metals = features.get("metal_categories", [])
+    metals = _clean_categories(features.get("metal_categories", []))
     if not metals:
         metals = ["Cat-1", "Cat-2", "Cat-3", "Cat-4", "Cat-5"]
 
@@ -413,9 +1250,14 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any]) -> 
     skeleton_desc = _build_skeleton_description(features)
     metal_rows_text = _build_metal_rows_text(features)
     take_home_text = _build_take_home_text(features)
+    approved_terms = _build_approved_terminology(features)
 
     # Visual style description with dynamic term replacement
     visual_style_desc = _get_visual_style_description(template)
+    n_words = _ENGLISH_NUM_WORDS.get(len(metals[:5]), str(len(metals[:5])))
+    if len(metals[:5]) != 5:
+        visual_style_desc = re.sub(r"\bFive\b", n_words.capitalize(), visual_style_desc)
+        visual_style_desc = re.sub(r"\bfive\b", n_words, visual_style_desc)
     if gb and gb[0] != "catalyst_or_method":
         gb_word = gb[0].replace("_", " ")
         gb_display_map = {
@@ -436,6 +1278,13 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any]) -> 
             visual_style_desc = visual_style_desc.replace(old, new)
 
     adaptation = f"""
+REFERENCE IMAGE USAGE (read first):
+The reference image is intentionally blurred: it is ONLY a layout guide
+(panel shapes, round/square icons, column structure, color scheme).
+Do NOT copy ANY object, label, symbol, molecule, or text visible in it.
+Fill this layout EXCLUSIVELY with the categories, title, and cell text
+given below for the current review topic.
+
 VISUAL STYLE REQUIREMENTS (match the reference template exactly):
 {visual_style_desc}
 
@@ -457,32 +1306,14 @@ CRITICAL RULES:
 - If the review title (banner) is in Chinese or any non-English language, translate it to professional English before rendering.
 - Do NOT draw a reaction equation (no arrow, no substrate-to-product transformation).
 - The left-page structure area shows ONLY a single representative skeleton/motif.
-- Keep all text concise. Category labels use ONLY symbols (e.g. Pd, Cu). No full names in hexagons.
+- Keep all text concise. Category labels stay SHORT (symbols or max 2 words). No long names in hexagons.
 - Right-page cells: max 2-3 words each. Use real metrics from the content above.
 - Generate the figure with ALL text fields FILLED IN. No dotted placeholders.
+- Every panel, arc, box, and cell in the layout MUST contain the provided text; absolutely no blank regions.
 - Use the same visual style, layout, color scheme, and icon design as the reference template.
 
 APPROVED TERMINOLOGY (use ONLY these exact phrases in the figure text):
-allene, allenes, allene synthesis, allene framework, allene motif,
-allenation, asymmetric allenation, enantioselective allenation,
-propargylic alcohol, propargylic alcohols, propargylic substrates,
-axial chirality, axially chiral allenes, chiral allenes,
-enantioenriched allenes, asymmetric induction, chiral induction,
-enantioselectivity, regioselectivity, chemoselectivity,
-stereoselectivity, catalytic metal center,
-classification by metal centers, metal catalysis,
-transition-metal catalysis, metal-catalyzed allene synthesis,
-catalytic system, representative catalytic system,
-representative transformation, representative reaction,
-substrate class, substrate scope, product class, ligand class,
-chiral ligand, chiral amine, reaction mode, catalytic strategy,
-key feature, key advantage, main limitation, key challenge,
-recent advances, major advances, key developments,
-research trends, future directions,
-opportunities and challenges, broad substrate scope,
-diverse substrate classes, high enantioselectivity,
-functional-group tolerance, sustainable catalysis,
-earth-abundant metal catalysis, synthetic utility.
+{approved_terms}
 
 FORBIDDEN BEHAVIOR (strictly enforced):
 - Do not hyphenate a word across two lines.
@@ -531,6 +1362,19 @@ def _build_skeleton_description(features: dict[str, Any]) -> str:
         skeleton = f"A 3D ball-and-stick model representing '{prod_label}'. Use black spheres for carbon, red for oxygen, blue for nitrogen, white for hydrogen, and colored spheres for R groups."
         label = prod_label
 
+    if features.get("_composite_layout") in _COMPOSITE_REGIONS:
+        return f"""LEFT-PAGE STRUCTURE AREA (center of left page):
+Draw an EMPTY white rounded panel here — NO molecule, NO atoms, NO bonds.
+A chemically accurate ball-and-stick model will be inserted into this panel afterwards.
+Label below: "{label}"."""
+
+    if features.get("_skeleton_image"):
+        return f"""LEFT-PAGE STRUCTURE AREA (center of left page):
+The SECOND attached image is a chemically accurate 3D ball-and-stick model of "{label}".
+Reproduce it EXACTLY in the structure area: identical atoms, bond angles, bond orders,
+colors, and orientation. Do NOT redraw, modify, extend, or substitute its geometry.
+Label below: "{label}"."""
+
     return f"""LEFT-PAGE STRUCTURE AREA (center of left page):
 Draw a SINGLE 3D ball-and-stick molecular model (NOT a reaction equation, NO arrow, NO 2D bond-line):
   Model: {skeleton}
@@ -561,7 +1405,7 @@ QUALITY CHECK:
 
 def _build_metal_rows_text(features: dict[str, Any]) -> str:
     """Build right-page category rows using fully dynamic multi-pass extraction."""
-    metals = features.get("metal_categories", [])
+    metals = _clean_categories(features.get("metal_categories", []))
     if not metals:
         metals = ["Cat-1", "Cat-2", "Cat-3", "Cat-4", "Cat-5"]
 
@@ -590,18 +1434,36 @@ def _build_metal_rows_text(features: dict[str, Any]) -> str:
     lines.append("  Cell 3 = highlight (one distinguishing feature, max 2 words)")
     lines.append("")
 
+    used: dict[str, set[str]] = {"strategy": set(), "selectivity": set(), "highlight": set()}
+    derives = {
+        "strategy": _derive_strategy,
+        "selectivity": _derive_selectivity,
+        "highlight": _derive_highlight,
+    }
     for m in metals[:6]:
-        d1 = pass1.get(m, {})
-        d2 = pass2.get(m, {})
-        d3 = pass3.get(m, {})
-        # Multi-pass fallback: pass1 → pass2 → pass3 → derive from name → dash
-        cell1 = (d1.get("strategy", "") or d2.get("strategy", "")
-                 or d3.get("strategy", "") or _derive_strategy(m))
-        cell2 = (d1.get("selectivity", "") or d2.get("selectivity", "")
-                 or d3.get("selectivity", "") or _derive_selectivity(m))
-        cell3 = (d1.get("highlight", "") or d2.get("highlight", "")
-                 or d3.get("highlight", "") or _derive_highlight(m))
-        lines.append(f"  [{m}] cell1=\"{cell1}\"  cell2=\"{cell2}\"  cell3=\"{cell3}\"")
+        # Merge ranked candidates from all passes (pass1 > pass2 > pass3)
+        candidates: dict[str, list[str]] = {"strategy": [], "selectivity": [], "highlight": []}
+        for src in (pass1.get(m, {}), pass2.get(m, {}), pass3.get(m, {})):
+            for dim in candidates:
+                for lbl in src.get(dim, []):
+                    if lbl and lbl not in candidates[dim]:
+                        candidates[dim].append(lbl)
+        # Greedy assignment: prefer a label not yet used by another row so
+        # rows do not collapse into identical text (visual duplication)
+        row: dict[str, str] = {}
+        for dim in ("strategy", "selectivity", "highlight"):
+            chosen = ""
+            for lbl in candidates[dim]:
+                if lbl not in used[dim]:
+                    chosen = lbl
+                    break
+            if not chosen and candidates[dim]:
+                chosen = candidates[dim][0]
+            if not chosen:
+                chosen = derives[dim](m)
+            used[dim].add(chosen)
+            row[dim] = chosen
+        lines.append(f"  [{m}] cell1=\"{row['strategy']}\"  cell2=\"{row['selectivity']}\"  cell3=\"{row['highlight']}\"")
 
     lines.append("")
     lines.append("Column headers above row 1: \"Strategy\"  \"Selectivity\"  \"Highlight\"")
@@ -653,7 +1515,7 @@ def _extract_from_draft(project_dir, categories: list[str]) -> dict[str, dict[st
             result[cat] = {}
             continue
         combined = section_body.lower()
-        result[cat] = _match_patterns(combined, strategy_pats, selectivity_pats, highlight_pats)
+        result[cat] = _match_patterns_ranked(combined, strategy_pats, selectivity_pats, highlight_pats)
     return result
 
 
@@ -683,7 +1545,7 @@ def _extract_from_paper_titles(project_dir, categories: list[str]) -> dict[str, 
                 matched_titles.append(title_lower)
         combined = " ".join(matched_titles)
         if combined:
-            result[cat] = _match_patterns(combined, strategy_pats, selectivity_pats, highlight_pats)
+            result[cat] = _match_patterns_ranked(combined, strategy_pats, selectivity_pats, highlight_pats)
         else:
             result[cat] = {}
     return result
@@ -759,27 +1621,27 @@ def _build_search_terms(cat: str) -> list[str]:
     return terms
 
 
-def _match_patterns(text: str, strategy_pats, selectivity_pats, highlight_pats) -> dict[str, str]:
-    """Match text against pattern lists and return first hits."""
-    result = {}
-    for pat, label in strategy_pats:
-        if re.search(pat, text):
-            result["strategy"] = label
-            break
-    for pat, label in selectivity_pats:
-        if re.search(pat, text):
-            result["selectivity"] = label
-            break
-    for pat, label in highlight_pats:
-        if re.search(pat, text):
-            result["highlight"] = label
-            break
+def _match_patterns_ranked(text: str, strategy_pats, selectivity_pats, highlight_pats) -> dict[str, list[str]]:
+    """Match text against pattern lists; return ALL hits in priority order.
+
+    Ranked results let the row assembler pick a distinct label per category
+    instead of every category converging on the same first-hit label.
+    """
+    result: dict[str, list[str]] = {"strategy": [], "selectivity": [], "highlight": []}
+    for pats, dim in ((strategy_pats, "strategy"), (selectivity_pats, "selectivity"),
+                      (highlight_pats, "highlight")):
+        for pat, label in pats:
+            if re.search(pat, text) and label not in result[dim]:
+                result[dim].append(label)
     return result
 
 
 def _derive_strategy(cat: str) -> str:
     """Final fallback: derive a strategy label from the category name itself."""
     cat_lower = cat.lower()
+    # Catch-all categories
+    if cat_lower in ("other", "others", "miscellaneous"):
+        return "diverse methods"
     # Metal symbols → "X catalysis"
     metal_symbols = {"pd", "cu", "ni", "co", "au", "rh", "ir", "fe", "ru", "zn", "cr"}
     if cat_lower in metal_symbols:
@@ -797,6 +1659,8 @@ def _derive_strategy(cat: str) -> str:
 def _derive_selectivity(cat: str) -> str:
     """Final fallback: derive a selectivity label."""
     cat_lower = cat.lower()
+    if cat_lower in ("other", "others", "miscellaneous"):
+        return "mixed"
     if "organicat" in cat_lower or "metal-free" in cat_lower:
         return "enantioselective"
     if cat_lower in ("pd", "au", "rh"):
@@ -809,6 +1673,8 @@ def _derive_selectivity(cat: str) -> str:
 def _derive_highlight(cat: str) -> str:
     """Final fallback: derive a highlight label."""
     cat_lower = cat.lower()
+    if cat_lower in ("other", "others", "miscellaneous"):
+        return "emerging"
     if "organicat" in cat_lower or "metal-free" in cat_lower:
         return "metal-free"
     if cat_lower in ("ni", "co", "fe"):
@@ -828,17 +1694,25 @@ def _derive_highlight(cat: str) -> str:
     return "—"
 
 
-def _parse_outline_sections(outline_text: str, categories: list[str]) -> dict[str, dict[str, str]]:
-    """Parse outline to extract per-category strategy, selectivity, and highlight.
+def _parse_outline_sections(outline_text: str, categories: list[str]) -> dict[str, dict[str, list[str]]]:
+    """Parse outline to extract ranked candidate labels per category.
 
-    Uses shared patterns from _get_extraction_patterns(). Strategy extraction
-    prioritizes the FIRST subsection title, then expands to all subsections + body.
+    Returns {category: {dimension: [labels in priority order]}}. Sources are
+    merged in priority order: subsections mentioning this category first,
+    then the first subsection, then all subsections + section body.
     """
-    result: dict[str, dict[str, str]] = {}
+    result: dict[str, dict[str, list[str]]] = {}
     if not outline_text:
         return result
 
     strategy_pats, selectivity_pats, highlight_pats = _get_extraction_patterns()
+    dims = ("strategy", "selectivity", "highlight")
+
+    def _merge(found: dict[str, list[str]], hits: dict[str, list[str]]) -> None:
+        for dim in dims:
+            for lbl in hits.get(dim, []):
+                if lbl not in found[dim]:
+                    found[dim].append(lbl)
 
     for cat in categories:
         search_terms = _build_search_terms(cat)
@@ -858,84 +1732,32 @@ def _parse_outline_sections(outline_text: str, categories: list[str]) -> dict[st
             continue
 
         section_lower = section_body.lower()
-        # Extract subsection titles (### headings or - N.N bullet format)
         subsec_lines = re.findall(r"^(?:###\s*(.+)|-\s*\d+\.\d+\s+(.+))$", section_body, re.MULTILINE)
         subsec_texts = [a or b for a, b in subsec_lines]
         first_subsec = subsec_texts[0].lower() if subsec_texts else ""
-        all_subsec = " ".join(subsec_texts).lower()
-        combined = all_subsec + " " + section_lower
-
-        # Build the set of category-matching terms for consistency check
+        combined = " ".join(subsec_texts).lower() + " " + section_lower
         cat_terms = set(_build_search_terms(cat))
 
-        # Strategy: iterate subsections, prioritize ones that mention THIS category
-        found = {}
-        # Pass 1: find a subsection that mentions this category AND matches a strategy pattern
+        found: dict[str, list[str]] = {"strategy": [], "selectivity": [], "highlight": []}
+        # Priority 1: subsections that mention THIS category
         for subsec_text in subsec_texts:
             subsec_lower = subsec_text.lower()
-            # Check if this subsection mentions the current category
-            mentions_cat = any(t in subsec_lower for t in cat_terms)
-            if mentions_cat:
-                for pat, label in strategy_pats:
-                    if re.search(pat, subsec_lower):
-                        found["strategy"] = label
-                        break
-                if "strategy" in found:
-                    break
-        # Pass 2: fall back to first subsection (original behavior)
-        if "strategy" not in found:
-            for pat, label in strategy_pats:
-                if re.search(pat, first_subsec):
-                    found["strategy"] = label
-                    break
-        # Pass 3: fall back to all subsections + body
-        if "strategy" not in found:
-            for pat, label in strategy_pats:
-                if re.search(pat, combined):
-                    found["strategy"] = label
-                    break
-        # Selectivity: try category-matching subsection first, then all
-        if "selectivity" not in found:
-            for subsec_text in subsec_texts:
-                subsec_lower = subsec_text.lower()
-                mentions_cat = any(t in subsec_lower for t in cat_terms)
-                if mentions_cat:
-                    for pat, label in selectivity_pats:
-                        if re.search(pat, subsec_lower):
-                            found["selectivity"] = label
-                            break
-                    if "selectivity" in found:
-                        break
-        if "selectivity" not in found:
-            for pat, label in selectivity_pats:
-                if re.search(pat, combined):
-                    found["selectivity"] = label
-                    break
-        # Highlight: try category-matching subsection first, then all
-        if "highlight" not in found:
-            for subsec_text in subsec_texts:
-                subsec_lower = subsec_text.lower()
-                mentions_cat = any(t in subsec_lower for t in cat_terms)
-                if mentions_cat:
-                    for pat, label in highlight_pats:
-                        if re.search(pat, subsec_lower):
-                            found["highlight"] = label
-                            break
-                    if "highlight" in found:
-                        break
-        if "highlight" not in found:
-            for pat, label in highlight_pats:
-                if re.search(pat, combined):
-                    found["highlight"] = label
-                    break
+            if any(t in subsec_lower for t in cat_terms):
+                _merge(found, _match_patterns_ranked(subsec_lower, strategy_pats, selectivity_pats, highlight_pats))
+        # Priority 2: first subsection, then all subsections + body
+        if first_subsec:
+            _merge(found, _match_patterns_ranked(first_subsec, strategy_pats, selectivity_pats, highlight_pats))
+        _merge(found, _match_patterns_ranked(combined, strategy_pats, selectivity_pats, highlight_pats))
         result[cat] = found
     return result
 
 
 def _build_take_home_text(features: dict[str, Any]) -> str:
-    """Build take-home messages dynamically."""
+    """Build take-home messages dynamically from theme features."""
     time_window = features.get("time_window", "recent years")
     classification_rule = features.get("classification_rule", "")
+    has_chirality = bool(features.get("has_chirality"))
+    has_reaction_focus = bool(features.get("has_reaction_focus"))
 
     # Extract short keyword from classification rule
     class_short = "Classified"
@@ -946,11 +1768,14 @@ def _build_take_home_text(features: dict[str, Any]) -> str:
     messages = [
         f"1. Timely overview ({time_window})",
         f"2. {class_short}-centered",
-        "3. High enantioselectivity",
-        "4. Diverse substrate scope",
-        "5. Emerging sustainable methods",
-        "6. Future directions",
     ]
+    if has_chirality:
+        messages.append("3. High enantioselectivity")
+    else:
+        messages.append("3. Distinct category features")
+    messages.append("4. Diverse substrate scope" if has_reaction_focus else "4. Diverse categories")
+    messages.append("5. Emerging sustainable methods" if has_reaction_focus else "5. Emerging approaches")
+    messages.append("6. Future directions")
     return "Take-home messages (bottom band, 6 items):\n" + "\n".join(messages)
 
 
@@ -1048,13 +1873,14 @@ def call_image_edit_api(
     preferred_size: str = "",
     wire_api: str = "",
     request_metadata: dict[str, str] | None = None,
+    extra_images: list[Path] | None = None,
 ) -> bytes:
     """Call image generation API. Supports both OpenAI-compatible and DashScope native format."""
     # Detect if this is an Alibaba Cloud / DashScope endpoint
     if "maas.aliyuncs.com" in base_url or "dashscope" in base_url:
         if request_metadata is not None:
             request_metadata.update({"endpoint": "dashscope-native", "image_size": "2K"})
-        return _call_dashscope_native(api_key, base_url, reference_image, prompt, model)
+        return _call_dashscope_native(api_key, base_url, reference_image, prompt, model, extra_images)
 
     # OpenAI-compatible endpoints.  Some New API relays expose gpt-image-2
     # only through multimodal /chat/completions.  When that transport is
@@ -1070,6 +1896,7 @@ def call_image_edit_api(
             reference_image,
             sized_prompt,
             model,
+            extra_images,
         )
         if request_metadata is not None:
             request_metadata.update(
@@ -1091,7 +1918,7 @@ def call_image_edit_api(
     for size in overview_image_size_candidates(base_url, preferred_size):
         sized_prompt = prompt_for_overview_size(prompt, size)
         try:
-            image = _try_images_edits(base, api_key, reference_image, sized_prompt, model, size)
+            image = _try_images_edits(base, api_key, reference_image, sized_prompt, model, size, extra_images)
             if request_metadata is not None:
                 request_metadata.update({"endpoint": "/images/edits", "image_size": size})
             return image
@@ -1112,22 +1939,31 @@ def call_image_edit_api(
     raise RuntimeError(f"All overview image generation routes failed: {summary}")
 
 
-def _try_chat_completions_image_edit(
-    base_url: str,
-    api_key: str,
-    reference_image: Path,
-    prompt: str,
-    model: str,
-) -> bytes:
-    """Generate the overview through a multimodal Chat Completions relay."""
-    encoded = base64.b64encode(reference_image.read_bytes()).decode("ascii")
-    suffix = reference_image.suffix.lower()
+def _data_uri_image_item(path: Path, detail: str | None = None) -> dict[str, Any]:
+    """Build a chat-completions image_url content item from a local file."""
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    suffix = path.suffix.lower()
     mime = {
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
         ".webp": "image/webp",
         ".gif": "image/gif",
     }.get(suffix, "image/png")
+    url_item: dict[str, Any] = {"url": f"data:{mime};base64,{encoded}"}
+    if detail:
+        url_item["detail"] = detail
+    return {"type": "image_url", "image_url": url_item}
+
+
+def _try_chat_completions_image_edit(
+    base_url: str,
+    api_key: str,
+    reference_image: Path,
+    prompt: str,
+    model: str,
+    extra_images: list[Path] | None = None,
+) -> bytes:
+    """Generate the overview through a multimodal Chat Completions relay."""
     payload = {
         "model": model,
         "messages": [
@@ -1135,14 +1971,8 @@ def _try_chat_completions_image_edit(
                 "role": "user",
                 "content": [
                     {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{mime};base64,{encoded}",
-                            "detail": "high",
-                        },
-                    },
-                ],
+                    _data_uri_image_item(reference_image, detail="high"),
+                ] + [_data_uri_image_item(p) for p in (extra_images or [])],
             }
         ],
         "stream": True,
@@ -1331,7 +2161,8 @@ def _extract_chat_completion_image_bytes(result: dict[str, Any]) -> bytes:
 
 
 def _call_dashscope_native(
-    api_key: str, base_url: str, reference_image: Path, prompt: str, model: str
+    api_key: str, base_url: str, reference_image: Path, prompt: str, model: str,
+    extra_images: list[Path] | None = None,
 ) -> bytes:
     """Call Alibaba Cloud DashScope native multimodal-generation API."""
     # Derive the native API URL from the base URL
@@ -1355,6 +2186,10 @@ def _call_dashscope_native(
                     "role": "user",
                     "content": [
                         {"image": img_data_uri},
+                    ] + [
+                        {"image": f"data:image/png;base64,{base64.b64encode(p.read_bytes()).decode('ascii')}"}
+                        for p in (extra_images or [])
+                    ] + [
                         {"text": prompt},
                     ],
                 }
@@ -1424,6 +2259,7 @@ def _try_images_edits(
     prompt: str,
     model: str,
     size: str,
+    extra_images: list[Path] | None = None,
 ) -> bytes:
     """Try the /images/edits endpoint."""
     url = f"{base}/images/edits"
@@ -1434,7 +2270,7 @@ def _try_images_edits(
         "quality": "high",
         "output_format": "png",
     }
-    file_fields = [("image", reference_image)]
+    file_fields = [("image", reference_image)] + [("image[]", p) for p in (extra_images or [])]
     content_type, body = build_multipart_form(fields, file_fields)
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -1586,6 +2422,20 @@ def main():
         sys.exit(1)
 
     # Build adapted prompt
+    out_dir = project_dir / "03_figure_redraw"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    extra_images: list[Path] = []
+    skeleton_png = out_dir / "skeleton_model.png"
+    layout_type = best_template["layout_type"]
+    will_composite = False
+    if render_skeleton_model(features, skeleton_png):
+        features["_skeleton_image"] = skeleton_png
+        will_composite = layout_type in _COMPOSITE_REGIONS
+        if will_composite:
+            features["_composite_layout"] = layout_type
+        else:
+            extra_images.append(skeleton_png)
+        print(f"  Accurate ball-and-stick model rendered: {skeleton_png}")
     adapted_prompt = build_adapted_prompt(best_template, features)
     print(f"\n  Adapted prompt length: {len(adapted_prompt)} chars")
 
@@ -1624,17 +2474,28 @@ def main():
     print(f"  Wire API: {wire_api}")
     print(f"  Model: {args.model}")
 
-    request_metadata: dict[str, str] = {}
+    # The reference image is a LAYOUT guide only: skeletonize it so the model
+    # can copy shapes/colors but not the template's text content
+    out_dir = project_dir / "03_figure_redraw"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    upload_image = build_layout_skeleton(reference_image, out_dir / "template_skeleton.png")
+    if upload_image != reference_image:
+        print(f"  Layout-skeleton reference: {upload_image}")
+
+    request_metadata: dict[str, str] = {
+        "reference_mode": "layout-skeleton" if upload_image != reference_image else "original",
+    }
     try:
         image_bytes = call_image_edit_api(
             api_key,
             base_url,
-            reference_image,
+            upload_image,
             adapted_prompt,
             args.model,
             preferred_size=args.size,
             wire_api=wire_api,
             request_metadata=request_metadata,
+            extra_images=extra_images,
         )
     except Exception as exc:
         print(f"\nERROR: API call failed: {exc}", file=sys.stderr)
@@ -1652,6 +2513,8 @@ def main():
     output_path = Path(args.output) if args.output else (out_dir / "overview_figure.png")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(image_bytes)
+    if will_composite and composite_skeleton_into_figure(output_path, skeleton_png, layout_type):
+        print("  Exact skeleton composited into the structure panel (pixel-exact).")
     print(f"\n  Overview figure saved to: {output_path}")
     print(f"  File size: {len(image_bytes):,} bytes")
 
