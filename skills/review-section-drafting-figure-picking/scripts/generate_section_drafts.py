@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _review_runtime.paths import resolve_review_root
+from _review_runtime.paths import resolve_review_root, resolve_review_skills_root
 
 
 def openai_endpoint(base_url: str, endpoint: str) -> str:
@@ -344,7 +344,15 @@ def main() -> int:
     blueprint = read_json(project / "01_matrix_outline" / "section_blueprint.json")
     selected_outline_path = project / "01_matrix_outline" / "selected_outline.md"
     selected_outline = selected_outline_path.read_text(encoding="utf-8", errors="ignore")[:12000] if selected_outline_path.exists() else ""
-    rule_path = root / "skills" / "review-section-blueprint" / "references" / "rule_packs" / "allenation" / "organic-review-style.md"
+    rule_pack_path = str(blueprint.get("rule_pack_path") or "references/rule_packs/allenation")
+    skills_root = resolve_review_skills_root(anchor=Path(__file__))
+    rule_path = skills_root / "review-section-blueprint" / rule_pack_path / "organic-review-style.md"
+    if not rule_path.is_file():
+        raise SystemExit(
+            f"Writing-style rule pack file not found: {rule_path}\n"
+            "Check section_blueprint.json.rule_pack_path and the review-section-blueprint "
+            "skill's references/rule_packs/ layout."
+        )
     rules = rule_path.read_text(encoding="utf-8", errors="ignore")[:14000]
     section_specs = {str(item.get("section_id")): item for item in blueprint.get("sections", []) if isinstance(item, dict)}
     paper_order = [str(pid) for task in tasks for pid in task.get("allowed_papers", []) if str(pid) in rows]

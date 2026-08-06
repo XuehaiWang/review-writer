@@ -138,7 +138,6 @@ STAGES: list[dict[str, Any]] = [
             "review_summary_chart.png",
         ],
         "human_check": "No additional human confirmation required.",
-        "optional": True,
     },
     {
         "id": "docx_export",
@@ -976,7 +975,7 @@ def summarize(review_root: Path, project_id: str) -> dict[str, Any]:
         "conclusion_generation": ("first_draft",),
         "final_audit": ("first_draft",),
         "summary_chart": ("final_audit",),
-        "docx_export": ("final_audit",),
+        "docx_export": ("final_audit", "summary_chart"),
     }
     for stage in stages:
         if any(not by_id[dependency]["complete"] for dependency in prerequisites.get(stage["id"], ())):

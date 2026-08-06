@@ -46,6 +46,35 @@ Do not delete caveats or no_figure_reason notes silently.
 Do not invent new papers, claims, or figures.
 ```
 
+## Run
+
+Invoke the bundled scripts in this order:
+
+```bash
+python skills/review-draft-merge-polish/scripts/init_first_draft.py \
+  --review-root <review-root> --project-id <project-id>
+
+python skills/review-draft-merge-polish/scripts/merge_polish_draft.py \
+  --review-root <review-root> --project-id <project-id>
+
+python skills/review-draft-merge-polish/scripts/insert_figures_into_draft.py \
+  --review-root <review-root> --project-id <project-id>
+
+python skills/review-draft-merge-polish/scripts/renumber_figures_in_draft.py \
+  --review-root <review-root> --project-id <project-id>
+```
+
+`merge_polish_draft.py` also strips each section's own `## References` block
+(every section from Section Drafting carries one, numbered from the same
+shared global citation map) before concatenating section bodies, and appends
+a single consolidated `## References` section built from the union of those
+per-section entries. It writes that consolidated mapping to `citations.json`
+in the same run — no separate script produces `citations.json`.
+
+`paragraph_editor.py` and `paragraph_manifest_builder.py` in this skill's
+`scripts/` folder are library modules for the paragraph-edit dashboard flow
+(see `review-paragraph-edit`), not part of this automated Run order.
+
 ## Hard Output Requirements
 
 `first_draft.md` must satisfy all of:
@@ -85,8 +114,10 @@ citations.json
 ```
 
 `citations.json` aggregates every paragraph's `cited_paper_ids` into a single
-ordered list per `[n]` slot. It is consumed by the final audit to cross-check
-inline `[n]` callouts and the References section against `literature_matrix.json`.
+ordered list per `[n]` slot; `merge_polish_draft.py` writes it directly from
+the consolidated References entries described in Run above. It is consumed by
+the final audit to cross-check inline `[n]` callouts and the References
+section against `literature_matrix.json`.
 
 Figure insertion is paragraph-anchored: read `target_paragraph_id` from
 `02_section_drafting/figure_candidates.json` and insert each figure right after

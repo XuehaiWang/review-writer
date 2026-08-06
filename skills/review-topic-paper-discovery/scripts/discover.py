@@ -970,6 +970,45 @@ def combine_results(local_grouped: list[dict[str, Any]], web_grouped: list[dict[
     return combined
 
 
+def select_top_papers_balanced_by_year(
+    candidates: list[dict[str, Any]], target_count: int
+) -> list[dict[str, Any]]:
+    """Rank candidates by score without letting score ties erase a whole year.
+
+    score_local_paper's scoring is coarse (a small fixed per-category weight
+    table, then rounded), so it is common for far more than target_count
+    papers to land on the exact same top score. A plain sort by (score, year)
+    descending then truncating would use year purely as a tiebreaker and
+    systematically prefer newer papers within that tie cluster -- for a
+    multi-year discovery window this can silently drop an entire in-range
+    year (typically the oldest one) even though its papers scored identically
+    to the ones kept. Round-robin across years, score-ordered within each
+    year, keeps score as the primary signal while guaranteeing every
+    represented year gets a fair share of the selected set.
+    """
+    by_year: dict[Any, list[dict[str, Any]]] = {}
+    for row in candidates:
+        by_year.setdefault(row.get("year"), []).append(row)
+    for rows in by_year.values():
+        rows.sort(key=lambda r: (r["best_score"], r.get("paper_id") or ""), reverse=True)
+    years_order = sorted((y for y in by_year if y is not None), reverse=True)
+    if None in by_year:
+        years_order.append(None)  # unknown-year papers fill remaining slots last
+
+    result: list[dict[str, Any]] = []
+    round_index = 0
+    while len(result) < target_count and any(round_index < len(by_year[y]) for y in years_order):
+        for year in years_order:
+            if len(result) >= target_count:
+                break
+            bucket = by_year[year]
+            if round_index < len(bucket):
+                result.append(bucket[round_index])
+        round_index += 1
+    result.sort(key=lambda r: (r["best_score"], r.get("year") or 0), reverse=True)
+    return result
+
+
 def selected_from_combined(combined: list[dict[str, Any]], target_count: int = 30) -> dict[str, Any]:
     selected = {"keywords": [], "local_papers": {}, "web_papers": []}
     for group in combined:
@@ -1002,9 +1041,9 @@ def selected_from_combined(combined: list[dict[str, Any]], target_count: int = 3
         for result in group.get("web_results", []):
             if result.get("keep", True):
                 selected["web_papers"].append({**result, "matched_keyword": group["keyword"]})
-    selected["local_papers"] = list(selected["local_papers"].values())
-    selected["local_papers"].sort(key=lambda r: (r["best_score"], r.get("year") or 0), reverse=True)
-    selected["local_papers"] = selected["local_papers"][:target_count]
+    selected["local_papers"] = select_top_papers_balanced_by_year(
+        list(selected["local_papers"].values()), target_count
+    )
     return selected
 
 

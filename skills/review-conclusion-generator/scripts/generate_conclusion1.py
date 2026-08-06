@@ -727,6 +727,7 @@ def validate_conclusion(
     draft_text: str,
     available_paper_ids: list[str] | None = None,
     paper_to_callout: dict[str, str] | None = None,
+    rendered_markdown: str = "",
 ) -> dict[str, Any]:
     """Validate the generated conclusion against quality criteria.
 
@@ -785,10 +786,24 @@ def validate_conclusion(
     if not all_refs:
         issues.append("no_paper_references: conclusion does not reference any specific paper IDs")
 
+    # An empty/missing paper_to_callout is not "nothing to check" -- it means
+    # citations.json couldn't map any referenced paper to a [n] slot, so every
+    # paper in all_refs is effectively unknown and rendering will be unable to
+    # emit a real callout for it. Only a genuinely absent mapping (None, i.e.
+    # citations.json load was never attempted) skips this check.
     if paper_to_callout is not None:
-        unknown = sorted({paper_id for paper_id in all_refs if paper_id not in paper_to_callout})
+        callout_map = paper_to_callout or {}
+        unknown = sorted({paper_id for paper_id in all_refs if paper_id not in callout_map})
         if unknown:
             issues.append(f"unknown_conclusion_paper_ids: {', '.join(unknown)}")
+
+    # Independently verify the actual rendered deliverable, not just the
+    # paper_id -> callout mapping: a conclusion that references real, known
+    # papers but whose rendered Markdown still has zero [n] callouts (e.g. a
+    # rendering bug, or every referenced paper missing from the map) must not
+    # be able to report passes_validation=True.
+    if all_refs and rendered_markdown and not _NUMERIC_CITATION_RE.search(rendered_markdown):
+        issues.append("no_rendered_callouts: conclusion_generated.md has referenced papers but no [n] callouts")
 
     for paragraph_number, para in enumerate(paragraphs, start=1):
         if isinstance(para, dict) and re.search(r"P\d+", str(para.get("content") or "")):
@@ -999,20 +1014,23 @@ def run(args: argparse.Namespace) -> int:
         print(f"Saved context and prompt for manual submission in {out_dir}")
         return 1
 
+    # Write outputs
+    out_dir = project / "04_first_draft"
+
+    # Write manuscript-only Markdown; provenance remains in the quality report.
+    # Rendered before validation so validate_conclusion can independently
+    # check the actual deliverable text, not just the paper_id -> callout map.
+    conclusion_md = render_conclusion_markdown(result, paper_to_callout)
+    write_text(out_dir / "conclusion_generated.md", conclusion_md)
+
     # Validate
     validation = validate_conclusion(
         result,
         draft_text,
         available_paper_ids,
-        paper_to_callout or None,
+        paper_to_callout if citations_path.exists() else None,
+        conclusion_md,
     )
-
-    # Write outputs
-    out_dir = project / "04_first_draft"
-
-    # Write manuscript-only Markdown; provenance remains in the quality report.
-    conclusion_md = render_conclusion_markdown(result, paper_to_callout)
-    write_text(out_dir / "conclusion_generated.md", conclusion_md)
 
     # Write the structured result with validation
     output = {

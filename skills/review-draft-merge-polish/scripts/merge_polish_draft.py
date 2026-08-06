@@ -180,6 +180,58 @@ def call_llm(
         raise ModelResponseError(detail) from exc
 
 
+REFERENCE_LINE_RE = re.compile(r"^\[(\d+)\]\s+(.+?)\s+\[([^\[\]]+)\]\s*$")
+
+
+def split_body_and_reference_entries(draft_md: str) -> tuple[str, list[dict[str, Any]]]:
+    """Split one section's draft into its body and its parsed References entries.
+
+    Every section written by generate_section_drafts.py ends with its own
+    ``## References`` block using the shared global citation_map, so the same
+    paper always gets the same [n] across every section. Splitting here (and
+    consolidating the parsed entries once in main()) is what turns those
+    per-section duplicates into the single final References section the
+    Hard Output Requirements demand, instead of concatenating them verbatim.
+    """
+    marker = re.search(r"\n##\s+References\s*\n", draft_md)
+    if marker is None:
+        return draft_md.strip(), []
+    body = draft_md[: marker.start()].strip()
+    tail = draft_md[marker.end():]
+    entries: list[dict[str, Any]] = []
+    for line in tail.splitlines():
+        match = REFERENCE_LINE_RE.match(line.strip())
+        if not match:
+            continue
+        callout, reference_text, paper_id = match.groups()
+        entries.append(
+            {
+                "callout": int(callout),
+                "paper_id": paper_id,
+                "cited_paper_ids": [paper_id],
+                "reference": f"[{callout}] {reference_text} [{paper_id}]",
+            }
+        )
+    return body, entries
+
+
+def build_citation_entries(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregate every section's parsed References entries into one ordered list.
+
+    citations.json is the documented hard-gated contract that aggregates each
+    paragraph's cited_paper_ids into a single ordered list per [n] slot; no
+    other script in this pipeline produces it from the section drafts, so it
+    is built here from the same References blocks split_body_and_reference_entries
+    already parses out of each section.
+    """
+    by_callout: dict[int, dict[str, Any]] = {}
+    for section in sections:
+        _, entries = split_body_and_reference_entries(str(section.get("draft_md") or ""))
+        for entry in entries:
+            by_callout.setdefault(entry["callout"], entry)
+    return [by_callout[callout] for callout in sorted(by_callout)]
+
+
 def section_brief(section: dict[str, Any]) -> dict[str, Any]:
     """Send only the evidence required for framing; preserve full prose locally."""
     paragraphs = section.get("paragraphs") if isinstance(section.get("paragraphs"), list) else []
@@ -284,15 +336,23 @@ Section evidence summaries:\n{json.dumps(summaries, ensure_ascii=False)}"""
         framing = fallback_framing(topic, sections)
     body = [f"# {str(framing.get('title') or topic or args.project_id).strip()}", "", "## Introduction", "", str(framing.get("introduction") or "").strip(), ""]
     transitions = framing.get("transitions") if isinstance(framing.get("transitions"), dict) else {}
+    citation_entries = build_citation_entries(sections)
     for index, section in enumerate(sections):
-        body.extend([str(section.get("draft_md") or "").strip(), ""])
+        section_body, _ = split_body_and_reference_entries(str(section.get("draft_md") or ""))
+        body.extend([section_body, ""])
         if index < len(sections) - 1:
             transition = str(transitions.get(str(section.get("section_id")), "")).strip()
             if transition:
                 body.extend([transition, ""])
+    body.extend(["", "## References", ""])
+    body.extend(entry["reference"] for entry in citation_entries)
     out = project / "04_first_draft"
     out.mkdir(parents=True, exist_ok=True)
     (out / "first_draft.md").write_text("\n".join(body).strip() + "\n", encoding="utf-8")
+    (out / "citations.json").write_text(
+        json.dumps({"entries": citation_entries}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     status = (
         f"Generated review framing and section transitions with model `{model}`."
         if not fallback_reason

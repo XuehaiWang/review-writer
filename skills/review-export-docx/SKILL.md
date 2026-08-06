@@ -116,12 +116,13 @@ Relative image paths in the Markdown are resolved against the Markdown file's di
 
 ## Summary-chart bridge
 
-When `review_summary_chart.json` exists beside the selected Markdown, validate
-that it was generated from the current draft with `generation_scope: full` or
-the legacy-compatible `both`. Validate every PNG path and SHA-256 in
+`review_summary_chart.json` beside the selected Markdown is required, not
+optional: run `review-outline-summary-chart` before this skill. Validate that
+it was generated from the current draft with `generation_scope: full` or the
+legacy-compatible `both`. Validate every PNG path and SHA-256 in
 `stats.image_manifest`, then insert the full-review chart at the managed
-manuscript position. Missing, stale, or unsafe chart entries stop export with a
-clear error instead of being skipped.
+manuscript position. A missing manifest file, or missing/stale/unsafe entries
+within it, stop export with a clear error instead of being skipped.
 
 ## Boundary
 

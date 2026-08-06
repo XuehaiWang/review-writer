@@ -963,7 +963,12 @@ def _manifest_image(base_dir: Path, entry: Any, label: str) -> Path:
 def _load_summary_chart_bundle(md_path: Path, blocks: List[Block]) -> Optional[SummaryChartBundle]:
     manifest_path = md_path.parent / "review_summary_chart.json"
     if not manifest_path.exists():
-        return None
+        raise ValueError(
+            f"summary chart manifest not found: {manifest_path}. "
+            "The orchestrator's DOCX hard gate requires a current "
+            "review_summary_chart.json beside the draft before export; run "
+            "review-outline-summary-chart first."
+        )
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     except Exception as exc:
