@@ -132,13 +132,19 @@
     setProject(projectId);
     button.disabled = true;
     status.textContent = t("Generating stage outputs...");
-    const runnableStages = new Set(["sections", "figures", "figure-review", "draft", "final"]);
+    const runnableStages = new Set(["sections", "figures", "figure-review", "final"]);
     const endpoint = current.id === "blueprint"
       ? `/api/project/${encodeURIComponent(projectId)}/section-tasks`
       : runnableStages.has(current.id)
         ? `/api/project/${encodeURIComponent(projectId)}/run/${encodeURIComponent(current.id)}`
         : `/api/project/${encodeURIComponent(projectId)}/handoff/${encodeURIComponent(current.id)}`;
     try {
+      if (current.id === "draft" && typeof window.reviewDraftSaveForHandoff === "function") {
+        status.textContent = t("Saving current draft...");
+        const saved = await window.reviewDraftSaveForHandoff();
+        if (!saved) throw new Error(t("Save the current draft before continuing."));
+        status.textContent = t("Handing off current draft...");
+      }
       const response = await fetch(endpoint, { method: "POST" });
       const result = await response.json().catch(() => ({ ok: false, error: message("serverReturned", { status: response.status }) }));
       if (!response.ok || !result.ok) throw new Error(result.error || message("serverReturned", { status: response.status }));

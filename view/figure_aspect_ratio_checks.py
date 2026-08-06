@@ -214,6 +214,34 @@ class FigureAspectRatioChecks(unittest.TestCase):
         self.assertFalse(REDRAW.should_fail_over_image_provider(RuntimeError("HTTP 401 unauthorized")))
         self.assertFalse(REDRAW.should_fail_over_image_provider(RuntimeError("HTTP 400 invalid image")))
 
+    def test_later_mechanism_retry_error_keeps_last_generated_image(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            out_path = Path(raw) / "mechanism.png"
+            Image.new("RGB", (40, 30), "white").save(out_path)
+            fidelity = {
+                "status": "failed",
+                "failures": ["too much new or displaced ink appeared"],
+            }
+            row = {
+                "figure_id": "P195-F01",
+                "render_mode": "ai-edit",
+                "edit_profile": REDRAW.MECHANISM_ARROW_STRAIGHTEN_PROFILE,
+            }
+
+            retained = REDRAW.retain_successful_mechanism_attempt_after_retry_error(
+                row,
+                out_path,
+                [{"attempt": 1, "status": "failed", "failures": fidelity["failures"], "source_fidelity": fidelity}],
+                RuntimeError("HTTP 400 reference image rejected"),
+            )
+
+            self.assertTrue(retained)
+            self.assertEqual(row["status"], "redrawn")
+            self.assertEqual(row["redrawn_image"], str(out_path))
+            self.assertEqual(row["output_disposition"], "saved_with_integrity_warning")
+            self.assertEqual(row["chemistry_integrity"]["status"], "failed")
+            self.assertIn("Later retry error", row["notes"])
+
     def test_wide_source_is_letterboxed_and_cropped_back_without_stretching(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

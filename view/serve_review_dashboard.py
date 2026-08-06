@@ -67,6 +67,9 @@ from provider_settings import (
 _DISCOVERY_MODULE = None
 _BATCH_REDRAW_LOCK = threading.RLock()
 _BATCH_REDRAW_JOBS: dict[str, dict[str, object]] = {}
+_FIGURE_REDRAW_STATE_LOCK = threading.RLock()
+_FIGURE_REDRAW_STATES: dict[tuple[str, str], dict[str, object]] = {}
+ACTIVE_FIGURE_REDRAW_STATUSES = {"queued", "running", "retrying"}
 _LITERATURE_JOB_LOCK = threading.RLock()
 _LITERATURE_THREADS: dict[str, threading.Thread] = {}
 _LIBRARY_WORKFLOW_PROJECT = "__library__"
@@ -116,7 +119,11 @@ def execute_dashboard_stage(review_root: Path, project_id: str, stage_id: str) -
         result = regenerate_figures_and_first_draft(review_root, project_id)
         next_stage = "draft"
     elif stage_id == "draft":
-        result = regenerate_first_draft(review_root, project_id)
+        # Stage 8 is a human-editing boundary. Entering Final must hand off the
+        # saved manuscript verbatim; regenerating here would overwrite manual
+        # paragraph and whole-document edits immediately before Stage 9 reads
+        # them.
+        result = handoff_current_draft(review_root, project_id)
         next_stage = "final"
     elif stage_id == "final-conclusion":
         result = generate_final_conclusion(review_root, project_id)
@@ -963,6 +970,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
         *,
         force_ai_edit: bool = False,
     ) -> None:
+        if not begin_figure_redraw_state(
+            self.review_root,
+            project_id,
+            figure_id,
+            origin="single",
+            force_ai_edit=force_ai_edit,
+        ):
+            self.send_json(
+                {"ok": False, "error": "This figure is already being generated."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
         try:
             result = redraw_current_figure(
                 self.review_root,
@@ -970,9 +989,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 figure_id,
                 force_ai_edit=force_ai_edit,
             )
-        except (RuntimeError, ValueError) as exc:
-            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
+        except Exception as exc:
+            finish_figure_redraw_state(
+                self.review_root,
+                project_id,
+                figure_id,
+                status="failed",
+                error=str(exc),
+            )
+            response_status = (
+                HTTPStatus.CONFLICT
+                if isinstance(exc, (RuntimeError, ValueError, OSError))
+                else HTTPStatus.INTERNAL_SERVER_ERROR
+            )
+            self.send_json({"ok": False, "error": str(exc)}, status=response_status)
             return
+        finish_figure_redraw_state(
+            self.review_root,
+            project_id,
+            figure_id,
+            status="completed",
+            result=result,
+        )
         self.send_json({"ok": True, "project_id": project_id, **result})
 
     def handle_figure_human_approval(self, project_id: str, figure_id: str) -> None:
@@ -1196,25 +1234,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             else:
                 refresh_figure_review_handoff(draft_stage, accept_current=True)
         elif stage_id == "draft":
-            draft_stage = project / "02_section_drafting"
-            source_freshness = section_source_freshness(draft_stage)
-            draft_freshness = artifact_freshness(
-                project / "04_first_draft" / "draft_handoff.json",
-                [project / "04_first_draft" / "first_draft.md"],
-            )
-            if source_freshness["stale"] or draft_freshness["stale"]:
-                error = "The first draft is out of date. Regenerate it from the current sections and reviewed figures before continuing to Final."
-            elif not (project / "04_first_draft" / "first_draft.md").exists():
-                error = "Create and save the first draft before continuing to Final."
-            else:
-                write_stage_handoff(
-                    project / "05_final_audit" / "final_handoff.json",
-                    "draft",
-                    [
-                        project / "04_first_draft" / "first_draft.md",
-                        project / "04_first_draft" / "citations.json",
-                    ],
-                )
+            try:
+                handoff_current_draft(self.review_root, project_id)
+            except RuntimeError as exc:
+                error = str(exc)
         elif stage_id == "final":
             final_freshness = artifact_freshness(
                 project / "05_final_audit" / "final_handoff.json",
@@ -3665,6 +3688,208 @@ def approve_figure_for_manuscript(review_root: Path, project_id: str, figure_id:
     }
 
 
+def _figure_redraw_state_key(review_root: Path, project_id: str) -> tuple[str, str]:
+    return str(Path(review_root).resolve()), project_id
+
+
+def _persist_figure_redraw_states(
+    review_root: Path,
+    project_id: str,
+    document: dict[str, object],
+) -> None:
+    figures = document.get("figures")
+    active = bool(
+        isinstance(figures, dict)
+        and any(
+            str(item.get("status") or "") in ACTIVE_FIGURE_REDRAW_STATUSES
+            for item in figures.values()
+            if isinstance(item, dict)
+        )
+    )
+    document["status"] = "active" if active else "idle"
+    document["updated_at"] = now_utc()
+    saved = workflow_store(review_root).save_job(project_id, "figure-redraw-statuses", document)
+    document["job_id"] = saved["job_id"]
+
+
+def _figure_redraw_state_document(review_root: Path, project_id: str) -> dict[str, object]:
+    """Load the durable per-figure generation states for one Stage 7 project."""
+    key = _figure_redraw_state_key(review_root, project_id)
+    document = _FIGURE_REDRAW_STATES.get(key)
+    if document is not None:
+        return document
+    persisted = workflow_store(review_root).load_job(project_id, "figure-redraw-statuses") or {}
+    raw_figures = persisted.get("figures") if isinstance(persisted, dict) else {}
+    figures = {
+        str(figure_id): dict(state)
+        for figure_id, state in (raw_figures or {}).items()
+        if str(figure_id).strip() and isinstance(state, dict)
+    }
+    interrupted = False
+    for state in figures.values():
+        if str(state.get("status") or "") in ACTIVE_FIGURE_REDRAW_STATUSES:
+            state["status"] = "interrupted"
+            state["error"] = "Generation was interrupted when the dashboard process stopped."
+            state["finished_at"] = now_utc()
+            state["updated_at"] = now_utc()
+            interrupted = True
+    document = {
+        "project_id": project_id,
+        "figures": figures,
+        "status": "idle",
+        "updated_at": now_utc(),
+    }
+    if persisted.get("job_id"):
+        document["job_id"] = str(persisted["job_id"])
+    _FIGURE_REDRAW_STATES[key] = document
+    if interrupted:
+        _persist_figure_redraw_states(review_root, project_id, document)
+    return document
+
+
+def public_figure_redraw_states(review_root: Path, project_id: str) -> dict[str, dict[str, object]]:
+    """Return a copy safe for the Stage 7 polling payload."""
+    with _FIGURE_REDRAW_STATE_LOCK:
+        document = _figure_redraw_state_document(review_root, project_id)
+        figures = document.get("figures") or {}
+        return {
+            str(figure_id): dict(state)
+            for figure_id, state in figures.items()
+            if isinstance(state, dict)
+        }
+
+
+def begin_figure_redraw_state(
+    review_root: Path,
+    project_id: str,
+    figure_id: str,
+    *,
+    origin: str,
+    force_ai_edit: bool = False,
+) -> bool:
+    """Atomically claim one figure and expose its running state before the provider call."""
+    with _FIGURE_REDRAW_STATE_LOCK:
+        document = _figure_redraw_state_document(review_root, project_id)
+        figures = document.setdefault("figures", {})
+        current = figures.get(figure_id) if isinstance(figures, dict) else None
+        previous_status = str((current or {}).get("status") or "") if isinstance(current, dict) else ""
+        if previous_status in {"running", "retrying"}:
+            return False
+        now = now_utc()
+        if not isinstance(figures, dict):
+            figures = {}
+            document["figures"] = figures
+        figures[figure_id] = {
+            "figure_id": figure_id,
+            "status": "retrying" if previous_status in {"failed", "interrupted"} else "running",
+            "origin": origin,
+            "force_ai_edit": bool(force_ai_edit),
+            "started_at": now,
+            "updated_at": now,
+            "finished_at": "",
+            "error": "",
+        }
+        _persist_figure_redraw_states(review_root, project_id, document)
+        return True
+
+
+def queue_figure_redraw_states(
+    review_root: Path,
+    project_id: str,
+    figure_ids: list[str],
+) -> None:
+    """Publish the batch queue in one durable update so every Scheme gets a badge."""
+    if not figure_ids:
+        return
+    with _FIGURE_REDRAW_STATE_LOCK:
+        document = _figure_redraw_state_document(review_root, project_id)
+        figures = document.setdefault("figures", {})
+        if not isinstance(figures, dict):
+            figures = {}
+            document["figures"] = figures
+        now = now_utc()
+        for figure_id in figure_ids:
+            current = figures.get(figure_id)
+            if isinstance(current, dict) and current.get("status") in {"running", "retrying"}:
+                continue
+            figures[figure_id] = {
+                "figure_id": figure_id,
+                "status": "queued",
+                "origin": "batch",
+                "force_ai_edit": False,
+                "started_at": "",
+                "updated_at": now,
+                "finished_at": "",
+                "error": "",
+            }
+        _persist_figure_redraw_states(review_root, project_id, document)
+
+
+def finish_figure_redraw_state(
+    review_root: Path,
+    project_id: str,
+    figure_id: str,
+    *,
+    status: str,
+    error: str = "",
+    result: dict[str, Any] | None = None,
+) -> None:
+    if status not in {"completed", "failed", "cancelled", "interrupted"}:
+        raise ValueError(f"Unsupported figure redraw status: {status}")
+    with _FIGURE_REDRAW_STATE_LOCK:
+        document = _figure_redraw_state_document(review_root, project_id)
+        figures = document.setdefault("figures", {})
+        if not isinstance(figures, dict):
+            figures = {}
+            document["figures"] = figures
+        state = dict(figures.get(figure_id) or {"figure_id": figure_id})
+        now = now_utc()
+        state.update(
+            {
+                "figure_id": figure_id,
+                "status": status,
+                "updated_at": now,
+                "finished_at": now,
+                "error": str(error or "")[-2000:],
+            }
+        )
+        if result:
+            state["preview_only"] = bool(result.get("preview_only"))
+            state["redrawn_image"] = str(result.get("redrawn_image") or "")
+            state["render_mode"] = str(result.get("render_mode") or "")
+        figures[figure_id] = state
+        _persist_figure_redraw_states(review_root, project_id, document)
+
+
+def cancel_queued_figure_redraw_states(
+    review_root: Path,
+    project_id: str,
+    figure_ids: list[str],
+) -> None:
+    with _FIGURE_REDRAW_STATE_LOCK:
+        document = _figure_redraw_state_document(review_root, project_id)
+        figures = document.get("figures") or {}
+        if not isinstance(figures, dict):
+            return
+        changed = False
+        now = now_utc()
+        for figure_id in figure_ids:
+            state = figures.get(figure_id)
+            if not isinstance(state, dict) or state.get("status") != "queued":
+                continue
+            state.update(
+                {
+                    "status": "cancelled",
+                    "error": "Generation was cancelled before the provider request started.",
+                    "updated_at": now,
+                    "finished_at": now,
+                }
+            )
+            changed = True
+        if changed:
+            _persist_figure_redraw_states(review_root, project_id, document)
+
+
 def persist_batch_redraw_job(review_root: Path, project_id: str, job: dict[str, object]) -> None:
     saved = workflow_store(review_root).save_job(project_id, "figure-redraw-all", job)
     job["job_id"] = saved["job_id"]
@@ -3747,6 +3972,19 @@ def stop_batch_figure_redraw(project_id: str, review_root: Path | None = None) -
             job["updated_at"] = now_utc()
             if review_root is not None:
                 persist_batch_redraw_job(review_root, project_id, job)
+                completed_ids = {
+                    str(value) for value in job.get("completed_figure_ids", []) if str(value)
+                }
+                current_id = str(job.get("current_figure_id") or "")
+                cancel_queued_figure_redraw_states(
+                    review_root,
+                    project_id,
+                    [
+                        str(value)
+                        for value in job.get("figure_ids", [])
+                        if str(value) not in completed_ids and str(value) != current_id
+                    ],
+                )
         elif job.get("status") == "interrupted":
             job["status"] = "stopped"
             job["stop_requested"] = True
@@ -3777,9 +4015,26 @@ def run_batch_figure_redraw(review_root: Path, project_id: str, figure_ids: list
             job["current_source_label"] = figure_id
             job["updated_at"] = now_utc()
             persist_batch_redraw_job(review_root, project_id, job)
+        claimed = False
         try:
+            claimed = begin_figure_redraw_state(
+                review_root,
+                project_id,
+                figure_id,
+                origin="batch",
+            )
+            if not claimed:
+                raise RuntimeError("This figure is already being generated by another request.")
             result = redraw_current_figure(review_root, project_id, figure_id)
-        except (RuntimeError, ValueError) as exc:
+        except Exception as exc:
+            if claimed:
+                finish_figure_redraw_state(
+                    review_root,
+                    project_id,
+                    figure_id,
+                    status="failed",
+                    error=str(exc),
+                )
             with _BATCH_REDRAW_LOCK:
                 job = _BATCH_REDRAW_JOBS.get(project_id)
                 if not job:
@@ -3790,6 +4045,13 @@ def run_batch_figure_redraw(review_root: Path, project_id: str, figure_ids: list
                     errors.append({"figure_id": figure_id, "error": str(exc)})
                     del errors[:-12]
         else:
+            finish_figure_redraw_state(
+                review_root,
+                project_id,
+                figure_id,
+                status="completed",
+                result=result,
+            )
             with _BATCH_REDRAW_LOCK:
                 job = _BATCH_REDRAW_JOBS.get(project_id)
                 if not job:
@@ -3915,6 +4177,7 @@ def start_batch_figure_redraw(review_root: Path, project_id: str) -> dict[str, o
             job["job_id"] = str(persisted["job_id"])
         persist_batch_redraw_job(review_root, project_id, job)
         _BATCH_REDRAW_JOBS[project_id] = job
+        queue_figure_redraw_states(review_root, project_id, remaining_figure_ids)
         if not remaining_figure_ids:
             job["status"] = "completed"
             job["finished_at"] = now_utc()
@@ -4491,17 +4754,38 @@ def generate_final_overview_figure(review_root: Path, project_id: str) -> dict[s
         ],
     )
     overview_script = review_root / "skills" / "review-figure-style-redraw" / "scripts" / "generate_overview_figure.py"
+    # Resolve the same Settings-backed image provider used by Stage 7. Pass
+    # non-secret routing values explicitly so the overview subprocess cannot
+    # fall back to an older inherited endpoint or probe a different API family.
+    image_environment = provider_subprocess_environment(review_root)
+    image_base_url = str(image_environment.get("IMAGE_OPENAI_BASE_URL") or "").strip()
+    image_model = str(image_environment.get("IMAGE_OPENAI_MODEL") or "gpt-image-2").strip() or "gpt-image-2"
+    image_wire_api = str(image_environment.get("IMAGE_OPENAI_WIRE_API") or "images").strip().lower().replace("_", "-")
+    image_wire_api = {
+        "chat": "chat-completions",
+        "chat-completion": "chat-completions",
+    }.get(image_wire_api, image_wire_api)
+    if image_wire_api not in {"images", "chat-completions"}:
+        raise RuntimeError(
+            "The configured image wire API must be 'images' or 'chat-completions'. "
+            "Update it in API Settings before generating the overview figure."
+        )
+    overview_extra = [
+        "--model",
+        image_model,
+        "--wire-api",
+        image_wire_api,
+        "--output",
+        str(output_path),
+    ]
+    if image_base_url:
+        overview_extra[0:0] = ["--base-url", image_base_url]
     run_project_script(
         overview_script,
         review_root,
         project_id,
         timeout=600,
-        extra=[
-            "--model",
-            os.environ.get("IMAGE_OPENAI_MODEL", "gpt-image-2").strip() or "gpt-image-2",
-            "--output",
-            str(output_path),
-        ],
+        extra=overview_extra,
     )
     if not output_path.is_file() or output_path.stat().st_size <= 0:
         raise RuntimeError("Overview figure generation did not produce a PNG output.")
@@ -5332,6 +5616,44 @@ def refresh_manual_draft_outputs(review_root: Path, project_id: str) -> dict[str
     return artifact_freshness(draft_handoff, [draft_path])
 
 
+def handoff_current_draft(review_root: Path, project_id: str) -> dict[str, Any]:
+    """Pass the current human-reviewed Stage-8 manuscript to Final unchanged."""
+    project = Path(review_root) / "review-projects" / project_id
+    section_stage = project / "02_section_drafting"
+    draft_stage = project / "04_first_draft"
+    draft_path = draft_stage / "first_draft.md"
+    citation_path = draft_stage / "citations.json"
+    if not draft_path.is_file():
+        raise RuntimeError("Create and save the first draft before continuing to Final.")
+
+    source_freshness = section_source_freshness(section_stage)
+    draft_freshness = artifact_freshness(
+        draft_stage / "draft_handoff.json",
+        [draft_path],
+    )
+    if source_freshness["stale"] or draft_freshness["stale"]:
+        raise RuntimeError(
+            "The first draft is out of date. Regenerate it from the current sections and "
+            "reviewed figures before continuing to Final."
+        )
+
+    final_handoff = project / "05_final_audit" / "final_handoff.json"
+    write_stage_handoff(
+        final_handoff,
+        "draft",
+        [draft_path, citation_path],
+        metadata={
+            "dependency_profile": "stage8-human-reviewed-draft-v1",
+            "preserves_manual_draft": True,
+        },
+    )
+    return {
+        "first_draft": str(draft_path),
+        "final_handoff": str(final_handoff),
+        "preserved_manual_draft": True,
+    }
+
+
 def infer_project_topic(project: Path) -> str:
     discovery = read_json_if_exists(project / "00_discovery" / "combined_results_by_keyword.json")
     if isinstance(discovery, dict) and discovery.get("topic"):
@@ -5613,7 +5935,8 @@ def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any
         "summary": project_summary(review_root, project_id),
         "figure_candidates": candidate_data,
         "redrawn_manifest": redrawn_manifest,
-        "batch_redraw": batch_figure_redraw_status(project_id),
+        "batch_redraw": batch_figure_redraw_status(project_id, review_root),
+        "figure_redraw_states": public_figure_redraw_states(review_root, project_id),
         "figure_redraw_report_md": read_text_if_exists(stage / "figure_redraw_report.md"),
         "freshness": {
             "source_stale": source_freshness["stale"],
@@ -5909,8 +6232,18 @@ def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
         overview_figure.exists()
         and not overview_freshness["stale"]
     )
-    overview_stale = bool(
-        (overview_figure.exists() or overview_included)
+    final_handoff = read_json_if_exists(stage / "final_handoff.json") or {}
+    final_depends_on_overview = bool(
+        overview_included
+        or final_handoff.get("includes_current_overview") is True
+    )
+    # An old overview image may remain on disk after the user intentionally
+    # generates a Final Draft without that optional artifact.  Keep reporting
+    # the preview as stale, but do not invalidate or hide a Final Draft that
+    # never declared the overview as one of its dependencies.
+    overview_stale = bool(overview_figure.exists() and not overview_current)
+    overview_dependency_stale = bool(
+        final_depends_on_overview
         and not (overview_current and overview_included)
     )
     conclusion_current = conclusion_artifacts_current(
@@ -5941,14 +6274,15 @@ def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
         "freshness": {
             "source_stale": source_freshness["stale"],
             "draft_stale": draft_dependency_freshness["stale"],
-            "final_stale": final_freshness["stale"] or overview_stale or not conclusion_integration_current,
+            "final_stale": final_freshness["stale"] or overview_dependency_stale or not conclusion_integration_current,
             "overview_stale": overview_stale,
+            "overview_dependency_stale": overview_dependency_stale,
             "conclusion_integration_stale": not conclusion_integration_current,
             "stale": (
                 source_freshness["stale"]
                 or draft_dependency_freshness["stale"]
                 or final_freshness["stale"]
-                or overview_stale
+                or overview_dependency_stale
                 or not conclusion_integration_current
             ),
         },

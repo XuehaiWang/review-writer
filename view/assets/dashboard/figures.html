@@ -14,6 +14,7 @@
     .tabs{display:flex;gap:8px;flex-wrap:wrap}.tab{border:1px solid var(--line);border-radius:999px;background:var(--paper);padding:7px 10px;cursor:pointer}.tab.active{background:var(--green);color:white;border-color:var(--green)}
     .main{background:var(--paper);padding:20px 24px;line-height:1.55}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.box{border:1px solid var(--line);border-radius:14px;background:#fffaf0;padding:12px;min-height:160px}.box img{max-width:100%;display:block;border:1px solid var(--line);border-radius:10px;background:white}.empty{border:1px dashed var(--line);border-radius:12px;padding:18px;color:var(--muted);background:#fffaf0}.field{margin-bottom:13px}.label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}.value{white-space:pre-wrap;line-height:1.45}.side{padding:14px}pre{white-space:pre-wrap;margin:0;font-family:Consolas,monospace;font-size:12px}.kv{display:grid;grid-template-columns:125px 1fr;gap:8px;border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.kv div:nth-child(odd){color:var(--muted);font-size:12px}
     .manual-editor{margin-top:16px;border:1px solid var(--green);border-radius:14px;padding:14px;background:#f5fbf5}.manual-editor h3{font-size:16px}.manual-note{font-size:13px;color:var(--muted);margin:7px 0 10px}.manual-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:9px 0}.manual-toolbar label{font-size:13px;display:flex;gap:5px;align-items:center}.manual-toolbar input,.manual-toolbar select{max-width:90px;padding:5px;border:1px solid var(--line);border-radius:6px}.manual-canvas-wrap{border:1px solid var(--line);border-radius:10px;background:#fff;overflow:auto;max-height:72vh}.manual-canvas{display:block;max-width:100%;height:auto;touch-action:none;cursor:crosshair}.manual-status{font-size:13px;color:var(--muted);min-height:1.4em}.manual-danger{color:var(--red)}.batch-actions{margin-top:10px}.batch-progress{margin-top:7px;font-size:12px;color:var(--muted);line-height:1.35}
+    .card.generation-active{border-color:#2d7194;background:#eef7fb;box-shadow:0 0 0 2px rgba(45,113,148,.09)}.generation-state{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;padding:4px 8px;border-radius:999px;margin-top:6px;border:1px solid transparent}.generation-state:before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;flex:0 0 auto}.generation-running,.generation-retrying{color:#1e648a;background:#e5f3fa;border-color:#b9d9e9}.generation-running:before,.generation-retrying:before{width:9px;height:9px;background:transparent;border:2px solid currentColor;border-right-color:transparent;animation:scheme-generation-spin .8s linear infinite}.generation-queued{color:#8a6223;background:#fff3d8;border-color:#ead29e}.generation-completed{color:#28603b;background:#e5f2e8;border-color:#bed9c5}.generation-review{color:#7b5b18;background:#fff2ca;border-color:#e7cf83}.generation-failed{color:#943f2c;background:#fae7e1;border-color:#e7bcb0}.generation-cancelled,.generation-interrupted,.generation-idle{color:#686d66;background:#f1f1ed;border-color:#d9d9d2}@keyframes scheme-generation-spin{to{transform:rotate(360deg)}}
     .svg-editor-shell{--svg-green:#185f4b;--svg-green-soft:#e7f2ed;--svg-border:#cbd9d2;--svg-blue:#315f7d;margin-top:20px;padding:0;overflow:hidden;border:1px solid #9ebcaf;border-radius:18px;background:#f8fbf9;box-shadow:0 16px 38px rgba(26,71,55,.14);font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
     .svg-editor-shell>h3{padding:18px 20px 4px;font-size:19px;letter-spacing:-.01em;color:#173f33}.svg-editor-shell>.manual-note{margin:0;padding:2px 20px 15px;color:#597067;line-height:1.55;border-bottom:1px solid #dbe6e1}
     .svg-editor-toolbar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px!important;align-items:stretch!important;margin:0!important;padding:14px!important;background:linear-gradient(180deg,#f2f7f4,#edf4f0);border-bottom:1px solid #d4e1db}
@@ -58,12 +59,12 @@
     function editableSvgPath(redrawnRow){return redrawnRow?.editable_svg||redrawnRow?.manual_arrow_edit?.editable_svg||''}
     // Kept only for legacy saved pages. Stage 7 now exposes the full SVG editor.
     function manualEditorMarkup(){return ''}
-    async function startBatchRedraw(){const button=$('redrawAll');if(button)button.disabled=true;try{const response=await fetch(`/api/project/${encodeURIComponent(selectedProject)}/figures/redraw-all`,{method:'POST'});const result=await response.json().catch(()=>({ok:false,error:`服务器返回 ${response.status}。`}));if(!response.ok||!result.ok)throw new Error(result.error||`服务器返回 ${response.status}。`);payload.batch_redraw=result;renderBatchActions();syncBatchPolling()}catch(error){if(button)button.disabled=false;const node=$('batchActions');if(node)node.insertAdjacentHTML('beforeend',`<div class="manual-danger">${esc(error.message||String(error))}</div>`)}}
+    async function startBatchRedraw(){const button=$('redrawAll');if(button)button.disabled=true;try{const response=await fetch(`/api/project/${encodeURIComponent(selectedProject)}/figures/redraw-all`,{method:'POST'});const result=await response.json().catch(()=>({ok:false,error:`服务器返回 ${response.status}。`}));if(!response.ok||!result.ok)throw new Error(result.error||`服务器返回 ${response.status}。`);payload.batch_redraw=result;renderBatchActions();syncBatchPolling();await refreshFigureRedrawActivity()}catch(error){if(button)button.disabled=false;const node=$('batchActions');if(node)node.insertAdjacentHTML('beforeend',`<div class="manual-danger">${esc(error.message||String(error))}</div>`)}}
     function batchIsActive(){return ['running','stopping'].includes(batchRedraw().status)}
     function renderBatchActions(){const node=$('batchActions');if(!node)return;const job=batchRedraw(),running=job.status==='running',stopping=job.status==='stopping',active=running||stopping,total=Number(job.total)||0,completed=Number(job.completed)||0,previewIds=new Set(redrawn().filter(x=>rejectedPreviewPath(x)).map(x=>x.figure_id)),recoveredPreview=(job.errors||[]).filter(x=>previewIds.has(x.figure_id)).length,succeeded=(Number(job.succeeded)||0)+recoveredPreview,preview=Math.max(Number(job.preview_succeeded)||0,recoveredPreview),failed=Math.max(0,(Number(job.failed)||0)-recoveredPreview),progress=total?`${completed}/${total}`:'0/0',current=job.current_figure_id?` · 当前：${job.current_figure_id}`:'',outcome=`成功 ${succeeded}${preview?`（其中预览成功 ${preview}）`:''}，失败 ${failed}`,summary=running?`AI 重绘进度：${progress}（${outcome}）${current}`:stopping?`正在停止全部生成：当前请求完成后将不再发送新请求。${progress}（${outcome}）${current}`:job.status==='stopped'?`批量重绘已停止：${completed}/${total}（${outcome}）`:job.status==='completed'?`批量重绘完成：${completed}/${total}（${outcome}）`:'逐张顺序调用 AI，切换页面后任务仍在后台继续。';node.innerHTML=`<button id="redrawAll" class="btn primary" ${active?'disabled':''}>${running?'全部 AI 重绘中…':stopping?'正在停止…':'全部 AI 重绘'}</button>${active?'<button id="stopRedrawAll" class="btn">全部停止生成</button>':''}<div class="batch-progress">${esc(summary)}</div>`}
     async function refreshBatchRedraw(){if(!selectedProject||!payload)return;try{const response=await fetch(`/api/project/${encodeURIComponent(selectedProject)}/figures/redraw-all`);const result=await response.json();if(!response.ok||!result.ok)throw new Error(result.error||`服务器返回 ${response.status}。`);payload.batch_redraw=result;const figuresResponse=await fetch(`/api/project/${encodeURIComponent(selectedProject)}/figures`);if(figuresResponse.ok){const figuresPayload=await figuresResponse.json();payload.redrawn_manifest=figuresPayload.redrawn_manifest}renderBatchActions();if(!['running','stopping'].includes(result.status)){if(batchPollTimer){clearInterval(batchPollTimer);batchPollTimer=null}await loadProject(selectedProject,candidates()[selected]?.figure_id||'')}}catch{if(batchPollTimer){clearInterval(batchPollTimer);batchPollTimer=null}}}
     function syncBatchPolling(){if(batchIsActive()){if(!batchPollTimer)batchPollTimer=setInterval(refreshBatchRedraw,2000)}else if(batchPollTimer){clearInterval(batchPollTimer);batchPollTimer=null}}
-    async function stopBatchRedraw(){const button=$('stopRedrawAll');if(button)button.disabled=true;try{const response=await fetch(`/api/project/${encodeURIComponent(selectedProject)}/figures/redraw-all/stop`,{method:'POST'});const result=await response.json().catch(()=>({ok:false,error:`服务器返回 ${response.status}。`}));if(!response.ok||!result.ok)throw new Error(result.error||`服务器返回 ${response.status}。`);payload.batch_redraw=result;renderBatchActions();syncBatchPolling()}catch(error){if(button)button.disabled=false;const node=$('batchActions');if(node)node.insertAdjacentHTML('beforeend',`<div class="manual-danger">${esc(error.message||String(error))}</div>`)}}
+    async function stopBatchRedraw(){const button=$('stopRedrawAll');if(button)button.disabled=true;try{const response=await fetch(`/api/project/${encodeURIComponent(selectedProject)}/figures/redraw-all/stop`,{method:'POST'});const result=await response.json().catch(()=>({ok:false,error:`服务器返回 ${response.status}。`}));if(!response.ok||!result.ok)throw new Error(result.error||`服务器返回 ${response.status}。`);payload.batch_redraw=result;renderBatchActions();syncBatchPolling();await refreshFigureRedrawActivity()}catch(error){if(button)button.disabled=false;const node=$('batchActions');if(node)node.insertAdjacentHTML('beforeend',`<div class="manual-danger">${esc(error.message||String(error))}</div>`)}}
     function manualPoint(event){const state=manualArrowState,rect=state.canvas.getBoundingClientRect();return{x:Math.round((event.clientX-rect.left)*state.canvas.width/rect.width),y:Math.round((event.clientY-rect.top)*state.canvas.height/rect.height)}}
     function manualSnapshot(){const state=manualArrowState;if(!state)return;state.history.push(state.canvas.toDataURL('image/png'));if(state.history.length>30)state.history.shift()}
     function manualRestore(data){const state=manualArrowState,img=new Image;img.onload=()=>{state.ctx.clearRect(0,0,state.canvas.width,state.canvas.height);state.ctx.drawImage(img,0,0)};img.src=data}
@@ -522,6 +523,156 @@
         if(currentButton)currentButton.disabled=false;
       }
     }
+
+    // Per-Scheme generation activity is returned by the server and persisted
+    // in the workflow store. The same state drives the left list and current
+    // detail card, so changing Scheme never loses an in-flight indicator.
+    const figureRedrawStates=()=>payload?.figure_redraw_states||{};
+    const activeFigureRedrawStatuses=new Set(['queued','running','retrying']);
+    const localFigureRedrawRequests=new Set();
+    let redrawPollBusy=false;
+    function figureGenerationState(candidate,index){
+      const figureId=String(candidate?.figure_id||rowKey(candidate||{},index));
+      const recorded=figureRedrawStates()[figureId];
+      if(localFigureRedrawRequests.has(figureId)&&!activeFigureRedrawStatuses.has(String(recorded?.status||''))){
+        return{...(recorded||{}),figure_id:figureId,status:'retrying',origin:'single',error:''};
+      }
+      const row=matchRedrawn(candidate||{},index);
+      const output=outputPath(row),preview=rejectedPreviewPath(row);
+      if(recorded&&activeFigureRedrawStatuses.has(String(recorded.status||'')))return recorded;
+      if(recorded&&['failed','cancelled','interrupted'].includes(String(recorded.status||'')))return recorded;
+      if(preview)return{...(recorded||{}),figure_id:figureId,status:'completed',preview_only:true};
+      if(output)return{...(recorded||{}),figure_id:figureId,status:'completed',preview_only:false};
+      return recorded&&recorded.status==='completed'
+        ?{...recorded,status:'idle'}
+        :recorded||{figure_id:figureId,status:'idle'};
+    }
+    function generationPresentation(state){
+      const status=String(state?.status||'idle');
+      if(status==='running')return{label:'生成中',css:'generation-running',title:'AI 正在生成此 Scheme'};
+      if(status==='retrying')return{label:'重试生成中',css:'generation-retrying',title:'AI 正在重试生成此 Scheme'};
+      if(status==='queued')return{label:'等待生成',css:'generation-queued',title:'已加入逐张生成队列'};
+      if(status==='completed'&&state?.preview_only)return{label:'已生成 · 待审核',css:'generation-review',title:'图像已生成，等待人工完整性审核'};
+      if(status==='completed')return{label:'生成完毕',css:'generation-completed',title:'当前 Scheme 已完成生成'};
+      if(status==='failed')return{label:'生成失败',css:'generation-failed',title:state?.error||'最近一次生成失败'};
+      if(status==='cancelled')return{label:'已停止',css:'generation-cancelled',title:'尚未开始的生成请求已停止'};
+      if(status==='interrupted')return{label:'生成中断',css:'generation-interrupted',title:state?.error||'生成进程已中断'};
+      return{label:'未生成',css:'generation-idle',title:'尚无当前 Scheme 的重绘输出'};
+    }
+    function setImmediateFigureGenerationState(figureId,state){
+      if(!payload)return;
+      payload.figure_redraw_states={...(payload.figure_redraw_states||{}),[figureId]:{figure_id:figureId,...state,updated_at:new Date().toISOString()}};
+      renderList();
+      applyCurrentFigureGenerationState();
+      syncBatchPolling();
+    }
+    renderList=function(){
+      const rows=candidates();
+      $('figureList').innerHTML=rows.map((candidate,index)=>{
+        const sourceStatus=String(candidate.resolution_status||candidate.status||'pending');
+        const state=figureGenerationState(candidate,index),view=generationPresentation(state);
+        const active=activeFigureRedrawStatuses.has(String(state.status||''));
+        return`<button class="card ${index===selected?'active':''} ${active?'generation-active':''}" data-idx="${index}"><div class="title">${esc(candidate.source_label||rowKey(candidate,index))}</div><div class="meta">${esc(candidate.section_id||'')} · ${esc(candidate.paper_id||'')}</div><span class="pill ${sourceStatus.includes('need')?'warn':''}">${esc(sourceStatus)}</span><span class="generation-state ${view.css}" title="${esc(view.title)}" aria-label="${esc(view.label)}">${esc(view.label)}</span></button>`;
+      }).join('')||'<div class="empty">No figure candidates found.</div>';
+    };
+    function anyFigureRedrawActive(){
+      return Object.values(figureRedrawStates()).some(state=>activeFigureRedrawStatuses.has(String(state?.status||'')));
+    }
+    function applyCurrentFigureGenerationState(){
+      const candidate=candidates()[selected];
+      if(!candidate)return;
+      const state=figureGenerationState(candidate,selected),view=generationPresentation(state);
+      const active=activeFigureRedrawStatuses.has(String(state.status||''));
+      ['redrawCurrent','redrawCurrentAiOverride'].forEach(id=>{const button=$(id);if(button)button.disabled=active});
+      const statusNode=$('redrawCurrentStatus');
+      if(!statusNode)return;
+      if(active){
+        statusNode.className='status';
+        statusNode.textContent=state.status==='queued'?'该 Scheme 已进入生成队列，等待前面的图完成。':state.status==='retrying'?'该 Scheme 正在重试 AI 重绘；切换到其他 Scheme 后仍会继续生成。':'该 Scheme 正在 AI 重绘；切换到其他 Scheme 后仍会继续生成。';
+      }else if(state.status==='failed'){
+        statusNode.className='status error';
+        statusNode.textContent=`最近一次生成失败：${state.error||'未返回详细原因。'}`;
+      }else if(state.status==='interrupted'){
+        statusNode.className='status error';
+        statusNode.textContent='生成进程曾被中断，可以重新点击 AI 重绘。';
+      }else if(state.status==='completed'&&!statusNode.textContent){
+        statusNode.className='status';
+        statusNode.textContent=state.preview_only?'AI 图已生成，等待人工审核后进入正文。':'AI 重绘已经完成。';
+      }
+    }
+    const renderMainBeforeGenerationStatus=renderMain;
+    renderMain=function(){renderMainBeforeGenerationStatus();applyCurrentFigureGenerationState()};
+    async function refreshFigureRedrawActivity(){
+      if(redrawPollBusy||!selectedProject||!payload)return;
+      redrawPollBusy=true;
+      const selectedFigureId=candidates()[selected]?.figure_id||'';
+      const previousStates=figureRedrawStates();
+      try{
+        const response=await fetch(`/api/project/${encodeURIComponent(selectedProject)}/figures`,{cache:'no-store'});
+        if(!response.ok)throw new Error(`服务器返回 ${response.status}。`);
+        const next=await response.json();
+        const transitioned=Object.entries(next.figure_redraw_states||{}).some(([figureId,state])=>activeFigureRedrawStatuses.has(String(previousStates[figureId]?.status||''))&&!activeFigureRedrawStatuses.has(String(state?.status||'')));
+        payload=next;
+        const preserved=candidates().findIndex(candidate=>candidate.figure_id===selectedFigureId);
+        if(preserved>=0)selected=preserved;
+        if(transitioned)assetRevision+=1;
+        renderBatchActions();
+        renderList();
+        renderSummary();
+        if(transitioned&&!manualEditorOpen&&!svgEditorOpen)renderMain();
+        else applyCurrentFigureGenerationState();
+      }catch(error){
+        console.warn('Figure redraw status refresh failed',error);
+      }finally{
+        redrawPollBusy=false;
+        syncBatchPolling();
+      }
+    }
+    refreshBatchRedraw=refreshFigureRedrawActivity;
+    syncBatchPolling=function(){
+      const active=batchIsActive()||anyFigureRedrawActive();
+      if(active&&!batchPollTimer)batchPollTimer=setInterval(refreshFigureRedrawActivity,2000);
+      else if(!active&&batchPollTimer){clearInterval(batchPollTimer);batchPollTimer=null}
+    };
+    redrawCurrent=async function(){
+      const candidate=candidates()[selected];
+      if(!candidate?.figure_id)return;
+      const figureId=candidate.figure_id,projectId=selectedProject;
+      const retrying=['failed','interrupted'].includes(String(figureGenerationState(candidate,selected).status||''));
+      localFigureRedrawRequests.add(figureId);
+      setImmediateFigureGenerationState(figureId,{status:retrying?'retrying':'running',origin:'single',force_ai_edit:false,error:''});
+      try{
+        const response=await fetch(`/api/project/${encodeURIComponent(projectId)}/figures/${encodeURIComponent(figureId)}/redraw`,{method:'POST'});
+        const result=await response.json().catch(()=>({ok:false,error:`服务器返回 ${response.status}。`}));
+        if(!response.ok||!result.ok)throw new Error(result.error||`服务器返回 ${response.status}。`);
+      }catch(error){
+        if(selectedProject===projectId)setImmediateFigureGenerationState(figureId,{status:'failed',origin:'single',error:error.message||String(error),finished_at:new Date().toISOString()});
+      }finally{
+        if(selectedProject===projectId)await refreshFigureRedrawActivity();
+        localFigureRedrawRequests.delete(figureId);
+        if(selectedProject===projectId){renderList();applyCurrentFigureGenerationState();syncBatchPolling()}
+      }
+    };
+    redrawCurrentWithAiOverride=async function(){
+      const candidate=candidates()[selected];
+      if(!candidate?.figure_id)return;
+      const figureId=candidate.figure_id,projectId=selectedProject;
+      if(!window.confirm('将生成一个标准 AI 对照版本，并保留服务商返回的完整画布。请在生成后逐项核对化学结构、化学键、文字、箭头和反应流程。是否继续？'))return;
+      const retrying=['failed','interrupted'].includes(String(figureGenerationState(candidate,selected).status||''));
+      localFigureRedrawRequests.add(figureId);
+      setImmediateFigureGenerationState(figureId,{status:retrying?'retrying':'running',origin:'single',force_ai_edit:true,error:''});
+      try{
+        const response=await fetch(`/api/project/${encodeURIComponent(projectId)}/figures/${encodeURIComponent(figureId)}/redraw?force_ai=1`,{method:'POST'});
+        const result=await response.json().catch(()=>({ok:false,error:`服务器返回 ${response.status}。`}));
+        if(!response.ok||!result.ok)throw new Error(result.error||`服务器返回 ${response.status}。`);
+      }catch(error){
+        if(selectedProject===projectId)setImmediateFigureGenerationState(figureId,{status:'failed',origin:'single',force_ai_edit:true,error:error.message||String(error),finished_at:new Date().toISOString()});
+      }finally{
+        if(selectedProject===projectId)await refreshFigureRedrawActivity();
+        localFigureRedrawRequests.delete(figureId);
+        if(selectedProject===projectId){renderList();applyCurrentFigureGenerationState();syncBatchPolling()}
+      }
+    };
     $('main').addEventListener('click',event=>{
       if(event.target.closest('#humanApproveFigure'))approveCurrentFigure();
       if(event.target.closest('#redrawCurrentAiOverride'))redrawCurrentWithAiOverride();

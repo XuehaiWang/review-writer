@@ -139,7 +139,7 @@ def _masked(value: str) -> str:
     if not value:
         return ""
     tail = value[-4:] if len(value) >= 4 else value[-1:]
-    return f"••••{tail}"
+    return "********" + tail
 
 
 def _legacy_mineru_key(review_root: Path) -> str:

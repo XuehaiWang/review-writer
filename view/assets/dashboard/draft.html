@@ -533,8 +533,13 @@
         els.issues.innerHTML = renderMarkdown(payload?.remaining_issues_md || '', payload?.paths?.stage_dir || '');
       }
     }
-    async function saveDraft() {
-      if (!selectedProject) return;
+    async function saveDraft(options = {}) {
+      if (!selectedProject) return false;
+      if (document.querySelector('.para-inline-editor')) {
+        msg('请先保存或取消当前段落编辑。');
+        return false;
+      }
+      const silent = Boolean(options.silent);
       const res = await fetch(`/api/project/${encodeURIComponent(selectedProject)}/draft`, {
         method: 'PUT',
         headers: {'Content-Type':'application/json'},
@@ -545,10 +550,12 @@
           draft_bundle: payload?.draft_bundle || {}
         })
       });
-      if (!res.ok) { msg(await res.text()); return; }
-      msg('Draft saved');
+      if (!res.ok) { msg(await res.text()); return false; }
+      if (!silent) msg('Draft saved');
       await loadProject(selectedProject);
+      return true;
     }
+    window.reviewDraftSaveForHandoff = () => saveDraft({silent:true});
     document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');

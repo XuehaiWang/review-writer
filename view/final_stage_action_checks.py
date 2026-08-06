@@ -60,6 +60,47 @@ class FinalStageActionTests(unittest.TestCase):
             self.assertEqual(final_draft.read_text(encoding="utf-8"), "# Review\n\nOld Stage 8 text.\n")
             self.assertTrue(dashboard.artifact_freshness(final_handoff, [final_draft])["stale"])
 
+    def test_overview_uses_the_settings_backed_image_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "review-projects" / "demo"
+            for directory in (
+                project / "00_discovery",
+                project / "01_matrix_outline",
+                project / "04_first_draft",
+                project / "05_final_audit",
+            ):
+                directory.mkdir(parents=True)
+            (project / "00_discovery" / "query_plan.draft.json").write_text("{}", encoding="utf-8")
+            (project / "00_discovery" / "selected_discovery_results.json").write_text("{}", encoding="utf-8")
+            (project / "01_matrix_outline" / "selected_outline.md").write_text("# Outline\n", encoding="utf-8")
+            (project / "04_first_draft" / "first_draft.md").write_text("# Draft\n", encoding="utf-8")
+            captured = {}
+
+            def fake_run(script: Path, review_root: Path, project_id: str, **kwargs: object) -> str:
+                captured["extra"] = list(kwargs["extra"])
+                output_index = captured["extra"].index("--output") + 1
+                Path(captured["extra"][output_index]).write_bytes(b"overview")
+                return "ok"
+
+            settings_environment = {
+                "IMAGE_OPENAI_BASE_URL": "https://image.example/v1",
+                "IMAGE_OPENAI_MODEL": "gpt-image-2",
+                "IMAGE_OPENAI_WIRE_API": "chat-completions",
+                "IMAGE_OPENAI_API_KEY": "secret-not-for-command-line",
+            }
+            with (
+                patch.object(dashboard, "provider_subprocess_environment", return_value=settings_environment),
+                patch.object(dashboard, "run_project_script", side_effect=fake_run),
+            ):
+                dashboard.generate_final_overview_figure(root, "demo")
+
+            extra = captured["extra"]
+            self.assertEqual(extra[extra.index("--base-url") + 1], "https://image.example/v1")
+            self.assertEqual(extra[extra.index("--model") + 1], "gpt-image-2")
+            self.assertEqual(extra[extra.index("--wire-api") + 1], "chat-completions")
+            self.assertNotIn("secret-not-for-command-line", extra)
+
     def test_final_integrity_gate_detects_lost_stage8_custom_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -178,6 +219,63 @@ class FinalStageActionTests(unittest.TestCase):
         self.assertIn('id="final-overview-figure"', final_page)
         self.assertNotIn("Outline Images", final_page)
         self.assertNotIn("final-outline-chart", final_page)
+
+    def test_final_actions_switch_the_middle_window_to_the_generated_output(self) -> None:
+        final_page = FINAL_PAGE_PATH.read_text(encoding="utf-8")
+        self.assertIn("selectedProject='',doc='final'", final_page)
+        self.assertIn("'final-conclusion':'conclusion'", final_page)
+        self.assertIn("'final-overview-figure':'overview-figure'", final_page)
+        self.assertIn("final:'final'", final_page)
+        selection = final_page.index("doc=targetDocs[stageId]||doc")
+        self.assertLess(selection, final_page.index("await loadProject(selectedProject)", selection))
+
+    def test_unused_stale_overview_does_not_hide_a_current_final_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "review-projects" / "demo"
+            draft_stage = project / "04_first_draft"
+            final_stage = project / "05_final_audit"
+            outline_stage = project / "01_matrix_outline"
+            for directory in (draft_stage, final_stage, outline_stage):
+                directory.mkdir(parents=True)
+
+            first_draft = draft_stage / "first_draft.md"
+            first_draft.write_text("# Current draft\n", encoding="utf-8")
+            final_draft = final_stage / "final_draft.md"
+            final_draft.write_text("# Current final\n", encoding="utf-8")
+            final_handoff = final_stage / "final_handoff.json"
+            dashboard.write_stage_handoff(
+                final_handoff,
+                "draft",
+                [first_draft],
+                metadata={"includes_current_overview": False},
+            )
+            dashboard.record_stage_outputs(final_handoff, [final_draft], "final")
+
+            outline = outline_stage / "selected_outline.md"
+            outline.write_text("# Old outline\n", encoding="utf-8")
+            overview = final_stage / "overview_figure.png"
+            overview.write_bytes(b"old-overview")
+            overview_handoff = final_stage / "overview_figure_handoff.json"
+            dashboard.write_stage_handoff(overview_handoff, "blueprint", [outline])
+            dashboard.record_stage_outputs(
+                overview_handoff,
+                [overview],
+                "final-overview-figure",
+            )
+            outline.write_text("# Changed outline\n", encoding="utf-8")
+
+            with (
+                patch.object(dashboard, "section_source_freshness", return_value={"stale": False}),
+                patch.object(dashboard, "project_draft_payload", return_value={"freshness": {"stale": False}}),
+            ):
+                payload = dashboard.project_final_payload(root, "demo")
+
+            self.assertTrue(payload["freshness"]["overview_stale"])
+            self.assertFalse(payload["freshness"]["overview_dependency_stale"])
+            self.assertFalse(payload["freshness"]["final_stale"])
+            self.assertFalse(payload["freshness"]["stale"])
+            self.assertEqual(payload["final_draft_md"], "# Current final\n")
 
     def test_final_page_hides_metadata_but_keeps_only_the_overall_chart(self) -> None:
         final_page = FINAL_PAGE_PATH.read_text(encoding="utf-8")
