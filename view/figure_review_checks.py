@@ -13,7 +13,12 @@ from PIL import Image
 from serve_review_dashboard import (
     approve_figure_for_manuscript,
     artifact_freshness,
+    begin_figure_redraw_state,
+    cancel_queued_figure_redraw_states,
+    finish_figure_redraw_state,
     project_figures_payload,
+    public_figure_redraw_states,
+    queue_figure_redraw_states,
     record_stage_outputs,
     refresh_figure_review_handoff,
     redraw_current_figure,
@@ -398,6 +403,86 @@ class FigureReviewHandoffChecks(unittest.TestCase):
         self.assertIn("force_ai=1", html)
         self.assertIn("standardAiProviderCanvas", html)
         self.assertIn("humanApproveFigure", html)
+
+    def test_per_figure_redraw_state_is_persisted_in_stage_seven_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, _, _, _ = self.build_project(root)
+
+            claimed = begin_figure_redraw_state(
+                root,
+                project.name,
+                "P001-F01",
+                origin="single",
+            )
+            self.assertTrue(claimed)
+            self.assertEqual(
+                project_figures_payload(root, project.name)["figure_redraw_states"]["P001-F01"]["status"],
+                "running",
+            )
+
+            finish_figure_redraw_state(
+                root,
+                project.name,
+                "P001-F01",
+                status="completed",
+                result={"redrawn_image": "output.png", "preview_only": False},
+            )
+            state = public_figure_redraw_states(root, project.name)["P001-F01"]
+            self.assertEqual(state["status"], "completed")
+            self.assertEqual(state["redrawn_image"], "output.png")
+
+    def test_failed_figure_retry_remains_an_active_generation_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, _, _, _ = self.build_project(root)
+            self.assertTrue(
+                begin_figure_redraw_state(root, project.name, "P001-F01", origin="single")
+            )
+            finish_figure_redraw_state(
+                root,
+                project.name,
+                "P001-F01",
+                status="failed",
+                error="provider unavailable",
+            )
+
+            self.assertTrue(
+                begin_figure_redraw_state(root, project.name, "P001-F01", origin="single")
+            )
+            state = public_figure_redraw_states(root, project.name)["P001-F01"]
+            self.assertEqual(state["status"], "retrying")
+            self.assertEqual(state["error"], "")
+
+    def test_batch_queue_exposes_and_cancels_each_scheme_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, _, _, _ = self.build_project(root)
+            queue_figure_redraw_states(root, project.name, ["P001-F01", "P002-F01"])
+            states = public_figure_redraw_states(root, project.name)
+            self.assertEqual(states["P001-F01"]["status"], "queued")
+            self.assertEqual(states["P002-F01"]["status"], "queued")
+
+            cancel_queued_figure_redraw_states(root, project.name, ["P002-F01"])
+            states = public_figure_redraw_states(root, project.name)
+            self.assertEqual(states["P001-F01"]["status"], "queued")
+            self.assertEqual(states["P002-F01"]["status"], "cancelled")
+
+    def test_figures_ui_marks_every_scheme_and_polls_durable_generation_state(self) -> None:
+        html = (
+            Path(__file__).resolve().parent
+            / "assets"
+            / "dashboard"
+            / "figures.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("figure_redraw_states", html)
+        self.assertIn("生成中", html)
+        self.assertIn("生成完毕", html)
+        self.assertIn("generation-state", html)
+        self.assertIn("retrying", html)
+        self.assertIn("localFigureRedrawRequests", html)
+        self.assertIn("refreshFigureRedrawActivity", html)
 
 
 if __name__ == "__main__":

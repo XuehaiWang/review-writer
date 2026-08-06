@@ -1219,6 +1219,41 @@ def chemistry_integrity_gate(redraw_row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def retain_successful_mechanism_attempt_after_retry_error(
+    redraw_row: dict[str, Any],
+    out_path: Path,
+    mechanism_attempts: list[dict[str, Any]],
+    error: BaseException,
+) -> bool:
+    """Keep the last valid image when only a later mechanism retry fails.
+
+    Mechanism edits deliberately retry outputs that fail the conservative pixel
+    gate.  A provider error during a later retry must not erase the image from a
+    completed earlier request: that image remains useful as a human-reviewable
+    preview and is safer than silently reverting to no output.
+    """
+    if not mechanism_attempts or not out_path.is_file():
+        return False
+    last_attempt = mechanism_attempts[-1]
+    source_fidelity = last_attempt.get("source_fidelity") or {}
+    failures = [str(value) for value in last_attempt.get("failures") or []]
+    retry_error = f"{type(error).__name__}: {error}"
+    redraw_row["mechanism_edit_attempts"] = mechanism_attempts
+    redraw_row["mechanism_source_fidelity"] = source_fidelity
+    redraw_row["mechanism_retry_error"] = retry_error[-2000:]
+    redraw_row["redrawn_image"] = str(out_path)
+    redraw_row["status"] = "redrawn"
+    redraw_row["output_disposition"] = "saved_with_integrity_warning"
+    failure_summary = "; ".join(failures) or "automated mechanism integrity check requires review"
+    redraw_row["notes"] = (
+        "Kept the last successfully generated mechanism image for human review after "
+        f"a later provider retry failed. Integrity warning: {failure_summary}. "
+        f"Later retry error: {retry_error}"
+    )
+    redraw_row["chemistry_integrity"] = chemistry_integrity_gate(redraw_row)
+    return True
+
+
 def call_images_edit(
     api_key: str,
     base_url: str,
@@ -2295,8 +2330,18 @@ def run(args: argparse.Namespace) -> int:
                 redraw_row["output_disposition"] = "saved_with_integrity_warning"
                 redraw_row["notes"] = "Saved to Redrawn Output with chemistry integrity warning: " + "; ".join(integrity["failures"])
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, RuntimeError, json.JSONDecodeError) as exc:
-            redraw_row["status"] = "failed"
-            redraw_row["notes"] = f"{type(exc).__name__}: {exc}"
+            retained = (
+                args.edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE
+                and retain_successful_mechanism_attempt_after_retry_error(
+                    redraw_row,
+                    out_path,
+                    mechanism_attempts,
+                    exc,
+                )
+            )
+            if not retained:
+                redraw_row["status"] = "failed"
+                redraw_row["notes"] = f"{type(exc).__name__}: {exc}"
         redraw_rows.append(redraw_row)
     current_redrawn_count = sum(1 for row in redraw_rows if row.get("status") == "redrawn")
     if args.paper_id or figure_id:

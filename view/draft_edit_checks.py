@@ -6,11 +6,75 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import serve_review_dashboard as dashboard
 
 
 class DraftEditChecks(unittest.TestCase):
+    def test_draft_stage_hands_off_saved_manual_text_without_regenerating(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "review-projects" / "demo"
+            sections = project / "02_section_drafting"
+            figures = project / "03_figure_redraw"
+            draft = project / "04_first_draft"
+            for directory in (sections, figures, draft):
+                directory.mkdir(parents=True, exist_ok=True)
+            section_drafts = sections / "section_drafts.json"
+            figure_review = sections / "human_figure_review.json"
+            redraw_manifest = figures / "redrawn_figure_manifest.json"
+            section_drafts.write_text('{"sections": []}', encoding="utf-8")
+            figure_review.write_text('{"papers": {}}', encoding="utf-8")
+            redraw_manifest.write_text('{"figures": []}', encoding="utf-8")
+            draft_path = draft / "first_draft.md"
+            draft_path.write_text("# Review\n\nMy manual Stage 8 edit.\n", encoding="utf-8")
+            citations = draft / "citations.json"
+            citations.write_text('{"project_id":"demo","entries":[]}', encoding="utf-8")
+            draft_handoff = draft / "draft_handoff.json"
+            dashboard.write_stage_handoff(
+                draft_handoff,
+                "figures",
+                [section_drafts, figure_review, redraw_manifest],
+            )
+            dashboard.record_stage_outputs(draft_handoff, [draft_path], "draft")
+
+            with patch.object(
+                dashboard,
+                "regenerate_first_draft",
+                side_effect=AssertionError("manual draft must not be regenerated"),
+            ), patch.object(
+                dashboard,
+                "section_source_freshness",
+                return_value={"stale": False},
+            ):
+                result = dashboard.execute_dashboard_stage(root, "demo", "draft")
+
+            self.assertEqual(
+                draft_path.read_text(encoding="utf-8"),
+                "# Review\n\nMy manual Stage 8 edit.\n",
+            )
+            self.assertTrue(result["result"]["preserved_manual_draft"])
+            final_handoff = dashboard.read_json_if_exists(
+                project / "05_final_audit" / "final_handoff.json"
+            )
+            self.assertTrue(final_handoff["preserves_manual_draft"])
+            self.assertEqual(
+                final_handoff["source_versions"][0]["sha256"],
+                dashboard.sha256_file(draft_path),
+            )
+
+    def test_draft_ui_saves_before_handoff_and_does_not_call_run_draft(self) -> None:
+        ui = (Path(__file__).parent / "assets" / "dashboard" / "review-ui.js").read_text(
+            encoding="utf-8"
+        )
+        draft_page = (Path(__file__).parent / "assets" / "dashboard" / "draft.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('new Set(["sections", "figures", "figure-review", "final"])', ui)
+        self.assertIn('window.reviewDraftSaveForHandoff', ui)
+        self.assertIn("window.reviewDraftSaveForHandoff = () => saveDraft({silent:true})", draft_page)
+
     def test_paragraph_edit_preserves_canonical_citation_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
