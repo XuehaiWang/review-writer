@@ -32,8 +32,16 @@ from review_writer_core.taxonomy import (  # noqa: E402
     labels_by_category,
     load_rules_from_path,
     load_taxonomy_rules,
-    resolve_taxonomy_path,
+    load_validation_taxonomy_rules,
+    suggest_taxonomy_profile,
     taxonomy_identity,
+)
+from review_writer_core.workspace import discover_review_root  # noqa: E402
+from review_writer_core.providers import (  # noqa: E402
+    DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_TEXT_MODEL,
+    openai_endpoint as _shared_openai_endpoint,
+    resolve_api_key as _shared_resolve_api_key,
 )
 
 
@@ -69,28 +77,6 @@ STRUCTURED_TAG_KEYS = [
 
 DEFAULT_CLASSIFICATION_LABELS = {key: ["not specified"] for key in STRUCTURED_TAG_KEYS}
 
-CHEM_TAG_RULES = {
-    "propargylic alcohols": ["propargylic alcohol", "propargylic alcohols"],
-    "propargylic derivatives": ["propargylic derivative", "propargylic derivatives", "propargyl"],
-    "allenes": ["allene", "allenes", "allenamide", "allenamides"],
-    "substituted allenes": ["substituted allene", "multisubstituted allene", "disubstituted allene"],
-    "copper catalysis": ["copper", "cui", "cu(", "copper-catalyzed"],
-    "nickel catalysis": ["nickel", "ni(", "nickel-catalyzed"],
-    "palladium catalysis": ["palladium", "pd(", "palladium-catalyzed"],
-    "gold catalysis": ["gold", "au(", "gold-catalyzed"],
-    "rhodium catalysis": ["rhodium", "rh(", "rhodium-catalyzed"],
-    "photoredox catalysis": ["photoredox", "visible-light", "light-mediated"],
-    "enantioselective synthesis": ["enantioselective", "enantiospecific", "enantioenriched", "ee"],
-    "cross-electrophile coupling": ["cross-electrophile"],
-    "radical reaction": ["radical", "radicals"],
-    "carbonylation": ["carbonylation"],
-    "C-H activation": ["c-h activation", "ch activation"],
-    "SN2' substitution": ["sn2", "substitution", "displacement"],
-    "mechanism": ["mechanism", "catalytic cycle", "intermediate", "control experiment", "dft"],
-    "total synthesis": ["total synthesis", "natural product"],
-}
-
-
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -122,7 +108,7 @@ def load_classification_rules(path: Path) -> dict[str, list[str]]:
 
 def classification_rules_prompt(labels: dict[str, list[str]]) -> str:
     lines = [
-        "Allowed allene classification labels. For each category, output exactly one label from its list.",
+        "Allowed project taxonomy labels. For each category, output exactly one label from its list.",
         "Use `not specified` only when no listed label is supported by the supplied paper evidence.",
     ]
     for key in STRUCTURED_TAG_KEYS:
@@ -518,24 +504,6 @@ def extract_journal(md: str, pdf_name: str) -> dict[str, Any]:
     return scored(None, "rule_not_found", 0.0)
 
 
-def infer_tags(text: str) -> list[str]:
-    low = text.lower()
-    tags: list[str] = []
-    for tag, needles in CHEM_TAG_RULES.items():
-        if any(n in low for n in needles):
-            tags.append(tag)
-    return tags
-
-
-def classify_tags(tags: list[str]) -> tuple[list[str], list[str], list[str], list[str]]:
-    topic = [t for t in tags if t in {"propargylic alcohols", "propargylic derivatives", "allenes", "substituted allenes"}]
-    reaction = [t for t in tags if t in {"SN2' substitution", "cross-electrophile coupling", "radical reaction", "carbonylation", "C-H activation"}]
-    reaction += [t for t in tags if "catalysis" in t]
-    mechanism = [t for t in tags if t in {"mechanism", "radical reaction", "photoredox catalysis"}]
-    application = [t for t in tags if t in {"total synthesis", "enantioselective synthesis"}]
-    return dedupe(topic), dedupe(reaction), dedupe(mechanism), dedupe(application)
-
-
 def dedupe(items: list[str]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -710,17 +678,15 @@ def structured_tags_schema(classification_labels: dict[str, list[str]] | None = 
 
 def openai_endpoint(base_url: str, endpoint: str) -> str:
     """Accept OpenAI-compatible base URLs with or without a trailing /v1."""
-    base = str(base_url or "https://api.openai.com").rstrip("/")
-    prefix = "" if base.lower().endswith("/v1") else "/v1"
-    return f"{base}{prefix}/{endpoint.lstrip('/')}"
+    return _shared_openai_endpoint(base_url, endpoint)
 
 
 def resolve_api_key(cli_value: str, base_url: str) -> str:
-    if cli_value:
-        return cli_value
-    if "api.xiaoleai.team" in str(base_url).lower():
-        return os.environ.get("XIAOLEAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
-    return os.environ.get("OPENAI_API_KEY", "") or os.environ.get("XIAOLEAI_API_KEY", "")
+    del base_url
+    return _shared_resolve_api_key(
+        cli_value,
+        env_names=("REVIEW_METADATA_API_KEY", "OPENAI_API_KEY"),
+    )
 
 
 TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -770,7 +736,7 @@ def open_json_request(
 
 
 def call_openai_responses(
-    payload: dict[str, Any], api_key: str, base_url: str = "https://api.openai.com", wire_api: str = "responses"
+    payload: dict[str, Any], api_key: str, base_url: str = DEFAULT_OPENAI_BASE_URL, wire_api: str = "responses"
 ) -> dict[str, Any]:
     endpoint = "chat/completions" if wire_api == "chat-completions" else "responses"
     body = json.dumps(payload).encode("utf-8")
@@ -851,28 +817,25 @@ def normalize_structured_tags(value: Any) -> dict[str, str]:
     return tags
 
 
-def structured_tags_from_legacy(
-    topic: list[str],
-    reaction: list[str],
-    mechanism: list[str],
-    application: list[str],
+def taxonomy_profile_for_text(text: str) -> str:
+    """Auto-select a profile only when no operator override is configured."""
+    if os.environ.get("REVIEW_CLASSIFICATION_RULES", "").strip():
+        return ""
+    configured = os.environ.get("REVIEW_TAXONOMY_PROFILE", "").strip()
+    return configured or suggest_taxonomy_profile(text)
+
+
+def structured_tags_from_classification_rules(
+    review_root: Path,
+    text: str,
+    profile: str = "",
 ) -> dict[str, str]:
-    return {
-        "product": first_or_not_specified([x for x in topic if "allene" in x]),
-        "substrate": first_or_not_specified([x for x in topic if "proparg" in x]),
-        "catalyst_or_method": first_or_not_specified([x for x in reaction if "catalysis" in x]),
-        "organometallic_partner": "not specified",
-        "ligand_or_chiral_source": first_or_not_specified([x for x in application if "enantio" in x]),
-        "leaving_group": "not specified",
-        "reaction_type": first_or_not_specified(reaction),
-        "document_scope": "primary research article",
-    }
-
-
-def structured_tags_from_classification_rules(review_root: Path, text: str) -> dict[str, str]:
     """Assign only labels defined by the repository's active taxonomy."""
     values = {key: "not specified" for key in STRUCTURED_TAG_KEYS}
-    rules = load_taxonomy_rules(review_root)
+    rules = load_taxonomy_rules(
+        review_root,
+        profile=profile or taxonomy_profile_for_text(text),
+    )
     haystack = text.casefold()
     for item in rules:
         if not isinstance(item, tuple) or len(item) < 3:
@@ -883,14 +846,6 @@ def structured_tags_from_classification_rules(review_root: Path, text: str) -> d
         if any(str(needle).casefold() in haystack for needle in needles if str(needle).strip()):
             values[category] = str(label)
     return values
-
-
-def first_or_not_specified(items: list[str]) -> str:
-    for item in items:
-        item = clean_text(str(item))
-        if item:
-            return item
-    return "not specified"
 
 
 def structured_tag_values(meta: dict[str, Any]) -> dict[str, str]:
@@ -1004,8 +959,15 @@ def build_metadata(
             md[:6000],
         ]
     )
-    tags = infer_tags(text_for_tags)
-    structured_tags = structured_tags_from_classification_rules(review_root, text_for_tags)
+    taxonomy_profile = taxonomy_profile_for_text(text_for_tags)
+    structured_tags = structured_tags_from_classification_rules(
+        review_root,
+        text_for_tags,
+        taxonomy_profile,
+    )
+    matched_tag_count = sum(
+        1 for value in structured_tags.values() if value != "not specified"
+    )
     pdf_hash = sha256_file(pdf_path)
     meta: dict[str, Any] = {
         "paper_id": paper_id,
@@ -1016,7 +978,11 @@ def build_metadata(
         "journal": journal,
         "doi": doi,
         "abstract": abstract,
-        "structured_tags": scored(structured_tags, "active_taxonomy_keyword_inference", 0.45 if tags else 0.0),
+        "structured_tags": scored(
+            structured_tags,
+            "active_taxonomy_keyword_inference",
+            min(0.75, 0.35 + matched_tag_count * 0.08) if matched_tag_count else 0.0,
+        ),
         "source_paths": {
             "pdf": str(pdf_path) if pdf_path else None,
             "markdown": str(md_path) if md_path else None,
@@ -1036,7 +1002,7 @@ def build_metadata(
                 "manifest": str(review_root / "mineru-outputs" / "manifest.json"),
                 "content_blocks": len(blocks),
                 "markdown_chars_used": min(len(md), 14000),
-                "taxonomy": taxonomy_identity(review_root),
+                "taxonomy": taxonomy_identity(review_root, profile=taxonomy_profile),
             },
             "notes": [],
         },
@@ -1120,12 +1086,15 @@ def run(args: argparse.Namespace) -> int:
         jobs = iter_jobs(manifest)
 
     system_prompt = (skill_root / "references" / "metadata_extraction_system.md").read_text(encoding="utf-8")
-    base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+    base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
     api_key = resolve_api_key(args.api_key, base_url)
-    model = args.model or os.environ.get("REVIEW_METADATA_MODEL", "gpt-5.4")
+    model = args.model or os.environ.get("REVIEW_METADATA_MODEL", DEFAULT_TEXT_MODEL)
     reasoning_effort = args.reasoning_effort or os.environ.get("REVIEW_METADATA_REASONING_EFFORT", "high")
     wire_api = args.wire_api or os.environ.get("REVIEW_METADATA_WIRE_API", "responses")
-    classification_labels = load_classification_rules(resolve_taxonomy_path(review_root))
+    classification_labels = labels_by_category(
+        load_validation_taxonomy_rules(review_root),
+        STRUCTURED_TAG_KEYS,
+    )
     use_llm = bool(args.use_llm)
     if use_llm and not api_key:
         print("WARN: --use-llm was set but OPENAI_API_KEY is missing; using rules only.", file=sys.stderr)

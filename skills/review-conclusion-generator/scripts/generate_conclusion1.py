@@ -38,26 +38,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _review_runtime.paths import resolve_review_root
 
 
+_BOOTSTRAP_ROOT = next(
+    (p for p in Path(__file__).resolve().parents if (p / "review_writer_core").is_dir()),
+    None,
+)
+if _BOOTSTRAP_ROOT is None:
+    raise RuntimeError("Could not locate the Review Writer workspace")
+if str(_BOOTSTRAP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BOOTSTRAP_ROOT))
+
+from review_writer_core.providers import (  # noqa: E402
+    DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_TEXT_MODEL,
+    openai_endpoint as _shared_openai_endpoint,
+    resolve_api_key as _shared_resolve_api_key,
+)
+from review_writer_core.text_safety import make_xml_compatible  # noqa: E402
+
+
 _NUMERIC_CITATION_RE = re.compile(r"\[\d+(?:\s*[-,]\s*\d+)*\]")
 
 
 def openai_endpoint(base_url: str, endpoint: str) -> str:
     """Accept OpenAI-compatible base URLs with or without a trailing /v1."""
-    base = str(base_url or "https://api.openai.com").rstrip("/")
-    prefix = "" if base.lower().endswith("/v1") else "/v1"
-    return f"{base}{prefix}/{endpoint.lstrip('/')}"
+    return _shared_openai_endpoint(base_url, endpoint)
 
 
 def resolve_api_key(cli_value: str, base_url: str) -> str:
     """Keep text calls aligned with the provider-specific image credential."""
-    if cli_value:
-        return cli_value
-    dedicated_key = os.environ.get("REVIEW_CONCLUSION_API_KEY", "")
-    if dedicated_key:
-        return dedicated_key
-    if "api.xiaoleai.team" in str(base_url).lower():
-        return os.environ.get("XIAOLEAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
-    return os.environ.get("OPENAI_API_KEY", "") or os.environ.get("XIAOLEAI_API_KEY", "")
+    del base_url
+    return _shared_resolve_api_key(
+        cli_value,
+        env_names=("REVIEW_CONCLUSION_API_KEY", "OPENAI_API_KEY"),
+    )
 
 
 def extract_response_text(data: dict[str, Any]) -> str:
@@ -135,7 +148,7 @@ def write_json(path: Path, data: Any) -> None:
 
 def write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(make_xml_compatible(text)[0], encoding="utf-8")
 
 
 def _normalize_callout(value: Any) -> str | None:
@@ -618,8 +631,8 @@ def call_llm(prompt: str, api_key: str, base_url: str, model: str, prefer_chat: 
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "Accept": "application/json",
-        # Browser-like UA: some relays (e.g. naiccc.com) sit behind
-        # Cloudflare and block non-browser User-Agents with 403 (error 1010).
+        # Browser-like UA: some compatible relays sit behind reverse proxies
+        # that reject generic library User-Agents.
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                       "AppleWebKit/537.36 (KHTML, like Gecko) "
                       "Chrome/120.0.0.0 Safari/537.36",
@@ -961,9 +974,9 @@ def run(args: argparse.Namespace) -> int:
         "available_paper_ids": available_paper_ids,
     }
 
-    base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+    base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
     api_key = resolve_api_key(args.api_key, base_url)
-    model = args.model or os.environ.get("REVIEW_CONCLUSION_MODEL", "gpt-5.4")
+    model = args.model or os.environ.get("REVIEW_CONCLUSION_MODEL", DEFAULT_TEXT_MODEL)
     prefer_chat = os.environ.get("REVIEW_CONCLUSION_WIRE_API", "").strip().lower() in {
         "chat",
         "chat-completions",
@@ -1089,10 +1102,10 @@ def parse_args() -> argparse.Namespace:
                         help="API key (or set OPENAI_API_KEY env var).")
     parser.add_argument("--base-url", default="",
                         help="API base URL (or set OPENAI_BASE_URL env var). "
-                             "Default: https://api.openai.com")
+                             f"Default: {DEFAULT_OPENAI_BASE_URL}")
     parser.add_argument("--model", default="",
                         help="Model name (or set REVIEW_CONCLUSION_MODEL env var). "
-                             "Default: gpt-5.4")
+                             f"Default: {DEFAULT_TEXT_MODEL}")
     return parser.parse_args()
 
 

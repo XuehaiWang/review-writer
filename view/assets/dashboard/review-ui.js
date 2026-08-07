@@ -124,6 +124,15 @@
   async function executeStage(current) {
     const button = document.querySelector("#stageExecute");
     const status = document.querySelector("#stageExecuteStatus");
+    // Library is a workspace-wide source collection, not a project stage.
+    // Project creation belongs to Discovery, so entering Discovery must never
+    // be gated by a project that does not exist yet.
+    if (current.id === "library") {
+      button.disabled = true;
+      status.textContent = t("Opening project creation...");
+      window.location.assign("/discovery?create=1");
+      return;
+    }
     const projectId = projectForAction();
     if (!projectId) {
       status.textContent = t("Select a project before continuing.");
@@ -186,7 +195,12 @@
   }
 
   function mountStageAction(current, actionLabel) {
+    // Discovery already has a stronger "Confirm and continue" action: it
+    // saves the review, confirms it, synchronizes Matrix, and navigates.
+    // A second generic handoff button only duplicates that transition and
+    // takes space away from the keyword review list.
     if (current.id === "final") return;
+    if (current.id === "discovery") return;
     const reviewGate = stageActionHost(current);
     if (!reviewGate) return;
     const action = document.createElement("div");
@@ -205,9 +219,11 @@
     const id = currentId();
     const current = stages.find((stage) => stage.id === id) || stages[0];
     const next = stages[stages.findIndex((stage) => stage.id === current.id) + 1];
-    const actionLabel = current.id === "final"
-      ? "Validate Final Stage"
-      : `Execute ${current.label} and Enter ${next?.label || "Next Stage"}`;
+    const actionLabel = current.id === "library"
+      ? "Enter Discovery and Create Project"
+      : current.id === "final"
+        ? "Validate Final Stage"
+        : `Execute ${current.label} and Enter ${next?.label || "Next Stage"}`;
     const kicker = document.querySelector(".stage-kicker");
     const stageName = document.querySelector(".stage-name");
     const stageHint = document.querySelector(".stage-hint");
@@ -236,9 +252,11 @@
     if (document.querySelector(".stage-strip")) return;
     const current = stages.find((s) => s.id === id) || stages[0];
     const next = stages[stages.findIndex((stage) => stage.id === current.id) + 1];
-    const actionLabel = current.id === "final"
-      ? "Validate Final Stage"
-      : `Execute ${current.label} and Enter ${next?.label || "Next Stage"}`;
+    const actionLabel = current.id === "library"
+      ? "Enter Discovery and Create Project"
+      : current.id === "final"
+        ? "Validate Final Stage"
+        : `Execute ${current.label} and Enter ${next?.label || "Next Stage"}`;
     const strip = document.createElement("div");
     strip.className = "stage-strip";
     strip.innerHTML = `

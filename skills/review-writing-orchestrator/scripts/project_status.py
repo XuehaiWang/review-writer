@@ -103,6 +103,19 @@ STAGES: list[dict[str, Any]] = [
         "human_check": "Review the unified first draft in http://127.0.0.1:8765/draft.",
     },
     {
+        "id": "draft_feedback_loop",
+        "name": "Optional first-draft quality loop",
+        "dir": "04_first_draft",
+        "skill": "review-first-draft-feedback-loop",
+        "required": [
+            "feedback_loop_status.json",
+            "rubric_evaluation.json",
+            "first_draft_gate_status.json",
+        ],
+        "human_check": "If the gate reports needs_human_review, inspect failed paragraphs before release.",
+        "optional": True,
+    },
+    {
         "id": "conclusion_generation",
         "name": "Conclusion generation",
         "dir": "04_first_draft",

@@ -131,8 +131,26 @@ _CAPTION_PATTERNS: List[Tuple[re.Pattern, str]] = [
 # Markdown image paths (for example figures\\figure_01.png) untouched.
 _RAW_LATEX_REWRITES: List[Tuple[re.Pattern, Any]] = [
     (
-        re.compile(r"\{\s*\\mathrm\s*\{\s*([^{}]+?)\s*\}\s*\}\s*_\s*\{\s*([^{}]+?)\s*\}"),
-        lambda m: "$\\mathrm{" + re.sub(r"\s+", "", m.group(1)) + "}_{" + re.sub(r"\s+", "", m.group(2)) + "}$",
+        re.compile(
+            r"\{\s*\\(mathrm|mathsf)\s*\{\s*([^{}]+?)\s*\}\s*\}"
+            r"\s*_\s*\{\s*([^{}]+?)\s*\}"
+        ),
+        lambda m: (
+            "$\\"
+            + m.group(1)
+            + "{"
+            + re.sub(r"\s+", "", m.group(2))
+            + "}_{"
+            + re.sub(r"\s+", "", m.group(3))
+            + "}$"
+        ),
+    ),
+    (
+        # MinerU also emits standalone wrappers such as `{ \mathrm { : } }`
+        # next to a chemical formula. Delimit these as math so the Word run
+        # renderer can preserve their visible text instead of rejecting them.
+        re.compile(r"\{\s*\\(mathrm|mathsf)\s*\{\s*([^{}]*?)\s*\}\s*\}"),
+        lambda m: "$\\" + m.group(1) + "{" + re.sub(r"\s+", "", m.group(2)) + "}$",
     ),
     (
         re.compile(r"\{\s*\\pmb\s*\{\s*\\(alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|rho|sigma|tau|phi|chi|psi|omega)\s*\}\s*\}\s*\^\s*\{\s*\\prime\s*\}"),
@@ -151,6 +169,9 @@ _RAW_GREEK_COMMAND_RE = re.compile(
     r"\\(alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|rho|sigma|tau|phi|chi|psi|omega)\b"
 )
 _RAW_LATEX_COMMAND_RE = re.compile(r"\\(?!figure_[A-Za-z0-9_-]+\.[A-Za-z0-9]+)[A-Za-z]+")
+_EXISTING_MATH_SPAN_RE = re.compile(
+    r"\$\$[\s\S]*?\$\$|\$(?:\\.|[^$\n])+\$"
+)
 
 _TRUNCATED_GREEK_ESCAPE_RE = re.compile(r"\x03([0-9a-fA-F]{2})")
 _KNOWN_TRUNCATED_UNICODE = {
@@ -187,6 +208,22 @@ def make_xml_compatible(text: str) -> Tuple[str, int]:
 
 def normalize_mineru_latex(md_text: str) -> str:
     """Turn known raw MinerU LaTex into Math-delimited expressions for DOCX."""
+    # Preserve formulas that MinerU already delimited.  Applying the raw
+    # wrapper rewrites inside an existing ``$...$`` formula creates nested
+    # dollar signs and can make a valid ``\mathsf`` command look unconverted.
+    protected_spans: List[Tuple[str, str]] = []
+
+    def protect_existing_math(match: re.Match) -> str:
+        index = len(protected_spans)
+        token = f"@@REVIEW_WRITER_EXISTING_MATH_{index:06d}@@"
+        while token in md_text:
+            index += 1
+            token = f"@@REVIEW_WRITER_EXISTING_MATH_{index:06d}@@"
+        protected_spans.append((token, match.group(0)))
+        return token
+
+    md_text = _EXISTING_MATH_SPAN_RE.sub(protect_existing_math, md_text)
+
     for pattern, replacement in _RAW_LATEX_REWRITES:
         md_text = pattern.sub(replacement, md_text)
 
@@ -211,6 +248,8 @@ def normalize_mineru_latex(md_text: str) -> str:
     if leftovers:
         examples = ", ".join(dict.fromkeys(leftovers[:5]))
         raise ValueError(f"Unconverted MinerU LaTex remains in Markdown: {examples}")
+    for token, formula in protected_spans:
+        md_text = md_text.replace(token, formula)
     return md_text
 
 
@@ -364,7 +403,7 @@ _LATEX_SYMBOLS = {
     "neq": "\u2260", "approx": "\u2248", "rightarrow": "\u2192", "leftarrow": "\u2190",
     "leftrightarrow": "\u2194", "sum": "\u03a3", "prod": "\u03a0", "infty": "\u221e",
 }
-_LATEX_TEXT_WRAPPERS = "mathrm|mathbf|mathit|text|operatorname|pmb|boldsymbol|rm|bf|it"
+_LATEX_TEXT_WRAPPERS = "mathrm|mathsf|mathbf|mathit|text|operatorname|pmb|boldsymbol|rm|bf|it"
 
 
 def _latex_to_readable_text(latex: str) -> str:

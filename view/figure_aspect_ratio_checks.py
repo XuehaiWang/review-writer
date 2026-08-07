@@ -147,7 +147,12 @@ class FigureAspectRatioChecks(unittest.TestCase):
             def fake_open(request, label, timeout=600):
                 captured["url"] = request.full_url
                 captured["payload"] = json.loads(request.data.decode("utf-8"))
-                return {"choices": [{"message": {"content": "unused"}}]}
+                encoded = base64.b64encode(source_path.read_bytes()).decode("ascii")
+                return {
+                    "choices": [
+                        {"message": {"content": f"data:image/png;base64,{encoded}"}}
+                    ]
+                }
 
             with mock.patch.object(REDRAW, "open_chat_completion_request", side_effect=fake_open):
                 REDRAW.call_chat_completions_image_edit(
@@ -166,6 +171,59 @@ class FigureAspectRatioChecks(unittest.TestCase):
             self.assertEqual(content[0]["text"], "preserve the chemistry")
             data_uri = content[1]["image_url"]["url"]
             self.assertEqual(base64.b64decode(data_uri.split(",", 1)[1]), source_path.read_bytes())
+
+    def test_chat_completions_retries_successful_responses_without_an_image(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            source_path = Path(raw) / "source.png"
+            Image.new("RGB", (17, 13), "white").save(source_path)
+            encoded = base64.b64encode(source_path.read_bytes()).decode("ascii")
+            responses = [
+                {"choices": [{"message": {"content": "still processing"}, "finish_reason": "stop"}]},
+                {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]},
+                {"choices": [{"message": {"content": f"data:image/png;base64,{encoded}"}}]},
+            ]
+
+            with mock.patch.object(REDRAW, "open_chat_completion_request", side_effect=responses) as opened:
+                with mock.patch.object(REDRAW.time, "sleep"):
+                    result = REDRAW.call_chat_completions_image_edit(
+                        "test-only-key",
+                        "https://www.micuapi.ai/v1",
+                        source_path,
+                        "preserve the chemistry",
+                        "gpt-image-2",
+                    )
+
+            self.assertEqual(opened.call_count, 3)
+            request_modes = [
+                json.loads(call.args[0].data.decode("utf-8"))["stream"]
+                for call in opened.call_args_list
+            ]
+            self.assertEqual(request_modes, [True, True, False])
+            self.assertIsNotNone(REDRAW.extract_chat_completion_image_reference(result))
+
+    def test_chat_completions_no_image_error_includes_provider_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            source_path = Path(raw) / "source.png"
+            Image.new("RGB", (17, 13), "white").save(source_path)
+            response = {
+                "choices": [
+                    {
+                        "message": {"content": "The upstream channel returned text only."},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+
+            with mock.patch.object(REDRAW, "open_chat_completion_request", return_value=response):
+                with mock.patch.object(REDRAW.time, "sleep"):
+                    with self.assertRaisesRegex(RuntimeError, "provider_text=The upstream channel returned text only"):
+                        REDRAW.call_chat_completions_image_edit(
+                            "test-only-key",
+                            "https://www.micuapi.ai/v1",
+                            source_path,
+                            "preserve the chemistry",
+                            "gpt-image-2",
+                        )
 
     def test_chat_completions_data_uri_is_saved_as_a_valid_image(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -213,6 +271,92 @@ class FigureAspectRatioChecks(unittest.TestCase):
         self.assertTrue(REDRAW.should_fail_over_image_provider(RuntimeError("ALL_CHANNELS_FAILED")))
         self.assertFalse(REDRAW.should_fail_over_image_provider(RuntimeError("HTTP 401 unauthorized")))
         self.assertFalse(REDRAW.should_fail_over_image_provider(RuntimeError("HTTP 400 invalid image")))
+
+    def test_scientific_moderation_false_positive_is_recognized_without_matching_generic_400(self) -> None:
+        self.assertTrue(
+            REDRAW.is_safety_moderation_rejection(
+                RuntimeError("HTTP 400: 内容被安全审核拦截 (疑似成人内容)")
+            )
+        )
+        self.assertTrue(REDRAW.is_safety_moderation_rejection(RuntimeError("finish_reason=content_filter")))
+        self.assertFalse(REDRAW.is_safety_moderation_rejection(RuntimeError("HTTP 400 invalid image size")))
+        self.assertFalse(REDRAW.is_safety_moderation_rejection(RuntimeError("HTTP 401 unauthorized")))
+
+    def test_moderation_false_positive_retries_once_with_concise_academic_prompt(self) -> None:
+        prompts = []
+        audit = []
+
+        def requester(prompt):
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                raise RuntimeError("HTTP 400: 内容被安全审核拦截 (疑似成人内容)")
+            return {"data": [{"b64_json": "image"}]}
+
+        safety_prompt = REDRAW.build_academic_chemistry_safety_retry_prompt(
+            REDRAW.FIGURE_TYPE_MECHANISM,
+            REDRAW.MECHANISM_ARROW_STRAIGHTEN_PROFILE,
+        )
+        result = REDRAW.call_with_academic_safety_retry(
+            requester,
+            "long original mechanism prompt",
+            safety_prompt,
+            audit,
+        )
+
+        self.assertEqual(result["data"][0]["b64_json"], "image")
+        self.assertEqual(len(prompts), 2)
+        self.assertEqual(prompts[1], safety_prompt)
+        self.assertIn("Academic chemistry diagram editing task", safety_prompt)
+        self.assertIn("contains no people", safety_prompt)
+        self.assertIn("Change only the shape of reaction-flow arrows", safety_prompt)
+        self.assertLess(len(safety_prompt), 1500)
+        self.assertEqual(audit[0]["status"], "succeeded")
+        self.assertEqual(audit[0]["prompt_variant"], "academic-chemistry-safety-context")
+
+    def test_moderation_retry_stops_after_the_single_safe_prompt_attempt(self) -> None:
+        attempts = []
+        audit = []
+
+        def requester(prompt):
+            attempts.append(prompt)
+            raise RuntimeError("HTTP 400: safety review rejected")
+
+        with self.assertRaisesRegex(RuntimeError, "academic-chemistry prompt retry also failed"):
+            REDRAW.call_with_academic_safety_retry(
+                requester,
+                "original",
+                "academic retry",
+                audit,
+            )
+
+        self.assertEqual(attempts, ["original", "academic retry"])
+        self.assertEqual(audit[0]["status"], "failed")
+
+    def test_mechanism_prompt_preserves_chemistry_unicode_without_mojibake(self) -> None:
+        prompt = REDRAW.build_mechanism_arrow_straighten_prompt({})
+
+        self.assertIn("h\u03bd", prompt)
+        self.assertIn("SN2\u2032 oxidative addition", prompt)
+        for damaged in ("h\u8c13", "\u9225?", "\u951f", "\ufffd"):
+            self.assertNotIn(damaged, prompt)
+        self.assertEqual(prompt.encode("utf-8").decode("utf-8"), prompt)
+
+        damaged_prompt = (
+            prompt.replace("h\u03bd", "h\u8c13")
+            .replace("SN2\u2032 oxidative addition", "SN2\u9225? oxidative addition")
+            + " \u951f\ufffd"
+        )
+        repaired_prompt = REDRAW.repair_mechanism_prompt_text(damaged_prompt)
+        self.assertIn("h\u03bd", repaired_prompt)
+        self.assertIn("SN2\u2032 oxidative addition", repaired_prompt)
+        for damaged in ("h\u8c13", "\u9225?", "\u951f", "\ufffd"):
+            self.assertNotIn(damaged, repaired_prompt)
+
+    def test_mechanism_prompt_repairs_missing_required_symbols_without_stopping(self) -> None:
+        repaired = REDRAW.repair_mechanism_prompt_text("Preserve this technical mechanism diagram.")
+
+        self.assertIn("h\u03bd", repaired)
+        self.assertIn("SN2\u2032 oxidative addition", repaired)
 
     def test_later_mechanism_retry_error_keeps_last_generated_image(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -281,6 +425,55 @@ class FigureAspectRatioChecks(unittest.TestCase):
             result = REDRAW.normalize_generated_aspect(output_path, source_path, framing)
             self.assertEqual(result["normalized_size"], [60, 180])
             self.assertAlmostEqual(result["normalized_aspect_ratio"], 1 / 3)
+
+    def test_generated_content_in_padding_expands_crop_without_stretching(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source_path = root / "source.png"
+            framed_path = root / "framed.png"
+            output_path = root / "output.png"
+            Image.new("RGB", (200, 80), "white").save(source_path)
+            framing = REDRAW.prepare_aspect_preserving_edit_input(source_path, framed_path)
+
+            generated = Image.new("RGB", (200, 200), "white")
+            draw = ImageDraw.Draw(generated)
+            draw.rectangle((35, 75, 165, 125), outline="black", width=4)
+            # Simulate a provider moving a lower label into the technical
+            # bottom padding, well beyond the antialiasing guard band.
+            draw.rectangle((70, 170, 130, 185), fill="black")
+            generated.save(output_path)
+
+            result = REDRAW.normalize_generated_aspect(output_path, source_path, framing)
+
+            self.assertTrue(result["padding_content"]["detected"])
+            self.assertTrue(result["provider_canvas_allowed"])
+            self.assertEqual(result["crop_mode"], "expanded_for_padding_content")
+            self.assertGreater(result["normalized_size"][1], 80)
+            with Image.open(output_path) as normalized:
+                self.assertEqual(list(normalized.size), result["normalized_size"])
+                self.assertLess(min(normalized.convert("L").crop((0, normalized.height - 30, normalized.width, normalized.height)).getextrema()), 64)
+
+    def test_content_touching_padding_boundary_preserves_provider_canvas(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source_path = root / "source.png"
+            framed_path = root / "framed.png"
+            output_path = root / "output.png"
+            Image.new("RGB", (200, 80), "white").save(source_path)
+            framing = REDRAW.prepare_aspect_preserving_edit_input(source_path, framed_path)
+
+            generated = Image.new("RGB", (200, 200), "white")
+            draw = ImageDraw.Draw(generated)
+            draw.rectangle((40, 65, 160, 135), outline="black", width=4)
+            draw.rectangle((80, 0, 120, 12), fill="black")
+            draw.rectangle((80, 187, 120, 199), fill="black")
+            generated.save(output_path)
+
+            result = REDRAW.normalize_generated_aspect(output_path, source_path, framing)
+
+            self.assertEqual(result["crop_mode"], "provider_canvas_preserved_for_padding_content")
+            self.assertEqual(result["crop_box"], [0, 0, 200, 200])
+            self.assertEqual(result["normalized_size"], [200, 200])
 
     def test_matching_provider_ratio_is_not_cropped_twice(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

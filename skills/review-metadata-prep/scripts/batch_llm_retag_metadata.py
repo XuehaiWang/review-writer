@@ -12,6 +12,8 @@ from typing import Any
 
 from llm_retag_metadata import retag_one, write_markdown_report
 from prepare_metadata import (
+    DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_TEXT_MODEL,
     STRUCTURED_TAG_KEYS,
     load_classification_rules,
     load_dotenv,
@@ -136,8 +138,8 @@ def main() -> int:
     review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     load_dotenv(review_root / ".env")
     api_key = args.api_key or os.environ.get("OPENAI_API_KEY", "")
-    base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
-    model = args.model or os.environ.get("REVIEW_METADATA_MODEL", "gpt-5.4")
+    base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
+    model = args.model or os.environ.get("REVIEW_METADATA_MODEL", DEFAULT_TEXT_MODEL)
     reasoning_effort = args.reasoning_effort or os.environ.get("REVIEW_METADATA_REASONING_EFFORT", "high")
     wire_api = args.wire_api or os.environ.get("REVIEW_METADATA_WIRE_API", "responses")
     if not api_key:

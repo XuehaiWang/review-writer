@@ -6,10 +6,22 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+REVIEW_ROOT = Path(__file__).resolve().parents[1]
+if str(REVIEW_ROOT) not in sys.path:
+    sys.path.insert(0, str(REVIEW_ROOT))
+
+from review_writer_core.providers import (
+    DEFAULT_IMAGE_MODEL,
+    DEFAULT_IMAGE_WIRE_API,
+    DEFAULT_TEXT_MODEL,
+    DEFAULT_TEXT_WIRE_API,
+)
 
 
 SETTINGS_VERSION = 1
@@ -142,22 +154,6 @@ def _masked(value: str) -> str:
     return "********" + tail
 
 
-def _legacy_mineru_key(review_root: Path) -> str:
-    path = (
-        Path(review_root).resolve()
-        / "skills"
-        / "mineru-precise-parse-review-writer"
-        / "config"
-        / "mineru_api_token.txt"
-    )
-    if not path.is_file():
-        return ""
-    try:
-        return path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-
-
 def apply_saved_provider_settings(review_root: Path) -> dict[str, str]:
     """Apply local settings to the current process so all future subprocesses inherit them."""
     values = {
@@ -187,10 +183,6 @@ def provider_subprocess_environment(review_root: Path) -> dict[str, str]:
         if str(key).strip() and isinstance(value, str)
     }
     environment.update(saved)
-    if not str(environment.get("MINERU_API_TOKEN") or "").strip():
-        legacy_key = _legacy_mineru_key(root)
-        if legacy_key:
-            environment["MINERU_API_TOKEN"] = legacy_key
     return environment
 
 
@@ -200,10 +192,6 @@ def public_provider_settings(review_root: Path) -> dict[str, Any]:
     values = apply_saved_provider_settings(root)
     mineru_key = _effective(values, "MINERU_API_TOKEN")
     mineru_source = _source(values, ("MINERU_API_TOKEN",))
-    if not mineru_key:
-        mineru_key = _legacy_mineru_key(review_root)
-        if mineru_key:
-            mineru_source = "legacy-token-file"
     text_key = _effective(values, "REVIEW_WRITING_API_KEY") or _effective(values, "OPENAI_API_KEY")
     image_key = _effective(values, "IMAGE_OPENAI_API_KEY")
     return {
@@ -223,16 +211,16 @@ def public_provider_settings(review_root: Path) -> dict[str, Any]:
         },
         "text": {
             "base_url": _effective(values, "REVIEW_WRITING_BASE_URL") or _effective(values, "OPENAI_BASE_URL"),
-            "model": _effective(values, "REVIEW_WRITING_MODEL", "gpt-5.4"),
-            "wire_api": _effective(values, "REVIEW_WRITING_WIRE_API", "chat-completions"),
+            "model": _effective(values, "REVIEW_WRITING_MODEL", DEFAULT_TEXT_MODEL),
+            "wire_api": _effective(values, "REVIEW_WRITING_WIRE_API", DEFAULT_TEXT_WIRE_API),
             "key_configured": bool(text_key),
             "key_hint": _masked(text_key),
             "source": _source(values, ("REVIEW_WRITING_API_KEY", "OPENAI_API_KEY")),
         },
         "image": {
             "base_url": _effective(values, "IMAGE_OPENAI_BASE_URL") or _effective(values, "OPENAI_BASE_URL"),
-            "model": _effective(values, "IMAGE_OPENAI_MODEL", "gpt-image-2"),
-            "wire_api": _effective(values, "IMAGE_OPENAI_WIRE_API", "images"),
+            "model": _effective(values, "IMAGE_OPENAI_MODEL", DEFAULT_IMAGE_MODEL),
+            "wire_api": _effective(values, "IMAGE_OPENAI_WIRE_API", DEFAULT_IMAGE_WIRE_API),
             "key_configured": bool(image_key),
             "key_hint": _masked(image_key),
             "source": _source(values, ("IMAGE_OPENAI_API_KEY",)),

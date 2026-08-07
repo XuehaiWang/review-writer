@@ -104,6 +104,7 @@
     .btn.primary, .tab.active { color: white; background: var(--green); border-color: var(--green); }
     .btn.orange { color: white; background: var(--orange); border-color: var(--orange); }
     .list, .detail-body, .side-body { overflow: auto; min-height: 0; }
+    .detail-body { flex: 1; }
     .list { padding: 9px; }
     .item {
       width: 100%;
@@ -190,19 +191,38 @@
       color: #4d3923;
     }
     .markdown .raw-block, .draft-view .raw-block { margin: 12px 0; }
+    .edit-pane {
+      height: 100%;
+      min-height: 0;
+      padding: 18px;
+      background: linear-gradient(180deg, #f7f0e3 0%, #fbf7ed 100%);
+    }
     .editor {
       width: 100%;
-      min-height: 240px;
-      resize: vertical;
-      border: 0;
+      height: 100%;
+      min-height: 320px;
+      resize: none;
+      border: 1px solid #d7cbb7;
+      border-radius: 14px;
       outline: none;
-      padding: 14px;
-      background: #181d1a;
-      color: #e8f4ea;
-      font-family: "SFMono-Regular", Consolas, monospace;
-      font-size: 12px;
-      line-height: 1.45;
+      padding: 22px 24px 28px;
+      background: #fffdf7;
+      color: #25231c;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.9), 0 10px 26px rgba(54,43,25,.08);
+      caret-color: var(--green);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 14px;
+      line-height: 1.65;
+      transition: border-color .16s ease, box-shadow .16s ease, background .16s ease;
     }
+    .editor:hover { border-color: #b9aa91; }
+    .editor:focus {
+      border-color: var(--green);
+      background: #fffefb;
+      box-shadow: 0 0 0 3px rgba(30,106,88,.12), 0 14px 30px rgba(54,43,25,.10);
+    }
+    .editor::selection { color: #173f36; background: #d9ece5; }
+    .editor:disabled { cursor: not-allowed; color: var(--muted); background: #f2ecdf; }
     .side-body { padding: 12px; }
     .field { margin-bottom: 12px; }
     .label {
@@ -278,7 +298,7 @@
       </div>
       <div class="detail-body">
         <div id="preview" class="draft-view"></div>
-        <div id="edit" style="display:none; height:100%">
+        <div id="edit" class="edit-pane" style="display:none">
           <textarea id="draftEditor" class="editor" spellcheck="false"></textarea>
         </div>
         <div id="report" class="markdown" style="display:none"></div>

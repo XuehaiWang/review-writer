@@ -53,32 +53,34 @@ Use one unified style preset: `organic-review-structure-locked-v2`. The presenta
 
 Scientific content is immutable. Every atom, substituent, ring, bond order, allene, wedge/dash, charge, radical, stereochemical descriptor, reaction arrow, process branch, reagent, condition, yield, label, panel, and table value must remain scientifically and topologically identical to the source. Permitted presentation changes are limited to stroke appearance, background cleanup, contrast, and non-scientific borders within their existing bounds.
 
-Default to `source-faithful-bw` when exact source geometry is required. It creates a 4x-resolution, pure black-and-white PNG without regenerating or relocating raster text. Before conversion, only uniform eroded 3x3 seeds proven to lie inside broad bright saturated fills are made white; cleanup must never propagate across the connected colour component. The black-and-white conversion is colour-aware—strongly chromatic pale strokes count as ink even when their grayscale luminance is high—so aromatic bonds, ring outlines, atom labels, and substituent strokes remain continuous black lines instead of disappearing into dots. After masking, only isolated chromatic-only components of at most five native pixels may be removed as JPEG noise; any component that is also dark in grayscale must be retained so radical dots, punctuation, stereochemical marks, and genuine scientific strokes survive.
+Keep the three `source-faithful-*` modes as explicit maintenance tools, but do not select them automatically from the Stage 7 AI redraw button. Stage 7 now sends dense scopes, complex multi-panel figures, low-resolution schemes, coloured chemistry figures, tables, and scientific plots through type-specific, structure-locked AI edit prompts. Preserve the provider result only as a reviewable Stage 7 artifact until the relevant integrity checks and required human chemistry approval are complete.
 
-Dense reaction-scope figures with many products, substituent grids, yields, or example panels must use `source-faithful-bw`, not a generative redraw. Reconstructing dozens of chemical structures from a raster scope image can alter bond order, ring topology, and substituents. The source-faithful path preserves those pixels and only normalizes resolution, contrast, and black-and-white presentation.
-
-Complex multi-panel reaction-overview, strategy, background, comparison, or rearrangement figures must use `source-faithful-color`. This creates a 4x PNG while retaining every source pixel's geometry and scientific color encoding. Do not use a generative redraw for these figures: broad image-level ink checks can miss a chemically serious local mutation in one panel.
-
-For the generated full-review overview figure, negotiate image size per provider instead of hard-coding a landscape size. Geek2API-backed xiaoleai routes use `1024x1024`; other compatible routes may prefer `1536x1024` and must fall back to `1024x1024` after an unsupported-size response. On a square-only route, keep the template's complete landscape reading order within balanced white margins and never crop or omit a panel.
+For the generated full-review overview figure, negotiate image size from the configured provider capabilities instead of a hostname. `IMAGE_SUPPORTED_SIZES` may list sizes in retry order; unsupported landscape requests must fall back to `1024x1024`. On a square-only route, keep the template's complete landscape reading order within balanced white margins and never crop or omit a panel.
 
 Overview layout references are versioned assets owned by this skill under `assets/overview-templates/`. Resolve the catalog and its images relative to the skill directory, independently of runtime Library contents.
 
 For the `source-faithful-outline-color` profile, whiten only the broad interior of a bright coloured filled shape. Never whiten, hollow, fade, blur, or break a coloured word, glyph, label, arrow, bond, or symbol: coloured typography must remain solid, continuous, crisp, and in its original colour.
 
-Use this routing order:
+Use the shared image-aware router in `review_writer_core.figure_redraw_routing` so the dashboard and worker always agree. Apply this routing order:
 
-1. A requested curved-arrow-only mechanism edit: `ai-edit` with `mechanism-arrow-straighten`.
-2. A dense reaction/substrate scope: `source-faithful-bw`.
-3. A complex multi-panel overview, strategy, comparison, background, rearrangement, catalytic-cycle, kinetic-investigation, or total-synthesis figure: `source-faithful-color`. Strategy figures with bright cyan/green/orange interior fills use `source-faithful-outline-color`: retain dark coloured outlines and all symbols, but whiten only bright saturated interiors.
-4. A simple single-transformation scheme without the above indicators: gated `ai-edit`, with no OCR extraction, OCR prompt injection, OCR masking, OCR text restoration, or OCR comparison.
+1. Explicit reviewer type, when supplied.
+2. Mechanism/catalytic-cycle source caption or explicit profile.
+3. Visual closed-cycle layout detection for under-described figures such as P026.
+4. Data table, reaction/substrate scope, scientific plot, or complex multi-panel evidence.
+5. Significant scientific colour before low-resolution evidence, so a small coloured chemistry scheme uses the fill-removal profile instead of the generic low-resolution profile.
+6. Simple reaction scheme, otherwise general scientific figure.
 
-Keep this routing as the default safety policy. When a reviewer explicitly requests an AI comparison for a figure that the router classified as dense, complex, tall, or low-resolution, run standard `ai-edit` with `--force-standard-ai-edit`. Never apply this override automatically or in batch mode, and never use it for `mechanism-arrow-straighten`. Preserve the provider's complete canvas, save the result as a Stage 7 preview, bind it to the current Stage 6 source hash, and require explicit human chemistry approval before Stage 8 or manuscript insertion.
+Use `ai-edit` for every automatically selected type. Add the corresponding type-specific prompt: scope prompts lock every example and yield; multi-panel prompts lock boundaries and reading order; low-resolution prompts prohibit inference; colour prompts remove only non-semantic fills and prohibit black blocks; table and plot prompts lock every value and data coordinate. High-risk types must record `requires_human_chemistry_approval: true`; they cannot enter Stage 8 until approval is bound to the exact source and output hashes.
 
-Low-resolution or thin-stroke schemes are forced to `source-faithful-bw`, even when their caption suggests a simple transformation. The black-and-white renderer detects saturated red/blue/other coloured source ink at native resolution before enlargement, converts it to continuous black strokes, and uses sharpened neutral-grey antialiasing only to smooth their black edges. It hollows only broad bright fills before conversion. A generative model must never infer missing thin bonds, labels, or stereochemical marks from a small raster.
+Derive `edit_profile` again from the final shared classification inside the worker; never trust a stale dashboard-supplied mechanism profile for a non-mechanism figure. For `colored-chemistry`, require broad cyan/teal/other decorative ring fills to become white while preserving every perimeter and inner bond. Measure chromatic pixels inside the content bounds after generation, retry once when most fill remains, and retain a still-failing output only as an integrity-warning preview for human review.
 
-Tall portrait multi-step figures are forced to `source-faithful-bw`. Their full source canvas and every stacked panel are preserved at 4x resolution; broad bright colour interiors are whitened and all remaining chemical strokes, labels, and symbols are rendered as black line art. Do not use a generative edit for these figures: it can retain the nominal aspect ratio while reflowing or clipping the lowest panel.
+Treat an HTTP-successful Chat Completions response with no image reference as a retryable provider failure. Retry the complete image request up to three times, use streaming first and a final non-streaming request for relays that attach images only to final JSON, accept common `content`, `images`, `data`, `result`, and `output` shapes, and include the provider's safe text excerpt plus `finish_reason` in the final error so channel refusals and text-only responses remain diagnosable.
 
-Standard `ai-edit` redraws retain the image provider's complete output canvas and native aspect ratio. A square-only result must not be cropped or stretched back to the source ratio, because doing so can delete generated structures and labels at the canvas edges. Require safe white margins and complete source content in the prompt, then use the returned image dimensions as the SVG editor base. Exact source dimensions remain mandatory only for pixel-local workflows such as `mechanism-arrow-straighten` and OCR-coordinate restoration.
+Treat an explicit provider moderation response such as `内容被安全审核拦截`, `疑似成人内容`, `content_filter`, or `moderation` as a possible false positive only when editing the supplied scientific figure. Retry exactly once on the same source image and route with a concise, neutral prompt that identifies the upload as a peer-reviewed academic chemistry schematic with no people or photographic subject matter. Retain the same structure, label, arrow, layout, and type-specific constraints; for mechanisms, keep the arrow-only edit rule. Do not retry a generic HTTP 400, authentication failure, malformed request, or unsupported image. Record the trigger and retry outcome in `safety_moderation_retries` in the redraw manifest.
+
+The former generic “AI comparison” override is replaced by a reviewer figure-type selector. Pass the selected value with `--figure-type`; a reviewer-selected mechanism type must still use `mechanism-arrow-straighten`, while every other selected type uses its structure-locked AI prompt.
+
+Standard `ai-edit` redraws retain the image provider's complete output canvas and native aspect ratio. A square-only result must not be cropped or stretched back to the source ratio, because doing so can delete generated structures and labels at the canvas edges. Require safe white margins and complete source content in the prompt, then use the returned image dimensions as the SVG editor base. Pixel-local workflows normally crop the technical wrapper back to the source rectangle, but content completeness overrides exact source dimensions: detect meaningful generated ink beyond the wrapper rectangle, ignore only a narrow antialiasing halo, and forbid the fixed crop when labels or structures enter the padding. Expand the crop around all generated ink with a safe margin, or preserve the complete provider canvas when the ink reaches its boundary. Record the detection and chosen crop in `aspect_ratio_normalization`, allow the saved dimensions to become the SVG editor base, and keep the output subject to the existing chemistry gate and human approval. When the online SVG editor saves an edit based on this protected AI canvas, preserve the normalization record and treat the manual output as derived from the same allowed canvas; keep the human-approval control available even though `render_mode` becomes `manual-arrow-edit`. Do not extend this exception to a manual edit based directly on the source image or to an output without the recorded padding-content provenance.
 
 Every provider result is saved directly to Stage 7 **Redrawn Output**. The chemistry-integrity gate remains diagnostic metadata: failed outputs stay available for viewing and download, but require explicit human approval before manuscript insertion.
 
@@ -118,9 +120,11 @@ python <review-root>/skills/review-figure-style-redraw/scripts/redraw_figures.py
 
 This profile permits only one change: replace every curved/arc/free-form process arrow with a straight arrow or a horizontal-vertical right-angle arrow. It explicitly requires preservation of every arrow’s count, start, end, direction, color, thickness, and connection relationship. It retains blue, black, and magenta/purple arrow classes and locks every molecular structure, bond, label, charge, radical, oxidation state, typography, layout coordinate, canvas dimension, and white background.
 
+Keep rare chemistry symbols in executable prompt source as Unicode escape sequences when practical. At runtime, automatically repair known mojibake such as `h谓`, `鈥?`, `锟`, or the Unicode replacement character, restore the exact characters `hν` and `SN2′ oxidative addition`, and continue the provider request. Do not fail or stop a redraw solely because the prompt text can be repaired deterministically.
+
 For this deployment, do not generate or send an edit mask for mechanism figures. The provider receives the original image, allowing short or connected curved arrows to be considered even when automatic component detection cannot isolate a safe corridor. The strict local-edit prompt and post-generation source-pixel geometry gate are mandatory; any output that changes chemistry or non-arrow content remains rejected.
 
-After each mechanism edit, run the mechanism source-fidelity gate. It permits localized arrow displacement but rejects the image when more than 28% of source ink is unmatched, more than 14% new/displaced ink appears, or total output ink falls below 75% of the source. No OCR transcription, OCR text-box restoration, or OCR output comparison is used by this profile. Geometry checks run inside each attempt; if the second attempt fails, clear the usable output path and report a fidelity/integrity failure. Preserve the final provider result as `rejected_preview_image` for Stage 7 inspection, but label it as rejected and never allow it into manuscript insertion.
+After each mechanism edit, run the mechanism source-fidelity gate. It permits localized arrow displacement but rejects the image when more than 28% of source ink is unmatched, more than 14% new/displaced ink appears, total output ink falls below 75% of the source, or no detectable arrow-geometry change occurred. No OCR transcription, OCR text-box restoration, or OCR output comparison is used by this profile. Geometry checks run inside each attempt; if the second attempt fails, clear the usable output path and report a fidelity/integrity failure. Preserve the final provider result as `rejected_preview_image` for Stage 7 inspection, but label it as rejected and never allow it into manuscript insertion.
 
 Do not use `ocr-hollow-ai` or `source-faithful-bw` with this profile: the former masks text and changes graphics, while the latter performs no arrow edit. The result remains subject to mandatory human comparison against the source, including an arrow-by-arrow count and routing check.
 
@@ -139,19 +143,19 @@ Stage 7 also provides an **online SVG editor**. It first creates that complete S
 Default recommendation for this project:
 
 ```text
-base_url: https://www.micuapi.ai/v1
+base_url: https://your-image-provider.example/v1
 wire_api: chat-completions
 model: gpt-image-2
 endpoint: /v1/chat/completions
 credential: IMAGE_OPENAI_API_KEY (vip_2_image group)
 ```
 
-For standard AI comparisons, embed the exact current Stage 6 image as a base64 `image_url`, accept either SSE or JSON, and validate the returned image before saving it. The strict mechanism-arrow profile must override the default and use `wire_api: images` with `/v1/images/edits`; do not weaken it to Chat Completions. Do not use `responses` for chemistry-preserving redraw unless the relay demonstrably supports image input and image editing through `/v1/responses`; otherwise it can generate a new figure without faithfully editing the source.
+Embed the exact current Stage 6 image in every AI request, accept either SSE or JSON where supported, and validate the returned image before saving it. The mechanism-arrow profile may use the configured `images` or `chat-completions` transport because this deployment does not send an edit mask; both routes must receive the exact source image and strict arrow-only prompt. Do not use `responses` for chemistry-preserving redraw unless the relay demonstrably supports image input and image editing through `/v1/responses`; otherwise it can generate a new figure without faithfully editing the source.
 
 An explicitly configured secondary provider may expose image editing through `/v1/chat/completions`:
 
 ```text
-IMAGE_FALLBACK_BASE_URL=https://www.micuapi.ai/v1
+IMAGE_FALLBACK_BASE_URL=https://your-fallback-image-provider.example/v1
 IMAGE_FALLBACK_WIRE_API=chat-completions
 IMAGE_FALLBACK_MODEL=gpt-image-2
 IMAGE_FALLBACK_API_KEY=<optional; otherwise reuse OPENAI_API_KEY>
@@ -179,6 +183,7 @@ Useful options:
 --output-format
 --style-name
 --edit-profile
+--figure-type
 --force-standard-ai-edit
 --limit
 --dry-run

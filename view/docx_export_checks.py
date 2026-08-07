@@ -54,6 +54,63 @@ class DocxUnicodeCompatibilityChecks(unittest.TestCase):
                     if name.endswith(".xml"):
                         ET.fromstring(archive.read(name))
 
+    def test_spaced_mineru_mathrm_and_mathsf_export(self) -> None:
+        source = (
+            "# Check\n\n"
+            "Carboxylation with { \\mathrm { C O } } _ { 2 }.\n\n"
+            "Product from { \\mathsf { C O } } _ { 2 } { \\mathrm { : } }.\n"
+        )
+        normalized = self.exporter["normalize_mineru_latex"](source)
+        self.assertIn("$\\mathrm{CO}_{2}$", normalized)
+        self.assertIn("$\\mathsf{CO}_{2}$", normalized)
+        self.assertIn("$\\mathrm{:}$", normalized)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            markdown = temp / "mineru.md"
+            output = temp / "mineru.docx"
+            markdown.write_text(source, encoding="utf-8")
+
+            self.exporter["convert"](markdown, output, TEMPLATE)
+
+            self.assertTrue(output.is_file())
+            with ZipFile(output) as archive:
+                document_xml = archive.read("word/document.xml")
+                ET.fromstring(document_xml)
+                self.assertIn(b"CO", document_xml)
+
+    def test_existing_complex_math_formula_is_not_rewritten(self) -> None:
+        existing_formula = (
+            "$\\mathrm { B } ( \\mathrm { C } _ { 6 } \\mathrm { F } _ { 5 } ) _ { 3 } "
+            "{ \\mathsf { C } } 2 { \\bigl ( } \\mathsf { s p } ^ { 2 } { \\bigr ) } "
+            "{ \\mathsf { - C } } 3$"
+        )
+        source = (
+            "# Check\n\n"
+            "Raw { \\mathsf { C O } } _ { 2 } must be normalized.\n\n"
+            f"Existing formula must remain intact: {existing_formula}\n"
+        )
+
+        normalized = self.exporter["normalize_mineru_latex"](source)
+
+        self.assertIn("$\\mathsf{CO}_{2}$", normalized)
+        self.assertEqual(normalized.count(existing_formula), 1)
+        self.assertNotIn("$$\\mathsf{C}$", normalized)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            markdown = temp / "existing-math.md"
+            output = temp / "existing-math.docx"
+            markdown.write_text(source, encoding="utf-8")
+
+            self.exporter["convert"](markdown, output, TEMPLATE)
+
+            self.assertTrue(output.is_file())
+            with ZipFile(output) as archive:
+                for name in archive.namelist():
+                    if name.endswith(".xml"):
+                        ET.fromstring(archive.read(name))
+
 
 if __name__ == "__main__":
     unittest.main()

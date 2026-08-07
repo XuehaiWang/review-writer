@@ -1,0 +1,4 @@
+interface:
+  display_name: "First Draft Feedback Loop"
+  short_description: "Score and iteratively improve review paragraphs"
+  default_prompt: "Use $review-first-draft-feedback-loop to score every first-draft paragraph, rewrite only failed paragraphs, and release the draft when it reaches its configured goal."

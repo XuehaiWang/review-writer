@@ -25,10 +25,8 @@
 /skills/review-export-docx/.deps/
 /skills/mineru-precise-parse-review-writer/config/mineru_api_token.txt
 
-# Local tests and generated test caches are not part of the release package.
-**/tests/
-**/test_*.py
-**/smoke_test_*.py
+# Generated test caches are not part of the release package. Test source files
+# remain trackable so portability and workflow regressions ship with the code.
 **/__pycache__/
 **/*.py[cod]
 **/.pytest_cache/

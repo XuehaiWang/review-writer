@@ -14,7 +14,10 @@ _CORE_ROOT = resolve_review_writer_core_root(anchor=Path(__file__))
 if _CORE_ROOT is not None and str(_CORE_ROOT) not in sys.path:
     sys.path.insert(0, str(_CORE_ROOT))
 
-from review_writer_core.taxonomy import labels_by_category, load_taxonomy_rules  # noqa: E402
+from review_writer_core.taxonomy import (  # noqa: E402
+    labels_by_category,
+    load_validation_taxonomy_rules,
+)
 
 
 BLOCKING_FIELDS = ["paper_id", "slug", "title", "authors", "year", "abstract", "source_paths", "structured_tags"]
@@ -32,7 +35,7 @@ STRUCTURED_TAG_KEYS = [
 
 
 def load_allowed_labels(review_root: Path) -> dict[str, set[str]]:
-    labels = labels_by_category(load_taxonomy_rules(review_root), STRUCTURED_TAG_KEYS)
+    labels = labels_by_category(load_validation_taxonomy_rules(review_root), STRUCTURED_TAG_KEYS)
     return {key: set(values) for key, values in labels.items()}
 
 

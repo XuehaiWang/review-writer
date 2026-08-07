@@ -23,6 +23,7 @@ from typing import Any, Iterable, Mapping, Sequence
 SCHEMA_VERSION = 1
 WORKFLOW_DIRECTORY = ".review-writer"
 WORKFLOW_DATABASE = "workflow.sqlite3"
+MATERIALIZED_STAGE_STATUSES = {"completed", "approved", "needs_human_review"}
 
 
 STAGE_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
@@ -35,7 +36,7 @@ STAGE_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
     "discovery": {
         "depends_on": ("library",),
         "optional_depends_on": (),
-        "inputs": (),
+        "inputs": ("project_config.json",),
         "outputs": (
             "00_discovery/query_plan.draft.json",
             "00_discovery/selected_discovery_results.json",
@@ -115,8 +116,36 @@ STAGE_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
             "04_first_draft/figures/*",
         ),
     },
+    "draft-feedback-loop": {
+        "depends_on": ("draft",),
+        "optional_depends_on": (),
+        # The loop deliberately updates first_draft.md. Keep its immutable
+        # scientific inputs here and track the current draft hash in the gate
+        # status/handoff instead of treating the mutable manuscript as its own
+        # input fingerprint.
+        "inputs": (
+            "02_section_drafting/section_drafts.json",
+            "03_figure_redraw/redrawn_figure_manifest.json",
+        ),
+        "outputs": (
+            "04_first_draft/first_draft.md",
+            "04_first_draft/first_draft_preflight.json",
+            "04_first_draft/rubric_evaluation.json",
+            "04_first_draft/reviewer_findings.json",
+            "04_first_draft/first_draft_gate_status.json",
+            "04_first_draft/first_draft_rewrite_queue.json",
+            "04_first_draft/first_draft_final_polish_queue.json",
+            "04_first_draft/feedback_loop_status.json",
+            "04_first_draft/feedback_loop_rewrites.json",
+            "04_first_draft/feedback_loop/runs/*",
+        ),
+    },
     "final-conclusion": {
         "depends_on": ("draft",),
+        # The quality loop writes back through the existing Draft handoff when
+        # it changes text.  Do not depend on its evaluation-only artifacts,
+        # otherwise merely rescoring an unchanged draft would stale an already
+        # valid conclusion.
         "optional_depends_on": (),
         "inputs": ("04_first_draft/first_draft.md",),
         "outputs": (
@@ -128,6 +157,7 @@ STAGE_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
         "depends_on": ("blueprint",),
         "optional_depends_on": ("draft",),
         "inputs": (
+            "project_config.json",
             "00_discovery/query_plan.draft.json",
             "00_discovery/selected_discovery_results.json",
             "01_matrix_outline/selected_outline.md",
@@ -352,6 +382,20 @@ class WorkflowStore:
         except ValueError:
             return resolved.as_posix()
 
+    def portable_path(self, project_id: str, path: Path) -> str:
+        """Store project artifacts relative to the project root.
+
+        External inputs remain absolute, but normal workflow handoffs can now
+        move with the project directory without retaining the old checkout.
+        """
+        return self.logical_name(project_id, path)
+
+    def resolve_artifact_reference(self, project_id: str, value: str | Path) -> Path:
+        candidate = Path(str(value or ""))
+        if not candidate.is_absolute():
+            candidate = self.project_root(project_id) / candidate
+        return candidate.resolve()
+
     def _artifact_type(self, path: Path) -> str:
         suffix = path.suffix.lower().lstrip(".")
         return suffix or "file"
@@ -502,7 +546,7 @@ class WorkflowStore:
             records.append(
                 {
                     "logical_name": self.logical_name(project_id, resolved),
-                    "path": str(resolved),
+                    "path": self.portable_path(project_id, resolved),
                     "exists": bool(row),
                     "artifact_version_id": str(row["artifact_version_id"]) if row else None,
                     "sha256": str(row["content_sha256"]) if row else None,
@@ -589,7 +633,7 @@ class WorkflowStore:
         output_snapshot: list[dict[str, Any]] = []
         output_fingerprint = ""
         final_status = status
-        if status == "completed":
+        if status in MATERIALIZED_STAGE_STATUSES:
             patterns = STAGE_SPECS.get(stage_id, {}).get("outputs", ())
             output_snapshot = self.capture_paths(
                 project_id,
@@ -632,7 +676,7 @@ class WorkflowStore:
     def set_stage_state(self, project_id: str, stage_id: str, status: str, *, error_message: str = "") -> None:
         self.ensure_project(project_id)
         now = utc_now()
-        if status in {"completed", "approved"}:
+        if status in MATERIALIZED_STAGE_STATUSES:
             input_snapshot = self.stage_input_snapshot(project_id, stage_id)
             output_snapshot = self.capture_paths(
                 project_id,
@@ -654,11 +698,11 @@ class WorkflowStore:
                 ON CONFLICT(project_id, stage_id) DO UPDATE SET
                     status=excluded.status,
                     input_fingerprint=CASE
-                        WHEN excluded.status IN ('completed', 'approved') THEN excluded.input_fingerprint
+                        WHEN excluded.status IN ('completed', 'approved', 'needs_human_review') THEN excluded.input_fingerprint
                         ELSE stage_state.input_fingerprint
                     END,
                     output_fingerprint=CASE
-                        WHEN excluded.status IN ('completed', 'approved') THEN excluded.output_fingerprint
+                        WHEN excluded.status IN ('completed', 'approved', 'needs_human_review') THEN excluded.output_fingerprint
                         ELSE stage_state.output_fingerprint
                     END,
                     error_message=excluded.error_message,
@@ -703,7 +747,7 @@ class WorkflowStore:
             "handoff_id": str(uuid.uuid4()),
             "source_stage": source_stage,
             "generated_at": utc_now(),
-            "source_artifacts": [str(Path(item).resolve()) for item in source_paths],
+            "source_artifacts": [self.portable_path(project_id, Path(item)) for item in source_paths],
             "source_fingerprint": _fingerprint(source_snapshot),
             "source_versions": source_snapshot,
             "output_fingerprint": "",
@@ -749,16 +793,16 @@ class WorkflowStore:
                     if key.startswith("source_")
                     and key not in {"source_stage", "source_fingerprint", "source_versions"}
                     and isinstance(value, str)
-                    and Path(value).is_file()
+                    and self.resolve_artifact_reference(project_id, value).is_file()
                 ]
             source_snapshot = self.capture_paths(
                 project_id,
-                [Path(item) for item in source_paths],
+                [self.resolve_artifact_reference(project_id, item) for item in source_paths],
             )
             payload.update(
                 {
                     "handoff_id": str(payload.get("handoff_id") or uuid.uuid4()),
-                    "source_artifacts": [str(Path(item).resolve()) for item in source_paths],
+                    "source_artifacts": [self.portable_path(project_id, self.resolve_artifact_reference(project_id, item)) for item in source_paths],
                     "source_fingerprint": _fingerprint(source_snapshot),
                     "source_versions": source_snapshot,
                 }
@@ -837,7 +881,7 @@ class WorkflowStore:
             if logical_path is not None and not logical_path.is_absolute():
                 path = (self.project_root(project_id) / logical_path).resolve()
             else:
-                path = Path(str(record.get("path") or "")).resolve()
+                path = self.resolve_artifact_reference(project_id, str(record.get("path") or ""))
             if not path.is_file() or sha256_file(path) != str(record.get("sha256") or ""):
                 outdated_sources.append(str(path))
 
@@ -956,7 +1000,7 @@ class WorkflowStore:
                 (project_id,),
             )]
         for row in rows:
-            if row["status"] not in {"completed", "approved"}:
+            if row["status"] not in MATERIALIZED_STAGE_STATUSES:
                 continue
             current = _fingerprint(self.stage_input_snapshot(project_id, str(row["stage_id"])))
             recorded = str(row.get("input_fingerprint") or "")

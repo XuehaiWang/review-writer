@@ -7,6 +7,7 @@ import os
 import re
 import ssl
 import statistics
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -14,6 +15,22 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+_BOOTSTRAP_ROOT = next(
+    (p for p in Path(__file__).resolve().parents if (p / "review_writer_core").is_dir()),
+    None,
+)
+if _BOOTSTRAP_ROOT is None:
+    raise RuntimeError("Could not locate the Review Writer workspace")
+if str(_BOOTSTRAP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BOOTSTRAP_ROOT))
+
+from review_writer_core.providers import (  # noqa: E402
+    DEFAULT_TEXT_MODEL,
+    DEFAULT_TEXT_WIRE_API,
+    openai_endpoint as _shared_openai_endpoint,
+)
 
 
 STYLE_SCHEMA: dict[str, Any] = {
@@ -178,12 +195,12 @@ def model_configuration(matrix_path: Path, args: argparse.Namespace) -> dict[str
     model = str(args.model or "").strip() or configured_value(
         "REVIEW_REFERENCE_OUTLINE_MODEL",
         dotenv,
-        configured_value("REVIEW_WRITING_MODEL", dotenv, "gpt-5.4"),
+        configured_value("REVIEW_WRITING_MODEL", dotenv, DEFAULT_TEXT_MODEL),
     )
     wire_api = str(args.wire_api or "").strip() or configured_value(
         "REVIEW_REFERENCE_OUTLINE_WIRE_API",
         dotenv,
-        configured_value("REVIEW_WRITING_WIRE_API", dotenv, "chat-completions"),
+        configured_value("REVIEW_WRITING_WIRE_API", dotenv, DEFAULT_TEXT_WIRE_API),
     )
     timeout_text = configured_value("REVIEW_REFERENCE_OUTLINE_TIMEOUT", dotenv, "300")
     try:
@@ -206,9 +223,7 @@ def model_configuration(matrix_path: Path, args: argparse.Namespace) -> dict[str
 
 
 def openai_endpoint(base_url: str, endpoint: str) -> str:
-    base = str(base_url).rstrip("/")
-    prefix = "" if base.casefold().endswith("/v1") else "/v1"
-    return f"{base}{prefix}/{endpoint.lstrip('/')}"
+    return _shared_openai_endpoint(base_url, endpoint)
 
 
 def make_request(url: str, payload: dict[str, Any], api_key: str) -> urllib.request.Request:

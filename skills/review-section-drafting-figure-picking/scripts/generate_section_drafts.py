@@ -18,11 +18,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _review_runtime.paths import resolve_review_root, resolve_review_skills_root
 
 
+_BOOTSTRAP_ROOT = next(
+    (
+        parent
+        for parent in Path(__file__).resolve().parents
+        if (parent / "review_writer_core").is_dir() and (parent / "skills").is_dir()
+    ),
+    None,
+)
+if _BOOTSTRAP_ROOT is None:
+    raise RuntimeError("Could not locate the Review Writer workspace")
+if str(_BOOTSTRAP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BOOTSTRAP_ROOT))
+
+from review_writer_core.providers import (  # noqa: E402
+    DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_TEXT_MODEL,
+    openai_endpoint as _shared_openai_endpoint,
+    resolve_api_key as _shared_resolve_api_key,
+)
+from review_writer_core.text_safety import make_xml_compatible  # noqa: E402
+
+
 def openai_endpoint(base_url: str, endpoint: str) -> str:
     """Accept OpenAI-compatible base URLs with or without a trailing /v1."""
-    base = str(base_url or "https://api.openai.com").rstrip("/")
-    prefix = "" if base.lower().endswith("/v1") else "/v1"
-    return f"{base}{prefix}/{endpoint.lstrip('/')}"
+    return _shared_openai_endpoint(base_url, endpoint)
 
 
 TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -56,24 +76,14 @@ def open_json_response(request: urllib.request.Request, *, label: str, timeout: 
 
 
 def resolve_api_key(cli_value: str, base_url: str, dotenv: dict[str, str] | None = None) -> str:
-    if cli_value:
-        return cli_value
-    values = dotenv or {}
-    dedicated = os.environ.get("REVIEW_WRITING_API_KEY", "") or values.get("REVIEW_WRITING_API_KEY", "")
-    if dedicated:
-        return dedicated
-    if "api.xiaoleai.team" in str(base_url).lower():
-        return (
-            values.get("XIAOLEAI_API_KEY", "")
-            or values.get("OPENAI_API_KEY", "")
-            or os.environ.get("XIAOLEAI_API_KEY", "")
-            or os.environ.get("OPENAI_API_KEY", "")
-        )
-    return (
-        values.get("OPENAI_API_KEY", "")
-        or os.environ.get("OPENAI_API_KEY", "")
-        or values.get("XIAOLEAI_API_KEY", "")
-        or os.environ.get("XIAOLEAI_API_KEY", "")
+    del base_url
+    return _shared_resolve_api_key(
+        cli_value,
+        env_names=(
+            "REVIEW_WRITING_API_KEY",
+            "OPENAI_API_KEY",
+        ),
+        dotenv=dotenv,
     )
 
 
@@ -143,6 +153,44 @@ def load_dotenv(root: Path) -> dict[str, str]:
     return values
 
 
+def load_blueprint_rule_pack(root: Path, blueprint: dict[str, Any]) -> str:
+    """Load the rule pack selected by Blueprint, confined to its skill root."""
+    del root  # skill_root is resolved independently: skills need not live under review_root (e.g. FounDryClaw).
+    skill_root = resolve_review_skills_root(anchor=Path(__file__)) / "review-section-blueprint"
+    skill_root = skill_root.resolve()
+    relative = str(
+        blueprint.get("rule_pack_path")
+        or "references/rule_packs/general"
+    ).strip()
+    candidate = (skill_root / relative).resolve()
+    try:
+        candidate.relative_to(skill_root)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Blueprint rule_pack_path escapes the blueprint skill: {relative}"
+        ) from exc
+    if not candidate.is_dir():
+        fallback = skill_root / "references" / "rule_packs" / "general"
+        if str(blueprint.get("rule_pack") or "") not in {"", "general"}:
+            raise RuntimeError(f"Blueprint rule pack does not exist: {candidate}")
+        candidate = fallback
+    files = sorted(candidate.glob("*.md"))
+    if not files:
+        raise RuntimeError(f"Blueprint rule pack contains no Markdown rules: {candidate}")
+    chunks: list[str] = []
+    remaining = 14000
+    for path in files:
+        text = path.read_text(encoding="utf-8", errors="ignore").strip()
+        if not text:
+            continue
+        chunk = f"\n\n<!-- rule source: {path.name} -->\n{text}"[:remaining]
+        chunks.append(chunk)
+        remaining -= len(chunk)
+        if remaining <= 0:
+            break
+    return "".join(chunks).strip()
+
+
 def value(item: Any) -> Any:
     return item.get("value") if isinstance(item, dict) and "value" in item else item
 
@@ -210,17 +258,7 @@ def repair_model_unicode(value: Any) -> Any:
         repaired,
     )
     repaired = "".join(_KNOWN_TRUNCATED_UNICODE.get(char, char) for char in repaired)
-    return "".join(
-        char
-        if (
-            ord(char) in {0x09, 0x0A, 0x0D}
-            or 0x20 <= ord(char) <= 0xD7FF
-            or 0xE000 <= ord(char) <= 0xFFFD
-            or 0x10000 <= ord(char) <= 0x10FFFF
-        )
-        else "\uFFFD"
-        for char in repaired
-    )
+    return make_xml_compatible(repaired)[0]
 
 
 def call_llm(
@@ -318,7 +356,7 @@ def main() -> int:
         or dotenv.get("REVIEW_WRITING_BASE_URL")
         or dotenv.get("OPENAI_BASE_URL")
         or os.environ.get("OPENAI_BASE_URL")
-        or "https://api.openai.com"
+        or DEFAULT_OPENAI_BASE_URL
     )
     api_key = resolve_api_key(args.api_key, base_url, dotenv)
     if not api_key:
@@ -327,13 +365,13 @@ def main() -> int:
         args.model
         or os.environ.get("REVIEW_WRITING_MODEL")
         or dotenv.get("REVIEW_WRITING_MODEL")
-        or "gpt-5.4"
+        or DEFAULT_TEXT_MODEL
     )
     wire_api = (
         args.wire_api
         or os.environ.get("REVIEW_WRITING_WIRE_API")
         or dotenv.get("REVIEW_WRITING_WIRE_API")
-        or ("chat-completions" if "micuapi.ai" in base_url.lower() else "responses")
+        or "responses"
     )
     project = root / "review-projects" / args.project_id
     stage = project / "02_section_drafting"
@@ -344,16 +382,7 @@ def main() -> int:
     blueprint = read_json(project / "01_matrix_outline" / "section_blueprint.json")
     selected_outline_path = project / "01_matrix_outline" / "selected_outline.md"
     selected_outline = selected_outline_path.read_text(encoding="utf-8", errors="ignore")[:12000] if selected_outline_path.exists() else ""
-    rule_pack_path = str(blueprint.get("rule_pack_path") or "references/rule_packs/allenation")
-    skills_root = resolve_review_skills_root(anchor=Path(__file__))
-    rule_path = skills_root / "review-section-blueprint" / rule_pack_path / "organic-review-style.md"
-    if not rule_path.is_file():
-        raise SystemExit(
-            f"Writing-style rule pack file not found: {rule_path}\n"
-            "Check section_blueprint.json.rule_pack_path and the review-section-blueprint "
-            "skill's references/rule_packs/ layout."
-        )
-    rules = rule_path.read_text(encoding="utf-8", errors="ignore")[:14000]
+    rules = load_blueprint_rule_pack(root, blueprint)
     section_specs = {str(item.get("section_id")): item for item in blueprint.get("sections", []) if isinstance(item, dict)}
     paper_order = [str(pid) for task in tasks for pid in task.get("allowed_papers", []) if str(pid) in rows]
     citation_map = {paper_id: index for index, paper_id in enumerate(dict.fromkeys(paper_order), start=1)}
@@ -368,7 +397,7 @@ def main() -> int:
         if not evidence or not any(item["evidence"] for item in evidence):
             raise SystemExit(f"No usable MinerU Markdown or matrix evidence for {section_id}.")
         spec = section_specs.get(section_id, {})
-        prompt = f"""Write one body section of a source-grounded organic-chemistry review.
+        prompt = f"""Write one body section of a source-grounded scientific review.
 
 Topic: {blueprint.get('review_topic') or project.name}
 Selected review outline (preserve its ordering and heading intent):
@@ -468,7 +497,9 @@ Source evidence (only use claims supported here):\n{json.dumps(evidence, ensure_
 
         # Append a numbered References section using the same global citation_map
         # used for inline [n] callouts, so this Hard Output Requirement is satisfied
-        # without a separate manual pass.
+        # without a separate manual pass. merge_polish_draft.py's
+        # split_body_and_reference_entries() parses this per-section block back out
+        # to build the final consolidated References section and citations.json.
         markdown.extend(["", "## References", ""])
         for paper_id in allowed:
             ref_fields = load_paper_reference_fields(root, paper_id)
@@ -480,7 +511,7 @@ Source evidence (only use claims supported here):\n{json.dumps(evidence, ensure_
             title = str(rows[paper_id].get("title") or paper_id).strip()
             markdown.append(f"[{citation_map[paper_id]}] {author_str} {title}{tail} ({year}). [{paper_id}]")
 
-        section_text = "\n".join(markdown).strip() + "\n"
+        section_text = make_xml_compatible("\n".join(markdown).strip() + "\n")[0]
         (sections_dir / f"{section_id}.md").write_text(section_text, encoding="utf-8")
         output_sections.append({"section_id": section_id, "heading": task.get("heading"), "overview": overview, "paragraphs": paragraphs, "draft_md": section_text})
     write_json(stage / "section_drafts.json", {"project_id": args.project_id, "sections": output_sections})

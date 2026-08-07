@@ -449,6 +449,73 @@ class FinalStageActionTests(unittest.TestCase):
         authors = ["Bingyu Shen", "<sup>[", "</sup> <sup>]</sup> Aimei Yang"]
         self.assertEqual(dashboard.clean_reference_author_text(authors), "Bingyu Shen, Aimei Yang")
 
+    def test_reference_render_with_missing_authors_has_no_orphan_period(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir)
+            matrix = project / "01_matrix_outline"
+            matrix.mkdir(parents=True)
+            (matrix / "literature_matrix.json").write_text(
+                json.dumps(
+                    {
+                        "rows": [
+                            {
+                                "paper_id": "P004",
+                                "authors": [],
+                                "title": "Reference without imported authors",
+                                "journal": "Example Journal",
+                                "year": 2024,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            rendered = dashboard.render_reference_section(
+                project,
+                [{"callout": 4, "paper_id": "P004"}],
+            )
+
+            self.assertIn("[4] Reference without imported authors.", rendered)
+            self.assertNotIn("[4].", rendered)
+
+    def test_reference_render_repairs_xml_incompatible_extractor_separator(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir)
+            matrix = project / "01_matrix_outline"
+            matrix.mkdir(parents=True)
+            (matrix / "literature_matrix.json").write_text(
+                json.dumps(
+                    {
+                        "rows": [
+                            {
+                                "paper_id": "P095",
+                                "authors": ["Example Author"],
+                                "title": "Ruthenium-Catalyzed C\x00 H Activation",
+                                "journal": "Example Journal",
+                                "year": 2023,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            rendered = dashboard.render_reference_section(
+                project,
+                [{"callout": 1, "paper_id": "P095"}],
+            )
+
+            self.assertNotIn("\x00", rendered)
+            self.assertIn("C–H Activation", rendered)
+
+            repaired_body = dashboard.replace_reference_section(
+                "# Review\n\nRuthenium-Catalyzed C\uFFFD H Activation.\n",
+                rendered,
+            )
+            self.assertNotIn("\uFFFD", repaired_body)
+            self.assertIn("C–H Activation", repaired_body)
+
     def test_reference_cleanup_never_crosses_into_the_next_entry(self) -> None:
         markdown = (
             "# Review\n\n## References\n\n"

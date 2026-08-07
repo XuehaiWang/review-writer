@@ -12,12 +12,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _review_runtime.paths import resolve_review_root
 
 
+_BOOTSTRAP_ROOT = next(
+    (parent for parent in Path(__file__).resolve().parents if (parent / "review_writer_core").is_dir()),
+    None,
+)
+if _BOOTSTRAP_ROOT is None:
+    raise RuntimeError("Could not locate the Review Writer workspace")
+if str(_BOOTSTRAP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BOOTSTRAP_ROOT))
+
+from review_writer_core.text_safety import incompatible_character_count  # noqa: E402
+
+
 PLACEHOLDER_RE = re.compile(
     r"\b(TODO|TBD|citation needed|verify|verification needed|check this|fixme|待核查|需要核查|未确认)\b",
     re.I,
 )
 REF_CALLOUT_RE = re.compile(r"\[(\d+(?:\s*[-,]\s*\d+)*)\]")
-REF_ITEM_RE = re.compile(r"^\s*(?:\[(\d+)\]|\d+\.)\s+", re.M)
+# Accept the canonical `[n] Reference` form, legacy empty-author output such
+# as `[n]. Reference`, and conventional `n. Reference` lists.  Two capture
+# groups keep the actual reference number available for every accepted form.
+REF_ITEM_RE = re.compile(r"^\s*(?:\[(\d+)\]\s*\.?|(\d+)\.)\s+\S", re.M)
 IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.M)
 
@@ -40,6 +55,11 @@ def expand_ref_callouts(text: str) -> set[int]:
     return refs
 
 
+def reference_item_number(match: re.Match[str]) -> int | None:
+    raw = match.group(1) or match.group(2)
+    return int(raw) if raw else None
+
+
 REFERENCES_HEADING_RE = re.compile(
     r"^\s*#{1,6}\s*(references|reference list|bibliography|cited literature|参考文献)\s*$",
     re.I | re.M,
@@ -51,7 +71,7 @@ def detect_references_section(text: str) -> dict[str, Any]:
     if not match:
         return {"present": False, "start_line": None, "item_count": 0}
     tail = text[match.end():]
-    items = [m for m in REF_ITEM_RE.finditer(tail) if m.group(1) is not None or m.group(0).strip()]
+    items = list(REF_ITEM_RE.finditer(tail))
     return {
         "present": True,
         "start_line": text[: match.start()].count("\n") + 1,
@@ -64,6 +84,7 @@ def scan_draft(project: Path) -> dict[str, Any]:
     first_path = project / "04_first_draft" / "first_draft.md"
     draft = final_path if final_path.exists() else first_path
     text = read_text(draft) if draft.exists() else ""
+    invalid_control_character_count = incompatible_character_count(text)
     target = "final_draft" if draft == final_path and final_path.exists() else "first_draft"
     headings = [{"level": len(m.group(1)), "title": m.group(2).strip()} for m in HEADING_RE.finditer(text)]
     duplicate_headings = sorted(
@@ -75,7 +96,13 @@ def scan_draft(project: Path) -> dict[str, Any]:
         if PLACEHOLDER_RE.search(line)
     ]
     called_refs = sorted(expand_ref_callouts(text))
-    listed_refs = sorted({int(m.group(1)) for m in REF_ITEM_RE.finditer(text) if m.group(1)})
+    listed_refs = sorted(
+        {
+            number
+            for match in REF_ITEM_RE.finditer(text)
+            if (number := reference_item_number(match)) is not None
+        }
+    )
     missing_listed_refs = [r for r in called_refs if listed_refs and r not in listed_refs]
     uncalled_listed_refs = [r for r in listed_refs if r not in called_refs]
     image_paths = [m.group(1) for m in IMAGE_RE.finditer(text)]
@@ -152,6 +179,9 @@ def scan_draft(project: Path) -> dict[str, Any]:
     if placeholder_hits:
         issues.append("placeholder_or_verification_notes_present")
         blocking_issues.append("placeholder_or_verification_notes_present")
+    if invalid_control_character_count:
+        issues.append("xml_incompatible_control_characters_present")
+        blocking_issues.append("xml_incompatible_control_characters_present")
     if duplicate_headings:
         issues.append("duplicate_headings")
     if empty_heading_titles:
@@ -197,6 +227,7 @@ def scan_draft(project: Path) -> dict[str, Any]:
         "duplicate_headings": duplicate_headings,
         "heading_jumps": heading_jumps,
         "placeholder_hits": placeholder_hits,
+        "invalid_control_character_count": invalid_control_character_count,
         "reference_callouts": called_refs,
         "reference_list_items": listed_refs,
         "missing_listed_refs": missing_listed_refs,

@@ -143,6 +143,27 @@ class LogicIntegrityChecks(unittest.TestCase):
             self.assertEqual(scan["unknown_cited_papers"], ["P999"])
             self.assertIn("citations_reference_unknown_papers", scan["issues"])
 
+    def test_final_audit_accepts_legacy_empty_author_reference_format(self) -> None:
+        module = runpy.run_path(str(AUDIT_SCRIPT))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir)
+            final = project / "05_final_audit"
+            final.mkdir(parents=True)
+            (final / "final_draft.md").write_text(
+                "# Review\n\nBody [4].\n\n## References\n\n[4]. Reference without imported authors.\n",
+                encoding="utf-8",
+            )
+            (project / "03_figure_redraw").mkdir(parents=True)
+            (project / "03_figure_redraw" / "skip_reason.md").write_text(
+                "User approved a text-only review.", encoding="utf-8"
+            )
+
+            scan = module["scan_draft"](project)
+
+            self.assertEqual(scan["reference_list_items"], [4])
+            self.assertEqual(scan["missing_listed_refs"], [])
+            self.assertNotIn("reference_callouts_missing_from_reference_list", scan["issues"])
+
     def test_full_scope_overview_chart_satisfies_project_status(self) -> None:
         module = runpy.run_path(str(STATUS_SCRIPT))
         with tempfile.TemporaryDirectory() as temp_dir:

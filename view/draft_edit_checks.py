@@ -75,6 +75,21 @@ class DraftEditChecks(unittest.TestCase):
         self.assertIn('window.reviewDraftSaveForHandoff', ui)
         self.assertIn("window.reviewDraftSaveForHandoff = () => saveDraft({silent:true})", draft_page)
 
+    def test_draft_editor_uses_the_light_project_surface(self) -> None:
+        draft_page = (Path(__file__).parent / "assets" / "dashboard" / "draft.html").read_text(
+            encoding="utf-8"
+        )
+        shared_styles = (
+            Path(__file__).parent / "assets" / "dashboard" / "review-ui.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('id="edit" class="edit-pane"', draft_page)
+        self.assertIn("background: #fffdf7;", draft_page)
+        self.assertIn("border-color: var(--green);", draft_page)
+        self.assertNotIn("background: #181d1a;", draft_page)
+        self.assertIn(".page-draft textarea.editor", shared_styles)
+        self.assertNotIn("#151a16", shared_styles)
+
     def test_paragraph_edit_preserves_canonical_citation_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

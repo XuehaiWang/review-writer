@@ -33,6 +33,35 @@ class RepositoryHygieneChecks(unittest.TestCase):
         self.assertIn('else review_root / "mineru-outputs"', script)
         self.assertNotIn('review_root / "review-library" / "mineru-outputs"', script)
 
+    def test_runtime_secrets_are_not_stored_inside_skills(self) -> None:
+        token_file = (
+            ROOT
+            / "skills"
+            / "mineru-precise-parse-review-writer"
+            / "config"
+            / "mineru_api_token.txt"
+        )
+        parser = (
+            ROOT
+            / "skills"
+            / "mineru-precise-parse-review-writer"
+            / "scripts"
+            / "parse_review_writer_pdfs.py"
+        ).read_text(encoding="utf-8")
+        self.assertFalse(token_file.exists())
+        self.assertNotIn("mineru_api_token.txt", parser)
+
+    def test_dashboard_pages_do_not_patch_core_render_functions_at_runtime(self) -> None:
+        assignments = re.compile(
+            r"(?m)^\s*(?:render|renderMain|renderList|renderSummary|matchRedrawn|"
+            r"outputPath|rejectedPreviewPath|svgEditorMarkup|svgEditorUndo|"
+            r"bindSvgEditorInteractions|saveSvgEditor|svgEditorDocument|"
+            r"renderSvgEditorOperations|loadSvgEditorAudit)\s*=\s*(?:async\s+)?function"
+        )
+        for name in ("figures.html", "final.html"):
+            text = (ROOT / "view" / "assets" / "dashboard" / name).read_text(encoding="utf-8")
+            self.assertIsNone(assignments.search(text), name)
+
 
 if __name__ == "__main__":
     unittest.main()
