@@ -1,96 +1,100 @@
 # Review Writer
 
-Review Writer 是一个面向化学综述写作的本地、可审计工作流。它把论文入库、主题检索、文献矩阵、章节规划、分节写作、化学图像审核与重绘、初稿合并、终稿审计和 Word 导出连接成同一个项目流程。
+Review Writer 是一个面向化学综述写作的本地、可审计工作流。它把论文入库、主题检索、文献矩阵、大纲与章节蓝图、分节写作、化学图像审核与重绘、初稿编辑、逐段质量反馈、终稿审计和 Word 导出连接成一个可恢复的九阶段流程。
 
-当前实现以三个基础层保证阶段之间稳定衔接：
+当前 `dy` 分支的核心设计是：
 
-1. **持久状态**：SQLite 保存阶段运行、人工放行、失败记录和可恢复批处理进度。
-2. **产物版本**：每个文件按 SHA-256 登记不可变版本，并维护当前版本指针。
-3. **明确依赖**：输出记录它所依赖的输入版本；上游变化后，下游会被标记为过期。
-
-Prefect 3 负责可执行阶段的编排、运行记录和有限重试，科学正文与图片仍以普通文件保存，便于检查、复制和归档。
+- **科学产物保存在普通文件中**：Markdown、JSON、PNG、SVG 和 DOCX 可以直接检查、备份和迁移。
+- **运行状态持久化到 SQLite**：页面切换或服务重启后，阶段状态、重绘进度和失败记录不会丢失。
+- **产物按 SHA-256 版本化**：上游内容变化时，下游旧产物会被标记为过期，避免混用旧图、旧草稿或旧 Word。
+- **阶段依赖显式声明**：每个阶段都从当前有效的上一阶段产物读取，而不是凭文件是否存在猜测。
+- **Prefect 3 负责编排**：记录 flow/task 运行并处理有限的瞬时故障重试；正文和图片不存入 Prefect 数据库。
 
 ## 工作流总览
 
 ```mermaid
 flowchart LR
-    A["Library<br/>PDF、Markdown、metadata"] --> B["Discovery<br/>主题检索与人工筛选"]
-    B --> C["Matrix<br/>文献矩阵与大纲"]
-    C --> D["Blueprint<br/>章节论证蓝图"]
-    D --> E["Sections<br/>分节草稿与候选图"]
-    E --> F["Figure Review<br/>逐篇确认源图"]
-    F --> G["Figures<br/>AI 重绘与 SVG 编辑"]
-    E --> H["Draft<br/>初稿合并"]
+    A["1 Library<br/>PDF、MinerU、metadata"] --> B["2 Discovery<br/>项目、检索与筛选"]
+    B --> C["3 Matrix<br/>深读、矩阵与大纲"]
+    C --> D["4 Blueprint<br/>章节论证与任务"]
+    D --> E["5 Sections<br/>分节草稿与候选图"]
+    E --> F["6 Figure Review<br/>逐篇确认源图"]
+    F --> G["7 Figures<br/>AI 重绘与 SVG 编辑"]
+    E --> H["8 Draft<br/>合并、插图与段落编辑"]
     G --> H
-    H --> I["Final<br/>终稿、审计与 DOCX"]
+    H --> I["9 Final<br/>反馈、终稿、审计与 DOCX"]
     D -. 可选 .-> J["Overview Figure"]
     H -. 可选 .-> K["Conclusion"]
-    J -. 合并当前版本 .-> I
-    K -. 合并当前版本 .-> I
+    J -. 当前版本 .-> I
+    K -. 当前版本 .-> I
 ```
 
-人工检查页面按以下顺序排列：
+页面顺序固定为：
 
 ```text
-Library -> Discovery -> Matrix -> Blueprint -> Sections
-        -> Figure Review -> Figures -> Draft -> Final
+Library → Discovery → Matrix → Blueprint → Sections
+        → Figure Review → Figures → Draft → Final
 ```
 
-## 主要能力
+## 九个阶段分别做什么
 
-- **全局中英文界面**
-  - 顶部语言切换器覆盖九个阶段，选择结果保存在浏览器并跨页面保持。
-  - 仅翻译系统控件和运行状态，不改写论文正文、Markdown、JSON 或化学内容。
-- **论文入库与结构化 metadata**
-  - 管理 PDF、MinerU Markdown、图片和论文注册表。
-  - Library 支持一次选择最多 30 个本地 PDF；逐篇校验、按 SHA-256 去重、
-    提取全文并生成统一的 `Pxxx` metadata 与 Markdown。
-  - 可检索文本 PDF 会立即供 Discovery 召回和 Sections 内容生成使用；
-    扫描版 PDF 会登记入库并提示后续 OCR。
-  - 审核标题、作者、摘要、路径及 8 类化学标签。
-- **联网发现与开放获取下载**
-  - 按主题检索 Crossref。
-  - 结合 Europe PMC、Semantic Scholar 和可选的 Unpaywall 寻找开放获取 PDF。
-  - 在 Library 弹窗内填写主题、年份、数量和可选联系邮箱。
-  - 下载文件先校验 PDF，再登记到本地文献库；不会把 HTML 错误页当作论文。
-- **可审计的主题检索**
-  - 先生成结构化 query plan，再检索本地 metadata 和可选外部来源。
-  - 支持缩写消歧、时间范围、化学概念、反应类型和组织方式。
-  - 人工确认关键词与论文后，才允许进入矩阵阶段。
-- **矩阵、蓝图与分节写作**
-  - 生成逐篇阅读记录、文献矩阵、大纲候选和选定大纲。
-  - 将章节目标、论点、论文角色、逻辑关系和图表需求固化为 blueprint。
-  - 分节草稿与候选图绑定，保留来源关系。
-- **化学图像工作流**
-  - Figure Review 先逐篇选择最终源图，再进入批量重绘。
-  - AI 重绘根据图像类型选择约束，批量进度和停止状态可恢复。
-  - 支持使用原图或 AI 重绘图作为在线 SVG 编辑底图。
-  - 全图转换为可编辑 SVG 路径，支持选择、框选、移动、删除、撤销、
-    橡皮擦、文本、直线和多种箭头。
-  - 保存后的人工编辑会更新重绘 manifest，并同步到已有初稿/终稿图片。
-- **终稿与 Word 导出**
-  - 第九阶段提供可选的 Draft Quality 循环：按统一 rubric 评估全文及每个段落，
-    仅重写未达标段落，并保护引用、数值和立体化学信息。
-  - 质量循环通过 Stage-8 覆盖层保存，不修改分节草稿；不运行它也不会阻断原有终稿功能。
-  - Conclusion 和 Overview Figure 是相互独立的可选产物。
-  - Generate Final Draft 使用当时存在且为当前版本的可选产物，不强制串行点击。
-  - 终稿统一图号及正文引用，清理内部插图标记和异常引用标签。
-  - `Generate & Download Word` 根据当前 `final_draft.md` 重新生成 DOCX；
-    `Download DOCX` 只下载已经确认与当前 Markdown 一致的最新文件。
-
-## 阶段与主要产物
-
-| 页面 | 作用 | 主要产物 |
+| 阶段 | 主要操作 | 主要产物 |
 |---|---|---|
-| Library | 本地批量 PDF 入库、metadata 审核、联网检索和 OA 下载 | `review-library/uploads/Pxxx.{pdf,md}`、`review-library/metadata/papers/*.metadata.json`、`review-library/registry/papers.jsonl` |
-| Discovery | 主题解析、候选召回、人工筛选 | `00_discovery/query_plan.draft.json`、`selected_discovery_results.json` |
-| Matrix | 深读、矩阵、大纲候选与大纲选择 | `01_matrix_outline/literature_matrix.json`、`paper_reading_notes.json`、`selected_outline.md` |
-| Blueprint | 章节论证计划和写作任务 | `01_matrix_outline/section_blueprint.json`、`02_section_drafting/section_tasks.json` |
-| Sections | 分节草稿和图像候选 | `section_drafts.json`、`section_drafts.md`、`figure_candidates.json` |
-| Figure Review | 逐篇确认最终源图 | `02_section_drafting/human_figure_review.json` |
-| Figures | AI 重绘、人工 SVG 编辑和图片清单 | `03_figure_redraw/redrawn_figure_manifest.json`、`redrawn/*.png`、`manual_arrow_edits/*.svg` |
-| Draft | 合并、润色、插图和引用整理 | `04_first_draft/first_draft.md`、`citations.json`、`figures/*` |
-| Final | 可选逐段质量循环、可选结论/总览图、最终审计和 Word 导出 | `04_first_draft/feedback_loop_status.json`、`rubric_evaluation.json`、`05_final_audit/final_draft.md`、`overview_figure.png`、`release_report.md`、`final_draft*.docx` |
+| 1. Library | 批量上传本地 PDF、调用 MinerU、审核 metadata；也可检索并下载合法开放获取论文 | `review-library/uploads/`、`review-library/metadata/papers/`、`review-library/registry/papers.jsonl` |
+| 2. Discovery | 创建项目、生成检索计划、召回本地文献、人工删除或确认候选论文 | `00_discovery/query_plan.draft.json`、`selected_discovery_results.json`、`human_check_state.json` |
+| 3. Matrix | 生成逐篇阅读记录、文献矩阵；选择内置大纲或上传参考综述并仅提取其结构与写法 | `01_matrix_outline/literature_matrix.json`、`paper_reading_notes.json`、`selected_outline.md` |
+| 4. Blueprint | 把选定大纲转成章节目标、论点、论文角色、图像需求和写作任务 | `01_matrix_outline/section_blueprint.json`、`02_section_drafting/section_tasks.json` |
+| 5. Sections | 按 Blueprint 和当前论文集合生成分节草稿，并从 MinerU 内容建立候选图 | `section_drafts.json`、`section_drafts.md`、`figure_candidates.json`、`paper_figure_candidates.json` |
+| 6. Figure Review | 逐篇检查候选图，选择真正进入重绘的源图 | `02_section_drafting/human_figure_review.json` |
+| 7. Figures | 按图像类型 AI 重绘、批量重绘、人工放行、在线 SVG/Ketcher 编辑 | `03_figure_redraw/redrawn_figure_manifest.json`、`redrawn/*.png`、`manual_arrow_edits/*.svg` |
+| 8. Draft | 合并分节草稿、插入当前审核图、整理引用；支持段落级人工编辑 | `04_first_draft/first_draft.md`、`citations.json`、`figures/` |
+| 9. Final | 可选逐段评估优化、可选结论、可选总览图；生成终稿、审计并导出 Word | `05_final_audit/final_draft.md`、`overview_figure.png`、审计报告、`final_draft*.docx` |
+
+## 当前主要能力
+
+### 文献库与 MinerU
+
+- Library 只负责共享文献库的入库和阅览；项目从 Discovery 阶段创建。
+- 支持一次批量选择最多 30 个本地 PDF，并按文件 SHA-256 去重。
+- 本地上传必须完成 MinerU 精确解析，取得 Markdown、图片目录和有效的 `content_list.json`，才会正式写入 Library。
+- MinerU 解析不完整或超时的 PDF 不会以“半入库”状态进入后续检索和写作。
+- 每篇论文使用稳定的 `Pxxx` ID，metadata、PDF、Markdown、MinerU 图片和原始上传名保持关联。
+- Discovery 检索和 Sections 写作统一使用已经入库的规范化 metadata 与 MinerU 全文。
+- 联网获取支持 Crossref 检索，并结合 Europe PMC、Semantic Scholar 和可选 Unpaywall 查找开放获取来源；不会绕过付费墙、验证码或访问控制。
+
+### 大纲、Blueprint 与写作
+
+- 第三阶段可选择内置结构，也可上传参考综述。
+- 参考综述只用于提取标题层级、章节组织、篇幅分配和论述方式；主题专有标题会被拒绝或改写，不直接复制参考综述内容。
+- Blueprint 固化每一节的写作目标、论点、论文分配、证据角色和图像需求。
+- Sections 只读取当前 Blueprint 和当前选中论文；Blueprint 更新后，旧章节草稿仍保留在磁盘，但不会被当成当前流程内容。
+- 第八阶段人工编辑会保存为当前 Draft，并通过内容哈希进入第九阶段，而不是被旧的自动草稿覆盖。
+
+### 化学图像重绘与在线编辑
+
+- 第六阶段的源图选择是第七阶段的唯一重绘来源；选择改变后，旧重绘会失效并要求重新生成。
+- 共享路由器会识别机理/循环、反应式、底物范围、表格、曲线图、多面板、低清晰度和彩色化学图等类型，也允许人工指定类型。
+- AI 请求始终携带当前源图；source hash 和 output hash 会写入 manifest，防止历史候选图串用。
+- 彩色化学图会要求去除不必要填充，同时保留苯环、化学键、文字、符号和圆球内标签。
+- 机理箭头模式要求保留所有箭头的数量、方向、颜色和连接关系，并把弧形流程箭头改为直线或直角折线。
+- 机理图编辑不使用 OCR 驱动重绘；普通 AI 编辑可把 OCR 作为辅助完整性检查，但 OCR 不替代化学结构审核。
+- 自动完整性检查未通过时，生成结果仍可作为预览保存；必须由人工审核放行后才能进入正文。
+- 批量任务的 `queued`、`running`、`retrying`、`completed`、`failed` 和停止状态写入持久状态，切换 Scheme 或页面后仍可看到。
+- 在线 SVG 编辑可选择原图或 AI 图作为底图，支持全图矢量化、选择、框选、移动、删除、撤销、橡皮擦、文本、直线、直角箭头、圆弧箭头和 Ketcher 化学结构。
+- SVG 保存会更新当前重绘产物并立即刷新页面；画布尺寸差异会按底图坐标换算，不要求用户手动匹配像素尺寸。
+
+> AI 重绘不能代替人工化学审核。进入 Draft 前仍应逐项检查化学键、原子、立体化学、箭头方向、上下标、电荷和文字。
+
+### Draft、Final 与 Word
+
+- 第八阶段可以直接编辑段落，保存后更新 Draft handoff 和内容哈希。
+- 第九阶段的 Draft Quality Feedback Loop 是可选操作：按 rubric 评估全文与每个段落，只改写未达标段落，并尽量保护引用、数值和化学信息。
+- Conclusion、Overview Figure 和 Generate Final Draft 相互独立；生成终稿时使用当时存在且仍为当前版本的可选产物，不要求按按钮顺序依次执行。
+- Overview Figure 使用 Settings 中同一套图像服务配置，并按服务商支持情况协商画布尺寸。
+- Final 会重新排列图号并同步正文引用，清理内部插图注释，核对正文 callout 与 References 的对应关系。
+- 最终审计会阻止空 References、缺失引用、失效图片、XML 非法控制字符和未处理的 MinerU LaTeX 等问题进入发布文件。
+- **Generate & Download Word** 从当前 `final_draft.md` 重新生成 DOCX，并记录源 Markdown 的 SHA-256。
+- **Download DOCX** 只下载已经存在且哈希仍与当前终稿一致的 Word；终稿改变后会提示重新生成。
 
 ## 快速开始
 
@@ -101,7 +105,9 @@ git clone --branch dy https://github.com/XuehaiWang/review-writer.git
 Set-Location review-writer
 ```
 
-### 2. 创建工作环境
+### 2. 创建 Python 环境
+
+建议使用 Python 3.11 或更新版本，并始终用同一个虚拟环境启动前端和执行依赖安装：
 
 ```powershell
 py -m venv .venv
@@ -109,58 +115,9 @@ py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-workflow.txt
 ```
 
-`requirements-workflow.txt` 包含当前前端工作流所需的 Prefect、Pillow、Requests、
-python-docx 和 pypdf。个别准备阶段还可能需要其对应 Skill 文档中列出的外部程序，
-例如 MinerU 或 Tesseract。
+`requirements-workflow.txt` 当前包含 Prefect 3、Pillow、Requests、python-docx 和 pypdf。
 
-### 3. 配置 `.env`
-
-推荐启动前端后打开 `http://127.0.0.1:8765/settings`，在“API 服务商设置”中
-填写 MinerU 密钥、文本 API 和图像 API。该页面把密钥保存在 Git 忽略的
-`.review-writer/provider-settings.json`，读取时只向浏览器返回掩码；保存后会立即
-应用到新启动的任务。每次执行阶段脚本时都会重新合并当前工作区的 `.env` 与本地
-设置，并显式传给子进程，因此不依赖启动前端时所在终端的临时环境变量。设置按
-项目目录隔离；复制到新的部署目录后，需要在新目录对应的设置页中重新保存一次。
-
-也可以继续通过项目根目录的 `.env` 手动配置。若两者同时存在，本地设置页保存的
-值优先：
-
-在项目根目录创建 `.env`。下面仅为变量结构示例，请填写自己的服务地址、
-模型名和密钥：
-
-```dotenv
-# 文本模型：OpenAI 或兼容服务
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_API_KEY=replace-with-your-key
-REVIEW_METADATA_MODEL=your-text-model
-REVIEW_WRITING_MODEL=your-text-model
-REVIEW_CONCLUSION_MODEL=your-text-model
-
-# 图像编辑可与文本模型使用不同令牌和传输接口
-IMAGE_OPENAI_BASE_URL=https://your-image-provider.example/v1
-IMAGE_OPENAI_WIRE_API=chat-completions
-IMAGE_OPENAI_API_KEY=replace-with-your-vip_2_image-key
-# 可选：按服务商实际支持范围设置，逗号分隔，避免尝试无效尺寸
-IMAGE_SUPPORTED_SIZES=1024x1024,1536x1024
-
-# 可选：文献服务与本地 OCR
-UNPAYWALL_EMAIL=you@example.org
-SEMANTIC_SCHOLAR_API_KEY=
-MINERU_API_TOKEN=
-TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
-```
-
-注意：
-
-- `.env` 已被 Git 忽略，不要把真实密钥写入 README、提交记录或截图。
-- 文本服务需要兼容项目所调用的 `chat/completions` 或 `responses` 接口。
-- 标准 AI 重绘按 `IMAGE_OPENAI_WIRE_API` 使用 `images/edits` 或
-  `chat/completions`，并把当前 Stage 6 源图随请求发送。严格机理箭头编辑固定使用
-  `images/edits`，因为它不能降低为普通聊天图像通道。
-- MinerU 令牌只从设置页或 `MINERU_API_TOKEN` 读取；不要在 Skill 目录中保存令牌文件。
-- Unpaywall 邮箱不是下载的强制条件；未填写时仍会尝试其他合法开放获取来源。
-
-### 4. 启动本地前端
+### 3. 启动前端
 
 ```powershell
 .\.venv\Scripts\python.exe view\serve_review_dashboard.py `
@@ -169,13 +126,223 @@ TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
   --port 8765
 ```
 
-浏览器打开：
+打开：
+
+- 工作台：<http://127.0.0.1:8765/>
+- API 设置：<http://127.0.0.1:8765/settings>
+
+若提示 Prefect 未安装，通常是启动前端时用了系统 Python。请重新使用 `.venv\Scripts\python.exe` 启动。
+
+## API 设置
+
+推荐在网页的 **API Settings** 中配置，而不是直接编辑代码。设置页包含：
+
+- MinerU API token；
+- 文本 API URL、key、模型和 wire API；
+- 图像 API URL、key、模型和 wire API。
+
+设置保存到当前工作区的：
 
 ```text
-http://127.0.0.1:8765
+.review-writer/provider-settings.json
 ```
 
-如需在可信局域网内临时访问，可设置访问令牌后将 `--host` 改为 `0.0.0.0`：
+该文件和 `.env` 都不会提交到 Git。浏览器重新进入设置页时会显示 URL、模型、接口类型和密钥掩码；空着密钥框再次保存表示保留已有 key，而不是清除。
+
+运行子进程的配置合并优先级是：
+
+```text
+启动进程环境 < 项目根目录 .env < Settings 页面保存值
+```
+
+也可以在根目录创建 `.env`。以下只展示变量结构，禁止把真实 key 提交到 Git：
+
+```dotenv
+# 文本模型
+OPENAI_BASE_URL=https://your-text-provider.example/v1
+OPENAI_API_KEY=replace-with-your-key
+REVIEW_WRITING_BASE_URL=https://your-text-provider.example/v1
+REVIEW_WRITING_MODEL=your-text-model
+REVIEW_WRITING_WIRE_API=chat-completions
+
+# 图像模型；可以与文本模型使用不同服务商和密钥
+IMAGE_OPENAI_BASE_URL=https://your-image-provider.example/v1
+IMAGE_OPENAI_API_KEY=replace-with-your-image-key
+IMAGE_OPENAI_MODEL=your-image-model
+IMAGE_OPENAI_WIRE_API=images
+
+# MinerU
+MINERU_API_TOKEN=replace-with-your-mineru-token
+
+# 可选开放获取服务
+UNPAYWALL_EMAIL=you@example.org
+SEMANTIC_SCHOLAR_API_KEY=
+```
+
+支持的文本 wire API 为 `chat-completions` 和 `responses`；支持的图像 wire API 为 `images` 和 `chat-completions`。兼容服务必须真的在响应中返回图像，仅返回 `choices` 但没有图片数据时，项目会明确报告“response did not contain an image”。
+
+高级兼容项：
+
+```dotenv
+# 某些图像服务要求 multipart 字段使用 image[]
+IMAGE_OPENAI_FIELD=image[]
+
+# 已知只支持方形输出的服务商可跳过横向尺寸尝试
+OVERVIEW_PROVIDER_SQUARE_ONLY=true
+
+# 运行时数量限制
+REVIEW_MAX_DISCOVERY_PAPERS=30
+REVIEW_MAX_LITERATURE_BATCH=30
+```
+
+## 数据、状态与版本
+
+### 本地科学产物
+
+```text
+review-library/
+├─ uploads/                  本地上传 PDF 与规范化 MinerU 结果
+├─ downloads/                联网获取的 PDF
+├─ metadata/papers/          规范化论文 metadata
+└─ registry/papers.jsonl     论文注册表
+
+review-projects/<project-id>/
+├─ project_config.json
+├─ 00_discovery/
+├─ 01_matrix_outline/
+├─ 02_section_drafting/
+├─ 03_figure_redraw/
+├─ 04_first_draft/
+└─ 05_final_audit/
+```
+
+这些是用户运行数据，不属于发布代码。仓库只保留 `review-library/.gitkeep`；干净克隆首次启动时会自动创建其余目录。
+
+### SQLite 工作流状态
+
+服务首次启动时创建：
+
+```text
+.review-writer/workflow.sqlite3
+```
+
+它只保存编排信息，不保存论文正文和图片二进制：
+
+- 项目、阶段状态和明确依赖；
+- stage run、错误、时间和 Prefect run ID；
+- 文件 SHA-256、逻辑产物名、不可变版本与当前版本指针；
+- 输出版本对输入版本的 lineage；
+- 批量重绘进度、重试和停止状态。
+
+项目状态可通过只读接口检查：
+
+```text
+GET /api/project/<project-id>/workflow-state
+```
+
+### Handoff 与过期判断
+
+各阶段继续输出人类可读的 JSON handoff。SQLite 中的产物版本和 handoff 中的内容哈希共同完成衔接：
+
+1. 阶段成功后登记输入和输出的 SHA-256；
+2. 下游只消费当前版本；
+3. 上游内容变化后，依赖旧 hash 的下游显示为 stale；
+4. 旧文件保留在磁盘以便追溯，但不会自动显示或进入新终稿；
+5. 重新执行相应阶段后建立新的 handoff 和依赖版本。
+
+## Prefect 3 的作用
+
+前端启动时自动启用 Prefect：
+
+- 每个可执行阶段形成 flow/task 运行记录；
+- 对超时、连接中断、429 和部分 5xx 做有限重试；
+- 400、401、403、404 和确定性校验错误不会盲目重试；
+- Prefect 服务短暂启动失败时会处理本地 `/api/health` 的 502/503/504；
+- 业务进度仍写入 `workflow.sqlite3`，因此不依赖 Prefect UI 才能恢复任务；
+- Windows 下按当前账户使用 `.review-writer/prefect-<account>/`，减少多账户 ACL 冲突。
+
+默认使用按需启动的本地临时 Prefect 服务。如需长期查看 Prefect UI：
+
+```powershell
+$env:PREFECT_HOME=(Resolve-Path '.review-writer\prefect-local').Path
+.\.venv\Scripts\prefect.exe server start --host 127.0.0.1 --port 4200
+```
+
+在另一个 PowerShell 窗口中：
+
+```powershell
+$env:PREFECT_API_URL='http://127.0.0.1:4200/api'
+.\.venv\Scripts\python.exe view\serve_review_dashboard.py --review-root . --host 127.0.0.1 --port 8765
+```
+
+Prefect UI：<http://127.0.0.1:4200>
+
+## Taxonomy 与项目级配置
+
+metadata 构建、校验和 Discovery 检索统一使用 `review_writer_core/taxonomy.py`：
+
+- 一般化学主题默认使用 `review_writer_core/taxonomies/chemistry_general.py`；
+- 联烯主题自动选择 `review_writer_core/taxonomies/allene.py`；
+- profile 写入 `review-projects/<project-id>/project_config.json`，已有项目不会被静默切换；
+- Blueprint 的主题规则包由 `skills/review-section-blueprint/references/rule_packs.json` 选择，不再固定加载单一主题规则。
+
+可显式覆盖：
+
+```dotenv
+REVIEW_TAXONOMY_PROFILE=allene
+# 绝对路径或相对项目根目录
+REVIEW_CLASSIFICATION_RULES=review_writer_core/taxonomies/my_topic.py
+```
+
+更多说明见 [Review Writer portable configuration](review_writer_core/CONFIGURATION.md)。
+
+## 项目结构
+
+```text
+skills/                     各阶段 Skill、脚本、references 与校验器
+view/                       九阶段网页、HTTP API、SQLite 与 Prefect flow
+review_writer_core/         跨阶段共享配置、provider、taxonomy 和图像路由
+review-library/             本地文献库（运行时数据，Git 忽略）
+review-projects/            每个综述项目的阶段产物（运行时数据，Git 忽略）
+examples/reference-reviews/ 示例综述与测试资源
+prefect.toml                Prefect 本地配置
+requirements-workflow.txt   前端工作流 Python 依赖
+```
+
+主要文档与入口：
+
+- [前端使用说明](view/前端使用说明.md)
+- [Skills 工作流说明](skills/技能工作流说明.md)
+- [总编排器](skills/review-writing-orchestrator/SKILL.md)
+- [本地 PDF / MinerU](skills/mineru-precise-parse-review-writer/SKILL.md)
+- [联网文献获取](skills/review-literature-acquisition/SKILL.md)
+- [图像重绘与编辑](skills/review-figure-style-redraw/SKILL.md)
+- [逐段反馈循环](skills/review-first-draft-feedback-loop/SKILL.md)
+- [最终审计与发布](skills/review-final-audit-release/SKILL.md)
+- [DOCX 导出](skills/review-export-docx/SKILL.md)
+
+## 测试
+
+项目的发布级检查文件位于 `view/*_checks.py`。在项目根目录执行：
+
+```powershell
+Set-Location view
+..\.venv\Scripts\python.exe -m unittest discover -s . -p '*_checks.py'
+Set-Location ..
+```
+
+提交前还应检查：
+
+```powershell
+git diff --check
+git status --short
+```
+
+不要把 `.env`、`.review-writer/`、`review-projects/`、用户 PDF、MinerU 输出、日志和密钥提交到仓库。
+
+## 局域网临时共享
+
+默认只监听 `127.0.0.1`。若要在可信局域网中临时共享，必须设置访问密码：
 
 ```powershell
 $env:REVIEW_DASHBOARD_ACCESS_TOKEN='replace-with-a-long-random-password'
@@ -185,142 +352,25 @@ $env:REVIEW_DASHBOARD_ACCESS_TOKEN='replace-with-a-long-random-password'
   --port 8765
 ```
 
-也可使用 `--access-token` 显式传入。浏览器会显示 HTTP Basic 登录框，用户名可任意
-填写，密码使用上述令牌。此方式适合可信局域网临时共享；它不是完整的多用户权限
-系统，仍不要把服务直接暴露到公网，也不要在不可信网络中开放防火墙端口。
+也可用 `--access-token` 传入密码。浏览器使用 HTTP Basic 登录，用户名可任意填写，密码为上述 token。
 
-## 数据、状态与版本
+这只是可信网络中的临时保护，不是完整的多租户认证、项目隔离或公网部署方案。不要直接把本地服务暴露到互联网。
 
-### 科学产物
+## 常见问题
 
-科学内容继续保存在普通文件中：
+- **设置保存后任务仍访问 `https://api.openai.com`**：确认设置页显示的 active workspace 与当前部署目录一致，然后重新保存；不要同时启动多个指向不同 `--review-root` 的服务。
+- **`Prefect is not installed`**：使用 `.venv\Scripts\python.exe` 启动，或重新安装 `requirements-workflow.txt`。
+- **MinerU 没有生成 `content_list.json`**：该 PDF 不会正式入库；先检查 MinerU token、网络和解析日志，再重新上传。
+- **`model_not_found` 或 `No available channel`**：服务商当前没有所填模型的可用渠道，应在 Settings 中改为该服务商实际支持的模型。
+- **图像接口只返回 `choices`、没有 image**：服务商的 Chat Completions 通道没有返回图片内容；切换到真正支持图片输出的模型/令牌，或使用 `images` wire API。
+- **Cloudflare 1010 / browser signature banned**：这是服务商网关拦截，不是项目内容错误；需要服务商解除限制或更换可访问的图像端点。
+- **下游提示 stale / 过期**：上游内容哈希已经改变。旧文件没有被删除，但必须重新执行受影响阶段以建立新的依赖版本。
+- **Word 提示已过期**：当前 `final_draft.md` 的 SHA-256 与上次 DOCX 导出记录不同，请点击 Generate & Download Word。
 
-```text
-review-library/
-├─ metadata/papers/       规范化论文 metadata
-├─ registry/papers.jsonl  论文注册表
-├─ downloads/             联网下载的本地 PDF（默认不提交 Git）
-└─ uploads/               本地上传的 PDF 与提取出的全文 Markdown
+## 安全边界
 
-review-projects/<project-id>/
-├─ 00_discovery/
-├─ 01_matrix_outline/
-├─ 02_section_drafting/
-├─ 03_figure_redraw/
-├─ 04_first_draft/
-└─ 05_final_audit/
-```
-
-`review-library/` 是运行时文献库：除占位文件外不会提交到 Git。干净克隆首次启动时
-会自动创建上述目录；每个用户的 metadata、注册表、PDF 和 Markdown 都只保留在其
-本地部署中。
-
-### 共享 taxonomy profile
-
-metadata 构建、校验和第二阶段检索统一通过
-`review_writer_core/taxonomy.py` 加载同一套分类规则。默认 profile 为
-`review_writer_core/taxonomies/chemistry_general.py`；项目主题匹配联烯时会选择
-`review_writer_core/taxonomies/allene.py`。也可显式配置：
-
-```dotenv
-REVIEW_TAXONOMY_PROFILE=allene
-# 或使用自定义文件（绝对路径或相对项目根目录）
-REVIEW_CLASSIFICATION_RULES=review_writer_core/taxonomies/my_topic.py
-```
-
-生成的 metadata 与 Discovery 产物会记录 taxonomy 文件路径和 SHA-256，便于判断
-后续结果是否仍依赖当前规则版本。
-
-### SQLite 业务状态
-
-服务首次启动时创建：
-
-```text
-.review-writer/workflow.sqlite3
-```
-
-它只保存编排 metadata，不存放论文正文或图片二进制：
-
-- 项目和阶段依赖；
-- 阶段 run、状态、错误与 Prefect run ID；
-- 文件 SHA-256、逻辑名称、产物版本和当前版本；
-- 输出版本到输入版本的依赖关系；
-- 批量 AI 重绘等长任务的进度与停止状态。
-
-上游文件发生变化后，依赖旧版本的下游产物会显示为过期，避免把旧图片、
-旧章节或旧 DOCX误当作当前结果。可通过只读接口查看项目状态：
-
-```text
-GET /api/project/<project-id>/workflow-state
-```
-
-### Handoff 文件
-
-各阶段仍保留 JSON handoff，方便人工检查、脚本调用和项目迁移。新 handoff
-会记录内容哈希和版本快照；旧项目会继续兼容，并在下一次成功执行相应阶段后
-升级为新的版本规则。
-
-## Prefect 编排
-
-前端启动时启用 Prefect 3：
-
-- 每个可执行阶段生成独立 flow run 和 task run；
-- HTTP 429、500、502、503、504、连接中断和超时可自动重试一次；
-- 400、401、403、404 和确定性校验错误不会盲目重试；
-- 批量重绘仍按项目逻辑逐张处理，业务进度写入 `workflow.sqlite3`；
-- Prefect 按 Windows 当前账户使用独立目录：
-  `.review-writer/prefect-<account>/`，避免不同账户之间的 ACL 冲突。
-
-默认使用按需启动的本地临时 Prefect 服务。需要持续查看 Prefect UI 时，可以
-单独启动服务：
-
-```powershell
-$env:PREFECT_HOME=(Resolve-Path '.review-writer\prefect-local').Path
-.\.venv\Scripts\prefect.exe server start --host 127.0.0.1 --port 4200
-```
-
-在另一个 PowerShell 窗口中启动 Review Writer：
-
-```powershell
-$env:PREFECT_API_URL='http://127.0.0.1:4200/api'
-.\.venv\Scripts\python.exe view\serve_review_dashboard.py `
-  --review-root . `
-  --host 127.0.0.1 `
-  --port 8765
-```
-
-Prefect UI 地址为 `http://127.0.0.1:4200`。
-
-## 项目结构
-
-```text
-skills/                 各阶段 Skill、规则、脚本和校验器
-view/                   本地前端、HTTP API、持久状态和 Prefect flow
-review_writer_core/      跨阶段共享代码与可配置 taxonomy profiles
-review-library/         本地运行时 metadata、注册表和文献（Git 忽略）
-review-projects/        每个综述项目的阶段产物（本地工作数据）
-examples/reference-reviews/  示例综述、参考 PDF 和测试夹具
-prefect.toml            Prefect 本地运行配置
-requirements-workflow.txt
-```
-
-主要入口：
-
-- [前端使用说明](view/前端使用说明.md)
-- [Skills 工作流说明](skills/技能工作流说明.md)
-- [总编排器](skills/review-writing-orchestrator/SKILL.md)
-- [联网文献获取](skills/review-literature-acquisition/SKILL.md)
-- [图像统一风格与编辑](skills/review-figure-style-redraw/SKILL.md)
-- [最终审计与发布](skills/review-final-audit-release/SKILL.md)
-- [DOCX 导出](skills/review-export-docx/SKILL.md)
-
-## 安全与使用边界
-
-- 仅下载合法开放获取或用户有权访问的论文，不绕过付费墙、验证码或访问控制。
-- AI 重绘不能代替化学正确性审核；化学键、原子、立体化学、箭头方向和文字
-  必须由人工确认。
-- SVG 编辑保存的是人工修改结果，仍应在 Draft 和 Final 阶段检查实际插图。
-- 删除项目会永久删除 `review-projects/<project-id>` 及其输出，界面要求输入完整
-  project ID 二次确认。
-- `review-projects/`、下载文件、`.env` 和 `.review-writer/` 都属于本地工作数据，
-  推送代码前应再次检查 `git status`，避免提交敏感内容。
+- 只处理用户有权访问的论文和开放获取来源。
+- API key 仅保存在本地 `.env` 或 `.review-writer/provider-settings.json`，不得写入代码、README、截图或提交历史。
+- 删除项目会永久删除 `review-projects/<project-id>` 及其输出，界面要求输入完整 project ID 二次确认。
+- AI 生成的化学结构、机理、箭头和文字必须经过人工审核。
+- 对外提供网站服务前，需要另行实现 HTTPS、用户认证、权限隔离、配额、对象存储和数据库备份；当前本地存储模式主要面向单机或可信局域网使用。
