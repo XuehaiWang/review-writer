@@ -12,6 +12,7 @@ from PIL import Image
 
 from serve_review_dashboard import (
     approve_figure_for_manuscript,
+    approve_successful_figures_for_manuscript,
     artifact_freshness,
     begin_figure_redraw_state,
     cancel_queued_figure_redraw_states,
@@ -198,6 +199,74 @@ class FigureReviewHandoffChecks(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "aspect ratio does not match"):
                 approve_figure_for_manuscript(root, "demo", "P001-F01")
+
+    def test_bulk_human_approval_only_changes_successful_current_redraws(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _, section_stage, redraw_stage, second_source = self.build_project(root)
+            candidates_path = section_stage / "figure_candidates.json"
+            candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
+            candidates.append(
+                {
+                    "figure_id": "P002-F01",
+                    "paper_id": "P002",
+                    "source_image_path": str(second_source),
+                    "target_paragraph_id": "sec1-p1",
+                    "manuscript_selected": True,
+                }
+            )
+            candidates_path.write_text(json.dumps(candidates), encoding="utf-8")
+
+            successful_output = redraw_stage / "successful.png"
+            Image.new("RGB", (240, 120), "white").save(successful_output)
+            manifest_path = redraw_stage / "redrawn_figure_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["figures"][0].update(
+                {
+                    "redrawn_image": str(successful_output),
+                    "render_mode": "ai-edit",
+                    "edit_profile": "standard",
+                    "chemistry_integrity": {"status": "failed", "failures": ["manual review"]},
+                    "output_disposition": "saved_with_integrity_warning",
+                }
+            )
+            manifest["figures"].append(
+                {
+                    "figure_id": "P002-F01",
+                    "paper_id": "P002",
+                    "source_image": str(second_source),
+                    "status": "failed",
+                    "notes": "provider request failed",
+                }
+            )
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            finish_figure_redraw_state(
+                root,
+                "demo",
+                "P002-F01",
+                status="failed",
+                error="provider request failed",
+            )
+
+            result = approve_successful_figures_for_manuscript(root, "demo")
+
+            self.assertEqual(result["approved_figure_ids"], ["P001-F01"])
+            self.assertEqual(result["approved_count"], 1)
+            self.assertEqual(result["generation_failed_count"], 1)
+            self.assertEqual(result["skipped"][0]["figure_id"], "P002-F01")
+            self.assertEqual(result["skipped"][0]["status"], "failed")
+            saved_rows = {
+                row["figure_id"]: row
+                for row in json.loads(manifest_path.read_text(encoding="utf-8"))["figures"]
+            }
+            self.assertEqual(saved_rows["P001-F01"]["human_approval"]["status"], "approved")
+            self.assertEqual(saved_rows["P002-F01"]["status"], "failed")
+            self.assertNotIn("human_approval", saved_rows["P002-F01"])
+
+            repeated = approve_successful_figures_for_manuscript(root, "demo")
+            self.assertEqual(repeated["approved_count"], 0)
+            self.assertEqual(repeated["already_approved_figure_ids"], ["P001-F01"])
+            self.assertEqual(repeated["generation_failed_count"], 1)
 
     def test_legacy_section_handoff_requires_explicit_regeneration(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -480,6 +549,24 @@ class FigureReviewHandoffChecks(unittest.TestCase):
         self.assertIn("providerCanvasAllowed", html)
         self.assertIn("manual_arrow_edit?.base_mode==='redrawn'", html)
         self.assertIn("humanApproveFigure", html)
+        self.assertIn("approveSuccessfulRedraws", html)
+        self.assertIn("human-approve-successful", html)
+        self.assertIn("Approve all", html)
+        self.assertNotIn('data-tab="redraw"', html)
+        self.assertNotIn('data-tab="raw"', html)
+        self.assertNotIn("JSON.stringify(row||{}", html)
+
+    def test_blueprint_ui_does_not_expose_internal_json(self) -> None:
+        html = (
+            Path(__file__).resolve().parent
+            / "assets"
+            / "dashboard"
+            / "blueprint.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn('data-tab="json"', html)
+        self.assertNotIn(">Raw JSON<", html)
+        self.assertNotIn("JSON.stringify(payload?.section_blueprint", html)
 
     def test_per_figure_redraw_state_is_persisted_in_stage_seven_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

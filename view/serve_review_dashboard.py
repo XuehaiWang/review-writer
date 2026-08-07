@@ -418,6 +418,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if len(parts) == 6 and parts[0:2] == ["api", "project"]:
                 self.handle_batch_figure_redraw_stop(unquote(parts[2]))
                 return
+        if parsed.path.startswith("/api/project/") and parsed.path.endswith("/figures/human-approve-successful"):
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) == 5 and parts[0:2] == ["api", "project"]:
+                self.handle_successful_figures_human_approval(unquote(parts[2]))
+                return
         if parsed.path.startswith("/api/project/") and parsed.path.endswith("/feedback-loop/stop"):
             parts = parsed.path.strip("/").split("/")
             if len(parts) == 5 and parts[0:2] == ["api", "project"]:
@@ -1111,6 +1116,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def handle_figure_human_approval(self, project_id: str, figure_id: str) -> None:
         try:
             result = approve_figure_for_manuscript(self.review_root, project_id, figure_id)
+        except (RuntimeError, ValueError, OSError) as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        self.send_json({"ok": True, "project_id": project_id, **result})
+
+    def handle_successful_figures_human_approval(self, project_id: str) -> None:
+        try:
+            result = approve_successful_figures_for_manuscript(self.review_root, project_id)
         except (RuntimeError, ValueError, OSError) as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
@@ -3858,6 +3871,131 @@ def approve_figure_for_manuscript(review_root: Path, project_id: str, figure_id:
         "redrawn_image": str(output_path),
         "human_approval": row["human_approval"],
         "synchronized_draft_assets": synchronized_assets,
+    }
+
+
+def approve_successful_figures_for_manuscript(
+    review_root: Path,
+    project_id: str,
+) -> dict[str, Any]:
+    """Approve every current successful Stage 7 output and leave failures alone.
+
+    This bulk action deliberately reuses ``approve_figure_for_manuscript`` for
+    the actual mutation.  Failed, active, interrupted, stale, missing, or
+    unsupported outputs are reported but never converted into approvals.
+    """
+    project = review_root / "review-projects" / project_id
+    draft_stage = project / "02_section_drafting"
+    stage = project / "03_figure_redraw"
+    candidates = read_json_if_exists(draft_stage / "figure_candidates.json") or []
+    if isinstance(candidates, dict):
+        candidates = candidates.get("figures") or candidates.get("candidates") or []
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("No current figure candidates are available for bulk human approval.")
+
+    manifest = read_json_if_exists(stage / "redrawn_figure_manifest.json") or {}
+    rows = manifest.get("figures") if isinstance(manifest, dict) else []
+    if not isinstance(rows, list):
+        rows = []
+    rows_by_id = {
+        str(row.get("figure_id") or ""): row
+        for row in rows
+        if isinstance(row, dict) and row.get("figure_id")
+    }
+    states = public_figure_redraw_states(review_root, project_id)
+    active_statuses = {"queued", "running", "retrying"}
+    failed_statuses = {"failed", "cancelled", "interrupted"}
+    approved_ids: list[str] = []
+    already_approved_ids: list[str] = []
+    skipped: list[dict[str, str]] = []
+
+    def skip(figure_id: str, status: str, reason: str) -> None:
+        skipped.append({"figure_id": figure_id, "status": status, "reason": reason})
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or candidate.get("manuscript_selected") is False:
+            continue
+        figure_id = str(candidate.get("figure_id") or "").strip()
+        if not figure_id:
+            continue
+        state = states.get(figure_id) or {}
+        generation_status = str(state.get("status") or "").strip().lower()
+        if generation_status in active_statuses:
+            skip(figure_id, generation_status, "Generation is still active.")
+            continue
+        if generation_status in failed_statuses:
+            skip(
+                figure_id,
+                generation_status,
+                str(state.get("error") or "The latest redraw attempt did not complete successfully."),
+            )
+            continue
+
+        row = rows_by_id.get(figure_id)
+        if not isinstance(row, dict) or str(row.get("status") or "") != "redrawn":
+            skip(figure_id, "not_generated", "No successful redrawn manifest row is available.")
+            continue
+        try:
+            source_path = _resolve_candidate_source(review_root, project, candidate)
+            recorded_source = str(row.get("source_image") or "").strip()
+            if (
+                not recorded_source
+                or _normalized_figure_path(recorded_source)
+                != _normalized_figure_path(source_path)
+            ):
+                raise ValueError("The redraw belongs to an older source candidate.")
+            source_hash = sha256_file(source_path)
+            recorded_source_hash = str(row.get("source_image_sha256") or "")
+            if recorded_source_hash and recorded_source_hash != source_hash:
+                raise ValueError("The selected source image changed after this redraw.")
+            output_path = resolve_redrawn_base_path(review_root, project, stage, row)
+            if output_path is None:
+                raise ValueError("No redrawn output file is available.")
+            aspect_integrity = figure_aspect_ratio_integrity(source_path, output_path)
+            if not figure_aspect_policy_matches(row, aspect_integrity):
+                raise ValueError("The output does not satisfy the current canvas policy.")
+            output_hash = sha256_file(output_path)
+        except (OSError, ValueError) as exc:
+            skip(figure_id, "stale_or_invalid", str(exc))
+            continue
+
+        approval = row.get("human_approval") or {}
+        current_approval = bool(
+            approval.get("status") == "approved"
+            and _normalized_figure_path(str(approval.get("source_image") or ""))
+            == _normalized_figure_path(source_path)
+            and str(approval.get("source_sha256") or "") == source_hash
+            and _normalized_figure_path(str(approval.get("output_image") or ""))
+            == _normalized_figure_path(output_path)
+            and str(approval.get("output_sha256") or "") == output_hash
+        )
+        if current_approval:
+            already_approved_ids.append(figure_id)
+            continue
+        try:
+            approve_figure_for_manuscript(review_root, project_id, figure_id)
+        except (RuntimeError, ValueError, OSError) as exc:
+            skip(figure_id, "approval_rejected", str(exc))
+            continue
+        approved_ids.append(figure_id)
+
+    return {
+        "total_candidates": sum(
+            1
+            for candidate in candidates
+            if isinstance(candidate, dict)
+            and candidate.get("manuscript_selected") is not False
+            and candidate.get("figure_id")
+        ),
+        "approved_count": len(approved_ids),
+        "already_approved_count": len(already_approved_ids),
+        "skipped_count": len(skipped),
+        "generation_failed_count": sum(
+            1 for item in skipped if item.get("status") in failed_statuses
+        ),
+        "approved_figure_ids": approved_ids,
+        "already_approved_figure_ids": already_approved_ids,
+        "skipped": skipped,
     }
 
 

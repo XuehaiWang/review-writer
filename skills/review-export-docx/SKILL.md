@@ -34,6 +34,12 @@ This keeps the global Python installation unchanged. `latex2word` remains
 optional; without it, math is rendered as italic plain text and a warning is
 printed.
 
+MinerU LaTeX is normalized before export. Known wrappers and symbols such as
+`\\mathrm`, `\\mathsf`, `\\mathbf`, and `\\prime` are converted to Word math
+or readable native runs. Any still-unsupported raw command is a non-blocking
+warning: it is retained as visible text so a current final draft always remains
+downloadable instead of failing the entire DOCX export.
+
 ## Run
 
 Default (final draft):

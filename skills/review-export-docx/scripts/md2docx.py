@@ -168,6 +168,16 @@ _RAW_LATEX_REWRITES: List[Tuple[re.Pattern, Any]] = [
 _RAW_GREEK_COMMAND_RE = re.compile(
     r"\\(alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|rho|sigma|tau|phi|chi|psi|omega)\b"
 )
+_RAW_LATEX_WRAPPER_WITH_SCRIPT_RE = re.compile(
+    r"\\(mathrm|mathsf|mathbf|mathit|text|operatorname|pmb|boldsymbol)"
+    r"\s*\{\s*([^{}]+?)\s*\}"
+    r"\s*([_^])\s*\{\s*([^{}]+?)\s*\}"
+)
+_RAW_LATEX_WRAPPER_RE = re.compile(
+    r"\\(mathrm|mathsf|mathbf|mathit|text|operatorname|pmb|boldsymbol)"
+    r"\s*\{\s*([^{}]*?)\s*\}"
+)
+_RAW_PRIME_COMMAND_RE = re.compile(r"\\prime\b")
 _RAW_LATEX_COMMAND_RE = re.compile(r"\\(?!figure_[A-Za-z0-9_-]+\.[A-Za-z0-9]+)[A-Za-z]+")
 _EXISTING_MATH_SPAN_RE = re.compile(
     r"\$\$[\s\S]*?\$\$|\$(?:\\.|[^$\n])+\$"
@@ -207,7 +217,12 @@ def make_xml_compatible(text: str) -> Tuple[str, int]:
 
 
 def normalize_mineru_latex(md_text: str) -> str:
-    """Turn known raw MinerU LaTex into Math-delimited expressions for DOCX."""
+    """Turn known raw MinerU LaTex into Math-delimited expressions for DOCX.
+
+    Unknown raw commands are deliberately non-fatal.  A final review must
+    always remain exportable, so unsupported MinerU syntax is preserved as
+    visible Word text and reported as a warning instead of aborting the DOCX.
+    """
     # Preserve formulas that MinerU already delimited.  Applying the raw
     # wrapper rewrites inside an existing ``$...$`` formula creates nested
     # dollar signs and can make a valid ``\mathsf`` command look unconverted.
@@ -226,6 +241,60 @@ def normalize_mineru_latex(md_text: str) -> str:
 
     for pattern, replacement in _RAW_LATEX_REWRITES:
         md_text = pattern.sub(replacement, md_text)
+
+    def replace_outside_math(
+        text: str,
+        pattern: re.Pattern,
+        replacement: Any,
+    ) -> str:
+        """Apply one raw-LaTex rewrite without nesting existing math spans."""
+        source = text
+        return pattern.sub(
+            lambda match: (
+                match.group(0)
+                if source[:match.start()].count("$") % 2
+                else replacement(match)
+            ),
+            source,
+        )
+
+    def wrapper_content(command: str, value: str) -> str:
+        cleaned = value.strip()
+        if command in {"mathrm", "mathsf"}:
+            return re.sub(r"\s+", "", cleaned)
+        return cleaned
+
+    md_text = replace_outside_math(
+        md_text,
+        _RAW_LATEX_WRAPPER_WITH_SCRIPT_RE,
+        lambda match: (
+            "$\\"
+            + match.group(1)
+            + "{"
+            + wrapper_content(match.group(1), match.group(2))
+            + "}"
+            + match.group(3)
+            + "{"
+            + re.sub(r"\s+", "", match.group(4))
+            + "}$"
+        ),
+    )
+    md_text = replace_outside_math(
+        md_text,
+        _RAW_LATEX_WRAPPER_RE,
+        lambda match: (
+            "$\\"
+            + match.group(1)
+            + "{"
+            + wrapper_content(match.group(1), match.group(2))
+            + "}$"
+        ),
+    )
+    md_text = replace_outside_math(
+        md_text,
+        _RAW_PRIME_COMMAND_RE,
+        lambda _match: "$\\prime$",
+    )
 
     # Do not use a simple lookbehind for Greek commands: a formula such as
     # ``$\\alpha, \\alpha^\\prime$`` contains a later command that is not
@@ -247,7 +316,10 @@ def normalize_mineru_latex(md_text: str) -> str:
     ]
     if leftovers:
         examples = ", ".join(dict.fromkeys(leftovers[:5]))
-        raise ValueError(f"Unconverted MinerU LaTex remains in Markdown: {examples}")
+        print(
+            "[md2docx] WARNING: unsupported raw MinerU LaTex was preserved "
+            f"as visible text instead of blocking Word export: {examples}"
+        )
     for token, formula in protected_spans:
         md_text = md_text.replace(token, formula)
     return md_text
