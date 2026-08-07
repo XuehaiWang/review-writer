@@ -1240,17 +1240,6 @@ def run(args: argparse.Namespace) -> int:
     review_root = resolve_review_root(args.review_root, anchor=Path(__file__))
     project_id = args.project_id or slugify(args.topic)
     project = resolve_project_path(review_root, project_id)
-    taxonomy_profile = project_taxonomy_profile(
-        review_root,
-        project_id,
-        topic=args.topic,
-    )
-    save_project_config(
-        review_root,
-        project_id,
-        topic=args.topic,
-        taxonomy_profile=taxonomy_profile,
-    )
     _load_dotenv_if_present(review_root)
     user_keywords = split_keywords(args.keywords)
     query_plan_path = getattr(args, "query_plan", "")
@@ -1276,6 +1265,32 @@ def run(args: argparse.Namespace) -> int:
         unresolved_concepts = topic_intent["unresolved_concepts"]
         filters = topic_intent["filters"]
         group_by = topic_intent["group_by"]
+
+    # Detect the taxonomy profile from the fully disambiguated topic, not just
+    # the raw --topic text: an abbreviation like "APA" only reveals its domain
+    # (e.g. "propargylic") through the query plan's resolved_concepts, which
+    # isn't available until after the query plan is parsed above. Persist only
+    # the clean args.topic as the project's topic, though -- the expanded
+    # concept text is a detection aid, not the stored label.
+    profile_detection_text = " ".join(
+        [args.topic]
+        + [
+            str(concept.get("expanded_name") or "")
+            for concept in resolved_concepts
+            if isinstance(concept, dict)
+        ]
+    )
+    taxonomy_profile = project_taxonomy_profile(
+        review_root,
+        project_id,
+        topic=profile_detection_text,
+    )
+    save_project_config(
+        review_root,
+        project_id,
+        topic=args.topic,
+        taxonomy_profile=taxonomy_profile,
+    )
     query_context = {
         "query_plan_source": query_plan_source,
         "resolved_concepts": resolved_concepts,

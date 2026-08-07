@@ -337,7 +337,24 @@ Section evidence summaries:\n{json.dumps(summaries, ensure_ascii=False)}"""
     except ModelResponseError as exc:
         fallback_reason = str(exc)
         framing = fallback_framing(topic, sections)
-    body = [f"# {str(framing.get('title') or topic or args.project_id).strip()}", "", "## Introduction", "", str(framing.get("introduction") or "").strip(), ""]
+    # If the outline's own first section is already titled "Introduction" (a
+    # common, reasonable outline choice), its section_body below will start
+    # with its own "## Introduction" heading. Emitting the fixed heading here
+    # too would duplicate it; keep the framing's synthesized intro prose as a
+    # lead-in and let that section's own heading be the only one.
+    first_section_body, _ = (
+        split_body_and_reference_entries(str(sections[0].get("draft_md") or "")) if sections else ("", [])
+    )
+    first_heading_is_introduction = bool(
+        re.match(r"^##\s+introduction\s*$", first_section_body.splitlines()[0].strip(), re.I)
+    ) if first_section_body else False
+    framing_intro = str(framing.get("introduction") or "").strip()
+    if first_heading_is_introduction:
+        body = [f"# {str(framing.get('title') or topic or args.project_id).strip()}", ""]
+        if framing_intro:
+            body.extend([framing_intro, ""])
+    else:
+        body = [f"# {str(framing.get('title') or topic or args.project_id).strip()}", "", "## Introduction", "", framing_intro, ""]
     transitions = framing.get("transitions") if isinstance(framing.get("transitions"), dict) else {}
     citation_entries = build_citation_entries(sections)
     for index, section in enumerate(sections):

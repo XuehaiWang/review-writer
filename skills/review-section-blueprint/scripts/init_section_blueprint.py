@@ -86,11 +86,17 @@ def paper_value(paper: dict[str, Any], key: str) -> str:
         value = paper.get(candidate)
         if value:
             return str(value)
-    structured = paper.get("structured_tags")
-    if isinstance(structured, dict):
-        value = structured.get(key)
-        if value:
-            return str(value)
+    # review-literature-matrix-outline's SKILL.md documents the per-row
+    # structured-tag column as "keywords" (the 8 structured tag values from
+    # metadata); review-metadata-prep's paper metadata itself calls the same
+    # data "structured_tags". Accept either so scoring works against the
+    # matrix schema as actually documented, not just the metadata's own name.
+    for structured_field in ("structured_tags", "keywords"):
+        structured = paper.get(structured_field)
+        if isinstance(structured, dict):
+            value = structured.get(key)
+            if value:
+                return str(value)
     return ""
 
 

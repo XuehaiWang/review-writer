@@ -936,22 +936,36 @@ def summarize(review_root: Path, project_id: str) -> dict[str, Any]:
         dashboard = None
     if dashboard is not None:
         try:
+            # The dashboard's own freshness checks report "stale" both when a
+            # handoff receipt exists but is out of date, and when no receipt
+            # was ever written at all (e.g. the stage ran through its
+            # documented CLI script directly, the officially supported path
+            # for this skill's SKILL.md and the only path FounDryClaw ever
+            # takes -- the dashboard is FounDryClaw-inert entirely). Only the
+            # first case is real staleness; the second just means "never
+            # tracked by the dashboard" and must not cascade into every later
+            # stage reporting incomplete via the prerequisites chain below.
+            # Detect it independently of the dashboard payloads (which don't
+            # all expose the distinction) by checking for the receipt file.
+            def handoff_untracked(stage_dir_name: str, handoff_name: str) -> bool:
+                return not (project / stage_dir_name / handoff_name).is_file()
+
             blueprint_state = dashboard.project_blueprint_payload(review_root, project_id).get("freshness") or {}
             sections_state = dashboard.project_sections_payload(review_root, project_id).get("handoff") or {}
             figures_state = dashboard.project_figures_payload(review_root, project_id).get("freshness") or {}
             draft_state = dashboard.project_draft_payload(review_root, project_id).get("freshness") or {}
             final_payload = dashboard.project_final_payload(review_root, project_id)
             final_state = final_payload.get("freshness") or {}
-            if blueprint_state.get("stale"):
+            if blueprint_state.get("stale") and not handoff_untracked("01_matrix_outline", "blueprint_handoff.json"):
                 invalidate("section_blueprint", "blueprint_handoff_stale")
-            if sections_state.get("drafts_stale"):
+            if sections_state.get("drafts_stale") and not handoff_untracked("02_section_drafting", "section_handoff.json"):
                 invalidate("section_drafting", "section_handoff_stale")
-            if figures_state.get("stale"):
+            if figures_state.get("stale") and not handoff_untracked("03_figure_redraw", "figures_handoff.json"):
                 invalidate(
                     "figure_redraw",
                     f"figure_handoff_stale_{figures_state.get('usable_count', 0)}_of_{figures_state.get('selected_count', 0)}_usable",
                 )
-            if draft_state.get("stale"):
+            if draft_state.get("stale") and not handoff_untracked("04_first_draft", "draft_handoff.json"):
                 invalidate("first_draft", "draft_handoff_stale")
             conclusion_current = bool(final_payload.get("conclusion_current"))
             if by_id["conclusion_generation"].get("optional_skipped"):
@@ -972,9 +986,19 @@ def summarize(review_root: Path, project_id: str) -> dict[str, Any]:
                     "final_audit",
                     "generated_conclusion_missing_from_final_draft",
                 )
-            if final_state.get("stale"):
+            if final_state.get("stale") and not handoff_untracked("05_final_audit", "final_handoff.json"):
                 invalidate("final_audit", "final_handoff_stale")
-            if not final_payload.get("final_draft_docx_exists"):
+            # Same CLI-vs-dashboard tracking gap as the handoff receipts above:
+            # docx_export_is_current() requires a docx_export.json manifest
+            # that only the dashboard's export wrapper writes, never the
+            # documented md2docx.py CLI script itself. Don't invalidate a
+            # docx that genuinely exists purely because that receipt was
+            # never written; a missing docx file is still a real gap.
+            docx_file = project / "05_final_audit" / "final_draft.docx"
+            docx_receipt_untracked = not (project / "05_final_audit" / "docx_export.json").is_file()
+            if not final_payload.get("final_draft_docx_exists") and not (
+                docx_file.is_file() and docx_receipt_untracked
+            ):
                 invalidate("docx_export", "docx_source_stale")
         except Exception as exc:
             invalidate("section_drafting", f"lineage_check_failed:{type(exc).__name__}")
@@ -985,6 +1009,7 @@ def summarize(review_root: Path, project_id: str) -> dict[str, Any]:
         "section_drafting": ("section_blueprint",),
         "figure_redraw": ("section_drafting",),
         "first_draft": ("figure_redraw",),
+        "draft_feedback_loop": ("first_draft",),
         "conclusion_generation": ("first_draft",),
         "final_audit": ("first_draft",),
         "summary_chart": ("final_audit",),
