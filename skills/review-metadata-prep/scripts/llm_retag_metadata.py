@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from prepare_metadata import (
+    DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_TEXT_MODEL,
     STRUCTURED_TAG_KEYS,
     apply_structured_tags_to_compat_fields,
     build_llm_payload,
@@ -96,7 +98,7 @@ def retag_one(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Refresh existing metadata with LLM-extracted eight-category tags.")
-    parser.add_argument("--review-root", default=str(Path(__file__).resolve().parents[3]))
+    parser.add_argument("--review-root", default=".")
     parser.add_argument("--model", default="")
     parser.add_argument("--base-url", default="")
     parser.add_argument("--api-key", default="")
@@ -112,9 +114,9 @@ def main() -> int:
     args = parse_args()
     review_root = Path(args.review_root).resolve()
     load_dotenv(review_root / ".env")
-    base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+    base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
     api_key = resolve_api_key(args.api_key, base_url)
-    model = args.model or os.environ.get("REVIEW_METADATA_MODEL", "gpt-5.4")
+    model = args.model or os.environ.get("REVIEW_METADATA_MODEL", DEFAULT_TEXT_MODEL)
     reasoning_effort = args.reasoning_effort or os.environ.get("REVIEW_METADATA_REASONING_EFFORT", "high")
     if not api_key:
         raise SystemExit("Missing API key. Pass --api-key, set OPENAI_API_KEY, or write it to <review-root>/.env.")

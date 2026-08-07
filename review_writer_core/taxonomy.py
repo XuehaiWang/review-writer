@@ -11,8 +11,20 @@ from pathlib import Path
 from typing import Iterable
 
 
-DEFAULT_TAXONOMY_PROFILE = "allene"
+DEFAULT_TAXONOMY_PROFILE = "chemistry_general"
 PROFILE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+
+PROFILE_TOPIC_SIGNALS: dict[str, tuple[str, ...]] = {
+    "allene": (
+        "allene",
+        "allenation",
+        "propargylic",
+        "propargyl",
+        "allenylidene",
+        "axial chirality",
+        "sn2'",
+    ),
+}
 
 
 class TaxonomyConfigurationError(ValueError):
@@ -29,7 +41,7 @@ def resolve_taxonomy_path(
 
     ``REVIEW_CLASSIFICATION_RULES`` may point to an absolute file or to a path
     relative to the workspace root. ``REVIEW_TAXONOMY_PROFILE`` selects a
-    built-in profile and defaults to ``allene``.
+    built-in profile and defaults to the broad ``chemistry_general`` profile.
     """
     root = Path(review_root).resolve()
     configured_path = str(rules_path or os.environ.get("REVIEW_CLASSIFICATION_RULES", "")).strip()
@@ -101,8 +113,57 @@ def load_rules_from_path(path: Path) -> list[tuple[str, str, list[str]]]:
     return [(label, category, list(aliases)) for label, category, aliases in rules]
 
 
-def load_taxonomy_rules(review_root: Path) -> list[tuple[str, str, list[str]]]:
-    return load_rules_from_path(resolve_taxonomy_path(review_root))
+def load_taxonomy_rules(
+    review_root: Path,
+    *,
+    profile: str = "",
+    rules_path: str | Path = "",
+) -> list[tuple[str, str, list[str]]]:
+    return load_rules_from_path(
+        resolve_taxonomy_path(review_root, profile=profile, rules_path=rules_path)
+    )
+
+
+def load_validation_taxonomy_rules(
+    review_root: Path,
+) -> list[tuple[str, str, list[str]]]:
+    """Load labels accepted by the shared library metadata validator.
+
+    A library may contain papers from projects using different profiles.  An
+    explicit operator override remains strict; otherwise validation accepts
+    the union of installed built-in profiles while retrieval stays bound to
+    one project profile.
+    """
+    if (
+        os.environ.get("REVIEW_CLASSIFICATION_RULES", "").strip()
+        or os.environ.get("REVIEW_TAXONOMY_PROFILE", "").strip()
+    ):
+        return load_taxonomy_rules(review_root)
+    combined: list[tuple[str, str, list[str]]] = []
+    seen: set[tuple[str, str]] = set()
+    profiles_dir = Path(__file__).resolve().parent / "taxonomies"
+    for path in sorted(profiles_dir.glob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        for label, category, aliases in load_rules_from_path(path):
+            key = (category, label)
+            if key not in seen:
+                seen.add(key)
+                combined.append((label, category, aliases))
+    return combined
+
+
+def suggest_taxonomy_profile(topic: str) -> str:
+    """Select a built-in profile from explicit topic signals.
+
+    Topic-specific profiles opt in only on a positive match; unrelated topics
+    therefore never inherit the allene vocabulary by accident.
+    """
+    normalized = re.sub(r"\s+", " ", str(topic or "").strip().casefold())
+    for profile, signals in PROFILE_TOPIC_SIGNALS.items():
+        if any(signal.casefold() in normalized for signal in signals):
+            return profile
+    return DEFAULT_TAXONOMY_PROFILE
 
 
 def labels_by_category(
@@ -127,8 +188,13 @@ def aliases_by_category(
     return result
 
 
-def taxonomy_identity(review_root: Path) -> dict[str, str]:
-    path = resolve_taxonomy_path(review_root)
+def taxonomy_identity(
+    review_root: Path,
+    *,
+    profile: str = "",
+    rules_path: str | Path = "",
+) -> dict[str, str]:
+    path = resolve_taxonomy_path(review_root, profile=profile, rules_path=rules_path)
     raw = path.read_bytes()
     configured_path = os.environ.get("REVIEW_CLASSIFICATION_RULES", "").strip()
     try:
@@ -139,7 +205,7 @@ def taxonomy_identity(review_root: Path) -> dict[str, str]:
         "profile": "custom"
         if configured_path
         else (
-            os.environ.get("REVIEW_TAXONOMY_PROFILE", DEFAULT_TAXONOMY_PROFILE).strip()
+            str(profile or os.environ.get("REVIEW_TAXONOMY_PROFILE", DEFAULT_TAXONOMY_PROFILE)).strip()
             or DEFAULT_TAXONOMY_PROFILE
         ),
         "rules_path": relative_path,

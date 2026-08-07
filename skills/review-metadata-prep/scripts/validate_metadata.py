@@ -8,11 +8,23 @@ from pathlib import Path
 from typing import Any
 
 
-REVIEW_ROOT = Path(__file__).resolve().parents[3]
+REVIEW_ROOT = next(
+    (
+        parent
+        for parent in Path(__file__).resolve().parents
+        if (parent / "review_writer_core").is_dir() and (parent / "skills").is_dir()
+    ),
+    None,
+)
+if REVIEW_ROOT is None:
+    raise RuntimeError("Could not locate the Review Writer workspace")
 if str(REVIEW_ROOT) not in sys.path:
     sys.path.insert(0, str(REVIEW_ROOT))
 
-from review_writer_core.taxonomy import labels_by_category, load_taxonomy_rules  # noqa: E402
+from review_writer_core.taxonomy import (  # noqa: E402
+    labels_by_category,
+    load_validation_taxonomy_rules,
+)
 
 
 BLOCKING_FIELDS = ["paper_id", "slug", "title", "authors", "year", "abstract", "source_paths", "structured_tags"]
@@ -30,7 +42,7 @@ STRUCTURED_TAG_KEYS = [
 
 
 def load_allowed_labels(review_root: Path) -> dict[str, set[str]]:
-    labels = labels_by_category(load_taxonomy_rules(review_root), STRUCTURED_TAG_KEYS)
+    labels = labels_by_category(load_validation_taxonomy_rules(review_root), STRUCTURED_TAG_KEYS)
     return {key: set(values) for key, values in labels.items()}
 
 
@@ -181,7 +193,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate review metadata JSON files.")
-    parser.add_argument("--review-root", default=str(Path(__file__).resolve().parents[3]))
+    parser.add_argument("--review-root", default=".")
     return parser.parse_args()
 
 

@@ -97,6 +97,19 @@ STAGES: list[dict[str, Any]] = [
         "human_check": "Review the unified first draft in http://127.0.0.1:8765/draft.",
     },
     {
+        "id": "draft_feedback_loop",
+        "name": "Optional first-draft quality loop",
+        "dir": "04_first_draft",
+        "skill": "review-first-draft-feedback-loop",
+        "required": [
+            "feedback_loop_status.json",
+            "rubric_evaluation.json",
+            "first_draft_gate_status.json",
+        ],
+        "human_check": "If the gate reports needs_human_review, inspect failed paragraphs before release.",
+        "optional": True,
+    },
+    {
         "id": "conclusion_generation",
         "name": "Conclusion generation",
         "dir": "04_first_draft",
@@ -905,7 +918,7 @@ def summarize(review_root: Path, project_id: str) -> dict[str, Any]:
     # Use the same SHA-256 handoff resolvers as the dashboard. File existence
     # alone is not evidence that an artifact belongs to the current upstream
     # version.
-    view_dir = Path(__file__).resolve().parents[3] / "view"
+    view_dir = review_root / "view"
     if str(view_dir) not in sys.path:
         sys.path.insert(0, str(view_dir))
     try:
@@ -1037,7 +1050,7 @@ def print_text(summary: dict[str, Any]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Inspect review project workflow status.")
-    parser.add_argument("--review-root", default=str(Path(__file__).resolve().parents[3]))
+    parser.add_argument("--review-root", default=".")
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     return parser.parse_args()

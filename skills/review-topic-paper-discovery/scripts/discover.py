@@ -15,15 +15,32 @@ from pathlib import Path
 from typing import Any
 
 
-REVIEW_ROOT = Path(__file__).resolve().parents[3]
+_BOOTSTRAP_ROOT = next(
+    (
+        parent
+        for parent in Path(__file__).resolve().parents
+        if (parent / "review_writer_core").is_dir() and (parent / "skills").is_dir()
+    ),
+    None,
+)
+if _BOOTSTRAP_ROOT is None:
+    raise RuntimeError("Could not locate the Review Writer workspace")
+REVIEW_ROOT = _BOOTSTRAP_ROOT
 if str(REVIEW_ROOT) not in sys.path:
     sys.path.insert(0, str(REVIEW_ROOT))
 
 from review_writer_core.taxonomy import (  # noqa: E402
     aliases_by_category,
     load_taxonomy_rules,
+    suggest_taxonomy_profile,
     taxonomy_identity,
 )
+from review_writer_core.project_config import (  # noqa: E402
+    project_taxonomy_profile,
+    save_project_config,
+)
+from review_writer_core.workspace import discover_review_root  # noqa: E402
+from review_writer_core.runtime_config import discovery_paper_limit  # noqa: E402
 
 from sciatlas_client import SciAtlasClient, load_config, papers_from_response
 
@@ -345,8 +362,14 @@ def load_query_plan(path: Path, topic: str) -> dict[str, Any]:
     return validate_query_plan(plan, topic)
 
 
-def load_classification_rules(review_root: Path) -> dict[str, dict[str, list[str]]]:
-    return aliases_by_category(load_taxonomy_rules(review_root), STRUCTURED_TAG_KEYS)
+def load_classification_rules(
+    review_root: Path,
+    profile: str = "",
+) -> dict[str, dict[str, list[str]]]:
+    return aliases_by_category(
+        load_taxonomy_rules(review_root, profile=profile),
+        STRUCTURED_TAG_KEYS,
+    )
 
 
 def markdown_signal(meta: dict[str, Any], max_chars: int = 12000) -> str:
@@ -432,6 +455,7 @@ def infer_keywords(
     topic: str,
     user_keywords: list[str],
     unresolved_surfaces: list[str] | None = None,
+    classification_rules: dict[str, dict[str, list[str]]] | None = None,
 ) -> list[dict[str, Any]]:
     text = " ".join([topic] + user_keywords)
     for surface in unresolved_surfaces or []:
@@ -444,39 +468,48 @@ def infer_keywords(
             re.escape(chunk) for chunk in chunks
         ) + r"(?![A-Za-z0-9])"
         text = re.sub(pattern, " ", text)
-    rules = [
-        ("polysubstituted allenes", "product", ["polysubstituted allene", "substituted allene"]),
-        ("allenes", "product", ["allene", "allenes"]),
-        ("allene synthesis", "reaction_type", ["allene synthesis", "synthesis of allene"]),
-        ("propargylic alcohols", "substrate", ["propargylic alcohol"]),
-        ("propargylic halides", "substrate", ["propargylic derivative", "propargyl halide", "propargyl bromide", "propargylic bromide"]),
-        ("propargylic acetates", "substrate", ["acetate"]),
-        ("propargylic carbonates", "substrate", ["carbonate"]),
-        ("propargylic phosphates", "substrate", ["phosphate"]),
-        ("propargylic halides", "substrate", ["bromide"]),
-        ("propargylic sulfinates and sulfonates", "substrate", ["sulfide", "sulfinate", "sulfonate", "tosylate"]),
-        ("propargylic dichlorides", "substrate", ["dichloride", "gem-dichloride"]),
-        ("propargylic substitution and cross-coupling", "reaction_type", ["sn2", "substitution"]),
-        ("propargylic substitution and cross-coupling", "reaction_type", ["allenylation"]),
-        ("copper catalysis", "catalyst_or_method", ["copper", "cu", "cu(i)", "cu(iii)", "cubr", "cui", "cuoac", "cucl2", "icycucl", "organocopper", "cuprate"]),
-        ("palladium catalysis", "catalyst_or_method", ["palladium", "pd", "pd(0)", "pd(ii)", "palladium species", "propargylpalladium", "allenylpalladium"]),
-        ("zinc-mediated methods", "catalyst_or_method", ["zinc", "zn", "zn(ii)", "zni2", "znbr2", "zncl2", "organozinc"]),
-        ("cadmium-mediated methods", "catalyst_or_method", ["cadmium", "cd", "cd(ii)", "cdi2"]),
-        ("gold catalysis", "catalyst_or_method", ["gold", "au", "au(i)", "au(iii)", "kaucl4", "gold salen complex"]),
-        ("silver-mediated methods", "catalyst_or_method", ["silver", "ag", "ag(i)", "agno3"]),
-        ("rhodium catalysis", "catalyst_or_method", ["rhodium", "rh", "rh(i)", "rhodium complex", "rh/chiral diene complex"]),
-        ("iron catalysis", "catalyst_or_method", ["iron", "fe", "iron-porphyrin", "iron porphyrin", "fe-porphyrin"]),
-        ("copper-zinc bimetallic catalysis", "catalyst_or_method", ["copper-zinc", "copper/zinc", "cu/zn", "cu+/zn2+", "cubr/znbr2", "bimetallic approach", "bimetallic catalysis"]),
-        ("photoredox catalysis", "catalyst_or_method", ["photoredox", "visible-light"]),
-        ("asymmetric synthesis", "reaction_type", ["asymmetric", "enantioselective", "enantiospecific"]),
-        ("radical and single-electron allene synthesis", "reaction_type", ["radical"]),
-        ("Meyer-Schuster rearrangement", "reaction_type", ["meyer-schuster"]),
-    ]
+    if classification_rules is None:
+        profile = suggest_taxonomy_profile(text)
+        classification_rules = load_classification_rules(REVIEW_ROOT, profile)
     candidates: list[dict[str, Any]] = []
-    for kw, category, needles in rules:
-        if any(contains_phrase(needle, text) for needle in needles):
-            candidates.append({"keyword": kw, "category": category, "reason": "rule expansion from topic/user keywords"})
+    for category, labels in classification_rules.items():
+        for label, aliases in labels.items():
+            needles = [label, *aliases]
+            if any(contains_phrase(needle, text) for needle in needles):
+                candidates.append(
+                    {
+                        "keyword": label,
+                        "category": category,
+                        "reason": "Matched the active project taxonomy.",
+                    }
+                )
+    if not candidates:
+        fallback = topic_keyword_fallback(topic, unresolved_surfaces or [])
+        if fallback:
+            candidates.append(
+                {
+                    "keyword": fallback,
+                    "category": classify_keyword(fallback, classification_rules),
+                    "reason": "Preserved the meaningful topic phrase because no taxonomy alias matched.",
+                }
+            )
     return unique_keyword_dicts(candidates)
+
+
+def topic_keyword_fallback(topic: str, unresolved_surfaces: list[str]) -> str:
+    """Return a portable search phrase for a topic outside built-in taxonomies."""
+    text = re.sub(r"\s+", " ", str(topic or "").strip())
+    for surface in unresolved_surfaces:
+        text = re.sub(re.escape(surface), " ", text, flags=re.I)
+    text = re.sub(r"\b(?:past|last)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+years?\b", " ", text, flags=re.I)
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9+.#'\-]*", text)
+    meaningful = [word for word in words if word.casefold() not in GENERIC_INSTRUCTION_KEYWORDS]
+    if meaningful:
+        return " ".join(meaningful[:12])
+    # Keep non-Latin scientific topics intact after removing excess spacing.
+    if text and not re.search(r"[A-Za-z0-9]", text):
+        return text[:160].strip()
+    return ""
 
 
 def unique_keyword_dicts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -495,6 +528,7 @@ def build_keyword_set(
     user_keywords: list[str],
     agent_keywords: list[dict[str, Any]] | None = None,
     query_context: dict[str, Any] | None = None,
+    classification_rules: dict[str, dict[str, list[str]]] | None = None,
 ) -> dict[str, Any]:
     user_keywords = dedupe(user_keywords)
     ignored_user_keywords = [
@@ -516,13 +550,23 @@ def build_keyword_set(
             for item in query_context.get("unresolved_concepts", [])
         ]
     agent = (
-        infer_keywords(topic, user_keywords, unresolved_surfaces)
+        infer_keywords(
+            topic,
+            user_keywords,
+            unresolved_surfaces,
+            classification_rules,
+        )
         if agent_keywords is None
         else agent_keywords
     )
     merged: dict[str, dict[str, Any]] = {}
     for kw in user_keywords:
-        merged[kw.casefold()] = {"keyword": kw, "category": classify_keyword(kw), "source": ["user"], "keep": True}
+        merged[kw.casefold()] = {
+            "keyword": kw,
+            "category": classify_keyword(kw, classification_rules),
+            "source": ["user"],
+            "keep": True,
+        }
     for item in agent:
         normalized_keyword = re.sub(r"\s+", " ", str(item["keyword"]).strip())
         key = normalized_keyword.casefold()
@@ -579,15 +623,28 @@ def build_keyword_set(
     return result
 
 
-def classify_keyword(keyword: str) -> str:
+def classify_keyword(
+    keyword: str,
+    classification_rules: dict[str, dict[str, list[str]]] | None = None,
+) -> str:
     low = keyword.lower()
+    for category, labels in (classification_rules or {}).items():
+        for label, aliases in labels.items():
+            if any(contains_phrase(candidate, keyword) for candidate in [label, *aliases]):
+                return category
     if any(x in low for x in ["alcohol", "acetate", "carbonate", "phosphate", "sulfide", "bromide", "derivative", "dichloride"]):
         return "substrate"
-    if "allene" in low:
+    if any(x in low for x in ["product", "molecule", "compound", "material"]):
         return "product"
-    if any(x in low for x in ["catalysis", "copper", "nickel", "palladium", "photoredox"]):
+    if any(x in low for x in ["catalysis", "copper", "nickel", "palladium", "photoredox", "method", "model", "neural network"]):
         return "catalyst_or_method"
-    if any(x in low for x in ["sn2", "rearrangement", "allenylation", "synthesis"]):
+    if any(
+        x in low
+        for x in [
+            "reaction", "rearrangement", "synthesis", "coupling", "substitution",
+            "addition", "oxidation", "reduction", "functionalization",
+        ]
+    ):
         return "reaction_type"
     return "reaction_type"
 
@@ -1001,7 +1058,7 @@ def selected_from_combined(combined: list[dict[str, Any]]) -> dict[str, Any]:
                 selected["web_papers"].append({**result, "matched_keyword": group["keyword"]})
     selected["local_papers"] = list(selected["local_papers"].values())
     selected["local_papers"].sort(key=lambda r: (r["best_score"], r.get("year") or 0), reverse=True)
-    selected["local_papers"] = selected["local_papers"][:30]
+    selected["local_papers"] = selected["local_papers"][:discovery_paper_limit()]
     return selected
 
 
@@ -1151,6 +1208,17 @@ def run(args: argparse.Namespace) -> int:
     review_root = Path(args.review_root).resolve()
     project_id = args.project_id or slugify(args.topic)
     project = resolve_project_path(review_root, project_id)
+    taxonomy_profile = project_taxonomy_profile(
+        review_root,
+        project_id,
+        topic=args.topic,
+    )
+    save_project_config(
+        review_root,
+        project_id,
+        topic=args.topic,
+        taxonomy_profile=taxonomy_profile,
+    )
     _load_dotenv_if_present(review_root)
     user_keywords = split_keywords(args.keywords)
     query_plan_path = getattr(args, "query_plan", "")
@@ -1182,16 +1250,18 @@ def run(args: argparse.Namespace) -> int:
         "unresolved_concepts": unresolved_concepts,
         "filters": filters,
         "group_by": group_by,
-        "taxonomy": taxonomy_identity(review_root),
+        "taxonomy": taxonomy_identity(review_root, profile=taxonomy_profile),
     }
     if effective_query_plan_path is not None:
         query_context["query_plan_path"] = effective_query_plan_path
 
+    classification_rules = load_classification_rules(review_root, taxonomy_profile)
     keyword_set = build_keyword_set(
         args.topic,
         user_keywords,
         agent_keywords=agent_keywords,
         query_context=query_context,
+        classification_rules=classification_rules,
     )
     out_dir = project / "00_discovery"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1200,7 +1270,6 @@ def run(args: argparse.Namespace) -> int:
         encoding="utf-8",
     )
     papers = load_metadata(review_root)
-    classification_rules = load_classification_rules(review_root)
     local_grouped, filter_stats = local_search_by_keyword(
         papers,
         keyword_set["merged_keywords"],
@@ -1339,7 +1408,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Discover local and web papers by expanded topic keywords.")
-    parser.add_argument("--review-root", default=str(Path(__file__).resolve().parents[3]))
+    parser.add_argument("--review-root", default=str(discover_review_root(__file__)))
     parser.add_argument("--project-id", default="")
     parser.add_argument("--topic", required=True)
     parser.add_argument("--keywords", default="")

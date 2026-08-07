@@ -136,6 +136,11 @@ class SvgEditorResolutionChecks(unittest.TestCase):
         self.assertEqual(audit["submitted_canvas_size"], [1600, 1432])
         self.assertEqual(audit["output_canvas_size"], [2560, 2292])
         self.assertTrue(audit["canvas_normalized_to_base"])
+        state = dashboard.public_figure_redraw_states(self.review_root, self.project_id)["P137-F01"]
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(state["render_mode"], "manual-arrow-edit")
+        self.assertTrue(state["preview_only"])
+        self.assertEqual(state["error"], "")
 
     def test_preview_normalization_is_general_for_portrait_and_wide_images(self) -> None:
         for base_size in ((2560, 3968), (5568, 3012), (5340, 5136)):
@@ -183,6 +188,8 @@ class SvgEditorResolutionChecks(unittest.TestCase):
         self.assertIn("assetRevision+=1", html)
         self.assertIn("&v=${assetRevision}", html)
         self.assertIn("{cache:'no-store'}", html)
+        self.assertIn("A current saved artifact supersedes an older AI failure", html)
+        self.assertIn("label:'已编辑 · 待审核'", html)
 
     def test_orthogonal_arrow_adapts_to_initial_drag_axis(self) -> None:
         html = (Path(__file__).parent / "assets" / "dashboard" / "figures.html").read_text(

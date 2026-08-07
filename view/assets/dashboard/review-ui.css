@@ -546,10 +546,13 @@ input,
 select {
   font-family: var(--rw-serif) !important;
 }
-textarea.editor {
-  background: #151a16 !important;
-  color: #edf6ef !important;
-  border-radius: 0 0 18px 18px;
+.page-draft textarea.editor {
+  background: #fffdf7 !important;
+  color: #25231c !important;
+  border-radius: 14px !important;
+}
+.page-draft textarea.editor:focus {
+  background: #fffefb !important;
 }
 
 .page-library .app { grid-template-columns: 340px minmax(500px, 1fr) 430px !important; }
@@ -575,6 +578,10 @@ textarea.editor {
     min-height: calc(100vh - 124px);
     grid-template-columns: 1fr !important;
   }
+  /* The per-stage desktop column rules above have two class selectors and
+     otherwise outrank `.app` even inside this media query. Keep the compact
+     layout genuinely single-column on narrower screens. */
+  body[class] .app { grid-template-columns: 1fr !important; }
   .panel { min-height: 340px; }
 }
 

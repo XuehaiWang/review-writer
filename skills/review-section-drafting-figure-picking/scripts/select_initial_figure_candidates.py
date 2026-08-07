@@ -200,7 +200,7 @@ def build_outputs(project: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Select initial paper-level and manuscript figure candidates.")
-    parser.add_argument("--review-root", default=str(Path(__file__).resolve().parents[3]))
+    parser.add_argument("--review-root", default=".")
     parser.add_argument("--project-id", required=True)
     return parser.parse_args()
 

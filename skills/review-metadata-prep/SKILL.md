@@ -82,8 +82,8 @@ python <review-root>/skills/review-metadata-prep/scripts/prepare_metadata.py \
   --discover-from-pdf-root \
   --append-registry \
   --use-llm \
-  --base-url https://naiccc.com \
-  --model gpt-5.4 \
+  --base-url "$OPENAI_BASE_URL" \
+  --model "$REVIEW_METADATA_MODEL" \
   --reasoning-effort high
 ```
 
@@ -94,8 +94,8 @@ To refresh only the eight LLM tags on an existing library without rebuilding pap
 ```bash
 python <review-root>/skills/review-metadata-prep/scripts/llm_retag_metadata.py \
   --review-root <review-root> \
-  --model gpt-5.4 \
-  --base-url https://naiccc.com \
+  --model "$REVIEW_METADATA_MODEL" \
+  --base-url "$OPENAI_BASE_URL" \
   --reasoning-effort high \
   --api-key "$OPENAI_API_KEY"
 ```

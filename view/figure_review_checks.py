@@ -391,7 +391,79 @@ class FigureReviewHandoffChecks(unittest.TestCase):
             self.assertTrue(row["human_approval"]["current_policy_match"])
             self.assertEqual(payload["freshness"]["usable_count"], 1)
 
-    def test_figures_ui_exposes_explicit_ai_comparison_without_weakening_default_route(self) -> None:
+    def test_svg_edit_of_mechanism_padding_content_keeps_approval_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, _, redraw_stage, _ = self.build_project(root)
+            source = project / "02_section_drafting" / "first.png"
+            output = redraw_stage / "mechanism-expanded.png"
+            Image.new("RGB", (120, 100), "white").save(output)
+            manifest_path = redraw_stage / "redrawn_figure_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["figures"][0].update(
+                {
+                    "redrawn_image": str(output),
+                    "render_mode": "manual-arrow-edit",
+                    "edit_profile": "manual-mechanism-arrow-paths",
+                    "manual_arrow_edit": {
+                        "status": "saved",
+                        "base_mode": "redrawn",
+                        "base_image": str(redraw_stage / "provider-ai-base.png"),
+                    },
+                    "aspect_ratio_normalization": {
+                        "crop_mode": "expanded_for_padding_content",
+                        "provider_canvas_allowed": True,
+                        "padding_content": {"detected": True},
+                    },
+                    "chemistry_integrity": {"status": "failed", "failures": ["manual review"]},
+                    "output_disposition": "saved_with_integrity_warning",
+                }
+            )
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            approve_figure_for_manuscript(root, "demo", "P001-F01")
+            handoff = redraw_stage / "figures_handoff.json"
+            record_stage_outputs(handoff, [manifest_path, output], "figures")
+            payload = project_figures_payload(root, project.name)
+            row = payload["redrawn_manifest"]["figures"][0]
+
+            self.assertEqual(row["aspect_ratio_integrity"]["status"], "failed")
+            self.assertEqual(row["aspect_ratio_policy"], "provider_canvas_allowed")
+            self.assertTrue(row["human_approval"]["current_policy_match"])
+            self.assertEqual(payload["freshness"]["usable_count"], 1)
+
+    def test_source_based_manual_edit_cannot_bypass_aspect_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, _, redraw_stage, _ = self.build_project(root)
+            source = project / "02_section_drafting" / "first.png"
+            output = redraw_stage / "source-manual-square.png"
+            Image.new("RGB", (100, 100), "white").save(output)
+            manifest_path = redraw_stage / "redrawn_figure_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["figures"][0].update(
+                {
+                    "redrawn_image": str(output),
+                    "render_mode": "manual-arrow-edit",
+                    "edit_profile": "manual-mechanism-arrow-paths",
+                    "manual_arrow_edit": {
+                        "status": "saved",
+                        "base_mode": "source",
+                        "base_image": str(source),
+                    },
+                    "aspect_ratio_normalization": {
+                        "crop_mode": "expanded_for_padding_content",
+                        "provider_canvas_allowed": True,
+                        "padding_content": {"detected": True},
+                    },
+                }
+            )
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "aspect ratio does not match"):
+                approve_figure_for_manuscript(root, "demo", "P001-F01")
+
+    def test_figures_ui_exposes_reviewer_selected_ai_figure_type(self) -> None:
         html = (
             Path(__file__).resolve().parent
             / "assets"
@@ -400,8 +472,13 @@ class FigureReviewHandoffChecks(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("redrawCurrentAiOverride", html)
-        self.assertIn("force_ai=1", html)
-        self.assertIn("standardAiProviderCanvas", html)
+        self.assertIn("redrawFigureType", html)
+        self.assertIn("figure_type=", html)
+        self.assertIn("按所选类型 AI 重绘", html)
+        self.assertIn("const defaultFigureTypes=", html)
+        self.assertIn("return valid.length?valid:defaultFigureTypes", html)
+        self.assertIn("providerCanvasAllowed", html)
+        self.assertIn("manual_arrow_edit?.base_mode==='redrawn'", html)
         self.assertIn("humanApproveFigure", html)
 
     def test_per_figure_redraw_state_is_persisted_in_stage_seven_payload(self) -> None:
@@ -483,6 +560,9 @@ class FigureReviewHandoffChecks(unittest.TestCase):
         self.assertIn("retrying", html)
         self.assertIn("localFigureRedrawRequests", html)
         self.assertIn("refreshFigureRedrawActivity", html)
+        self.assertIn("A redraw that is waiting for human approval is still a generated image", html)
+        self.assertIn("stored&&!outputPath(row)?stored:''", html)
+        self.assertIn("status:'completed',preview_only:true", html)
 
 
 if __name__ == "__main__":

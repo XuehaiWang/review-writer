@@ -25,8 +25,6 @@ STOPWORDS = {
     "synthesis",
     "review",
     "chemistry",
-    "allene",
-    "allenes",
 }
 
 
@@ -74,6 +72,9 @@ def paper_value(paper: dict[str, Any], key: str) -> str:
         "substrate": ["substrate", "substrate_class"],
         "catalyst_or_method": ["catalyst_or_method", "catalyst_logic", "activation_mode"],
         "reaction_type": ["reaction_type", "activation_mode"],
+        "method": ["method", "approach", "catalyst_or_method", "reaction_type", "activation_mode"],
+        "finding": ["main_finding", "key_findings", "contribution", "product", "product_class"],
+        "evidence": ["key_evidence", "evidence", "abstract", "summary"],
         "limitation": ["limitation", "main_limitation"],
         "selectivity": ["selectivity", "selectivity_mode"],
     }
@@ -138,8 +139,8 @@ def select_rule_pack(skill_root: Path, topic: str) -> tuple[str, str]:
     try:
         manifest = read_json(manifest_path)
     except Exception:
-        return "allenation", "references/rule_packs/allenation"
-    default = str(manifest.get("default_rule_pack") or "allenation")
+        return "general", "references/rule_packs/general"
+    default = str(manifest.get("default_rule_pack") or "general")
     packs = manifest.get("rule_packs") if isinstance(manifest, dict) else {}
     if not isinstance(packs, dict):
         return default, f"references/rule_packs/{default}"
@@ -212,19 +213,26 @@ def select_papers(section_title: str, papers: list[dict[str, Any]], notes: dict[
     return selected
 
 
-def infer_logic(title: str) -> str:
+def infer_logic(title: str, rule_pack: str = "general") -> str:
     low = title.lower()
-    if any(w in low for w in ["radical", "photoredox", "cross-electrophile", "reductive"]):
-        return "mechanistic_pathway"
-    if any(w in low for w in ["carbonate", "ester", "alcohol", "bromide", "phosphate", "sulfide", "derivative"]):
-        return "precursor_class"
-    if any(w in low for w in ["stereo", "enantio", "chiral", "chirality", "selectivity"]):
-        return "stereochemical_control"
+    if rule_pack == "allenation":
+        if any(w in low for w in ["radical", "photoredox", "cross-electrophile", "reductive"]):
+            return "mechanistic_pathway"
+        if any(w in low for w in ["carbonate", "ester", "alcohol", "bromide", "phosphate", "sulfide", "derivative"]):
+            return "precursor_class"
+        if any(w in low for w in ["stereo", "enantio", "chiral", "chirality", "selectivity"]):
+            return "stereochemical_control"
+    if any(w in low for w in ["mechanism", "pathway", "architecture", "workflow", "framework"]):
+        return "mechanism_or_method"
+    if any(w in low for w in ["class", "type", "taxonomy", "representation", "category"]):
+        return "category_or_representation"
+    if any(w in low for w in ["performance", "prediction", "evaluation", "benchmark", "comparison", "selectivity"]):
+        return "comparative_performance"
     if any(w in low for w in ["application", "target", "useful"]):
         return "application"
-    if any(w in low for w in ["outlook", "challenge", "conclusion"]):
+    if any(w in low for w in ["outlook", "challenge", "conclusion", "limitation", "future"]):
         return "outlook"
-    return "reaction_type"
+    return "reaction_type" if rule_pack == "allenation" else "thematic_synthesis"
 
 
 def target_depth(title: str, selected_count: int) -> tuple[int, str]:
@@ -242,10 +250,12 @@ def infer_claim_type(title: str, index: int) -> str:
     low = title.lower()
     if index == 0 and any(w in low for w in ["foundational", "classical", "introduction"]):
         return "foundation"
-    if any(w in low for w in ["mechanism", "radical", "photoredox"]):
+    if any(w in low for w in ["mechanism", "radical", "photoredox", "architecture", "framework", "workflow"]):
         return "mechanism"
-    if any(w in low for w in ["scope", "functionalized", "classes"]):
+    if any(w in low for w in ["scope", "functionalized", "classes", "taxonomy", "representation"]):
         return "scope"
+    if any(w in low for w in ["performance", "prediction", "evaluation", "benchmark", "comparison"]):
+        return "contrast"
     if any(w in low for w in ["challenge", "outlook", "limitation"]):
         return "limitation"
     return ["foundation", "extension", "contrast", "limitation"][min(index, 3)]
@@ -269,11 +279,31 @@ def join_values(values: list[str], fallback: str) -> str:
     return ", ".join(values[:-1]) + f", and {values[-1]}"
 
 
-def section_thesis(title: str, selected: list[dict[str, Any]], dominant_logic: str) -> str:
+def section_thesis(
+    title: str,
+    selected: list[dict[str, Any]],
+    dominant_logic: str,
+    rule_pack: str = "general",
+) -> str:
+    low = title.lower()
+    if rule_pack != "allenation":
+        methods = join_values(common_values(selected, "method"), "the principal approaches in the assigned literature")
+        findings = join_values(common_values(selected, "finding"), "the main findings reported by the assigned papers")
+        limitations = join_values(common_values(selected, "limitation"), "their stated evidence and applicability limits")
+        if "introduction" in low or "background" in low:
+            return f"Define the review's scope and organizing question, then position {methods} as the evidence base for the sections that follow."
+        if dominant_logic == "outlook":
+            return f"Synthesize the unresolved limitations across {methods}, distinguishing shared gaps from method-specific constraints such as {limitations}."
+        if dominant_logic == "comparative_performance":
+            return f"Compare {methods} using explicit evidence and performance boundaries, connecting the comparison to {findings}."
+        if dominant_logic == "category_or_representation":
+            return f"Explain how the field is organized into meaningful categories or representations, and use {methods} to show why those distinctions affect {findings}."
+        if dominant_logic == "mechanism_or_method":
+            return f"Compare how {methods} operate, separating demonstrated mechanisms or design choices from interpretation and linking them to {findings}."
+        return f"Synthesize how {methods} advance the section topic, while preserving the evidence boundaries and limitations behind {findings}."
     substrates = join_values(common_values(selected, "substrate"), "the assigned precursor classes")
     activations = join_values(common_values(selected, "reaction_type"), "the assigned reaction types")
     products = join_values(common_values(selected, "product"), "the target allene classes")
-    low = title.lower()
     if "introduction" in low:
         return f"Frame the review around how propargylic alcohols and derivatives access {products}, emphasizing why precursor activation mode and substitution pattern define the field."
     if "outlook" in low or "challenge" in low or "conclusion" in low:
@@ -287,7 +317,21 @@ def section_thesis(title: str, selected: list[dict[str, Any]], dominant_logic: s
     return f"Explain how {activations} convert {substrates} into {products}, and define the scope and limitation boundaries that matter for this section."
 
 
-def review_problem(title: str, selected: list[dict[str, Any]], dominant_logic: str) -> str:
+def review_problem(
+    title: str,
+    selected: list[dict[str, Any]],
+    dominant_logic: str,
+    rule_pack: str = "general",
+) -> str:
+    if rule_pack != "allenation":
+        axes = {
+            "mechanism_or_method": "How do the principal approaches differ in design or mechanism, and which differences are supported by evidence?",
+            "category_or_representation": "Which classification or representation best explains meaningful differences across the assigned studies?",
+            "comparative_performance": "Which evidence and evaluation boundaries support the reported performance differences?",
+            "application": "What practical value is demonstrated beyond proof of concept, and under which conditions?",
+            "outlook": "Which limitations recur across approaches, and which are specific to one method or evidence base?",
+        }
+        return axes.get(dominant_logic, "What shared question connects these papers, where do their findings agree or diverge, and what limits the resulting conclusion?")
     axes = {
         "mechanistic_pathway": "Which mechanistic manifold changes the accessible allene products, and how strong is the evidence for that manifold?",
         "stereochemical_control": "Which stereochemical control mode is operating, and where does the method lose fidelity or generality?",
@@ -309,16 +353,24 @@ def normalize_role(raw: str) -> str:
     return "comparison source"
 
 
-def claim_from_papers(section_id: str, title: str, idx: int, papers: list[dict[str, Any]], axes: list[str]) -> dict[str, Any]:
+def claim_from_papers(
+    section_id: str,
+    title: str,
+    idx: int,
+    papers: list[dict[str, Any]],
+    axes: list[str],
+    rule_pack: str = "general",
+) -> dict[str, Any]:
     claim_type = infer_claim_type(title, idx)
     paper_refs = []
     for paper in papers[:4]:
         pid = str(paper.get("paper_id"))
-        use_for = [
-            k.replace("_", " ")
-            for k in ["substrate", "reaction_type", "product", "selectivity", "limitation"]
-            if paper_value(paper, k)
-        ][:3]
+        evidence_keys = (
+            ["substrate", "reaction_type", "product", "selectivity", "limitation"]
+            if rule_pack == "allenation"
+            else ["method", "finding", "evidence", "limitation"]
+        )
+        use_for = [k.replace("_", " ") for k in evidence_keys if paper_value(paper, k)][:3]
         caveat = paper_value(paper, "limitation")
         paper_refs.append(
             {
@@ -328,7 +380,51 @@ def claim_from_papers(section_id: str, title: str, idx: int, papers: list[dict[s
                 "caveat": caveat,
             }
         )
-    axis_values = [a.replace("_", " ") for a in axes[:3]] or ["substrate class", "activation mode", "scope boundary"]
+    axis_values = [a.replace("_", " ") for a in axes[:3]] or (
+        ["substrate class", "activation mode", "scope boundary"]
+        if rule_pack == "allenation"
+        else ["approach", "evidence", "scope boundary"]
+    )
+    if rule_pack != "allenation":
+        methods = join_values(common_values(papers, "method", 2), "the assigned approaches")
+        findings = join_values(common_values(papers, "finding", 2), "the reported findings")
+        limitations = join_values(common_values(papers, "limitation", 2), "the stated evidence and applicability limits")
+        if claim_type == "foundation":
+            claim = f"Establish {methods} as the section's baseline and define which evidence supports {findings}."
+        elif claim_type == "extension":
+            claim = f"Show how the assigned studies extend the baseline in method, scope, or evidence, and connect those extensions to {findings}."
+        elif claim_type == "contrast":
+            claim = f"Compare {methods} on explicit evidence and evaluation axes rather than treating their conclusions as interchangeable."
+        elif claim_type == "limitation":
+            claim = f"Qualify the section's apparent generality by preserving the main boundaries: {limitations}."
+        elif claim_type == "mechanism":
+            claim = f"Separate demonstrated method or mechanism claims from proposed interpretations when explaining {methods}."
+        elif claim_type == "scope":
+            claim = f"Define the evidence and applicability scope of {findings}, including where the assigned studies do not support broader claims."
+        else:
+            claim = f"Use the assigned papers to develop a bounded review claim about {title}, with explicit evidence and limitations."
+        wording_constraints = [
+            "Name the method, evidence type, or study scope when making a comparative claim.",
+            "Distinguish demonstrated results from hypotheses or author interpretation.",
+            "Avoid one-paper-one-paragraph narration.",
+        ]
+        return {
+            "claim_id": f"{section_id}_c{idx + 1}",
+            "claim": claim,
+            "claim_type": claim_type,
+            "supporting_papers": paper_refs,
+            "logic_relationship": {
+                "foundation": "foundation_to_extension",
+                "extension": "limitation_repair",
+                "contrast": "contrast",
+                "limitation": "scope_boundary",
+                "mechanism": "mechanistic_partition",
+                "scope": "scope_boundary",
+            }.get(claim_type, "contrast"),
+            "comparison_axes": axis_values,
+            "evidence_strength": "needs verification",
+            "wording_constraints": wording_constraints,
+        }
     substrates = join_values(common_values(papers, "substrate", 2), "the assigned substrate classes")
     activations = join_values(common_values(papers, "reaction_type", 2), "the assigned reaction types")
     products = join_values(common_values(papers, "product", 2), "the assigned allene products")
@@ -372,7 +468,15 @@ def claim_from_papers(section_id: str, title: str, idx: int, papers: list[dict[s
     }
 
 
-def build_section(section: dict[str, Any], papers: list[dict[str, Any]], axes: list[str], notes: dict[str, dict[str, Any]], prev_title: str, next_title: str) -> dict[str, Any]:
+def build_section(
+    section: dict[str, Any],
+    papers: list[dict[str, Any]],
+    axes: list[str],
+    notes: dict[str, dict[str, Any]],
+    prev_title: str,
+    next_title: str,
+    rule_pack: str = "general",
+) -> dict[str, Any]:
     title = section["title"]
     assigned_ids = [str(paper_id) for paper_id in section.get("assigned_papers") or []]
     papers_by_id = {str(paper.get("paper_id")): paper for paper in papers if paper.get("paper_id")}
@@ -384,14 +488,14 @@ def build_section(section: dict[str, Any], papers: list[dict[str, Any]], axes: l
     claims = []
     for idx in range(claim_count):
         claim_papers = selected[idx * 2 : idx * 2 + 4] or selected[:4]
-        claims.append(claim_from_papers(section["section_id"], title, idx, claim_papers, axes))
-    dominant_logic = infer_logic(title)
+        claims.append(claim_from_papers(section["section_id"], title, idx, claim_papers, axes, rule_pack))
+    dominant_logic = infer_logic(title, rule_pack)
     target_paragraphs, target_words = target_depth(title, len(selected))
     return {
         "section_id": section["section_id"],
         "title": title,
-        "section_thesis": section_thesis(title, selected, dominant_logic),
-        "review_problem": review_problem(title, selected, dominant_logic),
+        "section_thesis": section_thesis(title, selected, dominant_logic, rule_pack),
+        "review_problem": review_problem(title, selected, dominant_logic, rule_pack),
         "target_paragraphs": target_paragraphs,
         "target_words": target_words,
         "dominant_logic": dominant_logic,
@@ -399,15 +503,27 @@ def build_section(section: dict[str, Any], papers: list[dict[str, Any]], axes: l
         "review_claims": claims,
         "figure_or_table_needs": [
             {
-                "type": "scheme" if infer_logic(title) != "outlook" else "comparison table",
-                "purpose": "Show the reaction logic, representative precursor/product classes, or comparison axis that anchors this section.",
+                "type": (
+                    "scheme" if rule_pack == "allenation" and dominant_logic != "outlook"
+                    else "comparison table" if dominant_logic == "outlook"
+                    else "conceptual diagram or comparison table"
+                ),
+                "purpose": (
+                    "Show the reaction logic, representative precursor/product classes, or comparison axis that anchors this section."
+                    if rule_pack == "allenation"
+                    else "Show the principal approaches, evidence relationships, or comparison axes that anchor this section."
+                ),
                 "candidate_papers": paper_ids[:3],
             }
         ],
         "depth_requirements": [
             "Draft fully developed review prose, not a compact example or annotated bibliography.",
             "Use the approved matrix as a guide, but reopen Markdown/PDF evidence for section-level details.",
-            "Each substantive paragraph should contain a claim, source-grounded chemical detail, and a review-level interpretation.",
+            (
+                "Each substantive paragraph should contain a claim, source-grounded chemical detail, and a review-level interpretation."
+                if rule_pack == "allenation"
+                else "Each substantive paragraph should contain a claim, source-grounded evidence, and a review-level interpretation."
+            ),
         ],
         "section_transition": {
             "from_previous": f"Connect from {prev_title}." if prev_title else "Open the review scope and organizing logic.",
@@ -415,8 +531,16 @@ def build_section(section: dict[str, Any], papers: list[dict[str, Any]], axes: l
         },
         "avoid_patterns": [
             "Do not summarize papers in chronological order unless chronology is the section logic.",
-            "Do not collapse distinct activation modes into generic substitution language.",
-            "Do not use broad/generic scope adjectives without substrate boundaries.",
+            (
+                "Do not collapse distinct activation modes into generic substitution language."
+                if rule_pack == "allenation"
+                else "Do not collapse distinct methods, evidence types, or study populations into one generic category."
+            ),
+            (
+                "Do not use broad/generic scope adjectives without substrate boundaries."
+                if rule_pack == "allenation"
+                else "Do not use broad scope or performance adjectives without explicit evidence boundaries."
+            ),
         ],
     }
 
@@ -469,17 +593,20 @@ def run(args: argparse.Namespace) -> int:
         raise SystemExit("No numbered outline sections found in selected_outline.md")
 
     topic, papers, axes = load_matrix(matrix_path)
-    rule_pack, rule_pack_path = select_rule_pack(skill_root, topic or outline_text)
+    project_config = read_json(project_dir / "project_config.json") if (project_dir / "project_config.json").is_file() else {}
+    configured_topic = str(project_config.get("topic") or "").strip() if isinstance(project_config, dict) else ""
+    effective_topic = configured_topic or topic
+    rule_pack, rule_pack_path = select_rule_pack(skill_root, effective_topic or outline_text)
     notes = load_notes(notes_path)
     blueprint_sections = []
     for idx, section in enumerate(sections):
         prev_title = sections[idx - 1]["title"] if idx > 0 else ""
         next_title = sections[idx + 1]["title"] if idx + 1 < len(sections) else ""
-        blueprint_sections.append(build_section(section, papers, axes, notes, prev_title, next_title))
+        blueprint_sections.append(build_section(section, papers, axes, notes, prev_title, next_title, rule_pack))
 
     blueprint = {
         "project_id": args.project_id,
-        "review_topic": topic,
+        "review_topic": effective_topic,
         "outline_source": str(selected_outline),
         "matrix_source": str(matrix_path),
         "rule_pack": rule_pack,
@@ -499,7 +626,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Initialize section_blueprint.json from selected outline and literature matrix.")
-    parser.add_argument("--review-root", default=str(Path(__file__).resolve().parents[3]))
+    parser.add_argument("--review-root", default=".")
     parser.add_argument("--project-id", required=True)
     return parser.parse_args()
 

@@ -7,11 +7,30 @@ import json
 import os
 import re
 import ssl
+import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+
+_BOOTSTRAP_ROOT = next(
+    (p for p in Path(__file__).resolve().parents if (p / "review_writer_core").is_dir()),
+    None,
+)
+if _BOOTSTRAP_ROOT is None:
+    raise RuntimeError("Could not locate the Review Writer workspace")
+if str(_BOOTSTRAP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BOOTSTRAP_ROOT))
+
+from review_writer_core.providers import (  # noqa: E402
+    DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_TEXT_MODEL,
+    openai_endpoint as _shared_openai_endpoint,
+    resolve_api_key as _shared_resolve_api_key,
+)
+from review_writer_core.text_safety import make_xml_compatible  # noqa: E402
 
 
 class ModelResponseError(RuntimeError):
@@ -20,30 +39,15 @@ class ModelResponseError(RuntimeError):
 
 def openai_endpoint(base_url: str, endpoint: str) -> str:
     """Accept OpenAI-compatible base URLs with or without a trailing /v1."""
-    base = str(base_url or "https://api.openai.com").rstrip("/")
-    prefix = "" if base.lower().endswith("/v1") else "/v1"
-    return f"{base}{prefix}/{endpoint.lstrip('/')}"
+    return _shared_openai_endpoint(base_url, endpoint)
 
 
 def resolve_api_key(cli_value: str, base_url: str, dotenv: dict[str, str] | None = None) -> str:
-    if cli_value:
-        return cli_value
-    values = dotenv or {}
-    dedicated = os.environ.get("REVIEW_WRITING_API_KEY", "") or values.get("REVIEW_WRITING_API_KEY", "")
-    if dedicated:
-        return dedicated
-    if "api.xiaoleai.team" in str(base_url).lower():
-        return (
-            values.get("XIAOLEAI_API_KEY", "")
-            or values.get("OPENAI_API_KEY", "")
-            or os.environ.get("XIAOLEAI_API_KEY", "")
-            or os.environ.get("OPENAI_API_KEY", "")
-        )
-    return (
-        values.get("OPENAI_API_KEY", "")
-        or os.environ.get("OPENAI_API_KEY", "")
-        or values.get("XIAOLEAI_API_KEY", "")
-        or os.environ.get("XIAOLEAI_API_KEY", "")
+    del base_url
+    return _shared_resolve_api_key(
+        cli_value,
+        env_names=("REVIEW_WRITING_API_KEY", "OPENAI_API_KEY"),
+        dotenv=dotenv,
     )
 
 
@@ -236,7 +240,7 @@ def main() -> int:
         or dotenv.get("REVIEW_WRITING_BASE_URL")
         or dotenv.get("OPENAI_BASE_URL")
         or os.environ.get("OPENAI_BASE_URL")
-        or "https://api.openai.com"
+        or DEFAULT_OPENAI_BASE_URL
     )
     api_key = resolve_api_key(args.api_key, base_url, dotenv)
     if not api_key:
@@ -245,13 +249,13 @@ def main() -> int:
         args.model
         or os.environ.get("REVIEW_WRITING_MODEL")
         or dotenv.get("REVIEW_WRITING_MODEL")
-        or "gpt-5.4"
+        or DEFAULT_TEXT_MODEL
     )
     wire_api = (
         args.wire_api
         or os.environ.get("REVIEW_WRITING_WIRE_API")
         or dotenv.get("REVIEW_WRITING_WIRE_API")
-        or ("chat-completions" if "micuapi.ai" in base_url.lower() else "responses")
+        or "responses"
     )
     project = root / "review-projects" / args.project_id
     sections_data = read_json(project / "02_section_drafting" / "section_drafts.json")
@@ -288,7 +292,8 @@ Section evidence summaries:\n{json.dumps(summaries, ensure_ascii=False)}"""
                 body.extend([transition, ""])
     out = project / "04_first_draft"
     out.mkdir(parents=True, exist_ok=True)
-    (out / "first_draft.md").write_text("\n".join(body).strip() + "\n", encoding="utf-8")
+    merged_text, _ = make_xml_compatible("\n".join(body).strip() + "\n")
+    (out / "first_draft.md").write_text(merged_text, encoding="utf-8")
     status = (
         f"Generated review framing and section transitions with model `{model}`."
         if not fallback_reason

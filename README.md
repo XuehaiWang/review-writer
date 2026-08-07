@@ -69,6 +69,9 @@ Library -> Discovery -> Matrix -> Blueprint -> Sections
     橡皮擦、文本、直线和多种箭头。
   - 保存后的人工编辑会更新重绘 manifest，并同步到已有初稿/终稿图片。
 - **终稿与 Word 导出**
+  - 第九阶段提供可选的 Draft Quality 循环：按统一 rubric 评估全文及每个段落，
+    仅重写未达标段落，并保护引用、数值和立体化学信息。
+  - 质量循环通过 Stage-8 覆盖层保存，不修改分节草稿；不运行它也不会阻断原有终稿功能。
   - Conclusion 和 Overview Figure 是相互独立的可选产物。
   - Generate Final Draft 使用当时存在且为当前版本的可选产物，不强制串行点击。
   - 终稿统一图号及正文引用，清理内部插图标记和异常引用标签。
@@ -87,7 +90,7 @@ Library -> Discovery -> Matrix -> Blueprint -> Sections
 | Figure Review | 逐篇确认最终源图 | `02_section_drafting/human_figure_review.json` |
 | Figures | AI 重绘、人工 SVG 编辑和图片清单 | `03_figure_redraw/redrawn_figure_manifest.json`、`redrawn/*.png`、`manual_arrow_edits/*.svg` |
 | Draft | 合并、润色、插图和引用整理 | `04_first_draft/first_draft.md`、`citations.json`、`figures/*` |
-| Final | 可选结论/总览图、最终审计和 Word 导出 | `05_final_audit/final_draft.md`、`overview_figure.png`、`release_report.md`、`final_draft*.docx` |
+| Final | 可选逐段质量循环、可选结论/总览图、最终审计和 Word 导出 | `04_first_draft/feedback_loop_status.json`、`rubric_evaluation.json`、`05_final_audit/final_draft.md`、`overview_figure.png`、`release_report.md`、`final_draft*.docx` |
 
 ## 快速开始
 
@@ -106,7 +109,7 @@ py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-workflow.txt
 ```
 
-`requirements-workflow.txt` 包含当前前端工作流所需的 Prefect、Pillow、
+`requirements-workflow.txt` 包含当前前端工作流所需的 Prefect、Pillow、Requests、
 python-docx 和 pypdf。个别准备阶段还可能需要其对应 Skill 文档中列出的外部程序，
 例如 MinerU 或 Tesseract。
 
@@ -134,9 +137,11 @@ REVIEW_WRITING_MODEL=your-text-model
 REVIEW_CONCLUSION_MODEL=your-text-model
 
 # 图像编辑可与文本模型使用不同令牌和传输接口
-IMAGE_OPENAI_BASE_URL=https://www.micuapi.ai/v1
+IMAGE_OPENAI_BASE_URL=https://your-image-provider.example/v1
 IMAGE_OPENAI_WIRE_API=chat-completions
 IMAGE_OPENAI_API_KEY=replace-with-your-vip_2_image-key
+# 可选：按服务商实际支持范围设置，逗号分隔，避免尝试无效尺寸
+IMAGE_SUPPORTED_SIZES=1024x1024,1536x1024
 
 # 可选：文献服务与本地 OCR
 UNPAYWALL_EMAIL=you@example.org
@@ -152,6 +157,7 @@ TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
 - 标准 AI 重绘按 `IMAGE_OPENAI_WIRE_API` 使用 `images/edits` 或
   `chat/completions`，并把当前 Stage 6 源图随请求发送。严格机理箭头编辑固定使用
   `images/edits`，因为它不能降低为普通聊天图像通道。
+- MinerU 令牌只从设置页或 `MINERU_API_TOKEN` 读取；不要在 Skill 目录中保存令牌文件。
 - Unpaywall 邮箱不是下载的强制条件；未填写时仍会尝试其他合法开放获取来源。
 
 ### 4. 启动本地前端
@@ -169,9 +175,19 @@ TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
 http://127.0.0.1:8765
 ```
 
-如需在可信局域网内临时访问，可将 `--host` 改为 `0.0.0.0`，然后让同一局域网
-中的用户访问 `http://<本机局域网IP>:8765`。该前端没有内置多用户认证，
-不要直接暴露到公网，也不要在不可信网络中开放防火墙端口。
+如需在可信局域网内临时访问，可设置访问令牌后将 `--host` 改为 `0.0.0.0`：
+
+```powershell
+$env:REVIEW_DASHBOARD_ACCESS_TOKEN='replace-with-a-long-random-password'
+.\.venv\Scripts\python.exe view\serve_review_dashboard.py `
+  --review-root . `
+  --host 0.0.0.0 `
+  --port 8765
+```
+
+也可使用 `--access-token` 显式传入。浏览器会显示 HTTP Basic 登录框，用户名可任意
+填写，密码使用上述令牌。此方式适合可信局域网临时共享；它不是完整的多用户权限
+系统，仍不要把服务直接暴露到公网，也不要在不可信网络中开放防火墙端口。
 
 ## 数据、状态与版本
 
@@ -203,7 +219,8 @@ review-projects/<project-id>/
 
 metadata 构建、校验和第二阶段检索统一通过
 `review_writer_core/taxonomy.py` 加载同一套分类规则。默认 profile 为
-`review_writer_core/taxonomies/allene.py`，也可配置：
+`review_writer_core/taxonomies/chemistry_general.py`；项目主题匹配联烯时会选择
+`review_writer_core/taxonomies/allene.py`。也可显式配置：
 
 ```dotenv
 REVIEW_TAXONOMY_PROFILE=allene

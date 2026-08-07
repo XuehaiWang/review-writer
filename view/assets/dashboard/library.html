@@ -365,6 +365,18 @@
       color: var(--ink);
       outline: none;
     }
+    .library-scope {
+      display: inline-flex;
+      align-items: center;
+      min-height: 36px;
+      padding: 7px 14px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fffdf7;
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
     .acquire-actions {
       display: flex;
       align-items: center;
@@ -434,7 +446,7 @@
   <nav class="nav">
     <div class="nav-title">Review Writer Dashboard</div>
     <div class="nav-center">
-      <select id="globalProjectSelect" class="project-select"></select>
+      <span class="library-scope">Shared Literature Library</span>
     </div>
     <div class="nav-right">
       <a class="active" href="/library">Library</a>
@@ -540,8 +552,8 @@
       </section>
     </div>
   </div>
-  <script src="/assets/dashboard/review-i18n.js?v=20260805d"></script>
-  <script src="/assets/dashboard/review-ui.js?v=20260805d"></script>
+  <script src="/assets/dashboard/review-i18n.js?v=20260807a"></script>
+  <script src="/assets/dashboard/review-ui.js?v=20260807a"></script>
   <script>
     let papers = [];
     let selected = null;
@@ -552,7 +564,6 @@
     let acquisitionDownloadBusy = false;
     let emailGateResolver = null;
     const els = {
-      globalProjectSelect: document.getElementById('globalProjectSelect'),
       papers: document.getElementById('papers'),
       search: document.getElementById('search'),
       pdfFrame: document.getElementById('pdfFrame'),
@@ -581,11 +592,6 @@
       const value = meta?.[key];
       if (value && typeof value === 'object' && 'value' in value) return value.value ?? fallback;
       return value ?? fallback;
-    }
-    async function loadProjects() {
-      const projects = await (await fetch('/api/projects')).json();
-      els.globalProjectSelect.innerHTML = ['<option value="">Select review project</option>'].concat(projects.map(p => `<option value="${escapeHtml(p.project_id)}">${escapeHtml(p.project_id)}</option>`)).join('');
-      els.globalProjectSelect.value = new URLSearchParams(window.location.search).get('project') || '';
     }
     function showMessage(text) {
       els.message.textContent = text;
@@ -1029,10 +1035,7 @@
     document.addEventListener('keydown', event => {
       if (event.key === 'Escape' && els.acquireModal.classList.contains('open')) closeAcquisition();
     });
-    els.globalProjectSelect.addEventListener('change', e => {
-      if (e.target.value) window.location.href = `/discovery?project=${encodeURIComponent(e.target.value)}`;
-    });
-    Promise.all([loadProjects(), loadPapers()]).catch(err => showMessage(err.message));
+    loadPapers().catch(err => showMessage(err.message));
   </script>
 </body>
 </html>

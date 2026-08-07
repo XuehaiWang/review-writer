@@ -1,6 +1,6 @@
 # 综述模板写作方式与风格总结
 
-本文档基于 `/home/ps/review-writer/template` 下三篇综述模板，并结合 MinerU 转换后的 Markdown、图片和 `content_list.json` 总结其写作组织方式。
+本文档基于项目示例目录中的三篇综述模板，并结合 MinerU 转换后的 Markdown、图片和 `content_list.json` 总结其写作组织方式。
 
 参考模板：
 
@@ -13,8 +13,8 @@ Conquering three-carbon axial chirality of allenes.pdf
 MinerU 输出位置：
 
 ```text
-/home/ps/review-writer/mineru-outputs/markdown/
-/home/ps/review-writer/mineru-outputs/extracted/
+<review-root>/mineru-outputs/markdown/
+<review-root>/mineru-outputs/extracted/
 ```
 
 ## 1. 三篇模板的基本类型

@@ -12,6 +12,7 @@ import re
 import shutil
 import ssl
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -20,6 +21,36 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
+
+
+_BOOTSTRAP_ROOT = next(
+    (p for p in Path(__file__).resolve().parents if (p / "review_writer_core").is_dir()),
+    None,
+)
+if _BOOTSTRAP_ROOT is None:
+    raise RuntimeError("Could not locate the Review Writer workspace")
+if str(_BOOTSTRAP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BOOTSTRAP_ROOT))
+
+from review_writer_core.providers import (  # noqa: E402
+    DEFAULT_IMAGE_MODEL,
+    DEFAULT_OPENAI_BASE_URL,
+    normalize_wire_api as _shared_normalize_wire_api,
+    openai_endpoint as _shared_openai_endpoint,
+    resolve_api_key as _shared_resolve_api_key,
+)
+from review_writer_core.figure_redraw_routing import (  # noqa: E402
+    FIGURE_TYPE_AUTO,
+    FIGURE_TYPE_COLORED,
+    FIGURE_TYPE_LOW_RESOLUTION,
+    FIGURE_TYPE_MECHANISM,
+    FIGURE_TYPE_MULTIPANEL,
+    FIGURE_TYPE_PLOT,
+    FIGURE_TYPE_SCOPE,
+    FIGURE_TYPE_TABLE,
+    classify_chemical_figure,
+    normalize_figure_type,
+)
 
 
 SOURCE_FAITHFUL_SCALE_FACTOR = 4
@@ -54,8 +85,17 @@ OCR_ASSUMED_DPI = "300"
 MECHANISM_MAX_UNMATCHED_SOURCE_INK_RATIO = 0.28
 MECHANISM_MAX_UNMATCHED_OUTPUT_INK_RATIO = 0.14
 MECHANISM_MIN_OUTPUT_TO_SOURCE_INK_RATIO = 0.75
+MECHANISM_MIN_CHANGED_INK_RATIO = 0.002
 MECHANISM_MAX_EDIT_ATTEMPTS = 2
+COLORED_CLEANUP_MAX_EDIT_ATTEMPTS = 2
+COLORED_MAX_REMAINING_CHROMATIC_RATIO = 0.012
+COLORED_MAX_SOURCE_CHROMATIC_RETENTION = 0.45
+CHAT_COMPLETION_NO_IMAGE_ATTEMPTS = 3
 AI_EDIT_MAX_INPUT_SIDE = 2048
+ASPECT_PADDING_GUARD_RATIO = 0.004
+ASPECT_PADDING_SAFE_MARGIN_RATIO = 0.012
+ASPECT_PADDING_MIN_INK_PIXELS = 24
+ASPECT_PADDING_MIN_INK_RATIO = 0.002
 _DENSE_SCOPE_FIGURE_PATTERN = re.compile(
     r"\b(?:reaction\s+scope|substrate\s+scope|scope\s+(?:summary|for|of)|examples?)\b|"
     r"反应范围|底物范围|反应底物",
@@ -480,6 +520,9 @@ def mechanism_source_fidelity_check(source_path: Path, output_path: Path) -> dic
     unmatched_source_ratio = structure["unmatched_source_ink_pixels"] / source_ink
     unmatched_output_ratio = structure["unmatched_output_ink_pixels"] / source_ink
     output_to_source_ratio = output_ink / source_ink
+    changed_ink_ratio = (
+        structure["unmatched_source_ink_pixels"] + structure["unmatched_output_ink_pixels"]
+    ) / source_ink
     failures: list[str] = []
     if unmatched_source_ratio > MECHANISM_MAX_UNMATCHED_SOURCE_INK_RATIO:
         failures.append("too much source ink disappeared outside a credible arrow-only edit")
@@ -487,6 +530,8 @@ def mechanism_source_fidelity_check(source_path: Path, output_path: Path) -> dic
         failures.append("too much new or displaced ink appeared")
     if output_to_source_ratio < MECHANISM_MIN_OUTPUT_TO_SOURCE_INK_RATIO:
         failures.append("output ink density indicates missing structures, labels, or process steps")
+    if changed_ink_ratio < MECHANISM_MIN_CHANGED_INK_RATIO:
+        failures.append("no detectable process-arrow geometry change was produced")
     return {
         "status": "failed" if failures else "pass",
         "failures": failures,
@@ -498,9 +543,11 @@ def mechanism_source_fidelity_check(source_path: Path, output_path: Path) -> dic
         "unmatched_source_ink_ratio": round(unmatched_source_ratio, 6),
         "unmatched_output_ink_ratio": round(unmatched_output_ratio, 6),
         "output_to_source_ink_ratio": round(output_to_source_ratio, 6),
+        "changed_ink_ratio": round(changed_ink_ratio, 6),
         "max_unmatched_source_ink_ratio": MECHANISM_MAX_UNMATCHED_SOURCE_INK_RATIO,
         "max_unmatched_output_ink_ratio": MECHANISM_MAX_UNMATCHED_OUTPUT_INK_RATIO,
         "min_output_to_source_ink_ratio": MECHANISM_MIN_OUTPUT_TO_SOURCE_INK_RATIO,
+        "min_changed_ink_ratio": MECHANISM_MIN_CHANGED_INK_RATIO,
     }
 
 
@@ -700,6 +747,64 @@ def whiten_large_bright_color_fills(image: Image.Image) -> int:
             pixels[x, y] = (255, 255, 255)
             replaced += 1
     return replaced
+
+
+def chromatic_content_metrics(image_path: Path) -> dict[str, Any]:
+    """Measure saturated colour inside the non-white scientific content bounds."""
+    with Image.open(image_path) as source:
+        rgba = source.convert("RGBA")
+        background = Image.new("RGBA", rgba.size, "white")
+        background.alpha_composite(rgba)
+        rgb = background.convert("RGB")
+    difference = ImageChops.difference(rgb, Image.new("RGB", rgb.size, "white"))
+    content_mask = ImageOps.grayscale(difference).point(lambda value: 255 if value >= 12 else 0, mode="L")
+    content_box = content_mask.getbbox() or (0, 0, rgb.width, rgb.height)
+    content = rgb.crop(content_box)
+    pixel_reader = getattr(content, "get_flattened_data", content.getdata)
+    pixels = list(pixel_reader())
+    chromatic_pixels = sum(
+        1
+        for red, green, blue in pixels
+        if max(red, green, blue) - min(red, green, blue) >= 45
+        and min(red, green, blue) <= 225
+    )
+    return {
+        "image_size": list(rgb.size),
+        "content_box": list(content_box),
+        "content_size": [content.width, content.height],
+        "chromatic_pixels": chromatic_pixels,
+        "chromatic_ratio": chromatic_pixels / max(len(pixels), 1),
+    }
+
+
+def colored_fill_cleanup_check(source_path: Path, output_path: Path) -> dict[str, Any]:
+    """Reject coloured-chemistry outputs that leave most broad source fill intact."""
+    source = chromatic_content_metrics(source_path)
+    output = chromatic_content_metrics(output_path)
+    maximum = max(
+        COLORED_MAX_REMAINING_CHROMATIC_RATIO,
+        source["chromatic_ratio"] * COLORED_MAX_SOURCE_CHROMATIC_RETENTION,
+    )
+    failures: list[str] = []
+    if output["chromatic_ratio"] > maximum:
+        failures.append(
+            "non-semantic coloured fill remains above the allowed content-area ratio "
+            f"({output['chromatic_ratio']:.4f} > {maximum:.4f})"
+        )
+    return {
+        "status": "failed" if failures else "pass",
+        "failures": failures,
+        "source": source,
+        "output": output,
+        "maximum_output_chromatic_ratio": maximum,
+    }
+
+
+def edit_profile_for_figure_type(figure_type: str, render_mode: str) -> str:
+    """Derive the edit profile from the final classification, ignoring stale caller flags."""
+    if figure_type == FIGURE_TYPE_MECHANISM and render_mode == "ai-edit":
+        return MECHANISM_ARROW_STRAIGHTEN_PROFILE
+    return "standard"
 
 
 def render_source_faithful_bw(source_path: Path, output_path: Path) -> dict[str, Any]:
@@ -931,43 +1036,35 @@ def guess_mime(path: Path) -> str:
 
 def resolve_api_key(cli_value: str, base_url: str = "") -> str:
     """Prefer the dedicated image credential over text-provider credentials."""
-    if cli_value:
-        return cli_value
-    image_key = os.environ.get("IMAGE_OPENAI_API_KEY", "")
-    if "micuapi.ai" in base_url.lower():
-        return (
-            image_key
-            or os.environ.get("IMAGE_FALLBACK_API_KEY", "")
-            or os.environ.get("OPENAI_API_KEY", "")
-        )
-    if image_key:
-        return image_key
-    if "api.xiaoleai.team" in base_url:
-        return os.environ.get("XIAOLEAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
-    return os.environ.get("OPENAI_API_KEY", "")
+    del base_url
+    return _shared_resolve_api_key(
+        cli_value,
+        env_names=(
+            "IMAGE_OPENAI_API_KEY",
+            "IMAGE_FALLBACK_API_KEY",
+            "OPENAI_API_KEY",
+        ),
+    )
 
 
 def resolve_image_field(configured: str, base_url: str) -> str:
     """Choose the multipart image field required by the selected OpenAI-compatible relay."""
-    if configured.strip():
-        return configured.strip()
-    if "api.xiaoleai.team" in base_url:
-        return "image"
-    return "image[]"
+    del base_url
+    return configured.strip() or os.environ.get("IMAGE_OPENAI_FIELD", "").strip() or "image[]"
 
 
 def default_base_url() -> str:
-    return os.environ.get("IMAGE_OPENAI_BASE_URL", os.environ.get("OPENAI_BASE_URL", "https://api.openai.com"))
+    return os.environ.get("IMAGE_OPENAI_BASE_URL", os.environ.get("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL))
 
 
 def default_wire_api() -> str:
-    configured = os.environ.get("IMAGE_OPENAI_WIRE_API", "images").strip().lower().replace("_", "-")
-    aliases = {
-        "chat": "chat-completions",
-        "chat-completion": "chat-completions",
-    }
-    configured = aliases.get(configured, configured)
-    return configured if configured in {"images", "responses", "chat-completions"} else "images"
+    configured = os.environ.get("IMAGE_OPENAI_WIRE_API", "images")
+    if configured.strip().lower().replace("_", "-") == "responses":
+        return "responses"
+    try:
+        return _shared_normalize_wire_api(configured, image=True, default="images")
+    except ValueError:
+        return "images"
 
 
 def image_fallback_config() -> dict[str, str]:
@@ -979,7 +1076,7 @@ def image_fallback_config() -> dict[str, str]:
     return {
         "base_url": base_url,
         "wire_api": "chat-completions",
-        "model": os.environ.get("IMAGE_FALLBACK_MODEL", "gpt-image-2").strip() or "gpt-image-2",
+        "model": os.environ.get("IMAGE_FALLBACK_MODEL", DEFAULT_IMAGE_MODEL).strip() or DEFAULT_IMAGE_MODEL,
         "api_key": (
             os.environ.get("IMAGE_FALLBACK_API_KEY", "").strip()
             or os.environ.get("OPENAI_API_KEY", "").strip()
@@ -989,10 +1086,7 @@ def image_fallback_config() -> dict[str, str]:
 
 def openai_api_url(base_url: str, endpoint: str) -> str:
     """Build an OpenAI-compatible v1 endpoint without duplicating a configured /v1 suffix."""
-    base = base_url.rstrip("/")
-    if base.endswith("/v1"):
-        return f"{base}{endpoint}"
-    return f"{base}/v1{endpoint}"
+    return _shared_openai_endpoint(base_url, endpoint)
 
 
 def http_error_details(error: urllib.error.HTTPError) -> str:
@@ -1026,6 +1120,21 @@ def build_headers(api_key: str, content_type: str | None = None) -> dict[str, st
 TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 GENERIC_TRANSIENT_RETRY_DELAYS = (1, 2)
 CHANNEL_FAILURE_RETRY_DELAYS = (15, 45)
+SAFETY_MODERATION_ERROR_MARKERS = (
+    "内容被安全审核拦截",
+    "疑似成人内容",
+    "安全审核",
+    "内容审核",
+    "adult content",
+    "sexual content",
+    "nsfw",
+    "content_filter",
+    "content filter",
+    "safety policy",
+    "safety review",
+    "moderation",
+    "policy violation",
+)
 
 
 def transient_retry_delay(details: str, attempt: int) -> int:
@@ -1036,6 +1145,45 @@ def transient_retry_delay(details: str, attempt: int) -> int:
         else GENERIC_TRANSIENT_RETRY_DELAYS
     )
     return delays[min(max(attempt, 0), len(delays) - 1)]
+
+
+def is_safety_moderation_rejection(error: BaseException | str) -> bool:
+    """Recognize an explicit provider moderation rejection, not a generic 400."""
+    details = str(error or "").casefold()
+    return any(marker.casefold() in details for marker in SAFETY_MODERATION_ERROR_MARKERS)
+
+
+def call_with_academic_safety_retry(
+    requester: Any,
+    prompt: str,
+    safety_prompt: str,
+    audit_log: list[dict[str, Any]],
+    generation_attempt: int = 1,
+) -> Any:
+    """Retry one false-positive moderation rejection with a concise academic prompt."""
+    try:
+        return requester(prompt)
+    except RuntimeError as exc:
+        if not is_safety_moderation_rejection(exc):
+            raise
+        audit = {
+            "generation_attempt": generation_attempt,
+            "status": "retrying",
+            "prompt_variant": "academic-chemistry-safety-context",
+            "trigger_error": str(exc)[-2000:],
+        }
+        audit_log.append(audit)
+        try:
+            result = requester(safety_prompt)
+        except RuntimeError as retry_error:
+            audit["status"] = "failed"
+            audit["retry_error"] = str(retry_error)[-2000:]
+            raise RuntimeError(
+                "Image edit request was blocked by provider safety review and the concise "
+                f"academic-chemistry prompt retry also failed: {retry_error}"
+            ) from retry_error
+        audit["status"] = "succeeded"
+        return result
 
 
 def decode_json_object(raw: bytes, label: str) -> dict[str, Any]:
@@ -1098,7 +1246,55 @@ def image_edit_file_fields(image_path: Path, image_field: str = "image[]") -> li
     return [(image_field.strip() or "image[]", image_path)]
 
 
-def build_prompt(style_name: str, figure: dict[str, Any], ocr_text: str = "") -> str:
+def figure_type_prompt(figure_type: str) -> str:
+    """Return type-specific constraints without weakening the shared chemistry lock."""
+    prompts = {
+        FIGURE_TYPE_SCOPE: (
+            " This is a reaction/substrate-scope grid. Preserve every cell, molecule, substituent, example number, "
+            "yield, selectivity value, footnote, condition, and failed-example marker one-for-one. Do not consolidate "
+            "examples or replace repeated structures with generic placeholders. Improve colour consistency, white "
+            "background, edge continuity, and legibility only."
+        ),
+        FIGURE_TYPE_MULTIPANEL: (
+            " This is a complex multi-panel chemistry figure. Preserve every panel boundary, panel letter, reading "
+            "order, cross-panel arrow, inset, legend, structure, and annotation. Do not merge, split, reorder, or "
+            "summarize panels. Improve colour balance and edge clarity only."
+        ),
+        FIGURE_TYPE_LOW_RESOLUTION: (
+            " This is a low-resolution or thin-stroke chemistry source. Upscale and strengthen only lines and glyphs "
+            "that are visibly present in the upload. Do not guess, autocomplete, infer, or reconstruct an ambiguous "
+            "bond, atom, digit, substituent, stereochemical mark, or arrow. Prefer faithful soft antialiasing over "
+            "inventing missing detail."
+        ),
+        FIGURE_TYPE_COLORED: (
+            " This is a coloured chemistry figure. Remove every broad non-semantic cyan, teal, blue, green, magenta, "
+            "orange, or other solid fill completely and make the affected aromatic-ring, fused-ring, circle, node, or "
+            "marker interior pure white. In particular, a solid colour behind a benzene or fused heteroaromatic ring "
+            "is decorative fill, not a chemical bond: delete the fill but retain the exact ring perimeter, every inner "
+            "alternating/double-bond stroke, heteroatom, substituent bond, R-group label, and symbol as crisp line art. "
+            "Retain colours only when they encode arrow classes, data series, atom identity, or scientific meaning. "
+            "Never leave the source fill unchanged and never convert a filled region into a black block."
+        ),
+        FIGURE_TYPE_TABLE: (
+            " This is a scientific data table. Preserve the exact row and column count, cell boundaries, headings, "
+            "numbers, decimal places, signs, units, superscripts, subscripts, footnotes, and blank cells. Never "
+            "recalculate, translate, normalize, or invent a value. Improve text and rule sharpness only."
+        ),
+        FIGURE_TYPE_PLOT: (
+            " This is a scientific plot or spectrum. Preserve every data curve and point at its exact coordinate, "
+            "together with axes, scales, ticks, legends, colours, error bars, labels, and annotations. Do not smooth, "
+            "fit, move, remove, or invent data. Improve visual clarity only."
+        ),
+    }
+    return prompts.get(figure_type, "")
+
+
+def build_prompt(
+    style_name: str,
+    figure: dict[str, Any],
+    ocr_text: str = "",
+    figure_type: str = "simple-scheme",
+) -> str:
     ocr_constraint = ""
     if ocr_text.strip():
         ocr_constraint = (
@@ -1127,13 +1323,18 @@ def build_prompt(style_name: str, figure: dict[str, Any], ocr_text: str = "") ->
         "inside their existing bounds; it must not move or obscure chemical structures, arrows, or text. "
         "Keep canvas dimensions, aspect ratio, panel order, and relative placement unchanged. "
         "The output must be scientifically and topologically identical to the source. "
-        f"Style preset: {style_name}.{ocr_constraint}"
+        f"Style preset: {style_name}.{figure_type_prompt(figure_type)}{ocr_constraint}"
     )
 
 
-def build_ocr_hollow_prompt(style_name: str, figure: dict[str, Any], ocr_text: str = "") -> str:
+def build_ocr_hollow_prompt(
+    style_name: str,
+    figure: dict[str, Any],
+    ocr_text: str = "",
+    figure_type: str = "simple-scheme",
+) -> str:
     return (
-        build_prompt(style_name, figure, ocr_text)
+        build_prompt(style_name, figure, ocr_text, figure_type)
         + " The input has all original text regions masked. Do not generate any letters, numbers, labels, or symbols. "
         "Redraw only the non-text chemistry graphics in pure black on white. Convert every solid filled icon, node, arrowhead, "
         "or shape into a black outline with a white hollow interior, while preserving bond connectivity and geometry. "
@@ -1142,9 +1343,30 @@ def build_ocr_hollow_prompt(style_name: str, figure: dict[str, Any], ocr_text: s
     )
 
 
+MECHANISM_PROMPT_REQUIRED_TOKENS = ("h\u03bd", "SN2\u2032 oxidative addition")
+MECHANISM_PROMPT_MOJIBAKE_REPLACEMENTS = (
+    ("h\u8c13", "h\u03bd"),
+    ("\u9225?", "\u2032"),
+    ("\u951f", ""),
+    ("\ufffd", ""),
+)
+
+
+def repair_mechanism_prompt_text(prompt: str) -> str:
+    """Repair known prompt mojibake and continue with canonical chemistry text."""
+    repaired = prompt
+    for damaged, canonical in MECHANISM_PROMPT_MOJIBAKE_REPLACEMENTS:
+        repaired = repaired.replace(damaged, canonical)
+    if "h\u03bd" not in repaired:
+        repaired += " Preserve the exact photocatalysis label h\u03bd."
+    if "SN2\u2032 oxidative addition" not in repaired:
+        repaired += " Preserve the exact text 'SN2\u2032 oxidative addition'."
+    return repaired
+
+
 def build_mechanism_arrow_straighten_prompt(figure: dict[str, Any]) -> str:
     """Strict local-edit prompt for mechanism figures with curved process arrows."""
-    return (
+    prompt = (
         "Use the uploaded original chemical reaction mechanism image as the only base image. "
         "Perform a strict, pixel-preserving local inpaint; do not redraw, reinterpret, regenerate, crop, "
         "rescale, or relayout the figure. "
@@ -1163,17 +1385,51 @@ def build_mechanism_arrow_straighten_prompt(figure: dict[str, Any]) -> str:
         "Everything except arrow geometry is locked and must remain visually identical to the original: "
         "all molecular structures, bond orders and angles, allenes, atom/group/formula labels, R-group "
         "positions and subscripts, charges, radical dots, oxidation states, catalysts, reagents, solvents, "
-        "photocatalyst labels, hν, compound labels and numbers, all text including 'SN2′ oxidative addition', "
+        "photocatalyst labels, h\u03bd, compound labels and numbers, all text including "
+        "'SN2\u2032 oxidative addition', "
         "fonts, font sizes, weights, italic/subscript/superscript formatting, positions, distances, angles, "
         "white background, canvas size, and aspect ratio. Do not alter any chemical bond or character. "
         "The final image must retain approximately the same non-white ink density as the source; loss of a molecule, "
         "intermediate, label, colored step name, branch, or cycle segment is an invalid result. "
         "Before returning the image, compare all quadrants with the source and verify that no source content was erased. "
-        "If an arrow cannot be converted without altering other content, leave that arrow unchanged instead of deleting "
-        "or simplifying any surrounding chemistry. "
+        "Convert every visibly isolated curved process arrow; returning the original image with all curved arrows "
+        "unchanged is not a valid result. If one individual arrow cannot be converted without altering other content, "
+        "leave that arrow unchanged (and only that arrow) instead of deleting or simplifying any surrounding chemistry. "
         "Reject any edit that changes chemistry, typography, layout, arrow direction, arrow color, or arrow count. "
         "Output the same high-resolution image with only the specified arrow-shape changes."
     )
+    return repair_mechanism_prompt_text(prompt)
+
+
+def build_academic_chemistry_safety_retry_prompt(
+    figure_type: str,
+    edit_profile: str,
+) -> str:
+    """Build a short, neutral retry prompt for scientific-image moderation false positives."""
+    prompt = (
+        "Academic chemistry diagram editing task. The uploaded image is a peer-reviewed scientific schematic "
+        "containing only chemical structures, formulas, labels, and reaction arrows; it is not a photograph and "
+        "contains no people. Use the upload as the sole base image. Preserve every molecule, atom, bond order, ring, "
+        "stereochemical mark, charge, formula, label, number, condition, arrow endpoint, arrow direction, arrow color, "
+        "and layout exactly. Do not add, remove, infer, rename, reconnect, crop, or rearrange scientific content. "
+    )
+    if edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE or figure_type == FIGURE_TYPE_MECHANISM:
+        prompt += (
+            "Change only the shape of reaction-flow arrows: replace each clearly curved process arrow with a straight "
+            "arrow or a horizontal-and-vertical right-angle arrow. Keep the original arrow count, endpoints, direction, "
+            "color, thickness, and connections. Leave an arrow unchanged if editing it could affect nearby chemistry. "
+            "Keep all non-arrow pixels unchanged. Preserve h\u03bd and SN2\u2032 oxidative addition exactly if present. "
+        )
+    elif figure_type == FIGURE_TYPE_COLORED:
+        prompt += (
+            "Remove only broad decorative color fills, leaving affected interiors white while preserving every outline, "
+            "inner aromatic bond, heteroatom, substituent, label, and scientifically meaningful color. "
+        )
+    else:
+        prompt += (
+            "Improve only line continuity, edge clarity, contrast, and the white background without changing content. "
+        )
+    return prompt + "Return one edited scientific diagram image and no explanatory text."
 
 
 def chemistry_integrity_gate(redraw_row: dict[str, Any]) -> dict[str, Any]:
@@ -1200,6 +1456,13 @@ def chemistry_integrity_gate(redraw_row: dict[str, Any]) -> dict[str, Any]:
             "human_check_required": True,
             "manual_check": "Verify arrow count, endpoints, direction, branching, color, and route against the source.",
         }
+
+    if str(redraw_row.get("figure_type") or "") == FIGURE_TYPE_COLORED:
+        cleanup = redraw_row.get("colored_fill_cleanup") or {}
+        if cleanup.get("status") != "pass":
+            failures.extend(
+                str(item) for item in cleanup.get("failures") or ["coloured fill cleanup check failed"]
+            )
 
     if structure_status != "pass":
         failures.append("bidirectional line geometry check failed")
@@ -1409,18 +1672,32 @@ def call_chat_completions_image_edit(
                 ],
             }
         ],
-        # The relay's image jobs can exceed a reverse proxy's non-streaming
-        # timeout.  Streaming gives it a chance to send progress/keepalive
-        # events while the final image URL or data URI is being produced.
-        "stream": True,
     }
-    req = urllib.request.Request(
-        openai_api_url(base_url, "/chat/completions"),
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers=build_headers(api_key, "application/json; charset=utf-8"),
-        method="POST",
+    last_response: dict[str, Any] = {}
+    # Streaming avoids many reverse-proxy timeouts, but some relays emit empty
+    # SSE choices and attach the image only to the final non-streaming JSON.
+    # Try both transports before declaring the provider incapable of producing
+    # an image for this request.
+    stream_modes = [True] * max(CHAT_COMPLETION_NO_IMAGE_ATTEMPTS - 1, 0) + [False]
+    for attempt in range(CHAT_COMPLETION_NO_IMAGE_ATTEMPTS):
+        payload["stream"] = stream_modes[attempt]
+        req = urllib.request.Request(
+            openai_api_url(base_url, "/chat/completions"),
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers=build_headers(api_key, "application/json; charset=utf-8"),
+            method="POST",
+        )
+        last_response = open_chat_completion_request(req, "Chat Completions image edit request")
+        if extract_chat_completion_image_reference(last_response):
+            return last_response
+        if attempt + 1 < CHAT_COMPLETION_NO_IMAGE_ATTEMPTS:
+            time.sleep(min(2 ** attempt, 4))
+    raise RuntimeError(
+        "Chat Completions image edit response did not contain an image after "
+        f"{CHAT_COMPLETION_NO_IMAGE_ATTEMPTS} attempts; "
+        + f"request_modes={['stream' if mode else 'non-stream' for mode in stream_modes]}; "
+        + chat_completion_response_summary(last_response)
     )
-    return open_chat_completion_request(req, "Chat Completions image edit request")
 
 
 def open_chat_completion_request(
@@ -1443,7 +1720,9 @@ def open_chat_completion_request(
                 if "text/event-stream" not in content_type:
                     return decode_json_object(response.read(), label)
                 content_parts: list[str] = []
+                reasoning_parts: list[str] = []
                 image_items: list[Any] = []
+                finish_reason = ""
                 for raw_line in response:
                     line = raw_line.decode("utf-8", "replace").strip()
                     if not line.startswith("data:"):
@@ -1457,24 +1736,41 @@ def open_chat_completion_request(
                         continue
                     choices = event.get("choices") if isinstance(event, dict) else None
                     if isinstance(choices, list) and choices:
-                        delta = (choices[0] or {}).get("delta") or {}
+                        choice = choices[0] or {}
+                        finish_reason = str(choice.get("finish_reason") or finish_reason)
+                        delta = choice.get("delta") or choice.get("message") or {}
                         content = delta.get("content") if isinstance(delta, dict) else None
                         if isinstance(content, str):
                             content_parts.append(content)
                         elif isinstance(content, list):
                             image_items.extend(content)
-                        images = delta.get("images") if isinstance(delta, dict) else None
-                        if isinstance(images, list):
-                            image_items.extend(images)
+                        elif isinstance(content, dict):
+                            image_items.append(content)
+                        if isinstance(delta, dict):
+                            for key in ("images", "image", "result", "output"):
+                                value = delta.get(key)
+                                if value is not None:
+                                    image_items.append(value)
+                            for key in ("reasoning_content", "refusal"):
+                                value = delta.get(key)
+                                if isinstance(value, str) and value.strip():
+                                    reasoning_parts.append(value)
                     if isinstance(event, dict) and isinstance(event.get("delta"), str):
                         content_parts.append(event["delta"])
+                    if isinstance(event, dict):
+                        for key in ("data", "images", "image", "result", "output"):
+                            value = event.get(key)
+                            if value is not None:
+                                image_items.append(value)
                 message: dict[str, Any] = {
                     "role": "assistant",
                     "content": "".join(content_parts),
                 }
+                if reasoning_parts:
+                    message["reasoning_content"] = "".join(reasoning_parts)
                 if image_items:
                     message["images"] = image_items
-                return {"choices": [{"message": message}]}
+                return {"choices": [{"message": message, "finish_reason": finish_reason}]}
         except urllib.error.HTTPError as exc:
             details = http_error_details(exc)
             if exc.code not in TRANSIENT_HTTP_CODES or attempt == 2:
@@ -1604,6 +1900,40 @@ def extract_chat_completion_image_reference(response: dict[str, Any]) -> tuple[s
             if found:
                 return found
     return _image_reference_from_node(response.get("output"))
+
+
+def chat_completion_response_summary(response: dict[str, Any]) -> str:
+    """Return safe diagnostics for a successful response that produced no image."""
+    keys = sorted(str(key) for key in response.keys()) if isinstance(response, dict) else []
+    finish_reasons: list[str] = []
+    text_parts: list[str] = []
+    choices = response.get("choices") if isinstance(response, dict) else None
+    if isinstance(choices, list):
+        for choice in choices[:3]:
+            if not isinstance(choice, dict):
+                continue
+            finish_reason = str(choice.get("finish_reason") or "").strip()
+            if finish_reason:
+                finish_reasons.append(finish_reason)
+            message = choice.get("message") or choice.get("delta") or {}
+            if not isinstance(message, dict):
+                continue
+            for field in ("content", "refusal", "reasoning_content"):
+                value = message.get(field)
+                if isinstance(value, str) and value.strip():
+                    cleaned = _DATA_IMAGE_PATTERN.sub("[image data omitted]", value.strip())
+                    text_parts.append(cleaned[:400])
+    error = response.get("error") if isinstance(response, dict) else None
+    if error:
+        text_parts.append(str(error)[:400])
+    summary = [f"response_keys={keys}", f"choice_count={len(choices) if isinstance(choices, list) else 0}"]
+    if finish_reasons:
+        summary.append("finish_reason=" + ",".join(finish_reasons))
+    if text_parts:
+        summary.append("provider_text=" + " | ".join(text_parts)[:600])
+    else:
+        summary.append("provider_text=<empty>")
+    return "; ".join(summary)
 
 
 def _write_validated_image(raw: bytes, out_path: Path) -> None:
@@ -1750,7 +2080,14 @@ def normalize_generated_aspect(
     source_path: Path,
     framing: dict[str, Any],
 ) -> dict[str, Any]:
-    """Crop the provider's padded canvas and save at the exact source dimensions."""
+    """Remove technical padding without cutting provider-generated content.
+
+    A square-only provider can move labels or structures into the white wrapper
+    even when the prompt asks it not to.  In that case the original fixed crop
+    is unsafe: expand it to the generated ink (or retain the complete provider
+    canvas) and keep the resulting native aspect ratio instead of stretching it
+    back to the source dimensions.
+    """
     with Image.open(source_path) as opened_source:
         source = ImageOps.exif_transpose(opened_source)
         source_size = source.size
@@ -1762,6 +2099,14 @@ def normalize_generated_aspect(
     provider_ratio = provider_size[0] / max(1, provider_size[1])
     crop_box = (0, 0, provider_size[0], provider_size[1])
     crop_mode = "provider_already_matches_source"
+    padding_content = {
+        "detected": False,
+        "ink_pixels": 0,
+        "ink_ratio": 0.0,
+        "minimum_ink_pixels": 0,
+        "guard_px": 0,
+        "ink_bbox": None,
+    }
 
     # A relay may honour the source ratio despite receiving the wrapper.  In
     # that case cropping by square-wrapper coordinates would incorrectly cut
@@ -1779,6 +2124,66 @@ def normalize_generated_aspect(
             min(provider_size[1], round((top + height) * scale_y)),
         )
         crop_mode = "letterbox_content_box"
+
+        # Ignore a narrow antialiasing halo around the expected content box,
+        # then look for a meaningful amount of real ink in the technical
+        # padding.  Fixed cropping is forbidden when the provider has moved
+        # content there because that would silently delete labels/structures.
+        generated_ink = ink_mask(generated)
+        total_ink_pixels = generated_ink.histogram()[255]
+        guard_px = max(2, round(min(provider_size) * ASPECT_PADDING_GUARD_RATIO))
+        protected_box = (
+            max(0, crop_box[0] - guard_px),
+            max(0, crop_box[1] - guard_px),
+            min(provider_size[0], crop_box[2] + guard_px),
+            min(provider_size[1], crop_box[3] + guard_px),
+        )
+        padding_zone = Image.new("L", provider_size, 255)
+        if protected_box[2] > protected_box[0] and protected_box[3] > protected_box[1]:
+            ImageDraw.Draw(padding_zone).rectangle(
+                (
+                    protected_box[0],
+                    protected_box[1],
+                    protected_box[2] - 1,
+                    protected_box[3] - 1,
+                ),
+                fill=0,
+            )
+        padding_ink = ImageChops.multiply(generated_ink, padding_zone)
+        padding_ink_pixels = padding_ink.histogram()[255]
+        minimum_ink_pixels = max(
+            ASPECT_PADDING_MIN_INK_PIXELS,
+            round(total_ink_pixels * ASPECT_PADDING_MIN_INK_RATIO),
+        )
+        padding_ink_bbox = padding_ink.getbbox()
+        padding_detected = bool(
+            padding_ink_bbox and padding_ink_pixels >= minimum_ink_pixels
+        )
+        padding_content = {
+            "detected": padding_detected,
+            "ink_pixels": padding_ink_pixels,
+            "ink_ratio": round(padding_ink_pixels / max(1, total_ink_pixels), 6),
+            "minimum_ink_pixels": minimum_ink_pixels,
+            "guard_px": guard_px,
+            "ink_bbox": list(padding_ink_bbox) if padding_ink_bbox else None,
+        }
+        if padding_detected:
+            generated_ink_bbox = generated_ink.getbbox() or (0, 0, *provider_size)
+            safe_margin = max(
+                4,
+                round(min(provider_size) * ASPECT_PADDING_SAFE_MARGIN_RATIO),
+            )
+            crop_box = (
+                max(0, min(crop_box[0], generated_ink_bbox[0] - safe_margin)),
+                max(0, min(crop_box[1], generated_ink_bbox[1] - safe_margin)),
+                min(provider_size[0], max(crop_box[2], generated_ink_bbox[2] + safe_margin)),
+                min(provider_size[1], max(crop_box[3], generated_ink_bbox[3] + safe_margin)),
+            )
+            crop_mode = (
+                "provider_canvas_preserved_for_padding_content"
+                if crop_box == (0, 0, provider_size[0], provider_size[1])
+                else "expanded_for_padding_content"
+            )
     elif ratio_delta > 0.015:
         # Defensive fallback for callers that do not have framing metadata.
         if provider_ratio > source_ratio:
@@ -1792,7 +2197,13 @@ def normalize_generated_aspect(
         crop_mode = "center_crop_fallback"
 
     cropped = generated.crop(crop_box)
-    normalized = cropped.resize(source_size, Image.Resampling.LANCZOS) if cropped.size != source_size else cropped
+    preserve_generated_geometry = bool(padding_content["detected"])
+    if preserve_generated_geometry:
+        normalized = cropped
+    elif cropped.size != source_size:
+        normalized = cropped.resize(source_size, Image.Resampling.LANCZOS)
+    else:
+        normalized = cropped
     suffix = generated_path.suffix.lower()
     image_format = {".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP"}.get(suffix, "PNG")
     temporary = generated_path.with_name(f"{generated_path.stem}.aspect-normalized{generated_path.suffix}")
@@ -1805,8 +2216,12 @@ def normalize_generated_aspect(
         "provider_size": list(provider_size),
         "provider_aspect_ratio": provider_ratio,
         "crop_box": list(crop_box),
-        "normalized_size": list(source_size),
-        "normalized_aspect_ratio": source_ratio,
+        "normalized_size": list(normalized.size),
+        "normalized_aspect_ratio": normalized.width / max(1, normalized.height),
+        "source_size": list(source_size),
+        "source_aspect_ratio": source_ratio,
+        "padding_content": padding_content,
+        "provider_canvas_allowed": preserve_generated_geometry,
     }
 
 
@@ -1869,6 +2284,7 @@ def run(args: argparse.Namespace) -> int:
     force_standard_ai_edit = bool(getattr(args, "force_standard_ai_edit", False))
     review_root = Path(args.review_root).resolve()
     args.edit_profile = getattr(args, "edit_profile", "standard")
+    requested_figure_type = normalize_figure_type(getattr(args, "figure_type", FIGURE_TYPE_AUTO))
     load_dotenv(review_root)
     if not args.base_url:
         args.base_url = default_base_url()
@@ -1906,6 +2322,7 @@ def run(args: argparse.Namespace) -> int:
         "wire_api": args.wire_api,
         "render_mode": args.render_mode,
         "edit_profile": args.edit_profile,
+        "requested_figure_type": requested_figure_type,
         "ocr_language": args.ocr_language,
         "tesseract_command": tesseract_command,
         "image_field": image_field,
@@ -1924,8 +2341,6 @@ def run(args: argparse.Namespace) -> int:
         raise SystemExit(
             "mechanism-arrow-straighten requires --render-mode ai-edit so source colors and text remain available to the editor."
         )
-    if args.edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE and args.wire_api != "images":
-        raise SystemExit("mechanism-arrow-straighten requires the images edit API so a local-edit mask can be supplied.")
     source_rows: list[dict[str, Any]] = []
     redraw_rows: list[dict[str, Any]] = []
     limit = args.limit if args.limit and args.limit > 0 else len(figures)
@@ -1937,34 +2352,18 @@ def run(args: argparse.Namespace) -> int:
         if not figure_id:
             figure = human_selected_figure(project, figure)
         requested_render_mode = args.render_mode
-        source_faithful_scope_guard = (
-            not force_standard_ai_edit
-            and
-            args.edit_profile == "standard"
-            and requested_render_mode in {"ai-edit", "ocr-hollow-ai"}
-            and is_dense_scope_figure(figure)
-        )
-        source_faithful_multipanel_guard = (
-            not force_standard_ai_edit
-            and
-            args.edit_profile == "standard"
-            and requested_render_mode in {"ai-edit", "ocr-hollow-ai"}
-            and not source_faithful_scope_guard
-            and is_complex_multipanel_figure(figure)
-        )
-        effective_render_mode = (
-            "source-faithful-bw"
-            if source_faithful_scope_guard
-            else "source-faithful-outline-color"
-            if source_faithful_multipanel_guard and needs_hollow_color_fills(figure)
-            else "source-faithful-color"
-            if source_faithful_multipanel_guard
-            else requested_render_mode
-        )
+        effective_render_mode = requested_render_mode
         if figure.get("recommended_action") == "retable":
             continue
         figure_id = str(figure.get("figure_id") or f"F{index:03d}")
         source_image, notes = resolve_source_image(review_root, figure)
+        classification = classify_chemical_figure(
+            figure,
+            source_image,
+            requested_type=requested_figure_type,
+        )
+        figure_type = str(classification["figure_type"])
+        effective_edit_profile = edit_profile_for_figure_type(figure_type, effective_render_mode)
         src_row = {
             "figure_id": figure_id,
             "section_id": figure.get("section_id"),
@@ -2001,13 +2400,16 @@ def run(args: argparse.Namespace) -> int:
             "background": args.background,
             "output_format": args.output_format,
             "render_mode": effective_render_mode,
-            "edit_profile": args.edit_profile,
+            "edit_profile": effective_edit_profile,
+            "figure_type": figure_type,
+            "figure_type_classification": classification,
+            "requires_human_chemistry_approval": bool(classification.get("requires_human_approval")),
             "color_policy": (
                 "preserve_source_arrow_colors"
-                if args.edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE
-                else "preserve_colored_text_and_outlines_hollow_large_bright_fills"
-                if effective_render_mode == "source-faithful-outline-color"
-                else "pure_black_and_white"
+                if effective_edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE
+                else "remove_nonsemantic_fills_preserve_scientific_colors"
+                if figure_type == FIGURE_TYPE_COLORED
+                else "structure_locked_clarity_and_color_cleanup"
             ),
             "typography_protection": (
                 "source_pixel_layout_preserved"
@@ -2015,7 +2417,7 @@ def run(args: argparse.Namespace) -> int:
                 else "ocr_masked_source_glyphs_restored_once"
                 if effective_render_mode == "ocr-hollow-ai"
                 else "source_ocr_regions_restored"
-                if args.edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE
+                if effective_edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE
                 else "ai_edit_requested_not_guaranteed"
             ),
             "human_selected_source": bool(figure.get("human_selected_source")),
@@ -2031,64 +2433,21 @@ def run(args: argparse.Namespace) -> int:
             "ocr_text_protection": "not_run",
             "notes": "",
         }
-        if force_standard_ai_edit:
+        if classification.get("selection") == "manual" or force_standard_ai_edit:
             redraw_row["render_mode_override"] = {
-                "status": "human_requested_ai_comparison",
+                "status": "human_selected_figure_type",
                 "requested_render_mode": requested_render_mode,
+                "requested_figure_type": figure_type,
                 "reason": (
-                    "Reviewer explicitly requested a standard AI-edit alternative; "
-                    "the generated output remains subject to manual chemistry approval."
+                    "Reviewer explicitly selected the figure type and AI redraw strategy; "
+                    "high-risk scientific figures remain subject to manual chemistry approval."
                 ),
-            }
-        if source_faithful_scope_guard:
-            redraw_row["render_mode_guard"] = {
-                "status": "forced_source_faithful",
-                "requested_render_mode": requested_render_mode,
-                "reason": "Dense reaction-scope figure: preserve original chemical geometry instead of generative reconstruction.",
-            }
-        elif source_faithful_multipanel_guard:
-            redraw_row["render_mode_guard"] = {
-                "status": "forced_source_faithful",
-                "requested_render_mode": requested_render_mode,
-                "reason": "Complex multi-panel chemistry figure: preserve source structures, annotations, and scientific colors instead of generative reconstruction.",
             }
         if not source_image:
             redraw_row["status"] = "source_unresolved"
             redraw_row["notes"] = "Could not resolve source image from figure candidate or content_list."
             redraw_rows.append(redraw_row)
             continue
-        if (
-            not force_standard_ai_edit
-            and
-            args.edit_profile == "standard"
-            and effective_render_mode in {"ai-edit", "ocr-hollow-ai"}
-            and is_tall_multistep_source(source_image)
-        ):
-            effective_render_mode = "source-faithful-bw"
-            redraw_row["render_mode"] = effective_render_mode
-            redraw_row["typography_protection"] = "source_pixel_layout_preserved"
-            redraw_row["color_policy"] = "pure_black_and_white"
-            redraw_row["render_mode_guard"] = {
-                "status": "forced_source_faithful",
-                "requested_render_mode": requested_render_mode,
-                "reason": "Tall multi-step figure: preserve the complete source canvas and every panel as black line art with hollow colour regions instead of allowing a generative edit to crop or reflow the lower content.",
-            }
-        if (
-            not force_standard_ai_edit
-            and
-            args.edit_profile == "standard"
-            and effective_render_mode in {"ai-edit", "ocr-hollow-ai"}
-            and is_low_resolution_or_thin_scheme(source_image)
-        ):
-            effective_render_mode = "source-faithful-bw"
-            redraw_row["render_mode"] = effective_render_mode
-            redraw_row["typography_protection"] = "source_pixel_layout_preserved"
-            redraw_row["color_policy"] = "pure_black_and_white"
-            redraw_row["render_mode_guard"] = {
-                "status": "forced_source_faithful",
-                "requested_render_mode": requested_render_mode,
-                "reason": "Low-resolution or thin-stroke scheme: preserve source geometry and convert all source ink to sharp connected black strokes instead of letting a model reconstruct bonds.",
-            }
         copied_source = source_dir / f"{figure_id}{source_image.suffix.lower() or '.png'}"
         copied_source.write_bytes(source_image.read_bytes())
         source_ocr = {"status": "not_run", "text": ""}
@@ -2105,7 +2464,7 @@ def run(args: argparse.Namespace) -> int:
                 source_ocr = source_regions
                 redraw_row["ocr_source_text"] = source_regions["text"]
                 redraw_row["ocr_source_status"] = source_regions["status"]
-        if args.edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE:
+        if effective_edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE:
             # The provider receives the original image without a mask. A mask can
             # miss short or connected curved arrows and would otherwise block a
             # requested edit before it reaches the model. The strict prompt and
@@ -2117,7 +2476,7 @@ def run(args: argparse.Namespace) -> int:
         if effective_render_mode == "ocr-hollow-ai":
             edit_input = source_dir / f"{figure_id}-ocr-masked.png"
             mask_ocr_regions(copied_source, edit_input, source_boxes)
-        if args.edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE:
+        if effective_edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE:
             # Mechanism edits do not invoke OCR. Chemical bonds and labels are too
             # often misclassified, so acceptance relies on the source-pixel gate.
             prompt = build_mechanism_arrow_straighten_prompt(figure)
@@ -2128,12 +2487,13 @@ def run(args: argparse.Namespace) -> int:
                 args.style_name,
                 figure,
                 source_ocr["text"] if effective_render_mode == "ocr-hollow-ai" and source_ocr["status"] == "ok" else "",
+                figure_type,
             )
         aspect_framing: dict[str, Any] = {}
         api_edit_input = edit_input
         provider_canvas_allowed = standard_ai_edit_uses_provider_canvas(
             effective_render_mode,
-            args.edit_profile,
+            effective_edit_profile,
         )
         if effective_render_mode not in SOURCE_FAITHFUL_RENDER_MODES:
             framed_input = source_dir / f"{figure_id}-ai-edit-framed.png"
@@ -2145,6 +2505,20 @@ def run(args: argparse.Namespace) -> int:
                 else append_aspect_ratio_prompt(prompt, aspect_framing)
             )
             redraw_row["aspect_ratio_input"] = aspect_framing
+        if effective_edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE:
+            # Repair text again at the final request boundary so a later prompt
+            # suffix or platform-specific edit cannot reintroduce mojibake.
+            prompt = repair_mechanism_prompt_text(prompt)
+        safety_retry_prompt = build_academic_chemistry_safety_retry_prompt(
+            figure_type,
+            effective_edit_profile,
+        )
+        if effective_render_mode not in SOURCE_FAITHFUL_RENDER_MODES:
+            safety_retry_prompt = (
+                append_provider_canvas_prompt(safety_retry_prompt, aspect_framing)
+                if provider_canvas_allowed
+                else append_aspect_ratio_prompt(safety_retry_prompt, aspect_framing)
+            )
         redraw_row["prompt"] = prompt
         if args.dry_run:
             redraw_row["status"] = "dry_run"
@@ -2160,19 +2534,31 @@ def run(args: argparse.Namespace) -> int:
         out_path = redrawn_dir / f"{figure_id}.{output_format}"
         try:
             mechanism_attempts: list[dict[str, Any]] = []
+            colored_cleanup_attempts: list[dict[str, Any]] = []
+            safety_moderation_retries: list[dict[str, Any]] = []
             max_attempts = (
                 MECHANISM_MAX_EDIT_ATTEMPTS
-                if args.edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE
+                if effective_edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE
+                else COLORED_CLEANUP_MAX_EDIT_ATTEMPTS
+                if figure_type == FIGURE_TYPE_COLORED and effective_render_mode == "ai-edit"
                 else 1
             )
             for attempt_number in range(1, max_attempts + 1):
                 attempt_prompt = prompt
                 if attempt_number > 1:
-                    attempt_prompt += (
-                        " A previous attempt was rejected because source geometry changed. "
-                        "Retry from the original upload, change only the arrow strokes, and preserve every molecule, "
-                        "intermediate, label, colored step name, and non-arrow pixel."
-                    )
+                    if effective_edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE:
+                        attempt_prompt += (
+                            " A previous attempt was rejected because source geometry changed. "
+                            "Retry from the original upload, change only the arrow strokes, and preserve every molecule, "
+                            "intermediate, label, colored step name, and non-arrow pixel."
+                        )
+                    elif figure_type == FIGURE_TYPE_COLORED:
+                        attempt_prompt += (
+                            " A previous attempt was rejected because most broad decorative colour fill remained. "
+                            "Retry from the original upload. Fully whiten the interiors of all solid cyan/teal/coloured "
+                            "benzene and fused-ring fills while preserving every black perimeter, internal double bond, "
+                            "heteroatom, substituent, R-group, panel label, and all relative geometry."
+                        )
                 if effective_render_mode in SOURCE_FAITHFUL_RENDER_MODES:
                     rendering = (
                         render_source_faithful_bw(copied_source, out_path)
@@ -2183,56 +2569,80 @@ def run(args: argparse.Namespace) -> int:
                     )
                     redraw_row["rendering"] = rendering
                 elif args.wire_api == "responses":
-                    response = call_responses_image_edit(
-                        api_key,
-                        args.base_url,
-                        api_edit_input,
-                        attempt_prompt,
-                        args.model,
-                        args.quality,
-                        args.background,
-                        args.output_format,
-                    )
-                    save_response_redrawn_image(response, out_path)
-                elif args.wire_api == "chat-completions":
-                    response = call_chat_completions_image_edit(
-                        api_key,
-                        args.base_url,
-                        api_edit_input,
-                        attempt_prompt,
-                        args.model,
-                    )
-                    save_chat_completion_redrawn_image(response, out_path)
-                else:
-                    try:
-                        response = call_images_edit(
+                    response = call_with_academic_safety_retry(
+                        lambda request_prompt: call_responses_image_edit(
                             api_key,
                             args.base_url,
                             api_edit_input,
-                            attempt_prompt,
+                            request_prompt,
                             args.model,
                             args.quality,
                             args.background,
                             args.output_format,
-                            image_field,
-                            images_transport,
+                        ),
+                        attempt_prompt,
+                        safety_retry_prompt,
+                        safety_moderation_retries,
+                        attempt_number,
+                    )
+                    save_response_redrawn_image(response, out_path)
+                elif args.wire_api == "chat-completions":
+                    response = call_with_academic_safety_retry(
+                        lambda request_prompt: call_chat_completions_image_edit(
+                            api_key,
+                            args.base_url,
+                            api_edit_input,
+                            request_prompt,
+                            args.model,
+                        ),
+                        attempt_prompt,
+                        safety_retry_prompt,
+                        safety_moderation_retries,
+                        attempt_number,
+                    )
+                    save_chat_completion_redrawn_image(response, out_path)
+                else:
+                    try:
+                        response = call_with_academic_safety_retry(
+                            lambda request_prompt: call_images_edit(
+                                api_key,
+                                args.base_url,
+                                api_edit_input,
+                                request_prompt,
+                                args.model,
+                                args.quality,
+                                args.background,
+                                args.output_format,
+                                image_field,
+                                images_transport,
+                            ),
+                            attempt_prompt,
+                            safety_retry_prompt,
+                            safety_moderation_retries,
+                            attempt_number,
                         )
                         save_redrawn_image(response, out_path)
                     except RuntimeError as primary_error:
                         can_fail_over = (
-                            args.edit_profile == "standard"
+                            effective_edit_profile == "standard"
                             and fallback_provider.get("api_key")
                             and should_fail_over_image_provider(primary_error)
                         )
                         if not can_fail_over:
                             raise
                         try:
-                            fallback_response = call_chat_completions_image_edit(
-                                fallback_provider["api_key"],
-                                fallback_provider["base_url"],
-                                api_edit_input,
+                            fallback_response = call_with_academic_safety_retry(
+                                lambda request_prompt: call_chat_completions_image_edit(
+                                    fallback_provider["api_key"],
+                                    fallback_provider["base_url"],
+                                    api_edit_input,
+                                    request_prompt,
+                                    fallback_provider["model"],
+                                ),
                                 attempt_prompt,
-                                fallback_provider["model"],
+                                safety_retry_prompt,
+                                safety_moderation_retries,
+                                attempt_number,
                             )
                             save_chat_completion_redrawn_image(fallback_response, out_path)
                         except RuntimeError as fallback_error:
@@ -2264,29 +2674,54 @@ def run(args: argparse.Namespace) -> int:
                         "source_size": list(aspect_framing.get("source_size") or []),
                         "reason": "Standard ai-edit outputs retain the complete provider canvas without cropping or stretching.",
                     }
-                if args.edit_profile != MECHANISM_ARROW_STRAIGHTEN_PROFILE:
-                    break
-                source_fidelity = mechanism_source_fidelity_check(copied_source, out_path)
-                attempt_failures = list(source_fidelity["failures"])
-                mechanism_attempts.append(
-                    {
-                        "attempt": attempt_number,
-                        "status": "failed" if attempt_failures else "pass",
-                        "failures": attempt_failures,
-                        "source_fidelity": source_fidelity,
-                    }
-                )
-                if not attempt_failures:
+                if effective_edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE:
+                    source_fidelity = mechanism_source_fidelity_check(copied_source, out_path)
+                    attempt_failures = list(source_fidelity["failures"])
+                    mechanism_attempts.append(
+                        {
+                            "attempt": attempt_number,
+                            "status": "failed" if attempt_failures else "pass",
+                            "failures": attempt_failures,
+                            "source_fidelity": source_fidelity,
+                        }
+                    )
+                    if not attempt_failures:
+                        break
+                    continue
+                if figure_type == FIGURE_TYPE_COLORED and effective_render_mode == "ai-edit":
+                    cleanup = colored_fill_cleanup_check(copied_source, out_path)
+                    colored_cleanup_attempts.append(
+                        {
+                            "attempt": attempt_number,
+                            "status": cleanup["status"],
+                            "failures": cleanup["failures"],
+                            "cleanup": cleanup,
+                        }
+                    )
+                    if cleanup["status"] == "pass":
+                        break
+                    continue
+                else:
                     break
             if mechanism_attempts:
                 redraw_row["mechanism_edit_attempts"] = mechanism_attempts
                 redraw_row["mechanism_source_fidelity"] = mechanism_attempts[-1]["source_fidelity"]
+            if colored_cleanup_attempts:
+                redraw_row["colored_fill_cleanup_attempts"] = colored_cleanup_attempts
+                redraw_row["colored_fill_cleanup"] = colored_cleanup_attempts[-1]["cleanup"]
+            if safety_moderation_retries:
+                redraw_row["safety_moderation_retries"] = safety_moderation_retries
             redraw_row["redrawn_image"] = str(out_path)
             redraw_row["status"] = "redrawn"
             if mechanism_attempts and mechanism_attempts[-1]["status"] != "pass":
                 redraw_row["output_disposition"] = "saved_with_integrity_warning"
                 redraw_row["notes"] = "Saved to Redrawn Output after mechanism integrity retries: " + "; ".join(
                     mechanism_attempts[-1]["failures"]
+                )
+            if colored_cleanup_attempts and colored_cleanup_attempts[-1]["status"] != "pass":
+                redraw_row["output_disposition"] = "saved_with_integrity_warning"
+                redraw_row["notes"] = "Saved to Redrawn Output after colour-fill cleanup retries: " + "; ".join(
+                    colored_cleanup_attempts[-1]["failures"]
                 )
             if effective_render_mode == "ocr-hollow-ai":
                 generated_ocr = ocr_region_boxes(out_path, args.ocr_language, command=tesseract_command)
@@ -2310,7 +2745,7 @@ def run(args: argparse.Namespace) -> int:
                         f"new or displaced output ink {structure['unmatched_output_ink_pixels']} pixels "
                         f"(limit {structure['max_unmatched_output_ink_pixels']})."
                     )
-            elif effective_render_mode == "ai-edit" and args.edit_profile == "standard":
+            elif effective_render_mode == "ai-edit" and effective_edit_profile == "standard":
                 redraw_row["structural_fidelity"] = structural_fidelity_check(copied_source, out_path)
             if effective_render_mode == "ocr-hollow-ai":
                 output_ocr = extract_ocr_text(out_path, args.ocr_language, command=tesseract_command)
@@ -2330,8 +2765,10 @@ def run(args: argparse.Namespace) -> int:
                 redraw_row["output_disposition"] = "saved_with_integrity_warning"
                 redraw_row["notes"] = "Saved to Redrawn Output with chemistry integrity warning: " + "; ".join(integrity["failures"])
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, RuntimeError, json.JSONDecodeError) as exc:
+            if safety_moderation_retries:
+                redraw_row["safety_moderation_retries"] = safety_moderation_retries
             retained = (
-                args.edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE
+                effective_edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE
                 and retain_successful_mechanism_attempt_after_retry_error(
                     redraw_row,
                     out_path,
@@ -2339,6 +2776,24 @@ def run(args: argparse.Namespace) -> int:
                     exc,
                 )
             )
+            if (
+                not retained
+                and figure_type == FIGURE_TYPE_COLORED
+                and colored_cleanup_attempts
+                and out_path.is_file()
+            ):
+                redraw_row["colored_fill_cleanup_attempts"] = colored_cleanup_attempts
+                redraw_row["colored_fill_cleanup"] = colored_cleanup_attempts[-1]["cleanup"]
+                redraw_row["colored_cleanup_retry_error"] = f"{type(exc).__name__}: {exc}"[-2000:]
+                redraw_row["redrawn_image"] = str(out_path)
+                redraw_row["status"] = "redrawn"
+                redraw_row["output_disposition"] = "saved_with_integrity_warning"
+                redraw_row["notes"] = (
+                    "Kept the last generated coloured-chemistry image for human review after a later cleanup retry failed. "
+                    + "; ".join(colored_cleanup_attempts[-1]["failures"])
+                )
+                redraw_row["chemistry_integrity"] = chemistry_integrity_gate(redraw_row)
+                retained = True
             if not retained:
                 redraw_row["status"] = "failed"
                 redraw_row["notes"] = f"{type(exc).__name__}: {exc}"
@@ -2365,7 +2820,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Redraw review figure candidates into a unified style.")
-    parser.add_argument("--review-root", default=str(Path(__file__).resolve().parents[3]))
+    parser.add_argument("--review-root", default=".")
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--figure-id", default="", help="Redraw exactly one figure candidate without paper-level source substitution.")
     parser.add_argument("--paper-id", default="", help="Redraw one paper after a Figure Review selection and preserve other manifest rows.")
@@ -2378,7 +2833,7 @@ def parse_args() -> argparse.Namespace:
         help="Image API transport; defaults to IMAGE_OPENAI_WIRE_API or images.",
     )
     parser.add_argument("--api-key", default="")
-    parser.add_argument("--model", default="gpt-image-2")
+    parser.add_argument("--model", default=DEFAULT_IMAGE_MODEL)
     parser.add_argument("--quality", default="high")
     parser.add_argument("--background", default="opaque")
     parser.add_argument("--output-format", default="png")
@@ -2387,7 +2842,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--image-field",
         default="",
-        help="Multipart field name for the source image (auto-detects image for xiaoleai; otherwise image[]).",
+        help="Multipart field name for the source image; leave blank for endpoint-based compatibility defaults.",
     )
     parser.add_argument(
         "--images-transport",
@@ -2399,13 +2854,22 @@ def parse_args() -> argparse.Namespace:
         "--render-mode",
         choices=["source-faithful-bw", "source-faithful-color", "source-faithful-outline-color", "ai-edit", "ocr-hollow-ai"],
         default="source-faithful-bw",
-        help="Use ocr-hollow-ai for OCR-masked gpt-image-2 hollow black-and-white redraws with source glyph restoration.",
+        help="Use ocr-hollow-ai for OCR-masked hollow black-and-white redraws with source glyph restoration.",
     )
     parser.add_argument(
         "--edit-profile",
         choices=["standard", MECHANISM_ARROW_STRAIGHTEN_PROFILE],
         default="standard",
         help="Use mechanism-arrow-straighten for a strict local edit that converts only curved process arrows.",
+    )
+    parser.add_argument(
+        "--figure-type",
+        default=FIGURE_TYPE_AUTO,
+        help=(
+            "Automatic or reviewer-selected scientific figure type. Supported values include auto, "
+            "mechanism-cycle, simple-scheme, reaction-scope, complex-multipanel, low-resolution, "
+            "colored-chemistry, data-table, scientific-plot, and general-scientific."
+        ),
     )
     parser.add_argument(
         "--force-standard-ai-edit",

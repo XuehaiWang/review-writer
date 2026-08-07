@@ -23,10 +23,10 @@ Token resolution order:
 
 1. `--token <token>`
 2. `MINERU_API_TOKEN`
-3. `config/mineru_api_token.txt`
 
-Keep credentials outside version control. Prefer `MINERU_API_TOKEN`; an optional
-local `config/mineru_api_token.txt` may be used only when it is ignored by Git.
+Keep credentials outside version control. Use the dashboard Settings page or
+the `MINERU_API_TOKEN` environment variable. Never store an API token inside
+the skill directory.
 
 ## Default Behavior
 

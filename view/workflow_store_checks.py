@@ -58,6 +58,11 @@ class WorkflowStoreChecks(unittest.TestCase):
             source.write_text('{"sections":[1]}', encoding="utf-8")
             store = WorkflowStore(root)
             store.write_handoff("demo", handoff, "blueprint", [source])
+            handoff_payload = json.loads(handoff.read_text(encoding="utf-8"))
+            self.assertEqual(
+                handoff_payload["source_artifacts"],
+                ["01_matrix_outline/section_blueprint.json"],
+            )
             output.write_text('{"drafts":[1]}', encoding="utf-8")
             store.complete_handoff("demo", handoff, [output], producer_stage="sections")
 

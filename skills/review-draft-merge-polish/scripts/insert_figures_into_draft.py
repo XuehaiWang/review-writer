@@ -44,6 +44,7 @@ def has_saved_redrawn_output(
     requires_approval = bool(
         integrity_status in {"failed", "needs_human_arrow_check"}
         or str(figure.get("output_disposition") or "") == "saved_with_integrity_warning"
+        or figure.get("requires_human_chemistry_approval")
     )
     approval = figure.get("human_approval") or {}
     if requires_approval and not (
@@ -185,17 +186,18 @@ def figure_markdown(figure: dict[str, Any], rel_path: str, index: int, mode: str
 
 
 def heading_aliases(section_id: str, section_heading: str) -> list[str]:
+    """Return only aliases justified by the current project Blueprint.
+
+    Older versions guessed topic-specific headings from ``sec2``/``sec3``.
+    That could insert a figure into the wrong section after the project topic
+    or outline changed. The stable section id remains available to the caller;
+    heading fallback is therefore limited to the actual current heading and a
+    generic Introduction alias for the conventional first section.
+    """
     aliases = [str(section_heading or "").strip()]
-    fallback = {
-        "sec1": ["Introduction"],
-        "sec2": ["Foundational methods", "activated propargylic", "Copper-catalyzed substitution"],
-        "sec3": ["Carbonates", "esters"],
-        "sec4": ["Radical", "one-electron", "photoredox"],
-        "sec5": ["Direct transformations", "free propargylic alcohols"],
-        "sec6": ["Organoboron", "organosilicon", "Stereochemical control", "mechanistic comparison"],
-    }
-    aliases.extend(fallback.get(str(section_id or ""), []))
-    return [a for a in aliases if a]
+    if str(section_id or "").strip().casefold() == "sec1":
+        aliases.append("Introduction")
+    return list(dict.fromkeys(alias for alias in aliases if alias))
 
 
 PARAGRAPH_ID_RE = re.compile(r"<!--\s*paragraph_id:\s*([A-Za-z0-9_\-:.]+)\s*-->")
@@ -387,7 +389,7 @@ def figure_anchor_position(text: str, figure: dict[str, Any]) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Insert available figures into the first draft.")
-    parser.add_argument("--review-root", default=str(Path(__file__).resolve().parents[3]))
+    parser.add_argument("--review-root", default=".")
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--max-per-section", type=int, default=0,
                         help="Maximum figures per section; 0 keeps every human-selected figure.")

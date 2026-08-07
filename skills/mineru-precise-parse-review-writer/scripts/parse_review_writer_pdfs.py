@@ -35,7 +35,6 @@ def default_review_root() -> Path:
 REVIEW_ROOT = default_review_root()
 DEFAULT_INPUT_DIR = REVIEW_ROOT / "Progargylic"
 DEFAULT_OUTPUT_DIR = REVIEW_ROOT / "mineru-outputs"
-DEFAULT_TOKEN_FILE = SKILL_ROOT / "config" / "mineru_api_token.txt"
 DEFAULT_TIMEOUT_MINUTES = 30
 DEFAULT_POLL_INTERVAL_SECONDS = 5
 DEFAULT_BATCH_SIZE = 20
@@ -105,7 +104,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--token",
-        help="MinerU API token. If omitted, MINERU_API_TOKEN and then config/mineru_api_token.txt are used.",
+        help="MinerU API token. If omitted, MINERU_API_TOKEN is used.",
     )
     parser.add_argument(
         "--language",
@@ -183,13 +182,9 @@ def resolve_token(args: argparse.Namespace) -> str:
     token = os.environ.get("MINERU_API_TOKEN", "").strip()
     if token:
         return token
-    if DEFAULT_TOKEN_FILE.is_file():
-        token = DEFAULT_TOKEN_FILE.read_text(encoding="utf-8").strip()
-        if token:
-            return token
     raise SystemExit(
-        "Missing MinerU API token. Pass --token, set MINERU_API_TOKEN, or write the token to "
-        f"{DEFAULT_TOKEN_FILE}."
+        "Missing MinerU API token. Pass --token, set MINERU_API_TOKEN, "
+        "or save it from the dashboard Settings page."
     )
 
 

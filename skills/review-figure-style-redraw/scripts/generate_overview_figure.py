@@ -35,9 +35,34 @@ from pathlib import Path
 from typing import Any
 
 
+_BOOTSTRAP_ROOT = next(
+    (
+        parent
+        for parent in Path(__file__).resolve().parents
+        if (parent / "review_writer_core").is_dir() and (parent / "skills").is_dir()
+    ),
+    None,
+)
+if _BOOTSTRAP_ROOT is None:
+    raise RuntimeError("Could not locate the Review Writer workspace")
+if str(_BOOTSTRAP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BOOTSTRAP_ROOT))
+
+from review_writer_core.providers import (  # noqa: E402
+    DEFAULT_IMAGE_MODEL,
+    DEFAULT_OPENAI_BASE_URL,
+    openai_endpoint as _shared_openai_endpoint,
+    resolve_api_key as _shared_resolve_api_key,
+)
+
+
 TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 LANDSCAPE_OVERVIEW_IMAGE_SIZE = "1536x1024"
 SQUARE_COMPATIBLE_IMAGE_SIZE = "1024x1024"
+
+# Some compatible gateways reject the default Python urllib signature; every
+# outbound request therefore carries an explicit application user agent.
+USER_AGENT = "review-writer-overview-figure/1.0"
 
 _ENGLISH_NUM_WORDS = {
     2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
@@ -78,29 +103,26 @@ def normalize_image_wire_api(value: str = "") -> str:
 
 def openai_api_url(base_url: str, endpoint: str) -> str:
     """Build an OpenAI-compatible endpoint without duplicating /v1."""
-    base = base_url.rstrip("/")
-    if base.endswith("/v1"):
-        return f"{base}{endpoint}"
-    return f"{base}/v1{endpoint}"
+    return _shared_openai_endpoint(base_url, endpoint)
 
 
 def overview_image_size_candidates(base_url: str, preferred_size: str = "") -> list[str]:
     """Return image sizes in provider-compatible retry order.
 
-    Geek2API-backed xiaoleai image routes reject the OpenAI landscape size
-    before generation starts.  Use their square size directly instead of
-    repeating a known-invalid request.  Other OpenAI-compatible providers keep
-    the landscape request first and can still fall back to the widely supported
-    square size.  ``OVERVIEW_IMAGE_SIZE`` and ``--size`` remain explicit
-    operator overrides, while the compatible fallback is always retained.
+    Provider capabilities are configured explicitly instead of inferred from a
+    hostname. ``OVERVIEW_IMAGE_SIZE``/``--size`` set the preferred size and
+    ``IMAGE_SUPPORTED_SIZES`` may list supported values in retry order. The
+    widely supported square size remains the final compatibility fallback.
     """
+    del base_url
     configured = preferred_size.strip() or os.environ.get("OVERVIEW_IMAGE_SIZE", "").strip()
-    provider_default = (
-        SQUARE_COMPATIBLE_IMAGE_SIZE
-        if "api.xiaoleai.team" in base_url.lower()
-        else LANDSCAPE_OVERVIEW_IMAGE_SIZE
-    )
-    candidates = [configured, provider_default, SQUARE_COMPATIBLE_IMAGE_SIZE]
+    supported = [
+        item.strip()
+        for item in os.environ.get("IMAGE_SUPPORTED_SIZES", "").split(",")
+        if item.strip()
+    ]
+    provider_default = supported[0] if supported else LANDSCAPE_OVERVIEW_IMAGE_SIZE
+    candidates = [configured, *supported, provider_default, SQUARE_COMPATIBLE_IMAGE_SIZE]
     return list(dict.fromkeys(size for size in candidates if size))
 
 
@@ -119,7 +141,7 @@ def prompt_for_overview_size(prompt: str, size: str) -> str:
 def condense_overview_prompt(prompt: str, max_chars: int = 3900) -> str:
     """Trim the prompt to provider limits without losing the adaptation data.
 
-    Providers such as micuapi gpt-image-2 reject prompts over ~4000 chars.
+    Some compatible image providers reject prompts over roughly 4000 chars.
     Removal order (least to most important): FORBIDDEN BEHAVIOR,
     APPROVED TERMINOLOGY, BALL-AND-STICK rendering detail, then the
     reference template preamble before DOMAIN OVERRIDE.
@@ -415,22 +437,6 @@ def _regular_polygon(m, edge):
             for k in range(m)]
 
 
-def _order_cycle(verts, adj):
-    """Order a cycle's vertex set along actual bonds (2 neighbors each)."""
-    vs = set(verts)
-    emap = {v: [w for w in adj[v] if w in vs] for v in vs}
-    if any(len(emap[v]) != 2 for v in vs):
-        return None
-    ordered, cur, prv = [], next(iter(vs)), None
-    for _ in vs:
-        ordered.append(cur)
-        nxts = [w for w in emap[cur] if w != prv]
-        if not nxts:
-            return None
-        prv, cur = cur, nxts[0]
-    return ordered
-
-
 def _find_rings(n, bonds):
     """Return ring cycles (3-7 members). Fused rings are recovered by
     reducing large perimeter cycles against accepted small rings via
@@ -577,7 +583,10 @@ def build_3d(atoms, bonds):
         if nd:
             used[i].append(nd)
 
-    for ring in _find_rings(n, bonds):
+    rings = _find_rings(n, bonds)
+    deferred: list[list[int]] = []
+
+    def place_ring(ring):
         m = len(ring)
         aromatic = any(atoms[i]["aromatic"] for i in ring)
         edge = 1.39 if aromatic else (1.51 if m == 3 else 1.5)
@@ -609,6 +618,8 @@ def build_3d(atoms, bonds):
                 return out
 
             cand = _place(w)
+            if not cand:  # ring already fully placed
+                return
             new_c = [cand[i] for i in cand]
             old_c = old_placed
             def _centroid(pts):
@@ -626,21 +637,38 @@ def build_3d(atoms, bonds):
                 for k, i in enumerate(ring):
                     coords[i] = poly[k]
                 normal = (0.0, 0.0, 1.0)
-            else:  # spiro-like single shared atom: perpendicular plane
+            else:
                 a = ring[k0]
                 A = coords[a]
-                e3p = frames[a][2] if frames[a] else (0.0, 0.0, 1.0)
-                e1p = frames[a][0] if frames[a] else (1.0, 0.0, 0.0)
-                normal = _vnorm(e1p)
-                t = _vnorm(_vcross(normal, e3p)) or _vnorm(e3p)
-                w = _vnorm(_vcross(normal, t))
-                pa = poly[k0]
-                tl = _vnorm(_vsub(poly[(k0 + 1) % m], pa))
-                wl = _vcross((0.0, 0.0, 1.0), tl)
-                for k, i in enumerate(ring):
-                    if coords[i] is None:
-                        q = _vsub(poly[k], pa)
-                        coords[i] = _vadd(A, _vadd(_vscale(t, _vdot(q, tl)), _vscale(w, _vdot(q, wl))))
+                exo = [w for w in adj[a] if w not in ring and coords[w] is not None]
+                if exo:  # pendant ring attached by a single bond (biaryl-like):
+                    # ring plane contains the attaching bond and stands
+                    # perpendicular to the parent ring plane (atropisomer-like)
+                    b = _vnorm(_vsub(coords[exo[0]], A))
+                    p = frames[exo[0]][2] if frames[exo[0]] else (0.0, 0.0, 1.0)
+                    normal = _vnorm(_vcross(b, p)) or _vnorm(_vcross(b, (0.0, 0.0, 1.0))) or (0.0, 0.0, 1.0)
+                    T = _vscale(b, -1.0)
+                    W = _vnorm(_vcross(normal, T)) or _vnorm(p)
+                    pa = poly[k0]
+                    tl = _vnorm(_vscale(pa, -1.0))
+                    wl = _vcross((0.0, 0.0, 1.0), tl)
+                    for k, i in enumerate(ring):
+                        if coords[i] is None:
+                            q = _vsub(poly[k], pa)
+                            coords[i] = _vadd(A, _vadd(_vscale(T, _vdot(q, tl)), _vscale(W, _vdot(q, wl))))
+                else:  # spiro-like single shared atom: perpendicular plane
+                    e3p = frames[a][2] if frames[a] else (0.0, 0.0, 1.0)
+                    e1p = frames[a][0] if frames[a] else (1.0, 0.0, 0.0)
+                    normal = _vnorm(e1p)
+                    t = _vnorm(_vcross(normal, e3p)) or _vnorm(e3p)
+                    w = _vnorm(_vcross(normal, t))
+                    pa = poly[k0]
+                    tl = _vnorm(_vsub(poly[(k0 + 1) % m], pa))
+                    wl = _vcross((0.0, 0.0, 1.0), tl)
+                    for k, i in enumerate(ring):
+                        if coords[i] is None:
+                            q = _vsub(poly[k], pa)
+                            coords[i] = _vadd(A, _vadd(_vscale(t, _vdot(q, tl)), _vscale(w, _vdot(q, wl))))
         for k, i in enumerate(ring):
             nxt, prv = ring[(k + 1) % m], ring[(k - 1) % m]
             e1 = _vnorm(_vsub(coords[nxt], coords[i]))
@@ -649,7 +677,21 @@ def build_3d(atoms, bonds):
             mark_used(i, _vsub(coords[nxt], coords[i]))
             mark_used(i, _vsub(coords[prv], coords[i]))
 
-    if coords[0] is None:
+    # Independent (non-fused) rings must wait until a connecting bond places an
+    # anchor atom; otherwise they would all be dropped onto the origin and
+    # overlap (e.g. biaryl).  They are placed in a second pass after BFS growth.
+    for ring in rings:
+        if any(coords[i] is not None for i in ring) or all(c is None for c in coords):
+            place_ring(ring)
+        else:
+            deferred.append(ring)
+
+    ring_of: dict[int, list[int]] = {}
+    for ring in deferred:
+        for i in ring:
+            ring_of[i] = ring
+
+    if all(c is None for c in coords):  # acyclic seed
         coords[0] = (0.0, 0.0, 0.0)
         frames[0] = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 
@@ -658,38 +700,79 @@ def build_3d(atoms, bonds):
         return _vadd(_vadd(_vscale(e1, v[0]), _vscale(e2, v[1])), _vscale(e3, v[2]))
 
     def next_slot(i):
-        for s in _SLOTS[hyb[i]]:
-            g = local_to_global(i, s)
-            if all(_vdot(g, u) < 0.9 for u in used[i]):
-                return g
+        hybrid = [local_to_global(i, s) for s in _SLOTS[hyb[i]]]
+        if not used[i]:
+            return hybrid[0]
+        # a slot is acceptable only when clear of EVERY used direction; among
+        # acceptable slots pick the most separated one (matters for strained
+        # rings where several slots pass the threshold)
+        def sep(g):
+            return min(_vdot(g, u) for u in used[i])
+        acceptable = [g for g in hybrid
+                      if max(_vdot(g, u) for u in used[i]) < 0.9]
+        if acceptable:
+            return min(acceptable, key=sep)
+        # crowded/strained: complete the tetrahedron opposite the used sum
+        comp = _vnorm((
+            -sum(u[0] for u in used[i]),
+            -sum(u[1] for u in used[i]),
+            -sum(u[2] for u in used[i]),
+        ))
+        if comp:
+            return comp
         for s in [(0, 1, 0), (0, 0, 1), (0, -1, 0), (0, 0, -1)]:
             g = local_to_global(i, s)
-            if all(_vdot(g, u) < 0.9 for u in used[i]):
+            if max(_vdot(g, u) for u in used[i]) < 0.9:
                 return g
         return local_to_global(i, (0, 1, 0))
 
-    q = deque(i for i in range(n) if coords[i] is not None)
-    while q:
-        u = q.popleft()
-        for v in adj[u]:
-            if coords[v] is not None:
-                continue
-            o = order_of[(u, v)]
-            d = next_slot(u)
-            coords[v] = _vadd(coords[u], _vscale(d, _bond_len(atoms[u]["el"], atoms[v]["el"], o)))
-            mark_used(u, d)
-            back = _vscale(d, -1.0)
-            e1 = back
-            e3p = frames[u][2]
-            if o == 2.0 and hyb[u] == "sp":  # cumulated double bond: perpendicular plane
-                e3 = _vcross(e3p, d)
-                e3 = _vnorm(e3) if _vdot(e3, e3) > 1e-6 else e3p
-            else:
-                e3 = e3p
-            e3 = _vnorm(_vsub(e3, _vscale(e1, _vdot(e3, e1)))) or _vnorm(frames[u][0])
-            frames[v] = (e1, _vcross(e3, e1), e3)
-            mark_used(v, back)
-            q.append(v)
+    def bfs_grow():
+        q = deque(i for i in range(n) if coords[i] is not None)
+        while q:
+            u = q.popleft()
+            for v in adj[u]:
+                if coords[v] is not None:
+                    continue
+                ring = ring_of.get(v)
+                if ring is not None:
+                    if any(coords[i] is not None for i in ring):
+                        continue  # ring is placed as a polygon, not a chain
+                    if not any(coords[w] is not None for w in adj[v]
+                               if w not in ring):
+                        continue  # only the connecting anchor enters early
+                o = order_of[(u, v)]
+                d = next_slot(u)
+                coords[v] = _vadd(coords[u], _vscale(d, _bond_len(atoms[u]["el"], atoms[v]["el"], o)))
+                mark_used(u, d)
+                back = _vscale(d, -1.0)
+                e1 = back
+                e3p = frames[u][2]
+                if o == 2.0 and hyb[u] == "sp":  # cumulated double bond: perpendicular plane
+                    e3 = _vcross(e3p, d)
+                    e3 = _vnorm(e3) if _vdot(e3, e3) > 1e-6 else e3p
+                else:
+                    e3 = e3p
+                e3 = _vnorm(_vsub(e3, _vscale(e1, _vdot(e3, e1)))) or _vnorm(frames[u][0])
+                frames[v] = (e1, _vcross(e3, e1), e3)
+                mark_used(v, back)
+                q.append(v)
+
+    bfs_grow()
+    for ring in list(deferred):
+        if any(coords[i] is not None for i in ring):
+            place_ring(ring)
+            deferred.remove(ring)
+    bfs_grow()
+    for ring in deferred:  # disconnected ring fragments: translate them apart
+        placed_before = [i for i in range(n) if coords[i] is not None]
+        place_ring(ring)
+        new_idx = [i for i in ring if coords[i] is not None]
+        if placed_before:
+            dx = max(coords[b][0] for b in placed_before) - min(coords[i][0] for i in new_idx) + 3.0
+            for i in new_idx:
+                coords[i] = (coords[i][0] + dx, coords[i][1], coords[i][2])
+    if deferred:
+        bfs_grow()
     return coords
 
 
@@ -714,9 +797,131 @@ def _rotate(p, rx, ry):
     return (x, y, z)
 
 
+def _cumulated_view_basis(atoms, bonds, coords):
+    """Return screen axes (x', y', z') that showcase allene-type perpendicular
+    substituent planes: the cumulated axis lies horizontal on screen while the
+    view direction is tilted between the two terminal plane normals so one
+    terminal reads face-on and the other edge-on.  Returns None for molecules
+    without a cumulated (C=C=C) core, which keep the default view."""
+    adj: dict[int, list[tuple[int, float]]] = {}
+    for a, b, o in bonds:
+        adj.setdefault(a, []).append((b, o))
+        adj.setdefault(b, []).append((a, o))
+    for i, a in enumerate(atoms):
+        if a["el"] in ("H", "R"):
+            continue
+        dbl = [j for j, o in adj.get(i, []) if o == 2.0]
+        if len(dbl) != 2:
+            continue
+        t1, t2 = dbl
+        axis = _vnorm(_vsub(coords[t2], coords[t1]))
+        if not axis:
+            continue
+
+        def _plane_normal(t, other):
+            for s, _o in adj.get(t, []):
+                if s in (i, other):
+                    continue
+                d = _vnorm(_vsub(coords[s], coords[t]))
+                nrm = _vnorm(_vcross(axis, d)) if d else None
+                if nrm:
+                    return nrm
+            return None
+
+        n1 = _plane_normal(t1, t2)
+        n2 = _plane_normal(t2, t1)
+        if not n1 or not n2:
+            continue
+        z = _vnorm(_vadd(_vadd(n2, _vscale(n1, 0.45)), _vscale(axis, 0.25)))
+        y = _vnorm(_vsub(axis, _vscale(z, _vdot(axis, z))))
+        if not z or not y:
+            continue
+        return (_vcross(y, z), y, z)
+    return None
+
+
+def _label_font(size: int = 22):
+    try:
+        from PIL import ImageFont
+    except ImportError:
+        return None
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:  # Pillow < 9.2 fallback
+        return ImageFont.load_default()
+
+
+# ---------------------------------------------------------------------------
+# Pseudo-3D skeleton rendering helpers (style="3d"); style="flat" keeps the
+# original flat vector look as the rollback switch.
+# ---------------------------------------------------------------------------
+
+_SPHERE_SPRITE_CACHE: dict[tuple[tuple[int, int, int], int], Any] = {}
+
+# Screen-space light direction (from upper-left, toward the viewer).
+_LIGHT_X, _LIGHT_Y, _LIGHT_Z = -0.45, -0.55, 0.70
+
+
+def _fog_color(color: tuple[int, int, int], depth01: float,
+               strength: float = 0.30) -> tuple[int, int, int]:
+    """Fade a color toward white for distant geometry (depth cue)."""
+    t = strength * (1.0 - max(0.0, min(1.0, depth01)))
+    return tuple(int(c + (255 - c) * t) for c in color)
+
+
+def _sphere_sprite(color: tuple[int, int, int], radius: float) -> Any:
+    """Deterministic Lambert-shaded sphere sprite with a specular highlight."""
+    from PIL import Image
+    r = max(2, int(round(radius)))
+    key = (color, r)
+    cached = _SPHERE_SPRITE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    size = 2 * r + 3
+    sprite = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    px = sprite.load()
+    c = (size - 1) / 2.0
+    for y in range(size):
+        for x in range(size):
+            dx, dy = (x - c) / r, (y - c) / r
+            d2 = dx * dx + dy * dy
+            if d2 > 1.0:
+                continue
+            nz = math.sqrt(1.0 - d2)
+            lam = max(0.0, dx * _LIGHT_X + dy * _LIGHT_Y + nz * _LIGHT_Z)
+            spec = lam ** 8
+            col = tuple(int(min(255, ch * (0.30 + 0.80 * lam) + 235 * spec)) for ch in color)
+            dist = math.sqrt(d2) * r
+            alpha = 255 if dist <= r - 0.5 else int(255 * max(0.0, r + 0.5 - dist))
+            px[x, y] = (col[0], col[1], col[2], alpha)
+    _SPHERE_SPRITE_CACHE[key] = sprite
+    return sprite
+
+
+def _draw_cylinder_bond(draw: Any, x1: float, y1: float, x2: float, y2: float,
+                        width: int, color: tuple[int, int, int]) -> None:
+    """Fake a lit cylinder: base stroke plus a highlight stripe toward the light."""
+    draw.line([(x1, y1), (x2, y2)], fill=color, width=width)
+    dx, dy = x2 - x1, y2 - y1
+    ln = math.hypot(dx, dy) or 1.0
+    nx, ny = -dy / ln, dx / ln
+    if nx * _LIGHT_X + ny * _LIGHT_Y < 0:
+        nx, ny = -nx, -ny
+    off = max(1.0, width * 0.25)
+    highlight = tuple(min(255, c + 70) for c in color)
+    draw.line([(x1 + nx * off, y1 + ny * off), (x2 + nx * off, y2 + ny * off)],
+              fill=highlight, width=max(1, width // 3))
+
+
 def render_smiles_ball_and_stick(smiles: str, output_path: Path,
-                                 img_size: tuple[int, int] = (900, 640)) -> Path | None:
-    """Render a SMILES string as a chemically accurate ball-and-stick PNG."""
+                                 img_size: tuple[int, int] = (900, 640),
+                                 style: str = "3d") -> Path | None:
+    """Render a SMILES string as a chemically accurate ball-and-stick PNG.
+
+    ``style="3d"`` adds shaded spheres, cylinder-lit bonds, mild perspective
+    and depth fog for a three-dimensional look; ``style="flat"`` keeps the
+    original flat vector rendering (rollback switch).
+    """
     try:
         from PIL import Image, ImageDraw
     except ImportError:
@@ -733,12 +938,30 @@ def render_smiles_ball_and_stick(smiles: str, output_path: Path,
         print(f"  WARNING: skeleton build failed for {smiles!r}: {exc}")
         return None
     pts = [_rotate(p, math.radians(18), math.radians(28)) for p in coords]
+    basis = _cumulated_view_basis(atoms, bonds, coords)
+    if basis:
+        bx, by, bz = basis
+        pts = [(_vdot(p, bx), _vdot(p, by), _vdot(p, bz)) for p in coords]
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
     span = max(max(xs) - min(xs), max(ys) - min(ys), 1e-6)
     scale = min(img_size) * 0.62 / span
     ox, oy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
-    px = [(img_size[0] / 2 + (p[0] - ox) * scale, img_size[1] / 2 + (p[1] - oy) * scale, p[2])
-          for p in pts]
+    if style == "flat":
+        px = [(img_size[0] / 2 + (p[0] - ox) * scale, img_size[1] / 2 + (p[1] - oy) * scale, p[2])
+              for p in pts]
+    else:
+        # Mild perspective: nearer atoms grow up to ~14%, farther ones shrink.
+        px = []
+        for p in pts:
+            f = 8.0 / (8.0 - p[2] / span)
+            px.append((img_size[0] / 2 + (p[0] - ox) * scale * f,
+                       img_size[1] / 2 + (p[1] - oy) * scale * f,
+                       p[2]))
+    zs = [p[2] for p in px]
+    zmin, zmax = min(zs), max(zs)
+
+    def depth01(z: float) -> float:
+        return (z - zmin) / max(zmax - zmin, 1e-6)
 
     img = Image.new("RGB", img_size, (255, 255, 255))
     draw = ImageDraw.Draw(img)
@@ -756,73 +979,172 @@ def render_smiles_ball_and_stick(smiles: str, output_path: Path,
             dx, dy = x2 - x1, y2 - y1
             ln = math.hypot(dx, dy) or 1.0
             nx, ny = -dy / ln, dx / ln
-            offsets = {1.0: [0.0], 2.0: [-4.0, 4.0], 3.0: [-6.0, 0.0, 6.0],
-                       1.5: [-3.0, 3.0]}[order]
-            for off in offsets:
-                draw.line([(x1 + nx * off, y1 + ny * off), (x2 + nx * off, y2 + ny * off)],
-                          fill=(120, 120, 120), width=8)
+            offsets = {1.0: [0.0], 2.0: [-5.0, 5.0], 3.0: [-7.0, 0.0, 7.0],
+                       1.5: [-4.0, 4.0]}[order]
+            if style == "flat":
+                for off in offsets:
+                    draw.line([(x1 + nx * off, y1 + ny * off), (x2 + nx * off, y2 + ny * off)],
+                              fill=(120, 120, 120), width=5 if order == 1.0 else 4)
+            else:
+                bond_color = _fog_color((110, 110, 110),
+                                        depth01((px[i][2] + px[j][2]) / 2))
+                for off in offsets:
+                    _draw_cylinder_bond(draw, x1 + nx * off, y1 + ny * off,
+                                        x2 + nx * off, y2 + ny * off,
+                                        6 if order == 1.0 else 5, bond_color)
         else:
             _, i, el = item
-            r = _ATOM_RADIUS.get(el, 20)
-            color = _CPK_COLORS.get(el, (150, 150, 150))
             x, y = px[i][0], px[i][1]
-            draw.ellipse([x - r, y - r, x + r, y + r], fill=color, outline=(20, 20, 20), width=2)
-            draw.ellipse([x - r * 0.55, y - r * 0.65, x - r * 0.05, y - r * 0.15],
-                         fill=tuple(min(255, c + 90) for c in color))
+            if style == "flat":
+                r = _ATOM_RADIUS.get(el, 20)
+                color = _CPK_COLORS.get(el, (150, 150, 150))
+                draw.ellipse([x - r, y - r, x + r, y + r], fill=color, outline=(20, 20, 20), width=2)
+                draw.ellipse([x - r * 0.55, y - r * 0.65, x - r * 0.05, y - r * 0.15],
+                             fill=tuple(min(255, c + 90) for c in color))
+            else:
+                depth = depth01(px[i][2])
+                r = _ATOM_RADIUS.get(el, 20) * (0.85 + 0.30 * depth)
+                color = _fog_color(_CPK_COLORS.get(el, (150, 150, 150)), depth, 0.18)
+                sprite = _sphere_sprite(color, r)
+                img.paste(sprite, (int(round(x - sprite.width / 2)),
+                                   int(round(y - sprite.height / 2))), sprite)
             if el == "R":
                 r_idx += 1
-                draw.text((x - 6, y - 8), f"R{r_idx}", fill=(255, 255, 255))
+                draw.text((x, y), f"R{r_idx}", fill=(255, 255, 255),
+                          font=_label_font(), anchor="mm")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(output_path, format="PNG")
     return output_path
 
 
-# Normalized (x0, y0, x1, y1) structure-panel regions per layout for
+# Normalized (x0, y0, x1, y1) candidate structure-panel regions per layout for
 # pixel-exact programmatic skeleton compositing.  Layouts not listed keep the
 # model-drawn molecule (extra reference image mode).
-_COMPOSITE_REGIONS = {
-    "why-strategy-what": (0.16, 0.31, 0.415, 0.65),
-    "module-cards-crosscut-sidebar": (0.02, 0.17, 0.35, 0.52),
+# NOTE: entries must be calibrated against the ACTUAL generated layout of the
+# named template (verified visually).  The previous module-cards / why-strategy-what
+# regions were calibrated against a mismatched artwork and pasted the molecule
+# over category cards, so they were removed; those layouts now use the extra
+# reference image mode until properly recalibrated.
+# The model is not fully deterministic: it alternates between a wide horizontal
+# structure panel at the top-left and a tall vertical panel on the left.  Each
+# layout therefore lists candidate regions; compositing pastes into the FIRST
+# candidate that passes the whiteness guard, so a drifted variant simply uses
+# its own blank panel instead of being overwritten or left empty.
+_COMPOSITE_REGIONS: dict[str, list[tuple[float, float, float, float]]] = {
+    "module-cards-crosscut-sidebar": [
+        # Variant A: wide horizontal structure panel at the top-left
+        # (caption excluded), calibrated against _composite_test.png.
+        (0.02, 0.13, 0.78, 0.365),
+        # Variant B: tall vertical structure panel on the left
+        # (caption excluded), calibrated against the 2026-08-06 run.
+        (0.016, 0.16, 0.198, 0.795),
+    ],
 }
 
 
-def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layout: str) -> bool:
+def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layout: str) -> tuple[bool, str]:
     """Paste the exact ball-and-stick model into the layout's structure panel.
 
     Guarantees pixel-exact molecular geometry: the panel is cleared to white
-    and the programmatically rendered model is centered into it.
+    and the programmatically rendered model is centered into it.  Multiple
+    candidate regions are tried in order; the first mostly-blank one wins.
+
+    Returns ``(ok, reason)``.  When ``ok`` is False, ``reason`` explains why
+    compositing was skipped so the match report can surface the guard blind
+    spot: in composite mode the model is told to leave the panel blank, so a
+    skipped run may contain NO molecule at all and needs a manual check.
     """
-    box = _COMPOSITE_REGIONS.get(layout)
-    if not box or not skeleton_path.exists():
-        return False
+    boxes = _COMPOSITE_REGIONS.get(layout)
+    if not boxes:
+        return False, "layout_not_calibrated"
+    if not skeleton_path.exists():
+        return False, "skeleton_missing"
     try:
-        from PIL import Image, ImageDraw
+        from PIL import Image
     except ImportError:
-        return False
+        return False, "pillow_unavailable"
     with Image.open(figure_path) as fig:
         fig = fig.convert("RGB")
         W, H = fig.size
-        x0, y0, x1, y1 = (int(W * box[0]), int(H * box[1]), int(W * box[2]), int(H * box[3]))
-        draw = ImageDraw.Draw(fig)
-        draw.rounded_rectangle([x0, y0, x1, y1], radius=24, fill=(255, 255, 255))
+        target = None
+        for box in boxes:
+            x0, y0, x1, y1 = (int(W * box[0]), int(H * box[1]), int(W * box[2]), int(H * box[3]))
+            # Guard: only paste into a mostly-blank panel.  If the layout drifted
+            # and the region contains cards/text/colors, keep the model's drawing.
+            raw = fig.crop((x0, y0, x1, y1)).resize((120, 48)).tobytes()
+            white = sum(1 for i in range(0, len(raw), 3)
+                        if raw[i] > 225 and raw[i + 1] > 225 and raw[i + 2] > 225)
+            if white / max(1, len(raw) // 3) >= 0.85:
+                target = (x0, y0, x1, y1)
+                break
+        if target is None:
+            return False, "guard_rejected_no_white_panel"
+        x0, y0, x1, y1 = target
+        _clear_panel_specks(fig, (x0, y0, x1, y1))
         with Image.open(skeleton_path) as sk:
             sk = sk.convert("RGB")
-            sk.thumbnail((x1 - x0 - 30, y1 - y0 - 30))
+            # Trim the skeleton's white margins so the molecule uses the panel space.
+            mask = sk.convert("L").point(lambda p: 255 if p < 245 else 0)
+            bbox = mask.getbbox()
+            if bbox:
+                sk = sk.crop(bbox)
+            sk.thumbnail((x1 - x0 - 40, y1 - y0 - 40))
             sx = x0 + (x1 - x0 - sk.width) // 2
             sy = y0 + (y1 - y0 - sk.height) // 2
             fig.paste(sk, (sx, sy))
         fig.save(figure_path, format="PNG")
-    return True
+    return True, ""
 
 
-def render_skeleton_model(features: dict[str, Any], output_path: Path,
-                          img_size: tuple[int, int] = (900, 640)) -> Path | None:
-    """Render the review's core motif as an accurate ball-and-stick PNG.
+def _clear_panel_specks(fig: Any, box: tuple[int, int, int, int],
+                        max_speck_px: int = 500) -> None:
+    """White-out small stray marks inside the structure panel.
 
-    SMILES resolution order: explicit project override (query_plan
+    The whiteness guard guarantees the panel is mostly blank, but the model can
+    leave tiny residue (stray glyphs, dots).  Blanketing the whole region with
+    white would erase the panel's own border stroke, so instead only small
+    non-white connected components that do NOT touch the region boundary are
+    cleared; border fragments (touching the boundary) survive.
+    """
+    from collections import deque
+    x0, y0, x1, y1 = box
+    px = fig.load()
+    seen = [[False] * (x1 - x0) for _ in range(y1 - y0)]
+
+    def is_ink(x: int, y: int) -> bool:
+        r, g, b = px[x, y][:3]
+        return r < 240 or g < 240 or b < 240
+
+    for sy in range(y0, y1):
+        for sx in range(x0, x1):
+            lx, ly = sx - x0, sy - y0
+            if seen[ly][lx] or not is_ink(sx, sy):
+                continue
+            comp: list[tuple[int, int]] = []
+            touches_edge = False
+            queue = deque([(lx, ly)])
+            seen[ly][lx] = True
+            while queue:
+                cx, cy = queue.popleft()
+                comp.append((cx, cy))
+                if cx == 0 or cy == 0 or cx == x1 - x0 - 1 or cy == y1 - y0 - 1:
+                    touches_edge = True
+                for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+                    if 0 <= nx < x1 - x0 and 0 <= ny < y1 - y0 and not seen[ny][nx] \
+                            and is_ink(x0 + nx, y0 + ny):
+                        seen[ny][nx] = True
+                        queue.append((nx, ny))
+            if not touches_edge and len(comp) <= max_speck_px:
+                for cx, cy in comp:
+                    px[x0 + cx, y0 + cy] = (255, 255, 255)
+
+
+def resolve_skeleton_smiles(features: dict[str, Any]) -> str:
+    """Resolve the review's core-motif SMILES.
+
+    Resolution order: explicit project override (query_plan
     "skeleton_smiles"/"smiles") -> product keyword map -> title/outline/draft
-    keyword scan.  Returns None when no motif can be determined (caller then
-    falls back to the text description).
+    keyword scan.  Returns "" when no motif can be determined.
     """
     smiles = features.get("skeleton_smiles", "") or ""
     if not smiles:
@@ -836,21 +1158,195 @@ def render_skeleton_model(features: dict[str, Any], output_path: Path,
             if draft_path.exists():
                 blob_parts.append(draft_path.read_text(encoding="utf-8", errors="ignore")[:1200])
         smiles = _smiles_for_label(" ".join(blob_parts)) or ""
+    return smiles
+
+
+def render_skeleton_model(features: dict[str, Any], output_path: Path,
+                          img_size: tuple[int, int] = (900, 640),
+                          style: str = "3d") -> Path | None:
+    """Render the review's core motif as an accurate ball-and-stick PNG."""
+    smiles = resolve_skeleton_smiles(features)
     if not smiles:
         return None
-    return render_smiles_ball_and_stick(smiles, output_path, img_size)
+    return render_smiles_ball_and_stick(smiles, output_path, img_size, style)
+
+
+def skeleton_atom_counts(smiles: str) -> tuple[int, int] | None:
+    """(visible non-H atom count, R-group count) used by the AI-redraw gate."""
+    try:
+        atoms, bonds = parse_smiles(smiles)
+        if not atoms:
+            return None
+        atoms, bonds = _expand_hydrogens(atoms, bonds)
+    except Exception:
+        return None
+    visible = sum(1 for a in atoms if a["el"] != "H")
+    r_count = sum(1 for a in atoms if a["el"] == "R")
+    return visible, r_count
+
+
+# ---------------------------------------------------------------------------
+# Form B: isolated AI style-transfer of the exact skeleton ("ai3d" style).
+# The model only restyles; a programmatic sanity gate must accept the redraw
+# before it replaces the deterministic skeleton, otherwise we fall back.
+# ---------------------------------------------------------------------------
+
+# Gate tuning knobs, calibrated 2026-08-06 against the programmatic flat/3D
+# renders and an accepted AI redraw (all analyzed at _GATE_SMALL_SIZE):
+_GATE_SMALL_SIZE = (450, 320)        # downscale size for gate analysis
+_GATE_INK_THRESHOLD = 235            # pixels darker than this count as ink
+_GATE_EMPTY_INK_RATIO = 0.005        # less ink than this => empty image
+_GATE_INK_EROSION = 5                # MinFilter width that erases thin bonds
+_GATE_ATOM_BLOB_MIN_PX = 8           # min surviving blob size (one atom)
+_GATE_ATOM_BLOB_RANGE = (0.5, 1.6)   # accepted blob count vs expected atoms
+_GATE_BLUE_MIN_PX = 30               # R spheres are large; no erosion needed
+_GATE_R_TOLERANCE = 1                # allowed |detected - expected| R labels
+
+_AI_SKELETON_REDRAW_PROMPT = (
+    "STYLE-TRANSFER TASK. The attached reference is an exact ball-and-stick diagram of ONE "
+    "molecule. Re-render this EXACT molecule as a glossy photorealistic 3D ball-and-stick "
+    "model on a pure white background: shaded spheres with specular highlights, cylindrical "
+    "lit bonds, soft studio lighting, mild perspective.\n"
+    "PRESERVE EXACTLY (chemistry must not change):\n"
+    "- every atom: same count, same topology, same colors (black carbon, red oxygen, blue "
+    "nitrogen, white hydrogen, blue labeled R-group spheres);\n"
+    "- every bond order: single/double/triple exactly as shown (parallel lines = multiple bonds);\n"
+    "- the perpendicular orientation of the two terminal substituent planes around the "
+    "cumulated C=C=C core;\n"
+    "- all label texts verbatim (R1, R2, ...).\n"
+    "Do not add, remove, merge or relabel atoms. No caption, no border, no extra text; "
+    "output only the molecule centered on white."
+)
+
+
+def _count_blobs(mask: Any, min_px: int) -> int:
+    """Count connected 255-valued blobs of at least min_px pixels (4-neighbor)."""
+    from collections import deque
+    w, h = mask.size
+    px = mask.load()
+    seen = bytearray(w * h)
+    blobs = 0
+    for y0 in range(h):
+        row = y0 * w
+        for x0 in range(w):
+            idx = row + x0
+            if seen[idx] or not px[x0, y0]:
+                continue
+            seen[idx] = 1
+            size = 0
+            stack = deque((idx,))
+            while stack:
+                i = stack.pop()
+                size += 1
+                x, y = i % w, i // w
+                if x + 1 < w:
+                    j = i + 1
+                    if not seen[j] and px[x + 1, y]:
+                        seen[j] = 1
+                        stack.append(j)
+                if x > 0:
+                    j = i - 1
+                    if not seen[j] and px[x - 1, y]:
+                        seen[j] = 1
+                        stack.append(j)
+                if y + 1 < h:
+                    j = i + w
+                    if not seen[j] and px[x, y + 1]:
+                        seen[j] = 1
+                        stack.append(j)
+                if y > 0:
+                    j = i - w
+                    if not seen[j] and px[x, y - 1]:
+                        seen[j] = 1
+                        stack.append(j)
+            if size >= min_px:
+                blobs += 1
+    return blobs
+
+
+def _ai_redraw_gate(img: Any, expected_visible: int, expected_r: int) -> tuple[bool, str]:
+    """Sanity-check an AI skeleton redraw: atom-blob and R-label counts.
+
+    Bonds are thin, atoms are thick: eroding the ink mask removes bonds so
+    each surviving blob approximates one atom.  Not a proof of correctness --
+    a probabilistic gate that catches catastrophic hallucinations only.
+    """
+    from PIL import Image, ImageFilter
+    small = img.resize(_GATE_SMALL_SIZE)
+    r_ch, g_ch, b_ch = small.split()
+    rp, gp, bp = r_ch.load(), g_ch.load(), b_ch.load()
+    ink = small.convert("L").point(lambda p: 255 if p < _GATE_INK_THRESHOLD else 0)
+    blue = Image.new("L", small.size, 0)
+    blp = blue.load()
+    for y in range(small.size[1]):
+        for x in range(small.size[0]):
+            rv, gv, bv = rp[x, y], gp[x, y], bp[x, y]
+            if bv >= rv + 25 and bv >= gv + 15 and bv > 90:
+                blp[x, y] = 255
+    ink_px = ink.histogram()[255]
+    if ink_px < _GATE_EMPTY_INK_RATIO * small.size[0] * small.size[1]:
+        return False, "empty_image"
+    blobs = _count_blobs(ink.filter(ImageFilter.MinFilter(_GATE_INK_EROSION)),
+                         _GATE_ATOM_BLOB_MIN_PX)
+    lo, hi = _GATE_ATOM_BLOB_RANGE
+    if not (lo * expected_visible <= blobs <= hi * expected_visible):
+        return False, f"atom_blobs_{blobs}_expected_about_{expected_visible}"
+    # No erosion for the blue mask: specular highlights hole the spheres and
+    # erosion would fragment them; R spheres are large, so a size floor suffices.
+    r_blobs = _count_blobs(blue, _GATE_BLUE_MIN_PX)
+    if abs(r_blobs - expected_r) > _GATE_R_TOLERANCE:
+        return False, f"r_labels_{r_blobs}_expected_{expected_r}"
+    return True, "gate_passed"
+
+
+def attempt_ai_skeleton_redraw(features: dict[str, Any], reference_png: Path,
+                               output_png: Path, api_key: str, base_url: str,
+                               model: str, wire_api: str) -> tuple[Path | None, str]:
+    """Ask the image model to restyle the exact skeleton into a 3D render.
+
+    Returns ``(path, note)``; ``path`` is None when the call fails or the
+    sanity gate rejects the redraw (caller then keeps the programmatic one).
+    """
+    smiles = resolve_skeleton_smiles(features)
+    counts = skeleton_atom_counts(smiles) if smiles else None
+    if counts is None:
+        return None, "no_smiles_for_gate"
+    try:
+        image_bytes = call_image_edit_api(
+            api_key, base_url, reference_png, _AI_SKELETON_REDRAW_PROMPT,
+            model=model, wire_api=wire_api)
+    except Exception as exc:
+        return None, f"api_error:{exc}"[:300]
+    try:
+        import io
+        from PIL import Image
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception as exc:
+        return None, f"undecodable_image:{exc}"[:300]
+    try:
+        ok, note = _ai_redraw_gate(img, counts[0], counts[1])
+    except Exception as exc:
+        return None, f"gate_error:{exc}"[:300]
+    if not ok:
+        # Keep the rejected draft for human inspection / gate tuning.
+        try:
+            output_png.parent.mkdir(parents=True, exist_ok=True)
+            output_png.with_name(output_png.stem + "_rejected.png").write_bytes(image_bytes)
+        except OSError:
+            pass
+        return None, f"gate_rejected:{note}"
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    output_png.write_bytes(image_bytes)
+    return output_png, "gate_passed"
 
 
 def resolve_api_key(cli_value: str, base_url: str) -> str:
     """Use the matching credential when text and image providers differ."""
-    if cli_value:
-        return cli_value
-    image_key = os.environ.get("IMAGE_OPENAI_API_KEY", "")
-    if image_key:
-        return image_key
-    if "api.xiaoleai.team" in str(base_url).lower():
-        return os.environ.get("XIAOLEAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
-    return os.environ.get("OPENAI_API_KEY", "") or os.environ.get("XIAOLEAI_API_KEY", "")
+    del base_url
+    return _shared_resolve_api_key(
+        cli_value,
+        env_names=("IMAGE_OPENAI_API_KEY", "OPENAI_API_KEY"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1226,7 +1722,9 @@ def _build_approved_terminology(features: dict[str, Any]) -> str:
 
 def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any]) -> str:
     """Adapt the template prompt with review-specific content (fully generic)."""
-    base_prompt = _retheme_base_prompt(template.get("prompt", ""), features)
+    profile = str(features.get("taxonomy_profile") or "").strip().casefold()
+    generic_project = bool(profile and profile != "allene")
+    base_prompt = "" if generic_project else _retheme_base_prompt(template.get("prompt", ""), features)
 
     # Build English title: if original is non-English, construct from keywords
     gb = features.get("group_by", [])
@@ -1254,6 +1752,12 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any]) -> 
 
     # Visual style description with dynamic term replacement
     visual_style_desc = _get_visual_style_description(template)
+    if generic_project:
+        visual_style_desc = (
+            f"Use the abstract panel geometry and reading order of the {template.get('layout_type', 'overview')} "
+            "reference, but discard all source-domain objects and wording. Render only the current project's "
+            "title, categories, evidence cells, and take-home messages with crisp vector-like typography."
+        )
     n_words = _ENGLISH_NUM_WORDS.get(len(metals[:5]), str(len(metals[:5])))
     if len(metals[:5]) != 5:
         visual_style_desc = re.sub(r"\bFive\b", n_words.capitalize(), visual_style_desc)
@@ -1277,6 +1781,25 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any]) -> 
         for old, new in replacements:
             visual_style_desc = visual_style_desc.replace(old, new)
 
+    if template.get("layout_type", "") in _COMPOSITE_REGIONS:
+        structure_rule = (
+            "- Leave the large structure/molecule panel COMPLETELY EMPTY (plain white, "
+            "no molecule, no drawing): an exact ball-and-stick model is inserted "
+            "programmatically after generation. Only the short caption below it is drawn."
+        )
+        blank_rule = (
+            "- Every panel, arc, box, and cell in the layout MUST contain the provided "
+            "text, EXCEPT the structure panel which must stay blank white."
+        )
+    else:
+        structure_rule = (
+            "- The left-page structure area shows ONLY a single representative "
+            "skeleton/motif."
+        )
+        blank_rule = (
+            "- Every panel, arc, box, and cell in the layout MUST contain the provided "
+            "text; absolutely no blank regions."
+        )
     adaptation = f"""
 REFERENCE IMAGE USAGE (read first):
 The reference image is intentionally blurred: it is ONLY a layout guide
@@ -1305,11 +1828,11 @@ CRITICAL RULES:
 - ALL text in the figure MUST be in ENGLISH only. No Chinese or other non-English characters.
 - If the review title (banner) is in Chinese or any non-English language, translate it to professional English before rendering.
 - Do NOT draw a reaction equation (no arrow, no substrate-to-product transformation).
-- The left-page structure area shows ONLY a single representative skeleton/motif.
+{structure_rule}
 - Keep all text concise. Category labels stay SHORT (symbols or max 2 words). No long names in hexagons.
 - Right-page cells: max 2-3 words each. Use real metrics from the content above.
 - Generate the figure with ALL text fields FILLED IN. No dotted placeholders.
-- Every panel, arc, box, and cell in the layout MUST contain the provided text; absolutely no blank regions.
+{blank_rule}
 - Use the same visual style, layout, color scheme, and icon design as the reference template.
 
 APPROVED TERMINOLOGY (use ONLY these exact phrases in the figure text):
@@ -1330,6 +1853,22 @@ def _build_skeleton_description(features: dict[str, Any]) -> str:
     """Determine what 3D ball-and-stick model to draw based on product keywords."""
     products = features.get("product_keywords", [])
     prod_label = products[0] if products else "product"
+
+    # The reference template may originate from a chemistry project. An
+    # unrelated review must never inherit its molecule-specific geometry.
+    profile = str(features.get("taxonomy_profile") or "").strip().casefold()
+    topic = str(features.get("review_title") or "").strip()
+    if not products or (profile and profile != "allene" and not features.get("has_reaction_focus")):
+        return f"""LEFT-PAGE CONCEPT AREA (center of left page):
+Draw one clean scientific concept illustration for the current review topic: "{topic or prod_label}".
+Use only concepts and labels supported by the supplied project outline. Do not introduce a molecule,
+reaction, catalyst, material, organism, or dataset that is not named in the current project evidence.
+
+GENERAL RENDERING RULES:
+- Prefer a simple domain-neutral icon, network, workflow, or evidence map appropriate to the topic.
+- Keep all elements inside the designated panel with balanced white space.
+- Use crisp vector-like edges, readable labels, and the template's established color palette.
+- Do not reuse subject matter from the reference template."""
 
     # Map product types to ball-and-stick model descriptions (generic, extensible)
     skeleton_map = {
@@ -1869,7 +2408,7 @@ def call_image_edit_api(
     base_url: str,
     reference_image: Path,
     prompt: str,
-    model: str = "gpt-image-1",
+    model: str = DEFAULT_IMAGE_MODEL,
     preferred_size: str = "",
     wire_api: str = "",
     request_metadata: dict[str, str] | None = None,
@@ -1882,11 +2421,14 @@ def call_image_edit_api(
             request_metadata.update({"endpoint": "dashscope-native", "image_size": "2K"})
         return _call_dashscope_native(api_key, base_url, reference_image, prompt, model, extra_images)
 
-    # OpenAI-compatible endpoints.  Some New API relays expose gpt-image-2
+    # OpenAI-compatible endpoints. Some relays expose image generation only
     # only through multimodal /chat/completions.  When that transport is
     # configured, do not probe /images/*: doing so can trigger provider-side
     # access controls and can never reach the model assigned to the chat route.
     resolved_wire_api = normalize_image_wire_api(wire_api)
+    # Some compatible providers reject prompts over roughly 4000 chars;
+    # condense before any route so the square-canvas note added below survives.
+    prompt = condense_overview_prompt(prompt)
     if resolved_wire_api == "chat-completions":
         size = overview_image_size_candidates(base_url, preferred_size)[0]
         sized_prompt = prompt_for_overview_size(prompt, size)
@@ -1984,7 +2526,7 @@ def _try_chat_completions_image_edit(
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json; charset=utf-8",
             "Accept": "application/json, text/event-stream",
-            "User-Agent": "review-writer-overview-figure/1.0",
+            "User-Agent": USER_AGENT,
         },
         method="POST",
     )
@@ -2143,7 +2685,7 @@ def _extract_chat_completion_image_bytes(result: dict[str, Any]) -> bytes:
         str(value),
         headers={
             "Accept": "image/*",
-            "User-Agent": "review-writer-overview-figure/1.0",
+            "User-Agent": USER_AGENT,
         },
     )
     try:
@@ -2276,6 +2818,7 @@ def _try_images_edits(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": content_type,
         "Accept": "application/json",
+        "User-Agent": USER_AGENT,
     }
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     result = open_json_request(req, "Overview image edit request")
@@ -2303,6 +2846,7 @@ def _try_images_generations_text_only(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "Accept": "application/json",
+        "User-Agent": USER_AGENT,
     }
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     result = open_json_request(req, "Overview image generation request")
@@ -2332,7 +2876,8 @@ def _build_report(args, template: dict, features: dict, prompt: str,
                          reference_image: Path, base_url: str, model: str,
                          status: str = "pending", output_path: str = "",
                          output_size: int = 0, error: str = "",
-                         request_metadata: dict[str, str] | None = None) -> dict:
+                         request_metadata: dict[str, str] | None = None,
+                         composite: dict[str, Any] | None = None) -> dict:
     """Build a single report dict (replaces 3 duplicate blocks in main)."""
     report = {
         "project_id": args.project_id,
@@ -2355,6 +2900,8 @@ def _build_report(args, template: dict, features: dict, prompt: str,
         report["output_size_bytes"] = output_size
     if error:
         report["error"] = error
+    if composite is not None:
+        report["composite"] = dict(composite)
     return report
 
 
@@ -2362,9 +2909,9 @@ def main():
     parser = argparse.ArgumentParser(description="Generate review overview figure from template")
     parser.add_argument("--review-root", required=True, help="Path to review-writer project root")
     parser.add_argument("--project-id", required=True, help="Project ID")
-    parser.add_argument("--api-key", default="", help="API key (or set XIAOLEAI_API_KEY / OPENAI_API_KEY)")
+    parser.add_argument("--api-key", default="", help="API key (or set IMAGE_OPENAI_API_KEY / OPENAI_API_KEY)")
     parser.add_argument("--base-url", default="", help="API base URL")
-    parser.add_argument("--model", default="gpt-image-1", help="Image generation model")
+    parser.add_argument("--model", default=DEFAULT_IMAGE_MODEL, help="Image generation model")
     parser.add_argument(
         "--wire-api",
         default="",
@@ -2375,6 +2922,14 @@ def main():
         "--size",
         default="",
         help="Preferred image size; incompatible providers automatically fall back to a supported size.",
+    )
+    parser.add_argument(
+        "--skeleton-style",
+        default="ai3d",
+        choices=["3d", "flat", "ai3d"],
+        help="Ball-and-stick skeleton rendering style; 'flat' restores the original 2D vector look; "
+             "'ai3d' asks the image model to restyle the exact skeleton into a 3D render, gated by a "
+             "programmatic sanity check with automatic fallback to the programmatic 3D skeleton.",
     )
     parser.add_argument("--output", default="", help="Output path for generated figure")
     parser.add_argument("--dry-run", action="store_true", help="Only show template matching, don't call API")
@@ -2387,7 +2942,7 @@ def main():
     # Resolve API settings
     base_url = args.base_url or os.environ.get(
         "IMAGE_OPENAI_BASE_URL",
-        os.environ.get("OPENAI_BASE_URL", "https://api.xiaoleai.team"),
+        os.environ.get("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL),
     )
     api_key = resolve_api_key(args.api_key, base_url)
     wire_api = normalize_image_wire_api(args.wire_api)
@@ -2428,13 +2983,30 @@ def main():
     skeleton_png = out_dir / "skeleton_model.png"
     layout_type = best_template["layout_type"]
     will_composite = False
-    if render_skeleton_model(features, skeleton_png):
+    program_style = "3d" if args.skeleton_style == "ai3d" else args.skeleton_style
+    skeleton_rendered = render_skeleton_model(features, skeleton_png,
+                                               style=program_style)
+    skeleton_source = "programmatic"
+    ai_redraw_note = ""
+    if skeleton_rendered and args.skeleton_style == "ai3d":
+        ai_png, ai_redraw_note = attempt_ai_skeleton_redraw(
+            features, skeleton_png, out_dir / "skeleton_model_ai3d.png",
+            api_key, base_url, args.model, wire_api)
+        if ai_png is not None:
+            skeleton_png = ai_png
+            skeleton_source = "ai_redraw"
+            print(f"  AI 3D skeleton redraw accepted by the sanity gate: {ai_png}")
+        else:
+            print(f"  WARNING: AI 3D skeleton redraw not used ({ai_redraw_note}); "
+                  "falling back to the programmatic skeleton.", file=sys.stderr)
+    if skeleton_rendered:
         features["_skeleton_image"] = skeleton_png
         will_composite = layout_type in _COMPOSITE_REGIONS
         if will_composite:
             features["_composite_layout"] = layout_type
-        else:
-            extra_images.append(skeleton_png)
+        # always provide the exact model as an extra reference: the model draws
+        # a faithful fallback in case the guarded compositing later skips
+        extra_images.append(skeleton_png)
         print(f"  Accurate ball-and-stick model rendered: {skeleton_png}")
     adapted_prompt = build_adapted_prompt(best_template, features)
     print(f"\n  Adapted prompt length: {len(adapted_prompt)} chars")
@@ -2458,7 +3030,7 @@ def main():
     # Call API
     if not api_key:
         print("\nERROR: No API key available.", file=sys.stderr)
-        print("  Set XIAOLEAI_API_KEY or OPENAI_API_KEY environment variable,", file=sys.stderr)
+        print("  Set IMAGE_OPENAI_API_KEY or OPENAI_API_KEY environment variable,", file=sys.stderr)
         print("  create a .env file, or pass --api-key.", file=sys.stderr)
         print("\n  Saving template match report for later use...", file=sys.stderr)
         out_dir = project_dir / "03_figure_redraw"
@@ -2513,8 +3085,36 @@ def main():
     output_path = Path(args.output) if args.output else (out_dir / "overview_figure.png")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(image_bytes)
-    if will_composite and composite_skeleton_into_figure(output_path, skeleton_png, layout_type):
-        print("  Exact skeleton composited into the structure panel (pixel-exact).")
+    composite_report: dict[str, Any] = {
+        "enabled": will_composite,
+        "status": "not_applicable",
+        "reason": "",
+    }
+    if not will_composite:
+        if not skeleton_rendered:
+            composite_report["reason"] = "skeleton_render_failed"
+        elif layout_type not in _COMPOSITE_REGIONS:
+            composite_report["reason"] = "layout_not_calibrated"
+    else:
+        composited, skip_reason = composite_skeleton_into_figure(
+            output_path, skeleton_png, layout_type)
+        if composited:
+            composite_report["status"] = "success"
+            print("  Exact skeleton composited into the structure panel (pixel-exact).")
+        else:
+            composite_report["status"] = "skipped"
+            composite_report["reason"] = skip_reason
+            print(
+                "  WARNING: skeleton compositing was SKIPPED by the safety guard "
+                f"(reason: {skip_reason}).\n"
+                "  In composite mode the model was told to leave the structure panel blank,\n"
+                "  so this overview figure may contain NO molecule at all. Inspect the PNG\n"
+                "  manually; if the panel is empty, calibrate a new candidate region.",
+                file=sys.stderr,
+            )
+    composite_report["skeleton_source"] = skeleton_source
+    if args.skeleton_style == "ai3d":
+        composite_report["ai_redraw_gate"] = ai_redraw_note or "not_attempted"
     print(f"\n  Overview figure saved to: {output_path}")
     print(f"  File size: {len(image_bytes):,} bytes")
 
@@ -2522,7 +3122,8 @@ def main():
     report = _build_report(args, best_template, features, adapted_prompt,
                            reference_image, base_url, args.model,
                            status="success", output_path=str(output_path),
-                           output_size=len(image_bytes), request_metadata=request_metadata)
+                           output_size=len(image_bytes), request_metadata=request_metadata,
+                           composite=composite_report)
     write_json(out_dir / "overview_template_match.json", report)
     print(f"  Match report saved to: {out_dir / 'overview_template_match.json'}")
 

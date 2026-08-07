@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "name": "readability_first_unified_review_rubric",
+  "pass_threshold": 90,
+  "level_scale": {
+    "0": "absent or materially defective",
+    "1": "major revision required",
+    "2": "partially adequate",
+    "3": "substantially adequate with limited issues",
+    "4": "fully satisfies the rule"
+  },
+  "dimensions": [
+    {"id": "M01", "weight": 3, "rule": "Retain the approved scope, order, and organizing classification."},
+    {"id": "M02", "weight": 3, "rule": "Keep the opening, body sections, and synthesis focused on the review question."},
+    {"id": "M03", "weight": 3, "rule": "Maintain a logical progression from scope and terminology through cases to synthesis and outlook."},
+    {"id": "M04", "weight": 2, "rule": "Give every major section a stated role and a meaningful synthesis exit."},
+    {"id": "M05", "weight": 1, "rule": "Avoid stitched extraction prose and excessive repeated evidence-boundary boilerplate."},
+    {"id": "M06", "weight": 2, "rule": "Keep terminology, catalyst labels, and narrative voice consistent."},
+    {"id": "M07", "weight": 2, "rule": "Retain valid figure provenance, placement, and identity boundaries."},
+
+    {"id": "S01", "weight": 2, "rule": "State what each subsection contributes and what comparison it enables."},
+    {"id": "S02", "weight": 3, "rule": "Cover the approved papers, section roles, scope axes, and evidence ceilings."},
+    {"id": "S03", "weight": 2, "rule": "Distinguish anchor examples from extensions and explain their functions."},
+    {"id": "S04", "weight": 2, "rule": "Use shared comparison axes and avoid unsupported rankings."},
+    {"id": "S05", "weight": 2, "rule": "Keep case paragraphs within their assigned section and catalyst/mode boundary."},
+    {"id": "S06", "weight": 1, "rule": "Close each substantive section with synthesis rather than a final isolated example."},
+    {"id": "S07", "weight": 1, "rule": "Disclose missing metrics, untested classes, and evidence ceilings adjacent to interpretation."},
+    {"id": "S08", "weight": 1, "rule": "Make each section's review function explicit rather than relying only on headings."},
+
+    {"id": "P01", "weight": 3, "rule": "Use one principal example per case paragraph and meet the configured paragraph-length range."},
+    {"id": "P02", "weight": 3, "rule": "Explain the paper's role in the review argument rather than listing extracted fields."},
+    {"id": "P03", "weight": 3, "rule": "Build a continuous contribution-reaction-scope-limitation-significance progression."},
+    {"id": "P04", "weight": 2, "rule": "Retain interpretation-changing conditions and evidence limits while compressing routine inventories."},
+    {"id": "P05", "weight": 2, "rule": "Bound scope claims and do not relabel untested classes as failures."},
+    {"id": "P06", "weight": 2, "rule": "Keep mechanism language at the evidence level supported by the source."},
+    {"id": "P07", "weight": 0.5, "rule": "Tie practicality and comparison claims to shared reported axes."},
+    {"id": "P08", "weight": 0.5, "rule": "Remove extraction scaffolds, label-style colons, fragments, duplicated sentences, and template transitions."},
+
+    {"id": "C01", "weight": 3, "rule": "Map every case to stable paper IDs, local source paths, and citation records."},
+    {"id": "C02", "weight": 3, "rule": "Preserve source-supported catalyst roles, primary assignment, and transformation identity."},
+    {"id": "C03", "weight": 2, "rule": "Distinguish reported data, author inference, missing evidence, and review synthesis."},
+    {"id": "C04", "weight": 2, "rule": "Do not fabricate metrics or silently change their denominator, basis, or stage."},
+    {"id": "C05", "weight": 2, "rule": "Keep citations adjacent and aligned with the authoritative bibliography."},
+    {"id": "C06", "weight": 1.5, "rule": "Separate untested, missing, inferred, and failed evidence states."},
+    {"id": "C07", "weight": 1.5, "rule": "Respect the evidence boundary between primary sources, parsed records, and review synthesis."},
+
+    {"id": "G01", "weight": 2, "rule": "Use detect-first independent review reports before synthesis or editing."},
+    {"id": "G02", "weight": 5, "rule": "Do not invent data, methods, references, DOI values, mechanisms, structures, yields, selectivities, or interpretations."},
+    {"id": "G03", "weight": 4, "rule": "Keep catalyst, ligand, reagent roles, and primary organizing assignment source-supported."},
+    {"id": "G04", "weight": 5, "rule": "Preserve metric type, basis, and stage; do not interchange yield, conversion, recovery, selectivity, ee, er, dr, or de."},
+    {"id": "G05", "weight": 3, "rule": "Do not silently reconcile catalyst loading, equivalents, concentration, temperature, time, atmosphere, pressure, or scale."},
+    {"id": "G06", "weight": 4, "rule": "Protect stereochemical descriptors, formulas, chemical identifiers, and compound labels."},
+    {"id": "G07", "weight": 6, "rule": "Keep observed results, explanations, proposed mechanisms, and review synthesis linguistically distinct; route wording-only calibration to final polish."},
+    {"id": "G08", "weight": 4, "rule": "Base citation support on supplied/local records and mark unavailable support for verification."},
+    {"id": "G09", "weight": 2, "rule": "Keep figure, caption, and nearby quantitative-claim identity linked to the source record."},
+    {"id": "G10", "weight": 1, "rule": "Give every blocking finding a precise location, severity, confidence, and rewrite route."},
+    {"id": "G11", "weight": 1, "rule": "Do not mechanically penalize passive methods-style prose; require meaning-preserving edits."},
+    {"id": "G12", "weight": 2, "rule": "Require first-draft release before conclusion/final polish and final-release approval before export."}
+  ],
+  "hard_regressions": [
+    "invalid or missing citation map",
+    "citation/reference identity mismatch",
+    "missing linked source for a protected factual change",
+    "broken required figure path or unresolved figure identity",
+    "case paragraph outside the configured word range",
+    "label-style colon or extraction-field scaffold in generated case prose",
+    "critical or major readability finding",
+    "critical or major protected-fact finding"
+  ]
+}

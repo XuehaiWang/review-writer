@@ -5,6 +5,7 @@ import argparse
 import base64
 import csv
 import hashlib
+import hmac
 import io
 import importlib.util
 import json
@@ -29,6 +30,9 @@ from PIL import Image
 _VIEW_SCRIPTS = Path(__file__).resolve().parent
 if str(_VIEW_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_VIEW_SCRIPTS))
+_WORKSPACE_ROOT = _VIEW_SCRIPTS.parent
+if str(_WORKSPACE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_WORKSPACE_ROOT))
 from workflow_store import WorkflowStore
 from prefect_runtime import (
     configure_prefect_environment,
@@ -61,6 +65,24 @@ from provider_settings import (
     provider_subprocess_environment,
     public_provider_settings,
     save_provider_settings,
+)
+from review_writer_core.runtime_config import discovery_paper_limit, literature_batch_limit
+from review_writer_core.providers import DEFAULT_IMAGE_MODEL
+from review_writer_core.text_safety import make_xml_compatible
+from review_writer_core.project_config import (
+    load_project_config,
+    project_taxonomy_profile,
+    save_project_config,
+)
+from review_writer_core.taxonomy import suggest_taxonomy_profile
+from review_writer_core.figure_redraw_routing import (
+    FIGURE_TYPE_AUTO,
+    FIGURE_TYPE_COLORED,
+    FIGURE_TYPE_MECHANISM,
+    FIGURE_TYPE_SIMPLE,
+    classify_chemical_figure,
+    figure_type_options,
+    normalize_figure_type,
 )
 
 
@@ -106,9 +128,15 @@ def workflow_context_for_path(path: Path) -> tuple[WorkflowStore, str] | None:
     return workflow_store(review_root), project_id
 
 
-def execute_dashboard_stage(review_root: Path, project_id: str, stage_id: str) -> dict[str, Any]:
+def execute_dashboard_stage(
+    review_root: Path,
+    project_id: str,
+    stage_id: str,
+    stage_options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Execute one existing scientific stage inside a Prefect task."""
     project = Path(review_root) / "review-projects" / project_id
+    stage_options = stage_options or {}
     if stage_id == "sections":
         result = regenerate_section_drafting(review_root, project_id)
         next_stage = "figure-review"
@@ -124,6 +152,18 @@ def execute_dashboard_stage(review_root: Path, project_id: str, stage_id: str) -
         # paragraph and whole-document edits immediately before Stage 9 reads
         # them.
         result = handoff_current_draft(review_root, project_id)
+        next_stage = "final"
+    elif stage_id == "draft-feedback-loop":
+        result = run_first_draft_feedback_loop(
+            review_root,
+            project_id,
+            goal=float(stage_options.get("goal", 90)),
+            paragraph_goal=float(stage_options.get("paragraph_goal", 85)),
+            max_iterations=int(stage_options.get("max_iterations", 3)),
+            min_case_words=int(stage_options.get("min_case_words", 140)),
+            max_case_words=int(stage_options.get("max_case_words", 280)),
+            evaluate_only=bool(stage_options.get("evaluate_only", False)),
+        )
         next_stage = "final"
     elif stage_id == "final-conclusion":
         result = generate_final_conclusion(review_root, project_id)
@@ -180,6 +220,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     settings_app_path: Path
     external_file_allowlist: frozenset[Path] = frozenset()
     external_directory_allowlist: frozenset[Path] = frozenset()
+    access_token: str = ""
 
     def log_message(self, fmt: str, *args: object) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -192,7 +233,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def registry_path(self) -> Path:
         return self.review_root / "review-library" / "registry" / "papers.jsonl"
 
+    def require_authorization(self) -> bool:
+        """Optionally protect every dashboard page and API with HTTP Basic auth."""
+        expected = str(self.access_token or "")
+        if not expected:
+            return True
+        authorization = str(self.headers.get("Authorization") or "")
+        supplied = ""
+        if authorization.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(authorization[6:], validate=True).decode("utf-8")
+                _username, supplied = decoded.split(":", 1)
+            except (ValueError, UnicodeDecodeError):
+                supplied = ""
+        if hmac.compare_digest(supplied, expected):
+            return True
+        self.send_response(HTTPStatus.UNAUTHORIZED)
+        self.send_header("WWW-Authenticate", 'Basic realm="Review Writer", charset="UTF-8"')
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        return False
+
     def do_GET(self) -> None:
+        if not self.require_authorization():
+            return
         parsed = urlparse(self.path)
         if not self.validate_route_identifiers(parsed.path):
             return
@@ -283,6 +347,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_PUT(self) -> None:
+        if not self.require_authorization():
+            return
         parsed = urlparse(self.path)
         if not self.validate_route_identifiers(parsed.path):
             return
@@ -317,6 +383,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_POST(self) -> None:
+        if not self.require_authorization():
+            return
         parsed = urlparse(self.path)
         if not self.validate_route_identifiers(parsed.path):
             return
@@ -350,16 +418,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if len(parts) == 6 and parts[0:2] == ["api", "project"]:
                 self.handle_batch_figure_redraw_stop(unquote(parts[2]))
                 return
+        if parsed.path.startswith("/api/project/") and parsed.path.endswith("/feedback-loop/stop"):
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) == 5 and parts[0:2] == ["api", "project"]:
+                self.handle_feedback_loop_stop(unquote(parts[2]))
+                return
         if parsed.path.startswith("/api/project/") and "/figures/" in parsed.path:
             parts = parsed.path.strip("/").split("/")
             if len(parts) == 6 and parts[0:2] == ["api", "project"] and parts[3] == "figures" and parts[5] == "redraw":
-                force_ai = str(parse_qs(parsed.query).get("force_ai", [""])[0]).lower() in {
+                query = parse_qs(parsed.query)
+                force_ai = str(query.get("force_ai", [""])[0]).lower() in {
                     "1", "true", "yes"
                 }
+                requested_figure_type = str(query.get("figure_type", [FIGURE_TYPE_AUTO])[0])
                 self.handle_current_figure_redraw(
                     unquote(parts[2]),
                     unquote(parts[4]),
                     force_ai_edit=force_ai,
+                    requested_figure_type=requested_figure_type,
                 )
                 return
             if len(parts) == 6 and parts[0:2] == ["api", "project"] and parts[3] == "figures" and parts[5] == "human-approve":
@@ -374,7 +450,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/project/") and "/run/" in parsed.path:
             parts = parsed.path.strip("/").split("/")
             if len(parts) == 5 and parts[0:2] == ["api", "project"] and parts[3] == "run":
-                self.handle_project_stage_run(unquote(parts[2]), unquote(parts[4]))
+                stage_id = unquote(parts[4])
+                options: dict[str, object] = {}
+                if stage_id == "draft-feedback-loop" and int(self.headers.get("Content-Length") or 0) > 0:
+                    try:
+                        options = self.read_json_object()
+                    except (ValueError, json.JSONDecodeError) as exc:
+                        self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                        return
+                self.handle_project_stage_run(unquote(parts[2]), stage_id, options)
                 return
         if parsed.path.startswith("/api/project/") and "/handoff/" in parsed.path:
             parts = parsed.path.strip("/").split("/")
@@ -396,6 +480,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_DELETE(self) -> None:
+        if not self.require_authorization():
+            return
         parsed = urlparse(self.path)
         if not self.validate_route_identifiers(parsed.path):
             return
@@ -726,8 +812,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             candidate_ids = list(dict.fromkeys(candidate_ids))
             if not candidate_ids:
                 raise ValueError("Select at least one candidate.")
-            if len(candidate_ids) > 30:
-                raise ValueError("Download at most 30 papers in one run.")
+            batch_limit = literature_batch_limit()
+            if len(candidate_ids) > batch_limit:
+                raise ValueError(f"Download at most {batch_limit} papers in one run.")
             email = str(payload.get("email") or "").strip()
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -969,13 +1056,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
         figure_id: str,
         *,
         force_ai_edit: bool = False,
+        requested_figure_type: str = FIGURE_TYPE_AUTO,
     ) -> None:
+        try:
+            requested_figure_type = normalize_figure_type(requested_figure_type)
+        except ValueError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
         if not begin_figure_redraw_state(
             self.review_root,
             project_id,
             figure_id,
             origin="single",
             force_ai_edit=force_ai_edit,
+            requested_figure_type=requested_figure_type,
         ):
             self.send_json(
                 {"ok": False, "error": "This figure is already being generated."},
@@ -988,6 +1082,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 project_id,
                 figure_id,
                 force_ai_edit=force_ai_edit,
+                requested_figure_type=requested_figure_type,
             )
         except Exception as exc:
             finish_figure_redraw_state(
@@ -1095,7 +1190,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             }
         )
 
-    def handle_project_stage_run(self, project_id: str, stage_id: str) -> None:
+    def handle_project_stage_run(
+        self,
+        project_id: str,
+        stage_id: str,
+        stage_options: dict[str, object] | None = None,
+    ) -> None:
         """Run the deterministic part of a stage before handing it to the next page."""
         project = self.review_root / "review-projects" / project_id
         if not project.exists():
@@ -1108,7 +1208,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.review_root,
                 project_id,
                 stage_id,
-                lambda: execute_dashboard_stage(self.review_root, project_id, stage_id),
+                lambda: execute_dashboard_stage(
+                    self.review_root,
+                    project_id,
+                    stage_id,
+                    dict(stage_options or {}),
+                ),
             )
             execution = orchestration["result"]
             result = execution["result"]
@@ -1124,9 +1229,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 status=HTTPStatus.CONFLICT,
             )
             return
+        workflow_status = "completed"
+        workflow_error = ""
+        if stage_id == "draft-feedback-loop" and isinstance(result, dict):
+            feedback_status = result.get("status")
+            if isinstance(feedback_status, dict):
+                reported = str(feedback_status.get("status") or "").strip()
+                if reported in {"completed", "needs_human_review", "stopped", "failed"}:
+                    workflow_status = reported
+                    workflow_error = str(feedback_status.get("error") or "").strip()
         store.finish_stage_run(
             run_id,
-            "completed",
+            workflow_status,
+            error_message=workflow_error,
             metadata={
                 "result": result,
                 "workflow_engine": "prefect",
@@ -1142,6 +1257,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "next_stage": next_stage,
             "next_path": f"/{next_stage}?project={quote(project_id)}" if next_stage else "",
         })
+
+    def handle_feedback_loop_stop(self, project_id: str) -> None:
+        project = self.review_root / "review-projects" / project_id
+        if not project.is_dir():
+            self.send_json({"ok": False, "error": "Project not found."}, status=HTTPStatus.NOT_FOUND)
+            return
+        marker = project / "04_first_draft" / "feedback_loop.stop"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("stop requested\n", encoding="utf-8")
+        self.send_json({"ok": True, "status": "stop_requested"})
 
     def handle_project_handoff(self, project_id: str, stage_id: str) -> None:
         project = self.review_root / "review-projects" / project_id
@@ -1304,11 +1429,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
         stage_dir = project / "04_first_draft"
         stage_dir.mkdir(parents=True, exist_ok=True)
         if "first_draft_md" in data:
-            (stage_dir / "first_draft.md").write_text(str(data.get("first_draft_md") or ""), encoding="utf-8")
+            (stage_dir / "first_draft.md").write_text(
+                clean_publication_text(data.get("first_draft_md") or ""), encoding="utf-8"
+            )
         if "merge_report_md" in data:
-            (stage_dir / "merge_report.md").write_text(str(data.get("merge_report_md") or ""), encoding="utf-8")
+            (stage_dir / "merge_report.md").write_text(
+                clean_publication_text(data.get("merge_report_md") or ""), encoding="utf-8"
+            )
         if "remaining_issues_md" in data:
-            (stage_dir / "remaining_issues.md").write_text(str(data.get("remaining_issues_md") or ""), encoding="utf-8")
+            (stage_dir / "remaining_issues.md").write_text(
+                clean_publication_text(data.get("remaining_issues_md") or ""), encoding="utf-8"
+            )
         if "draft_bundle" in data and isinstance(data.get("draft_bundle"), dict):
             write_json(stage_dir / "draft_bundle.json", data["draft_bundle"])
         refresh_manual_draft_outputs(self.review_root, project_id)
@@ -1934,6 +2065,12 @@ def start_discovery(
             "error": f"Query plan needs clarification: {exc}",
         }
     project.mkdir(parents=True, exist_ok=False)
+    save_project_config(
+        review_root,
+        project_id,
+        topic=str(payload["topic"]),
+        taxonomy_profile=suggest_taxonomy_profile(str(payload["topic"])),
+    )
     query_plan_path = write_query_plan(project, query_plan)
     command = build_discovery_command(
         review_root,
@@ -2741,18 +2878,8 @@ _HOLLOW_COLOR_FILL_PROFILE_PATTERN = re.compile(
 
 
 def use_mechanism_arrow_straighten_profile(candidate: dict[str, Any]) -> bool:
-    """Identify a mechanism/catalytic-cycle figure eligible for strict arrow-only editing."""
-    explicit = str(candidate.get("edit_profile") or candidate.get("redraw_profile") or "").strip()
-    if explicit == "mechanism-arrow-straighten":
-        return True
-    fields = (
-        "source_label",
-        "source_caption_text",
-        "what_it_shows",
-        "recommended_action",
-        "source_type",
-    )
-    return bool(_MECHANISM_ARROW_PROFILE_PATTERN.search(" ".join(str(candidate.get(field) or "") for field in fields)))
+    """Compatibility wrapper for text-only callers; redraws use the shared image-aware router."""
+    return classify_chemical_figure(candidate)["figure_type"] == FIGURE_TYPE_MECHANISM
 
 
 def use_source_faithful_scope_render(candidate: dict[str, Any]) -> bool:
@@ -2995,10 +3122,35 @@ def figure_aspect_ratio_integrity(source_path: Path, output_path: Path, toleranc
 
 
 def ai_edit_allows_provider_canvas(row: dict[str, Any]) -> bool:
-    """Return whether a redraw may intentionally differ from the source ratio."""
+    """Return whether an AI canvas (including its SVG edit) may keep its ratio."""
+    normalization = row.get("aspect_ratio_normalization") or {}
+    padding_content = normalization.get("padding_content") or {}
+    preserved_padding_content = bool(
+        normalization.get("provider_canvas_allowed")
+        and padding_content.get("detected")
+        and str(normalization.get("crop_mode") or "")
+        in {
+            "expanded_for_padding_content",
+            "provider_canvas_preserved_for_padding_content",
+        }
+    )
+    render_mode = str(row.get("render_mode") or "")
+    edit_profile = str(row.get("edit_profile") or "standard")
+    manual_edit = row.get("manual_arrow_edit") or {}
+    ai_canvas_provenance = bool(
+        render_mode == "ai-edit"
+        or (
+            render_mode == "manual-arrow-edit"
+            and str(manual_edit.get("base_mode") or "") == "redrawn"
+            and str(manual_edit.get("base_image") or "").strip()
+        )
+    )
     return bool(
-        str(row.get("render_mode") or "") == "ai-edit"
-        and str(row.get("edit_profile") or "standard") == "standard"
+        ai_canvas_provenance
+        and (
+            (render_mode == "ai-edit" and edit_profile == "standard")
+            or preserved_padding_content
+        )
     )
 
 
@@ -3299,7 +3451,7 @@ def save_manual_arrow_edit(
     if editable_svg:
         versioned_outputs.append(editable_svg_path)
     record_stage_outputs(figures_handoff, versioned_outputs, "figures")
-    return {
+    result = {
         "figure_id": figure_id,
         "render_mode": "manual-arrow-edit",
         "edit_profile": "manual-mechanism-arrow-paths",
@@ -3309,6 +3461,18 @@ def save_manual_arrow_edit(
         "requires_human_arrow_check": True,
         "synchronized_draft_assets": synchronized_assets,
     }
+    finish_figure_redraw_state(
+        review_root,
+        project_id,
+        figure_id,
+        status="completed",
+        result={
+            **result,
+            "preview_only": True,
+            "figure_type": str(row.get("figure_type") or ""),
+        },
+    )
+    return result
 
 
 def _normalized_figure_path(path: str | Path) -> str:
@@ -3338,8 +3502,9 @@ def redraw_current_figure(
     figure_id: str,
     *,
     force_ai_edit: bool = False,
+    requested_figure_type: str = FIGURE_TYPE_AUTO,
 ) -> dict[str, Any]:
-    """Create one redraw, optionally exposing a reviewer-requested AI alternative."""
+    """Create one redraw using automatic or reviewer-selected figure-type routing."""
     project = review_root / "review-projects" / project_id
     draft_stage = project / "02_section_drafting"
     # Reconcile the Stage 6 human choice immediately before every redraw.  This
@@ -3360,6 +3525,18 @@ def redraw_current_figure(
         raise ValueError("Current figure candidate has no paper ID.")
     current_source = _resolve_candidate_source(review_root, project, candidate)
     source_sha256_before = sha256_file(current_source)
+    normalized_requested_type = normalize_figure_type(requested_figure_type)
+    # Backward-compatible force_ai requests represented the old generic AI
+    # comparison button. Treat them as a reviewer-selected simple scheme rather
+    # than retaining a second, divergent routing system.
+    if force_ai_edit and normalized_requested_type == FIGURE_TYPE_AUTO:
+        normalized_requested_type = FIGURE_TYPE_SIMPLE
+    classification = classify_chemical_figure(
+        candidate,
+        current_source,
+        requested_type=normalized_requested_type,
+    )
+    figure_type = str(classification["figure_type"])
     figures_handoff = project / "03_figure_redraw" / "figures_handoff.json"
     ensure_stage_handoff(
         figures_handoff,
@@ -3390,30 +3567,27 @@ def redraw_current_figure(
             "paper_id": paper_id,
             "render_mode": str((row or {}).get("render_mode") or "ai-preview"),
             "edit_profile": str((row or {}).get("edit_profile") or ""),
+            "figure_type": str((row or {}).get("figure_type") or figure_type),
+            "figure_type_classification": (row or {}).get("figure_type_classification") or classification,
             "requires_human_arrow_check": mechanism_arrow_profile,
+            "requires_human_chemistry_approval": bool(classification.get("requires_human_approval")),
             "redrawn_image": str(preview),
             "preview_only": True,
         }
-    mechanism_arrow_profile = use_mechanism_arrow_straighten_profile(candidate)
-    if force_ai_edit and mechanism_arrow_profile:
-        raise ValueError(
-            "Mechanism-arrow figures must keep the constrained local-edit workflow; "
-            "an unconstrained standard AI redraw is not available for this figure."
-        )
-    source_faithful_scope = (
-        not force_ai_edit
-        and not mechanism_arrow_profile
-        and use_source_faithful_scope_render(candidate)
-    )
-    source_faithful_multipanel = (
-        not force_ai_edit
-        and not mechanism_arrow_profile
-        and not source_faithful_scope
-        and use_source_faithful_multipanel_render(candidate)
-    )
-    hollow_color_fills = source_faithful_multipanel and use_hollow_color_fill_render(candidate)
-    image_model = os.environ.get("IMAGE_OPENAI_MODEL", "gpt-image-2").strip() or "gpt-image-2"
-    extra = ["--figure-id", figure_id, "--model", image_model, "--require-redrawn"]
+    mechanism_arrow_profile = figure_type == FIGURE_TYPE_MECHANISM
+    source_faithful_scope = False
+    source_faithful_multipanel = False
+    hollow_color_fills = figure_type == FIGURE_TYPE_COLORED
+    image_model = os.environ.get("IMAGE_OPENAI_MODEL", DEFAULT_IMAGE_MODEL).strip() or DEFAULT_IMAGE_MODEL
+    extra = [
+        "--figure-id",
+        figure_id,
+        "--model",
+        image_model,
+        "--figure-type",
+        normalized_requested_type,
+        "--require-redrawn",
+    ]
     if mechanism_arrow_profile:
         extra.extend(
             [
@@ -3421,17 +3595,11 @@ def redraw_current_figure(
                 "ai-edit",
                 "--edit-profile",
                 "mechanism-arrow-straighten",
-                "--wire-api",
-                "images",
             ]
         )
-    elif source_faithful_scope:
-        extra.extend(["--render-mode", "source-faithful-bw"])
-    elif source_faithful_multipanel:
-        extra.extend(["--render-mode", "source-faithful-outline-color" if hollow_color_fills else "source-faithful-color"])
     else:
         extra.extend(["--render-mode", "ai-edit"])
-        if force_ai_edit:
+        if classification.get("selection") == "manual":
             extra.append("--force-standard-ai-edit")
     try:
         run_project_script(
@@ -3472,6 +3640,8 @@ def redraw_current_figure(
                 "source_image": str(current_source),
                 "source_sha256": source_sha256_before,
                 "force_ai_edit": force_ai_edit,
+                "requested_figure_type": normalized_requested_type,
+                "figure_type": figure_type,
                 "error": detail,
             }
             write_json(
@@ -3485,13 +3655,13 @@ def redraw_current_figure(
         if note:
             if "NO AVAILABLE CHANNEL FOR MODEL GPT-IMAGE-2 UNDER GROUP" in note.upper():
                 raise RuntimeError(
-                    "备用图像服务可以连接，但当前 API 令牌所属分组未开放 gpt-image-2。"
-                    "请在 micuapi 创建/选择 vip_2_image 图像分组令牌，并将其写入 "
+                    f"备用图像服务可以连接，但当前 API 令牌所属分组未开放 {image_model}。"
+                    "请在当前图像服务商中创建或选择具有图像模型权限的令牌，并将其写入 "
                     "IMAGE_FALLBACK_API_KEY 后重试；当前 Stage 6 源图和已有输出未被替换。"
                 ) from exc
             if "ALL_CHANNELS_FAILED" in note.upper():
                 raise RuntimeError(
-                    "The AI image provider currently has no available gpt-image-2 channel. "
+                    f"The AI image provider currently has no available {image_model} channel. "
                     "The current Stage 6 source and existing Redrawn Output were preserved; "
                     "retry later or configure another image provider."
                 ) from exc
@@ -3564,10 +3734,13 @@ def redraw_current_figure(
         "render_mode": str(redrawn.get("render_mode") or ""),
         "edit_profile": str(redrawn.get("edit_profile") or ""),
         "requires_human_arrow_check": mechanism_arrow_profile,
+        "figure_type": figure_type,
+        "figure_type_classification": classification,
+        "requires_human_chemistry_approval": bool(classification.get("requires_human_approval")),
         "source_faithful_scope_render": source_faithful_scope,
         "source_faithful_multipanel_render": source_faithful_multipanel,
         "hollow_color_fills": hollow_color_fills,
-        "human_ai_override": force_ai_edit,
+        "human_ai_override": classification.get("selection") == "manual",
         "integrity_warning": integrity_warning,
         "redrawn_image": str(redrawn["redrawn_image"]),
     })
@@ -3766,6 +3939,7 @@ def begin_figure_redraw_state(
     *,
     origin: str,
     force_ai_edit: bool = False,
+    requested_figure_type: str = FIGURE_TYPE_AUTO,
 ) -> bool:
     """Atomically claim one figure and expose its running state before the provider call."""
     with _FIGURE_REDRAW_STATE_LOCK:
@@ -3784,6 +3958,7 @@ def begin_figure_redraw_state(
             "status": "retrying" if previous_status in {"failed", "interrupted"} else "running",
             "origin": origin,
             "force_ai_edit": bool(force_ai_edit),
+            "requested_figure_type": normalize_figure_type(requested_figure_type),
             "started_at": now,
             "updated_at": now,
             "finished_at": "",
@@ -3857,6 +4032,7 @@ def finish_figure_redraw_state(
             state["preview_only"] = bool(result.get("preview_only"))
             state["redrawn_image"] = str(result.get("redrawn_image") or "")
             state["render_mode"] = str(result.get("render_mode") or "")
+            state["figure_type"] = str(result.get("figure_type") or state.get("requested_figure_type") or "")
         figures[figure_id] = state
         _persist_figure_redraw_states(review_root, project_id, document)
 
@@ -4226,6 +4402,17 @@ REFERENCE_SUP_ELEMENT_RE = re.compile(r"<sup\b[^>\r\n]*>[^\r\n]*?</sup>", re.I)
 REFERENCE_SUP_TAG_RE = re.compile(r"</?sup\b[^>]*>", re.I)
 
 
+def clean_publication_text(value: object) -> str:
+    """Remove XML controls and repair dropped chemistry bond separators."""
+    text = str(value or "")
+    text = re.sub(
+        r"\b([A-Z][a-z]?)(?:\x00|\uFFFD)[ \t]*([A-Z][a-z]?)\b",
+        r"\1–\2",
+        text,
+    )
+    return make_xml_compatible(text, replacement="")[0]
+
+
 def clean_reference_author_text(authors: object) -> str:
     """Remove PDF-extraction affiliation markup from bibliography author names."""
     text = ", ".join(str(author) for author in authors[:3]) if isinstance(authors, list) else str(authors or "")
@@ -4236,11 +4423,22 @@ def clean_reference_author_text(authors: object) -> str:
     text = re.sub(r",\s*,+", ",", text)
     text = re.sub(r"\s+([,.;])", r"\1", text)
     text = re.sub(r"\s{2,}", " ", text)
-    return text.strip(" ,;")
+    return clean_publication_text(text.strip(" ,;"))
+
+
+def clean_reference_field_text(value: object) -> str:
+    """Repair extractor control bytes before bibliography publication.
+
+    A control byte between two element tokens commonly represents a dropped
+    bond dash (for example ``C<NUL> H``). Restore that separator before
+    removing any remaining XML-incompatible controls.
+    """
+    return clean_publication_text(value)
 
 
 def sanitize_reference_section_markup(markdown: str) -> str:
     """Keep HTML superscript artifacts out of the publication bibliography."""
+    markdown = clean_publication_text(markdown)
     match = REFERENCE_SECTION_HEADING_RE.search(markdown or "")
     if not match:
         return markdown
@@ -4273,9 +4471,14 @@ def render_reference_section(project: Path, citation_entries: list[dict[str, Any
         paper_id = str(entry.get("paper_id") or "")
         row = rows.get(paper_id, {})
         author_text = clean_reference_author_text(row.get("authors") or [])
+        # Do not leave an orphan full stop after the callout when source
+        # metadata has no author list.  Apart from looking malformed, `[n].`
+        # used to fall outside the final-audit reference-item grammar.
+        author_prefix = f"{author_text}. " if author_text else ""
         lines.append(
-            f"[{entry.get('callout')}] {author_text}. {row.get('title') or paper_id}. "
-            f"{row.get('journal') or ''} ({row.get('year') or 'n.d.'})."
+            f"[{entry.get('callout')}] {author_prefix}{clean_reference_field_text(row.get('title') or paper_id)}. "
+            f"{clean_reference_field_text(row.get('journal') or '')} "
+            f"({clean_reference_field_text(row.get('year') or 'n.d.')})."
         )
     return sanitize_reference_section_markup("\n".join(lines).rstrip() + "\n")
 
@@ -4283,7 +4486,8 @@ def render_reference_section(project: Path, citation_entries: list[dict[str, Any
 def replace_reference_section(markdown: str, reference_section: str) -> str:
     match = REFERENCE_SECTION_HEADING_RE.search(markdown or "")
     body = markdown[: match.start()] if match else markdown
-    return body.rstrip() + "\n\n" + reference_section.strip() + "\n"
+    updated = body.rstrip() + "\n\n" + reference_section.strip() + "\n"
+    return clean_publication_text(updated)
 
 
 def refresh_reference_file(project: Path, path: Path, citation_entries: list[dict[str, Any]]) -> bool:
@@ -4474,6 +4678,15 @@ def regenerate_first_draft(review_root: Path, project_id: str) -> dict[str, Any]
     draft_text = draft_path.read_text(encoding="utf-8", errors="ignore")
     draft_path.write_text(replace_reference_section(draft_text, render_reference_section(project, citation_entries)), encoding="utf-8")
     run_project_script(review_root / "skills" / "review-draft-merge-polish" / "scripts" / "insert_figures_into_draft.py", review_root, project_id)
+    # Feedback-loop rewrites live in a Stage-8 overlay so rebuilding the draft
+    # cannot mutate Stage-5 source outputs or invalidate figure selection. A
+    # rewrite is replayed only when its paragraph ID and original-text hash
+    # still match the newly merged manuscript.
+    run_project_script(
+        review_root / "skills" / "review-first-draft-feedback-loop" / "scripts" / "apply_feedback_overlays.py",
+        review_root,
+        project_id,
+    )
     (stage / "remaining_issues.md").write_text("# Remaining Issues\n\nConfirm the scientific interpretation, scope boundaries, and every redrawn figure before approving the first draft.\n", encoding="utf-8")
     record_stage_outputs(
         draft_handoff,
@@ -4482,6 +4695,93 @@ def regenerate_first_draft(review_root: Path, project_id: str) -> dict[str, Any]
     )
     write_stage_handoff(project / "05_final_audit" / "final_handoff.json", "draft", [stage / "first_draft.md", stage / "citations.json"])
     return {"citation_count": len(citations), "first_draft": str(stage / "first_draft.md")}
+
+
+def run_first_draft_feedback_loop(
+    review_root: Path,
+    project_id: str,
+    *,
+    goal: float = 90,
+    paragraph_goal: float = 85,
+    max_iterations: int = 3,
+    min_case_words: int = 140,
+    max_case_words: int = 280,
+    evaluate_only: bool = False,
+) -> dict[str, Any]:
+    """Run the optional Stage-9 quality loop and preserve all existing routes."""
+    if not 0 <= goal <= 100 or not 0 <= paragraph_goal <= 100:
+        raise ValueError("Feedback goals must be between 0 and 100.")
+    if not 1 <= max_iterations <= 10:
+        raise ValueError("Feedback max iterations must be between 1 and 10.")
+    if min_case_words < 1 or max_case_words < min_case_words:
+        raise ValueError("Feedback paragraph word range is invalid.")
+    project = Path(review_root) / "review-projects" / project_id
+    draft_stage = project / "04_first_draft"
+    draft_path = draft_stage / "first_draft.md"
+    if not draft_path.is_file():
+        raise RuntimeError("Create and save the first draft before running the quality loop.")
+    script = (
+        Path(review_root)
+        / "skills"
+        / "review-first-draft-feedback-loop"
+        / "scripts"
+        / "feedback_loop.py"
+    )
+    extra = [
+        "--goal",
+        str(goal),
+        "--paragraph-goal",
+        str(paragraph_goal),
+        "--max-iterations",
+        str(max_iterations),
+        "--min-case-words",
+        str(min_case_words),
+        "--max-case-words",
+        str(max_case_words),
+    ]
+    if evaluate_only:
+        extra.append("--evaluate-only")
+    output = run_project_script(script, review_root, project_id, timeout=7200, extra=extra)
+    # Re-index and accept the targeted Stage-8 edits as the current draft
+    # output. This keeps the pre-existing Draft → Final path fresh.
+    refresh_manual_draft_outputs(review_root, project_id)
+    gate_handoff = draft_stage / "feedback_loop_handoff.json"
+    sources = [
+        draft_path,
+        draft_stage / "citations.json",
+        project / "02_section_drafting" / "section_drafts.json",
+        project / "03_figure_redraw" / "redrawn_figure_manifest.json",
+    ]
+    write_stage_handoff(
+        gate_handoff,
+        "draft",
+        [path for path in sources if path.is_file()],
+        metadata={
+            "dependency_profile": "optional-first-draft-feedback-loop-v1",
+            "does_not_block_legacy_final_actions": True,
+            "targeted_paragraph_overlays": True,
+        },
+    )
+    outputs = [
+        draft_path,
+        *(draft_stage / name for name in (
+            "first_draft_preflight.json",
+            "rubric_evaluation.json",
+            "reviewer_findings.json",
+            "first_draft_gate_status.json",
+            "first_draft_rewrite_queue.json",
+            "first_draft_final_polish_queue.json",
+            "feedback_loop_status.json",
+            "feedback_loop_rewrites.json",
+        )),
+    ]
+    record_stage_outputs(gate_handoff, [path for path in outputs if path.is_file()], "draft-feedback-loop")
+    status = read_json_if_exists(draft_stage / "feedback_loop_status.json") or {}
+    return {
+        "status": status,
+        "output": output.splitlines()[-1] if output else "",
+        "feedback_loop_handoff": str(gate_handoff),
+    }
 
 
 OVERVIEW_FIGURE_ID = "OVERVIEW-F01"
@@ -4625,11 +4925,14 @@ def regenerate_final_audit(review_root: Path, project_id: str) -> dict[str, Any]
         # boundary instead of forcing a paid image regeneration.
         overview_handoff = final_stage / "overview_figure_handoff.json"
         handoff = read_json_if_exists(overview_handoff) or {}
-        source_artifacts = [
-            Path(value)
-            for value in handoff.get("source_artifacts") or []
-            if str(value or "").strip()
-        ]
+        source_artifacts = []
+        for value in handoff.get("source_artifacts") or []:
+            if not str(value or "").strip():
+                continue
+            artifact = Path(str(value))
+            if not artifact.is_absolute():
+                artifact = project / artifact
+            source_artifacts.append(artifact.resolve())
         overview_output = final_stage / OVERVIEW_FIGURE_FILENAME
         if source_artifacts and overview_output.is_file():
             write_stage_handoff(
@@ -4704,6 +5007,11 @@ def regenerate_final_audit(review_root: Path, project_id: str) -> dict[str, Any]
         project_id,
         extra=["--stage", "05_final_audit"],
     )
+    final_draft_path = final_stage / "final_draft.md"
+    final_text = final_draft_path.read_text(encoding="utf-8", errors="replace")
+    safe_final_text = clean_publication_text(final_text)
+    if safe_final_text != final_text:
+        final_draft_path.write_text(safe_final_text, encoding="utf-8")
     missing_paragraphs = missing_final_draft_paragraphs(
         review_root,
         project_id,
@@ -4759,7 +5067,7 @@ def generate_final_overview_figure(review_root: Path, project_id: str) -> dict[s
     # fall back to an older inherited endpoint or probe a different API family.
     image_environment = provider_subprocess_environment(review_root)
     image_base_url = str(image_environment.get("IMAGE_OPENAI_BASE_URL") or "").strip()
-    image_model = str(image_environment.get("IMAGE_OPENAI_MODEL") or "gpt-image-2").strip() or "gpt-image-2"
+    image_model = str(image_environment.get("IMAGE_OPENAI_MODEL") or DEFAULT_IMAGE_MODEL).strip() or DEFAULT_IMAGE_MODEL
     image_wire_api = str(image_environment.get("IMAGE_OPENAI_WIRE_API") or "images").strip().lower().replace("_", "-")
     image_wire_api = {
         "chat": "chat-completions",
@@ -4924,10 +5232,11 @@ def selected_from_combined(groups: list[dict], project_id: str) -> dict:
         for row in group.get("web_results", []):
             if row.get("keep") is not False:
                 selected["web_papers"].append({**row, "matched_keyword": group.get("keyword")})
+    limit = discovery_paper_limit()
     selected["local_papers"] = sorted(
         selected["local_papers"].values(), key=lambda x: x.get("best_score", 0), reverse=True
-    )[:30]
-    selected["web_papers"] = selected["web_papers"][:30]
+    )[:limit]
+    selected["web_papers"] = selected["web_papers"][:limit]
     return selected
 
 
@@ -4987,7 +5296,7 @@ def write_matrix_reading_artifacts(stage: Path, matrix: dict[str, Any], saved_at
         writer = csv.DictWriter(handle, fieldnames=["paper_id", "title", "authors", "keywords", "abstract", "main_content", "year", "journal", "doi", "matrix_status"])
         writer.writeheader()
         for row in rows:
-            writer.writerow({
+            values = {
                 "paper_id": row.get("paper_id", ""),
                 "title": row.get("title", ""),
                 "authors": "; ".join(str(item) for item in row.get("authors") or []),
@@ -4998,7 +5307,8 @@ def write_matrix_reading_artifacts(stage: Path, matrix: dict[str, Any], saved_at
                 "journal": row.get("journal", ""),
                 "doi": row.get("doi", ""),
                 "matrix_status": row.get("matrix_status", "needs_full_reading"),
-            })
+            }
+            writer.writerow({key: make_xml_compatible(str(value))[0] for key, value in values.items()})
     completed, total = matrix_reading_progress(rows)
     write_json(stage / "paper_reading_notes.json", {
         "source": "matrix_human_review",
@@ -5010,6 +5320,10 @@ def write_matrix_reading_artifacts(stage: Path, matrix: dict[str, Any], saved_at
 
 
 def discovery_topic(project: Path) -> str:
+    project_config = load_project_config(project.parent.parent, project.name)
+    configured_topic = str(project_config.get("topic") or "").strip()
+    if configured_topic:
+        return configured_topic
     candidates = (
         project / "00_discovery" / "selected_discovery_results.json",
         project / "00_discovery" / "combined_results_by_keyword.json",
@@ -5055,7 +5369,7 @@ def discovery_outline_hints(project: Path, tag_key: str) -> list[str]:
     result: list[str] = []
     for hint in hints:
         normalized = re.sub(r"\s+", " ", hint).strip(" .")
-        if not normalized or normalized.casefold() in {"allene", "allenes", "method", "methods"}:
+        if not normalized or normalized.casefold() in {"method", "methods"}:
             continue
         if normalized.casefold() not in {item.casefold() for item in result}:
             result.append(normalized)
@@ -5070,11 +5384,13 @@ def _outline_search_text(row: dict[str, Any]) -> str:
     return re.sub(r"[^a-z0-9]+", " ", " ".join(str(value or "") for value in values).casefold()).strip()
 
 
-def _outline_hint_score(hint: str, text: str) -> int:
+def _outline_hint_score(hint: str, text: str, taxonomy_profile: str = "") -> int:
     normalized = re.sub(r"[^a-z0-9]+", " ", hint.casefold()).strip()
     if not normalized:
         return 0
     score = 100 + len(normalized) if re.search(rf"\b{re.escape(normalized)}\b", text) else 0
+    if taxonomy_profile != "allene":
+        return score
     if "propargylic" in normalized and "derivative" in normalized:
         derivative_markers = (
             "acetate", "carbonate", "phosphate", "ester", "ether", "halide", "bromide",
@@ -5097,7 +5413,11 @@ def _outline_hint_score(hint: str, text: str) -> int:
     return score
 
 
-def semantic_outline_groups(rows: list[dict[str, Any]], hints: list[str]) -> dict[str, list[str]]:
+def semantic_outline_groups(
+    rows: list[dict[str, Any]],
+    hints: list[str],
+    taxonomy_profile: str = "",
+) -> dict[str, list[str]]:
     groups: dict[str, list[str]] = {hint: [] for hint in hints}
     related: list[str] = []
     for row in rows:
@@ -5108,7 +5428,12 @@ def semantic_outline_groups(rows: list[dict[str, Any]], hints: list[str]) -> dic
         title_text = re.sub(r"[^a-z0-9]+", " ", str(row.get("title") or "").casefold()).strip()
         ranked = sorted(
             (
-                (_outline_hint_score(hint, title_text) * 10 + _outline_hint_score(hint, text), index, hint)
+                (
+                    _outline_hint_score(hint, title_text, taxonomy_profile) * 10
+                    + _outline_hint_score(hint, text, taxonomy_profile),
+                    index,
+                    hint,
+                )
                 for index, hint in enumerate(hints)
             ),
             key=lambda item: (-item[0], item[1]),
@@ -5138,8 +5463,13 @@ def outline_groups(review_root: Path, project_id: str, rows: list[dict[str, Any]
     if len(rows) < 6 or (len(meaningful) >= 2 and largest_share < 0.85):
         return groups
     project = review_root / "review-projects" / project_id
+    taxonomy_profile = project_taxonomy_profile(
+        review_root,
+        project_id,
+        topic=discovery_topic(project),
+    )
     hints = discovery_outline_hints(project, tag_key)
-    semantic = semantic_outline_groups(rows, hints) if len(hints) >= 2 else {}
+    semantic = semantic_outline_groups(rows, hints, taxonomy_profile) if len(hints) >= 2 else {}
     semantic_meaningful = [paper_ids for label, paper_ids in semantic.items() if not label.casefold().startswith("other")]
     return semantic if len(semantic_meaningful) >= 2 else groups
 
@@ -5169,7 +5499,7 @@ OUTLINE_STYLES = {
         "option_title": "Option B: Catalyst and method-classified",
         "selected_title": "Catalyst and method-classified",
         "tag_key": "catalyst_or_method",
-        "introduction": "Purpose: compare how catalytic systems control allene construction and stereochemical outcome.",
+        "introduction": "Purpose: compare how catalysts or methods shape outcomes, evidence quality, and applicability.",
     },
     "reaction": {
         "option_title": "Option C: Reaction-type-classified",
@@ -5210,7 +5540,7 @@ def selected_outline_document(
             "",
             *outline_sections(groups),
             "## Cross-category comparison and conclusion",
-            "Purpose: compare substrate availability, catalyst requirements, selectivity, scope, and limitations.",
+            "Purpose: compare the main systems, methods, outcomes, evidence boundaries, and limitations.",
             "",
         ]
     )
@@ -5655,6 +5985,9 @@ def handoff_current_draft(review_root: Path, project_id: str) -> dict[str, Any]:
 
 
 def infer_project_topic(project: Path) -> str:
+    project_config = load_project_config(project.parent.parent, project.name)
+    if project_config.get("topic"):
+        return str(project_config["topic"])
     discovery = read_json_if_exists(project / "00_discovery" / "combined_results_by_keyword.json")
     if isinstance(discovery, dict) and discovery.get("topic"):
         return str(discovery.get("topic"))
@@ -5808,6 +6141,26 @@ def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any
         if isinstance(candidate_data, dict)
         else candidate_data
     )
+    classified_candidates: list[dict[str, Any]] = []
+    for raw_candidate in candidate_rows or []:
+        if not isinstance(raw_candidate, dict):
+            continue
+        candidate = dict(raw_candidate)
+        try:
+            candidate_source = _resolve_candidate_source(review_root, project, candidate)
+        except (OSError, ValueError):
+            candidate_source = None
+        classification = classify_chemical_figure(candidate, candidate_source)
+        candidate["redraw_classification"] = classification
+        candidate["auto_figure_type"] = classification["figure_type"]
+        classified_candidates.append(candidate)
+    candidate_rows = classified_candidates
+    if isinstance(candidate_data, dict):
+        candidate_data = dict(candidate_data)
+        target_key = "figures" if "figures" in candidate_data else "candidates"
+        candidate_data[target_key] = candidate_rows
+    else:
+        candidate_data = candidate_rows
     candidate_by_id = {
         str(row.get("figure_id") or ""): row
         for row in candidate_rows or []
@@ -5869,6 +6222,7 @@ def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any
                 requires_approval = bool(
                     integrity_status in {"failed", "needs_human_arrow_check"}
                     or str(row.get("output_disposition") or "") == "saved_with_integrity_warning"
+                    or row.get("requires_human_chemistry_approval")
                 )
                 human_approved = bool(
                     approval.get("status") == "approved"
@@ -5918,6 +6272,7 @@ def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any
         requires_approval = bool(
             integrity_status in {"failed", "needs_human_arrow_check"}
             or str(row.get("output_disposition") or "") == "saved_with_integrity_warning"
+            or row.get("requires_human_chemistry_approval")
         )
         approval = row.get("human_approval") or {}
         if requires_approval and not (
@@ -5937,6 +6292,7 @@ def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any
         "redrawn_manifest": redrawn_manifest,
         "batch_redraw": batch_figure_redraw_status(project_id, review_root),
         "figure_redraw_states": public_figure_redraw_states(review_root, project_id),
+        "figure_type_options": figure_type_options(),
         "figure_redraw_report_md": read_text_if_exists(stage / "figure_redraw_report.md"),
         "freshness": {
             "source_stale": source_freshness["stale"],
@@ -6220,6 +6576,18 @@ def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     draft_path = draft_stage / "first_draft.md"
     conclusion_path = draft_stage / "conclusion_generated.md"
     conclusion_report = read_json_if_exists(draft_stage / "conclusion_quality_report.json") or {}
+    feedback_loop_status = read_json_if_exists(draft_stage / "feedback_loop_status.json") or {}
+    feedback_gate_status = read_json_if_exists(draft_stage / "first_draft_gate_status.json") or {}
+    feedback_output_hash = str(
+        feedback_loop_status.get("output_draft_sha256")
+        or feedback_loop_status.get("source_draft_sha256")
+        or ""
+    )
+    feedback_loop_current = bool(
+        draft_path.is_file()
+        and re.fullmatch(r"[0-9a-f]{64}", feedback_output_hash)
+        and sha256_file(draft_path) == feedback_output_hash
+    )
     overview_figure = stage / "overview_figure.png"
     release_full_png = stage / "review_summary_chart.png"
     final_draft_text = read_text_if_exists(final_draft_path)
@@ -6262,6 +6630,9 @@ def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
         "conclusion_generated_md": read_text_if_exists(conclusion_path),
         "conclusion_current": conclusion_current,
         "conclusion_integration_current": conclusion_integration_current,
+        "feedback_loop_status": feedback_loop_status,
+        "feedback_gate_status": feedback_gate_status,
+        "feedback_loop_current": feedback_loop_current,
         "final_draft_docx_path": str(docx_path),
         "final_draft_docx_exists": docx_current,
         "final_draft_docx_stale": docx_path.exists() and not docx_current,
@@ -6396,6 +6767,17 @@ def reconcile_project_semantic_states(review_root: Path, project_id: str) -> Non
                 stage_id,
                 "approved" if stage_id == "matrix" else "completed",
             )
+    feedback_status = read_json_if_exists(
+        project / "04_first_draft" / "feedback_loop_status.json"
+    ) or {}
+    reported_feedback_status = str(feedback_status.get("status") or "").strip()
+    if reported_feedback_status in {"completed", "needs_human_review", "stopped", "failed"}:
+        store.set_stage_state(
+            project_id,
+            "draft-feedback-loop",
+            reported_feedback_status,
+            error_message=str(feedback_status.get("error") or "").strip(),
+        )
 
 
 def dashboard_assets(view_root: Path) -> tuple[Path, ...]:
@@ -6526,6 +6908,9 @@ def run(args: argparse.Namespace) -> int:
     DashboardHandler.draft_app_path = draft_app_path
     DashboardHandler.final_app_path = final_app_path
     DashboardHandler.settings_app_path = settings_app_path
+    DashboardHandler.access_token = str(
+        args.access_token or os.environ.get("REVIEW_DASHBOARD_ACCESS_TOKEN") or ""
+    ).strip()
     (
         DashboardHandler.external_file_allowlist,
         DashboardHandler.external_directory_allowlist,
@@ -6534,6 +6919,12 @@ def run(args: argparse.Namespace) -> int:
     try:
         server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
         print(f"Serving dashboard at http://{args.host}:{args.port}")
+        if args.host not in {"127.0.0.1", "localhost", "::1"} and not DashboardHandler.access_token:
+            print(
+                "WARNING: remote dashboard access has no password. Set "
+                "REVIEW_DASHBOARD_ACCESS_TOKEN or pass --access-token.",
+                file=sys.stderr,
+            )
         print("Press Ctrl+C to stop.")
         server.serve_forever()
     except KeyboardInterrupt:
@@ -6550,6 +6941,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--review-root", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--access-token",
+        default="",
+        help="Optional HTTP Basic password for every dashboard page and API.",
+    )
     return parser.parse_args()
 
 
