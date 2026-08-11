@@ -41,7 +41,7 @@ Library → Discovery → Matrix → Blueprint → Sections
 | 阶段 | 主要操作 | 主要产物 |
 |---|---|---|
 | 1. Library | 批量上传本地 PDF、调用 MinerU、审核 metadata；也可检索并下载合法开放获取论文 | `review-library/uploads/`、`review-library/metadata/papers/`、`review-library/registry/papers.jsonl` |
-| 2. Discovery | 创建项目、生成检索计划、召回本地文献、人工删除或确认候选论文 | `00_discovery/query_plan.draft.json`、`selected_discovery_results.json`、`human_check_state.json` |
+| 2. Discovery | 创建项目、生成检索计划、召回全部本地候选文献，并由人工选择进入 Matrix 的论文 | `00_discovery/query_plan.draft.json`、`selected_discovery_results.json`、`human_check_state.json` |
 | 3. Matrix | 生成逐篇阅读记录、文献矩阵；选择内置大纲或上传参考综述并仅提取其结构与写法 | `01_matrix_outline/literature_matrix.json`、`paper_reading_notes.json`、`selected_outline.md` |
 | 4. Blueprint | 把选定大纲转成章节目标、论点、论文角色、图像需求和写作任务 | `01_matrix_outline/section_blueprint.json`、`02_section_drafting/section_tasks.json` |
 | 5. Sections | 按 Blueprint 和当前论文集合生成分节草稿，并从 MinerU 内容建立候选图 | `section_drafts.json`、`section_drafts.md`、`figure_candidates.json`、`paper_figure_candidates.json` |
@@ -191,7 +191,6 @@ IMAGE_OPENAI_FIELD=image[]
 OVERVIEW_PROVIDER_SQUARE_ONLY=true
 
 # 运行时数量限制
-REVIEW_MAX_DISCOVERY_PAPERS=30
 REVIEW_MAX_LITERATURE_BATCH=30
 ```
 

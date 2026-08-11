@@ -90,6 +90,36 @@ class DraftEditChecks(unittest.TestCase):
         self.assertIn(".page-draft textarea.editor", shared_styles)
         self.assertNotIn("#151a16", shared_styles)
 
+    def test_draft_workspace_removes_duplicate_report_and_issue_tabs(self) -> None:
+        draft_page = (Path(__file__).parent / "assets" / "dashboard" / "draft.html").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('data-tab="preview">Draft Preview</button>', draft_page)
+        self.assertIn('data-tab="edit">Full-text Edit</button>', draft_page)
+        self.assertIn('data-tab="checks">Review Checks</button>', draft_page)
+        self.assertNotIn('data-tab="report"', draft_page)
+        self.assertNotIn('data-tab="issues"', draft_page)
+        self.assertNotIn("selectedItem = 'first_draft'", draft_page)
+        self.assertIn("function renderReviewChecks()", draft_page)
+        self.assertIn("Merge and normalization", draft_page)
+        self.assertIn("Human review items", draft_page)
+        self.assertIn("merge_report_md", draft_page)
+        self.assertIn("remaining_issues_md", draft_page)
+        self.assertNotIn("merge_report_md: payload", draft_page)
+        self.assertNotIn("remaining_issues_md: payload", draft_page)
+
+    def test_draft_workspace_keeps_both_editing_modes_and_save_handoff(self) -> None:
+        draft_page = (Path(__file__).parent / "assets" / "dashboard" / "draft.html").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("renderMarkdownWithParagraphs", draft_page)
+        self.assertIn("beginParagraphEdit", draft_page)
+        self.assertIn('id="draftEditor"', draft_page)
+        self.assertIn('id="saveBtn"', draft_page)
+        self.assertIn("window.reviewDraftSaveForHandoff", draft_page)
+
     def test_paragraph_edit_preserves_canonical_citation_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

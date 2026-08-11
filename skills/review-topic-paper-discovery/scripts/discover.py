@@ -40,8 +40,6 @@ from review_writer_core.project_config import (  # noqa: E402
     save_project_config,
 )
 from review_writer_core.workspace import discover_review_root  # noqa: E402
-from review_writer_core.runtime_config import discovery_paper_limit  # noqa: E402
-
 from sciatlas_client import SciAtlasClient, load_config, papers_from_response
 
 
@@ -755,6 +753,7 @@ def score_local_paper(
         "reason": "; ".join(reasons) if reasons else "weak or no direct local metadata match",
         "role": role,
         "keep": normalized > 0,
+        "selected_for_matrix": False,
         "source_paths": source_paths,
     }
 
@@ -855,6 +854,7 @@ def web_search(keyword: str, topic: str, limit: int = 8) -> list[dict[str, Any]]
                 "score": round(min(score, 1.0), 4),
                 "reason": "Crossref title/snippet/topic/DOI overlap score",
                 "keep": score > 0.15,
+                "selected_for_matrix": False,
                 "source": "crossref",
             }
         )
@@ -929,6 +929,7 @@ def normalize_sciatlas_paper(item: dict[str, Any]) -> dict[str, Any]:
         "raw_score": raw_score,
         "reason": "SciAtlas KG retrieval (hybrid)",
         "keep": norm > 0,
+        "selected_for_matrix": False,
         "source": "sciatlas",
     }
 
@@ -1031,7 +1032,12 @@ def selected_from_combined(combined: list[dict[str, Any]]) -> dict[str, Any]:
             continue
         selected["keywords"].append({"keyword": group["keyword"], "category": group.get("category")})
         for result in group.get("local_results", []):
-            if not result.get("keep", True):
+            explicitly_selected = (
+                bool(result.get("selected_for_matrix"))
+                if "selected_for_matrix" in result
+                else result.get("keep", True)
+            )
+            if not explicitly_selected or str(result.get("role") or "").strip().lower() == "excluded":
                 continue
             pid = result.get("paper_id")
             if not pid:
@@ -1054,11 +1060,15 @@ def selected_from_combined(combined: list[dict[str, Any]]) -> dict[str, Any]:
             if role_rank(result.get("role")) < role_rank(entry["role"]):
                 entry["role"] = result.get("role")
         for result in group.get("web_results", []):
-            if result.get("keep", True):
+            explicitly_selected = (
+                bool(result.get("selected_for_matrix"))
+                if "selected_for_matrix" in result
+                else result.get("keep", True)
+            )
+            if explicitly_selected:
                 selected["web_papers"].append({**result, "matched_keyword": group["keyword"]})
     selected["local_papers"] = list(selected["local_papers"].values())
     selected["local_papers"].sort(key=lambda r: (r["best_score"], r.get("year") or 0), reverse=True)
-    selected["local_papers"] = selected["local_papers"][:discovery_paper_limit()]
     return selected
 
 
@@ -1376,12 +1386,14 @@ def run(args: argparse.Namespace) -> int:
         {
             "project_id": project_id,
             "topic": args.topic,
+            "selection_mode": "explicit",
             **output_context,
             "results": combined,
         },
     )
     selected["project_id"] = project_id
     selected["human_confirmed"] = False
+    selected["selection_mode"] = "explicit"
     selected.update(output_context)
     write_json(out_dir / "selected_discovery_results.json", selected)
     write_json(

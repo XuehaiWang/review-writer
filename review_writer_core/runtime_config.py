@@ -24,9 +24,5 @@ def integer_setting(
     return value
 
 
-def discovery_paper_limit() -> int:
-    return integer_setting("REVIEW_MAX_DISCOVERY_PAPERS", 30, maximum=500)
-
-
 def literature_batch_limit() -> int:
     return integer_setting("REVIEW_MAX_LITERATURE_BATCH", 30, maximum=200)

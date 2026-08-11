@@ -11,6 +11,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from serve_review_dashboard import (
+    anchored_figure_review_papers,
     approve_figure_for_manuscript,
     approve_successful_figures_for_manuscript,
     artifact_freshness,
@@ -113,6 +114,20 @@ class FigureReviewHandoffChecks(unittest.TestCase):
             self.assertEqual(output["status"], "source_changed")
             self.assertNotIn("redrawn_image", output)
             self.assertTrue(output["superseded_output"]["redrawn_image"])
+
+    def test_stage6_only_reviews_papers_with_current_paragraph_anchors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, section_stage, _, _ = self.build_project(Path(temp_dir))
+            candidates = {
+                "papers": [
+                    {"paper_id": "P001", "candidates": [{"candidate_index": 0}]},
+                    {"paper_id": "P002", "candidates": [{"candidate_index": 0}]},
+                ]
+            }
+
+            rows = anchored_figure_review_papers(section_stage, candidates)
+
+            self.assertEqual([row["paper_id"] for row in rows], ["P001"])
 
     def test_redraw_timeout_does_not_report_the_old_source_changed_note(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -650,6 +665,32 @@ class FigureReviewHandoffChecks(unittest.TestCase):
         self.assertIn("A redraw that is waiting for human approval is still a generated image", html)
         self.assertIn("stored&&!outputPath(row)?stored:''", html)
         self.assertIn("status:'completed',preview_only:true", html)
+
+    def test_candidate_selection_buttons_align_to_card_bottom_left(self) -> None:
+        html = (
+            Path(__file__).resolve().parent
+            / "assets"
+            / "dashboard"
+            / "figure-review.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(".candidate{display:flex;flex-direction:column", html)
+        self.assertIn(".candidate-grid{display:grid", html)
+        self.assertIn("align-items:stretch", html)
+        self.assertIn(".candidate>.btn{align-self:flex-start;margin-top:auto}", html)
+
+    def test_stage_seven_batch_buttons_use_the_shared_button_shape(self) -> None:
+        html = (
+            Path(__file__).resolve().parent
+            / "assets"
+            / "dashboard"
+            / "figures.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(".batch-actions .btn{display:inline-flex", html)
+        self.assertIn("padding:8px 12px", html)
+        self.assertIn("border-radius:999px", html)
+        self.assertIn(".batch-actions .btn:disabled{opacity:.55;cursor:not-allowed", html)
 
 
 if __name__ == "__main__":

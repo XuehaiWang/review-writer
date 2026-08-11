@@ -25,7 +25,7 @@ pause only at the established human checkpoints.
 
 ## Stage Contract
 
-1. Discover 20-30 papers for the confirmed topic.
+1. Discover the complete qualifying candidate set for the confirmed topic and use only the papers explicitly selected by the human reviewer.
 2. Build the fixed-field literature matrix and approved outline.
 3. Map sections, paragraphs, papers, and figures in the blueprint.
 4. Draft one file per section and select figure candidates.

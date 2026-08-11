@@ -169,6 +169,243 @@ class SvgEditorResolutionChecks(unittest.TestCase):
                 with Image.open(result["redrawn_image"]) as saved:
                     self.assertEqual(saved.size, base_size)
 
+    def test_verified_svg_content_crop_saves_with_the_cropped_canvas(self) -> None:
+        vector = dashboard.create_full_figure_svg(
+            self.review_root,
+            self.project_id,
+            "P137-F01",
+        )
+        full_svg = Path(vector["full_svg"]).read_text(encoding="utf-8")
+        cropped_svg = full_svg.replace(
+            'data-original-width="2560" data-original-height="2292"',
+            'data-original-width="1200" data-original-height="900" '
+            'data-source-width="2560" data-source-height="2292" '
+            'data-content-crop="true" data-crop-unit="source-px" '
+            'data-crop-x="200" data-crop-y="100" '
+            'data-crop-width="1200" data-crop-height="900"',
+            1,
+        )
+        cropped = Image.new("RGBA", (1200, 900), "white")
+        cropped_bytes = io.BytesIO()
+        cropped.save(cropped_bytes, format="PNG")
+
+        result = dashboard.save_manual_arrow_edit(
+            self.review_root,
+            self.project_id,
+            "P137-F01",
+            cropped_bytes.getvalue(),
+            [],
+            full_vector_svg=cropped_svg,
+        )
+
+        with Image.open(result["redrawn_image"]) as saved:
+            self.assertEqual(saved.size, (1200, 900))
+        audit_path = self.project / "03_figure_redraw" / "manual_arrow_edits" / "P137-F01.json"
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        self.assertEqual(audit["base_canvas_size"], [2560, 2292])
+        self.assertEqual(audit["output_canvas_size"], [1200, 900])
+        self.assertEqual(
+            audit["canvas_crop"],
+            {
+                "status": "verified",
+                "unit": "source-px",
+                "x": 200,
+                "y": 100,
+                "width": 1200,
+                "height": 900,
+                "source_width": 2560,
+                "source_height": 2292,
+            },
+        )
+        manifest = json.loads(
+            (self.project / "03_figure_redraw" / "redrawn_figure_manifest.json").read_text(encoding="utf-8")
+        )
+        row = manifest["figures"][0]
+        self.assertEqual(row["aspect_ratio_policy"], "content_crop_allowed")
+        self.assertTrue(dashboard.figure_aspect_policy_matches(row, row["aspect_ratio_integrity"]))
+        approved = dashboard.approve_figure_for_manuscript(
+            self.review_root,
+            self.project_id,
+            "P137-F01",
+        )
+        self.assertEqual(approved["human_approval"]["status"], "approved")
+        approved_manifest = json.loads(
+            (self.project / "03_figure_redraw" / "redrawn_figure_manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            approved_manifest["figures"][0]["aspect_ratio_policy"],
+            "content_crop_allowed",
+        )
+
+    def test_svg_content_crop_rejects_png_dimension_mismatch(self) -> None:
+        vector = dashboard.create_full_figure_svg(
+            self.review_root,
+            self.project_id,
+            "P137-F01",
+        )
+        full_svg = Path(vector["full_svg"]).read_text(encoding="utf-8")
+        invalid_svg = full_svg.replace(
+            'data-original-width="2560" data-original-height="2292"',
+            'data-original-width="1200" data-original-height="900" '
+            'data-source-width="2560" data-source-height="2292" '
+            'data-content-crop="true" data-crop-unit="source-px" '
+            'data-crop-x="200" data-crop-y="100" '
+            'data-crop-width="1200" data-crop-height="900"',
+            1,
+        )
+        wrong_size = Image.new("RGBA", (1199, 900), "white")
+        wrong_size_bytes = io.BytesIO()
+        wrong_size.save(wrong_size_bytes, format="PNG")
+
+        with self.assertRaisesRegex(ValueError, "does not match submitted PNG"):
+            dashboard.save_manual_arrow_edit(
+                self.review_root,
+                self.project_id,
+                "P137-F01",
+                wrong_size_bytes.getvalue(),
+                [],
+                full_vector_svg=invalid_svg,
+            )
+
+    def test_reopened_cropped_svg_keeps_its_verified_crop_contract(self) -> None:
+        vector = dashboard.create_full_figure_svg(
+            self.review_root,
+            self.project_id,
+            "P137-F01",
+        )
+        full_svg = Path(vector["full_svg"]).read_text(encoding="utf-8")
+        cropped_svg = full_svg.replace(
+            'data-original-width="2560" data-original-height="2292"',
+            'data-original-width="1200" data-original-height="900" '
+            'data-source-width="2560" data-source-height="2292" '
+            'data-content-crop="true" data-crop-unit="source-px" '
+            'data-crop-x="200" data-crop-y="100" '
+            'data-crop-width="1200" data-crop-height="900"',
+            1,
+        )
+        cropped = Image.new("RGBA", (1200, 900), "white")
+        cropped_bytes = io.BytesIO()
+        cropped.save(cropped_bytes, format="PNG")
+        dashboard.save_manual_arrow_edit(
+            self.review_root,
+            self.project_id,
+            "P137-F01",
+            cropped_bytes.getvalue(),
+            [],
+            full_vector_svg=cropped_svg,
+        )
+
+        reopened = dashboard.create_full_figure_svg(
+            self.review_root,
+            self.project_id,
+            "P137-F01",
+            base_mode="redrawn",
+        )
+        self.assertEqual(reopened["vectorization"], "saved-manual-svg")
+        reopened_svg = Path(reopened["full_svg"]).read_text(encoding="utf-8")
+        dashboard.save_manual_arrow_edit(
+            self.review_root,
+            self.project_id,
+            "P137-F01",
+            cropped_bytes.getvalue(),
+            [{"type": "line", "start": {"x": 10, "y": 10}, "end": {"x": 100, "y": 10}}],
+            base_mode="redrawn",
+            full_vector_svg=reopened_svg,
+        )
+
+        audit = json.loads(
+            (self.project / "03_figure_redraw" / "manual_arrow_edits" / "P137-F01.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(audit["canvas_crop"]["source_width"], 2560)
+        self.assertEqual(audit["canvas_crop"]["source_height"], 2292)
+        self.assertEqual(audit["canvas_crop"]["width"], 1200)
+        self.assertEqual(audit["canvas_crop"]["height"], 900)
+        manifest = json.loads(
+            (self.project / "03_figure_redraw" / "redrawn_figure_manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["figures"][0]["aspect_ratio_policy"], "content_crop_allowed")
+
+    def test_saved_manual_svg_ratio_warning_can_be_individually_human_approved(self) -> None:
+        stage = self.project / "03_figure_redraw"
+        output = stage / "redrawn" / "P137-F01-manual.png"
+        svg_path = stage / "manual_arrow_edits" / "P137-F01.svg"
+        audit_path = stage / "manual_arrow_edits" / "P137-F01.json"
+        output.parent.mkdir(parents=True)
+        svg_path.parent.mkdir(parents=True)
+        Image.new("RGBA", (751, 200), "white").save(output)
+        svg_path.write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="751" height="200" '
+            'viewBox="0 0 751 200" data-original-width="751" data-original-height="200">'
+            '<g id="full-image-vector-trace"><path d="M 10 10 L 100 10"/></g></svg>',
+            encoding="utf-8",
+        )
+        audit_path.write_text(
+            json.dumps(
+                {
+                    "figure_id": "P137-F01",
+                    "source_image": str(self.source_path),
+                    "output_image": str(output),
+                    "editable_svg": str(svg_path),
+                    "output_canvas_size": [751, 200],
+                }
+            ),
+            encoding="utf-8",
+        )
+        row = {
+            "figure_id": "P137-F01",
+            "source_image": str(self.source_path),
+            "redrawn_image": str(output),
+            "render_mode": "manual-arrow-edit",
+            "status": "redrawn",
+            "chemistry_integrity": {"status": "needs_human_arrow_check"},
+            "aspect_ratio_policy": "source_ratio_required",
+            "manual_arrow_edit": {
+                "status": "saved",
+                "audit_path": str(audit_path),
+                "editable_svg": str(svg_path),
+                "full_image_vector_trace": True,
+            },
+        }
+        manifest_path = stage / "redrawn_figure_manifest.json"
+        manifest_path.write_text(
+            json.dumps({"project_id": self.project_id, "figures": [row]}),
+            encoding="utf-8",
+        )
+        integrity = dashboard.figure_aspect_ratio_integrity(self.source_path, output)
+        self.assertTrue(dashboard.manual_svg_canvas_review_eligible(stage, row, integrity, output))
+
+        approved = dashboard.approve_figure_for_manuscript(
+            self.review_root,
+            self.project_id,
+            "P137-F01",
+        )
+
+        self.assertTrue(approved["human_approval"]["manual_canvas_override"])
+        approved_row = json.loads(manifest_path.read_text(encoding="utf-8"))["figures"][0]
+        self.assertEqual(approved_row["aspect_ratio_policy"], "human_verified_manual_canvas")
+        self.assertTrue(dashboard.figure_aspect_policy_matches(approved_row, integrity))
+
+    def test_figures_page_exposes_crop_canvas_without_replacing_existing_tools(self) -> None:
+        html = (Path(__file__).parent / "assets" / "dashboard" / "figures.html").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('id="svgCropCanvas"', html)
+        self.assertIn('id="svgCropPadding"', html)
+        self.assertIn("function svgCropCanvasToContent", html)
+        self.assertIn("kind:'restore-canvas-crop'", html)
+        self.assertIn('data-content-crop="${cropped?', html)
+        for existing_control in (
+            'id="svgDeleteSelected"',
+            'id="svgUndo"',
+            'id="svgOpenKetcher"',
+            'id="svgDownload"',
+            'id="svgSave"',
+        ):
+            self.assertIn(existing_control, html)
+
     def test_figures_page_has_no_shadowed_function_declarations(self) -> None:
         html = (Path(__file__).parent / "assets" / "dashboard" / "figures.html").read_text(
             encoding="utf-8"

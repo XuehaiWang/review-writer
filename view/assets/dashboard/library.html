@@ -111,6 +111,17 @@
       outline: none;
     }
     .papers { overflow: auto; padding: 8px; }
+    .search-empty {
+      margin: 8px;
+      padding: 18px 14px;
+      border: 1px dashed var(--line);
+      border-radius: 12px;
+      color: var(--muted);
+      background: #fffdf7;
+      font-size: 13px;
+      line-height: 1.5;
+      text-align: center;
+    }
     .paper-card {
       width: 100%;
       text-align: left;
@@ -678,9 +689,46 @@
       }).join('\n');
       return html.replace(/@@HTML_BLOCK_(\d+)@@/g, (_, i) => blocks[Number(i)] || '');
     }
+    function searchableValues(value) {
+      if (value === null || value === undefined) return [];
+      if (Array.isArray(value)) return value.flatMap(searchableValues);
+      if (typeof value === 'object') {
+        return Object.entries(value).flatMap(([key, nested]) => [key, ...searchableValues(nested)]);
+      }
+      return [String(value)];
+    }
+    function normalizeSearchText(value) {
+      return String(value || '').normalize('NFKC').toLocaleLowerCase().replace(/\s+/g, ' ').trim();
+    }
+    function paperSearchDocument(paper) {
+      return normalizeSearchText([
+        paper.paper_id,
+        paper.title,
+        ...searchableValues(paper.authors),
+        ...searchableValues(paper.keywords),
+        paper.abstract,
+        paper.doi,
+        paper.journal,
+        paper.year,
+        ...searchableValues(paper.structured_tags),
+        ...searchableValues(paper.tags),
+      ].join(' '));
+    }
+    function paperMatchesSearch(paper, query) {
+      const terms = normalizeSearchText(query).split(' ').filter(Boolean);
+      if (!terms.length) return true;
+      const documentText = paperSearchDocument(paper);
+      return terms.every(term => documentText.includes(term));
+    }
     function renderList() {
-      const q = els.search.value.trim().toLowerCase();
-      const filtered = papers.filter(p => [p.paper_id, ...(p.tags||[])].join(' ').toLowerCase().includes(q));
+      const q = els.search.value.trim();
+      const filtered = papers.filter(p => paperMatchesSearch(p, q));
+      if (!filtered.length) {
+        const message = window.reviewI18n?.t('No papers match the current search.') || 'No papers match the current search.';
+        const suggestion = window.reviewI18n?.t('Try fewer or more specific keywords.') || 'Try fewer or more specific keywords.';
+        els.papers.innerHTML = `<div class="search-empty" role="status">${escapeHtml(message)}${q ? `<br><strong>${escapeHtml(q)}</strong>` : ''}<br>${escapeHtml(suggestion)}</div>`;
+        return;
+      }
       els.papers.innerHTML = filtered.map(p => {
         const active = selected === p.paper_id ? ' active' : '';
         const statusClass = p.human_review_status === 'reviewed' ? 'reviewed' : (p.needs_human_check ? 'warn' : '');

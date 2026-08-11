@@ -91,7 +91,7 @@ def paper_value(paper: dict[str, Any], key: str) -> str:
 
 
 def parse_outline_sections(text: str) -> list[dict[str, Any]]:
-    """Extract numbered sections and their explicit Matrix paper assignments."""
+    """Extract major Markdown sections and their explicit Matrix paper assignments."""
     sections: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     for raw in text.splitlines():
@@ -101,6 +101,13 @@ def parse_outline_sections(text: str) -> list[dict[str, Any]]:
         match = re.match(r"^(?:#{1,6}\s+)?(?:[-*]\s*)?(\d+)[.)]\s+(.+?)\s*$", line)
         if match:
             title = match.group(2).strip()
+            if title:
+                current = {"section_id": f"sec{len(sections) + 1}", "title": title, "assigned_papers": []}
+                sections.append(current)
+            continue
+        match = re.match(r"^##\s+(.+?)\s*$", line)
+        if match:
+            title = match.group(1).strip()
             if title:
                 current = {"section_id": f"sec{len(sections) + 1}", "title": title, "assigned_papers": []}
                 sections.append(current)
@@ -210,6 +217,8 @@ def select_papers(section_title: str, papers: list[dict[str, Any]], notes: dict[
             if str(p.get("review_topic_relevance") or "").lower() == "high"
             or str(p.get("role_after_reading") or "").lower() == "core"
         ][:6]
+    if not selected:
+        selected = [paper for paper in papers if paper.get("paper_id")][:6]
     return selected
 
 
@@ -590,7 +599,7 @@ def run(args: argparse.Namespace) -> int:
     outline_text = read_text(selected_outline)
     sections = parse_outline_sections(outline_text)
     if not sections:
-        raise SystemExit("No numbered outline sections found in selected_outline.md")
+        raise SystemExit("No level-2 or numbered outline sections found in selected_outline.md")
 
     topic, papers, axes = load_matrix(matrix_path)
     project_config = read_json(project_dir / "project_config.json") if (project_dir / "project_config.json").is_file() else {}

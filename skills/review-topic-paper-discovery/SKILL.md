@@ -1,12 +1,17 @@
 ---
 name: review-topic-paper-discovery
-description: Start a review project from a user topic, expand keywords against the eight LLM allene classification tags, retrieve local candidates from the metadata library, and optionally enrich with the hosted SciAtlas knowledge-graph search; produce 20-30 candidate papers for human check.
+description: Start a review project from a user topic, expand keywords against the eight LLM allene classification tags, retrieve the complete local candidate set from the metadata library, and optionally enrich it with the hosted SciAtlas knowledge-graph search; let a human choose which candidates enter the Matrix.
 ---
 
 # Review Topic Paper Discovery
 
-Goal: from the user review topic, select `20-30` local candidate papers and
-keep an external evidence pool from SciAtlas for the matrix stage.
+Goal: from the user review topic, retrieve all qualifying local candidate papers,
+let the human choose which candidates enter the Matrix, and keep an external
+evidence pool from SciAtlas for coverage checking.
+
+Every newly retrieved paper is a candidate only: set `selected_for_matrix` to
+`false` initially. A paper enters the Matrix only after the human explicitly
+selects it in Discovery.
 
 ## Hard Rules
 
@@ -154,16 +159,15 @@ human_check_state.json
 ```
 
 `web_results_by_keyword.json.source` is `sciatlas`, `crossref`, `sciatlas+crossref`, or `none`. Per-result rows carry a `sources` array so you can see which sources contributed.
-`selected_discovery_results.json` should contain `20-30` kept local papers
-when enough matches exist. External (SciAtlas/Crossref) papers go into
+`selected_discovery_results.json` contains every local paper explicitly kept by
+the human reviewer; there is no fixed paper-count cap. External (SciAtlas/Crossref) papers go into
 `web_papers`; they are a topic-coverage check pool only. They never enter
 the local `paper_id` registry and the matrix stage may cite them only as
-references without assigning a `paper_id`. If fewer than 20 local papers
-are found, record why in `discovery_report.md`.
+references without assigning a `paper_id`.
 
 ## Human Check
 
-Stop after discovery. The human checks `/discovery`, deletes irrelevant
-keywords/papers, and confirms the candidate set. SciAtlas papers are visible
+Stop after discovery. The human checks `/discovery`, explicitly includes or
+excludes candidate papers, and confirms the selected set. SciAtlas papers are visible
 in the same "external" panel as Crossref papers; deletions take effect for
 both sources.

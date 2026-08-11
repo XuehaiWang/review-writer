@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 DISCOVERY_PAGE = Path(__file__).resolve().parent / "assets" / "dashboard" / "discovery.html"
+DISCOVERY_SCRIPT = Path(__file__).resolve().parents[1] / "skills" / "review-topic-paper-discovery" / "scripts" / "discover.py"
 
 
 class DiscoveryResultInteractionChecks(unittest.TestCase):
@@ -29,9 +30,34 @@ class DiscoveryResultInteractionChecks(unittest.TestCase):
     def test_summary_uses_unique_paper_ids_and_labels_keyword_hits_separately(self) -> None:
         self.assertIn("function discoveryCounts", self.source)
         self.assertIn("uniqueLocal: new Set(localKeys).size", self.source)
-        self.assertIn("['Unique papers', stats.uniqueLocal]", self.source)
+        self.assertIn("['Selected papers', stats.uniqueLocal]", self.source)
+        self.assertIn("['Candidate papers', stats.candidateLocal]", self.source)
         self.assertIn("['Keyword hits', stats.localHits]", self.source)
         self.assertNotIn("${localMatches} local matches", self.source)
+
+    def test_paper_choice_is_explicit_and_shared_across_duplicate_keyword_hits(self) -> None:
+        self.assertIn("Include in Matrix", self.source)
+        self.assertIn("Remove from Matrix", self.source)
+        self.assertIn("function candidateSelected", self.source)
+        self.assertIn("row?.selected_for_matrix === true", self.source)
+        self.assertNotIn("row?.selected_for_matrix === true && row?.keep !== false", self.source)
+        self.assertIn("function setCandidateSelection", self.source)
+        self.assertIn("if (row.paper_id === id)", self.source)
+        self.assertIn("function setCandidateRole", self.source)
+        self.assertIn("if (role === 'excluded') row.selected_for_matrix = false", self.source)
+        self.assertIn('type="button" class="btn ${selectedForMatrix', self.source)
+        self.assertIn('aria-pressed="${selectedForMatrix', self.source)
+
+    def test_confirmation_verifies_matrix_membership_before_redirecting(self) -> None:
+        self.assertIn("result.matrix_sync?.selection_current", self.source)
+        self.assertIn("count !== expectedCount", self.source)
+        self.assertIn("selection_fingerprint", self.source)
+
+    def test_new_candidates_start_unselected_and_can_be_cleared_in_bulk(self) -> None:
+        discovery_script = DISCOVERY_SCRIPT.read_text(encoding="utf-8")
+        self.assertGreaterEqual(discovery_script.count('"selected_for_matrix": False'), 3)
+        self.assertIn("clearPaperSelection", self.source)
+        self.assertIn("function clearCandidateSelection", self.source)
 
     def test_left_review_column_keeps_keyword_list_visible(self) -> None:
         self.assertIn('class="panel discovery-sidebar"', self.source)

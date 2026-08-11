@@ -44,6 +44,37 @@ class DashboardI18nChecks(unittest.TestCase):
         self.assertIn(".rw-language-option.active", css)
         self.assertIn('html[lang="zh-CN"] body', css)
 
+    def test_blueprint_dynamic_labels_have_chinese_mappings(self) -> None:
+        source = (ASSET_DIR / "review-i18n.js").read_text(encoding="utf-8")
+        for english, chinese in (
+            ("Section Thesis", "章节论点"),
+            ("Target Paragraphs", "目标段落数"),
+            ("Core Papers", "核心论文"),
+            ("Claims to Establish", "待建立论点"),
+            ("Figure and Table Needs", "图表需求"),
+            ("Writing Guardrails", "写作约束"),
+            ("Section Transition", "章节衔接"),
+            ("Supporting Papers:", "支撑论文："),
+            ("Comparison Axes:", "比较维度："),
+        ):
+            with self.subTest(label=english):
+                self.assertIn(f'"{english}": "{chinese}"', source)
+        self.assertIn(r"(\d+) core papers · (\d+) review claims", source)
+        self.assertIn(r"(sec\d+) · (.+)", source)
+        self.assertIn(r"^Claim Type: (.+)$", source)
+        self.assertIn(r"^Candidate Papers: (.+)$", source)
+
+    def test_sections_workspace_removes_redundant_report_and_adapts_tabs(self) -> None:
+        source = (ASSET_DIR / "sections.html").read_text(encoding="utf-8")
+        self.assertIn('id="sectionTabs"', source)
+        self.assertIn("function renderTabs()", source)
+        self.assertIn("taskOnlyMode()?[['tasks','Writing Requirements']]", source)
+        self.assertIn("['section','Section Draft']", source)
+        self.assertIn("['drafts','Merged Preview']", source)
+        self.assertIn("function renderFigureRequirements", source)
+        self.assertNotIn('data-tab="report"', source)
+        self.assertNotIn("section_drafting_report_md", source)
+
     def test_stage_actions_mount_by_stable_dom_contract_in_every_language(self) -> None:
         source = (ASSET_DIR / "review-ui.js").read_text(encoding="utf-8")
         self.assertIn("function stageActionHost(current)", source)

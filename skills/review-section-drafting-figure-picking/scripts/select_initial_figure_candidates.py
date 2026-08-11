@@ -63,6 +63,36 @@ def inventory_by_paper(inventory: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
+def paragraph_anchors(drafts: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """Map papers actually cited in the generated manuscript to insertion anchors."""
+    anchors: dict[str, dict[str, str]] = {}
+    for section in drafts.get("sections", []) if isinstance(drafts, dict) else []:
+        if not isinstance(section, dict):
+            continue
+        for paragraph in section.get("paragraphs", []):
+            if not isinstance(paragraph, dict):
+                continue
+            paragraph_id = str(paragraph.get("paragraph_id") or "").strip()
+            if not paragraph_id:
+                continue
+            paper_ids = paragraph.get("cited_paper_ids") or [paragraph.get("paper_id")]
+            if not isinstance(paper_ids, list):
+                paper_ids = [paper_ids]
+            for raw_paper_id in paper_ids:
+                paper_id = str(raw_paper_id or "").strip()
+                if paper_id:
+                    anchors.setdefault(
+                        paper_id,
+                        {
+                            "paragraph_id": paragraph_id,
+                            "target_paragraph_id": paragraph_id,
+                            "section_id": str(section.get("section_id") or ""),
+                            "section_heading": str(section.get("heading") or ""),
+                        },
+                    )
+    return anchors
+
+
 def best_candidate_for_paper(paper: dict[str, Any]) -> dict[str, Any]:
     candidates = [c for c in paper.get("top_candidates", []) if isinstance(c, dict)]
     candidates.sort(key=lambda c: figure_score(c), reverse=True)
@@ -127,17 +157,22 @@ def build_default_figure_reviews(paper_level: dict[str, Any], reviewed_at: str) 
 def build_outputs(project: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     inventory = read_json(project / "02_section_drafting" / "paper_figure_inventory.json")
     tasks = read_json(project / "02_section_drafting" / "section_tasks.json")
+    anchors = paragraph_anchors(read_json(project / "02_section_drafting" / "section_drafts.json"))
     by_paper = inventory_by_paper(inventory)
 
     paper_rows: list[dict[str, Any]] = []
     for paper in inventory.get("papers", []):
         if isinstance(paper, dict):
+            paper_id = str(paper.get("paper_id") or "")
+            if paper_id not in anchors:
+                continue
             choices = [dict(candidate) for candidate in paper.get("top_candidates", []) if isinstance(candidate, dict)]
             for index, candidate in enumerate(choices):
                 candidate["candidate_index"] = index
                 candidate["score"] = figure_score(candidate)
                 candidate["resolution_status"] = "ready" if candidate.get("source_image_path") else "needs_source_resolution"
                 candidate["needs_human_check"] = True
+                candidate.update(anchors[paper_id])
             selected_index = best_redrawable_candidate_index(choices)
             paper_rows.append({
                 "paper_id": paper.get("paper_id"),
@@ -159,6 +194,8 @@ def build_outputs(project: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         allowed = [str(pid) for pid in section.get("allowed_papers", [])]
         pool: list[dict[str, Any]] = []
         for paper_id in allowed:
+            if paper_id not in anchors:
+                continue
             paper = by_paper.get(paper_id)
             if not paper:
                 continue
@@ -192,6 +229,7 @@ def build_outputs(project: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
                     "needs_human_check": True,
                 }
             )
+            candidate.update(anchors.get(str(candidate.get("paper_id") or ""), {}))
             manuscript.append(candidate)
             if section_selected >= 2:
                 break
