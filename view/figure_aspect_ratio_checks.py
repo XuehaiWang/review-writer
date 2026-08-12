@@ -490,5 +490,64 @@ class FigureAspectRatioChecks(unittest.TestCase):
                 self.assertEqual(normalized.size, (240, 120))
 
 
+class AiSkeletonRedrawGateChecks(unittest.TestCase):
+    """The ai3d sanity gate must survive glossy highlight fragmentation."""
+
+    BLUE = (0, 0, 220)
+
+    def _blue_mask(self, image: Image.Image) -> Image.Image:
+        small = image.resize(OVERVIEW._GATE_SMALL_SIZE)
+        r_ch, g_ch, b_ch = small.split()
+        rp, gp, bp = r_ch.load(), g_ch.load(), b_ch.load()
+        blue = Image.new("L", small.size, 0)
+        blp = blue.load()
+        for y in range(small.size[1]):
+            for x in range(small.size[0]):
+                rv, gv, bv = rp[x, y], gp[x, y], bp[x, y]
+                if bv >= rv + 25 and bv >= gv + 15 and bv > 90:
+                    blp[x, y] = 255
+        return blue
+
+    def _sphere(self, center: tuple[int, int], radius: int = 50) -> Image.Image:
+        image = Image.new("RGB", OVERVIEW._GATE_SMALL_SIZE, "white")
+        draw = ImageDraw.Draw(image)
+        cx, cy = center
+        draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill=self.BLUE)
+        return image
+
+    def test_highlight_band_fragments_are_clustered_into_one_sphere(self) -> None:
+        image = self._sphere((225, 160))
+        # A narrow specular band splits the sphere into two disconnected mask
+        # blobs whose bounding boxes still interlock, like a real glossy render.
+        ImageDraw.Draw(image).rectangle([0, 157, 449, 162], fill="white")
+        stats = OVERVIEW._blob_stats(self._blue_mask(image), OVERVIEW._GATE_BLUE_MIN_PX)
+        self.assertEqual(len(stats), 2)
+        self.assertEqual(OVERVIEW._clustered_blob_count(stats, OVERVIEW._GATE_BLUE_MERGE_PX), 1)
+        ok, note = OVERVIEW._ai_redraw_gate(image, 2, 1)
+        self.assertTrue(ok, note)
+        self.assertEqual(note, "gate_passed")
+
+    def test_distant_extra_spheres_are_still_rejected(self) -> None:
+        image = Image.new("RGB", OVERVIEW._GATE_SMALL_SIZE, "white")
+        draw = ImageDraw.Draw(image)
+        for cx, cy in ((80, 70), (225, 160), (370, 250)):
+            draw.ellipse([cx - 40, cy - 40, cx + 40, cy + 40], fill=self.BLUE)
+        stats = OVERVIEW._blob_stats(self._blue_mask(image), OVERVIEW._GATE_BLUE_MIN_PX)
+        self.assertEqual(OVERVIEW._clustered_blob_count(stats, OVERVIEW._GATE_BLUE_MERGE_PX), 3)
+        # Tolerance allows |detected - expected| of 1, so three distant spheres
+        # against an expected single R label exceed it and must be rejected.
+        ok, note = OVERVIEW._ai_redraw_gate(image, 3, 1)
+        self.assertFalse(ok)
+        self.assertEqual(note, "r_labels_3_expected_1")
+
+    def test_solid_sphere_count_is_unchanged(self) -> None:
+        image = self._sphere((225, 160))
+        stats = OVERVIEW._blob_stats(self._blue_mask(image), OVERVIEW._GATE_BLUE_MIN_PX)
+        self.assertEqual(len(stats), 1)
+        self.assertEqual(OVERVIEW._clustered_blob_count(stats, OVERVIEW._GATE_BLUE_MERGE_PX), 1)
+        ok, note = OVERVIEW._ai_redraw_gate(image, 2, 1)
+        self.assertTrue(ok, note)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1200,6 +1200,7 @@ _GATE_INK_EROSION = 5                # MinFilter width that erases thin bonds
 _GATE_ATOM_BLOB_MIN_PX = 8           # min surviving blob size (one atom)
 _GATE_ATOM_BLOB_RANGE = (0.5, 1.6)   # accepted blob count vs expected atoms
 _GATE_BLUE_MIN_PX = 30               # R spheres are large; no erosion needed
+_GATE_BLUE_MERGE_PX = 24             # centroid distance that merges R-sphere fragments
 _GATE_R_TOLERANCE = 1                # allowed |detected - expected| R labels
 
 _AI_SKELETON_REDRAW_PROMPT = (
@@ -1219,13 +1220,14 @@ _AI_SKELETON_REDRAW_PROMPT = (
 )
 
 
-def _count_blobs(mask: Any, min_px: int) -> int:
-    """Count connected 255-valued blobs of at least min_px pixels (4-neighbor)."""
+def _blob_stats(mask: Any, min_px: int) -> list[tuple[float, float, float, int, int, int, int]]:
+    """Return (size, cx, cy, x0, y0, x1, y1) for every connected 255-valued
+    blob of at least min_px pixels (4-neighbor)."""
     from collections import deque
     w, h = mask.size
     px = mask.load()
     seen = bytearray(w * h)
-    blobs = 0
+    stats: list[tuple[float, float, float, int, int, int, int]] = []
     for y0 in range(h):
         row = y0 * w
         for x0 in range(w):
@@ -1233,11 +1235,11 @@ def _count_blobs(mask: Any, min_px: int) -> int:
             if seen[idx] or not px[x0, y0]:
                 continue
             seen[idx] = 1
-            size = 0
             stack = deque((idx,))
+            points: list[int] = []
             while stack:
                 i = stack.pop()
-                size += 1
+                points.append(i)
                 x, y = i % w, i // w
                 if x + 1 < w:
                     j = i + 1
@@ -1259,9 +1261,64 @@ def _count_blobs(mask: Any, min_px: int) -> int:
                     if not seen[j] and px[x, y - 1]:
                         seen[j] = 1
                         stack.append(j)
-            if size >= min_px:
-                blobs += 1
-    return blobs
+            if len(points) < min_px:
+                continue
+            xs = [p % w for p in points]
+            ys = [p // w for p in points]
+            stats.append(
+                (
+                    float(len(points)),
+                    sum(xs) / len(points),
+                    sum(ys) / len(points),
+                    min(xs),
+                    min(ys),
+                    max(xs),
+                    max(ys),
+                )
+            )
+    return stats
+
+
+def _count_blobs(mask: Any, min_px: int) -> int:
+    """Count connected 255-valued blobs of at least min_px pixels (4-neighbor)."""
+    return len(_blob_stats(mask, min_px))
+
+
+def _clustered_blob_count(
+    stats: list[tuple[float, float, float, int, int, int, int]],
+    merge_px: float,
+) -> int:
+    """Count blobs after merging fragments of one physical object.
+
+    Glossy specular bands can split a single sphere into several disconnected
+    mask blobs; fragments overlap on one axis with at most a merge_px-wide gap
+    on the other (or have centroids within merge_px) and are treated as one
+    object. Well-separated blobs stay distinct.
+    """
+    count = len(stats)
+    parent = list(range(count))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(count):
+        _, cx_i, cy_i, x0_i, y0_i, x1_i, y1_i = stats[i]
+        for j in range(i + 1, count):
+            _, cx_j, cy_j, x0_j, y0_j, x1_j, y1_j = stats[j]
+            sep_x = max(x0_i, x0_j) - min(x1_i, x1_j)
+            sep_y = max(y0_i, y0_j) - min(y1_i, y1_j)
+            aligned = (
+                (sep_x <= 0 or sep_y <= 0)
+                and sep_x <= merge_px
+                and sep_y <= merge_px
+            )
+            close = (cx_i - cx_j) ** 2 + (cy_i - cy_j) ** 2 <= merge_px * merge_px
+            if aligned or close:
+                parent[find(j)] = find(i)
+    return len({find(i) for i in range(count)})
 
 
 def _ai_redraw_gate(img: Any, expected_visible: int, expected_r: int) -> tuple[bool, str]:
@@ -1293,7 +1350,10 @@ def _ai_redraw_gate(img: Any, expected_visible: int, expected_r: int) -> tuple[b
         return False, f"atom_blobs_{blobs}_expected_about_{expected_visible}"
     # No erosion for the blue mask: specular highlights hole the spheres and
     # erosion would fragment them; R spheres are large, so a size floor suffices.
-    r_blobs = _count_blobs(blue, _GATE_BLUE_MIN_PX)
+    # A highlight band can still split one sphere into disconnected fragments,
+    # so nearby fragments are clustered back into single spheres before counting.
+    blue_stats = _blob_stats(blue, _GATE_BLUE_MIN_PX)
+    r_blobs = _clustered_blob_count(blue_stats, _GATE_BLUE_MERGE_PX)
     if abs(r_blobs - expected_r) > _GATE_R_TOLERANCE:
         return False, f"r_labels_{r_blobs}_expected_{expected_r}"
     return True, "gate_passed"

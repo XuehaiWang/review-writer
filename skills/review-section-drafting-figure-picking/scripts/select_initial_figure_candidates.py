@@ -117,11 +117,11 @@ def best_candidate_for_paper(paper: dict[str, Any]) -> dict[str, Any]:
 
 
 def best_redrawable_candidate_index(candidates: list[dict[str, Any]]) -> int | None:
-    """Choose the highest-scoring image/scheme that the redraw stage can use."""
+    """Choose the highest-scoring candidate with a located source image that the redraw stage can use."""
     redrawable = [
         candidate
         for candidate in candidates
-        if candidate.get("source_type") != "table" and candidate.get("source_image_path")
+        if candidate.get("source_image_path")
     ]
     if not redrawable:
         return None
@@ -223,7 +223,11 @@ def build_outputs(project: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
                     ),
                     "what_it_shows": candidate.get("source_caption_text") or candidate.get("source_label"),
                     "fits_paragraph_or_claim": section.get("core_argument"),
-                    "recommended_action": "redraw" if candidate.get("source_type") != "table" else "retable",
+                    "recommended_action": (
+                        "redraw"
+                        if not (candidate.get("source_type") == "table" and not candidate.get("source_image_path"))
+                        else "retable"
+                    ),
                     "manuscript_selected": True,
                     "resolution_status": "ready" if candidate.get("source_image_path") else "needs_source_resolution",
                     "needs_human_check": True,

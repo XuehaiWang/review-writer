@@ -1028,9 +1028,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not isinstance(candidate, dict):
             self.send_json({"ok": False, "error": "Selected candidate does not belong to this paper."}, status=HTTPStatus.BAD_REQUEST)
             return
-        if candidate.get("source_type") == "table":
+        if candidate.get("source_type") == "table" and not candidate.get("source_image_path"):
             self.send_json(
-                {"ok": False, "error": "Table candidates cannot be passed to the figure redraw skill. Select an image or scheme candidate."},
+                {"ok": False, "error": "Table candidates without a located source image cannot be passed to the figure redraw skill. Select a candidate with an available image."},
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
@@ -4938,8 +4938,10 @@ def validate_figure_review(project: Path, project_id: str) -> dict[str, Any]:
             (item for item in paper.get("candidates") or [] if item.get("candidate_index") == selected_index),
             None,
         )
-        if not isinstance(candidate, dict) or candidate.get("source_type") == "table":
-            raise RuntimeError(f"{paper_id} needs an image or scheme candidate before it can be redrawn.")
+        if not isinstance(candidate, dict) or (
+            candidate.get("source_type") == "table" and not candidate.get("source_image_path")
+        ):
+            raise RuntimeError(f"{paper_id} needs a candidate with a located source image before it can be redrawn.")
         sync_selected_candidate_for_redraw(project, paper_id, candidate)
     refresh_figure_review_handoff(draft_stage, accept_current=True)
     return {"reviewed_paper_count": len(reviewable), "redraw_pending": True}
@@ -6989,10 +6991,10 @@ def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any
 
 
 def default_redrawable_candidate(paper: dict[str, Any]) -> dict[str, Any] | None:
-    """Return a stable highest-scoring Figure Review default, excluding tables."""
+    """Return a stable highest-scoring Figure Review default, excluding candidates without a located source image."""
     candidates = []
     for candidate in paper.get("candidates") or []:
-        if not isinstance(candidate, dict) or candidate.get("source_type") == "table" or not candidate.get("source_image_path"):
+        if not isinstance(candidate, dict) or not candidate.get("source_image_path"):
             continue
         if not isinstance(candidate.get("candidate_index"), int):
             continue
@@ -7028,7 +7030,7 @@ def sync_reviewed_figure_candidates(stage: Path, candidates_data: dict[str, Any]
             (item for item in paper.get("candidates") or [] if isinstance(item, dict) and item.get("candidate_index") == selected_index),
             None,
         )
-        if not isinstance(candidate, dict) or candidate.get("source_type") == "table" or not candidate.get("source_image_path"):
+        if not isinstance(candidate, dict) or not candidate.get("source_image_path"):
             continue
         existing = [item for item in manifest if isinstance(item, dict) and str(item.get("paper_id") or "") == paper_id]
         if len(existing) == 1 and existing[0].get("source_image_path") == candidate.get("source_image_path"):

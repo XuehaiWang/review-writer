@@ -30,10 +30,17 @@ class DiscoveryResultInteractionChecks(unittest.TestCase):
     def test_summary_uses_unique_paper_ids_and_labels_keyword_hits_separately(self) -> None:
         self.assertIn("function discoveryCounts", self.source)
         self.assertIn("uniqueLocal: new Set(localKeys).size", self.source)
+        self.assertIn("candidateHits: candidateLocalRows.length", self.source)
         self.assertIn("['Selected papers', stats.uniqueLocal]", self.source)
         self.assertIn("['Candidate papers', stats.candidateLocal]", self.source)
-        self.assertIn("['Keyword hits', stats.localHits]", self.source)
+        self.assertIn("['Keyword hits', stats.candidateHits]", self.source)
+        self.assertNotIn("['Keyword hits', stats.localHits]", self.source)
         self.assertNotIn("${localMatches} local matches", self.source)
+
+    def test_ready_message_reports_candidate_pool_and_hits_not_selected_counts(self) -> None:
+        self.assertIn("found ${stats.candidateLocal} candidate papers (${stats.candidateHits} keyword hits)", self.source)
+        self.assertIn("Selected for Matrix: ${stats.uniqueLocal}; include candidates to build the selection.", self.source)
+        self.assertNotIn("${stats.uniqueLocal} unique local papers (${stats.localHits} keyword hits)", self.source)
 
     def test_paper_choice_is_explicit_and_shared_across_duplicate_keyword_hits(self) -> None:
         self.assertIn("Include in Matrix", self.source)

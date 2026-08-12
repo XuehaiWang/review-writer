@@ -549,7 +549,7 @@
         await loadProject(result.project_id);
         const stats = discoveryCounts(data);
         const externalText = stats.uniqueExternal ? ` and ${stats.uniqueExternal} unique external results` : '';
-        els.runStatus.textContent = `Project ${result.project_id} is ready: ${stats.uniqueLocal} unique local papers (${stats.localHits} keyword hits)${externalText} across ${stats.keywordGroups} keyword groups.`;
+        els.runStatus.textContent = `Project ${result.project_id} is ready: found ${stats.candidateLocal} candidate papers (${stats.candidateHits} keyword hits)${externalText} across ${stats.keywordGroups} keyword groups. Selected for Matrix: ${stats.uniqueLocal}; include candidates to build the selection.`;
         msg('Discovery complete');
       } catch (error) {
         els.runStatus.textContent = error.message || 'Discovery failed.';
@@ -591,11 +591,13 @@
       const externalRows = groups.flatMap(group => (group.web_results || []).filter(row => row.keep !== false));
       const localKeys = localRows.map((row, index) => row.paper_id || (row.title ? `${row.title}|${row.year || ''}` : `local-${index}`));
       const externalKeys = externalRows.map((row, index) => row.doi || row.url || (row.title ? `${row.title}|${row.year || ''}` : `external-${index}`));
-      const candidateLocalKeys = allGroups.flatMap(group => group.local_results || []).map((row, index) => row.paper_id || (row.title ? `${row.title}|${row.year || ''}` : `candidate-${index}`));
+      const candidateLocalRows = allGroups.flatMap(group => group.local_results || []);
+      const candidateLocalKeys = candidateLocalRows.map((row, index) => row.paper_id || (row.title ? `${row.title}|${row.year || ''}` : `candidate-${index}`));
       const configuredLibraryTotal = Number(source?.filter_stats?.after_filter ?? source?.filter_stats?.before_filter);
       return {
         uniqueLocal: new Set(localKeys).size,
         candidateLocal: new Set(candidateLocalKeys).size,
+        candidateHits: candidateLocalRows.length,
         localHits: localRows.length,
         uniqueExternal: new Set(externalKeys).size,
         externalHits: externalRows.length,
@@ -608,7 +610,7 @@
       els.discoveryStats.innerHTML = [
         ['Selected papers', stats.uniqueLocal],
         ['Candidate papers', stats.candidateLocal],
-        ['Keyword hits', stats.localHits],
+        ['Keyword hits', stats.candidateHits],
         ['Keyword groups', stats.keywordGroups]
       ].map(([label, value]) => `<div class="stat-card"><span class="stat-value">${esc(value)}</span><span class="stat-label">${esc(label)}</span></div>`).join('');
       els.keywordGroupCount.textContent = `${stats.keywordGroups} active`;
