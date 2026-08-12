@@ -1,6 +1,6 @@
 ﻿---
 name: review-literature-matrix-outline
-description: Read the 20-30 selected papers, build a concise fixed-field literature matrix, and draft review outline options using the writing-rule skill.
+description: Read every paper explicitly selected by the human reviewer, build a concise fixed-field literature matrix, and draft review outline options using the writing-rule skill.
 ---
 
 # Review Literature Matrix Outline
@@ -118,3 +118,18 @@ Stop after this stage for human outline selection. The preferred human artifact 
 ```text
 selected_outline.md
 ```
+
+The dashboard may create this artifact from a built-in structure, a reference
+review, or a custom outline. A newly selected custom outline starts completely
+blank and is not ready for Blueprint until the reviewer writes and saves it.
+The dashboard's default editor is a visual section-card builder. Reviewers can
+edit section titles and purposes, assign papers with checkboxes, request a
+metadata-based paper recommendation, and reorder sections without knowing the
+Markdown syntax. Every major section must have a non-empty title and at least
+one assigned paper before the outline can be saved.
+
+Advanced reviewers may switch to Markdown editing. Keep major sections as
+level-2 headings (`## Section title` or `## 1. Section title`) and use
+`Assigned papers: P001, P002.` for every major section. The visual editor and
+Markdown editor must round-trip the same selected outline. Saved manual edits
+are authoritative for Blueprint and all later stages.

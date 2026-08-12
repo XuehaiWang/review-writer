@@ -66,7 +66,7 @@ from provider_settings import (
     public_provider_settings,
     save_provider_settings,
 )
-from review_writer_core.runtime_config import discovery_paper_limit, literature_batch_limit
+from review_writer_core.runtime_config import literature_batch_limit
 from review_writer_core.providers import DEFAULT_IMAGE_MODEL
 from review_writer_core.text_safety import make_xml_compatible
 from review_writer_core.project_config import (
@@ -418,6 +418,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if len(parts) == 6 and parts[0:2] == ["api", "project"]:
                 self.handle_batch_figure_redraw_stop(unquote(parts[2]))
                 return
+        if parsed.path.startswith("/api/project/") and parsed.path.endswith("/figures/human-approve-successful"):
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) == 5 and parts[0:2] == ["api", "project"]:
+                self.handle_successful_figures_human_approval(unquote(parts[2]))
+                return
         if parsed.path.startswith("/api/project/") and parsed.path.endswith("/feedback-loop/stop"):
             parts = parsed.path.strip("/").split("/")
             if len(parts) == 5 and parts[0:2] == ["api", "project"]:
@@ -669,6 +674,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "paper_id": meta.get("paper_id"),
                     "title": value_of(meta.get("title")),
                     "authors": value_of(meta.get("authors")) or [],
+                    "keywords": value_of(meta.get("keywords")) or [],
+                    "abstract": value_of(meta.get("abstract")) or "",
                     "year": value_of(meta.get("year")),
                     "journal": value_of(meta.get("journal")),
                     "doi": value_of(meta.get("doi")),
@@ -902,7 +909,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not path.exists():
             self.send_error(HTTPStatus.NOT_FOUND, "discovery data not found")
             return
-        self.send_file(path, "application/json; charset=utf-8")
+        data = read_json_if_exists(path) or {}
+        selected = read_json_if_exists(path.parent / "selected_discovery_results.json") or {}
+        self.send_json(discovery_payload_with_explicit_selection(data, selected))
 
     def handle_discovery_put(self, project_id: str, confirm: bool = False) -> None:
         path = self.discovery_path(project_id)
@@ -912,12 +921,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.send_error(HTTPStatus.BAD_REQUEST, f"invalid discovery json: {exc}")
             return
+        data["selection_mode"] = "explicit"
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         tmp.replace(path)
         selected = selected_from_combined(data.get("results", []), project_id)
+        selected_paper_ids = discovery_selected_paper_ids(selected)
+        selection_fingerprint = discovery_selection_fingerprint(selected_paper_ids)
         selected["human_confirmed"] = bool(confirm)
+        selected["selection_mode"] = "explicit"
+        selected["selection"] = {
+            "paper_ids": selected_paper_ids,
+            "paper_count": len(selected_paper_ids),
+            "fingerprint": selection_fingerprint,
+            "saved_at": now_utc(),
+        }
         (path.parent / "selected_discovery_results.json").write_text(
             json.dumps(selected, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -936,7 +955,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             encoding="utf-8",
         )
         matrix_sync = sync_matrix_from_discovery(self.review_root, project_id) if confirm else None
-        self.send_json({"ok": True, "confirmed": confirm, "matrix_sync": matrix_sync})
+        self.send_json(
+            {
+                "ok": True,
+                "confirmed": confirm,
+                "selection": selected["selection"],
+                "matrix_sync": matrix_sync,
+            }
+        )
 
     def handle_project_draft_get(self, project_id: str) -> None:
         project = self.review_root / "review-projects" / project_id
@@ -1111,6 +1137,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def handle_figure_human_approval(self, project_id: str, figure_id: str) -> None:
         try:
             result = approve_figure_for_manuscript(self.review_root, project_id, figure_id)
+        except (RuntimeError, ValueError, OSError) as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        self.send_json({"ok": True, "project_id": project_id, **result})
+
+    def handle_successful_figures_human_approval(self, project_id: str) -> None:
+        try:
+            result = approve_successful_figures_for_manuscript(self.review_root, project_id)
         except (RuntimeError, ValueError, OSError) as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
             return
@@ -1560,7 +1594,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 raise ValueError("payload must be an object")
             outline_style = str(payload.get("outline_style") or "").strip().casefold()
-            if not outline_style.startswith("reference:"):
+            manual_outline = "outline_md" in payload
+            outline_md = validate_selected_outline_markdown(payload.get("outline_md")) if manual_outline else ""
+            if not outline_style.startswith("reference:") and outline_style != "custom":
                 outline_style_definition(outline_style)
         except (ValueError, json.JSONDecodeError) as exc:
             self.send_json({"ok": False, "error": f"Invalid outline selection: {exc}"}, status=HTTPStatus.BAD_REQUEST)
@@ -1576,10 +1612,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
             return
         selected_at = now_utc()
+        custom_draft = outline_style == "custom" and not manual_outline
         try:
             selected_outline = (
-                reference_outline_document(stage, outline_style)
+                outline_md
+                if manual_outline
+                else reference_outline_document(stage, outline_style)
                 if outline_style.startswith("reference:")
+                else ""
+                if custom_draft
                 else selected_outline_document(self.review_root, project_id, rows, outline_style, selected_at)
             )
         except ValueError as exc:
@@ -1590,9 +1631,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             stage / "selected_outline.meta.json",
             {
                 "outline_style": outline_style,
-                "selection_source": "user",
+                "selection_source": "custom_draft" if custom_draft else "user",
                 "selected_at": selected_at,
                 "matrix_synced_at": (matrix.get("sync") or {}).get("synced_at") if isinstance(matrix, dict) else None,
+                "manually_edited": manual_outline,
+                "edited_at": selected_at if manual_outline else None,
+                "outline_complete": not custom_draft,
             },
         )
         self.send_json(
@@ -1601,7 +1645,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "project_id": project_id,
                 "outline_style": outline_style,
                 "selected_outline_md": selected_outline,
-                "blueprint_pending": True,
+                "outline_complete": not custom_draft,
+                "blueprint_pending": not custom_draft,
             }
         )
 
@@ -2404,6 +2449,52 @@ def invalidate_redrawn_output_for_source_change(
     return changed
 
 
+def manuscript_paragraph_anchors(stage: Path) -> dict[str, dict[str, str]]:
+    """Map every paper cited by the current section drafts to a stable paragraph."""
+    drafts = read_json_if_exists(stage / "section_drafts.json") or {}
+    sections = drafts.get("sections") if isinstance(drafts, dict) else []
+    anchors: dict[str, dict[str, str]] = {}
+    for section in sections if isinstance(sections, list) else []:
+        if not isinstance(section, dict):
+            continue
+        for paragraph in section.get("paragraphs") or []:
+            if not isinstance(paragraph, dict):
+                continue
+            paragraph_id = str(paragraph.get("paragraph_id") or "").strip()
+            if not paragraph_id:
+                continue
+            paper_ids = paragraph.get("cited_paper_ids") or [paragraph.get("paper_id")]
+            if not isinstance(paper_ids, list):
+                paper_ids = [paper_ids]
+            for raw_paper_id in paper_ids:
+                paper_id = str(raw_paper_id or "").strip()
+                if not paper_id:
+                    continue
+                anchors.setdefault(
+                    paper_id,
+                    {
+                        "paragraph_id": paragraph_id,
+                        "target_paragraph_id": paragraph_id,
+                        "section_id": str(section.get("section_id") or ""),
+                        "section_heading": str(section.get("heading") or ""),
+                    },
+                )
+    return anchors
+
+
+def anchored_figure_review_papers(stage: Path, candidates_data: Any) -> list[dict[str, Any]]:
+    """Return only candidate papers that can be placed in the current manuscript."""
+    rows = candidates_data.get("papers") if isinstance(candidates_data, dict) else []
+    if not isinstance(rows, list):
+        return []
+    anchors = manuscript_paragraph_anchors(stage)
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict) and str(row.get("paper_id") or "") in anchors
+    ]
+
+
 def sync_selected_candidate_for_redraw(project: Path, paper_id: str, candidate: dict[str, Any]) -> None:
     """Promote a Figure Review choice into the redraw skill's actual input list."""
     candidates_path = project / "02_section_drafting" / "figure_candidates.json"
@@ -2436,21 +2527,11 @@ def sync_selected_candidate_for_redraw(project: Path, paper_id: str, candidate: 
     selected["resolution_status"] = "ready" if selected.get("source_image_path") else "needs_source_resolution"
     selected["needs_human_check"] = True
     if not selected.get("target_paragraph_id"):
-        sections = (read_json_if_exists(project / "02_section_drafting" / "section_drafts.json") or {}).get("sections", [])
-        for section in sections if isinstance(sections, list) else []:
-            for paragraph in section.get("paragraphs") or []:
-                paper_ids = paragraph.get("cited_paper_ids") or [paragraph.get("paper_id")]
-                if paper_id not in {str(value) for value in paper_ids if value}:
-                    continue
-                selected["paragraph_id"] = str(paragraph.get("paragraph_id") or "")
-                selected["target_paragraph_id"] = str(paragraph.get("paragraph_id") or "")
-                selected["section_id"] = str(section.get("section_id") or "")
-                selected["section_heading"] = str(section.get("heading") or "")
-                break
-            if selected.get("target_paragraph_id"):
-                break
+        anchor = manuscript_paragraph_anchors(project / "02_section_drafting").get(paper_id)
+        if anchor:
+            selected.update(anchor)
     if not selected.get("target_paragraph_id"):
-        raise RuntimeError("The selected candidate has no matching manuscript paragraph anchor.")
+        raise RuntimeError(f"{paper_id} has no matching paragraph anchor in the current section drafts.")
     source_changed = bool(
         previous_source
         and selected_source
@@ -2718,7 +2799,7 @@ def regenerate_figures(review_root: Path, project_id: str) -> dict[str, Any]:
         raise RuntimeError("No figure candidates are available. Regenerate Sections first.")
     per_paper = read_json_if_exists(draft_stage / "paper_figure_candidates.json") or {}
     reviewable = [
-        str(row.get("paper_id")) for row in per_paper.get("papers", [])
+        str(row.get("paper_id")) for row in anchored_figure_review_papers(draft_stage, per_paper)
         if isinstance(row, dict) and row.get("paper_id") and row.get("candidates")
     ]
     reviews = (read_json_if_exists(draft_stage / "human_figure_review.json") or {}).get("papers", {})
@@ -3154,8 +3235,139 @@ def ai_edit_allows_provider_canvas(row: dict[str, Any]) -> bool:
     )
 
 
+def manual_edit_allows_content_crop(
+    row: dict[str, Any],
+    integrity: dict[str, Any] | None = None,
+) -> bool:
+    """Allow only server-verified SVG content crops to change canvas ratio."""
+    if str(row.get("render_mode") or "") != "manual-arrow-edit":
+        return False
+    manual_edit = row.get("manual_arrow_edit") or {}
+    crop = manual_edit.get("canvas_crop") or {}
+    try:
+        crop_width = int(crop.get("width") or 0)
+        crop_height = int(crop.get("height") or 0)
+    except (TypeError, ValueError):
+        return False
+    allowed = bool(
+        crop.get("status") == "verified"
+        and crop.get("unit") == "source-px"
+        and crop_width > 0
+        and crop_height > 0
+    )
+    if not allowed or not integrity:
+        return allowed
+    return list(integrity.get("output_size") or []) == [
+        crop_width,
+        crop_height,
+    ]
+
+
+def human_approved_manual_canvas(row: dict[str, Any], integrity: dict[str, Any]) -> bool:
+    """Accept a ratio-changing manual SVG only after an explicit bound approval."""
+    approval = row.get("human_approval") or {}
+    return bool(
+        str(row.get("render_mode") or "") == "manual-arrow-edit"
+        and str(row.get("aspect_ratio_policy") or "") == "human_verified_manual_canvas"
+        and approval.get("status") == "approved"
+        and approval.get("manual_canvas_override") is True
+        and list(approval.get("source_canvas_size") or [])
+        == list(integrity.get("source_size") or [])
+        and list(approval.get("output_canvas_size") or [])
+        == list(integrity.get("output_size") or [])
+    )
+
+
 def figure_aspect_policy_matches(row: dict[str, Any], integrity: dict[str, Any]) -> bool:
-    return bool(integrity.get("status") == "pass" or ai_edit_allows_provider_canvas(row))
+    return bool(
+        integrity.get("status") == "pass"
+        or ai_edit_allows_provider_canvas(row)
+        or manual_edit_allows_content_crop(row, integrity)
+        or human_approved_manual_canvas(row, integrity)
+    )
+
+
+def _recorded_stage_file(stage: Path, value: object) -> Path | None:
+    """Resolve an audit-owned file without allowing a manifest path to escape Stage 7."""
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    raw = Path(raw_value)
+    candidates = [raw] if raw.is_absolute() else [stage / raw, stage.parent / raw, raw]
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved.is_file() and path_is_within(resolved, stage):
+            return resolved
+    return None
+
+
+def manual_svg_canvas_review_eligible(
+    stage: Path,
+    row: dict[str, Any],
+    integrity: dict[str, Any],
+    output_path: Path | None,
+) -> bool:
+    """Return whether a saved manual SVG may receive a one-by-one canvas override.
+
+    This is intentionally stricter than the normal human chemistry gate.  It is
+    used only for a ratio mismatch and requires the server-owned audit, editable
+    full-vector SVG, and current PNG to agree on the exact output dimensions.
+    """
+    if (
+        integrity.get("status") != "failed"
+        or output_path is None
+        or str(row.get("render_mode") or "") != "manual-arrow-edit"
+    ):
+        return False
+    manual_edit = row.get("manual_arrow_edit") or {}
+    if (
+        manual_edit.get("status") != "saved"
+        or manual_edit.get("full_image_vector_trace") is not True
+    ):
+        return False
+    audit_path = _recorded_stage_file(stage, manual_edit.get("audit_path"))
+    svg_path = _recorded_stage_file(
+        stage,
+        manual_edit.get("editable_svg") or row.get("editable_svg"),
+    )
+    if audit_path is None or svg_path is None:
+        return False
+    audit = read_json_if_exists(audit_path) or {}
+    if not isinstance(audit, dict):
+        return False
+    if _normalized_figure_path(str(audit.get("output_image") or "")) != _normalized_figure_path(output_path):
+        return False
+    if list(audit.get("output_canvas_size") or []) != list(integrity.get("output_size") or []):
+        return False
+    try:
+        svg_markup = svg_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+    if (
+        len(svg_markup.encode("utf-8")) > 25 * 1024 * 1024
+        or not svg_markup.lstrip().startswith("<svg")
+        or "full-image-vector-trace" not in svg_markup
+        or re.search(r"<image\b", svg_markup, re.IGNORECASE)
+    ):
+        return False
+    opening = re.match(r"\s*<svg\b([^>]*)>", svg_markup, re.IGNORECASE | re.DOTALL)
+    if not opening:
+        return False
+
+    def dimension(name: str) -> int:
+        match = re.search(
+            rf"\b{re.escape(name)}\s*=\s*(['\"])(\d+)\1",
+            opening.group(1),
+            re.IGNORECASE,
+        )
+        return int(match.group(2)) if match else 0
+
+    return [dimension("data-original-width"), dimension("data-original-height")] == list(
+        integrity.get("output_size") or []
+    )
 
 
 def create_full_figure_svg(
@@ -3188,6 +3400,7 @@ def create_full_figure_svg(
         raise ValueError("The current source image is unavailable")
     stage = project / "03_figure_redraw"
     base_path = source_path
+    reusable_svg_path: Path | None = None
     if base_mode == "redrawn":
         manifest = read_json_if_exists(stage / "redrawn_figure_manifest.json") or {}
         rows = manifest.get("figures") if isinstance(manifest, dict) else []
@@ -3199,12 +3412,50 @@ def create_full_figure_svg(
         if redrawn_path is None:
             raise ValueError("The selected AI redraw is unavailable. Switch the editor base to the source image or regenerate this figure.")
         base_path = redrawn_path
-    svg = build_full_image_vector_svg(base_path, [])
+        if isinstance(row, dict) and str(row.get("render_mode") or "") == "manual-arrow-edit":
+            manual_edit = row.get("manual_arrow_edit") or {}
+            candidate_svg = _recorded_stage_file(
+                stage,
+                manual_edit.get("editable_svg") or row.get("editable_svg"),
+            )
+            if candidate_svg is not None:
+                try:
+                    existing_svg = candidate_svg.read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
+                    existing_svg = ""
+                opening = re.match(r"\s*<svg\b([^>]*)>", existing_svg, re.IGNORECASE | re.DOTALL)
+
+                def saved_dimension(name: str) -> int:
+                    match = re.search(
+                        rf"\b{re.escape(name)}\s*=\s*(['\"])(\d+)\1",
+                        opening.group(1) if opening else "",
+                        re.IGNORECASE,
+                    )
+                    return int(match.group(2)) if match else 0
+
+                try:
+                    with Image.open(base_path) as current_base:
+                        saved_svg_size_matches = [
+                            saved_dimension("data-original-width"),
+                            saved_dimension("data-original-height"),
+                        ] == list(current_base.size)
+                except (OSError, ValueError):
+                    saved_svg_size_matches = False
+                if (
+                    existing_svg.lstrip().startswith("<svg")
+                    and "full-image-vector-trace" in existing_svg
+                    and not re.search(r"<image\b", existing_svg, re.IGNORECASE)
+                    and len(existing_svg.encode("utf-8")) <= 25 * 1024 * 1024
+                    and saved_svg_size_matches
+                ):
+                    reusable_svg_path = candidate_svg
+    svg = reusable_svg_path.read_text(encoding="utf-8") if reusable_svg_path else build_full_image_vector_svg(base_path, [])
     if len(svg.encode("utf-8")) > 25 * 1024 * 1024:
         raise ValueError("Full-image vector SVG is larger than the 25 MB editor limit")
-    output_path = stage / "manual_arrow_edits" / f"{figure_id}-{base_mode}-full.svg"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(svg, encoding="utf-8")
+    output_path = reusable_svg_path or stage / "manual_arrow_edits" / f"{figure_id}-{base_mode}-full.svg"
+    if reusable_svg_path is None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(svg, encoding="utf-8")
     with Image.open(base_path) as base_image:
         base_width, base_height = base_image.size
     return {
@@ -3214,7 +3465,7 @@ def create_full_figure_svg(
         "base_width": base_width,
         "base_height": base_height,
         "full_svg": str(output_path),
-        "vectorization": "full-image-pixel-trace",
+        "vectorization": "saved-manual-svg" if reusable_svg_path else "full-image-pixel-trace",
         "contains_embedded_raster": False,
     }
 
@@ -3263,6 +3514,78 @@ def sync_edited_figure_to_manuscripts(project: Path, figure_id: str, edited_imag
     return synced
 
 
+def validated_svg_content_crop(
+    svg_markup: str,
+    base_size: tuple[int, int],
+    submitted_size: tuple[int, int],
+) -> dict[str, object] | None:
+    """Validate the crop contract emitted by the online SVG editor."""
+    opening = re.match(r"\s*<svg\b([^>]*)>", svg_markup, re.IGNORECASE | re.DOTALL)
+    if not opening:
+        return None
+
+    def attribute(name: str) -> str:
+        match = re.search(
+            rf"\b{re.escape(name)}\s*=\s*(['\"])(.*?)\1",
+            opening.group(1),
+            re.IGNORECASE | re.DOTALL,
+        )
+        return match.group(2).strip() if match else ""
+
+    if attribute("data-content-crop").casefold() != "true":
+        return None
+    if attribute("data-crop-unit") != "source-px":
+        raise ValueError("SVG content crop uses an unsupported coordinate unit")
+    values: dict[str, int] = {}
+    for name in (
+        "data-source-width",
+        "data-source-height",
+        "data-crop-x",
+        "data-crop-y",
+        "data-crop-width",
+        "data-crop-height",
+        "data-original-width",
+        "data-original-height",
+    ):
+        raw = attribute(name)
+        if not re.fullmatch(r"\d+", raw):
+            raise ValueError(f"SVG content crop attribute {name} is missing or invalid")
+        values[name] = int(raw)
+    source_width = values["data-source-width"]
+    source_height = values["data-source-height"]
+    crop_x = values["data-crop-x"]
+    crop_y = values["data-crop-y"]
+    crop_width = values["data-crop-width"]
+    crop_height = values["data-crop-height"]
+    if (source_width, source_height) != base_size:
+        raise ValueError(
+            f"SVG content crop source {(source_width, source_height)} does not match selected base image {base_size}"
+        )
+    if crop_width < 1 or crop_height < 1:
+        raise ValueError("SVG content crop dimensions must be positive")
+    if crop_x + crop_width > source_width or crop_y + crop_height > source_height:
+        raise ValueError("SVG content crop rectangle extends outside the selected base image")
+    if (crop_width, crop_height) != submitted_size:
+        raise ValueError(
+            f"SVG content crop {(crop_width, crop_height)} does not match submitted PNG {submitted_size}"
+        )
+    if (
+        values["data-original-width"],
+        values["data-original-height"],
+    ) != submitted_size:
+        raise ValueError("SVG output dimensions do not match the submitted cropped PNG")
+    return {
+        "status": "verified",
+        "unit": "source-px",
+        "x": crop_x,
+        "y": crop_y,
+        "width": crop_width,
+        "height": crop_height,
+        "source_width": source_width,
+        "source_height": source_height,
+    }
+
+
 def save_manual_arrow_edit(
     review_root: Path,
     project_id: str,
@@ -3306,6 +3629,7 @@ def save_manual_arrow_edit(
     if base_mode not in {"source", "redrawn"}:
         raise ValueError("base_mode must be source or redrawn")
     base_path = source_path
+    previous_row: dict[str, Any] = {}
     if base_mode == "redrawn":
         manifest = read_json_if_exists(stage / "redrawn_figure_manifest.json") or {}
         rows = manifest.get("figures") if isinstance(manifest, dict) else []
@@ -3317,6 +3641,7 @@ def save_manual_arrow_edit(
         if redrawn_path is None:
             raise ValueError("The selected AI redraw is unavailable. Switch the editor base to the source image or regenerate this figure.")
         base_path = redrawn_path
+        previous_row = dict(row) if isinstance(row, dict) else {}
     if editable_svg:
         if len(editable_svg.encode("utf-8")) > 25 * 1024 * 1024:
             raise ValueError("Editable SVG is larger than the 25 MB manual-edit limit")
@@ -3331,12 +3656,74 @@ def save_manual_arrow_edit(
             raise ValueError("full_vector_svg must contain the full vector trace and no embedded raster image")
     submitted_canvas_size: tuple[int, int] | None = None
     base_canvas_size: tuple[int, int] | None = None
+    output_canvas_size: tuple[int, int] | None = None
+    canvas_crop: dict[str, object] | None = None
+    canvas_crop_inherited = False
     normalized_canvas = False
     with Image.open(base_path) as base_image, Image.open(io.BytesIO(image_bytes)) as edited:
         if edited.format != "PNG":
             raise ValueError("Manual edit must be encoded as PNG")
         submitted_canvas_size = edited.size
         base_canvas_size = base_image.size
+        output_canvas_size = edited.size
+        previous_crop: dict[str, object] | None = None
+        if base_mode == "redrawn" and manual_edit_allows_content_crop(previous_row):
+            crop = dict((previous_row.get("manual_arrow_edit") or {}).get("canvas_crop") or {})
+            try:
+                prior_output_size = (int(crop.get("width") or 0), int(crop.get("height") or 0))
+                prior_source_size = (
+                    int(crop.get("source_width") or 0),
+                    int(crop.get("source_height") or 0),
+                )
+            except (TypeError, ValueError):
+                prior_output_size = (0, 0)
+                prior_source_size = (0, 0)
+            if prior_output_size == base_canvas_size and min(prior_source_size) > 0:
+                previous_crop = crop
+        if full_vector_svg:
+            if previous_crop:
+                try:
+                    canvas_crop = validated_svg_content_crop(
+                        full_vector_svg,
+                        (
+                            int(previous_crop["source_width"]),
+                            int(previous_crop["source_height"]),
+                        ),
+                        submitted_canvas_size,
+                    )
+                except ValueError as original_crop_error:
+                    # A reopened cropped SVG may describe another crop relative to
+                    # its current PNG base.  Validate that local contract, then
+                    # compose it with the previously verified source-space crop.
+                    try:
+                        relative_crop = validated_svg_content_crop(
+                            full_vector_svg,
+                            base_canvas_size,
+                            submitted_canvas_size,
+                        )
+                    except ValueError:
+                        raise original_crop_error
+                    if relative_crop:
+                        canvas_crop = {
+                            **relative_crop,
+                            "x": int(previous_crop.get("x") or 0) + int(relative_crop.get("x") or 0),
+                            "y": int(previous_crop.get("y") or 0) + int(relative_crop.get("y") or 0),
+                            "source_width": int(previous_crop["source_width"]),
+                            "source_height": int(previous_crop["source_height"]),
+                        }
+            else:
+                canvas_crop = validated_svg_content_crop(
+                    full_vector_svg,
+                    base_canvas_size,
+                    submitted_canvas_size,
+                )
+        if canvas_crop is None and previous_crop and submitted_canvas_size == base_canvas_size:
+            # Reopening a cropped manual output used to rebuild the editor from the
+            # cropped PNG and silently erase its original crop contract.  A same-size
+            # follow-up save cannot restore pixels outside that base, so retaining the
+            # already server-verified crop is both safe and necessary.
+            canvas_crop = previous_crop
+            canvas_crop_inherited = True
         if edited.size != base_image.size:
             # Full-image SVG tracing intentionally caps its editing coordinate space
             # at 1600 px.  Older cached editor pages exported that preview-sized PNG
@@ -3352,15 +3739,17 @@ def save_manual_arrow_edit(
                 and max(base_image.size) > FULL_SVG_MAX_DIMENSION
                 and abs(edited_ratio - base_ratio) / max(base_ratio, 1e-9) <= 0.005
             )
-            if not scalable_full_svg:
+            if not canvas_crop and not scalable_full_svg:
                 raise ValueError(f"Canvas size {edited.size} does not match selected base image {base_image.size}")
-            normalized = edited.convert("RGBA").resize(base_image.size, Image.Resampling.LANCZOS)
-            normalized_bytes = io.BytesIO()
-            normalized.save(normalized_bytes, format="PNG")
-            image_bytes = normalized_bytes.getvalue()
-            if len(image_bytes) > 25 * 1024 * 1024:
-                raise ValueError("Full-resolution PNG is larger than the 25 MB manual-edit limit")
-            normalized_canvas = True
+            if scalable_full_svg and not canvas_crop:
+                normalized = edited.convert("RGBA").resize(base_image.size, Image.Resampling.LANCZOS)
+                normalized_bytes = io.BytesIO()
+                normalized.save(normalized_bytes, format="PNG")
+                image_bytes = normalized_bytes.getvalue()
+                if len(image_bytes) > 25 * 1024 * 1024:
+                    raise ValueError("Full-resolution PNG is larger than the 25 MB manual-edit limit")
+                normalized_canvas = True
+                output_canvas_size = base_image.size
         edited.load()
     if full_vector_svg:
         editable_svg = full_vector_svg
@@ -3372,6 +3761,7 @@ def save_manual_arrow_edit(
     output_path = stage / "redrawn" / f"{figure_id}-manual.png"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(image_bytes)
+    aspect_integrity = figure_aspect_ratio_integrity(source_path, output_path)
     audit_path = stage / "manual_arrow_edits" / f"{figure_id}.json"
     editable_svg_path = stage / "manual_arrow_edits" / f"{figure_id}.svg"
     if editable_svg:
@@ -3388,10 +3778,13 @@ def save_manual_arrow_edit(
             "editable_svg": str(editable_svg_path) if editable_svg else None,
             "saved_at": now_utc(),
             "submitted_canvas_size": list(submitted_canvas_size or ()),
-            "output_canvas_size": list(base_canvas_size or ()),
+            "base_canvas_size": list(base_canvas_size or ()),
+            "output_canvas_size": list(output_canvas_size or ()),
             "canvas_normalized_to_base": normalized_canvas,
+            "canvas_crop": canvas_crop,
+            "canvas_crop_inherited": canvas_crop_inherited,
             "operations": operations,
-            "rule": "User-operated local pixel edit: erase only original curved arrows and draw only straight or orthogonal arrows.",
+            "rule": "User-operated SVG edit with server-validated optional content cropping; chemistry changes still require human review.",
         },
     )
     manifest_path = stage / "redrawn_figure_manifest.json"
@@ -3401,6 +3794,8 @@ def save_manual_arrow_edit(
         rows = []
     existing = next((row for row in rows if isinstance(row, dict) and str(row.get("figure_id") or "") == figure_id), {})
     row = dict(existing) if isinstance(existing, dict) else {}
+    row.pop("human_approval", None)
+    row.pop("output_disposition", None)
     row.update(
         {
             "figure_id": figure_id,
@@ -3420,6 +3815,8 @@ def save_manual_arrow_edit(
             "edit_profile": "manual-mechanism-arrow-paths",
             "status": "redrawn",
             "needs_human_check": True,
+            "aspect_ratio_integrity": aspect_integrity,
+            "aspect_ratio_policy": "content_crop_allowed" if canvas_crop else "source_ratio_required",
             "manual_arrow_edit": {
                 "status": "saved",
                 "audit_path": str(audit_path),
@@ -3429,6 +3826,7 @@ def save_manual_arrow_edit(
                 "base_image": str(base_path),
                 "operation_count": len(operations),
                 "source_pixels_preserved_outside_user_strokes": True,
+                "canvas_crop": canvas_crop,
             },
             "chemistry_integrity": {
                 "status": "needs_human_arrow_check",
@@ -3436,7 +3834,7 @@ def save_manual_arrow_edit(
                 "human_check_required": True,
                 "manual_check": "Verify every erased stroke was an original curved arrow and every new arrow has the correct endpoint, direction, color, and route.",
             },
-            "notes": "Manual local arrow edit; no image-generation model or OCR rewriting was used. The SVG is a full-image vector trace with editable arrow overlays.",
+            "notes": "Manual SVG edit; no image-generation model or OCR rewriting was used. The SVG is a full-image vector trace with editable overlays and an optional verified content crop.",
         }
     )
     replacement_rows = [
@@ -3799,7 +4197,17 @@ def approve_figure_for_manuscript(review_root: Path, project_id: str, figure_id:
     if output_path is None:
         raise ValueError("No AI redraw or preview file is available for human approval.")
     aspect_integrity = figure_aspect_ratio_integrity(source_path, output_path)
-    if not figure_aspect_policy_matches(row, aspect_integrity):
+    current_canvas_policy_matches = figure_aspect_policy_matches(row, aspect_integrity)
+    manual_canvas_override = bool(
+        not current_canvas_policy_matches
+        and manual_svg_canvas_review_eligible(
+            stage,
+            row,
+            aspect_integrity,
+            output_path,
+        )
+    )
+    if not current_canvas_policy_matches and not manual_canvas_override:
         source_size = aspect_integrity.get("source_size") or []
         output_size = aspect_integrity.get("output_size") or []
         raise ValueError(
@@ -3820,7 +4228,13 @@ def approve_figure_for_manuscript(review_root: Path, project_id: str, figure_id:
     row["output_image_sha256"] = output_hash
     row["aspect_ratio_integrity"] = aspect_integrity
     row["aspect_ratio_policy"] = (
-        "provider_canvas_allowed" if ai_edit_allows_provider_canvas(row) else "source_ratio_required"
+        "human_verified_manual_canvas"
+        if manual_canvas_override
+        else "content_crop_allowed"
+        if manual_edit_allows_content_crop(row, aspect_integrity)
+        else "provider_canvas_allowed"
+        if ai_edit_allows_provider_canvas(row)
+        else "source_ratio_required"
     )
     row["status"] = "redrawn"
     row["output_disposition"] = "human_approved_for_manuscript"
@@ -3831,6 +4245,9 @@ def approve_figure_for_manuscript(review_root: Path, project_id: str, figure_id:
         "source_sha256": source_hash,
         "output_image": str(output_path),
         "output_sha256": output_hash,
+        "manual_canvas_override": manual_canvas_override,
+        "source_canvas_size": list(aspect_integrity.get("source_size") or []),
+        "output_canvas_size": list(aspect_integrity.get("output_size") or []),
         "current_source_match": True,
         "current_output_match": True,
         "acknowledgement": (
@@ -3838,6 +4255,15 @@ def approve_figure_for_manuscript(review_root: Path, project_id: str, figure_id:
             "layout, and output quality and explicitly allowed manuscript use."
         ),
     }
+    if manual_canvas_override:
+        manual_edit = dict(row.get("manual_arrow_edit") or {})
+        manual_edit["canvas_review"] = {
+            "status": "human-approved",
+            "source_size": list(aspect_integrity.get("source_size") or []),
+            "output_size": list(aspect_integrity.get("output_size") or []),
+            "approved_at": row["human_approval"]["approved_at"],
+        }
+        row["manual_arrow_edit"] = manual_edit
     write_json(manifest_path, {"project_id": project_id, "figures": rows})
 
     figures_handoff = stage / "figures_handoff.json"
@@ -3858,6 +4284,131 @@ def approve_figure_for_manuscript(review_root: Path, project_id: str, figure_id:
         "redrawn_image": str(output_path),
         "human_approval": row["human_approval"],
         "synchronized_draft_assets": synchronized_assets,
+    }
+
+
+def approve_successful_figures_for_manuscript(
+    review_root: Path,
+    project_id: str,
+) -> dict[str, Any]:
+    """Approve every current successful Stage 7 output and leave failures alone.
+
+    This bulk action deliberately reuses ``approve_figure_for_manuscript`` for
+    the actual mutation.  Failed, active, interrupted, stale, missing, or
+    unsupported outputs are reported but never converted into approvals.
+    """
+    project = review_root / "review-projects" / project_id
+    draft_stage = project / "02_section_drafting"
+    stage = project / "03_figure_redraw"
+    candidates = read_json_if_exists(draft_stage / "figure_candidates.json") or []
+    if isinstance(candidates, dict):
+        candidates = candidates.get("figures") or candidates.get("candidates") or []
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("No current figure candidates are available for bulk human approval.")
+
+    manifest = read_json_if_exists(stage / "redrawn_figure_manifest.json") or {}
+    rows = manifest.get("figures") if isinstance(manifest, dict) else []
+    if not isinstance(rows, list):
+        rows = []
+    rows_by_id = {
+        str(row.get("figure_id") or ""): row
+        for row in rows
+        if isinstance(row, dict) and row.get("figure_id")
+    }
+    states = public_figure_redraw_states(review_root, project_id)
+    active_statuses = {"queued", "running", "retrying"}
+    failed_statuses = {"failed", "cancelled", "interrupted"}
+    approved_ids: list[str] = []
+    already_approved_ids: list[str] = []
+    skipped: list[dict[str, str]] = []
+
+    def skip(figure_id: str, status: str, reason: str) -> None:
+        skipped.append({"figure_id": figure_id, "status": status, "reason": reason})
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or candidate.get("manuscript_selected") is False:
+            continue
+        figure_id = str(candidate.get("figure_id") or "").strip()
+        if not figure_id:
+            continue
+        state = states.get(figure_id) or {}
+        generation_status = str(state.get("status") or "").strip().lower()
+        if generation_status in active_statuses:
+            skip(figure_id, generation_status, "Generation is still active.")
+            continue
+        if generation_status in failed_statuses:
+            skip(
+                figure_id,
+                generation_status,
+                str(state.get("error") or "The latest redraw attempt did not complete successfully."),
+            )
+            continue
+
+        row = rows_by_id.get(figure_id)
+        if not isinstance(row, dict) or str(row.get("status") or "") != "redrawn":
+            skip(figure_id, "not_generated", "No successful redrawn manifest row is available.")
+            continue
+        try:
+            source_path = _resolve_candidate_source(review_root, project, candidate)
+            recorded_source = str(row.get("source_image") or "").strip()
+            if (
+                not recorded_source
+                or _normalized_figure_path(recorded_source)
+                != _normalized_figure_path(source_path)
+            ):
+                raise ValueError("The redraw belongs to an older source candidate.")
+            source_hash = sha256_file(source_path)
+            recorded_source_hash = str(row.get("source_image_sha256") or "")
+            if recorded_source_hash and recorded_source_hash != source_hash:
+                raise ValueError("The selected source image changed after this redraw.")
+            output_path = resolve_redrawn_base_path(review_root, project, stage, row)
+            if output_path is None:
+                raise ValueError("No redrawn output file is available.")
+            aspect_integrity = figure_aspect_ratio_integrity(source_path, output_path)
+            if not figure_aspect_policy_matches(row, aspect_integrity):
+                raise ValueError("The output does not satisfy the current canvas policy.")
+            output_hash = sha256_file(output_path)
+        except (OSError, ValueError) as exc:
+            skip(figure_id, "stale_or_invalid", str(exc))
+            continue
+
+        approval = row.get("human_approval") or {}
+        current_approval = bool(
+            approval.get("status") == "approved"
+            and _normalized_figure_path(str(approval.get("source_image") or ""))
+            == _normalized_figure_path(source_path)
+            and str(approval.get("source_sha256") or "") == source_hash
+            and _normalized_figure_path(str(approval.get("output_image") or ""))
+            == _normalized_figure_path(output_path)
+            and str(approval.get("output_sha256") or "") == output_hash
+        )
+        if current_approval:
+            already_approved_ids.append(figure_id)
+            continue
+        try:
+            approve_figure_for_manuscript(review_root, project_id, figure_id)
+        except (RuntimeError, ValueError, OSError) as exc:
+            skip(figure_id, "approval_rejected", str(exc))
+            continue
+        approved_ids.append(figure_id)
+
+    return {
+        "total_candidates": sum(
+            1
+            for candidate in candidates
+            if isinstance(candidate, dict)
+            and candidate.get("manuscript_selected") is not False
+            and candidate.get("figure_id")
+        ),
+        "approved_count": len(approved_ids),
+        "already_approved_count": len(already_approved_ids),
+        "skipped_count": len(skipped),
+        "generation_failed_count": sum(
+            1 for item in skipped if item.get("status") in failed_statuses
+        ),
+        "approved_figure_ids": approved_ids,
+        "already_approved_figure_ids": already_approved_ids,
+        "skipped": skipped,
     }
 
 
@@ -4372,7 +4923,7 @@ def start_batch_figure_redraw(review_root: Path, project_id: str) -> dict[str, o
 def validate_figure_review(project: Path, project_id: str) -> dict[str, Any]:
     draft_stage = project / "02_section_drafting"
     candidates = read_json_if_exists(draft_stage / "paper_figure_candidates.json") or {}
-    papers = candidates.get("papers") if isinstance(candidates, dict) else candidates
+    papers = anchored_figure_review_papers(draft_stage, candidates)
     reviews = (read_json_if_exists(draft_stage / "human_figure_review.json") or {}).get("papers", {})
     reviewable = [str(row.get("paper_id")) for row in papers or [] if isinstance(row, dict) and row.get("candidates")]
     missing = [paper_id for paper_id in reviewable if paper_id not in reviews]
@@ -5202,6 +5753,40 @@ def generate_final_conclusion(review_root: Path, project_id: str) -> dict[str, A
     return {"conclusion": str(draft_stage / "conclusion_generated.md"), "validation": "passed"}
 
 
+def discovery_row_selected_for_matrix(row: dict[str, Any]) -> bool:
+    """Use explicit selection when present and retain legacy saved projects safely."""
+    if "selected_for_matrix" in row:
+        return bool(row.get("selected_for_matrix"))
+    return row.get("keep") is not False
+
+
+def discovery_payload_with_explicit_selection(data: dict[str, Any], selected: dict[str, Any]) -> dict[str, Any]:
+    """Expose one explicit Matrix choice per candidate without mutating source files.
+
+    Confirmed legacy projects preserve the papers that were actually synchronized.
+    Unconfirmed legacy search results start with no papers selected.
+    """
+    payload = json.loads(json.dumps(data, ensure_ascii=False))
+    explicit_mode = str(payload.get("selection_mode") or "") == "explicit"
+    legacy_selected_ids = {
+        str(row.get("paper_id"))
+        for row in selected.get("local_papers") or []
+        if selected.get("human_confirmed") and isinstance(row, dict) and row.get("paper_id")
+    }
+    for group in payload.get("results") or []:
+        if not isinstance(group, dict):
+            continue
+        for row in group.get("local_results") or []:
+            if not isinstance(row, dict) or (explicit_mode and "selected_for_matrix" in row):
+                continue
+            row["selected_for_matrix"] = str(row.get("paper_id") or "") in legacy_selected_ids
+        for row in group.get("web_results") or []:
+            if isinstance(row, dict) and "selected_for_matrix" not in row:
+                row["selected_for_matrix"] = False
+    payload["selection_mode"] = "explicit"
+    return payload
+
+
 def selected_from_combined(groups: list[dict], project_id: str) -> dict:
     selected = {"project_id": project_id, "keywords": [], "local_papers": {}, "web_papers": []}
     for group in groups:
@@ -5209,7 +5794,10 @@ def selected_from_combined(groups: list[dict], project_id: str) -> dict:
             continue
         selected["keywords"].append({"keyword": group.get("keyword"), "category": group.get("category")})
         for row in group.get("local_results", []):
-            if row.get("keep") is False:
+            if (
+                not discovery_row_selected_for_matrix(row)
+                or str(row.get("role") or "").strip().lower() == "excluded"
+            ):
                 continue
             pid = row.get("paper_id")
             if not pid:
@@ -5230,14 +5818,28 @@ def selected_from_combined(groups: list[dict], project_id: str) -> dict:
             item["matched_keywords"].append(group.get("keyword"))
             item["best_score"] = max(item.get("best_score", 0), row.get("score", 0))
         for row in group.get("web_results", []):
-            if row.get("keep") is not False:
+            if discovery_row_selected_for_matrix(row):
                 selected["web_papers"].append({**row, "matched_keyword": group.get("keyword")})
-    limit = discovery_paper_limit()
     selected["local_papers"] = sorted(
         selected["local_papers"].values(), key=lambda x: x.get("best_score", 0), reverse=True
-    )[:limit]
-    selected["web_papers"] = selected["web_papers"][:limit]
+    )
     return selected
+
+
+def discovery_selected_paper_ids(selected: dict[str, Any]) -> list[str]:
+    """Return selected local paper IDs once, preserving reviewer order."""
+    paper_ids: list[str] = []
+    for row in selected.get("local_papers") or []:
+        paper_id = str(row.get("paper_id") or "") if isinstance(row, dict) else ""
+        if paper_id and paper_id not in paper_ids:
+            paper_ids.append(paper_id)
+    return paper_ids
+
+
+def discovery_selection_fingerprint(paper_ids: list[str]) -> str:
+    """Bind Matrix synchronization to the exact selected paper membership."""
+    normalized = "\n".join(sorted(set(paper_ids)))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def matrix_row_from_metadata(paper_id: str, metadata: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -5527,6 +6129,16 @@ def selected_outline_document(
 ) -> str:
     definition = outline_style_definition(outline_style)
     groups = outline_groups(review_root, project_id, rows, definition["tag_key"])
+    representative_ids: list[str] = []
+    for paper_ids in groups.values():
+        if paper_ids and paper_ids[0] not in representative_ids:
+            representative_ids.append(paper_ids[0])
+    for row in rows:
+        paper_id = str(row.get("paper_id") or "") if isinstance(row, dict) else ""
+        if paper_id and paper_id not in representative_ids:
+            representative_ids.append(paper_id)
+    representative_ids = representative_ids[:6]
+    representative_line = f"Assigned papers: {', '.join(representative_ids)}."
     return "\n".join(
         [
             "# Selected Outline",
@@ -5536,10 +6148,12 @@ def selected_outline_document(
             "This working outline is used by Blueprint and later stages.",
             "",
             "## Introduction",
+            representative_line,
             "Purpose: define the review scope, terms, and comparison criteria.",
             "",
             *outline_sections(groups),
             "## Cross-category comparison and conclusion",
+            representative_line,
             "Purpose: compare the main systems, methods, outcomes, evidence boundaries, and limitations.",
             "",
         ]
@@ -5556,14 +6170,17 @@ def write_matrix_outline_documents(review_root: Path, project_id: str, rows: lis
         "",
     ]
     for style, definition in OUTLINE_STYLES.items():
+        groups = outline_groups(review_root, project_id, rows, definition["tag_key"])
+        representative_ids = [paper_ids[0] for paper_ids in groups.values() if paper_ids][:6]
         options.extend(
             [
                 f"# {definition['option_title']}",
                 "",
                 "## Introduction",
+                f"Assigned papers: {', '.join(representative_ids)}.",
                 definition["introduction"],
                 "",
-                *outline_sections(outline_groups(review_root, project_id, rows, definition["tag_key"])),
+                *outline_sections(groups),
             ]
         )
     (stage / "outline_options.md").write_text("\n".join(options), encoding="utf-8")
@@ -5575,10 +6192,10 @@ def sync_matrix_from_discovery(review_root: Path, project_id: str) -> dict[str, 
     selected = read_json_if_exists(discovery_path) or {}
     if not selected.get("human_confirmed"):
         raise ValueError("Discovery must be confirmed before synchronizing the literature matrix.")
-    selected_rows = selected.get("local_papers") or []
-    paper_ids = [str(row.get("paper_id")) for row in selected_rows if isinstance(row, dict) and row.get("paper_id")]
+    paper_ids = discovery_selected_paper_ids(selected)
     if not paper_ids:
         raise ValueError("The confirmed discovery set contains no local papers.")
+    selection_fingerprint = discovery_selection_fingerprint(paper_ids)
 
     stage = project / "01_matrix_outline"
     previous = read_json_if_exists(stage / "literature_matrix.json") or {}
@@ -5588,6 +6205,13 @@ def sync_matrix_from_discovery(review_root: Path, project_id: str) -> dict[str, 
         for row in previous_rows or []
         if isinstance(row, dict) and row.get("paper_id")
     }
+    previous_ids = [
+        str(row.get("paper_id"))
+        for row in previous_rows or []
+        if isinstance(row, dict) and row.get("paper_id")
+    ]
+    added_paper_ids = [paper_id for paper_id in paper_ids if paper_id not in previous_ids]
+    removed_paper_ids = [paper_id for paper_id in previous_ids if paper_id not in paper_ids]
     rows = []
     for paper_id in paper_ids:
         metadata = read_json_if_exists(review_root / "review-library" / "metadata" / "papers" / f"{paper_id}.metadata.json") or {}
@@ -5605,6 +6229,11 @@ def sync_matrix_from_discovery(review_root: Path, project_id: str) -> dict[str, 
         "sync": {
             "source": "00_discovery/selected_discovery_results.json",
             "selected_paper_count": len(rows),
+            "selected_paper_ids": paper_ids,
+            "selection_fingerprint": selection_fingerprint,
+            "selection_current": True,
+            "added_paper_ids": added_paper_ids,
+            "removed_paper_ids": removed_paper_ids,
             "synced_at": synced_at,
             "status": "needs_full_reading",
         },
@@ -5626,6 +6255,11 @@ def sync_matrix_from_discovery(review_root: Path, project_id: str) -> dict[str, 
     )
     return {
         "selected_paper_count": len(rows),
+        "selected_paper_ids": paper_ids,
+        "selection_fingerprint": selection_fingerprint,
+        "selection_current": True,
+        "added_paper_ids": added_paper_ids,
+        "removed_paper_ids": removed_paper_ids,
         "synced_at": synced_at,
         "status": "needs_full_reading",
     }
@@ -5731,6 +6365,32 @@ def conclusion_artifacts_current(
         and sha256_file(draft_path) == expected
         and (report.get("validation") or {}).get("passes_validation") is True
     )
+
+
+def validate_selected_outline_markdown(value: Any) -> str:
+    """Validate the editable outline contract consumed by Stage 4."""
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        raise ValueError("outline_md must not be empty")
+    if len(text) > 250_000:
+        raise ValueError("outline_md exceeds the 250,000 character limit")
+    if not re.search(r"(?m)^##\s+\S.*$", text):
+        raise ValueError("outline_md must contain at least one level-2 section heading such as '## 1. Introduction'")
+    sections: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        heading = re.match(r"^##\s+(?:\d+[.)]\s*)?(.+?)\s*$", line)
+        if heading:
+            current = {"title": heading.group(1).strip(), "paper_ids": []}
+            sections.append(current)
+            continue
+        if current is not None and line.casefold().startswith("assigned papers:"):
+            current["paper_ids"] = re.findall(r"\b[A-Za-z]+\d+\b", line)
+    missing = [section["title"] for section in sections if not section["paper_ids"]]
+    if missing:
+        raise ValueError("Every major section must assign at least one paper. Missing: " + ", ".join(missing))
+    return text + "\n"
 
 
 def section_candidate_dependency_fingerprint(section_drafts_path: Path) -> str:
@@ -6053,6 +6713,15 @@ def project_matrix_payload(review_root: Path, project_id: str) -> dict[str, Any]
     stage = project / "01_matrix_outline"
     discovery = read_json_if_exists(project / "00_discovery" / "selected_discovery_results.json") or {}
     matrix = read_json_if_exists(stage / "literature_matrix.json")
+    selected_paper_ids = discovery_selected_paper_ids(discovery)
+    selection_fingerprint = discovery_selection_fingerprint(selected_paper_ids)
+    matrix_sync = matrix.get("sync") if isinstance(matrix, dict) else {}
+    selection_current = bool(
+        discovery.get("human_confirmed")
+        and matrix_sync
+        and str(matrix_sync.get("selection_fingerprint") or "") == selection_fingerprint
+        and list(matrix_sync.get("selected_paper_ids") or []) == selected_paper_ids
+    )
     return {
         "project_id": project_id,
         "topic": infer_project_topic(project),
@@ -6067,9 +6736,12 @@ def project_matrix_payload(review_root: Path, project_id: str) -> dict[str, Any]
         "matrix_outline_report_md": read_text_if_exists(stage / "matrix_outline_report.md"),
         "discovery_selection": {
             "human_confirmed": bool(discovery.get("human_confirmed")),
-            "selected_paper_count": len(discovery.get("local_papers") or []),
+            "selected_paper_count": len(selected_paper_ids),
+            "selected_paper_ids": selected_paper_ids,
+            "selection_fingerprint": selection_fingerprint,
+            "selection_current": selection_current,
         },
-        "matrix_sync": matrix.get("sync") if isinstance(matrix, dict) else None,
+        "matrix_sync": matrix_sync or None,
         "paths": {"stage_dir": str(stage)},
     }
 
@@ -6201,6 +6873,7 @@ def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any
                     approval["current_output_match"] = False
                     row["human_approval"] = approval
                 aspect_status = "unavailable"
+                row["manual_canvas_review_eligible"] = False
                 if isinstance(candidate, dict):
                     try:
                         ratio_source = _resolve_candidate_source(review_root, project, candidate)
@@ -6211,11 +6884,20 @@ def project_figures_payload(review_root: Path, project_id: str) -> dict[str, Any
                                 ratio_output,
                             )
                             aspect_status = str(row["aspect_ratio_integrity"].get("status") or "unavailable")
+                            row["manual_canvas_review_eligible"] = manual_svg_canvas_review_eligible(
+                                stage,
+                                row,
+                                row["aspect_ratio_integrity"],
+                                ratio_output,
+                            )
                     except (OSError, ValueError):
                         row["aspect_ratio_integrity"] = {"status": "unavailable"}
                 if approval:
                     approval["current_policy_match"] = bool(
-                        aspect_status == "pass" or ai_edit_allows_provider_canvas(row)
+                        figure_aspect_policy_matches(
+                            row,
+                            row.get("aspect_ratio_integrity") or {"status": aspect_status},
+                        )
                     )
                     row["human_approval"] = approval
                 integrity_status = str((row.get("chemistry_integrity") or {}).get("status") or "")
@@ -6324,7 +7006,7 @@ def default_redrawable_candidate(paper: dict[str, Any]) -> dict[str, Any] | None
 
 def sync_reviewed_figure_candidates(stage: Path, candidates_data: dict[str, Any], reviews: dict[str, Any]) -> bool:
     """Make Stage 7 immediately reflect every saved Stage 6 selection."""
-    papers = candidates_data.get("papers") if isinstance(candidates_data, dict) else []
+    papers = anchored_figure_review_papers(stage, candidates_data)
     if not isinstance(papers, list) or not isinstance(reviews, dict):
         return False
     manifest_path = stage / "figure_candidates.json"
@@ -6355,8 +7037,7 @@ def sync_reviewed_figure_candidates(stage: Path, candidates_data: dict[str, Any]
             sync_selected_candidate_for_redraw(stage.parent, paper_id, candidate)
             changed = True
         except RuntimeError:
-            # A candidate without a paragraph anchor remains available for a manual
-            # review; do not make the whole Figure Review page unavailable.
+            # Keep page loading resilient if a legacy candidate manifest is malformed.
             continue
         manifest = read_json_if_exists(manifest_path) or []
         if isinstance(manifest, dict):
@@ -6366,7 +7047,7 @@ def sync_reviewed_figure_candidates(stage: Path, candidates_data: dict[str, Any]
     return changed
 
 
-FIGURE_REVIEW_DEPENDENCY_PROFILE = "candidate-manifests-and-selected-sources-v2"
+FIGURE_REVIEW_DEPENDENCY_PROFILE = "anchored-candidate-manifests-and-selected-sources-v3"
 
 
 def figure_review_dependency_paths(stage: Path) -> list[Path]:
@@ -6393,8 +7074,8 @@ def figure_review_dependency_paths(stage: Path) -> list[Path]:
             if raw:
                 raw_sources.append(str(raw))
     paper_candidates = read_json_if_exists(paths[1]) or {}
-    papers = paper_candidates.get("papers") if isinstance(paper_candidates, dict) else []
-    for paper in papers if isinstance(papers, list) else []:
+    papers = anchored_figure_review_papers(stage, paper_candidates)
+    for paper in papers:
         if not isinstance(paper, dict):
             continue
         paper_id = str(paper.get("paper_id") or "")
@@ -6445,7 +7126,7 @@ def ensure_default_figure_reviews(stage: Path) -> dict[str, Any]:
     """Persist defaults only for papers without an existing user or prior default choice."""
     candidates_path = stage / "paper_figure_candidates.json"
     candidates_data = read_json_if_exists(candidates_path) or {}
-    papers = candidates_data.get("papers") if isinstance(candidates_data, dict) else []
+    papers = anchored_figure_review_papers(stage, candidates_data)
     if not isinstance(papers, list):
         return {"papers": {}}
     review_path = stage / "human_figure_review.json"
@@ -6505,7 +7186,7 @@ def project_figure_review_payload(review_root: Path, project_id: str) -> dict[st
     )
     review_rows = reviews.get("papers") if isinstance(reviews, dict) else {}
     papers: list[dict[str, Any]] = []
-    for row in candidates_data.get("papers", []) if isinstance(candidates_data, dict) else []:
+    for row in anchored_figure_review_papers(stage, candidates_data):
         if not isinstance(row, dict) or not row.get("paper_id"):
             continue
         paper_id = str(row["paper_id"])

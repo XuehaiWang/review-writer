@@ -33,8 +33,6 @@ from review_writer_core.project_config import (  # noqa: E402
     save_project_config,
 )
 from review_writer_core.workspace import discover_review_root  # noqa: E402
-from review_writer_core.runtime_config import discovery_paper_limit  # noqa: E402
-
 from sciatlas_client import SciAtlasClient, load_config, papers_from_response
 
 
@@ -748,6 +746,7 @@ def score_local_paper(
         "reason": "; ".join(reasons) if reasons else "weak or no direct local metadata match",
         "role": role,
         "keep": normalized > 0,
+        "selected_for_matrix": False,
         "source_paths": source_paths,
     }
 
@@ -848,6 +847,7 @@ def web_search(keyword: str, topic: str, limit: int = 8) -> list[dict[str, Any]]
                 "score": round(min(score, 1.0), 4),
                 "reason": "Crossref title/snippet/topic/DOI overlap score",
                 "keep": score > 0.15,
+                "selected_for_matrix": False,
                 "source": "crossref",
             }
         )
@@ -922,6 +922,7 @@ def normalize_sciatlas_paper(item: dict[str, Any]) -> dict[str, Any]:
         "raw_score": raw_score,
         "reason": "SciAtlas KG retrieval (hybrid)",
         "keep": norm > 0,
+        "selected_for_matrix": False,
         "source": "sciatlas",
     }
 
@@ -1017,53 +1018,19 @@ def combine_results(local_grouped: list[dict[str, Any]], web_grouped: list[dict[
     return combined
 
 
-def select_top_papers_balanced_by_year(
-    candidates: list[dict[str, Any]], target_count: int
-) -> list[dict[str, Any]]:
-    """Rank candidates by score without letting score ties erase a whole year.
-
-    score_local_paper's scoring is coarse (a small fixed per-category weight
-    table, then rounded), so it is common for far more than target_count
-    papers to land on the exact same top score. A plain sort by (score, year)
-    descending then truncating would use year purely as a tiebreaker and
-    systematically prefer newer papers within that tie cluster -- for a
-    multi-year discovery window this can silently drop an entire in-range
-    year (typically the oldest one) even though its papers scored identically
-    to the ones kept. Round-robin across years, score-ordered within each
-    year, keeps score as the primary signal while guaranteeing every
-    represented year gets a fair share of the selected set.
-    """
-    by_year: dict[Any, list[dict[str, Any]]] = {}
-    for row in candidates:
-        by_year.setdefault(row.get("year"), []).append(row)
-    for rows in by_year.values():
-        rows.sort(key=lambda r: (r["best_score"], r.get("paper_id") or ""), reverse=True)
-    years_order = sorted((y for y in by_year if y is not None), reverse=True)
-    if None in by_year:
-        years_order.append(None)  # unknown-year papers fill remaining slots last
-
-    result: list[dict[str, Any]] = []
-    round_index = 0
-    while len(result) < target_count and any(round_index < len(by_year[y]) for y in years_order):
-        for year in years_order:
-            if len(result) >= target_count:
-                break
-            bucket = by_year[year]
-            if round_index < len(bucket):
-                result.append(bucket[round_index])
-        round_index += 1
-    result.sort(key=lambda r: (r["best_score"], r.get("year") or 0), reverse=True)
-    return result
-
-
-def selected_from_combined(combined: list[dict[str, Any]], target_count: int = 30) -> dict[str, Any]:
+def selected_from_combined(combined: list[dict[str, Any]]) -> dict[str, Any]:
     selected = {"keywords": [], "local_papers": {}, "web_papers": []}
     for group in combined:
         if not group.get("keep", True):
             continue
         selected["keywords"].append({"keyword": group["keyword"], "category": group.get("category")})
         for result in group.get("local_results", []):
-            if not result.get("keep", True):
+            explicitly_selected = (
+                bool(result.get("selected_for_matrix"))
+                if "selected_for_matrix" in result
+                else result.get("keep", True)
+            )
+            if not explicitly_selected or str(result.get("role") or "").strip().lower() == "excluded":
                 continue
             pid = result.get("paper_id")
             if not pid:
@@ -1086,11 +1053,15 @@ def selected_from_combined(combined: list[dict[str, Any]], target_count: int = 3
             if role_rank(result.get("role")) < role_rank(entry["role"]):
                 entry["role"] = result.get("role")
         for result in group.get("web_results", []):
-            if result.get("keep", True):
+            explicitly_selected = (
+                bool(result.get("selected_for_matrix"))
+                if "selected_for_matrix" in result
+                else result.get("keep", True)
+            )
+            if explicitly_selected:
                 selected["web_papers"].append({**result, "matched_keyword": group["keyword"]})
-    selected["local_papers"] = select_top_papers_balanced_by_year(
-        list(selected["local_papers"].values()), min(target_count, discovery_paper_limit())
-    )
+    selected["local_papers"] = list(selected["local_papers"].values())
+    selected["local_papers"].sort(key=lambda r: (r["best_score"], r.get("year") or 0), reverse=True)
     return selected
 
 
@@ -1405,7 +1376,7 @@ def run(args: argparse.Namespace) -> int:
     })
     web_grouped = external_grouped
     combined = combine_results(local_grouped, web_grouped)
-    selected = selected_from_combined(combined, target_count=args.target_count)
+    selected = selected_from_combined(combined)
     groups = group_selected_papers(selected, papers, group_by)
     output_context = {
         **query_context,
@@ -1423,12 +1394,14 @@ def run(args: argparse.Namespace) -> int:
         {
             "project_id": project_id,
             "topic": args.topic,
+            "selection_mode": "explicit",
             **output_context,
             "results": combined,
         },
     )
     selected["project_id"] = project_id
     selected["human_confirmed"] = False
+    selected["selection_mode"] = "explicit"
     selected.update(output_context)
     write_json(out_dir / "selected_discovery_results.json", selected)
     write_json(
@@ -1470,13 +1443,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sciatlas-timeout", type=int, default=0, help="HTTP timeout in seconds. 0 = use env/default.")
     parser.add_argument("--sciatlas-time-range", default="", help="Optional year range like 2018-2025.")
     parser.add_argument("--sciatlas-domain", default="", help="Optional domain hint, e.g. 'organic chemistry'.")
-    parser.add_argument(
-        "--target-count",
-        type=int,
-        default=30,
-        help="Maximum number of local candidate papers to select, sorted by match score/year. Default: 30 (the "
-        "skill's documented 20-30 range). Raise this for topics that legitimately need more candidates.",
-    )
     return parser.parse_args()
 
 

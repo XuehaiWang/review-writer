@@ -354,7 +354,7 @@
         </div>
         <div class="sidebar-action-row">
           <button class="btn primary" id="saveBtn">Save review</button>
-          <button class="btn orange" id="confirmBtn">Confirm and continue</button>
+          <button class="btn orange" id="confirmBtn">Confirm selected papers and continue</button>
         </div>
         <div class="sidebar-filter-row">
           <input id="keywordFilter" placeholder="Filter keywords">
@@ -371,7 +371,7 @@
         <h2 id="keywordTitle">Keyword Results</h2>
         <div id="keywordMeta" class="sub"></div>
       </div>
-      <div class="toolbar"><button class="btn" id="toggleKeywordBtn">Toggle keyword keep</button></div>
+      <div class="toolbar"><button class="btn" id="toggleKeywordBtn">Toggle keyword keep</button><button class="btn" id="clearPaperSelection">Clear selected papers</button></div>
       <div id="results" class="results"></div>
     </section>
     <section class="panel">
@@ -583,15 +583,19 @@
       els.centerFilter.value = categories.has(selectedValue) || selectedValue === 'all' ? selectedValue : 'all';
     }
     function currentGroup() { return data?.results?.find(g => g.keyword === selectedKeyword); }
+    function candidateSelected(row) { return row?.selected_for_matrix === true && row?.role !== 'excluded'; }
     function discoveryCounts(source=data) {
-      const groups = (source?.results || []).filter(group => group.keep !== false);
-      const localRows = groups.flatMap(group => (group.local_results || []).filter(row => row.keep !== false));
+      const allGroups = source?.results || [];
+      const groups = allGroups.filter(group => group.keep !== false);
+      const localRows = groups.flatMap(group => (group.local_results || []).filter(candidateSelected));
       const externalRows = groups.flatMap(group => (group.web_results || []).filter(row => row.keep !== false));
       const localKeys = localRows.map((row, index) => row.paper_id || (row.title ? `${row.title}|${row.year || ''}` : `local-${index}`));
       const externalKeys = externalRows.map((row, index) => row.doi || row.url || (row.title ? `${row.title}|${row.year || ''}` : `external-${index}`));
+      const candidateLocalKeys = allGroups.flatMap(group => group.local_results || []).map((row, index) => row.paper_id || (row.title ? `${row.title}|${row.year || ''}` : `candidate-${index}`));
       const configuredLibraryTotal = Number(source?.filter_stats?.after_filter ?? source?.filter_stats?.before_filter);
       return {
         uniqueLocal: new Set(localKeys).size,
+        candidateLocal: new Set(candidateLocalKeys).size,
         localHits: localRows.length,
         uniqueExternal: new Set(externalKeys).size,
         externalHits: externalRows.length,
@@ -602,9 +606,9 @@
     function renderStats() {
       const stats = discoveryCounts(data);
       els.discoveryStats.innerHTML = [
-        ['Unique papers', stats.uniqueLocal],
+        ['Selected papers', stats.uniqueLocal],
+        ['Candidate papers', stats.candidateLocal],
         ['Keyword hits', stats.localHits],
-        ['Library papers', stats.libraryTotal],
         ['Keyword groups', stats.keywordGroups]
       ].map(([label, value]) => `<div class="stat-card"><span class="stat-value">${esc(value)}</span><span class="stat-label">${esc(label)}</span></div>`).join('');
       els.keywordGroupCount.textContent = `${stats.keywordGroups} active`;
@@ -622,7 +626,7 @@
         <button class="card ${selectedKeyword===g.keyword?'active':''} ${g.keep===false?'deleted':''}" data-keyword="${esc(g.keyword)}">
           <div class="k-title">${esc(g.keyword)}</div>
           <div class="meta">${esc(categoryLabel(g))}</div>
-          <span class="pill">${(g.local_results||[]).filter(r=>r.keep!==false).length} local</span>
+          <span class="pill">${(g.local_results||[]).filter(candidateSelected).length} selected</span>
           <span class="pill web">${(g.web_results||[]).filter(r=>r.keep!==false).length} external</span>
         </button>`).join('');
     }
@@ -635,12 +639,16 @@
       els.results.innerHTML = rows.map(r => {
         const id = r.kind === 'local' ? r.paper_id : `web-${r.webIndex}`;
         const active = selectedPaper?.kind === r.kind && selectedPaper?.id === id;
-        return `<article class="result ${r.keep===false?'drop':''} ${active?'active':''}" data-result-kind="${esc(r.kind)}" data-result-id="${esc(id)}" tabindex="0" aria-label="${esc(`View details: ${r.title || '(untitled)'}`)}" aria-current="${active?'true':'false'}">
-          <div class="result-heading"><div class="r-title">${esc(r.title || '(untitled)')}</div>${active?'<span class="selected-indicator">Selected</span>':''}</div>
+        const selectedForMatrix = candidateSelected(r);
+        const selectedLabel = r.kind === 'local' ? 'Included in Matrix' : 'Kept as external reference';
+        const includeLabel = r.kind === 'local' ? 'Include in Matrix' : 'Keep as external reference';
+        const removeLabel = r.kind === 'local' ? 'Remove from Matrix' : 'Remove external reference';
+        return `<article class="result ${selectedForMatrix?'':'drop'} ${active?'active':''}" data-result-kind="${esc(r.kind)}" data-result-id="${esc(id)}" tabindex="0" aria-label="${esc(`View details: ${r.title || '(untitled)'}`)}" aria-current="${active?'true':'false'}">
+          <div class="result-heading"><div class="r-title">${esc(r.title || '(untitled)')}</div>${selectedForMatrix?`<span class="selected-indicator">${selectedLabel}</span>`:active?'<span class="selected-indicator">Viewing</span>':''}</div>
           <div class="meta">${esc([r.paper_id, r.year, r.journal, `score=${r.score}`, (Array.isArray(r.sources) && r.sources.length) ? `source=${r.sources.join('+')}` : (r.source ? `source=${r.source}` : null)].filter(Boolean).join(' · '))}</div>
           <div class="meta">${esc(r.reason || '')} ${r.url ? `<a href="${esc(r.url)}" target="_blank">Open link</a>` : ''}</div>
           <div class="r-actions">
-            <button class="btn ${r.keep===false?'primary':'red'}" data-action="toggle" data-kind="${r.kind}" data-id="${esc(id)}">${r.keep===false?'Restore':'Delete'}</button>
+            <button type="button" class="btn ${selectedForMatrix?'red':'primary'}" data-action="toggle" data-kind="${r.kind}" data-id="${esc(id)}" aria-pressed="${selectedForMatrix?'true':'false'}">${selectedForMatrix?removeLabel:includeLabel}</button>
             ${r.kind==='local' ? `<select data-role="${esc(id)}">${['core_candidate','supporting_candidate','background','uncertain','excluded'].map(x=>`<option ${r.role===x?'selected':''}>${x}</option>`).join('')}</select>` : ''}
           </div>
           ${active?'<span class="result-hint">Details are displayed in the right panel.</span>':''}
@@ -651,6 +659,35 @@
       const g = currentGroup();
       if (kind === 'local') return (g.local_results || []).find(r => r.paper_id === id);
       return (g.web_results || [])[Number(id.replace('web-', ''))];
+    }
+    function setCandidateSelection(kind, id, selectedForMatrix) {
+      if (kind === 'local') {
+        (data?.results || []).forEach(group => (group.local_results || []).forEach(row => {
+          if (row.paper_id === id) {
+            row.selected_for_matrix = selectedForMatrix;
+            if (selectedForMatrix && row.role === 'excluded') row.role = 'uncertain';
+          }
+        }));
+        return;
+      }
+      const row = findRow(kind, id);
+      if (row) row.selected_for_matrix = selectedForMatrix;
+    }
+    function setCandidateRole(id, role) {
+      (data?.results || []).forEach(group => (group.local_results || []).forEach(row => {
+        if (row.paper_id === id) {
+          row.role = role;
+          if (role === 'excluded') row.selected_for_matrix = false;
+        }
+      }));
+    }
+    function clearCandidateSelection() {
+      (data?.results || []).forEach(group => {
+        [...(group.local_results || []), ...(group.web_results || [])].forEach(row => {
+          row.selected_for_matrix = false;
+        });
+      });
+      renderAll();
     }
     async function renderDetail() {
       const requestToken = ++detailRequestToken;
@@ -691,8 +728,13 @@
         if (!res.ok || !result.ok) throw new Error(result.error || 'Could not save Discovery.');
         if (confirm) {
           const count = result.matrix_sync?.selected_paper_count || 0;
+          const expectedCount = discoveryCounts(data).uniqueLocal;
+          if (!result.matrix_sync?.selection_current || count !== expectedCount) {
+            throw new Error(`Matrix synchronization mismatch: selected ${expectedCount}, synchronized ${count}. Stay in Discovery and retry.`);
+          }
           els.runStatus.textContent = `Discovery confirmed. ${count} selected papers were synchronized to Matrix.`;
-          window.location.assign(`/matrix?project=${encodeURIComponent(selected)}`);
+          const fingerprint = result.matrix_sync?.selection_fingerprint || '';
+          window.location.assign(`/matrix?project=${encodeURIComponent(selected)}&selection=${encodeURIComponent(fingerprint)}`);
           return;
         }
         msg('Saved');
@@ -708,10 +750,15 @@
     els.results.addEventListener('click', async e => {
       const btn = e.target.closest('[data-action]');
       if (btn) {
+        e.preventDefault();
+        e.stopPropagation();
         const row = findRow(btn.dataset.kind, btn.dataset.id);
-        if (row && btn.dataset.action === 'toggle') row.keep = row.keep === false;
-        renderResults();
-        if (selectedPaper) await renderDetail();
+        if (row && btn.dataset.action === 'toggle') {
+          const selectedForMatrix = !candidateSelected(row);
+          setCandidateSelection(btn.dataset.kind, btn.dataset.id, selectedForMatrix);
+          msg(selectedForMatrix ? 'Added to Matrix selection.' : 'Removed from Matrix selection.');
+        }
+        renderAll();
         return;
       }
       if (e.target.closest('a, select')) return;
@@ -734,7 +781,7 @@
       renderResults();
       await renderDetail();
     });
-    els.results.addEventListener('change', e => { const sel = e.target.closest('[data-role]'); if (sel) findRow('local', sel.dataset.role).role = sel.value; });
+    els.results.addEventListener('change', e => { const sel = e.target.closest('[data-role]'); if (sel) { setCandidateRole(sel.dataset.role, sel.value); renderAll(); } });
     document.getElementById('projectSelect').addEventListener('change', e => loadProject(e.target.value));
     els.globalProjectSelect.addEventListener('change', e => loadProject(e.target.value));
     document.getElementById('reloadBtn').addEventListener('click', () => selected && loadProject(selected));
@@ -742,6 +789,7 @@
     document.getElementById('saveBtn').addEventListener('click', () => save(false));
     document.getElementById('confirmBtn').addEventListener('click', () => save(true));
     document.getElementById('toggleKeywordBtn').addEventListener('click', () => { const g = currentGroup(); if (g) { g.keep = g.keep === false; renderAll(); } });
+    document.getElementById('clearPaperSelection').addEventListener('click', clearCandidateSelection);
     els.keywordFilter.addEventListener('input', renderKeywords);
     els.centerFilter.addEventListener('change', () => {
       const visible = (data?.results || []).filter(g => els.centerFilter.value === 'all' || categoryKey(g) === els.centerFilter.value);

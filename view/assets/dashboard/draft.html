@@ -253,6 +253,20 @@
     .para-actions button { border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; padding:3px 8px; }
     .para-inline-editor { width:100%; min-height:150px; resize:vertical; padding:10px; border:1px solid var(--green); border-radius:8px; font:inherit; line-height:1.55; }
     .para-inline-controls { display:flex; gap:8px; margin-top:8px; }
+    .draft-workflow { display:grid; gap:10px; }
+    .workflow-step { padding:12px 13px; border:1px solid var(--line); border-radius:12px; background:#fffdf7; }
+    .workflow-step strong { display:block; margin-bottom:4px; color:#234f43; }
+    .workflow-step span { display:block; color:var(--muted); font-size:12px; line-height:1.45; }
+    .checks-view { height:100%; overflow:auto; padding:22px 26px 30px; background:#fffdf7; }
+    .checks-intro { margin:0 0 14px; padding:11px 13px; border-radius:11px; background:#eef6f2; color:#3f5d53; font-size:13px; line-height:1.5; }
+    .check-card { margin-bottom:14px; padding:16px 18px; border:1px solid var(--line); border-radius:14px; background:#fffaf1; }
+    .check-card-head { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px; }
+    .check-card h3 { font-size:16px; }
+    .check-status { flex:0 0 auto; padding:3px 8px; border-radius:999px; background:#e4efe4; color:#285a37; font-size:11px; }
+    .check-status.review { background:#f7e4cd; color:#8a4b20; }
+    .check-help { margin:0 0 10px; color:var(--muted); font-size:13px; line-height:1.45; }
+    .check-content { padding-top:8px; border-top:1px solid #e5dac6; }
+    .check-content.markdown { height:auto; overflow:visible; padding:8px 0 0; background:transparent; font-size:14px; }
   </style>
   <link rel="stylesheet" href="/assets/dashboard/review-ui.css?v=20260803">
 </head>
@@ -291,18 +305,16 @@
         <div id="detailMeta" class="sub"></div>
       </div>
       <div class="tabs">
-        <button class="tab active" data-tab="preview">Preview</button>
-        <button class="tab" data-tab="edit">Edit</button>
-        <button class="tab" data-tab="report">Merge Report</button>
-        <button class="tab" data-tab="issues">Issues</button>
+        <button class="tab active" data-tab="preview">Draft Preview</button>
+        <button class="tab" data-tab="edit">Full-text Edit</button>
+        <button class="tab" data-tab="checks">Review Checks</button>
       </div>
       <div class="detail-body">
         <div id="preview" class="draft-view"></div>
         <div id="edit" class="edit-pane" style="display:none">
           <textarea id="draftEditor" class="editor" spellcheck="false"></textarea>
         </div>
-        <div id="report" class="markdown" style="display:none"></div>
-        <div id="issues" class="markdown" style="display:none"></div>
+        <div id="checks" class="checks-view" style="display:none"></div>
       </div>
     </section>
     <section class="panel">
@@ -322,7 +334,7 @@
     let projects = [];
     let selectedProject = '';
     let payload = null;
-    let selectedItem = 'first_draft';
+    let activeTab = 'preview';
     const els = {
       projectSelect: document.getElementById('projectSelect'),
       projectInfo: document.getElementById('projectInfo'),
@@ -331,8 +343,7 @@
       detailMeta: document.getElementById('detailMeta'),
       preview: document.getElementById('preview'),
       draftEditor: document.getElementById('draftEditor'),
-      report: document.getElementById('report'),
-      issues: document.getElementById('issues'),
+      checks: document.getElementById('checks'),
       summaryBox: document.getElementById('summaryBox'),
       message: document.getElementById('message')
     };
@@ -494,18 +505,14 @@
       renderCurrent();
     }
     function renderLeft() {
-      const items = [
-        {id:'first_draft', title:'First Draft', meta:'Unified manuscript preview and editable source'},
-        {id:'merge_report', title:'Merge Report', meta:'Section merge notes and normalization report'},
-        {id:'remaining_issues', title:'Remaining Issues', meta:'Open risks that still need human check'}
-      ];
-      els.leftList.innerHTML = items.map(item => `
-        <button class="item ${selectedItem===item.id?'active':''}" data-id="${item.id}">
-          <div class="item-title">${esc(item.title)}</div>
-          <div class="item-meta">${esc(item.meta)}</div>
-          ${item.id==='first_draft' && payload?.freshness?.stale ? '<span class="pill warn">outdated</span>' : item.id==='first_draft' && payload?.summary?.has_figure_redraw ? '<span class="pill">figures ready</span>' : ''}
-        </button>
-      `).join('');
+      const stale = Boolean(payload?.freshness?.stale);
+      els.leftList.innerHTML = `
+        <div class="draft-workflow">
+          <div class="workflow-step"><strong>1. Draft Preview</strong><span>Read the composed manuscript and edit individual paragraphs in context.</span></div>
+          <div class="workflow-step"><strong>2. Full-text Edit</strong><span>Edit the complete Markdown source when structure or multiple paragraphs must change together.</span></div>
+          <div class="workflow-step"><strong>3. Review Checks</strong><span>Review merge notes and unresolved human checks together before Stage 9.</span></div>
+          ${stale ? '<div class="workflow-step"><span class="pill warn">outdated</span><span>Upstream content changed; regenerate the first draft before editing.</span></div>' : payload?.summary?.has_figure_redraw ? '<div class="workflow-step"><span class="pill">figures ready</span><span>Reviewed figures are available to the current draft.</span></div>' : ''}
+        </div>`;
       els.projectInfo.textContent = `${selectedProject} · ${payload?.topic || ''}`;
     }
     function renderSummary() {
@@ -528,30 +535,48 @@
         <div class="field"><div class="label">Draft Files</div><div class="value">${esc(payload?.paths?.stage_dir || '')}</div></div>
       `;
     }
+    function renderReviewChecks() {
+      const mergeReport = String(payload?.merge_report_md || '').trim();
+      const remainingIssues = String(payload?.remaining_issues_md || '').trim();
+      return `
+        <div class="checks-intro">Merge notes and remaining issues are read-only evidence, so they are grouped here. Correct manuscript text in Draft Preview or Full-text Edit.</div>
+        <section class="check-card">
+          <div class="check-card-head"><h3>Merge and normalization</h3><span class="check-status">${mergeReport ? 'report available' : 'no report'}</span></div>
+          <p class="check-help">Confirms how section text, transitions, terminology, citations, and figures were assembled. It is not a second editable draft.</p>
+          <div class="check-content markdown">${mergeReport ? renderMarkdown(mergeReport, payload?.paths?.stage_dir || '') : '<p>No separate merge warning was produced.</p>'}</div>
+        </section>
+        <section class="check-card">
+          <div class="check-card-head"><h3>Human review items</h3><span class="check-status ${remainingIssues ? 'review' : ''}">${remainingIssues ? 'review required' : 'none recorded'}</span></div>
+          <p class="check-help">Check scientific interpretation, scope boundaries, citations, and every retained figure before continuing to Stage 9.</p>
+          <div class="check-content markdown">${remainingIssues ? renderMarkdown(remainingIssues, payload?.paths?.stage_dir || '') : '<p>No remaining issue file was produced.</p>'}</div>
+        </section>`;
+    }
+    function syncActiveTab() {
+      const valid = new Set(['preview', 'edit', 'checks']);
+      if (!valid.has(activeTab)) activeTab = 'preview';
+      document.querySelectorAll('.tab').forEach(tab => tab.classList.toggle('active', tab.dataset.tab === activeTab));
+      for (const id of valid) document.getElementById(id).style.display = id === activeTab ? 'block' : 'none';
+    }
     function renderCurrent() {
       if (payload?.freshness?.editing_blocked) {
+        activeTab = 'preview';
         els.detailTitle.textContent = '初稿已过期';
         els.detailMeta.textContent = '当前 Blueprint、章节或审核图片已经更新。';
         els.preview.innerHTML = '<div class="empty">请重新生成初稿。旧初稿保留在磁盘中，但不会作为当前流程内容显示或保存。</div>';
-        els.report.innerHTML = '';
-        els.issues.innerHTML = '';
+        els.checks.innerHTML = '';
+        syncActiveTab();
         return;
       }
-      if (selectedItem === 'first_draft') {
-        els.detailTitle.textContent = 'First Draft';
-        els.detailMeta.textContent = 'Unified manuscript preview for the selected project.';
-        els.preview.innerHTML = renderMarkdownWithParagraphs(els.draftEditor.value || '', payload?.paths?.first_draft_base_dir || payload?.paths?.stage_dir || '');
-        els.report.innerHTML = renderMarkdown(payload?.merge_report_md || '', payload?.paths?.stage_dir || '');
-        els.issues.innerHTML = renderMarkdown(payload?.remaining_issues_md || '', payload?.paths?.stage_dir || '');
-      } else if (selectedItem === 'merge_report') {
-        els.detailTitle.textContent = 'Merge Report';
-        els.detailMeta.textContent = 'Section merge and normalization notes.';
-        els.report.innerHTML = renderMarkdown(payload?.merge_report_md || '', payload?.paths?.stage_dir || '');
-      } else {
-        els.detailTitle.textContent = 'Remaining Issues';
-        els.detailMeta.textContent = 'Open issues requiring review.';
-        els.issues.innerHTML = renderMarkdown(payload?.remaining_issues_md || '', payload?.paths?.stage_dir || '');
-      }
+      const titles = {
+        preview:['Draft Preview','Read the manuscript and edit individual paragraphs in context.'],
+        edit:['Full-text Edit','Edit and save the complete Markdown source.'],
+        checks:['Review Checks','Merge evidence and open human-review items before Stage 9.']
+      };
+      els.detailTitle.textContent = titles[activeTab][0];
+      els.detailMeta.textContent = titles[activeTab][1];
+      els.preview.innerHTML = renderMarkdownWithParagraphs(els.draftEditor.value || '', payload?.paths?.first_draft_base_dir || payload?.paths?.stage_dir || '');
+      els.checks.innerHTML = renderReviewChecks();
+      syncActiveTab();
     }
     async function saveDraft(options = {}) {
       if (!selectedProject) return false;
@@ -565,8 +590,6 @@
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify({
           first_draft_md: els.draftEditor.value,
-          merge_report_md: payload?.merge_report_md || '',
-          remaining_issues_md: payload?.remaining_issues_md || '',
           draft_bundle: payload?.draft_bundle || {}
         })
       });
@@ -577,20 +600,9 @@
     }
     window.reviewDraftSaveForHandoff = () => saveDraft({silent:true});
     document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
-      const map = {preview:'preview', edit:'edit', report:'report', issues:'issues'};
-      for (const id of Object.values(map)) document.getElementById(id).style.display = 'none';
-      document.getElementById(map[tab.dataset.tab]).style.display = 'block';
+      activeTab = tab.dataset.tab;
       renderCurrent();
     }));
-    els.leftList.addEventListener('click', e => {
-      const item = e.target.closest('[data-id]');
-      if (!item) return;
-      selectedItem = item.dataset.id;
-      renderLeft();
-      renderCurrent();
-    });
     els.projectSelect.addEventListener('change', e => loadProject(e.target.value));
     document.getElementById('reloadBtn').addEventListener('click', () => selectedProject && loadProject(selectedProject));
     document.getElementById('saveBtn').addEventListener('click', saveDraft);

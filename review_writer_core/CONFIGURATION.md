@@ -51,9 +51,6 @@ OVERVIEW_PROVIDER_SQUARE_ONLY=true
 ## Runtime limits
 
 ```dotenv
-# Maximum papers retained when Discovery materializes a selected set.
-REVIEW_MAX_DISCOVERY_PAPERS=30
-
 # Maximum papers downloaded by one literature acquisition job.
 REVIEW_MAX_LITERATURE_BATCH=30
 ```

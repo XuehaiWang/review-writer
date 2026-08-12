@@ -111,6 +111,53 @@ class DocxUnicodeCompatibilityChecks(unittest.TestCase):
                     if name.endswith(".xml"):
                         ET.fromstring(archive.read(name))
 
+    def test_raw_mathsf_prime_and_mathbf_are_normalized_without_blocking(self) -> None:
+        source = (
+            "# Check\n\n"
+            "MinerU raw notation: \\mathsf { C O } _ { 2 }, "
+            "\\mathbf { R }, and x\\prime.\n"
+        )
+
+        normalized = self.exporter["normalize_mineru_latex"](source)
+
+        self.assertIn("$\\mathsf{CO}_{2}$", normalized)
+        self.assertIn("$\\mathbf{R}$", normalized)
+        self.assertIn("$\\prime$", normalized)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            markdown = temp / "raw-wrapper.md"
+            output = temp / "raw-wrapper.docx"
+            markdown.write_text(source, encoding="utf-8")
+
+            self.exporter["convert"](markdown, output, TEMPLATE)
+
+            self.assertTrue(output.is_file())
+            with ZipFile(output) as archive:
+                for name in archive.namelist():
+                    if name.endswith(".xml"):
+                        ET.fromstring(archive.read(name))
+
+    def test_unknown_mineru_latex_is_warning_only_and_docx_is_created(self) -> None:
+        source = "# Check\n\nUnsupported but visible: \\unknowncommand { X }.\n"
+
+        normalized = self.exporter["normalize_mineru_latex"](source)
+        self.assertIn("\\unknowncommand", normalized)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            markdown = temp / "unknown-command.md"
+            output = temp / "unknown-command.docx"
+            markdown.write_text(source, encoding="utf-8")
+
+            self.exporter["convert"](markdown, output, TEMPLATE)
+
+            self.assertTrue(output.is_file())
+            with ZipFile(output) as archive:
+                document_xml = archive.read("word/document.xml")
+                ET.fromstring(document_xml)
+                self.assertIn(b"unknowncommand", document_xml)
+
 
 if __name__ == "__main__":
     unittest.main()
