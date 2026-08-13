@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from unittest.mock import patch
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -267,6 +268,77 @@ class DiscoveryV1Tests(unittest.TestCase):
                 repository.get_stage_state(self.first.user_id, self.project_id, stage).status,
             )
 
+    def test_failed_atomic_restart_keeps_previous_discovery_and_downstream_current(self) -> None:
+        service = self.app.state.discovery_service
+        repository = self.app.state.workflow_repository
+        with TestClient(self.app) as client:
+            self.discover(client)
+            matrix_artifact, matrix_run = service._write_json_artifact(
+                self.first,
+                self.project_id,
+                stage_id="matrix",
+                logical_name="matrix/literature_matrix.json",
+                payload={"rows": [{"paper_id": "P001"}]},
+            )
+            repository.compare_and_set_stage(
+                self.first.user_id,
+                self.project_id,
+                "matrix",
+                0,
+                status="approved",
+                current_run_id=matrix_run.id,
+            )
+            before = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+            with patch.object(
+                repository,
+                "replace_discovery_atomically",
+                side_effect=RuntimeError("injected atomic replacement failure"),
+            ):
+                failed = self.discover(client, "Replacement must roll back")
+            after = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+
+        self.assertEqual("failed", failed["status"])
+        self.assertEqual(before["artifact_id"], after["artifact_id"])
+        self.assertEqual("Copper allenation", after["topic"])
+        self.assertEqual(
+            matrix_artifact.id,
+            repository.get_current_artifact(
+                self.first.user_id,
+                self.project_id,
+                "matrix/literature_matrix.json",
+            ).id,
+        )
+        self.assertEqual(
+            "approved",
+            repository.get_stage_state(
+                self.first.user_id, self.project_id, "matrix"
+            ).status,
+        )
+
+    def test_identical_restart_reuses_content_without_losing_atomic_transition(self) -> None:
+        service = self.app.state.discovery_service
+        with TestClient(self.app) as client:
+            self.discover(client)
+            before = client.get(
+                f"/api/v1/projects/{self.project_id}/discovery"
+            ).json()
+            current_payload, _artifact = service._read_current(
+                self.first, self.project_id, "discovery/review.json"
+            )
+            restarted = service.replace_from_job(
+                self.first,
+                self.project_id,
+                {"topic": before["topic"]},
+                current_payload,
+            )
+            after = client.get(
+                f"/api/v1/projects/{self.project_id}/discovery"
+            ).json()
+
+        self.assertEqual(before["artifact_id"], restarted["artifact_id"])
+        self.assertEqual(before["artifact_id"], after["artifact_id"])
+        self.assertEqual(before["revision"] + 1, after["revision"])
+
     def test_viewing_candidate_does_not_select_it(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client)
@@ -351,6 +423,37 @@ class DiscoveryV1Tests(unittest.TestCase):
             reloaded["results"][1]["local_results"][1]["role"],
         )
 
+    def test_failed_atomic_save_keeps_previous_discovery_pointer_and_revision(self) -> None:
+        repository = self.app.state.workflow_repository
+        with TestClient(self.app) as client:
+            self.discover(client)
+            before = client.get(
+                f"/api/v1/projects/{self.project_id}/discovery"
+            ).json()
+            changed = before["results"]
+            changed[0]["keep"] = False
+            with patch.object(
+                repository,
+                "save_discovery_atomically",
+                side_effect=RuntimeError("injected atomic save failure"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    client.put(
+                        f"/api/v1/projects/{self.project_id}/discovery",
+                        json={
+                            "revision": before["revision"],
+                            "results": changed,
+                        },
+                        headers=self.headers(),
+                    )
+            after = client.get(
+                f"/api/v1/projects/{self.project_id}/discovery"
+            ).json()
+
+        self.assertEqual(before["artifact_id"], after["artifact_id"])
+        self.assertEqual(before["revision"], after["revision"])
+        self.assertTrue(after["results"][0]["keep"])
+
     def test_confirm_synchronizes_exact_selection(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client)
@@ -394,6 +497,18 @@ class DiscoveryV1Tests(unittest.TestCase):
             )
         self.assertEqual(422, rejected.status_code)
         self.assertEqual("DISCOVERY_SELECTION_NOT_IN_LIBRARY", rejected.json()["error"]["code"])
+
+    def test_failed_atomic_confirmation_keeps_old_matrix_and_discovery_state_current(self) -> None:
+        with TestClient(self.app) as client:
+            self.discover(client)
+            selected = client.post(f"/api/v1/projects/{self.project_id}/discovery/selection/top", json={"count": 1}, headers=self.headers()).json()
+            before = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+            with patch.object(self.app.state.workflow_repository, "confirm_discovery_atomically", side_effect=RuntimeError("injected")):
+                with self.assertRaises(RuntimeError):
+                    client.post(f"/api/v1/projects/{self.project_id}/discovery/confirm", json={"revision": selected["revision"]}, headers=self.headers())
+            after = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+        self.assertEqual(before["artifact_id"], after["artifact_id"])
+        self.assertIsNone(self.app.state.workflow_repository.get_current_artifact(self.first.user_id, self.project_id, "matrix/literature_matrix.json"))
 
     def test_external_results_preserve_source_identity_and_project_isolation(self) -> None:
         with TestClient(self.app) as client:

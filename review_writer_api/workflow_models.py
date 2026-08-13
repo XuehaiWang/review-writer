@@ -66,6 +66,32 @@ class LibraryPaper(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class LibraryArtifact(Base):
+    """Immutable user-owned Library file version addressable by artifact ID."""
+
+    __tablename__ = "library_artifacts"
+    __table_args__ = (
+        Index("ix_library_artifacts_user_paper_kind", "user_id", "paper_id", "kind"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    paper_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    relative_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    mtime_ns: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    availability: Mapped[str] = mapped_column(
+        String(32), default="available", nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
 class WorkflowStageRun(Base):
     __tablename__ = "workflow_stage_runs"
     __table_args__ = (

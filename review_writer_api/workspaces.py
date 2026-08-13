@@ -24,9 +24,15 @@ class HostedWorkspaceManager:
             safe_user_id = str(uuid.UUID(str(user_id)))
         except ValueError as exc:
             raise WorkspaceAccessError("Authenticated user ID is invalid.") from exc
-        candidate = (self.root / safe_user_id).resolve()
+        lexical = self.root / safe_user_id
+        if lexical.is_symlink():
+            raise WorkspaceAccessError("User workspace is not trusted.")
+        candidate = lexical.resolve()
         if candidate.parent != self.root:
             raise WorkspaceAccessError("User workspace escaped the configured root.")
+        candidate.mkdir(exist_ok=True)
+        if lexical.is_symlink():
+            raise WorkspaceAccessError("User workspace is not trusted.")
         self._ensure_layout(candidate)
         return candidate
 
@@ -37,13 +43,38 @@ class HostedWorkspaceManager:
             raise WorkspaceAccessError(str(exc)) from exc
         user_root = self.user_root(user_id)
         projects_root = (user_root / "review-projects").resolve()
-        candidate = (projects_root / safe_slug).resolve()
+        lexical = projects_root / safe_slug
+        if lexical.is_symlink():
+            raise WorkspaceAccessError("Project workspace is not trusted.")
+        candidate = lexical.resolve()
         if candidate.parent != projects_root:
-            raise WorkspaceAccessError("Project workspace escaped the authenticated user root.")
+            raise WorkspaceAccessError(
+                "Project workspace escaped the authenticated user root."
+            )
         return candidate
 
-    @staticmethod
-    def _ensure_layout(user_root: Path) -> None:
+    def trusted_user_directory(self, user_id: str, *parts: str) -> Path:
+        """Resolve/create a user-owned internal directory without traversing symlinks."""
+        current = self.user_root(user_id)
+        for part in parts:
+            if not part or part in {".", ".."} or Path(part).name != part:
+                raise WorkspaceAccessError("Workspace directory component is invalid.")
+            candidate = current / part
+            if candidate.is_symlink():
+                raise WorkspaceAccessError(
+                    "Workspace internal directory is not trusted."
+                )
+            candidate.mkdir(exist_ok=True)
+            resolved = candidate.resolve()
+            if candidate.is_symlink() or resolved.parent != current:
+                raise WorkspaceAccessError(
+                    "Workspace internal directory escaped the user root."
+                )
+            current = resolved
+        return current
+
+    @classmethod
+    def _ensure_layout(cls, user_root: Path) -> None:
         directories = (
             user_root / "review-projects",
             user_root / "review-library" / "metadata" / "papers",
@@ -54,4 +85,18 @@ class HostedWorkspaceManager:
             user_root / ".review-writer",
         )
         for directory in directories:
-            directory.mkdir(parents=True, exist_ok=True)
+            relative = directory.relative_to(user_root)
+            current = user_root
+            for part in relative.parts:
+                candidate = current / part
+                if candidate.is_symlink():
+                    raise WorkspaceAccessError(
+                        "Workspace internal directory is not trusted."
+                    )
+                candidate.mkdir(exist_ok=True)
+                resolved = candidate.resolve()
+                if candidate.is_symlink() or resolved.parent != current:
+                    raise WorkspaceAccessError(
+                        "Workspace internal directory escaped the user root."
+                    )
+                current = resolved

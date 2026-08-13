@@ -9,12 +9,16 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from sqlalchemy import select
+
+from review_writer_api.database import database_session
 from review_writer_api.errors import (
     ArtifactFileMissing,
     WorkflowNotFound,
     WorkflowValidationError,
 )
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
+from review_writer_api.workflow_models import LibraryArtifact
 from review_writer_api.workspaces import HostedWorkspaceManager
 
 
@@ -112,6 +116,7 @@ class ArtifactService:
         logical_name: str,
         artifact_type: str,
         producer_stage: str,
+        make_current: bool = True,
         validator: Callable[[Path], None] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> ArtifactRecord:
@@ -147,9 +152,11 @@ class ArtifactService:
         )
         if existing is not None:
             source.unlink()
-            return self.repository.set_current_artifact(
-                user_id, project_id, logical.as_posix(), existing.id
-            )
+            if make_current:
+                return self.repository.set_current_artifact(
+                    user_id, project_id, logical.as_posix(), existing.id
+                )
+            return existing
 
         artifact_id = str(uuid.uuid4())
         project_root = self.workspace_manager.project_path(user_id, project.slug)
@@ -187,12 +194,55 @@ class ArtifactService:
             producer_stage=producer_stage,
             producer_run_id=run_id,
             metadata=metadata,
+            make_current=make_current,
         )
 
     def resolve_owned_artifact(self, user_id: str, artifact_id: str) -> ResolvedArtifact:
         owned = self.repository.get_artifact(user_id, artifact_id)
         if owned is None:
-            raise WorkflowNotFound("Artifact not found.")
+            try:
+                artifact_uuid = uuid.UUID(str(artifact_id))
+                user_uuid = uuid.UUID(str(user_id))
+            except ValueError as exc:
+                raise WorkflowNotFound("Artifact not found.") from exc
+            with database_session(self.repository.session_factory) as session:
+                library = session.scalar(
+                    select(LibraryArtifact).where(
+                        LibraryArtifact.id == artifact_uuid,
+                        LibraryArtifact.user_id == user_uuid,
+                    )
+                )
+                if library is None:
+                    raise WorkflowNotFound("Artifact not found.")
+                relative = self._safe_relative(
+                    library.relative_path, label="Stored Library artifact path"
+                )
+                user_root = self.workspace_manager.user_root(user_id)
+                path = (user_root / Path(*relative.parts)).resolve()
+                try:
+                    path.relative_to(user_root)
+                except ValueError as exc:
+                    raise WorkflowNotFound("Artifact not found.") from exc
+                record = ArtifactRecord(
+                    id=str(library.id),
+                    project_id="",
+                    logical_name=f"library/{library.paper_id}/{library.kind}",
+                    artifact_type=library.kind,
+                    relative_path=library.relative_path,
+                    content_sha256=library.content_sha256,
+                    size_bytes=library.size_bytes,
+                    mtime_ns=library.mtime_ns,
+                    availability=library.availability,
+                    producer_stage="library",
+                    producer_run_id=None,
+                    metadata={"paper_id": library.paper_id, "kind": library.kind},
+                )
+            if record.availability != "available" or not path.is_file():
+                raise ArtifactFileMissing(
+                    "The Library artifact record exists but its file is missing.",
+                    details={"artifact_id": artifact_id},
+                )
+            return ResolvedArtifact(artifact=record, path=path)
         relative = self._safe_relative(
             owned.artifact.relative_path, label="Stored artifact path"
         )

@@ -122,6 +122,7 @@ class DiscoveryService:
         stage_id: str,
         logical_name: str,
         payload: dict[str, Any],
+        make_current: bool = True,
     ):
         run = self.repository.create_stage_run(
             principal.user_id,
@@ -143,6 +144,7 @@ class DiscoveryService:
             logical_name=logical_name,
             artifact_type="json",
             producer_stage=stage_id,
+            make_current=make_current,
         ), run
 
     def _read_current(self, principal: Principal, project_id: str, logical_name: str) -> tuple[dict[str, Any], Any]:
@@ -251,14 +253,15 @@ class DiscoveryService:
                 stage_id="discovery",
                 logical_name=DISCOVERY_LOGICAL_NAME,
                 payload=review,
+                make_current=False,
             )
-            next_state = self.repository.compare_and_set_stage(
+            next_state = self.repository.save_discovery_atomically(
                 principal.user_id,
                 project_id,
-                "discovery",
-                expected_revision,
+                artifact_id=artifact.id,
+                run_id=run.id,
+                expected_revision=expected_revision,
                 status=status_value,
-                current_run_id=run.id,
             )
         return {
             **review,
@@ -268,41 +271,62 @@ class DiscoveryService:
             "selected_paper_ids": self.selected_paper_ids(review),
         }
 
-    def replace_from_job(self, principal: Principal, project_id: str, payload: dict[str, Any], built: dict[str, Any]) -> dict[str, Any]:
+    def replace_from_job(
+        self,
+        principal: Principal,
+        project_id: str,
+        payload: dict[str, Any],
+        built: dict[str, Any],
+    ) -> dict[str, Any]:
         self._owned_project(principal, project_id)
-        review = normalize_review({**built, "project_id": project_id, "topic": payload["topic"]})
-        state = self.repository.get_stage_state(principal.user_id, project_id, "discovery")
-        result = self._publish_review(
+        review = normalize_review(
+            {**built, "project_id": project_id, "topic": payload["topic"]}
+        )
+        state = self.repository.get_stage_state(
+            principal.user_id, project_id, "discovery"
+        )
+        artifact, run = self._write_json_artifact(
             principal,
             project_id,
-            review,
-            expected_revision=state.revision if state else 0,
+            stage_id="discovery",
+            logical_name=DISCOVERY_LOGICAL_NAME,
+            payload=review,
+            make_current=False,
         )
-        self.repository.invalidate_downstream_after_discovery(principal.user_id, project_id)
-        with database_session(self.repository.session_factory) as session:
-            project = session.scalar(
-                select(Project).where(
-                    Project.id == uuid.UUID(project_id),
-                    Project.user_id == uuid.UUID(principal.user_id),
-                )
-            )
-            if project is not None:
-                project.topic = str(payload["topic"])
-                project.updated_at = utc_now()
+        next_state = self.repository.replace_discovery_atomically(
+            principal.user_id,
+            project_id,
+            artifact_id=artifact.id,
+            run_id=run.id,
+            expected_revision=state.revision if state else 0,
+            topic=str(payload["topic"]),
+        )
         return {
-            "artifact_id": result["artifact_id"],
-            "revision": result["revision"],
-            "statistics": result["statistics"],
+            "artifact_id": artifact.id,
+            "revision": next_state.revision,
+            "statistics": statistics(review),
         }
 
-    def save(self, principal: Principal, project_id: str, revision: int, results: list[Any]) -> dict[str, Any]:
+    def save(
+        self,
+        principal: Principal,
+        project_id: str,
+        revision: int,
+        results: list[Any],
+    ) -> dict[str, Any]:
         current, _artifact = self._read_current(principal, project_id, DISCOVERY_LOGICAL_NAME)
         merged = self._merge_mutable(current, results)
         return self._publish_review(
             principal, project_id, merged, expected_revision=int(revision)
         )
 
-    def select_one(self, principal: Principal, project_id: str, paper_id: str, selected: bool) -> dict[str, Any]:
+    def select_one(
+        self,
+        principal: Principal,
+        project_id: str,
+        paper_id: str,
+        selected: bool,
+    ) -> dict[str, Any]:
         current = self.get(principal, project_id)
         found = False
         for group in current["results"]:
@@ -316,7 +340,9 @@ class DiscoveryService:
             raise WorkflowNotFound("Discovery candidate not found.")
         return self.save(principal, project_id, current["revision"], current["results"])
 
-    def select_top(self, principal: Principal, project_id: str, count: int) -> dict[str, Any]:
+    def select_top(
+        self, principal: Principal, project_id: str, count: int
+    ) -> dict[str, Any]:
         if int(count) < 1:
             raise WorkflowValidationError("Top-N count must be positive.")
         current = self.get(principal, project_id)
@@ -334,7 +360,9 @@ class DiscoveryService:
                 order += 1
         selected_ids = {
             identity
-            for identity, _rank in sorted(ranked.items(), key=lambda item: (-item[1][0], item[1][1]))[: int(count)]
+            for identity, _rank in sorted(
+                ranked.items(), key=lambda item: (-item[1][0], item[1][1])
+            )[: int(count)]
         }
         for group in current["results"]:
             for row in group.get("local_results") or []:
@@ -347,7 +375,10 @@ class DiscoveryService:
     def clear(self, principal: Principal, project_id: str) -> dict[str, Any]:
         current = self.get(principal, project_id)
         for group in current["results"]:
-            for row in [*(group.get("local_results") or []), *(group.get("web_results") or [])]:
+            for row in [
+                *(group.get("local_results") or []),
+                *(group.get("web_results") or []),
+            ]:
                 row["selected_for_matrix"] = False
         return self.save(principal, project_id, current["revision"], current["results"])
 
@@ -370,7 +401,9 @@ class DiscoveryService:
                 )
             ).all()
         catalog_by_id = {row.paper_id: row for row in catalog}
-        missing = [paper_id for paper_id in selected_ids if paper_id not in catalog_by_id]
+        missing = [
+            paper_id for paper_id in selected_ids if paper_id not in catalog_by_id
+        ]
         if missing:
             raise DiscoverySelectionNotInLibrary(
                 "Selected Discovery papers must belong to your active Library catalog.",
@@ -378,15 +411,36 @@ class DiscoveryService:
             )
 
         def metadata_value(row: LibraryPaper, key: str, default: Any) -> Any:
-            return _field_value(row.metadata_json.get(key)) if row.metadata_json.get(key) is not None else default
+            value = row.metadata_json.get(key)
+            return _field_value(value) if value is not None else default
 
         rows = [
             {
                 "paper_id": paper_id,
-                "title": metadata_value(catalog_by_id[paper_id], "title", catalog_by_id[paper_id].title) or paper_id,
-                "authors": metadata_value(catalog_by_id[paper_id], "authors", catalog_by_id[paper_id].authors_json) or [],
-                "keywords": metadata_value(catalog_by_id[paper_id], "keywords", catalog_by_id[paper_id].keywords_json) or [],
-                "abstract": metadata_value(catalog_by_id[paper_id], "abstract", "abstract unavailable or unreliable") or "abstract unavailable or unreliable",
+                "title": metadata_value(
+                    catalog_by_id[paper_id],
+                    "title",
+                    catalog_by_id[paper_id].title,
+                )
+                or paper_id,
+                "authors": metadata_value(
+                    catalog_by_id[paper_id],
+                    "authors",
+                    catalog_by_id[paper_id].authors_json,
+                )
+                or [],
+                "keywords": metadata_value(
+                    catalog_by_id[paper_id],
+                    "keywords",
+                    catalog_by_id[paper_id].keywords_json,
+                )
+                or [],
+                "abstract": metadata_value(
+                    catalog_by_id[paper_id],
+                    "abstract",
+                    "abstract unavailable or unreliable",
+                )
+                or "abstract unavailable or unreliable",
                 "main_content": "",
                 "year": metadata_value(catalog_by_id[paper_id], "year", None),
                 "journal": metadata_value(catalog_by_id[paper_id], "journal", "") or "",
@@ -395,7 +449,9 @@ class DiscoveryService:
             }
             for paper_id in selected_ids
         ]
-        fingerprint = hashlib.sha256("\n".join(sorted(selected_ids)).encode("utf-8")).hexdigest()
+        fingerprint = hashlib.sha256(
+            "\n".join(sorted(selected_ids)).encode("utf-8")
+        ).hexdigest()
         matrix = {
             "project_id": project_id,
             "rows": rows,
@@ -407,28 +463,24 @@ class DiscoveryService:
             },
         }
         with self._write_lock:
-            matrix_state = self.repository.get_stage_state(principal.user_id, project_id, "matrix")
+            matrix_state = self.repository.get_stage_state(
+                principal.user_id, project_id, "matrix"
+            )
             matrix_artifact, matrix_run = self._write_json_artifact(
                 principal,
                 project_id,
                 stage_id="matrix",
                 logical_name=MATRIX_LOGICAL_NAME,
                 payload=matrix,
+                make_current=False,
             )
-            next_matrix = self.repository.compare_and_set_stage(
+            discovery_state, next_matrix = self.repository.confirm_discovery_atomically(
                 principal.user_id,
                 project_id,
-                "matrix",
-                matrix_state.revision if matrix_state else 0,
-                status="review",
-                current_run_id=matrix_run.id,
-            )
-            discovery_state = self.repository.compare_and_set_stage(
-                principal.user_id,
-                project_id,
-                "discovery",
-                current["revision"],
-                status="approved",
+                artifact_id=matrix_artifact.id,
+                run_id=matrix_run.id,
+                expected_discovery_revision=current["revision"],
+                expected_matrix_revision=matrix_state.revision if matrix_state else 0,
             )
         return {
             "discovery_revision": discovery_state.revision,

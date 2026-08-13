@@ -12,6 +12,7 @@ import uuid
 from contextlib import closing, redirect_stderr
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import create_engine, delete, event, func, select
 from sqlalchemy.orm import sessionmaker
@@ -25,7 +26,10 @@ from review_writer_api.database import (
     create_session_factory,
     database_session,
 )
+from review_writer_api.domain_services.library import LibraryService
+from review_writer_api.security import Principal, Role
 from review_writer_api.workflow_models import (
+    LibraryArtifact,
     LibraryPaper,
     WorkflowArtifact,
     WorkflowArtifactDependency,
@@ -37,6 +41,7 @@ from review_writer_api.workflow_models import (
     WorkflowStageState,
     WorkflowSystemState,
 )
+from review_writer_api.workspaces import HostedWorkspaceManager
 from view.workflow_store import WorkflowStore
 
 
@@ -313,15 +318,25 @@ class WorkflowMigrationTests(unittest.TestCase):
         self.assertEqual(2, self._count(WorkflowJob))
         self.assertEqual(2, self._count(WorkflowCurrentJob))
         self.assertEqual(1, self._count(LibraryPaper))
+        self.assertEqual(3, self._count(LibraryArtifact))
         self.assertEqual(1, self._count(WorkflowMigration))
 
         with self.sessions() as session:
             run = session.get(WorkflowStageRun, uuid.UUID(self.ids["run_alpha"]))
             self.assertEqual("zh", run.metadata_json["language"])
             paper = session.scalar(select(LibraryPaper))
+            artifacts = list(session.scalars(select(LibraryArtifact)))
             self.assertEqual("P001", paper.paper_id)
+            self.assertEqual(
+                {"pdf", "markdown", "metadata"},
+                {artifact.kind for artifact in artifacts},
+            )
+            self.assertEqual(
+                {str(artifact.id) for artifact in artifacts},
+                set(paper.metadata_json["_artifact_ids"].values()),
+            )
             self.assertEqual("Legacy copper paper", paper.title)
-            self.assertEqual("review-library/uploads/P001.pdf", paper.pdf_relative_path)
+            self.assertIn("review-library/.artifacts/P001/", paper.pdf_relative_path)
             self.assertEqual(self.ids["run_alpha"], run.legacy_id)
             missing = session.get(WorkflowArtifact, uuid.UUID(self.ids["artifact_missing"]))
             self.assertEqual("missing", missing.availability)
@@ -342,7 +357,69 @@ class WorkflowMigrationTests(unittest.TestCase):
         with self.sessions() as session:
             ready = session.get(WorkflowSystemState, "workflow_ready")
             self.assertEqual("ready", ready.value_json["status"])
-        self.assertEqual([], self.migration.validate_migrated_workflows(self.sessions, accepted))
+        self.assertEqual(
+            [], self.migration.validate_migrated_workflows(self.sessions, accepted)
+        )
+
+    def test_migrated_library_metadata_edit_preserves_imported_artifact(self) -> None:
+        report = self.migration.migrate_legacy_workflows(
+            self.workspace_root,
+            self.backup_root,
+            self.sessions,
+            accept_missing_files=True,
+        )
+        self.assertTrue(report.ready)
+        with self.sessions() as session:
+            paper = session.scalar(select(LibraryPaper))
+            imported_metadata = session.get(
+                LibraryArtifact,
+                uuid.UUID(paper.metadata_json["_artifact_ids"]["metadata"]),
+            )
+            imported_path = self.review_root / Path(
+                *imported_metadata.relative_path.split("/")
+            )
+            imported_bytes = imported_path.read_bytes()
+            imported_sha256 = imported_metadata.content_sha256
+
+        service = LibraryService(
+            self.sessions, HostedWorkspaceManager(self.workspace_root)
+        )
+        principal = Principal(
+            self.user_id, frozenset({Role.USER}), "owner@example.com"
+        )
+        updated_metadata = dict(paper.metadata_json)
+        updated_metadata["title"] = {"value": "Edited after migration"}
+        updated = service.update_metadata(principal, paper.paper_id, updated_metadata)
+
+        self.assertEqual("Edited after migration", updated.title)
+        self.assertNotEqual(
+            str(imported_metadata.id), updated.artifact_ids["metadata"]
+        )
+        self.assertEqual(imported_bytes, imported_path.read_bytes())
+        self.assertEqual(imported_sha256, hashlib.sha256(imported_bytes).hexdigest())
+
+    def test_import_rejects_intermediate_library_symlink(self) -> None:
+        unsafe_directory = self.review_root / "review-library"
+        original_is_symlink = Path.is_symlink
+
+        def reports_intermediate_symlink(path: Path) -> bool:
+            return path == unsafe_directory or original_is_symlink(path)
+
+        with patch.object(Path, "is_symlink", reports_intermediate_symlink):
+            report = self.migration.migrate_legacy_workflows(
+                self.workspace_root,
+                self.backup_root,
+                self.sessions,
+                accept_missing_files=True,
+            )
+
+        self.assertFalse(report.success)
+        self.assertTrue(
+            any("symbolic link" in error.lower() for error in report.errors),
+            report.errors,
+        )
+        self.assertEqual(0, self._count(LibraryPaper))
+        self.assertEqual(0, self._count(LibraryArtifact))
 
     def test_broken_legacy_dependency_rolls_back_source_and_leaves_readiness_unset(self) -> None:
         with closing(sqlite3.connect(self.ids["database_path"])) as connection:

@@ -484,6 +484,198 @@ class PostgreSQLWorkflowRepositoryTests(unittest.TestCase):
             )
         self.assertEqual(2, count)
 
+    def test_concurrent_discovery_replacements_promote_one_complete_transition(self) -> None:
+        def stage_artifact(stage: str, logical_name: str, seed: int, *, current: bool):
+            run = self.repository.create_stage_run(
+                self.user_id,
+                self.project_id,
+                stage,
+                status="succeeded",
+            )
+            artifact = self.repository.publish_artifact(
+                user_id=self.user_id,
+                project_id=self.project_id,
+                artifact_id=str(uuid.uuid4()),
+                logical_name=logical_name,
+                artifact_type="json",
+                relative_path=f".artifacts/{stage}/{seed}.json",
+                content_sha256=f"{seed:064x}",
+                size_bytes=seed,
+                mtime_ns=seed,
+                producer_stage=stage,
+                producer_run_id=run.id,
+                make_current=current,
+            )
+            return artifact, run
+
+        initial, initial_run = stage_artifact(
+            "discovery", "discovery/review.json", 101, current=True
+        )
+        self.repository.compare_and_set_stage(
+            self.user_id,
+            self.project_id,
+            "discovery",
+            0,
+            status="review",
+            current_run_id=initial_run.id,
+        )
+        matrix, matrix_run = stage_artifact(
+            "matrix", "matrix/literature_matrix.json", 102, current=True
+        )
+        self.repository.compare_and_set_stage(
+            self.user_id,
+            self.project_id,
+            "matrix",
+            0,
+            status="approved",
+            current_run_id=matrix_run.id,
+        )
+        staged = [
+            (*stage_artifact("discovery", "discovery/review.json", seed, current=False), topic)
+            for seed, topic in ((201, "First replacement"), (202, "Second replacement"))
+        ]
+        barrier = threading.Barrier(2)
+
+        def replace(candidate):
+            artifact, run, topic = candidate
+            barrier.wait(timeout=10)
+            try:
+                state = self.repository.replace_discovery_atomically(
+                    self.user_id,
+                    self.project_id,
+                    artifact_id=artifact.id,
+                    run_id=run.id,
+                    expected_revision=1,
+                    topic=topic,
+                )
+                return "promoted", artifact.id, topic, state.revision
+            except self.errors.WorkflowConflict:
+                return "conflict", artifact.id, topic, None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(replace, staged))
+
+        promoted = [item for item in outcomes if item[0] == "promoted"]
+        self.assertEqual(1, len(promoted), outcomes)
+        self.assertEqual(2, promoted[0][3])
+        current = self.repository.get_current_artifact(
+            self.user_id, self.project_id, "discovery/review.json"
+        )
+        self.assertEqual(promoted[0][1], current.id)
+        self.assertIsNone(
+            self.repository.get_current_artifact(
+                self.user_id, self.project_id, "matrix/literature_matrix.json"
+            )
+        )
+        self.assertEqual(
+            "pending",
+            self.repository.get_stage_state(
+                self.user_id, self.project_id, "matrix"
+            ).status,
+        )
+        with database_session(self.sessions) as session:
+            project = session.get(Project, uuid.UUID(self.project_id))
+            self.assertEqual(promoted[0][2], project.topic)
+            self.assertEqual(2, project.stage_states["discovery"]["revision"])
+            self.assertEqual("pending", project.stage_states["matrix"]["status"])
+
+    def test_concurrent_discovery_save_and_restart_never_split_pointer_and_state(self) -> None:
+        def stage(seed: int):
+            run = self.repository.create_stage_run(
+                self.user_id,
+                self.project_id,
+                "discovery",
+                status="succeeded",
+            )
+            artifact = self.repository.publish_artifact(
+                user_id=self.user_id,
+                project_id=self.project_id,
+                artifact_id=str(uuid.uuid4()),
+                logical_name="discovery/review.json",
+                artifact_type="json",
+                relative_path=f".artifacts/discovery/{seed}.json",
+                content_sha256=f"{seed:064x}",
+                size_bytes=seed,
+                mtime_ns=seed,
+                producer_stage="discovery",
+                producer_run_id=run.id,
+                make_current=False,
+            )
+            return artifact, run
+
+        initial_artifact, initial_run = stage(301)
+        self.repository.set_current_artifact(
+            self.user_id,
+            self.project_id,
+            "discovery/review.json",
+            initial_artifact.id,
+        )
+        self.repository.compare_and_set_stage(
+            self.user_id,
+            self.project_id,
+            "discovery",
+            0,
+            status="review",
+            current_run_id=initial_run.id,
+        )
+        saved, save_run = stage(302)
+        restarted, restart_run = stage(303)
+        barrier = threading.Barrier(2)
+
+        def save():
+            barrier.wait(timeout=10)
+            try:
+                state = self.repository.save_discovery_atomically(
+                    self.user_id,
+                    self.project_id,
+                    artifact_id=saved.id,
+                    run_id=save_run.id,
+                    expected_revision=1,
+                    status="review",
+                )
+                return "save", "promoted", state
+            except self.errors.WorkflowConflict:
+                return "save", "conflict", None
+
+        def restart():
+            barrier.wait(timeout=10)
+            try:
+                state = self.repository.replace_discovery_atomically(
+                    self.user_id,
+                    self.project_id,
+                    artifact_id=restarted.id,
+                    run_id=restart_run.id,
+                    expected_revision=1,
+                    topic="Replacement topic",
+                )
+                return "restart", "promoted", state
+            except self.errors.WorkflowConflict:
+                return "restart", "conflict", None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = [executor.submit(save), executor.submit(restart)]
+            outcomes = [future.result(timeout=15) for future in outcomes]
+
+        promoted = next(item for item in outcomes if item[1] == "promoted")
+        self.assertEqual(1, sum(item[1] == "promoted" for item in outcomes))
+        current = self.repository.get_current_artifact(
+            self.user_id, self.project_id, "discovery/review.json"
+        )
+        state = self.repository.get_stage_state(
+            self.user_id, self.project_id, "discovery"
+        )
+        expected_artifact = saved if promoted[0] == "save" else restarted
+        expected_run = save_run if promoted[0] == "save" else restart_run
+        self.assertEqual(expected_artifact.id, current.id)
+        self.assertEqual(expected_run.id, state.current_run_id)
+        self.assertEqual(2, state.revision)
+        with database_session(self.sessions) as session:
+            project = session.get(Project, uuid.UUID(self.project_id))
+            self.assertEqual(
+                "Replacement topic" if promoted[0] == "restart" else "test",
+                project.topic,
+            )
+
     def test_concurrent_project_jobs_allow_only_one_active_job_type(self) -> None:
         barrier = threading.Barrier(2)
 

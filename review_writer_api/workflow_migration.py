@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 import uuid
 from contextlib import closing, contextmanager
@@ -16,6 +17,7 @@ from sqlalchemy import delete, func, select
 
 from review_writer_api.database import Project, User, database_session, utc_now
 from review_writer_api.workflow_models import (
+    LibraryArtifact,
     LibraryPaper,
     WorkflowArtifact,
     WorkflowArtifactDependency,
@@ -140,14 +142,35 @@ def _readonly_connection(path: Path):
 
 
 def _discover_sources(workspace_root: Path) -> list[tuple[Path, Path, str, bool]]:
-    root = workspace_root.expanduser().resolve()
+    lexical_root = workspace_root.expanduser().absolute()
+    if lexical_root.is_symlink():
+        raise WorkflowMigrationError(
+            "Legacy workspace root is a symbolic link and cannot be migrated safely."
+        )
+    root = lexical_root.resolve()
+    if lexical_root != root:
+        raise WorkflowMigrationError(
+            "Legacy workspace root traverses a symbolic link and cannot be migrated safely."
+        )
     discovered: list[tuple[Path, Path, str, bool]] = []
-    local_source = root / ".review-writer" / "workflow.sqlite3"
+    local_source = _trusted_migration_path(
+        root, root / ".review-writer" / "workflow.sqlite3", label="database"
+    )
     if local_source.is_file():
         discovered.append((local_source, root, "", True))
     if root.is_dir():
-        for child in sorted(path for path in root.iterdir() if path.is_dir()):
-            candidate = child / ".review-writer" / "workflow.sqlite3"
+        for child in sorted(root.iterdir()):
+            if child.is_symlink():
+                raise WorkflowMigrationError(
+                    f"Legacy user workspace is a symbolic link: {child}"
+                )
+            if not child.is_dir():
+                continue
+            candidate = _trusted_migration_path(
+                child,
+                child / ".review-writer" / "workflow.sqlite3",
+                label="database",
+            )
             if candidate.is_file():
                 discovered.append((candidate, child, child.name, False))
     return discovered
@@ -173,7 +196,7 @@ def inventory_legacy_workflows(
     workspace_root: str | Path,
     _session_factory=None,
 ) -> MigrationInventory:
-    root = Path(workspace_root).expanduser().resolve()
+    root = Path(workspace_root).expanduser().absolute()
     sources: list[LegacySourceInventory] = []
     totals = {table: 0 for table in LEGACY_TABLES}
     for source_path, review_root, owner_hint, is_local in _discover_sources(root):
@@ -374,6 +397,52 @@ def _metadata_value(metadata: dict[str, Any], key: str, default: Any = None) -> 
     return value.get("value", default) if isinstance(value, dict) else value
 
 
+def _trusted_migration_directory(
+    current: Path, *parts: str, label: str
+) -> Path:
+    for part in parts:
+        if not part or part in {".", ".."} or Path(part).name != part:
+            raise WorkflowMigrationError(f"Legacy Library {label} component is unsafe.")
+        lexical = current / part
+        if lexical.is_symlink():
+            raise WorkflowMigrationError(
+                f"Legacy Library {label} directory is a symbolic link."
+            )
+        lexical.mkdir(exist_ok=True)
+        resolved = lexical.resolve()
+        if lexical.is_symlink() or resolved.parent != current:
+            raise WorkflowMigrationError(
+                f"Legacy Library {label} directory escaped its user workspace."
+            )
+        current = resolved
+    return current
+
+
+def _trusted_migration_path(
+    review_root: Path, candidate: Path, *, label: str
+) -> Path:
+    try:
+        relative = candidate.relative_to(review_root)
+    except ValueError as exc:
+        raise WorkflowMigrationError(
+            f"Legacy Library {label} escaped its user workspace."
+        ) from exc
+    current = review_root
+    for part in relative.parts:
+        lexical = current / part
+        if lexical.is_symlink():
+            raise WorkflowMigrationError(
+                f"Legacy Library {label} path contains a symbolic link."
+            )
+        resolved = lexical.resolve()
+        if lexical.is_symlink() or resolved.parent != current:
+            raise WorkflowMigrationError(
+                f"Legacy Library {label} escaped its user workspace."
+            )
+        current = resolved
+    return current
+
+
 def _legacy_library_path(review_root: Path, raw: Any, fallback: Path) -> tuple[str, Path, bool]:
     value = str(raw or "").strip()
     recorded = Path(value) if value else fallback
@@ -384,19 +453,66 @@ def _legacy_library_path(review_root: Path, raw: Any, fallback: Path) -> tuple[s
             if marker in folded:
                 candidates.append(review_root.joinpath(*recorded.parts[folded.index(marker) :]))
     for candidate in candidates:
-        resolved = candidate.resolve()
         try:
-            relative = resolved.relative_to(review_root).as_posix()
+            lexical = candidate if candidate.is_absolute() else review_root / candidate
+            relative_path = lexical.relative_to(review_root)
         except ValueError:
             continue
+        resolved = _trusted_migration_path(
+            review_root, review_root / relative_path, label="source"
+        )
+        relative = relative_path.as_posix()
         if resolved.is_file():
             return relative, resolved, True
-    resolved = (review_root / fallback).resolve()
-    try:
-        relative = resolved.relative_to(review_root).as_posix()
-    except ValueError:
-        relative = fallback.as_posix()
+    resolved = _trusted_migration_path(
+        review_root, review_root / fallback, label="source"
+    )
+    relative = fallback.as_posix()
     return relative, resolved, False
+
+
+def _publish_migrated_library_file(source: Path, destination: Path) -> None:
+    if destination.is_symlink():
+        raise WorkflowMigrationError(
+            f"Immutable Library artifact is a symbolic link: {destination}"
+        )
+    if destination.is_file():
+        if _sha256_file(destination) != _sha256_file(source):
+            raise WorkflowMigrationError(
+                f"Immutable Library artifact has conflicting content: {destination}"
+            )
+        return
+    temporary = destination.parent / f".{destination.name}.{uuid.uuid4().hex}.part"
+    try:
+        shutil.copy2(source, temporary)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _publish_migrated_library_metadata(
+    destination: Path, metadata: dict[str, Any]
+) -> None:
+    content = (json.dumps(metadata, ensure_ascii=False, indent=2) + "\n").encode(
+        "utf-8"
+    )
+    if destination.is_symlink():
+        raise WorkflowMigrationError(
+            f"Immutable Library metadata is a symbolic link: {destination}"
+        )
+    if destination.is_file():
+        if destination.read_bytes() != content:
+            raise WorkflowMigrationError(
+                f"Immutable Library metadata has conflicting content: {destination}"
+            )
+        return
+    temporary = destination.parent / f".{destination.name}.{uuid.uuid4().hex}.part"
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(content)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _import_library_catalog(
@@ -405,9 +521,19 @@ def _import_library_catalog(
     review_root: Path,
     report: MigrationSourceReport,
 ) -> int:
-    metadata_root = review_root / "review-library" / "metadata" / "papers"
+    metadata_root = _trusted_migration_directory(
+        review_root,
+        "review-library",
+        "metadata",
+        "papers",
+        label="metadata",
+    )
     imported = 0
     for metadata_path in sorted(metadata_root.glob("*.metadata.json")):
+        if metadata_path.is_symlink() or metadata_path.resolve().parent != metadata_root:
+            raise WorkflowMigrationError(
+                f"Legacy Library metadata path is a symbolic link: {metadata_path}"
+            )
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -446,6 +572,104 @@ def _import_library_catalog(
             digest = _sha256_file(pdf_path)
         if not digest or len(digest) != 64:
             digest = hashlib.sha256(f"missing:{owner.id}:{paper_id}".encode("utf-8")).hexdigest()
+        markdown_sha256 = (
+            _sha256_file(markdown_path)
+            if markdown_ready
+            else hashlib.sha256(
+                f"missing:{owner.id}:{paper_id}:markdown".encode("utf-8")
+            ).hexdigest()
+        )
+        source_metadata_sha256 = _sha256_file(metadata_path)
+        artifact_ids = {
+            kind: _stable_uuid(
+                str(review_root),
+                "library-artifact",
+                f"{paper_id}:{kind}:{content_sha256}",
+            )
+            for kind, content_sha256 in {
+                "pdf": digest,
+                "markdown": markdown_sha256,
+                "metadata": source_metadata_sha256,
+            }.items()
+        }
+        artifact_paper_root = _trusted_migration_directory(
+            review_root,
+            "review-library",
+            ".artifacts",
+            paper_id,
+            label="artifact",
+        )
+        artifact_version_roots = {
+            kind: _trusted_migration_directory(
+                artifact_paper_root,
+                str(artifact_id),
+                label="artifact version",
+            )
+            for kind, artifact_id in artifact_ids.items()
+        }
+        artifact_destinations = {
+            "pdf": artifact_version_roots["pdf"] / f"{paper_id}.pdf",
+            "markdown": artifact_version_roots["markdown"] / f"{paper_id}.md",
+            "metadata": (
+                artifact_version_roots["metadata"] / f"{paper_id}.metadata.json"
+            ),
+        }
+        if pdf_ready:
+            _publish_migrated_library_file(pdf_path, artifact_destinations["pdf"])
+        if markdown_ready:
+            _publish_migrated_library_file(
+                markdown_path, artifact_destinations["markdown"]
+            )
+        artifact_paths = {
+            kind: destination.relative_to(review_root).as_posix()
+            for kind, destination in artifact_destinations.items()
+        }
+        metadata = dict(metadata)
+        metadata["_artifact_ids"] = {
+            kind: str(artifact_id) for kind, artifact_id in artifact_ids.items()
+        }
+        metadata["_artifact_paths"] = dict(artifact_paths)
+        stored_source_paths = dict(metadata.get("source_paths") or {})
+        stored_source_paths["pdf"] = str(artifact_destinations["pdf"])
+        stored_source_paths["markdown"] = str(artifact_destinations["markdown"])
+        metadata["source_paths"] = stored_source_paths
+        stored_source_file = dict(metadata.get("source_file") or {})
+        stored_source_file["pdf_name"] = artifact_destinations["pdf"].name
+        stored_source_file["relative_pdf_path"] = artifact_paths["pdf"]
+        stored_source_file["sha256"] = digest
+        metadata["source_file"] = stored_source_file
+        _publish_migrated_library_metadata(
+            artifact_destinations["metadata"], metadata
+        )
+        artifact_sources = {
+            "pdf": (artifact_destinations["pdf"], pdf_ready),
+            "markdown": (artifact_destinations["markdown"], markdown_ready),
+            "metadata": (artifact_destinations["metadata"], True),
+        }
+        for kind, (path, ready) in artifact_sources.items():
+            artifact = session.get(LibraryArtifact, artifact_ids[kind])
+            stat = path.stat() if ready else None
+            artifact_values = {
+                "user_id": owner.id,
+                "paper_id": paper_id,
+                "kind": kind,
+                "relative_path": artifact_paths[kind],
+                "content_sha256": (
+                    _sha256_file(path)
+                    if ready
+                    else hashlib.sha256(
+                        f"missing:{owner.id}:{paper_id}:{kind}".encode("utf-8")
+                    ).hexdigest()
+                ),
+                "size_bytes": stat.st_size if stat else 0,
+                "mtime_ns": stat.st_mtime_ns if stat else 0,
+                "availability": "available" if ready else "missing",
+            }
+            if artifact is None:
+                session.add(LibraryArtifact(id=artifact_ids[kind], **artifact_values))
+            else:
+                for key, value in artifact_values.items():
+                    setattr(artifact, key, value)
         row = session.scalar(
             select(LibraryPaper).where(
                 LibraryPaper.user_id == owner.id,
@@ -473,8 +697,8 @@ def _import_library_catalog(
             "keywords_json": _metadata_value(metadata, "keywords", []) or [],
             "tags_json": _metadata_value(metadata, "structured_tags", {}) or {},
             "metadata_json": metadata,
-            "pdf_relative_path": pdf_relative,
-            "markdown_relative_path": markdown_relative,
+            "pdf_relative_path": artifact_paths["pdf"],
+            "markdown_relative_path": artifact_paths["markdown"],
             "status": "active",
             "deleted_at": None,
         }

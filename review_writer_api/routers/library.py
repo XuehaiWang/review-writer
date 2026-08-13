@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 import uuid
+import anyio
 from collections.abc import Callable, Mapping
+from contextlib import suppress
+from functools import partial
+from threading import Event
 from typing import Any
 from urllib.parse import quote
 
@@ -43,6 +48,7 @@ def _paper_payload(record: LibraryPaperRecord) -> dict[str, Any]:
         "tags": record.tags,
         "original_filename": record.original_filename,
         "content_sha256": record.content_sha256,
+        "artifact_ids": record.artifact_ids,
         "updated_at": record.updated_at,
         "year": value("year"),
         "journal": value("journal", ""),
@@ -94,6 +100,16 @@ def build_library_router(
             raise WorkflowValidationError("Only PDF uploads are accepted.")
         staged, safe_name = library_service.begin_upload(principal, filename)
         size = 0
+        cancel_requested = Event()
+        disconnect_watcher: asyncio.Task | None = None
+
+        async def watch_disconnect() -> None:
+            while not cancel_requested.is_set():
+                if await request.is_disconnected():
+                    cancel_requested.set()
+                    return
+                await anyio.sleep(0.25)
+
         try:
             with staged.open("xb") as handle:
                 async for chunk in request.stream():
@@ -102,7 +118,17 @@ def build_library_router(
                         raise WorkflowValidationError("Each PDF must be 80 MB or smaller.")
                     handle.write(chunk)
             library_service.validate_staged_upload(staged, size)
-            record, outcome = library_service.admit_staged(principal, safe_name, staged)
+            disconnect_watcher = asyncio.create_task(watch_disconnect())
+            admission = partial(
+                library_service.admit_staged,
+                principal,
+                safe_name,
+                staged,
+                cancel_requested=cancel_requested.is_set,
+            )
+            record, outcome = await anyio.to_thread.run_sync(
+                admission, abandon_on_cancel=True
+            )
             payload = {
                 **_paper_payload(record),
                 "status": outcome,
@@ -119,6 +145,11 @@ def build_library_router(
                 content={"status": "failed", **exc.payload()},
             )
         finally:
+            cancel_requested.set()
+            if disconnect_watcher is not None:
+                disconnect_watcher.cancel()
+                with suppress(asyncio.CancelledError):
+                    await disconnect_watcher
             staged.unlink(missing_ok=True)
 
     @router.get("/papers/{paper_id}/metadata")

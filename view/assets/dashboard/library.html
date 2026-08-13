@@ -936,7 +936,8 @@
       } else if (job.status === 'failed') {
         els.acquireStatus.textContent = `Download job failed: ${job.error || 'unknown error'}`;
       } else if (job.status === 'completed') {
-        els.acquireStatus.textContent = `Download finished: ${job.success_count || 0} added/already present, ${job.failed_count || 0} unavailable or failed.`;
+        const present = Number(job.added_count || 0) + Number(job.already_present_count || 0);
+        els.acquireStatus.textContent = `Download finished: ${present} added/already present, ${job.failed_count || 0} unavailable or failed.`;
       }
       const currentSearch = window.currentAcquisitionSearchJob || {candidates: acquisitionCandidates, status:'completed'};
       renderAcquisitionCandidates(currentSearch, job);

@@ -32,6 +32,9 @@ services:
       REVIEW_WRITER_POSTGRES_USER: ${REVIEW_WRITER_POSTGRES_USER:-review_writer}
       REVIEW_WRITER_POSTGRES_PASSWORD: "${REVIEW_WRITER_POSTGRES_PASSWORD:?Set REVIEW_WRITER_POSTGRES_PASSWORD in .env}"
       REVIEW_WRITER_POSTGRES_DB: ${REVIEW_WRITER_POSTGRES_DB:-review_writer}
+      REVIEW_WRITER_HOSTED_WORKSPACE_ROOT: /app/.review-writer/hosted-workspaces
+    volumes:
+      - review_state:/app/.review-writer
     restart: "no"
 
   api:

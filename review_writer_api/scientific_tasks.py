@@ -89,6 +89,17 @@ def download(args: argparse.Namespace) -> int:
     return 0
 
 
+def precise_ingest(args: argparse.Namespace) -> int:
+    """Subprocess adapter for local precise parsing; API code never invokes the legacy handler."""
+    module = _module(
+        "review_writer_precise_ingest_adapter",
+        ROOT / "view" / "local_pdf_ingestion.py",
+    )
+    result = module.ingest_local_pdf(args.review_root, args.filename, args.input)
+    _write(args.output, result)
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -105,12 +116,21 @@ def parse_args() -> argparse.Namespace:
     download_parser.add_argument("--input", type=Path, required=True)
     download_parser.add_argument("--output", type=Path, required=True)
     download_parser.add_argument("--email", default="")
+    ingest_parser = commands.add_parser("precise-ingest")
+    ingest_parser.add_argument("--review-root", type=Path, required=True)
+    ingest_parser.add_argument("--filename", required=True)
+    ingest_parser.add_argument("--input", type=Path, required=True)
+    ingest_parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    return search(args) if args.command == "literature-search" else download(args)
+    if args.command == "literature-search":
+        return search(args)
+    if args.command == "literature-download":
+        return download(args)
+    return precise_ingest(args)
 
 
 if __name__ == "__main__":

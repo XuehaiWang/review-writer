@@ -323,7 +323,7 @@ class WorkflowRepository:
         project_uuid = self._uuid(project_id, not_found_message="Project not found.")
         downstream = tuple(stage for stage in INTERNAL_STAGES if stage != "discovery")
         with database_session(self.session_factory) as session:
-            project = self._owned_project(session, user_uuid, project_uuid)
+            project = session.scalar(select(Project).where(Project.id == project_uuid, Project.user_id == user_uuid, Project.deleted_at.is_(None)).with_for_update())
             if project is None:
                 raise WorkflowNotFound("Project not found.")
             downstream_artifacts = select(WorkflowArtifact.id).where(
@@ -362,6 +362,371 @@ class WorkflowRepository:
                 }
             )
             project.updated_at = now
+
+    def replace_discovery_atomically(
+        self,
+        user_id: str,
+        project_id: str,
+        *,
+        artifact_id: str,
+        run_id: str,
+        expected_revision: int,
+        topic: str,
+    ) -> StageStateRecord:
+        """Promote a staged Discovery artifact and invalidate derived state in one commit."""
+        user_uuid = self._uuid(user_id, not_found_message="Project not found.")
+        project_uuid = self._uuid(project_id, not_found_message="Project not found.")
+        artifact_uuid = self._uuid(artifact_id, not_found_message="Artifact not found.")
+        run_uuid = self._uuid(run_id, not_found_message="Stage run not found.")
+        downstream = tuple(stage for stage in INTERNAL_STAGES if stage != "discovery")
+        with database_session(self.session_factory) as session:
+            project = session.scalar(
+                select(Project)
+                .where(
+                    Project.id == project_uuid,
+                    Project.user_id == user_uuid,
+                    Project.deleted_at.is_(None),
+                )
+                .with_for_update()
+            )
+            if project is None:
+                raise WorkflowNotFound("Project not found.")
+            artifact = session.scalar(
+                select(WorkflowArtifact).where(
+                    WorkflowArtifact.id == artifact_uuid,
+                    WorkflowArtifact.project_id == project_uuid,
+                    WorkflowArtifact.logical_name == "discovery/review.json",
+                    WorkflowArtifact.producer_stage == "discovery",
+                )
+            )
+            if artifact is None:
+                raise WorkflowNotFound("Artifact not found.")
+            run = session.scalar(
+                select(WorkflowStageRun).where(
+                    WorkflowStageRun.id == run_uuid,
+                    WorkflowStageRun.project_id == project_uuid,
+                    WorkflowStageRun.stage_id == "discovery",
+                )
+            )
+            if run is None:
+                raise WorkflowNotFound("Stage run not found.")
+            state = session.scalar(
+                select(WorkflowStageState)
+                .where(
+                    WorkflowStageState.project_id == project_uuid,
+                    WorkflowStageState.stage_id == "discovery",
+                )
+                .with_for_update()
+            )
+            actual = state.revision if state else 0
+            if actual != expected_revision:
+                raise WorkflowConflict(
+                    "Discovery changed since it was loaded.",
+                    details={
+                        "expected_revision": expected_revision,
+                        "actual_revision": actual,
+                    },
+                )
+            now = utc_now()
+            self._upsert_current_artifact(
+                session,
+                project_id=project_uuid,
+                logical_name="discovery/review.json",
+                artifact_id=artifact_uuid,
+            )
+            if state is None:
+                state = WorkflowStageState(
+                    project_id=project_uuid,
+                    stage_id="discovery",
+                    status="review",
+                    revision=1,
+                    current_run_id=run_uuid,
+                )
+                session.add(state)
+            else:
+                state.status = "review"
+                state.current_run_id = run_uuid
+                state.revision = actual + 1
+                state.error_code = ""
+                state.error_message = ""
+                state.updated_at = now
+            downstream_artifacts = select(WorkflowArtifact.id).where(
+                WorkflowArtifact.project_id == project_uuid,
+                WorkflowArtifact.producer_stage.in_(downstream),
+            )
+            session.execute(
+                delete(WorkflowCurrentArtifact).where(
+                    WorkflowCurrentArtifact.project_id == project_uuid,
+                    WorkflowCurrentArtifact.artifact_id.in_(downstream_artifacts),
+                )
+            )
+            stored = dict(project.stage_states or {})
+            stored["discovery"] = {"status": state.status, "revision": state.revision}
+            derived_states = session.scalars(
+                select(WorkflowStageState).where(
+                    WorkflowStageState.project_id == project_uuid,
+                    WorkflowStageState.stage_id.in_(downstream),
+                )
+            ).all()
+            for derived in derived_states:
+                derived.status = "pending"
+                derived.current_run_id = None
+                derived.error_code = ""
+                derived.error_message = ""
+                derived.revision += 1
+                derived.updated_at = now
+                stored[derived.stage_id] = {
+                    "status": "pending",
+                    "revision": derived.revision,
+                }
+            project.topic = str(topic)
+            project.stage_states = stored
+            project.current_stage = current_user_stage(
+                {
+                    key: (
+                        value.get("status", "pending")
+                        if isinstance(value, dict)
+                        else str(value)
+                    )
+                    for key, value in stored.items()
+                }
+            )
+            project.updated_at = now
+            session.flush()
+            return self._stage_record(state)
+
+    def save_discovery_atomically(
+        self,
+        user_id: str,
+        project_id: str,
+        *,
+        artifact_id: str,
+        run_id: str,
+        expected_revision: int,
+        status: str,
+    ) -> StageStateRecord:
+        """Promote one reviewed Discovery version with its stage revision in one commit."""
+
+        user_uuid = self._uuid(user_id, not_found_message="Project not found.")
+        project_uuid = self._uuid(project_id, not_found_message="Project not found.")
+        artifact_uuid = self._uuid(
+            artifact_id, not_found_message="Artifact not found."
+        )
+        run_uuid = self._uuid(run_id, not_found_message="Stage run not found.")
+        with database_session(self.session_factory) as session:
+            project = session.scalar(
+                select(Project)
+                .where(
+                    Project.id == project_uuid,
+                    Project.user_id == user_uuid,
+                    Project.deleted_at.is_(None),
+                )
+                .with_for_update()
+            )
+            if project is None:
+                raise WorkflowNotFound("Project not found.")
+            artifact = session.scalar(
+                select(WorkflowArtifact).where(
+                    WorkflowArtifact.id == artifact_uuid,
+                    WorkflowArtifact.project_id == project_uuid,
+                    WorkflowArtifact.logical_name == "discovery/review.json",
+                    WorkflowArtifact.producer_stage == "discovery",
+                )
+            )
+            run = session.scalar(
+                select(WorkflowStageRun).where(
+                    WorkflowStageRun.id == run_uuid,
+                    WorkflowStageRun.project_id == project_uuid,
+                    WorkflowStageRun.stage_id == "discovery",
+                )
+            )
+            if artifact is None:
+                raise WorkflowNotFound("Artifact not found.")
+            if run is None:
+                raise WorkflowNotFound("Stage run not found.")
+            state = session.scalar(
+                select(WorkflowStageState)
+                .where(
+                    WorkflowStageState.project_id == project_uuid,
+                    WorkflowStageState.stage_id == "discovery",
+                )
+                .with_for_update()
+            )
+            actual = state.revision if state else 0
+            if actual != expected_revision:
+                raise WorkflowConflict(
+                    "Discovery changed since it was loaded.",
+                    details={
+                        "expected_revision": expected_revision,
+                        "actual_revision": actual,
+                    },
+                )
+            now = utc_now()
+            self._upsert_current_artifact(
+                session,
+                project_id=project_uuid,
+                logical_name="discovery/review.json",
+                artifact_id=artifact_uuid,
+            )
+            if state is None:
+                state = WorkflowStageState(
+                    project_id=project_uuid,
+                    stage_id="discovery",
+                    status=status,
+                    revision=1,
+                    current_run_id=run_uuid,
+                )
+                session.add(state)
+            else:
+                state.status = status
+                state.revision = actual + 1
+                state.current_run_id = run_uuid
+                state.error_code = ""
+                state.error_message = ""
+                state.updated_at = now
+            stored = dict(project.stage_states or {})
+            stored["discovery"] = {
+                "status": state.status,
+                "revision": state.revision,
+            }
+            project.stage_states = stored
+            project.current_stage = current_user_stage(
+                {
+                    key: (
+                        value.get("status", "pending")
+                        if isinstance(value, dict)
+                        else str(value)
+                    )
+                    for key, value in stored.items()
+                }
+            )
+            project.updated_at = now
+            session.flush()
+            return self._stage_record(state)
+
+    def confirm_discovery_atomically(
+        self,
+        user_id: str,
+        project_id: str,
+        *,
+        artifact_id: str,
+        run_id: str,
+        expected_discovery_revision: int,
+        expected_matrix_revision: int,
+    ) -> tuple[StageStateRecord, StageStateRecord]:
+        """Promote a staged Matrix artifact and approve its exact Discovery revision atomically."""
+        user_uuid = self._uuid(user_id, not_found_message="Project not found.")
+        project_uuid = self._uuid(project_id, not_found_message="Project not found.")
+        artifact_uuid = self._uuid(
+            artifact_id, not_found_message="Artifact not found."
+        )
+        run_uuid = self._uuid(run_id, not_found_message="Stage run not found.")
+        with database_session(self.session_factory) as session:
+            project = session.scalar(
+                select(Project)
+                .where(
+                    Project.id == project_uuid,
+                    Project.user_id == user_uuid,
+                    Project.deleted_at.is_(None),
+                )
+                .with_for_update()
+            )
+            if project is None:
+                raise WorkflowNotFound("Project not found.")
+            artifact = session.scalar(
+                select(WorkflowArtifact).where(
+                    WorkflowArtifact.id == artifact_uuid,
+                    WorkflowArtifact.project_id == project_uuid,
+                    WorkflowArtifact.logical_name == "matrix/literature_matrix.json",
+                    WorkflowArtifact.producer_stage == "matrix",
+                )
+            )
+            if artifact is None:
+                raise WorkflowNotFound("Artifact not found.")
+            run = session.scalar(
+                select(WorkflowStageRun).where(
+                    WorkflowStageRun.id == run_uuid,
+                    WorkflowStageRun.project_id == project_uuid,
+                    WorkflowStageRun.stage_id == "matrix",
+                )
+            )
+            if run is None:
+                raise WorkflowNotFound("Stage run not found.")
+            discovery = session.scalar(
+                select(WorkflowStageState)
+                .where(
+                    WorkflowStageState.project_id == project_uuid,
+                    WorkflowStageState.stage_id == "discovery",
+                )
+                .with_for_update()
+            )
+            matrix = session.scalar(
+                select(WorkflowStageState)
+                .where(
+                    WorkflowStageState.project_id == project_uuid,
+                    WorkflowStageState.stage_id == "matrix",
+                )
+                .with_for_update()
+            )
+            actual_discovery = discovery.revision if discovery else 0
+            actual_matrix = matrix.revision if matrix else 0
+            if (
+                discovery is None
+                or actual_discovery != expected_discovery_revision
+                or actual_matrix != expected_matrix_revision
+            ):
+                raise WorkflowConflict("Discovery changed since confirmation was opened.")
+            now = utc_now()
+            self._upsert_current_artifact(
+                session,
+                project_id=project_uuid,
+                logical_name="matrix/literature_matrix.json",
+                artifact_id=artifact_uuid,
+            )
+            if matrix is None:
+                matrix = WorkflowStageState(
+                    project_id=project_uuid,
+                    stage_id="matrix",
+                    status="review",
+                    revision=1,
+                    current_run_id=run_uuid,
+                )
+                session.add(matrix)
+            else:
+                matrix.status = "review"
+                matrix.current_run_id = run_uuid
+                matrix.revision = expected_matrix_revision + 1
+                matrix.error_code = ""
+                matrix.error_message = ""
+                matrix.updated_at = now
+            discovery.status = "approved"
+            discovery.revision = expected_discovery_revision + 1
+            discovery.error_code = ""
+            discovery.error_message = ""
+            discovery.updated_at = now
+            stored = dict(project.stage_states or {})
+            stored["matrix"] = {
+                "status": matrix.status,
+                "revision": matrix.revision,
+            }
+            stored["discovery"] = {
+                "status": discovery.status,
+                "revision": discovery.revision,
+            }
+            project.stage_states = stored
+            project.current_stage = current_user_stage(
+                {
+                    key: (
+                        value.get("status", "pending")
+                        if isinstance(value, dict)
+                        else str(value)
+                    )
+                    for key, value in stored.items()
+                }
+            )
+            project.updated_at = now
+            session.flush()
+            return self._stage_record(discovery), self._stage_record(matrix)
 
     def create_stage_run(
         self,
@@ -771,6 +1136,7 @@ class WorkflowRepository:
         producer_stage: str,
         producer_run_id: str | None,
         metadata: dict[str, Any] | None = None,
+        make_current: bool = True,
     ) -> ArtifactRecord:
         """Insert an immutable artifact and update its current pointer atomically."""
 
@@ -812,12 +1178,13 @@ class WorkflowRepository:
                 )
                 session.add(artifact)
                 session.flush()
-                self._upsert_current_artifact(
-                    session,
-                    project_id=project_uuid,
-                    logical_name=logical_name,
-                    artifact_id=artifact_uuid,
-                )
+                if make_current:
+                    self._upsert_current_artifact(
+                        session,
+                        project_id=project_uuid,
+                        logical_name=logical_name,
+                        artifact_id=artifact_uuid,
+                    )
                 session.flush()
                 return self._artifact_record(artifact)
         except IntegrityError as exc:

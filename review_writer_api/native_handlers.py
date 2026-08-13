@@ -95,6 +95,10 @@ class NativeWorkflowHandlers:
 
     def library_download(self, context, payload):
         staging = self._staging(context.user_id, context.job_id)
+        task_workspace = staging / "library-workspace"
+        if task_workspace.is_symlink():
+            raise RuntimeError("Library download workspace is not trusted.")
+        task_workspace.mkdir(exist_ok=True)
         (staging / "candidates.json").write_text(
             json.dumps(payload["candidates"], ensure_ascii=False), encoding="utf-8"
         )
@@ -105,7 +109,7 @@ class NativeWorkflowHandlers:
             "review_writer_api.scientific_tasks",
             "literature-download",
             "--review-root",
-            str(self.workspaces.user_root(context.user_id)),
+            str(task_workspace),
             "--input",
             str(staging / "candidates.json"),
             "--output",

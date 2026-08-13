@@ -130,6 +130,7 @@ def create_app(
                 if provider_settings_service is not None
                 else None
             ),
+            scientific_runner=scientific_runner,
         )
         if session_factory is not None and hosted_workspace_manager is not None
         else None
