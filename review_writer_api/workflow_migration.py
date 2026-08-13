@@ -16,6 +16,7 @@ from sqlalchemy import delete, func, select
 
 from review_writer_api.database import Project, User, database_session, utc_now
 from review_writer_api.workflow_models import (
+    LibraryPaper,
     WorkflowArtifact,
     WorkflowArtifactDependency,
     WorkflowCurrentArtifact,
@@ -368,6 +369,125 @@ def _normalize_job_status(status: str) -> str:
     }.get(normalized, normalized)
 
 
+def _metadata_value(metadata: dict[str, Any], key: str, default: Any = None) -> Any:
+    value = metadata.get(key, default)
+    return value.get("value", default) if isinstance(value, dict) else value
+
+
+def _legacy_library_path(review_root: Path, raw: Any, fallback: Path) -> tuple[str, Path, bool]:
+    value = str(raw or "").strip()
+    recorded = Path(value) if value else fallback
+    candidates = [recorded] if recorded.is_absolute() else [review_root / recorded]
+    if recorded.is_absolute() and not recorded.exists():
+        folded = [part.casefold() for part in recorded.parts]
+        for marker in ("review-library", "mineru-outputs"):
+            if marker in folded:
+                candidates.append(review_root.joinpath(*recorded.parts[folded.index(marker) :]))
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        try:
+            relative = resolved.relative_to(review_root).as_posix()
+        except ValueError:
+            continue
+        if resolved.is_file():
+            return relative, resolved, True
+    resolved = (review_root / fallback).resolve()
+    try:
+        relative = resolved.relative_to(review_root).as_posix()
+    except ValueError:
+        relative = fallback.as_posix()
+    return relative, resolved, False
+
+
+def _import_library_catalog(
+    session,
+    owner: User,
+    review_root: Path,
+    report: MigrationSourceReport,
+) -> int:
+    metadata_root = review_root / "review-library" / "metadata" / "papers"
+    imported = 0
+    for metadata_path in sorted(metadata_root.glob("*.metadata.json")):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise WorkflowMigrationError(
+                f"Legacy Library metadata is unreadable: {metadata_path}"
+            ) from exc
+        if not isinstance(metadata, dict):
+            raise WorkflowMigrationError(
+                f"Legacy Library metadata is not an object: {metadata_path}"
+            )
+        paper_id = str(metadata.get("paper_id") or metadata_path.name.split(".", 1)[0]).strip()
+        if not paper_id:
+            raise WorkflowMigrationError(f"Legacy Library metadata is missing paper_id: {metadata_path}")
+        source_paths = metadata.get("source_paths") if isinstance(metadata.get("source_paths"), dict) else {}
+        source_file = metadata.get("source_file") if isinstance(metadata.get("source_file"), dict) else {}
+        pdf_relative, pdf_path, pdf_ready = _legacy_library_path(
+            review_root,
+            source_paths.get("pdf") or source_file.get("relative_pdf_path"),
+            Path("review-library") / "uploads" / f"{paper_id}.pdf",
+        )
+        markdown_relative, markdown_path, markdown_ready = _legacy_library_path(
+            review_root,
+            source_paths.get("markdown"),
+            Path("mineru-outputs") / "markdown" / f"{paper_id}.md",
+        )
+        for label, path, ready in (
+            ("library_pdf", pdf_path, pdf_ready),
+            ("library_markdown", markdown_path, markdown_ready),
+        ):
+            if not ready:
+                report.missing_files.append(
+                    {"project_id": LIBRARY_PROJECT_ID, "logical_name": f"{paper_id}:{label}", "path": str(path)}
+                )
+        digest = str(source_file.get("sha256") or "").strip().lower()
+        if (not digest or len(digest) != 64) and pdf_ready:
+            digest = _sha256_file(pdf_path)
+        if not digest or len(digest) != 64:
+            digest = hashlib.sha256(f"missing:{owner.id}:{paper_id}".encode("utf-8")).hexdigest()
+        row = session.scalar(
+            select(LibraryPaper).where(
+                LibraryPaper.user_id == owner.id,
+                LibraryPaper.content_sha256 == digest,
+            )
+        )
+        if row is None:
+            row = session.scalar(
+                select(LibraryPaper).where(
+                    LibraryPaper.user_id == owner.id,
+                    LibraryPaper.paper_id == paper_id,
+                )
+            )
+        values = {
+            "user_id": owner.id,
+            "paper_id": paper_id,
+            "content_sha256": digest,
+            "original_filename": str(
+                source_file.get("original_upload_name")
+                or source_file.get("pdf_name")
+                or pdf_path.name
+            ),
+            "title": str(_metadata_value(metadata, "title", paper_id) or paper_id),
+            "authors_json": _metadata_value(metadata, "authors", []) or [],
+            "keywords_json": _metadata_value(metadata, "keywords", []) or [],
+            "tags_json": _metadata_value(metadata, "structured_tags", {}) or {},
+            "metadata_json": metadata,
+            "pdf_relative_path": pdf_relative,
+            "markdown_relative_path": markdown_relative,
+            "status": "active",
+            "deleted_at": None,
+        }
+        if row is None:
+            session.add(LibraryPaper(**values))
+        else:
+            for key, value in values.items():
+                setattr(row, key, value)
+        imported += 1
+    session.flush()
+    return imported
+
+
 def _upsert_ledger(
     session,
     source: LegacySourceInventory,
@@ -652,6 +772,10 @@ def _import_source(
             for value_key, value in values.items():
                 setattr(pointer, value_key, value)
 
+    library_paper_count = _import_library_catalog(
+        session, owner, review_root, report
+    )
+
     report.imported_counts = {
         "projects": len([key for key in projects if key != LIBRARY_PROJECT_ID]),
         "stage_runs": len(tables["stage_runs"]),
@@ -661,6 +785,7 @@ def _import_source(
         "artifact_dependencies": len(tables["artifact_dependencies"]),
         "jobs": len(tables["jobs"]),
         "current_jobs": len(tables["current_jobs"]),
+        "library_papers": library_paper_count,
     }
     report.status = (
         "requires_acknowledgement"

@@ -40,7 +40,10 @@ class WorkflowContractInventoryTests(unittest.TestCase):
         required_prefixes = {"LIB", "DIS", "PLN", "SEC", "FIG", "DRF", "FIN", "ISO"}
         self.assertEqual(required_prefixes, {row.row_id.split("-", 1)[0] for row in rows})
         self.assertTrue(all(row.native_test for row in rows))
-        self.assertTrue(all(row.status == "baseline" for row in rows))
+        self.assertTrue(all(row.status in {"baseline", "passed"} for row in rows))
+        for row in rows:
+            expected = "passed" if row.row_id.startswith(("LIB-", "DIS-")) else "baseline"
+            self.assertEqual(expected, row.status, row.row_id)
 
 
 if __name__ == "__main__":

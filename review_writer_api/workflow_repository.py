@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -316,6 +316,52 @@ class WorkflowRepository:
                 )
             )
             return self._stage_record(state) if state else None
+
+    def invalidate_downstream_after_discovery(self, user_id: str, project_id: str) -> None:
+        """Clear derived outputs when a newly published Discovery review replaces its input."""
+        user_uuid = self._uuid(user_id, not_found_message="Project not found.")
+        project_uuid = self._uuid(project_id, not_found_message="Project not found.")
+        downstream = tuple(stage for stage in INTERNAL_STAGES if stage != "discovery")
+        with database_session(self.session_factory) as session:
+            project = self._owned_project(session, user_uuid, project_uuid)
+            if project is None:
+                raise WorkflowNotFound("Project not found.")
+            downstream_artifacts = select(WorkflowArtifact.id).where(
+                WorkflowArtifact.project_id == project_uuid,
+                WorkflowArtifact.producer_stage.in_(downstream),
+            )
+            session.execute(
+                delete(WorkflowCurrentArtifact).where(
+                    WorkflowCurrentArtifact.project_id == project_uuid,
+                    WorkflowCurrentArtifact.artifact_id.in_(downstream_artifacts),
+                )
+            )
+            states = session.scalars(
+                select(WorkflowStageState).where(
+                    WorkflowStageState.project_id == project_uuid,
+                    WorkflowStageState.stage_id.in_(downstream),
+                )
+            ).all()
+            now = utc_now()
+            stored_states = dict(project.stage_states or {})
+            for state in states:
+                state.status = "pending"
+                state.current_run_id = None
+                state.error_code = ""
+                state.error_message = ""
+                state.revision += 1
+                state.updated_at = now
+                stored_states[state.stage_id] = {"status": "pending", "revision": state.revision}
+            project.stage_states = stored_states
+            project.current_stage = current_user_stage(
+                {
+                    stage_id: value.get("status", "pending")
+                    if isinstance(value, dict)
+                    else str(value)
+                    for stage_id, value in stored_states.items()
+                }
+            )
+            project.updated_at = now
 
     def create_stage_run(
         self,
@@ -630,6 +676,34 @@ class WorkflowRepository:
             )
             return self._job_record(job) if job else None
 
+    def get_current_job(
+        self,
+        user_id: str,
+        *,
+        scope: str,
+        job_type: str,
+        project_id: str | None = None,
+    ) -> JobRecord | None:
+        user_uuid = self._uuid(user_id, not_found_message="Job not found.")
+        normalized_scope = str(scope or "").strip().lower()
+        if normalized_scope == "library":
+            scope_key = "_library_"
+        elif normalized_scope == "project" and project_id:
+            scope_key = str(self._uuid(project_id, not_found_message="Project not found."))
+        else:
+            raise WorkflowValidationError("A valid job scope is required.")
+        with database_session(self.session_factory) as session:
+            job = session.scalar(
+                select(WorkflowJob)
+                .join(WorkflowCurrentJob, WorkflowCurrentJob.job_id == WorkflowJob.id)
+                .where(
+                    WorkflowCurrentJob.user_id == user_uuid,
+                    WorkflowCurrentJob.scope_key == scope_key,
+                    WorkflowCurrentJob.job_type == str(job_type),
+                )
+            )
+            return self._job_record(job) if job else None
+
     def create_artifact(
         self,
         user_id: str,
@@ -871,6 +945,29 @@ class WorkflowRepository:
                 .where(
                     WorkflowCurrentArtifact.project_id == project_uuid,
                     WorkflowCurrentArtifact.logical_name == logical_name,
+                    Project.user_id == user_uuid,
+                    Project.deleted_at.is_(None),
+                )
+            )
+            return self._artifact_record(artifact) if artifact else None
+
+    def get_artifact_by_content(
+        self,
+        user_id: str,
+        project_id: str,
+        logical_name: str,
+        content_sha256: str,
+    ) -> ArtifactRecord | None:
+        user_uuid = self._uuid(user_id, not_found_message="Artifact not found.")
+        project_uuid = self._uuid(project_id, not_found_message="Artifact not found.")
+        with database_session(self.session_factory) as session:
+            artifact = session.scalar(
+                select(WorkflowArtifact)
+                .join(Project, Project.id == WorkflowArtifact.project_id)
+                .where(
+                    WorkflowArtifact.project_id == project_uuid,
+                    WorkflowArtifact.logical_name == logical_name,
+                    WorkflowArtifact.content_sha256 == content_sha256,
                     Project.user_id == user_uuid,
                     Project.deleted_at.is_(None),
                 )

@@ -1,0 +1,412 @@
+from __future__ import annotations
+
+import base64
+import json
+import tempfile
+import time
+import unittest
+import uuid
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, event, select
+from sqlalchemy.orm import sessionmaker
+
+from review_writer_api.app import create_app
+from review_writer_api.config import ApiSettings
+from review_writer_api.database import Base, Project, User
+from review_writer_api.security import Principal, Role
+from review_writer_api.workflow_models import LibraryPaper
+
+
+TEST_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("=")
+
+
+class DiscoveryV1Tests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        root = Path(self.temporary.name)
+        database_url = f"sqlite+pysqlite:///{(root / 'discovery.sqlite3').as_posix()}"
+        self.engine = create_engine(database_url, connect_args={"check_same_thread": False})
+
+        @event.listens_for(self.engine, "connect")
+        def enable_foreign_keys(connection, _record):
+            cursor = connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+        Base.metadata.create_all(self.engine)
+        self.sessions = sessionmaker(bind=self.engine, expire_on_commit=False)
+        with self.sessions.begin() as session:
+            first = User(email="first@example.com", display_name="First", password_hash="hash")
+            second = User(email="second@example.com", display_name="Second", password_hash="hash")
+            session.add_all([first, second])
+            session.flush()
+            project = Project(user_id=first.id, slug="copper", topic="Copper")
+            other_project = Project(user_id=second.id, slug="hidden", topic="Hidden")
+            catalog = [
+                LibraryPaper(
+                    user_id=first.id,
+                    paper_id=paper_id,
+                    content_sha256=f"{paper_id.lower():0<64}"[:64],
+                    original_filename=f"{paper_id}.pdf",
+                    title=f"Catalog {paper_id}",
+                    authors_json=[f"Catalog author {paper_id}"],
+                    keywords_json=[f"catalog-keyword-{paper_id}"],
+                    tags_json={"reaction_type": "catalog"},
+                    metadata_json={
+                        "paper_id": paper_id,
+                        "title": {"value": f"Catalog {paper_id}"},
+                        "authors": {"value": [f"Catalog author {paper_id}"]},
+                        "keywords": {"value": [f"catalog-keyword-{paper_id}"]},
+                        "abstract": {"value": f"Catalog abstract {paper_id}"},
+                        "year": {"value": 2024},
+                        "journal": {"value": "Catalog Journal"},
+                        "doi": {"value": f"10.9/{paper_id.lower()}"},
+                    },
+                    pdf_relative_path=f"review-library/uploads/{paper_id}.pdf",
+                    markdown_relative_path=f"review-library/markdown/{paper_id}.md",
+                )
+                for paper_id in ("P001", "P002", "P003")
+            ]
+            session.add_all([project, other_project, *catalog])
+            session.flush()
+            self.project_id = str(project.id)
+            self.other_project_id = str(other_project.id)
+            self.first = Principal(str(first.id), frozenset({Role.USER}), first.email)
+            self.second = Principal(str(second.id), frozenset({Role.USER}), second.email)
+        self.current = self.first
+        settings = ApiSettings(
+            review_root=root,
+            deployment_mode="hosted",
+            database_url=database_url,
+            public_origin="http://testserver",
+            credential_encryption_key=TEST_KEY,
+            hosted_workspace_root=root / "users",
+        )
+
+        def discovery_builder(_context, payload):
+            if payload["topic"] == "forced failure":
+                raise RuntimeError("provider unavailable")
+            return {
+                "project_id": payload["project_id"],
+                "topic": payload["topic"],
+                "selection_mode": "explicit",
+                "results": [
+                    {
+                        "keyword": "copper",
+                        "category": "catalyst_or_method",
+                        "keep": True,
+                        "local_results": [
+                            {
+                                "paper_id": "P001",
+                                "title": "High score",
+                                "score": 99,
+                                "role": "core_candidate",
+                                "selected_for_matrix": False,
+                            },
+                            {
+                                "paper_id": "P002",
+                                "title": "Second",
+                                "score": 80,
+                                "role": "uncertain",
+                                "selected_for_matrix": False,
+                            },
+                        ],
+                        "web_results": [
+                            {
+                                "candidate_id": "crossref:10.1/example",
+                                "doi": "10.1/example",
+                                "title": "External",
+                                "source": "crossref",
+                                "selected_for_matrix": False,
+                            }
+                        ],
+                    },
+                    {
+                        "keyword": "allenation",
+                        "category": "reaction_type",
+                        "keep": True,
+                        "local_results": [
+                            {
+                                "paper_id": "P001",
+                                "title": "High score",
+                                "score": 90,
+                                "role": "core_candidate",
+                                "selected_for_matrix": False,
+                            },
+                            {
+                                "paper_id": "P003",
+                                "title": "Third",
+                                "score": 70,
+                                "role": "background",
+                                "selected_for_matrix": False,
+                            },
+                        ],
+                        "web_results": [],
+                    },
+                ],
+            }
+
+        self.app = create_app(
+            settings,
+            principal_provider=lambda: self.current,
+            session_factory_override=self.sessions,
+            native_workflow_overrides={"discovery.search": discovery_builder},
+        )
+
+    def tearDown(self) -> None:
+        Base.metadata.drop_all(self.engine)
+        self.engine.dispose()
+        self.temporary.cleanup()
+
+    @staticmethod
+    def headers(key: str = "request") -> dict[str, str]:
+        return {"Origin": "http://testserver", "Idempotency-Key": key}
+
+    def wait_job(self, client: TestClient, job_id: str) -> dict:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            payload = client.get(f"/api/v1/jobs/{job_id}").json()
+            if payload["status"] in {"succeeded", "failed", "cancelled", "interrupted"}:
+                return payload
+            time.sleep(0.02)
+        self.fail("Job did not finish.")
+
+    def discover(self, client: TestClient, topic: str = "Copper allenation") -> dict:
+        response = client.post(
+            f"/api/v1/projects/{self.project_id}/discovery/jobs",
+            json={"topic": topic, "keywords": "copper, allenation", "web_search": True},
+            headers=self.headers(f"discovery:{topic}"),
+        )
+        self.assertEqual(202, response.status_code, response.text)
+        return self.wait_job(client, response.json()["id"])
+
+    def test_new_topic_builds_candidate_pool(self) -> None:
+        with TestClient(self.app) as client:
+            job = self.discover(client)
+            review = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+            project = client.get("/api/v1/projects").json()["items"][0]
+        self.assertEqual("succeeded", job["status"])
+        self.assertEqual(3, review["statistics"]["candidate_count"])
+        self.assertEqual(4, review["statistics"]["keyword_hit_count"])
+        self.assertEqual(0, review["statistics"]["selected_count"])
+        self.assertEqual("review", project["discovery_status"])
+
+    def test_failed_restart_preserves_current_project(self) -> None:
+        with TestClient(self.app) as client:
+            self.discover(client)
+            selected = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/selection/top",
+                json={"count": 1},
+                headers=self.headers(),
+            ).json()
+            confirmed = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/confirm",
+                json={"revision": selected["revision"]},
+                headers=self.headers(),
+            ).json()
+            before = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+            failed = self.discover(client, "forced failure")
+            after = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+        self.assertEqual("failed", failed["status"])
+        self.assertEqual(before["artifact_id"], after["artifact_id"])
+        self.assertEqual("Copper allenation", after["topic"])
+        self.assertEqual(
+            confirmed["matrix_artifact_id"],
+            self.app.state.workflow_repository.get_current_artifact(
+                self.first.user_id, self.project_id, "matrix/literature_matrix.json"
+            ).id,
+        )
+        self.assertEqual(
+            "review",
+            self.app.state.workflow_repository.get_stage_state(
+                self.first.user_id, self.project_id, "matrix"
+            ).status,
+        )
+
+    def test_successful_restart_invalidates_downstream_current_artifacts_and_states(self) -> None:
+        service = self.app.state.discovery_service
+        repository = self.app.state.workflow_repository
+        with TestClient(self.app) as client:
+            self.discover(client)
+            for stage, logical_name in (
+                ("matrix", "matrix/literature_matrix.json"),
+                ("blueprint", "blueprint/outline.json"),
+            ):
+                artifact, run = service._write_json_artifact(
+                    self.first,
+                    self.project_id,
+                    stage_id=stage,
+                    logical_name=logical_name,
+                    payload={"stage": stage},
+                )
+                repository.compare_and_set_stage(
+                    self.first.user_id,
+                    self.project_id,
+                    stage,
+                    0,
+                    status="approved",
+                    current_run_id=run.id,
+                )
+                self.assertEqual(
+                    artifact.id,
+                    repository.get_current_artifact(self.first.user_id, self.project_id, logical_name).id,
+                )
+            self.discover(client, "Replacement topic")
+
+        for stage, logical_name in (
+            ("matrix", "matrix/literature_matrix.json"),
+            ("blueprint", "blueprint/outline.json"),
+        ):
+            self.assertIsNone(
+                repository.get_current_artifact(self.first.user_id, self.project_id, logical_name)
+            )
+            self.assertEqual(
+                "pending",
+                repository.get_stage_state(self.first.user_id, self.project_id, stage).status,
+            )
+
+    def test_viewing_candidate_does_not_select_it(self) -> None:
+        with TestClient(self.app) as client:
+            self.discover(client)
+            first = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+            second = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+        self.assertEqual(0, first["statistics"]["selected_count"])
+        self.assertEqual(first["revision"], second["revision"])
+
+    def test_explicit_selection_updates_duplicate_hits(self) -> None:
+        with TestClient(self.app) as client:
+            self.discover(client)
+            response = client.put(
+                f"/api/v1/projects/{self.project_id}/discovery/selection/P001",
+                json={"selected": True},
+                headers=self.headers(),
+            )
+            review = response.json()
+        hits = [
+            row
+            for group in review["results"]
+            for row in group["local_results"]
+            if row["paper_id"] == "P001"
+        ]
+        self.assertEqual(2, len(hits))
+        self.assertTrue(all(row["selected_for_matrix"] for row in hits))
+        self.assertEqual(1, review["statistics"]["selected_count"])
+
+    def test_discovery_payloads_reject_ambiguous_json_types(self) -> None:
+        with TestClient(self.app) as client:
+            self.discover(client)
+            ambiguous_boolean = client.put(
+                f"/api/v1/projects/{self.project_id}/discovery/selection/P001",
+                json={"selected": "false"},
+                headers=self.headers(),
+            )
+            invalid_revision = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/confirm",
+                json={"revision": "not-an-integer"},
+                headers=self.headers(),
+            )
+        self.assertEqual(422, ambiguous_boolean.status_code)
+        self.assertEqual(422, invalid_revision.status_code)
+
+    def test_application_container_exposes_native_task7_services(self) -> None:
+        self.assertIs(self.app.state.library_service, self.app.state.container.library_service)
+        self.assertIs(self.app.state.discovery_service, self.app.state.container.discovery_service)
+
+    def test_top_n_selects_ranked_unique_papers_and_clear_keeps_pool(self) -> None:
+        with TestClient(self.app) as client:
+            self.discover(client)
+            selected = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/selection/top",
+                json={"count": 2},
+                headers=self.headers(),
+            ).json()
+            cleared_response = client.delete(
+                f"/api/v1/projects/{self.project_id}/discovery/selection",
+                headers=self.headers(),
+            )
+            self.assertEqual(200, cleared_response.status_code, cleared_response.text)
+            cleared = cleared_response.json()
+        self.assertEqual(["P001", "P002"], selected["selected_paper_ids"])
+        self.assertEqual(0, cleared["statistics"]["selected_count"])
+        self.assertEqual(3, cleared["statistics"]["candidate_count"])
+
+    def test_keyword_and_role_review_persists_and_save_versions(self) -> None:
+        with TestClient(self.app) as client:
+            self.discover(client)
+            current = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+            current["results"][0]["keep"] = False
+            current["results"][1]["local_results"][1]["role"] = "supporting_candidate"
+            saved = client.put(
+                f"/api/v1/projects/{self.project_id}/discovery",
+                json={"revision": current["revision"], "results": current["results"]},
+                headers=self.headers(),
+            ).json()
+            reloaded = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+        self.assertNotEqual(current["artifact_id"], saved["artifact_id"])
+        self.assertFalse(reloaded["results"][0]["keep"])
+        self.assertEqual(
+            "supporting_candidate",
+            reloaded["results"][1]["local_results"][1]["role"],
+        )
+
+    def test_confirm_synchronizes_exact_selection(self) -> None:
+        with TestClient(self.app) as client:
+            self.discover(client)
+            selected = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/selection/top",
+                json={"count": 2},
+                headers=self.headers(),
+            ).json()
+            confirmed = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/confirm",
+                json={"revision": selected["revision"]},
+                headers=self.headers(),
+            ).json()
+        self.assertEqual(2, confirmed["matrix_sync"]["selected_paper_count"])
+        self.assertEqual(2, confirmed["matrix_sync"]["synchronized_paper_count"])
+        self.assertTrue(confirmed["matrix_sync"]["selection_current"])
+        self.assertEqual(["P001", "P002"], [row["paper_id"] for row in confirmed["matrix"]["rows"]])
+        self.assertEqual("Catalog P001", confirmed["matrix"]["rows"][0]["title"])
+        self.assertEqual(["Catalog author P001"], confirmed["matrix"]["rows"][0]["authors"])
+
+    def test_confirmation_rejects_selected_paper_absent_from_owners_catalog(self) -> None:
+        with TestClient(self.app) as client:
+            self.discover(client)
+            selected = client.put(
+                f"/api/v1/projects/{self.project_id}/discovery/selection/P003",
+                json={"selected": True},
+                headers=self.headers(),
+            ).json()
+            with self.sessions.begin() as session:
+                paper = session.scalar(
+                    select(LibraryPaper).where(
+                        LibraryPaper.user_id == uuid.UUID(self.first.user_id),
+                        LibraryPaper.paper_id == "P003",
+                    )
+                )
+                session.delete(paper)
+            rejected = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/confirm",
+                json={"revision": selected["revision"]},
+                headers=self.headers(),
+            )
+        self.assertEqual(422, rejected.status_code)
+        self.assertEqual("DISCOVERY_SELECTION_NOT_IN_LIBRARY", rejected.json()["error"]["code"])
+
+    def test_external_results_preserve_source_identity_and_project_isolation(self) -> None:
+        with TestClient(self.app) as client:
+            self.discover(client)
+            review = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+            external = review["results"][0]["web_results"][0]
+            self.assertEqual("crossref:10.1/example", external["candidate_id"])
+            self.assertEqual("crossref", external["source"])
+
+            self.current = self.second
+            hidden = client.get(f"/api/v1/projects/{self.project_id}/discovery")
+            self.assertEqual(404, hidden.status_code)
+
+
+if __name__ == "__main__":
+    unittest.main()

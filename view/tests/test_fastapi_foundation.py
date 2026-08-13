@@ -315,7 +315,7 @@ class HostedAuthApiTests(unittest.TestCase):
             )
             self.assertEqual(blocked.status_code, 403)
 
-    def test_hosted_project_catalog_uses_database_topic_and_backfills_workflow_summary(self):
+    def test_native_project_catalog_uses_database_state_while_legacy_route_can_backfill(self):
         from view.serve_review_dashboard import workflow_store
 
         origin = {"Origin": "http://testserver"}
@@ -347,8 +347,8 @@ class HostedAuthApiTests(unittest.TestCase):
 
             portal_project = client.get("/api/v1/projects").json()["items"][0]
             self.assertEqual(portal_project["topic"], "Database-owned topic")
-            self.assertEqual(portal_project["current_stage"], "matrix")
-            self.assertEqual(portal_project["completed_stages"], ["discovery"])
+            self.assertEqual(portal_project["current_stage"], "discovery")
+            self.assertEqual(portal_project["completed_stages"], [])
 
             legacy_project = client.get("/api/projects").json()[0]
             self.assertEqual(legacy_project["topic"], "Database-owned topic")
@@ -362,7 +362,7 @@ class HostedAuthApiTests(unittest.TestCase):
         finally:
             database.close()
 
-    def test_hosted_workflow_sync_failure_is_reported_instead_of_silently_ignored(self):
+    def test_legacy_sync_failure_does_not_break_native_project_catalog(self):
         origin = {"Origin": "http://testserver"}
         with TestClient(self.app) as client:
             identity = register(client, "sync-error@example.com").json()
@@ -383,10 +383,13 @@ class HostedAuthApiTests(unittest.TestCase):
                 "view.serve_review_dashboard.reconcile_project_semantic_states",
                 side_effect=OSError("intentional sync failure"),
             ):
-                response = client.get("/api/v1/projects")
+                native_response = client.get("/api/v1/projects")
+                legacy_response = client.get("/api/projects")
 
-            self.assertEqual(response.status_code, 500)
-            self.assertIn("PostgreSQL was not updated", response.json()["detail"])
+            self.assertEqual(native_response.status_code, 200)
+            self.assertEqual(native_response.json()["items"][0]["current_stage"], "discovery")
+            self.assertEqual(legacy_response.status_code, 500)
+            self.assertIn("PostgreSQL was not updated", legacy_response.json()["detail"])
 
     def test_topic_restart_updates_only_the_owned_project_after_discovery_succeeds(self):
         origin = {"Origin": "http://testserver"}

@@ -59,7 +59,7 @@ class DiscoveryResultInteractionChecks(unittest.TestCase):
         self.assertIn('aria-pressed="${selectedForMatrix', self.source)
 
     def test_confirmation_verifies_matrix_membership_before_redirecting(self) -> None:
-        self.assertIn("result.matrix_sync?.selection_current", self.source)
+        self.assertIn("confirmed.matrix_sync?.selection_current", self.source)
         self.assertIn("const expectedCount = discoveryCounts(data).selectedLocal", self.source)
         self.assertIn("count !== expectedCount", self.source)
         self.assertIn("selection_fingerprint", self.source)

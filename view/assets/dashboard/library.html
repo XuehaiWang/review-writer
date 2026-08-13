@@ -554,8 +554,8 @@
       </section>
     </div>
   </div>
-<script src="/assets/dashboard/review-i18n.js?v=20260813g"></script>
-<script src="/assets/dashboard/review-ui.js?v=20260813g"></script>
+<script src="/assets/dashboard/review-i18n.js?v=20260813h"></script>
+<script src="/assets/dashboard/review-ui.js?v=20260813h"></script>
   <script>
     let papers = [];
     let selected = null;
@@ -746,26 +746,26 @@
         <div class="field"><div class="label">Quality</div><div class="value">${escapeHtml(JSON.stringify(meta.quality || {}, null, 0))}</div></div>`;
     }
     async function loadPapers() {
-      papers = await (await fetch('/api/papers')).json();
+      const listing = await readJsonResponse(await fetch('/api/v1/library/papers'));
+      papers = listing.items || [];
       renderList();
       if (papers.length && !selected) await selectPaper(papers[0].paper_id);
     }
     async function selectPaper(id) {
       selected = id;
       renderList();
-      currentMeta = await (await fetch(`/api/metadata/${encodeURIComponent(id)}`)).json();
+      currentMeta = await readJsonResponse(await fetch(`/api/v1/library/papers/${encodeURIComponent(id)}/metadata`));
       els.jsonEditor.value = JSON.stringify(currentMeta, null, 2);
       renderSummary(currentMeta);
-      const pdf = currentMeta.source_paths?.pdf;
-      els.pdfFrame.src = pdf ? `/file?path=${encodeURIComponent(pdf)}` : 'about:blank';
-      const md = await (await fetch(`/api/markdown/${encodeURIComponent(id)}`)).text();
+      els.pdfFrame.src = `/api/v1/library/papers/${encodeURIComponent(id)}/pdf`;
+      const md = await (await fetch(`/api/v1/library/papers/${encodeURIComponent(id)}/markdown`)).text();
       els.markdown.innerHTML = renderMarkdown(md);
     }
     async function saveMeta() {
       if (!selected) return;
       let parsed;
       try { parsed = JSON.parse(els.jsonEditor.value); } catch (err) { showMessage(`Invalid JSON: ${err.message}`); return; }
-      const res = await fetch(`/api/metadata/${encodeURIComponent(selected)}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(parsed)});
+      const res = await fetch(`/api/v1/library/papers/${encodeURIComponent(selected)}/metadata`, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(parsed)});
       if (!res.ok) { showMessage(await res.text()); return; }
       showMessage('Metadata saved');
       await loadPapers(); await selectPaper(selected);
@@ -802,7 +802,7 @@
           const file = files[index];
           els.uploadStatus.textContent = `Uploading and running MinerU precise parsing ${index + 1}/${files.length}: ${file.name}`;
           try {
-            const response = await fetch(`/api/library/upload-pdf?filename=${encodeURIComponent(file.name)}`, {
+            const response = await fetch(`/api/v1/library/papers?filename=${encodeURIComponent(file.name)}`, {
               method: 'POST',
               headers: {'Content-Type': 'application/pdf'},
               body: file
@@ -837,8 +837,19 @@
       let data;
       try { data = text ? JSON.parse(text) : {}; }
       catch (_) { throw new Error(`Server returned a non-JSON response (HTTP ${response.status}).`); }
-      if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
+      if (!response.ok || data.ok === false) throw new Error(data.error?.message || data.error || `HTTP ${response.status}`);
       return data;
+    }
+    function nativeJob(job) {
+      if (!job) return null;
+      const statusMap = {succeeded:'completed', cancelled:'failed', interrupted:'failed'};
+      return {
+        ...job,
+        ...(job.result || {}),
+        status: statusMap[job.status] || job.status,
+        error: job.error_message || job.error || '',
+        job_id: job.id || job.job_id
+      };
     }
     function setAcquireBusy(operation, busy) {
       if (operation === 'search') els.acquireSearchBtn.disabled = busy;
@@ -932,25 +943,27 @@
       setAcquireBusy('download', busy);
     }
     async function refreshSearchStatus(schedule = false) {
-      const data = await readJsonResponse(await fetch('/api/literature/search/status'));
-      window.currentAcquisitionSearchJob = data.job || null;
-      renderSearchState(data.job);
+      const data = await readJsonResponse(await fetch('/api/v1/library/search-jobs/current'));
+      const job = nativeJob(data.job);
+      window.currentAcquisitionSearchJob = job;
+      renderSearchState(job);
       clearTimeout(acquisitionSearchTimer);
-      if (schedule && ['queued','running'].includes(data.job?.status)) {
+      if (schedule && ['queued','running'].includes(job?.status)) {
         acquisitionSearchTimer = setTimeout(() => refreshSearchStatus(true).catch(err => {
           els.acquireStatus.textContent = err.message;
         }), 1100);
       }
     }
     async function refreshDownloadStatus(schedule = false) {
-      const data = await readJsonResponse(await fetch('/api/literature/download/status'));
-      renderDownloadState(data.job);
+      const data = await readJsonResponse(await fetch('/api/v1/library/download-jobs/current'));
+      const job = nativeJob(data.job);
+      renderDownloadState(job);
       clearTimeout(acquisitionDownloadTimer);
-      if (schedule && ['queued','running'].includes(data.job?.status)) {
+      if (schedule && ['queued','running'].includes(job?.status)) {
         acquisitionDownloadTimer = setTimeout(() => refreshDownloadStatus(true).catch(err => {
           els.acquireStatus.textContent = err.message;
         }), 1100);
-      } else if (data.job?.status === 'completed') {
+      } else if (job?.status === 'completed') {
         await loadPapers();
       }
     }
@@ -958,9 +971,9 @@
       const topic = els.acquireTopic.value.trim();
       if (!topic) { els.acquireStatus.textContent = 'Enter an English literature topic.'; return; }
       setAcquireBusy('search', true);
-      const response = await fetch('/api/literature/search', {
+      const response = await fetch('/api/v1/library/search-jobs', {
         method: 'POST',
-        headers: {'Content-Type':'application/json'},
+        headers: {'Content-Type':'application/json', 'Idempotency-Key': crypto.randomUUID()},
         body: JSON.stringify({
           topic,
           year_from: els.acquireYearFrom.value || null,
@@ -970,7 +983,7 @@
         })
       });
       const data = await readJsonResponse(response);
-      renderSearchState(data.job);
+      renderSearchState(nativeJob(data));
       await refreshSearchStatus(true);
     }
     async function startOnlineDownload() {
@@ -986,13 +999,14 @@
         if (email) els.acquireEmail.value = email;
       }
       setAcquireBusy('download', true);
-      const response = await fetch('/api/literature/download', {
+      const selectedCandidates = acquisitionCandidates.filter(row => candidateIds.includes(String(row.candidate_id)));
+      const response = await fetch('/api/v1/library/download-jobs', {
         method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({candidate_ids: candidateIds, email})
+        headers: {'Content-Type':'application/json', 'Idempotency-Key': crypto.randomUUID()},
+        body: JSON.stringify({candidates: selectedCandidates, email})
       });
       const data = await readJsonResponse(response);
-      renderDownloadState(data.job);
+      renderDownloadState(nativeJob(data));
       await refreshDownloadStatus(true);
     }
     function requestDownloadEmail() {

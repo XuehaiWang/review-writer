@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -20,6 +21,56 @@ STAGE_PAGES = (
 
 
 class DashboardI18nChecks(unittest.TestCase):
+    def test_library_precise_parsing_progress_translates_at_runtime(self) -> None:
+        source_path = (ASSET_DIR / "review-i18n.js").as_posix()
+        script = f"""
+const fs = require('fs');
+global.window = {{location: {{pathname: '/', search: ''}}, dispatchEvent() {{}}}};
+global.localStorage = {{getItem() {{ return 'zh-CN'; }}, setItem() {{}}}};
+global.document = {{readyState: 'loading', addEventListener() {{}}}};
+global.CustomEvent = function() {{}};
+eval(fs.readFileSync({source_path!r}, 'utf8'));
+process.stdout.write(window.reviewI18n.t('Uploading and running MinerU precise parsing 2/5: paper.pdf'));
+"""
+        translated = subprocess.run(
+            ["node", "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout
+        self.assertEqual(
+            "正在上传并进行 MinerU 精确解析 2/5：paper.pdf",
+            translated,
+        )
+
+    def test_task7_static_labels_translate_at_runtime(self) -> None:
+        source_path = (ASSET_DIR / "review-i18n.js").as_posix()
+        script = f"""
+const fs = require('fs');
+global.window = {{location: {{pathname: '/', search: ''}}, dispatchEvent() {{}}}};
+global.localStorage = {{getItem() {{ return 'zh-CN'; }}, setItem() {{}}}};
+global.document = {{readyState: 'loading', addEventListener() {{}}}};
+global.CustomEvent = function() {{}};
+eval(fs.readFileSync({source_path!r}, 'utf8'));
+process.stdout.write(JSON.stringify([
+  window.reviewI18n.t('Batch upload runs MinerU precise parsing, then builds searchable metadata and full-text Markdown.'),
+  window.reviewI18n.t('All categories'),
+  window.reviewI18n.t('Discovery project')
+]));
+"""
+        translated = subprocess.run(
+            ["node", "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout
+        self.assertEqual(
+            '["批量上传会执行 MinerU 精确解析，并生成可检索的元数据和全文 Markdown。","全部类别","检索项目"]',
+            translated,
+        )
+
     def test_every_stage_loads_i18n_before_shared_ui(self) -> None:
         for page_name in STAGE_PAGES:
             with self.subTest(page=page_name):

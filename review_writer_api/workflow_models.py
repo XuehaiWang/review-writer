@@ -34,6 +34,38 @@ class WorkflowSystemState(Base):
     )
 
 
+class LibraryPaper(Base):
+    """User-owned searchable catalog for admitted, precisely parsed PDFs."""
+
+    __tablename__ = "library_papers"
+    __table_args__ = (
+        UniqueConstraint("user_id", "paper_id", name="uq_library_paper_user_paper_id"),
+        UniqueConstraint("user_id", "content_sha256", name="uq_library_paper_user_content"),
+        Index("ix_library_papers_user_updated", "user_id", "updated_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    paper_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    title: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    authors_json: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    keywords_json: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    tags_json: Mapped[Any] = mapped_column(JSON, default=dict, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    pdf_relative_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    markdown_relative_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class WorkflowStageRun(Base):
     __tablename__ = "workflow_stage_runs"
     __table_args__ = (

@@ -138,6 +138,19 @@ class ArtifactService:
                     "Artifact validation failed.", details={"reason": str(exc)}
                 ) from exc
 
+        digest = self._sha256(source)
+        existing = self.repository.get_artifact_by_content(
+            user_id,
+            project_id,
+            logical.as_posix(),
+            digest,
+        )
+        if existing is not None:
+            source.unlink()
+            return self.repository.set_current_artifact(
+                user_id, project_id, logical.as_posix(), existing.id
+            )
+
         artifact_id = str(uuid.uuid4())
         project_root = self.workspace_manager.project_path(user_id, project.slug)
         artifacts_root = self._secure_storage_root(project_root, ".artifacts")
@@ -158,7 +171,6 @@ class ArtifactService:
             raise WorkflowValidationError(
                 "Staging and artifact directories must use the same filesystem."
             )
-        digest = self._sha256(source)
         stat = source.stat()
         source.replace(destination)
         relative_path = destination.relative_to(project_root).as_posix()

@@ -432,8 +432,8 @@
     </section>
   </main>
   <div id="message" class="message"></div>
-<script src="/assets/dashboard/review-i18n.js?v=20260813g"></script>
-<script src="/assets/dashboard/review-ui.js?v=20260813g"></script>
+<script src="/assets/dashboard/review-i18n.js?v=20260813h"></script>
+<script src="/assets/dashboard/review-ui.js?v=20260813h"></script>
   <script>
     let projects = [], selected = null, data = null, selectedKeyword = null, selectedPaper = null, detailRequestToken = 0;
     let discoveryFormMode = 'new';
@@ -574,11 +574,15 @@
       return html.replace(/@@HTML_BLOCK_(\d+)@@/g, (_, i) => blocks[Number(i)] || '');
     }
     async function loadProjects() {
-      const allProjects = await (await fetch('/api/projects')).json();
-      const requestedRecord = allProjects.find(p => p.project_id === requestedProject);
+      const response = await (await fetch('/api/v1/projects')).json();
+      const allProjects = (response.items || []).map(project => ({
+        ...project,
+        has_discovery: project.discovery_status && project.discovery_status !== 'pending'
+      }));
+      const requestedRecord = allProjects.find(p => p.project_id === requestedProject || p.slug === requestedProject);
       projects = allProjects.filter(p => p.has_discovery);
-      els.globalProjectSelect.innerHTML = projects.map(p => `<option value="${esc(p.project_id)}">${esc(p.project_id)}</option>`).join('');
-      els.projectSelect.innerHTML = projects.map(p => `<option value="${esc(p.project_id)}">${esc(p.project_id)}</option>`).join('');
+      els.globalProjectSelect.innerHTML = projects.map(p => `<option value="${esc(p.project_id)}">${esc(p.slug || p.project_id)}</option>`).join('');
+      els.projectSelect.innerHTML = projects.map(p => `<option value="${esc(p.project_id)}">${esc(p.slug || p.project_id)}</option>`).join('');
       if (requestedRecord && !requestedRecord.has_discovery) {
         selected = null;
         setDiscoveryFormMode('initial', requestedRecord);
@@ -588,7 +592,7 @@
         return;
       }
       if (projects.length) {
-        selected = projects.find(p => p.project_id === requestedProject)?.project_id || projects[0].project_id;
+        selected = projects.find(p => p.project_id === requestedProject || p.slug === requestedProject)?.project_id || projects[0].project_id;
         els.projectSelect.value = selected;
         els.globalProjectSelect.value = selected;
         await loadProject(selected);
@@ -622,10 +626,24 @@
       els.runDiscoveryBtn.disabled = true;
       els.runStatus.textContent = payload.restart_existing ? 'Searching the new topic before replacing the current project...' : 'Searching local metadata...';
       try {
-        const response = await fetch('/api/discovery', {
+        let targetProjectId = payload.project_id;
+        const registered = (await (await fetch('/api/v1/projects')).json()).items || [];
+        let project = registered.find(item => item.project_id === targetProjectId || item.slug === targetProjectId);
+        if (!project) {
+          const created = await fetch('/api/v1/projects', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({slug: payload.project_id, topic: payload.topic})
+          });
+          const createdBody = await created.json();
+          if (!created.ok) throw new Error(createdBody.detail || 'Project creation failed.');
+          project = createdBody;
+        }
+        targetProjectId = project.project_id;
+        const response = await fetch(`/api/v1/projects/${encodeURIComponent(targetProjectId)}/discovery/jobs`, {
           method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(payload)
+          headers: {'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID()},
+          body: JSON.stringify({topic: payload.topic, keywords: payload.keywords, web_search: payload.web_search})
         });
         const raw = await response.text();
         let result;
@@ -634,7 +652,14 @@
         } catch (_) {
           result = {error: raw};
         }
-        if (!response.ok || !result.ok) throw new Error(result.error || result.output || 'Discovery failed.');
+        if (!response.ok) throw new Error(result.error?.message || result.detail || 'Discovery failed.');
+        let job = result;
+        while (['queued', 'running', 'cancel_requested'].includes(job.status)) {
+          await new Promise(resolve => setTimeout(resolve, 700));
+          job = await (await fetch(`/api/v1/jobs/${encodeURIComponent(job.id)}`)).json();
+          els.runStatus.textContent = `Searching literature... ${job.progress_current || 0}/${job.progress_total || 1}`;
+        }
+        if (job.status !== 'succeeded') throw new Error(job.error_message || 'Discovery failed.');
         els.newProjectId.value = '';
         els.newTopic.value = '';
         els.newKeywords.value = '';
@@ -642,11 +667,11 @@
         setDiscoveryFormMode('new');
         document.getElementById('newDiscoveryShell').open = false;
         await loadProjects();
-        await loadProject(result.project_id);
+        await loadProject(targetProjectId);
         const stats = discoveryCounts(data);
         const externalText = stats.uniqueExternal ? ` and ${stats.uniqueExternal} unique external results` : '';
-        els.runStatus.textContent = `Project ${result.project_id} is ready: found ${stats.candidateLocal} candidate papers (${stats.candidateHits} keyword hits)${externalText} across ${stats.keywordGroups} keyword groups. Selected for Matrix: ${stats.selectedLocal}; include candidates to build the selection.`;
-        msg(result.restarted ? 'Topic changed and Discovery restarted.' : 'Discovery complete');
+        els.runStatus.textContent = `Project ${project.slug || targetProjectId} is ready: found ${stats.candidateLocal} candidate papers (${stats.candidateHits} keyword hits)${externalText} across ${stats.keywordGroups} keyword groups. Selected for Matrix: ${stats.selectedLocal}; include candidates to build the selection.`;
+        msg(payload.restart_existing ? 'Topic changed and Discovery restarted.' : 'Discovery complete');
       } catch (error) {
         els.runStatus.textContent = error.message || 'Discovery failed.';
         msg(error.message || 'Discovery failed.');
@@ -657,7 +682,7 @@
     async function loadProject(id) {
       selected = id;
       window.reviewUi?.setProject(id);
-      data = await (await fetch(`/api/discovery/${encodeURIComponent(id)}`)).json();
+      data = await (await fetch(`/api/v1/projects/${encodeURIComponent(id)}/discovery`)).json();
       els.projectSelect.value = id;
       els.globalProjectSelect.value = id;
       selectedKeyword = data.results.find(g => g.keep !== false)?.keyword || data.results[0]?.keyword;
@@ -847,13 +872,13 @@
       els.detailMeta.textContent = selectedPaper.kind === 'local' ? `${r.paper_id} · ${r.year || ''} · ${r.journal || ''}` : `${r.year || ''} · ${r.journal || ''}`;
       els.summary.innerHTML = `<h3>${esc(r.title)}</h3><p><strong>Score:</strong> ${esc(r.score)}</p><p><strong>Reason:</strong> ${esc(r.reason || '')}</p><p><strong>Role:</strong> ${esc(r.role || 'web_candidate')}</p>${r.url ? `<p><a href="${esc(r.url)}" target="_blank">Open web result</a></p>` : ''}`;
       if (selectedPaper.kind === 'local') {
-        const meta = await (await fetch(`/api/local/metadata/${encodeURIComponent(r.paper_id)}`)).json();
+        const meta = await (await fetch(`/api/v1/library/papers/${encodeURIComponent(r.paper_id)}/metadata`)).json();
         if (requestToken !== detailRequestToken) return;
         els.metadata.textContent = JSON.stringify(meta, null, 2);
-        const md = await (await fetch(`/api/local/markdown/${encodeURIComponent(r.paper_id)}`)).text();
+        const md = await (await fetch(`/api/v1/library/papers/${encodeURIComponent(r.paper_id)}/markdown`)).text();
         if (requestToken !== detailRequestToken) return;
         els.markdown.innerHTML = renderMarkdown(md, r.paper_id);
-        els.pdfFrame.src = meta.source_paths?.pdf ? `/file?path=${encodeURIComponent(meta.source_paths.pdf)}` : 'about:blank';
+        els.pdfFrame.src = `/api/v1/library/papers/${encodeURIComponent(r.paper_id)}/pdf`;
       } else {
         els.metadata.textContent = JSON.stringify(r, null, 2);
         els.markdown.innerHTML = '<p>No local Markdown for web result.</p>';
@@ -865,19 +890,23 @@
       const button = confirm ? document.getElementById('confirmBtn') : document.getElementById('saveBtn');
       button.disabled = true;
       try {
-        const res = await fetch(`/api/discovery/${encodeURIComponent(selected)}${confirm?'?confirm=1':''}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+        const res = await fetch(`/api/v1/projects/${encodeURIComponent(selected)}/discovery`, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({revision:data.revision, results:data.results})});
         const raw = await res.text();
         let result = {};
         try { result = raw ? JSON.parse(raw) : {}; } catch (_) { result = {error: raw}; }
-        if (!res.ok || !result.ok) throw new Error(result.error || 'Could not save Discovery.');
+        if (!res.ok) throw new Error(result.error?.message || result.detail || 'Could not save Discovery.');
+        data = result;
         if (confirm) {
-          const count = result.matrix_sync?.selected_paper_count || 0;
+          const confirmResponse = await fetch(`/api/v1/projects/${encodeURIComponent(selected)}/discovery/confirm`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({revision:data.revision})});
+          const confirmed = await confirmResponse.json();
+          if (!confirmResponse.ok) throw new Error(confirmed.error?.message || confirmed.detail || 'Could not confirm Discovery.');
+          const count = confirmed.matrix_sync?.selected_paper_count || 0;
           const expectedCount = discoveryCounts(data).selectedLocal;
-          if (!result.matrix_sync?.selection_current || count !== expectedCount) {
+          if (!confirmed.matrix_sync?.selection_current || count !== expectedCount || confirmed.matrix_sync?.synchronized_paper_count !== expectedCount) {
             throw new Error(`Matrix synchronization mismatch: selected ${expectedCount}, synchronized ${count}. Stay in Discovery and retry.`);
           }
           els.runStatus.textContent = `Discovery confirmed. ${count} selected papers were synchronized to Matrix.`;
-          const fingerprint = result.matrix_sync?.selection_fingerprint || '';
+          const fingerprint = confirmed.matrix_sync?.selection_fingerprint || '';
           window.location.assign(`/planning?tab=matrix&project=${encodeURIComponent(selected)}&selection=${encodeURIComponent(fingerprint)}`);
           return;
         }

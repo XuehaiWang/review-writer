@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from contextlib import asynccontextmanager, suppress
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,9 @@ from .credentials import CredentialCipher, ProviderSettingsError, ProviderSettin
 from .database import create_session_factory, utc_now
 from .errors import ProjectArchiveFailed, WorkflowError
 from .job_service import JobService
+from .native_handlers import NativeWorkflowHandlers
+from .domain_services.library import LibraryService
+from .domain_services.discovery import DiscoveryService
 from .repositories import (
     HostedProjectRepository,
     LocalProjectRepository,
@@ -44,6 +47,8 @@ from .security import AuthorizationError, Principal, local_owner_principal
 from .services import ProjectService
 from .routers.files import build_file_router
 from .routers.jobs import build_job_router
+from .routers.library import build_library_router
+from .routers.discovery import build_discovery_router
 from .scientific_runner import ScientificRunner
 from .workflow_compat import WorkflowCompatibilityGateway
 from .workflow_repository import WorkflowRepository
@@ -61,6 +66,7 @@ def create_app(
     project_repository: ProjectRepository | None = None,
     workflow_repository_override: WorkflowRepository | None = None,
     job_service_override: JobService | None = None,
+    native_workflow_overrides: Mapping[str, Callable] | None = None,
 ) -> FastAPI:
     resolved = settings or ApiSettings.from_env()
     engine = None
@@ -113,12 +119,44 @@ def create_app(
         else None
     )
     scientific_runner = ScientificRunner() if workflow_repository is not None else None
+    native_overrides = dict(native_workflow_overrides or {})
+    library_service = (
+        LibraryService(
+            session_factory,
+            hosted_workspace_manager,
+            precise_ingest=native_overrides.get("library.precise_ingest"),
+            runtime_environment=(
+                provider_settings_service.runtime_environment
+                if provider_settings_service is not None
+                else None
+            ),
+        )
+        if session_factory is not None and hosted_workspace_manager is not None
+        else None
+    )
+    discovery_service = (
+        DiscoveryService(workflow_repository, artifact_service)
+        if workflow_repository is not None and artifact_service is not None
+        else None
+    )
+    native_handlers = (
+        NativeWorkflowHandlers(
+            scientific_runner,
+            hosted_workspace_manager,
+            provider_settings_service,
+        ).mapping()
+        if scientific_runner is not None and hosted_workspace_manager is not None
+        else {}
+    )
+    native_handlers.update(native_overrides)
     container = (
         ApplicationContainer(
             workflow_repository=workflow_repository,
             artifact_service=artifact_service,
             job_service=job_service,
             scientific_runner=scientific_runner,
+            library_service=library_service,
+            discovery_service=discovery_service,
         )
         if (
             workflow_repository is not None
@@ -190,6 +228,8 @@ def create_app(
     app.state.artifact_service = artifact_service
     app.state.job_service = job_service
     app.state.scientific_runner = scientific_runner
+    app.state.library_service = library_service
+    app.state.discovery_service = discovery_service
     app.state.container = container
     web_root = Path(__file__).resolve().parent / "web"
 
@@ -230,8 +270,13 @@ def create_app(
         # rendered by the authenticated dashboard in same-origin iframes.
         # Keep every other route non-embeddable and never allow cross-origin
         # framing of these two narrowly scoped surfaces.
-        same_origin_frame = request.url.path == "/file" or request.url.path.startswith(
-            "/assets/ketcher/"
+        same_origin_frame = (
+            request.url.path == "/file"
+            or request.url.path.startswith("/assets/ketcher/")
+            or (
+                request.url.path.startswith("/api/v1/library/papers/")
+                and request.url.path.endswith("/pdf")
+            )
         )
         if same_origin_frame:
             response.headers["X-Frame-Options"] = "SAMEORIGIN"
@@ -415,7 +460,7 @@ def create_app(
 
     @app.get("/api/v1/projects", response_model=ProjectListResponse, tags=["projects"])
     def projects(principal: Principal = Depends(current_principal)) -> ProjectListResponse:
-        items = workflow_gateway.refresh_project_states(principal)
+        items = project_service.list_projects(principal)
         return ProjectListResponse(items=items, count=len(items))
 
     @app.post(
@@ -441,17 +486,6 @@ def create_app(
         record = project_service.get_project(principal, project_id)
         if record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
-        if hosted_workspace_manager is not None:
-            root = workflow_gateway.review_root(principal)
-            workflow_gateway.sync_project_state(
-                principal,
-                record.project_id,
-                record.slug,
-                root,
-            )
-            record = project_service.get_project(principal, project_id)
-            if record is None:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
         return ProjectResponse.model_validate(record)
 
     @app.delete(
@@ -535,6 +569,24 @@ def create_app(
         app.include_router(build_file_router(current_principal, artifact_service))
     if job_service is not None:
         app.include_router(build_job_router(current_principal, job_service))
+    if library_service is not None and job_service is not None:
+        app.include_router(
+            build_library_router(
+                current_principal,
+                library_service,
+                job_service,
+                native_handlers,
+            )
+        )
+    if discovery_service is not None and job_service is not None:
+        app.include_router(
+            build_discovery_router(
+                current_principal,
+                discovery_service,
+                job_service,
+                native_handlers,
+            )
+        )
     workflow_gateway.register_routes(app, current_principal)
 
     return app

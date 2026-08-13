@@ -26,6 +26,7 @@ from review_writer_api.database import (
     database_session,
 )
 from review_writer_api.workflow_models import (
+    LibraryPaper,
     WorkflowArtifact,
     WorkflowArtifactDependency,
     WorkflowCurrentArtifact,
@@ -82,6 +83,34 @@ def create_legacy_fixture(review_root: Path) -> dict[str, str]:
     beta_file = beta_root / "duplicate.json"
     alpha_file.write_bytes(shared_content)
     beta_file.write_bytes(shared_content)
+    library_pdf = review_root / "review-library" / "uploads" / "P001.pdf"
+    library_markdown = review_root / "mineru-outputs" / "markdown" / "P001.md"
+    library_metadata = review_root / "review-library" / "metadata" / "papers" / "P001.metadata.json"
+    library_pdf.parent.mkdir(parents=True, exist_ok=True)
+    library_markdown.parent.mkdir(parents=True, exist_ok=True)
+    library_metadata.parent.mkdir(parents=True, exist_ok=True)
+    library_pdf.write_bytes(b"%PDF-1.7\nlegacy\n%%EOF")
+    library_markdown.write_text("# Legacy copper paper\n", encoding="utf-8")
+    library_metadata.write_text(
+        json.dumps(
+            {
+                "paper_id": "P001",
+                "title": {"value": "Legacy copper paper"},
+                "authors": {"value": ["Legacy Author"]},
+                "keywords": {"value": ["copper"]},
+                "structured_tags": {"value": {"reaction_type": "allenation"}},
+                "source_file": {
+                    "original_upload_name": "legacy.pdf",
+                    "sha256": sha256(library_pdf.read_bytes()),
+                },
+                "source_paths": {
+                    "pdf": str(library_pdf),
+                    "markdown": str(library_markdown),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
 
     ids = {
         "run_alpha": str(uuid.uuid4()),
@@ -283,11 +312,16 @@ class WorkflowMigrationTests(unittest.TestCase):
         self.assertEqual(2, self._count(WorkflowCurrentArtifact))
         self.assertEqual(2, self._count(WorkflowJob))
         self.assertEqual(2, self._count(WorkflowCurrentJob))
+        self.assertEqual(1, self._count(LibraryPaper))
         self.assertEqual(1, self._count(WorkflowMigration))
 
         with self.sessions() as session:
             run = session.get(WorkflowStageRun, uuid.UUID(self.ids["run_alpha"]))
             self.assertEqual("zh", run.metadata_json["language"])
+            paper = session.scalar(select(LibraryPaper))
+            self.assertEqual("P001", paper.paper_id)
+            self.assertEqual("Legacy copper paper", paper.title)
+            self.assertEqual("review-library/uploads/P001.pdf", paper.pdf_relative_path)
             self.assertEqual(self.ids["run_alpha"], run.legacy_id)
             missing = session.get(WorkflowArtifact, uuid.UUID(self.ids["artifact_missing"]))
             self.assertEqual("missing", missing.availability)

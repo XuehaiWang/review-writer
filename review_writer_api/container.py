@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from review_writer_api.artifact_service import ArtifactService
+from review_writer_api.domain_services.discovery import DiscoveryService
+from review_writer_api.domain_services.library import LibraryService
 from review_writer_api.job_service import JobService
 from review_writer_api.scientific_runner import ScientificRunner
 from review_writer_api.workflow_repository import WorkflowRepository
@@ -16,3 +18,5 @@ class ApplicationContainer:
     artifact_service: ArtifactService
     job_service: JobService
     scientific_runner: ScientificRunner
+    library_service: LibraryService
+    discovery_service: DiscoveryService
