@@ -112,6 +112,39 @@ class LogicIntegrityChecks(unittest.TestCase):
                 {"1": "P001", "2": "P002"},
             )
 
+    def test_summary_chart_uses_browser_free_png_renderer(self) -> None:
+        module = runpy.run_path(str(CHART_SCRIPT))
+        section_type = module["ReviewSection"]
+        sections = [
+            section_type(
+                heading="1. Introduction",
+                level=2,
+                line_number=3,
+                section_type="introduction",
+                cited_paper_ids=["P001", "P002"],
+            ),
+            section_type(
+                heading="2. Mechanistic discussion",
+                level=2,
+                line_number=8,
+                section_type="discussion",
+                cited_paper_ids=["P003"],
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "review_summary_chart.png"
+            manifest = module["render_full_chart_png"](
+                "graph LR\nN1 --> N2",
+                output,
+                sections=sections,
+                review_title="Test Review",
+            )
+
+            self.assertTrue(output.is_file())
+            self.assertGreater(output.stat().st_size, 0)
+            self.assertEqual(manifest["renderer"], "pillow-static")
+            self.assertEqual(manifest["sha256"], hashlib.sha256(output.read_bytes()).hexdigest())
+
     def test_final_audit_checks_single_paper_id_entries(self) -> None:
         module = runpy.run_path(str(AUDIT_SCRIPT))
         with tempfile.TemporaryDirectory() as temp_dir:

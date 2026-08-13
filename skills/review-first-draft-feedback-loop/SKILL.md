@@ -15,12 +15,13 @@ The host review-writer integration is intentionally additive. It must not make c
 
 1. Verify the current first draft and its paragraph markers exist.
 2. Run deterministic preflight checks before any model evaluation.
-3. Score all rubric dimensions and every paragraph using source evidence and citation metadata.
-4. Write evaluation, findings, gate status, rewrite queue, and polish queue artifacts.
-5. If the goal is unmet, rewrite only `section_rewrite` paragraphs.
-6. Reject rewrites that change citation callouts, numeric facts, stereochemical terms, or required labels.
-7. Record accepted changes in `feedback_loop_rewrites.json` and the current first draft.
-8. Repeat until the goal is met or a bounded stop condition is reached.
+3. Resolve each paragraph's paper IDs, treating figure/caption source identity as authoritative over source-paper bracket labels; retrieve page-anchored passages from local MinerU text with chemistry-aware English/Chinese expansion (falling back to PDF text), and perform the original-source check inside the same optimization run.
+4. Score all rubric dimensions and every paragraph using retrieved original passages, citation metadata, and evidence boundaries.
+5. Write evaluation, original-source check, findings, gate status, rewrite queue, and polish queue artifacts.
+6. If the goal is unmet, rewrite `section_rewrite` paragraphs and source-recheck paragraphs that have readable original text plus explicit unsupported claims. For the latter, only remove or qualify the listed unsupported claims.
+7. Reject rewrites that add or replace citation callouts, numeric facts, stereochemical terms, chemical identities, or required labels. An explicitly unsupported value may be deleted, never substituted.
+8. Record accepted changes in `feedback_loop_rewrites.json` and the current first draft.
+9. Repeat until the goal is met or a bounded stop condition is reached. If a later iteration scores lower, restore the highest fully evaluated draft and its matching evaluation artifacts.
 
 Read [artifact_contract.md](references/artifact_contract.md) for inputs and outputs and [unified_rubric.json](references/unified_rubric.json) for the scoring model.
 
@@ -52,17 +53,20 @@ python scripts/apply_feedback_overlays.py --review-root <review-root> --project-
 
 ## Host Integration Rules
 
-- Treat the loop as an optional Stage-9 action depending only on the current Stage-8 draft.
-- Preserve all existing independent Stage-9 actions.
+- Treat evaluation, rewrite candidates, targeted improvement, and human approval as Stage-8 actions depending only on the current saved draft.
+- Keep Stage 9 read-only with respect to the first draft; it only assembles and audits a human-approved Stage-8 version.
 - Pass provider settings through the host's normal runtime configuration; do not add skill-specific API keys.
 - Persist live status in `feedback_loop_status.json` so navigation or page refresh does not lose progress.
 - Keep every run under `04_first_draft/feedback_loop/runs/<run-id>/`.
+- Ensure every prose paragraph has a stable marker before scoring; never treat an empty paragraph set as passing.
 - Re-index the modified first draft through the host handoff/hash mechanism after completion.
 - Replay an overlay only when both paragraph ID and original paragraph hash still match.
 - Never overwrite a newer upstream paragraph when an overlay conflicts; report the conflict instead.
+- Bind scores, rewrite candidates, and human approval to exact draft hashes. Any later paragraph or full-text edit makes the previous result visibly out of date.
+- Generate one-paragraph AI candidates without applying them; accept them only after a human decision and record the accepted edit in paragraph history.
 
 ## Release and Safety
 
-Release only when the total score reaches the overall goal, every paragraph meets the paragraph goal, and no hard-gate failure remains. If the model is unavailable, evaluation JSON is malformed, score improvement plateaus, or protected content changes, retain the last valid draft and return an explicit status for human review.
+Release only when the total score reaches the overall goal, every paragraph meets the paragraph goal, and no hard-gate failure remains. The overall goal may be higher than the rubric threshold but never lower than 90. If the model is unavailable, evaluation JSON is malformed, score improvement plateaus, or protected content changes, retain the highest fully evaluated draft when available and return an explicit status for human review.
 
 Do not silently fabricate evidence, references, chemical details, or scores. Do not broaden a paragraph rewrite into a whole-draft rewrite.

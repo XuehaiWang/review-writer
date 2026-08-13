@@ -103,6 +103,27 @@
       flex-wrap: wrap;
       align-items: center;
     }
+    .keyword-result-toolbar {
+      display: grid;
+      gap: 8px;
+      align-items: stretch;
+    }
+    .keyword-review-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .top-selection-control {
+      display: grid;
+      grid-template-columns: max-content 72px minmax(0, 1fr);
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+    .top-selection-control label { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .top-selection-control input { width: 72px; text-align: center; }
+    .top-selection-control .btn { min-width: 0; line-height: 1.25; white-space: normal; }
     .new-discovery {
       padding: 12px;
       display: grid;
@@ -124,6 +145,17 @@
       outline: none;
     }
     .new-discovery input { width: 100%; }
+    .new-discovery input[readonly] { color: var(--muted); background: #f7f8fb; }
+    .restart-notice {
+      margin: 0;
+      padding: 10px;
+      border: 1px solid #f0c36a;
+      border-radius: 10px;
+      background: #fff8e8;
+      color: #805600;
+      font-size: 12px;
+      line-height: 1.5;
+    }
     .new-actions { display: flex; gap: 8px; align-items: center; }
     .new-actions .btn { flex: 1; }
     .new-options { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
@@ -307,7 +339,7 @@
       .app > .panel:first-child { height: calc(100dvh - 180px); }
     }
   </style>
-  <link rel="stylesheet" href="/assets/dashboard/review-ui.css?v=20260803">
+<link rel="stylesheet" href="/assets/dashboard/review-ui.css?v=20260813g">
 </head>
 <body>
   <nav class="nav">
@@ -315,16 +347,7 @@
     <div class="nav-center">
       <select id="globalProjectSelect" class="project-select"></select>
     </div>
-    <div class="nav-right">
-      <a href="/library">Library</a>
-      <a class="active" href="/discovery">Discovery</a>
-      <a href="/matrix">Matrix</a>
-      <a href="/blueprint">Blueprint</a>
-      <a href="/sections">Sections</a>
-      <a href="/figures">Figures</a>
-      <a href="/draft">Draft</a>
-      <a href="/final">Final</a>
-    </div>
+    <div class="nav-right"></div>
   </nav>
   <main class="app">
     <section class="panel discovery-sidebar">
@@ -334,7 +357,7 @@
         <div id="discoveryStats" class="discovery-stats" aria-live="polite"></div>
       </div>
       <details id="newDiscoveryShell" class="new-discovery-shell">
-        <summary>New discovery project</summary>
+        <summary id="discoveryFormSummary">New discovery project</summary>
         <div class="new-discovery">
           <label for="newProjectId">Project ID</label>
           <input id="newProjectId" maxlength="80" placeholder="axial-allene-review">
@@ -343,7 +366,11 @@
           <label for="newKeywords">Keywords (optional)</label>
           <input id="newKeywords" maxlength="500" placeholder="comma-separated chemistry terms">
           <label class="new-options"><input id="newWebSearch" type="checkbox"> Include Crossref results</label>
-          <div class="new-actions"><button class="btn primary" id="runDiscoveryBtn">Run discovery</button></div>
+          <p id="restartNotice" class="restart-notice" hidden>Restarting replaces this project's candidate pool and clears Matrix, outlines, drafts, and figure work. PDFs in Library are kept. Existing project data stays unchanged if the new search fails.</p>
+          <div class="new-actions">
+            <button class="btn" id="cancelRestartBtn" hidden>Cancel topic change</button>
+            <button class="btn primary" id="runDiscoveryBtn">Run discovery</button>
+          </div>
           <div id="runStatus" class="run-status"></div>
         </div>
       </details>
@@ -351,6 +378,7 @@
         <div class="sidebar-project-row">
           <select id="projectSelect" aria-label="Discovery project"></select>
           <button class="btn" id="reloadBtn">Reload</button>
+          <button class="btn orange" id="restartDiscoveryBtn" hidden>Change topic</button>
         </div>
         <div class="sidebar-action-row">
           <button class="btn primary" id="saveBtn">Save review</button>
@@ -371,7 +399,17 @@
         <h2 id="keywordTitle">Keyword Results</h2>
         <div id="keywordMeta" class="sub"></div>
       </div>
-      <div class="toolbar"><button class="btn" id="toggleKeywordBtn">Toggle keyword keep</button><button class="btn" id="clearPaperSelection">Clear selected papers</button></div>
+      <div class="toolbar keyword-result-toolbar">
+        <div class="keyword-review-actions">
+          <button class="btn" id="toggleKeywordBtn">Toggle keyword keep</button>
+          <button class="btn" id="clearPaperSelection">Clear selected papers</button>
+        </div>
+        <div class="top-selection-control">
+          <label for="topPaperCount">Top papers</label>
+          <input id="topPaperCount" type="number" min="1" step="1" value="10" inputmode="numeric" aria-label="Number of top-ranked local papers">
+          <button class="btn primary" id="selectTopPapers" title="Replaces the current local paper selection">Include top papers in Matrix</button>
+        </div>
+      </div>
       <div id="results" class="results"></div>
     </section>
     <section class="panel">
@@ -394,10 +432,11 @@
     </section>
   </main>
   <div id="message" class="message"></div>
-  <script src="/assets/dashboard/review-i18n.js?v=20260805d"></script>
-  <script src="/assets/dashboard/review-ui.js?v=20260805d"></script>
+<script src="/assets/dashboard/review-i18n.js?v=20260813g"></script>
+<script src="/assets/dashboard/review-ui.js?v=20260813g"></script>
   <script>
     let projects = [], selected = null, data = null, selectedKeyword = null, selectedPaper = null, detailRequestToken = 0;
+    let discoveryFormMode = 'new';
     const requestedParams = new URLSearchParams(window.location.search);
     const requestedProject = requestedParams.get('project') || '';
     const createRequested = requestedParams.get('create') === '1';
@@ -413,10 +452,50 @@
       metadata: document.getElementById('metadata'), message: document.getElementById('message'),
       newProjectId: document.getElementById('newProjectId'), newTopic: document.getElementById('newTopic'),
       newKeywords: document.getElementById('newKeywords'), newWebSearch: document.getElementById('newWebSearch'),
-      runDiscoveryBtn: document.getElementById('runDiscoveryBtn'), runStatus: document.getElementById('runStatus')
+      runDiscoveryBtn: document.getElementById('runDiscoveryBtn'), runStatus: document.getElementById('runStatus'),
+      discoveryFormSummary: document.getElementById('discoveryFormSummary'), restartNotice: document.getElementById('restartNotice'),
+      restartDiscoveryBtn: document.getElementById('restartDiscoveryBtn'), cancelRestartBtn: document.getElementById('cancelRestartBtn'),
+      topPaperCount: document.getElementById('topPaperCount'), selectTopPapers: document.getElementById('selectTopPapers')
     };
     function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
     function msg(text) { els.message.textContent = text; els.message.classList.add('show'); setTimeout(() => els.message.classList.remove('show'), 2600); }
+    function tr(text) { return window.reviewI18n?.t(text) || text; }
+    function setDiscoveryFormMode(mode, record={}) {
+      discoveryFormMode = mode;
+      const restart = mode === 'restart';
+      const initial = mode === 'initial';
+      els.newProjectId.readOnly = restart || initial;
+      els.restartNotice.hidden = !restart;
+      els.cancelRestartBtn.hidden = !restart;
+      els.discoveryFormSummary.textContent = restart
+        ? 'Change topic and restart this project'
+        : initial
+          ? "Run this project's first discovery"
+          : 'New discovery project';
+      els.runDiscoveryBtn.textContent = restart ? 'Restart discovery' : 'Run discovery';
+      if (restart || initial) {
+        els.newProjectId.value = record.project_id || '';
+        els.newTopic.value = record.topic || '';
+      }
+    }
+    function prepareDiscoveryRestart() {
+      if (!selected) return;
+      setDiscoveryFormMode('restart', {project_id: selected, topic: data?.topic || ''});
+      els.newKeywords.value = '';
+      els.newWebSearch.checked = false;
+      els.runStatus.textContent = 'Enter a new topic. The current project is changed only after Discovery succeeds.';
+      document.getElementById('newDiscoveryShell').open = true;
+      els.newTopic.focus();
+    }
+    function cancelDiscoveryRestart() {
+      setDiscoveryFormMode('new');
+      els.newProjectId.value = '';
+      els.newTopic.value = '';
+      els.newKeywords.value = '';
+      els.newWebSearch.checked = false;
+      els.runStatus.textContent = 'Topic change cancelled. The existing project was not changed.';
+      document.getElementById('newDiscoveryShell').open = false;
+    }
     function simpleMathToHtml(expr) {
       let s = String(expr ?? '');
       s = s.replace(/\\mathrm\s*\{\s*([^{}]+?)\s*\}/g, '$1');
@@ -495,9 +574,19 @@
       return html.replace(/@@HTML_BLOCK_(\d+)@@/g, (_, i) => blocks[Number(i)] || '');
     }
     async function loadProjects() {
-      projects = (await (await fetch('/api/projects')).json()).filter(p => p.has_discovery);
+      const allProjects = await (await fetch('/api/projects')).json();
+      const requestedRecord = allProjects.find(p => p.project_id === requestedProject);
+      projects = allProjects.filter(p => p.has_discovery);
       els.globalProjectSelect.innerHTML = projects.map(p => `<option value="${esc(p.project_id)}">${esc(p.project_id)}</option>`).join('');
       els.projectSelect.innerHTML = projects.map(p => `<option value="${esc(p.project_id)}">${esc(p.project_id)}</option>`).join('');
+      if (requestedRecord && !requestedRecord.has_discovery) {
+        selected = null;
+        setDiscoveryFormMode('initial', requestedRecord);
+        document.getElementById('newDiscoveryShell').open = true;
+        els.projectInfo.textContent = `${requestedRecord.project_id} · Run Discovery to create its candidate set.`;
+        els.runStatus.textContent = 'This project is registered but has not run Discovery yet.';
+        return;
+      }
       if (projects.length) {
         selected = projects.find(p => p.project_id === requestedProject)?.project_id || projects[0].project_id;
         els.projectSelect.value = selected;
@@ -511,7 +600,8 @@
         project_id: els.newProjectId.value.trim(),
         topic: els.newTopic.value.trim(),
         keywords: els.newKeywords.value.trim(),
-        web_search: els.newWebSearch.checked
+        web_search: els.newWebSearch.checked,
+        restart_existing: discoveryFormMode === 'restart'
       };
       if (!payload.project_id) {
         els.runStatus.textContent = 'Enter a project ID before running discovery.';
@@ -525,8 +615,12 @@
         msg('Topic is required.');
         return;
       }
+      if (payload.restart_existing && !window.confirm(tr('Replace this project topic and clear all downstream Matrix, outline, draft, and figure work? Library PDFs will be kept.'))) {
+        els.runStatus.textContent = 'Restart cancelled. The existing project was not changed.';
+        return;
+      }
       els.runDiscoveryBtn.disabled = true;
-      els.runStatus.textContent = 'Searching local metadata...';
+      els.runStatus.textContent = payload.restart_existing ? 'Searching the new topic before replacing the current project...' : 'Searching local metadata...';
       try {
         const response = await fetch('/api/discovery', {
           method: 'POST',
@@ -545,12 +639,14 @@
         els.newTopic.value = '';
         els.newKeywords.value = '';
         els.newWebSearch.checked = false;
+        setDiscoveryFormMode('new');
+        document.getElementById('newDiscoveryShell').open = false;
         await loadProjects();
         await loadProject(result.project_id);
         const stats = discoveryCounts(data);
         const externalText = stats.uniqueExternal ? ` and ${stats.uniqueExternal} unique external results` : '';
-        els.runStatus.textContent = `Project ${result.project_id} is ready: found ${stats.candidateLocal} candidate papers (${stats.candidateHits} keyword hits)${externalText} across ${stats.keywordGroups} keyword groups. Selected for Matrix: ${stats.uniqueLocal}; include candidates to build the selection.`;
-        msg('Discovery complete');
+        els.runStatus.textContent = `Project ${result.project_id} is ready: found ${stats.candidateLocal} candidate papers (${stats.candidateHits} keyword hits)${externalText} across ${stats.keywordGroups} keyword groups. Selected for Matrix: ${stats.selectedLocal}; include candidates to build the selection.`;
+        msg(result.restarted ? 'Topic changed and Discovery restarted.' : 'Discovery complete');
       } catch (error) {
         els.runStatus.textContent = error.message || 'Discovery failed.';
         msg(error.message || 'Discovery failed.');
@@ -566,6 +662,7 @@
       els.globalProjectSelect.value = id;
       selectedKeyword = data.results.find(g => g.keep !== false)?.keyword || data.results[0]?.keyword;
       selectedPaper = null;
+      els.restartDiscoveryBtn.hidden = false;
       syncCategoryFilter();
       renderAll();
     }
@@ -587,18 +684,22 @@
     function discoveryCounts(source=data) {
       const allGroups = source?.results || [];
       const groups = allGroups.filter(group => group.keep !== false);
-      const localRows = groups.flatMap(group => (group.local_results || []).filter(candidateSelected));
-      const externalRows = groups.flatMap(group => (group.web_results || []).filter(row => row.keep !== false));
+      const localRows = groups.flatMap(group => group.local_results || []);
+      const selectedLocalRows = localRows.filter(candidateSelected);
+      const externalRows = groups.flatMap(group => group.web_results || []);
       const localKeys = localRows.map((row, index) => row.paper_id || (row.title ? `${row.title}|${row.year || ''}` : `local-${index}`));
+      const selectedLocalKeys = selectedLocalRows.map((row, index) => row.paper_id || (row.title ? `${row.title}|${row.year || ''}` : `selected-local-${index}`));
       const externalKeys = externalRows.map((row, index) => row.doi || row.url || (row.title ? `${row.title}|${row.year || ''}` : `external-${index}`));
-      const candidateLocalRows = allGroups.flatMap(group => group.local_results || []);
+      const candidateLocalRows = groups.flatMap(group => group.local_results || []);
       const candidateLocalKeys = candidateLocalRows.map((row, index) => row.paper_id || (row.title ? `${row.title}|${row.year || ''}` : `candidate-${index}`));
       const configuredLibraryTotal = Number(source?.filter_stats?.after_filter ?? source?.filter_stats?.before_filter);
       return {
-        uniqueLocal: new Set(localKeys).size,
+        uniqueLocal: new Set(candidateLocalKeys).size,
         candidateLocal: new Set(candidateLocalKeys).size,
         candidateHits: candidateLocalRows.length,
+        selectedLocal: new Set(selectedLocalKeys).size,
         localHits: localRows.length,
+        selectedLocalHits: selectedLocalRows.length,
         uniqueExternal: new Set(externalKeys).size,
         externalHits: externalRows.length,
         libraryTotal: Number.isFinite(configuredLibraryTotal) ? configuredLibraryTotal : new Set(localKeys).size,
@@ -608,12 +709,13 @@
     function renderStats() {
       const stats = discoveryCounts(data);
       els.discoveryStats.innerHTML = [
-        ['Selected papers', stats.uniqueLocal],
         ['Candidate papers', stats.candidateLocal],
         ['Keyword hits', stats.candidateHits],
+        ['Selected papers', stats.selectedLocal],
         ['Keyword groups', stats.keywordGroups]
       ].map(([label, value]) => `<div class="stat-card"><span class="stat-value">${esc(value)}</span><span class="stat-label">${esc(label)}</span></div>`).join('');
       els.keywordGroupCount.textContent = `${stats.keywordGroups} active`;
+      els.topPaperCount.max = String(Math.max(1, stats.candidateLocal));
     }
     function renderAll() { renderStats(); renderKeywords(); renderResults(); renderDetail(); }
     function renderKeywords() {
@@ -628,7 +730,8 @@
         <button class="card ${selectedKeyword===g.keyword?'active':''} ${g.keep===false?'deleted':''}" data-keyword="${esc(g.keyword)}">
           <div class="k-title">${esc(g.keyword)}</div>
           <div class="meta">${esc(categoryLabel(g))}</div>
-          <span class="pill">${(g.local_results||[]).filter(candidateSelected).length} selected</span>
+          <span class="pill">${(g.local_results||[]).length} hits</span>
+          <span class="pill">${new Set((g.local_results||[]).filter(candidateSelected).map(row => row.paper_id)).size} selected</span>
           <span class="pill web">${(g.web_results||[]).filter(r=>r.keep!==false).length} external</span>
         </button>`).join('');
     }
@@ -645,7 +748,7 @@
         const selectedLabel = r.kind === 'local' ? 'Included in Matrix' : 'Kept as external reference';
         const includeLabel = r.kind === 'local' ? 'Include in Matrix' : 'Keep as external reference';
         const removeLabel = r.kind === 'local' ? 'Remove from Matrix' : 'Remove external reference';
-        return `<article class="result ${selectedForMatrix?'':'drop'} ${active?'active':''}" data-result-kind="${esc(r.kind)}" data-result-id="${esc(id)}" tabindex="0" aria-label="${esc(`View details: ${r.title || '(untitled)'}`)}" aria-current="${active?'true':'false'}">
+        return `<article class="result ${r.role==='excluded'?'drop':''} ${active?'active':''}" data-result-kind="${esc(r.kind)}" data-result-id="${esc(id)}" tabindex="0" aria-label="${esc(`View details: ${r.title || '(untitled)'}`)}" aria-current="${active?'true':'false'}">
           <div class="result-heading"><div class="r-title">${esc(r.title || '(untitled)')}</div>${selectedForMatrix?`<span class="selected-indicator">${selectedLabel}</span>`:active?'<span class="selected-indicator">Viewing</span>':''}</div>
           <div class="meta">${esc([r.paper_id, r.year, r.journal, `score=${r.score}`, (Array.isArray(r.sources) && r.sources.length) ? `source=${r.sources.join('+')}` : (r.source ? `source=${r.source}` : null)].filter(Boolean).join(' · '))}</div>
           <div class="meta">${esc(r.reason || '')} ${r.url ? `<a href="${esc(r.url)}" target="_blank">Open link</a>` : ''}</div>
@@ -691,6 +794,45 @@
       });
       renderAll();
     }
+    function rankedLocalCandidates() {
+      const ranked = new Map();
+      let sourceOrder = 0;
+      (data?.results || []).filter(group => group.keep !== false).forEach(group => {
+        (group.local_results || []).forEach(row => {
+          const paperId = String(row.paper_id || '').trim();
+          if (!paperId) return;
+          const score = Number(row.score ?? row.raw_score ?? row.direct_raw_score ?? 0);
+          const existing = ranked.get(paperId);
+          if (!existing) ranked.set(paperId, {paperId, score: Number.isFinite(score) ? score : 0, sourceOrder});
+          else if (Number.isFinite(score) && score > existing.score) existing.score = score;
+          sourceOrder += 1;
+        });
+      });
+      return [...ranked.values()].sort((a, b) => (b.score - a.score) || (a.sourceOrder - b.sourceOrder));
+    }
+    function selectTopCandidates() {
+      const candidates = rankedLocalCandidates();
+      const requested = Number.parseInt(els.topPaperCount.value, 10);
+      if (!Number.isInteger(requested) || requested < 1) {
+        msg('Enter a valid number of papers.');
+        els.topPaperCount.focus();
+        return;
+      }
+      if (!candidates.length) {
+        msg('No local candidate papers are available.');
+        return;
+      }
+      const count = Math.min(requested, candidates.length);
+      const selectedIds = new Set(candidates.slice(0, count).map(row => row.paperId));
+      (data?.results || []).forEach(group => (group.local_results || []).forEach(row => {
+        const selectedForMatrix = selectedIds.has(String(row.paper_id || '').trim());
+        row.selected_for_matrix = selectedForMatrix;
+        if (selectedForMatrix && row.role === 'excluded') row.role = 'uncertain';
+      }));
+      els.topPaperCount.value = String(count);
+      renderAll();
+      msg(`Selected top ${count} of ${candidates.length} candidate papers for Matrix.`);
+    }
     async function renderDetail() {
       const requestToken = ++detailRequestToken;
       if (!selectedPaper) {
@@ -730,13 +872,13 @@
         if (!res.ok || !result.ok) throw new Error(result.error || 'Could not save Discovery.');
         if (confirm) {
           const count = result.matrix_sync?.selected_paper_count || 0;
-          const expectedCount = discoveryCounts(data).uniqueLocal;
+          const expectedCount = discoveryCounts(data).selectedLocal;
           if (!result.matrix_sync?.selection_current || count !== expectedCount) {
             throw new Error(`Matrix synchronization mismatch: selected ${expectedCount}, synchronized ${count}. Stay in Discovery and retry.`);
           }
           els.runStatus.textContent = `Discovery confirmed. ${count} selected papers were synchronized to Matrix.`;
           const fingerprint = result.matrix_sync?.selection_fingerprint || '';
-          window.location.assign(`/matrix?project=${encodeURIComponent(selected)}&selection=${encodeURIComponent(fingerprint)}`);
+          window.location.assign(`/planning?tab=matrix&project=${encodeURIComponent(selected)}&selection=${encodeURIComponent(fingerprint)}`);
           return;
         }
         msg('Saved');
@@ -787,10 +929,14 @@
     document.getElementById('projectSelect').addEventListener('change', e => loadProject(e.target.value));
     els.globalProjectSelect.addEventListener('change', e => loadProject(e.target.value));
     document.getElementById('reloadBtn').addEventListener('click', () => selected && loadProject(selected));
+    els.restartDiscoveryBtn.addEventListener('click', prepareDiscoveryRestart);
+    els.cancelRestartBtn.addEventListener('click', cancelDiscoveryRestart);
     els.runDiscoveryBtn.addEventListener('click', startDiscovery);
     document.getElementById('saveBtn').addEventListener('click', () => save(false));
     document.getElementById('confirmBtn').addEventListener('click', () => save(true));
     document.getElementById('toggleKeywordBtn').addEventListener('click', () => { const g = currentGroup(); if (g) { g.keep = g.keep === false; renderAll(); } });
+    els.selectTopPapers.addEventListener('click', selectTopCandidates);
+    els.topPaperCount.addEventListener('keydown', event => { if (event.key === 'Enter') selectTopCandidates(); });
     document.getElementById('clearPaperSelection').addEventListener('click', clearCandidateSelection);
     els.keywordFilter.addEventListener('input', renderKeywords);
     els.centerFilter.addEventListener('change', () => {

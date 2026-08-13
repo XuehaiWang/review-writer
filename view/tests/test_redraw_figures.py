@@ -30,7 +30,7 @@ class SourceFaithfulRenderTests(unittest.TestCase):
 
             with Image.open(output) as rendered:
                 self.assertEqual(rendered.size, (44, 28))
-                self.assertEqual(rendered.mode, "1")
+                self.assertEqual(rendered.mode, "L")
             self.assertEqual(rendering["width"], 44)
             self.assertEqual(rendering["height"], 28)
             self.assertEqual(rendering["scale_factor"], 4)
@@ -171,7 +171,7 @@ class OcrValidationTests(unittest.TestCase):
                 redraw_figures.run(argparse.Namespace(
                     review_root=str(root), project_id="demo", paper_id="", figures_file="", base_url="https://example.test",
                     wire_api="images", api_key="test-key", model="gpt-image-2", quality="high", background="opaque",
-                    output_format="png", render_mode="ai-edit", style_name="test", limit=0, dry_run=False,
+                    output_format="png", render_mode="ocr-hollow-ai", style_name="test", limit=0, dry_run=False,
                     require_redrawn=False, ocr_language="eng", tesseract_cmd="",
                     image_field="image[]",
                     images_transport="urllib",
@@ -187,9 +187,10 @@ class OcrValidationTests(unittest.TestCase):
             self.assertEqual(row["ocr_output_text"], "Pd(OAc)2")
             self.assertEqual(row["missing_ocr_tokens"], ["85%"])
             self.assertEqual(row["ocr_check_status"], "needs_human_check")
-            self.assertEqual(row["status"], "chemistry_integrity_failed")
+            self.assertEqual(row["status"], "redrawn")
             self.assertEqual(row["chemistry_integrity"]["status"], "failed")
-            self.assertIsNone(row["redrawn_image"])
+            self.assertTrue(Path(row["redrawn_image"]).is_file())
+            self.assertEqual(row["output_disposition"], "saved_with_integrity_warning")
             self.assertIn("OCR transcription", row["prompt"])
             self.assertEqual(captured_edit_args[-2:], ["image[]", "urllib"])
 

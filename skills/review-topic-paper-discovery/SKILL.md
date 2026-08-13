@@ -77,7 +77,7 @@ coverage is requested. For SciAtlas KG, configure the service and append its
 search controls:
 
 ```bash
-export SCIATLAS_API_BASE_URL=http://sciatlas.openkg.cn
+export SCIATLAS_API_BASE_URL=https://sciatlas-proxy.example
 export SCIATLAS_API_KEY=sciatlas_xxx     # required for /v1/search
 
 python skills/review-topic-paper-discovery/scripts/discover.py \
@@ -127,11 +127,16 @@ Authorization: Bearer $SCIATLAS_API_KEY
 X-API-Key:     $SCIATLAS_API_KEY
 ```
 
-Health check before searching:
+Health check before searching (against the configured HTTPS endpoint):
 
 ```bash
-curl -s http://sciatlas.openkg.cn/healthz
+curl -s "$SCIATLAS_API_BASE_URL/healthz"
 ```
+
+The application no longer embeds a remote HTTP default because that would send
+the API key in cleartext. Prefer an HTTPS reverse proxy. A legacy non-loopback
+HTTP endpoint is accepted only with the explicit
+`SCIATLAS_ALLOW_INSECURE_HTTP=true` opt-in.
 
 If SciAtlas health or auth fails, the script records the failure in
 `web_results_by_keyword.json.status` and continues with local-only retrieval.

@@ -222,12 +222,33 @@ class FinalStageActionTests(unittest.TestCase):
 
     def test_final_actions_switch_the_middle_window_to_the_generated_output(self) -> None:
         final_page = FINAL_PAGE_PATH.read_text(encoding="utf-8")
-        self.assertIn("selectedProject='',doc='final'", final_page)
+        self.assertIn("doc=initialFinalDocument()", final_page)
+        self.assertIn("requested:'preparation'", final_page)
+        self.assertIn('class="tab active" data-doc="preparation"', final_page)
+        self.assertNotIn('data-doc="quality"', final_page)
+        self.assertNotIn('class="tab active" data-doc="final"', final_page)
         self.assertIn("'final-conclusion':'conclusion'", final_page)
         self.assertIn("'final-overview-figure':'overview-figure'", final_page)
         self.assertIn("final:'final'", final_page)
-        selection = final_page.index("doc=targetDocs[stageId]||doc")
+        selection = final_page.index("selectDocument(targets[stageId]||doc)")
         self.assertLess(selection, final_page.index("await loadProject(selectedProject)", selection))
+
+    def test_hosted_linux_artifact_paths_use_the_authenticated_file_route(self) -> None:
+        final_page = FINAL_PAGE_PATH.read_text(encoding="utf-8")
+        self.assertIn("/^(?:[A-Za-z]:[\\\\/]|\\/)/.test(raw)", final_page)
+        self.assertIn("return '/file?path='+encodeURIComponent(raw)", final_page)
+        self.assertIn("/^(?:\\/file\\?|\\/api\\/|\\/assets\\/)/.test(raw)", final_page)
+        self.assertNotIn("p.startsWith('/')", final_page)
+
+    def test_draft_handoff_enters_stage_nine_at_final_preparation(self) -> None:
+        self.assertEqual(
+            dashboard.stage_next_path("draft", "final", "demo"),
+            "/final?project=demo&doc=preparation",
+        )
+        self.assertEqual(
+            dashboard.stage_next_path("figures", "draft", "demo"),
+            "/draft?project=demo",
+        )
 
     def test_unused_stale_overview_does_not_hide_a_current_final_draft(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

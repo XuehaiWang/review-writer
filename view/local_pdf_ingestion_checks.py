@@ -146,7 +146,7 @@ def check_ingestion_and_downstream_reuse() -> None:
 def check_dashboard_wiring() -> None:
     html = (ROOT / "view" / "assets" / "dashboard" / "library.html").read_text(encoding="utf-8")
     server = (ROOT / "view" / "serve_review_dashboard.py").read_text(encoding="utf-8")
-    requirements = (ROOT / "requirements-workflow.txt").read_text(encoding="utf-8")
+    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     assert 'id="localPdfInput"' in html and "multiple" in html
     assert "/api/library/upload-pdf?filename=" in html
     assert "MinerU precise parsing" in html

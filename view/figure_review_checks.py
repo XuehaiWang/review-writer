@@ -158,6 +158,27 @@ class FigureReviewHandoffChecks(unittest.TestCase):
             self.assertNotIn("selected a different source candidate", failed["notes"])
             self.assertEqual(failed["last_redraw_attempt"]["source_sha256"], failed["source_image_sha256"])
 
+    def test_redraw_uses_the_current_workspace_image_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.build_project(root)
+
+            with (
+                patch(
+                    "serve_review_dashboard.provider_subprocess_environment",
+                    return_value={"IMAGE_OPENAI_MODEL": "user-scoped-image-model"},
+                ),
+                patch(
+                    "serve_review_dashboard.run_project_script",
+                    side_effect=RuntimeError("intentional redraw stop"),
+                ) as runner,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "intentional redraw stop"):
+                    redraw_current_figure(root, "demo", "P001-F01", force_ai_edit=True)
+
+            extra = runner.call_args.kwargs["extra"]
+            self.assertEqual(extra[extra.index("--model") + 1], "user-scoped-image-model")
+
     def test_human_approval_is_bound_to_current_source_and_output_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

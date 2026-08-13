@@ -27,17 +27,17 @@
     @media(max-width:760px){.svg-editor-toolbar{grid-template-columns:1fr}.svg-toolbar-tools,.svg-toolbar-file{grid-column:auto}.svg-tool-palette{grid-template-columns:repeat(3,minmax(76px,1fr))}.svg-toolbar-file .svg-toolbar-body{align-items:stretch}.svg-toolbar-file .btn{flex:1}.svg-editor-toolbar .svg-close-action{margin-left:0}}
     @media(max-width:1100px){body{height:auto;overflow:auto}.app{height:auto;grid-template-columns:1fr}.panel{min-height:360px}.grid{grid-template-columns:1fr}}
   </style>
-  <link rel="stylesheet" href="/assets/dashboard/review-ui.css?v=20260803">
+<link rel="stylesheet" href="/assets/dashboard/review-ui.css?v=20260813g">
 </head>
 <body>
-  <nav class="nav"><div class="nav-title">Review Writer</div><div class="nav-center"><select id="projectSelect" class="project-select"></select></div><div class="nav-right"><a href="/library">Library</a><a href="/discovery">Discovery</a><a href="/matrix">Matrix</a><a href="/blueprint">Blueprint</a><a href="/sections">Sections</a><a class="active" href="/figures">Figures</a><a href="/draft">Draft</a><a href="/final">Final</a></div></nav>
+  <nav class="nav"><div class="nav-title">Review Writer</div><div class="nav-center"><select id="projectSelect" class="project-select"></select></div><div class="nav-right"></div></nav>
   <main class="app">
     <section class="panel"><div class="head"><h1>Figure Redraw</h1><div id="projectInfo" class="sub">Loading...</div><div id="batchActions" class="batch-actions"></div></div><div id="figureList" class="list"></div></section>
-    <section class="panel"><div class="head"><h2 id="mainTitle">Figure Check</h2><div id="mainMeta" class="sub"></div></div><div class="tabs"><button class="tab active" data-tab="figure">Figure</button><button class="tab" data-tab="report">Report</button></div><div id="main" class="main"></div></section>
+    <section class="panel"><div class="head"><h2 id="mainTitle">Figure Check</h2><div id="mainMeta" class="sub"></div></div><div class="tabs"><button class="tab active" data-tab="figure">Image Preview</button><button class="tab" data-tab="report">Redraw Report</button></div><div id="main" class="main"></div></section>
     <section class="panel"><div class="head"><h2>Review Gate</h2><div class="sub">Do not proceed unless source image and redrawn output are both verified.</div></div><div id="summary" class="side"></div></section>
   </main>
-  <script src="/assets/dashboard/review-i18n.js?v=20260807a"></script>
-  <script src="/assets/dashboard/review-ui.js?v=20260807a"></script>
+<script src="/assets/dashboard/review-i18n.js?v=20260813g"></script>
+<script src="/assets/dashboard/review-ui.js?v=20260813g"></script>
   <script>
     let projects=[],payload=null,selectedProject='',selected=0,tab='figure',manualEditorOpen=false,manualArrowState=null,manualEditorBaseMode='source',svgEditorOpen=false,svgEditorState=null,batchPollTimer=null,assetRevision=0,bulkApprovalNotice='',bulkApprovalNoticeError=false;
     const svgEditorMarkupTransforms=[],svgEditorInteractionEnhancers=[],svgEditorUndoHandlers=[];
@@ -58,10 +58,26 @@
     function manualBaseControls(candidate){const r=matchRedrawn(candidate,selected),ai=outputPath(r)||rejectedPreviewPath(r),disabled=ai?'':'disabled';if(!ai&&manualEditorBaseMode==='redrawn')manualEditorBaseMode='source';return`<label>编辑底图 <select id="manualBaseMode"><option value="source" ${manualEditorBaseMode==='source'?'selected':''}>原图</option><option value="redrawn" ${manualEditorBaseMode==='redrawn'?'selected':''} ${disabled}>AI 重绘图</option></select></label>`}
     function editableSvgPath(redrawnRow){return redrawnRow?.editable_svg||redrawnRow?.manual_arrow_edit?.editable_svg||''}
     function bulkApprovalEligibleIds(){const states=payload?.figure_redraw_states||{},blocked=new Set(['queued','running','retrying','failed','cancelled','interrupted']);return candidates().filter(candidate=>{if(!candidate?.figure_id||candidate.manuscript_selected===false)return false;const row=findRedrawnRecord(candidate,candidates().indexOf(candidate)),state=states[candidate.figure_id]||{},stored=row?.output_path||row?.redrawn_path||row?.output_image_path||row?.redrawn_image||row?.image_path||row?.path||'',aspectBlocked=row?.aspect_ratio_integrity?.status==='failed'&&!canvasPolicyAllowed(row);return row?.status==='redrawn'&&Boolean(stored)&&!aspectBlocked&&!humanApprovalCurrent(row)&&!blocked.has(String(state.status||''))}).map(candidate=>candidate.figure_id)}
-    async function startBatchRedraw(){const button=$('redrawAll');if(button)button.disabled=true;try{const response=await fetch(`/api/project/${encodeURIComponent(selectedProject)}/figures/redraw-all`,{method:'POST'});const result=await response.json().catch(()=>({ok:false,error:`服务器返回 ${response.status}。`}));if(!response.ok||!result.ok)throw new Error(result.error||`服务器返回 ${response.status}。`);payload.batch_redraw=result;renderBatchActions();syncBatchPolling();await refreshFigureRedrawActivity()}catch(error){if(button)button.disabled=false;const node=$('batchActions');if(node)node.insertAdjacentHTML('beforeend',`<div class="manual-danger">${esc(error.message||String(error))}</div>`)}}
+    async function startBatchRedraw(){const button=$('redrawAll');if(button)button.disabled=true;try{const response=await fetch(`/api/project/${encodeURIComponent(selectedProject)}/figures/redraw-all`,{method:'POST'});const result=await response.json().catch(()=>({ok:false,error:`服务器返回 ${response.status}。`}));if(!response.ok||!result.ok)throw new Error(result.error||`服务器返回 ${response.status}。`);payload.batch_redraw=result;renderBatchActions();renderSummary();syncBatchPolling();await refreshFigureRedrawActivity()}catch(error){if(button)button.disabled=false;const node=$('batchActions');if(node)node.insertAdjacentHTML('beforeend',`<div class="manual-danger">${esc(error.message||String(error))}</div>`)}}
     function batchIsActive(){return ['running','stopping'].includes(batchRedraw().status)}
+    function figureStageReadiness(){
+      const freshness=payload?.freshness||{};
+      const selectedCount=Math.max(0,Number(freshness.selected_count)||0);
+      const usableCount=Math.min(selectedCount,Math.max(0,Number(freshness.usable_count)||0));
+      const remainingCount=Math.max(0,selectedCount-usableCount);
+      const activeStatuses=new Set(['queued','running','retrying']);
+      const generationActive=batchIsActive()||Object.values(payload?.figure_redraw_states||{}).some(state=>activeStatuses.has(String(state?.status||'')));
+      let code='ready',message=`All ${selectedCount} selected manuscript figures are usable. You can enter Draft.`;
+      if(generationActive){code='generating';message='Figure generation is still running. Wait until it finishes before entering Draft.'}
+      else if(!selectedCount){code='no_selection';message='No manuscript figure is selected. Return to Source Figure Review and select at least one figure.'}
+      else if(remainingCount){code='incomplete';message=`${usableCount}/${selectedCount} selected manuscript figures are usable; ${remainingCount} still need redraw or approval.`}
+      else if(freshness.stale||freshness.source_stale){code='out_of_date';message='Figure outputs are out of date. Redraw the affected figures before entering Draft.'}
+      return{ready:code==='ready',code,selectedCount,usableCount,remainingCount,generationActive,message};
+    }
+    window.reviewFigureStageReadiness=figureStageReadiness;
+    function announceFigureStageReadiness(){window.dispatchEvent(new CustomEvent('review-stage-readiness-change',{detail:figureStageReadiness()}))}
     function renderBatchActions(){const node=$('batchActions');if(!node)return;const job=batchRedraw(),running=job.status==='running',stopping=job.status==='stopping',active=running||stopping,total=Number(job.total)||0,completed=Number(job.completed)||0,previewIds=new Set(redrawn().filter(x=>rejectedPreviewPath(x)).map(x=>x.figure_id)),recoveredPreview=(job.errors||[]).filter(x=>previewIds.has(x.figure_id)).length,succeeded=(Number(job.succeeded)||0)+recoveredPreview,preview=Math.max(Number(job.preview_succeeded)||0,recoveredPreview),failed=Math.max(0,(Number(job.failed)||0)-recoveredPreview),progress=total?`${completed}/${total}`:'0/0',current=job.current_figure_id?` · 当前：${job.current_figure_id}`:'',outcome=`成功 ${succeeded}${preview?`（其中预览成功 ${preview}）`:''}，失败 ${failed}`,summary=running?`AI 重绘进度：${progress}（${outcome}）${current}`:stopping?`正在停止全部生成：当前请求完成后将不再发送新请求。${progress}（${outcome}）${current}`:job.status==='stopped'?`批量重绘已停止：${completed}/${total}（${outcome}）`:job.status==='completed'?`批量重绘完成：${completed}/${total}（${outcome}）`:'逐张顺序调用 AI，切换页面后任务仍在后台继续。',approvalReady=bulkApprovalEligibleIds().length,notice=bulkApprovalNotice?`<div class="batch-progress${bulkApprovalNoticeError?' manual-danger':''}">${esc(bulkApprovalNotice)}</div>`:'';node.innerHTML=`<button id="redrawAll" class="btn primary" ${active?'disabled':''}>${running?'全部 AI 重绘中…':stopping?'正在停止…':'全部 AI 重绘'}</button>${active?'<button id="stopRedrawAll" class="btn">全部停止生成</button>':''}<button id="approveSuccessfulRedraws" class="btn" ${active||!approvalReady?'disabled':''}>${esc(tr('Approve all'))}${approvalReady?` (${approvalReady})`:''}</button><div class="batch-progress">${esc(summary)}</div>${notice}`}
-    async function stopBatchRedraw(){const button=$('stopRedrawAll');if(button)button.disabled=true;try{const response=await fetch(`/api/project/${encodeURIComponent(selectedProject)}/figures/redraw-all/stop`,{method:'POST'});const result=await response.json().catch(()=>({ok:false,error:`服务器返回 ${response.status}。`}));if(!response.ok||!result.ok)throw new Error(result.error||`服务器返回 ${response.status}。`);payload.batch_redraw=result;renderBatchActions();syncBatchPolling();await refreshFigureRedrawActivity()}catch(error){if(button)button.disabled=false;const node=$('batchActions');if(node)node.insertAdjacentHTML('beforeend',`<div class="manual-danger">${esc(error.message||String(error))}</div>`)}}
+    async function stopBatchRedraw(){const button=$('stopRedrawAll');if(button)button.disabled=true;try{const response=await fetch(`/api/project/${encodeURIComponent(selectedProject)}/figures/redraw-all/stop`,{method:'POST'});const result=await response.json().catch(()=>({ok:false,error:`服务器返回 ${response.status}。`}));if(!response.ok||!result.ok)throw new Error(result.error||`服务器返回 ${response.status}。`);payload.batch_redraw=result;renderBatchActions();renderSummary();syncBatchPolling();await refreshFigureRedrawActivity()}catch(error){if(button)button.disabled=false;const node=$('batchActions');if(node)node.insertAdjacentHTML('beforeend',`<div class="manual-danger">${esc(error.message||String(error))}</div>`)}}
     async function approveSuccessfulRedraws(){const eligible=bulkApprovalEligibleIds();if(!eligible.length){bulkApprovalNotice=tr('No successful redraw is awaiting approval.');bulkApprovalNoticeError=false;renderBatchActions();return}if(!window.confirm(`${tr('Only current successful redraws will be approved. Failed, active, stale, or missing outputs remain unchanged.')}\n\n${eligible.length}`))return;const button=$('approveSuccessfulRedraws'),keepId=candidates()[selected]?.figure_id||'';if(button)button.disabled=true;bulkApprovalNotice='正在保存批量人工审核结果…';bulkApprovalNoticeError=false;renderBatchActions();try{const response=await fetch(`/api/project/${encodeURIComponent(selectedProject)}/figures/human-approve-successful`,{method:'POST'}),result=await response.json().catch(()=>({ok:false,error:`服务器返回 ${response.status}。`}));if(!response.ok||!result.ok)throw new Error(result.error||`服务器返回 ${response.status}。`);bulkApprovalNotice=`批量审核完成：新通过 ${Number(result.approved_count)||0}，已通过 ${Number(result.already_approved_count)||0}，保持未通过/未生成 ${Number(result.skipped_count)||0}（其中生成失败 ${Number(result.generation_failed_count)||0}）。`;bulkApprovalNoticeError=false;await loadProject(selectedProject,keepId)}catch(error){bulkApprovalNotice=error.message||String(error);bulkApprovalNoticeError=true;renderBatchActions()}}
     function manualPoint(event){const state=manualArrowState,rect=state.canvas.getBoundingClientRect();return{x:Math.round((event.clientX-rect.left)*state.canvas.width/rect.width),y:Math.round((event.clientY-rect.top)*state.canvas.height/rect.height)}}
     function manualSnapshot(){const state=manualArrowState;if(!state)return;state.history.push(state.canvas.toDataURL('image/png'));if(state.history.length>30)state.history.shift()}
@@ -322,8 +338,8 @@
     }
     svgEditorInteractionEnhancers.push(()=>svgEnhanceEditorToolbar());
 
-    // A changed Stage 6 selection invalidates only the old redraw, not the
-    // current source candidate. Keep the selected source visible in Stage 7
+    // A changed source-figure selection invalidates only the old redraw, not the
+    // current source candidate. Keep the selected source visible in redraw
     // and hide outputs whose recorded source cannot be matched to it.
     function normalizedFigureSource(path){return String(path||'').replace(/\\/g,'/').toLowerCase()}
     function matchRedrawn(candidate,index){
@@ -343,13 +359,14 @@
       const status=sourceStale
         ?'阻止：章节或候选来源已过期，请重新生成。'
         :redrawStale
-          ?`第六阶段选图已载入；${redrawDone}/${rows.length} 个重绘结果与当前选图匹配，其余需要重新重绘。`
+          ?`候选源图审核结果已载入；${redrawDone}/${rows.length} 个重绘结果与当前选图匹配，其余需要重新重绘。`
           :redrawDone===rows.length&&resolved===rows.length
             ?'Ready after human image verification'
             :'Blocking: source/redraw incomplete';
       const humanCheck=['1. 源图必须真实来自对应论文。','2. 重绘图只能改变视觉风格，不能改变反应、条件、产物和机理。','3. 未定位源图的候选不能进入终稿。'].join(String.fromCharCode(10));
       $('projectInfo').textContent=`${selectedProject} · ${payload?.topic||''}`;
       $('summary').innerHTML=`<div class="field"><div class="label">Status</div><div class="value">${status}</div></div><div class="field"><div class="label">Candidates</div><div class="value">${rows.length}</div></div><div class="field"><div class="label">Manuscript Selected</div><div class="value">${selectedRows}</div></div><div class="field"><div class="label">Source Images Resolved</div><div class="value">${resolved}/${rows.length}</div></div><div class="field"><div class="label">Current Redrawn Outputs</div><div class="value">${redrawDone}/${rows.length}</div></div><div class="field"><div class="label">Needs Human Check</div><div class="value">${needs}</div></div><div class="field"><div class="label">Required Check</div><div class="value">${esc(humanCheck)}</div></div>`;
+      announceFigureStageReadiness();
     }
 
     // Failed automated integrity gates remain visible as previews. They become
@@ -458,7 +475,7 @@
     // Keep it visible as a preview while outputPath() continues to enforce the
     // separate manuscript-eligibility gate.  Some source-faithful/high-risk
     // rows have only redrawn_image and no rejected_preview_image; hiding both
-    // made completed jobs appear as "not generated" in the Stage 7 list.
+    // made completed jobs appear as "not generated" in the redraw list.
     function rejectedPreviewPath(row){
       const explicit=row?.rejected_preview_image||'';
       if(explicit)return explicit;
@@ -592,6 +609,7 @@
       if(!payload)return;
       payload.figure_redraw_states={...(payload.figure_redraw_states||{}),[figureId]:{figure_id:figureId,...state,updated_at:new Date().toISOString()}};
       renderList();
+      renderSummary();
       applyCurrentFigureGenerationState();
       syncBatchPolling();
     }

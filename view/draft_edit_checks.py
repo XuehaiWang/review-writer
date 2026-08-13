@@ -38,6 +38,15 @@ class DraftEditChecks(unittest.TestCase):
                 [section_drafts, figure_review, redraw_manifest],
             )
             dashboard.record_stage_outputs(draft_handoff, [draft_path], "draft")
+            (draft / "draft_approval.json").write_text(
+                json.dumps(
+                    {
+                        "status": "approved",
+                        "draft_sha256": dashboard.sha256_file(draft_path),
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             with patch.object(
                 dashboard,
@@ -74,6 +83,8 @@ class DraftEditChecks(unittest.TestCase):
         self.assertIn('new Set(["sections", "figures", "figure-review", "final"])', ui)
         self.assertIn('window.reviewDraftSaveForHandoff', ui)
         self.assertIn("window.reviewDraftSaveForHandoff = () => saveDraft({silent:true})", draft_page)
+        self.assertIn("window.reviewDraftApproveForHandoff", ui)
+        self.assertIn("window.reviewDraftApproveForHandoff = () => approveDraftForHandoff()", draft_page)
 
     def test_draft_editor_uses_the_light_project_surface(self) -> None:
         draft_page = (Path(__file__).parent / "assets" / "dashboard" / "draft.html").read_text(
@@ -90,18 +101,20 @@ class DraftEditChecks(unittest.TestCase):
         self.assertIn(".page-draft textarea.editor", shared_styles)
         self.assertNotIn("#151a16", shared_styles)
 
-    def test_draft_workspace_removes_duplicate_report_and_issue_tabs(self) -> None:
+    def test_draft_workspace_combines_editing_quality_and_human_approval(self) -> None:
         draft_page = (Path(__file__).parent / "assets" / "dashboard" / "draft.html").read_text(
             encoding="utf-8"
         )
 
         self.assertIn('data-tab="preview">Draft Preview</button>', draft_page)
         self.assertIn('data-tab="edit">Full-text Edit</button>', draft_page)
-        self.assertIn('data-tab="checks">Review Checks</button>', draft_page)
+        self.assertIn('data-tab="quality">Draft Quality</button>', draft_page)
+        self.assertIn('data-tab="approval">Human Approval</button>', draft_page)
+        self.assertNotIn('data-tab="checks"', draft_page)
         self.assertNotIn('data-tab="report"', draft_page)
         self.assertNotIn('data-tab="issues"', draft_page)
         self.assertNotIn("selectedItem = 'first_draft'", draft_page)
-        self.assertIn("function renderReviewChecks()", draft_page)
+        self.assertIn("function renderHumanApproval()", draft_page)
         self.assertIn("Merge and normalization", draft_page)
         self.assertIn("Human review items", draft_page)
         self.assertIn("merge_report_md", draft_page)
@@ -119,6 +132,9 @@ class DraftEditChecks(unittest.TestCase):
         self.assertIn('id="draftEditor"', draft_page)
         self.assertIn('id="saveBtn"', draft_page)
         self.assertIn("window.reviewDraftSaveForHandoff", draft_page)
+        self.assertIn("reviewDraftApproveForHandoff", draft_page)
+        self.assertIn("requestAiRewrite", draft_page)
+        self.assertIn("accept-candidate", draft_page)
 
     def test_paragraph_edit_preserves_canonical_citation_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

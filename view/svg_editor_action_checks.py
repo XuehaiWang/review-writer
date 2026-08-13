@@ -443,8 +443,14 @@ class SvgEditorResolutionChecks(unittest.TestCase):
 
     def test_mutable_project_files_disable_http_caching(self) -> None:
         source = Path(dashboard.__file__).read_text(encoding="utf-8")
-        self.assertIn("self.send_file(path, ctype, no_store=True)", source)
-        self.assertIn("def send_file(self, path: Path, content_type: str, *, no_store: bool = False)", source)
+        self.assertRegex(
+            source,
+            r"self\.send_file\(\s*path,\s*ctype,\s*no_store=True,",
+        )
+        self.assertRegex(
+            source,
+            r"def send_file\(\s*self,\s*path: Path,\s*content_type: str,\s*\*,\s*no_store: bool = False,",
+        )
 
 
 if __name__ == "__main__":

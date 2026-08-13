@@ -109,9 +109,12 @@ def load_dotenv(root: Path) -> dict[str, str]:
     return values
 
 
-def load_blueprint_rule_pack(root: Path, blueprint: dict[str, Any]) -> str:
-    """Load the rule pack selected by Blueprint, confined to its skill root."""
-    skill_root = (root / "skills" / "review-section-blueprint").resolve()
+def load_blueprint_rule_pack(_review_root: Path, blueprint: dict[str, Any]) -> str:
+    """Load application-owned Blueprint rules, never user-workspace content."""
+    # ``review_root`` points at per-user project storage in hosted mode.  Rule
+    # packs are immutable application resources and live beside this script,
+    # under the bootstrap root discovered above.
+    skill_root = (_BOOTSTRAP_ROOT / "skills" / "review-section-blueprint").resolve()
     relative = str(
         blueprint.get("rule_pack_path")
         or "references/rule_packs/general"

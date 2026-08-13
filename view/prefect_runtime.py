@@ -101,7 +101,7 @@ def ensure_prefect_available(review_root: Path) -> None:
     if importlib.util.find_spec("prefect") is None:
         raise RuntimeError(
             "Prefect is not installed in the active Python environment. "
-            "Start the dashboard with .venv\\Scripts\\python.exe or install requirements-workflow.txt."
+            "Start the dashboard with .venv\\Scripts\\python.exe or install requirements.txt."
         )
 
 

@@ -1,6 +1,6 @@
 # Review Writer
 
-Review Writer 是一个面向化学综述写作的本地、可审计工作流。它把论文入库、主题检索、文献矩阵、大纲与章节蓝图、分节写作、化学图像审核与重绘、初稿编辑、逐段质量反馈、终稿审计和 Word 导出连接成一个可恢复的九阶段流程。
+Review Writer 是一个面向化学综述写作的本地、可审计工作流。它把论文入库、主题检索、文献分析与写作规划、分节写作、化学图像审核与重绘、初稿编辑与质量确认、终稿审计和 Word 导出连接成一个可恢复的七阶段前端流程；后台任务和产物边界仍保持独立。
 
 当前 `dy` 分支的核心设计是：
 
@@ -15,40 +15,35 @@ Review Writer 是一个面向化学综述写作的本地、可审计工作流。
 ```mermaid
 flowchart LR
     A["1 Library<br/>PDF、MinerU、metadata"] --> B["2 Discovery<br/>项目、检索与筛选"]
-    B --> C["3 Matrix<br/>深读、矩阵与大纲"]
-    C --> D["4 Blueprint<br/>章节论证与任务"]
-    D --> E["5 Sections<br/>分节草稿与候选图"]
-    E --> F["6 Figure Review<br/>逐篇确认源图"]
-    F --> G["7 Figures<br/>AI 重绘与 SVG 编辑"]
-    E --> H["8 Draft<br/>合并、插图与段落编辑"]
-    G --> H
-    H --> I["9 Final<br/>反馈、终稿、审计与 DOCX"]
-    D -. 可选 .-> J["Overview Figure"]
-    H -. 可选 .-> K["Conclusion"]
-    J -. 当前版本 .-> I
-    K -. 当前版本 .-> I
+    B --> C["3 Analysis & Planning<br/>矩阵、大纲与章节蓝图"]
+    C --> D["4 Sections<br/>分节草稿与候选图"]
+    D --> E["5 Image Processing<br/>源图审核、AI 重绘与人工编辑"]
+    E --> F["6 Draft<br/>合并、质量评估与人工确认"]
+    F --> G["7 Final<br/>终稿、审计与 DOCX"]
+    C -. 可选 .-> H["Overview Figure"]
+    F -. 可选 .-> I["Conclusion"]
+    H -. 当前版本 .-> G
+    I -. 当前版本 .-> G
 ```
 
 页面顺序固定为：
 
 ```text
-Library → Discovery → Matrix → Blueprint → Sections
-        → Figure Review → Figures → Draft → Final
+Library → Discovery → Analysis & Planning → Sections
+        → Image Processing → Draft → Final
 ```
 
-## 九个阶段分别做什么
+## 七个前端阶段分别做什么
 
 | 阶段 | 主要操作 | 主要产物 |
 |---|---|---|
 | 1. Library | 批量上传本地 PDF、调用 MinerU、审核 metadata；也可检索并下载合法开放获取论文 | `review-library/uploads/`、`review-library/metadata/papers/`、`review-library/registry/papers.jsonl` |
 | 2. Discovery | 创建项目、生成检索计划、召回全部本地候选文献，并由人工选择进入 Matrix 的论文 | `00_discovery/query_plan.draft.json`、`selected_discovery_results.json`、`human_check_state.json` |
-| 3. Matrix | 生成逐篇阅读记录、文献矩阵；选择内置大纲或上传参考综述并仅提取其结构与写法 | `01_matrix_outline/literature_matrix.json`、`paper_reading_notes.json`、`selected_outline.md` |
-| 4. Blueprint | 把选定大纲转成章节目标、论点、论文角色、图像需求和写作任务 | `01_matrix_outline/section_blueprint.json`、`02_section_drafting/section_tasks.json` |
-| 5. Sections | 按 Blueprint 和当前论文集合生成分节草稿，并从 MinerU 内容建立候选图 | `section_drafts.json`、`section_drafts.md`、`figure_candidates.json`、`paper_figure_candidates.json` |
-| 6. Figure Review | 逐篇检查候选图，选择真正进入重绘的源图 | `02_section_drafting/human_figure_review.json` |
-| 7. Figures | 按图像类型 AI 重绘、批量重绘、人工放行、在线 SVG/Ketcher 编辑 | `03_figure_redraw/redrawn_figure_manifest.json`、`redrawn/*.png`、`manual_arrow_edits/*.svg` |
-| 8. Draft | 合并分节草稿、插入当前审核图、整理引用；支持段落级人工编辑 | `04_first_draft/first_draft.md`、`citations.json`、`figures/` |
-| 9. Final | 可选逐段评估优化、可选结论、可选总览图；生成终稿、审计并导出 Word | `05_final_audit/final_draft.md`、`overview_figure.png`、审计报告、`final_draft*.docx` |
+| 3. Analysis & Planning | 生成逐篇阅读记录和文献矩阵；选择或编辑大纲，再生成章节目标、论点、论文角色、图像需求和写作任务 | `01_matrix_outline/literature_matrix.json`、`selected_outline.md`、`section_blueprint.json`、`02_section_drafting/section_tasks.json` |
+| 4. Sections | 按当前章节蓝图和论文集合生成分节草稿，并从 MinerU 内容建立候选图 | `section_drafts.json`、`section_drafts.md`、`figure_candidates.json`、`paper_figure_candidates.json` |
+| 5. Image Processing | 逐篇选择真正进入重绘的源图，再进行 AI 重绘、批量处理、人工放行及在线 SVG/Ketcher 编辑 | `02_section_drafting/human_figure_review.json`、`03_figure_redraw/redrawn_figure_manifest.json`、`redrawn/*.png`、`manual_arrow_edits/*.svg` |
+| 6. Draft | 合并分节草稿、插入当前审核图、整理引用；支持段落/全文编辑、质量评估、AI 候选重写和精确版本人工确认 | `04_first_draft/first_draft.md`、`citations.json`、`figures/`、`draft_approval.json` |
+| 7. Final | 生成可选结论和总览图，组装终稿、执行审计并导出 Word | `05_final_audit/final_draft.md`、`overview_figure.png`、审计报告、`final_draft*.docx` |
 
 ## 当前主要能力
 
@@ -68,11 +63,11 @@ Library → Discovery → Matrix → Blueprint → Sections
 - 参考综述只用于提取标题层级、章节组织、篇幅分配和论述方式；主题专有标题会被拒绝或改写，不直接复制参考综述内容。
 - Blueprint 固化每一节的写作目标、论点、论文分配、证据角色和图像需求。
 - Sections 只读取当前 Blueprint 和当前选中论文；Blueprint 更新后，旧章节草稿仍保留在磁盘，但不会被当成当前流程内容。
-- 第八阶段人工编辑会保存为当前 Draft，并通过内容哈希进入第九阶段，而不是被旧的自动草稿覆盖。
+- Draft 中的人工编辑会保存为当前版本，并通过内容哈希进入 Final，而不是被旧的自动草稿覆盖。
 
 ### 化学图像重绘与在线编辑
 
-- 第六阶段的源图选择是第七阶段的唯一重绘来源；选择改变后，旧重绘会失效并要求重新生成。
+- Image Processing 中的候选源图审核是 AI 重绘的唯一来源；选择改变后，旧重绘会失效并要求重新生成。
 - 共享路由器会识别机理/循环、反应式、底物范围、表格、曲线图、多面板、低清晰度和彩色化学图等类型，也允许人工指定类型。
 - AI 请求始终携带当前源图；source hash 和 output hash 会写入 manifest，防止历史候选图串用。
 - 彩色化学图会要求去除不必要填充，同时保留苯环、化学键、文字、符号和圆球内标签。
@@ -87,8 +82,9 @@ Library → Discovery → Matrix → Blueprint → Sections
 
 ### Draft、Final 与 Word
 
-- 第八阶段可以直接编辑段落，保存后更新 Draft handoff 和内容哈希。
-- 第九阶段的 Draft Quality Feedback Loop 是可选操作：按 rubric 评估全文与每个段落，只改写未达标段落，并尽量保护引用、数值和化学信息。
+- Draft 可以直接编辑段落或全文；保存后更新 handoff 和内容哈希。
+- Draft Quality Feedback Loop 位于 Draft 内：按 rubric 评估全文与每个段落，AI 只生成候选重写，人工接受后才修改正文，并尽量保护引用、数值和化学信息。
+- 进入 Final 前必须对当前精确 Draft 版本完成评估和人工确认；正文再次修改后，旧评分与旧确认自动失效。
 - Conclusion、Overview Figure 和 Generate Final Draft 相互独立；生成终稿时使用当时存在且仍为当前版本的可选产物，不要求按按钮顺序依次执行。
 - Overview Figure 使用 Settings 中同一套图像服务配置，并按服务商支持情况协商画布尺寸。
 - Final 会重新排列图号并同步正文引用，清理内部插图注释，核对正文 callout 与 References 的对应关系。
@@ -112,10 +108,10 @@ Set-Location review-writer
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r requirements-workflow.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-`requirements-workflow.txt` 当前包含 Prefect 3、Pillow、Requests、python-docx 和 pypdf。
+`requirements.txt` 是本地工作流与托管 API 共用的唯一 Python 依赖清单。
 
 ### 3. 启动前端
 
@@ -133,6 +129,81 @@ py -m venv .venv
 
 若提示 Prefect 未安装，通常是启动前端时用了系统 Python。请重新使用 `.venv\Scripts\python.exe` 启动。
 
+### 4. FastAPI 开发入口
+
+当前版本提供一个小型单体 FastAPI 应用，同时提供网页和版本化 API。开发模式仍可直接读取现有本地项目：
+
+七阶段页面和静态资源已经由 FastAPI 直接、安全地提供。页面暂时仍使用的未版本化
+`/api/...` 请求集中在 `review_writer_api/workflow_compat.py`，响应带有
+`Deprecation: true`，新功能必须进入 `/api/v1/...`；底层 HTTP 适配只保留在
+`review_writer_api/dashboard_executor.py`，用于尚未逐项迁移的工作流端点和受控文件预览。
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m review_writer_api `
+  --review-root . `
+  --host 127.0.0.1 `
+  --port 8770
+```
+
+可访问：
+
+- 健康检查：<http://127.0.0.1:8770/api/v1/health>
+- 当前本地身份：<http://127.0.0.1:8770/api/v1/me>
+- 项目列表：<http://127.0.0.1:8770/api/v1/projects>
+- OpenAPI：<http://127.0.0.1:8770/api/docs>
+
+本地开发模式是单用户模式，不要求登录。需要验证多用户登录注册时，使用下面的 PostgreSQL Compose 部署。
+
+托管数据库迁移使用：
+
+```powershell
+$env:REVIEW_WRITER_POSTGRES_HOST='127.0.0.1'
+$env:REVIEW_WRITER_POSTGRES_PORT='5432'
+$env:REVIEW_WRITER_POSTGRES_USER='review_writer'
+$env:REVIEW_WRITER_POSTGRES_PASSWORD='replace-with-your-password'
+$env:REVIEW_WRITER_POSTGRES_DB='review_writer'
+.\.venv\Scripts\alembic.exe upgrade head
+```
+
+也可以用 `REVIEW_WRITER_DATABASE_URL` 直接覆盖上述五项配置。
+
+### 5. 小型线上部署：FastAPI + PostgreSQL
+
+线上结构只保留 FastAPI 和 PostgreSQL。用户、密码哈希、登录会话、项目归属和个人 API 设置都存入 PostgreSQL；项目文件使用 Docker Volume，不依赖 Keycloak、Redis 或 MinIO。
+
+复制 Docker 专用环境变量示例并修改密码与密钥。不要覆盖本地单用户模式可能已经使用的 `.env`：
+
+```powershell
+Copy-Item .env.hosted.example .env.hosted
+# 编辑 .env.hosted 后，后台启动 PostgreSQL、自动迁移和 API
+docker compose --env-file .env.hosted up --build -d
+docker compose --env-file .env.hosted ps
+```
+
+查看 API 日志或停止服务：
+
+```powershell
+docker compose --env-file .env.hosted logs -f api
+docker compose --env-file .env.hosted down
+```
+
+每次启动都会先等待 PostgreSQL 健康检查，再幂等执行 `alembic upgrade head`；普通重启不需要手动运行迁移。不要给 `down` 添加 `-v`，否则会删除 PostgreSQL 和用户工作区数据卷。
+
+本地开发地址：
+
+- 用户门户：<http://127.0.0.1:8770/>
+- 健康检查：<http://127.0.0.1:8770/api/v1/health>
+- API 文档（仅在显式启用后）：<http://127.0.0.1:8770/api/docs>
+
+注册和登录直接使用站内邮箱与密码，不要求邮箱验证。密码通过 scrypt 加盐哈希后保存，浏览器只接收 HttpOnly、SameSite Cookie；数据库只保存会话 Token 的 SHA-256，不保存原始 Token。所有项目和模型凭据查询都必须携带当前 `user_id`，数据库外键同时阻止跨用户关联。
+
+`REVIEW_WRITER_PUBLIC_ORIGIN`、数据库地址、Cookie 名称、有效期、HTTPS Cookie 开关和监听地址都由环境变量配置，不写死在前后端。生产环境必须把 `REVIEW_WRITER_PUBLIC_ORIGIN` 设置为实际 HTTPS 域名，并设置 `REVIEW_WRITER_SESSION_COOKIE_SECURE=true`。
+
+托管模式的文本模型、图像模型和 MinerU 密钥通过 `/api/v1/provider-settings` 按当前登录用户保存。API 只返回是否已配置及末四位提示，密钥使用 AES-256-GCM 加密落库；`REVIEW_WRITER_CREDENTIAL_ENCRYPTION_KEY` 必须作为部署密钥长期安全保存，不能提交到 Git，也不能随意更换，否则已有模型密钥将无法解密。本地单用户模式仍沿用 `.review-writer/provider-settings.json`。
+
+托管模式默认关闭 `/api/docs` 和 `/api/openapi.json`；确需内部调试时可临时设置 `REVIEW_WRITER_EXPOSE_API_DOCS=true`。
+
 ## API 设置
 
 推荐在网页的 **API Settings** 中配置，而不是直接编辑代码。设置页包含：
@@ -141,11 +212,13 @@ py -m venv .venv
 - 文本 API URL、key、模型和 wire API；
 - 图像 API URL、key、模型和 wire API。
 
-设置保存到当前工作区的：
+本地单用户模式保存到当前工作区的：
 
 ```text
 .review-writer/provider-settings.json
 ```
+
+托管模式不会使用这个共享文件，而是按当前用户加密保存到 PostgreSQL 的 `provider_credentials` 表。
 
 该文件和 `.env` 都不会提交到 Git。浏览器重新进入设置页时会显示 URL、模型、接口类型和密钥掩码；空着密钥框再次保存表示保留已有 key，而不是清除。
 
@@ -188,7 +261,7 @@ SEMANTIC_SCHOLAR_API_KEY=
 IMAGE_OPENAI_FIELD=image[]
 
 # 已知只支持方形输出的服务商可跳过横向尺寸尝试
-OVERVIEW_PROVIDER_SQUARE_ONLY=true
+IMAGE_SUPPORTED_SIZES=1024x1024
 
 # 运行时数量限制
 REVIEW_MAX_LITERATURE_BATCH=30
@@ -299,13 +372,13 @@ REVIEW_CLASSIFICATION_RULES=review_writer_core/taxonomies/my_topic.py
 
 ```text
 skills/                     各阶段 Skill、脚本、references 与校验器
-view/                       九阶段网页、HTTP API、SQLite 与 Prefect flow
+view/                       七阶段前端网页、兼容 HTTP API、SQLite 与 Prefect flow
 review_writer_core/         跨阶段共享配置、provider、taxonomy 和图像路由
 review-library/             本地文献库（运行时数据，Git 忽略）
 review-projects/            每个综述项目的阶段产物（运行时数据，Git 忽略）
 examples/reference-reviews/ 示例综述与测试资源
 prefect.toml                Prefect 本地配置
-requirements-workflow.txt   前端工作流 Python 依赖
+requirements.txt            Python 依赖（工作流与 API 共用）
 ```
 
 主要文档与入口：
@@ -358,7 +431,7 @@ $env:REVIEW_DASHBOARD_ACCESS_TOKEN='replace-with-a-long-random-password'
 ## 常见问题
 
 - **设置保存后任务仍访问 `https://api.openai.com`**：确认设置页显示的 active workspace 与当前部署目录一致，然后重新保存；不要同时启动多个指向不同 `--review-root` 的服务。
-- **`Prefect is not installed`**：使用 `.venv\Scripts\python.exe` 启动，或重新安装 `requirements-workflow.txt`。
+- **`Prefect is not installed`**：使用 `.venv\Scripts\python.exe` 启动，或重新安装 `requirements.txt`。
 - **MinerU 没有生成 `content_list.json`**：该 PDF 不会正式入库；先检查 MinerU token、网络和解析日志，再重新上传。
 - **`model_not_found` 或 `No available channel`**：服务商当前没有所填模型的可用渠道，应在 Settings 中改为该服务商实际支持的模型。
 - **图像接口只返回 `choices`、没有 image**：服务商的 Chat Completions 通道没有返回图片内容；切换到真正支持图片输出的模型/令牌，或使用 `images` wire API。

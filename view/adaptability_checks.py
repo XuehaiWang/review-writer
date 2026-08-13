@@ -23,6 +23,7 @@ def load_module(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -32,6 +33,7 @@ from review_writer_core.project_config import (  # noqa: E402
     project_taxonomy_profile,
     save_project_config,
 )
+from review_writer_core.sciatlas_client import load_config as load_sciatlas_config  # noqa: E402
 from review_writer_core.workspace import WorkspacePaths, discover_review_root  # noqa: E402
 
 
@@ -54,6 +56,14 @@ SECTION_WRITER = load_module(
 OVERVIEW = load_module(
     "adaptability_overview",
     ROOT / "skills" / "review-figure-style-redraw" / "scripts" / "generate_overview_figure.py",
+)
+SUMMARY_CHART = load_module(
+    "adaptability_summary_chart",
+    ROOT
+    / "skills"
+    / "review-outline-summary-chart"
+    / "scripts"
+    / "generate_review_summary_chart.py",
 )
 
 
@@ -123,6 +133,19 @@ class AdaptabilityChecks(unittest.TestCase):
         )
         self.assertIn("General scientific review style", rules)
         self.assertNotIn("ATA Introduction", rules)
+
+    def test_section_writer_loads_application_rules_for_hosted_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            hosted_workspace = Path(raw)
+            self.assertFalse((hosted_workspace / "skills").exists())
+            rules = SECTION_WRITER.load_blueprint_rule_pack(
+                hosted_workspace,
+                {
+                    "rule_pack": "allenation",
+                    "rule_pack_path": "references/rule_packs/allenation",
+                },
+            )
+        self.assertIn("Organic Review Style", rules)
 
     def test_blueprint_logic_is_generic_unless_specialized_pack_is_selected(self) -> None:
         self.assertEqual(
@@ -208,6 +231,92 @@ class AdaptabilityChecks(unittest.TestCase):
             providers.openai_endpoint("https://example.test/v1", "/responses"),
             "https://example.test/v1/responses",
         )
+
+    def test_sciatlas_requires_explicit_safe_remote_origin(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SCIATLAS_API_BASE_URL": "",
+                "SCIATLAS_API_KEY": "",
+                "SCIATLAS_ALLOW_INSECURE_HTTP": "",
+            },
+            clear=False,
+        ):
+            self.assertFalse(load_sciatlas_config().configured)
+
+        secure = load_sciatlas_config(
+            base_url="https://sciatlas-proxy.example",
+            api_key="secret",
+        )
+        self.assertTrue(secure.configured)
+        self.assertEqual(secure.base_url, "https://sciatlas-proxy.example")
+
+        local = load_sciatlas_config(
+            base_url="http://127.0.0.1:9080/",
+            api_key="secret",
+        )
+        self.assertEqual(local.base_url, "http://127.0.0.1:9080")
+
+        with self.assertRaisesRegex(ValueError, "cleartext"):
+            load_sciatlas_config(
+                base_url="http://sciatlas.example",
+                api_key="secret",
+            )
+        legacy = load_sciatlas_config(
+            base_url="http://sciatlas.example",
+            api_key="secret",
+            allow_insecure_http=True,
+        )
+        self.assertTrue(legacy.configured)
+
+    def test_summary_chart_png_has_no_browser_or_machine_dependency(self) -> None:
+        source_path = (
+            ROOT
+            / "skills"
+            / "review-outline-summary-chart"
+            / "scripts"
+            / "generate_review_summary_chart.py"
+        )
+        source = source_path.read_text(encoding="utf-8")
+        for machine_specific in (
+            "C:/Windows",
+            "C:/Program Files",
+            "subprocess.run",
+            "find_browser_executable",
+        ):
+            self.assertNotIn(machine_specific, source)
+
+        section = SUMMARY_CHART.ReviewSection(
+            heading="Introduction",
+            level=1,
+            line_number=1,
+            section_type="introduction",
+            cited_paper_ids=["P001", "P002"],
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            output = Path(raw) / "review_summary_chart.png"
+            manifest = SUMMARY_CHART.render_full_chart_png(
+                "flowchart TD",
+                output,
+                sections=[section],
+                review_title="Portable Review",
+            )
+            self.assertTrue(output.is_file())
+            self.assertGreater(output.stat().st_size, 0)
+            self.assertEqual(manifest["renderer"], "pillow-static")
+            with SUMMARY_CHART.Image.open(output) as image:
+                self.assertEqual(image.format, "PNG")
+                self.assertGreaterEqual(image.width, 1200)
+
+    def test_summary_chart_font_can_be_configured_without_fixed_drive_paths(self) -> None:
+        configured = ROOT / "assets" / "custom-chart-font.ttf"
+        with mock.patch.dict(
+            os.environ,
+            {"REVIEW_WRITER_CHART_FONT_REGULAR": str(configured)},
+            clear=False,
+        ):
+            candidates = SUMMARY_CHART._font_candidates(bold=False)
+        self.assertEqual(candidates[0], configured)
 
     def test_known_hardcoding_regressions_are_absent(self) -> None:
         production_roots = [ROOT / "review_writer_core", ROOT / "skills", ROOT / "view"]

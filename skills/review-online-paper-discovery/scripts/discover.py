@@ -15,7 +15,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sciatlas_client import SciAtlasClient, load_config as load_sciatlas_config, papers_from_response
+
+_BOOTSTRAP_ROOT = next(
+    (parent for parent in Path(__file__).resolve().parents if (parent / "review_writer_core").is_dir()),
+    None,
+)
+if _BOOTSTRAP_ROOT is None:
+    raise RuntimeError("Could not locate the Review Writer workspace")
+if str(_BOOTSTRAP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BOOTSTRAP_ROOT))
+
+from review_writer_core.sciatlas_client import (  # noqa: E402
+    SciAtlasClient,
+    load_config as load_sciatlas_config,
+    papers_from_response,
+)
 
 
 def utc_now() -> str:
@@ -962,15 +976,20 @@ def run_search(args: argparse.Namespace) -> int:
     sciatlas_client: SciAtlasClient | None = None
     sciatlas_status = "disabled"
     if sciatlas_requested:
-        sciatlas_config = load_sciatlas_config(
-            base_url=args.sciatlas_base_url or None,
-            api_key=args.sciatlas_api_key or None,
-            timeout=args.sciatlas_timeout or None,
-        )
-        if not sciatlas_config.configured:
-            sciatlas_status = "missing_api_key"
+        try:
+            sciatlas_config = load_sciatlas_config(
+                base_url=args.sciatlas_base_url or None,
+                api_key=args.sciatlas_api_key or None,
+                timeout=args.sciatlas_timeout or None,
+            )
+        except ValueError as exc:
+            sciatlas_status = f"invalid_configuration: {exc}"
         else:
-            sciatlas_client = SciAtlasClient(config=sciatlas_config)
+            if not sciatlas_config.configured:
+                sciatlas_status = "missing_configuration"
+            else:
+                sciatlas_client = SciAtlasClient(config=sciatlas_config)
+        if sciatlas_client is not None:
             try:
                 sciatlas_client.health()
                 sciatlas_status = "ok"
@@ -1300,13 +1319,19 @@ def run_probe(args: argparse.Namespace) -> int:
     if args.web_search:
         rows.extend(web_search(args.query, "", args.limit, args.mailto))
     if args.sciatlas_search:
-        sciatlas_config = load_sciatlas_config(
-            base_url=args.sciatlas_base_url or None,
-            api_key=args.sciatlas_api_key or None,
-            timeout=args.sciatlas_timeout or None,
-        )
-        if not sciatlas_config.configured:
-            print("[probe] SciAtlas not configured (missing API key) -- skipping.")
+        try:
+            sciatlas_config = load_sciatlas_config(
+                base_url=args.sciatlas_base_url or None,
+                api_key=args.sciatlas_api_key or None,
+                timeout=args.sciatlas_timeout or None,
+            )
+        except ValueError as exc:
+            print(f"[probe] SciAtlas configuration is invalid: {exc} -- skipping.")
+            sciatlas_config = None
+        if sciatlas_config is None:
+            pass
+        elif not sciatlas_config.configured:
+            print("[probe] SciAtlas not configured (base URL and API key are required) -- skipping.")
         else:
             client = SciAtlasClient(config=sciatlas_config)
             try:

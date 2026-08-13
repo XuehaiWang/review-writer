@@ -69,6 +69,13 @@ class ProjectStatusChecks(unittest.TestCase):
             }
         )
 
+    def test_human_checks_use_deployment_independent_routes(self) -> None:
+        stages = self.module["STAGES"]
+        checks = "\n".join(stage["human_check"] for stage in stages)
+        self.assertNotIn("127.0.0.1", checks)
+        self.assertIn("/discovery", checks)
+        self.assertIn("/draft", checks)
+
     def test_orphan_optional_outputs_are_not_reported_as_completed(self) -> None:
         summarize = self.module["summarize"]
         with tempfile.TemporaryDirectory() as temp_dir:

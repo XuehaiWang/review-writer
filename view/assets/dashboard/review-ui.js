@@ -2,14 +2,96 @@
   const stages = [
     { id: "library", label: "Library", href: "/library", hint: "Verify PDFs, MinerU Markdown, titles, authors, abstracts, eight structured tags, and paths." },
     { id: "discovery", label: "Discovery", href: "/discovery", hint: "Remove irrelevant keywords and papers, then confirm the candidate literature set." },
-    { id: "matrix", label: "Matrix", href: "/matrix", hint: "Review fixed paper fields, full-reading notes, and the most relevant figure." },
-    { id: "blueprint", label: "Blueprint", href: "/blueprint", hint: "Confirm sections, claims, assigned papers, visual needs, and writing constraints." },
+    { id: "planning", label: "Analysis & Planning", href: "/planning?tab=matrix", hint: "Review the literature matrix, organize the outline, and confirm the section blueprint in one workspace." },
     { id: "sections", label: "Sections", href: "/sections", hint: "Review section prose, paper grounding, and paragraph-level figure candidates." },
-    { id: "figures", label: "Figures", href: "/figures", hint: "Verify source resolution and ensure redraws preserve all chemical content." },
-    { id: "draft", label: "Draft", href: "/draft", hint: "Review coherence, figure placement, terminology, citations, and remaining issues." },
-    { id: "final", label: "Final", href: "/final", hint: "Complete the final content, format, reference, figure, and release audit." },
+    { id: "images", label: "Image Processing", href: "/images?tab=review", hint: "Select source figures, redraw them, edit SVG or chemical structures, and complete human approval." },
+    { id: "draft", label: "Draft", href: "/draft", hint: "Edit the first draft, evaluate quality, review rewrite candidates, and human-approve the exact version." },
+    { id: "final", label: "Final", href: "/final", hint: "Assemble approved content, conclusion, overview figure, audit, and release files." },
   ];
-  stages.splice(5, 0, { id: "figure-review", label: "Figure Review", href: "/figure-review", hint: "Select the final source figure for every cited paper before batch redraw." });
+  const workspaceDefinitions = Object.freeze({
+    planning: Object.freeze([
+      Object.freeze({ id: "matrix", label: "Literature Matrix", href: "/planning?tab=matrix" }),
+      Object.freeze({ id: "blueprint", label: "Outline & Blueprint", href: "/planning?tab=blueprint" }),
+    ]),
+    images: Object.freeze([
+      Object.freeze({ id: "review", label: "Source Figure Review", href: "/images?tab=review" }),
+      Object.freeze({ id: "redraw", label: "AI Redraw & Manual Edit", href: "/images?tab=redraw" }),
+    ]),
+  });
+  const legacyStageIds = Object.freeze({
+    matrix: "planning",
+    blueprint: "planning",
+    "figure-review": "images",
+    figures: "images",
+  });
+
+  function currentId(pathname = "") {
+    const rawPath = pathname || (typeof location !== "undefined" ? location.pathname : "/library");
+    const path = String(rawPath).replace(/^\/+|\/+$/g, "") || "library";
+    const canonical = legacyStageIds[path] || path;
+    return stages.some((stage) => stage.id === canonical) ? canonical : "library";
+  }
+
+  function workspaceTabs(stageId) {
+    return Array.from(workspaceDefinitions[stageId] || [], (tab) => ({ ...tab }));
+  }
+
+  function workspaceStepPlacement(stageId) {
+    return ["planning", "images"].includes(stageId) ? "middle-header" : "below-stage-strip";
+  }
+
+  function activeWorkspaceTab(stageId, search = "") {
+    const tabs = workspaceDefinitions[stageId] || [];
+    if (!tabs.length) return "";
+    const requested = new URLSearchParams(String(search || "").replace(/^\?/, "")).get("tab") || "";
+    return tabs.some((tab) => tab.id === requested) ? requested : tabs[0].id;
+  }
+
+  function withProject(path, projectId) {
+    const url = new URL(path, "http://review-writer.local");
+    if (projectId) url.searchParams.set("project", projectId);
+    return `${url.pathname}${url.search}`;
+  }
+
+  function stageActionSpec(stageId, tab, projectId) {
+    const encoded = encodeURIComponent(projectId || "");
+    if (stageId === "planning" && tab === "matrix") return {
+      backendStage: "matrix",
+      endpoint: `/api/project/${encoded}/handoff/matrix`,
+      nextPath: withProject("/planning?tab=blueprint", projectId),
+      label: "Confirm Matrix and Continue to Outline & Blueprint",
+    };
+    if (stageId === "planning") return {
+      backendStage: "blueprint",
+      endpoint: `/api/project/${encoded}/section-tasks`,
+      nextPath: withProject("/sections", projectId),
+      label: "Generate Writing Tasks and Enter Sections",
+    };
+    if (stageId === "images" && tab === "review") return {
+      backendStage: "figure-review",
+      endpoint: `/api/project/${encoded}/run/figure-review`,
+      nextPath: withProject("/images?tab=redraw", projectId),
+      label: "Confirm Source Figures and Continue to AI Redraw",
+    };
+    if (stageId === "images") return {
+      backendStage: "figures",
+      endpoint: `/api/project/${encoded}/run/figures`,
+      nextPath: withProject("/draft", projectId),
+      label: "Confirm Images and Enter Draft",
+    };
+    return null;
+  }
+
+  const stageModel = {
+    stages,
+    currentId,
+    workspaceTabs,
+    workspaceStepPlacement,
+    activeWorkspaceTab,
+    stageActionSpec,
+  };
+  if (typeof module !== "undefined" && module.exports) module.exports = stageModel;
+  if (typeof window === "undefined" || typeof document === "undefined") return;
 
   function t(value) {
     return window.reviewI18n?.t(value) || value;
@@ -17,11 +99,6 @@
 
   function message(key, params) {
     return window.reviewI18n?.message(key, params) || key;
-  }
-
-  function currentId() {
-    const path = location.pathname.replace(/^\/+/, "") || "library";
-    return stages.some((s) => s.id === path) ? path : "library";
   }
 
   function selectedProject() {
@@ -47,9 +124,10 @@
 
   function syncProjectLinks() {
     const projectId = selectedProject();
+    const stagePaths = new Set(stages.map((stage) => new URL(stage.href, location.origin).pathname));
     document.querySelectorAll('a[href^="/"]').forEach((link) => {
       const url = new URL(link.getAttribute("href"), location.origin);
-      if (!stages.some((stage) => stage.href === url.pathname)) return;
+      if (!stagePaths.has(url.pathname)) return;
       if (projectId) url.searchParams.set("project", projectId);
       else url.searchParams.delete("project");
       link.href = `${url.pathname}${url.search}${url.hash}`;
@@ -121,6 +199,28 @@
     tabs?.classList.add("rw-workspace-tabs");
   }
 
+  function stageActionReadiness(current) {
+    if (
+      current.id !== "images"
+      || activeWorkspaceTab(current.id, location.search) !== "redraw"
+    ) return null;
+    if (typeof window.reviewFigureStageReadiness !== "function") {
+      return { ready: false, message: "Loading image readiness..." };
+    }
+    return window.reviewFigureStageReadiness();
+  }
+
+  function syncStageActionReadiness(current) {
+    const readiness = stageActionReadiness(current);
+    if (!readiness) return;
+    const button = document.querySelector("#stageExecute");
+    const status = document.querySelector("#stageExecuteStatus");
+    if (!button) return;
+    button.disabled = !readiness.ready;
+    button.setAttribute("aria-disabled", String(!readiness.ready));
+    if (status) status.textContent = t(readiness.message || "");
+  }
+
   async function executeStage(current) {
     const button = document.querySelector("#stageExecute");
     const status = document.querySelector("#stageExecuteStatus");
@@ -138,28 +238,44 @@
       status.textContent = t("Select a project before continuing.");
       return;
     }
+    const readiness = stageActionReadiness(current);
+    if (readiness && !readiness.ready) {
+      syncStageActionReadiness(current);
+      return;
+    }
     setProject(projectId);
     button.disabled = true;
     status.textContent = t("Generating stage outputs...");
+    const workspaceAction = stageActionSpec(
+      current.id,
+      activeWorkspaceTab(current.id, location.search),
+      projectId,
+    );
     const runnableStages = new Set(["sections", "figures", "figure-review", "final"]);
-    const endpoint = current.id === "blueprint"
+    const backendStage = workspaceAction?.backendStage || current.id;
+    const endpoint = workspaceAction?.endpoint || (backendStage === "blueprint"
       ? `/api/project/${encodeURIComponent(projectId)}/section-tasks`
-      : runnableStages.has(current.id)
-        ? `/api/project/${encodeURIComponent(projectId)}/run/${encodeURIComponent(current.id)}`
-        : `/api/project/${encodeURIComponent(projectId)}/handoff/${encodeURIComponent(current.id)}`;
+      : runnableStages.has(backendStage)
+        ? `/api/project/${encodeURIComponent(projectId)}/run/${encodeURIComponent(backendStage)}`
+        : `/api/project/${encodeURIComponent(projectId)}/handoff/${encodeURIComponent(backendStage)}`);
     try {
       if (current.id === "draft" && typeof window.reviewDraftSaveForHandoff === "function") {
         status.textContent = t("Saving current draft...");
         const saved = await window.reviewDraftSaveForHandoff();
         if (!saved) throw new Error(t("Save the current draft before continuing."));
+        if (typeof window.reviewDraftApproveForHandoff === "function") {
+          status.textContent = t("Confirming evaluated draft...");
+          const approved = await window.reviewDraftApproveForHandoff();
+          if (!approved) throw new Error(t("Evaluate and approve the current draft before continuing."));
+        }
         status.textContent = t("Handing off current draft...");
       }
       const response = await fetch(endpoint, { method: "POST" });
       const result = await response.json().catch(() => ({ ok: false, error: message("serverReturned", { status: response.status }) }));
       if (!response.ok || !result.ok) throw new Error(result.error || message("serverReturned", { status: response.status }));
-      const nextPath = current.id === "blueprint"
+      const nextPath = workspaceAction?.nextPath || (backendStage === "blueprint"
         ? `/sections?project=${encodeURIComponent(projectId)}`
-        : result.next_path;
+        : result.next_path);
       if (nextPath) {
         window.location.assign(nextPath);
       } else {
@@ -167,20 +283,20 @@
         button.disabled = false;
       }
     } catch (error) {
-      status.textContent = error.message || String(error);
       button.disabled = false;
+      syncStageActionReadiness(current);
+      status.textContent = t(error.message || String(error));
     }
   }
 
   function stageActionHost(current) {
+    const workspaceTab = activeWorkspaceTab(current.id, location.search);
     const actionHostSelectors = {
       library: "#libraryStageAction",
       discovery: "#projectInfo",
-      matrix: "#summary",
-      blueprint: "#summary",
+      planning: "#summary",
       sections: "#summary",
-      "figure-review": "#savedStatus",
-      figures: "#summary",
+      images: workspaceTab === "review" ? "#savedStatus" : "#summary",
       draft: "#summaryBox",
     };
     const anchor = document.querySelector(actionHostSelectors[current.id] || "");
@@ -213,17 +329,19 @@
     if (description) description.insertAdjacentElement("afterend", action);
     else reviewGate.appendChild(action);
     document.querySelector("#stageExecute")?.addEventListener("click", () => executeStage(current));
+    syncStageActionReadiness(current);
   }
 
   function refreshReviewUiLanguage() {
     const id = currentId();
     const current = stages.find((stage) => stage.id === id) || stages[0];
     const next = stages[stages.findIndex((stage) => stage.id === current.id) + 1];
-    const actionLabel = current.id === "library"
+    const workspaceAction = stageActionSpec(current.id, activeWorkspaceTab(current.id, location.search), projectForAction());
+    const actionLabel = workspaceAction?.label || (current.id === "library"
       ? "Enter Discovery and Create Project"
       : current.id === "final"
         ? "Validate Final Stage"
-        : `Execute ${current.label} and Enter ${next?.label || "Next Stage"}`;
+        : `Execute ${current.label} and Enter ${next?.label || "Next Stage"}`);
     const kicker = document.querySelector(".stage-kicker");
     const stageName = document.querySelector(".stage-name");
     const stageHint = document.querySelector(".stage-hint");
@@ -233,13 +351,52 @@
     document.querySelectorAll(".stage-step").forEach((link, index) => {
       if (stages[index]) link.textContent = t(stages[index].label);
     });
+    document.querySelectorAll("[data-workspace-step]").forEach((link) => {
+      const tab = workspaceTabs(id).find((item) => item.id === link.dataset.workspaceStep);
+      if (tab) link.querySelector("span:last-child").textContent = t(tab.label);
+    });
     const executeButton = document.querySelector("#stageExecute");
     if (executeButton) executeButton.textContent = t(actionLabel);
+    syncStageActionReadiness(current);
     const deleteButton = document.querySelector("#delete-project");
     if (deleteButton) {
       deleteButton.textContent = t("Delete project");
       deleteButton.title = t("Permanently delete the selected project");
     }
+  }
+
+  function mountWorkspaceSteps(stageId, stageStrip) {
+    const tabs = workspaceTabs(stageId);
+    if (!tabs.length || document.querySelector(".workspace-step-strip")) return;
+    const activeTab = activeWorkspaceTab(stageId, location.search);
+    const strip = document.createElement("nav");
+    strip.className = "workspace-step-strip";
+    strip.setAttribute("aria-label", t("Current stage steps"));
+    strip.innerHTML = tabs.map((tab, index) => `
+      <a class="workspace-step ${tab.id === activeTab ? "active" : ""}" data-workspace-step="${tab.id}" href="${tab.href}">
+        <span class="workspace-step-number">${index + 1}</span>
+        <span>${t(tab.label)}</span>
+      </a>
+    `).join("");
+    if (workspaceStepPlacement(stageId) === "middle-header") {
+      const panels = Array.from(document.querySelector(".app")?.children || [])
+        .filter((child) => child.classList.contains("panel"));
+      const middlePanel = panels[1];
+      if (middlePanel) {
+        const heading = Array.from(middlePanel.children)
+          .find((child) => child.matches(".head, .meta-head, .brand"));
+        const viewTabs = Array.from(middlePanel.children)
+          .find((child) => child.matches(".tabs, .detail-tabs"));
+        if (heading) {
+          heading.classList.add("rw-workspace-flow-head");
+          viewTabs?.classList.add("rw-workspace-view-tabs");
+          strip.classList.add("workspace-step-strip-inline", "workspace-step-strip-head");
+          heading.insertAdjacentElement("beforeend", strip);
+          return;
+        }
+      }
+    }
+    stageStrip.insertAdjacentElement("afterend", strip);
   }
 
   function init() {
@@ -252,24 +409,26 @@
     if (document.querySelector(".stage-strip")) return;
     const current = stages.find((s) => s.id === id) || stages[0];
     const next = stages[stages.findIndex((stage) => stage.id === current.id) + 1];
-    const actionLabel = current.id === "library"
+    const workspaceAction = stageActionSpec(current.id, activeWorkspaceTab(current.id, location.search), projectForAction());
+    const actionLabel = workspaceAction?.label || (current.id === "library"
       ? "Enter Discovery and Create Project"
       : current.id === "final"
         ? "Validate Final Stage"
-        : `Execute ${current.label} and Enter ${next?.label || "Next Stage"}`;
+        : `Execute ${current.label} and Enter ${next?.label || "Next Stage"}`);
     const strip = document.createElement("div");
     strip.className = "stage-strip";
     strip.innerHTML = `
       <div class="stage-current">
         <div class="stage-kicker">Human Check Stage</div>
-        <div class="stage-name">${current.label}</div>
-        <div class="stage-hint">${current.hint}</div>
+        <div class="stage-name">${t(current.label)}</div>
+        <div class="stage-hint">${t(current.hint)}</div>
       </div>
       <div class="stage-steps">
-        ${stages.map((s, i) => `<a class="stage-step ${s.id === id ? "active" : ""}" data-index="${i + 1}" href="${s.href}">${s.label}</a>`).join("")}
+        ${stages.map((s, i) => `<a class="stage-step ${s.id === id ? "active" : ""}" data-index="${i + 1}" href="${s.href}">${t(s.label)}</a>`).join("")}
       </div>
     `;
     nav.insertAdjacentElement("afterend", strip);
+    mountWorkspaceSteps(id, strip);
     syncProjectLinks();
     mountStageAction(current, actionLabel);
   }
@@ -281,6 +440,11 @@
     }
   });
   window.addEventListener("review-language-change", refreshReviewUiLanguage);
+  window.addEventListener("review-stage-readiness-change", () => {
+    const id = currentId();
+    const current = stages.find((stage) => stage.id === id) || stages[0];
+    syncStageActionReadiness(current);
+  });
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);

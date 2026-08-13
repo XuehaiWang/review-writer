@@ -45,7 +45,7 @@ Optional advanced environment settings:
 IMAGE_OPENAI_FIELD=image[]
 
 # Skip a known-unsupported landscape attempt for square-only image providers.
-OVERVIEW_PROVIDER_SQUARE_ONLY=true
+IMAGE_SUPPORTED_SIZES=1024x1024
 ```
 
 ## Runtime limits
