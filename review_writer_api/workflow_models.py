@@ -155,7 +155,13 @@ class WorkflowJob(Base):
     __tablename__ = "workflow_jobs"
     __table_args__ = (
         UniqueConstraint("legacy_id", name="uq_workflow_jobs_legacy_id"),
-        UniqueConstraint("user_id", "idempotency_key", name="uq_workflow_job_user_idempotency"),
+        UniqueConstraint(
+            "user_id",
+            "idempotency_scope_key",
+            "job_type",
+            "idempotency_key",
+            name="uq_workflow_job_scoped_idempotency",
+        ),
         Index("ix_workflow_jobs_user_status_created", "user_id", "status", "created_at"),
         Index("ix_workflow_jobs_project_type", "project_id", "job_type"),
     )
@@ -171,6 +177,9 @@ class WorkflowJob(Base):
     scope: Mapped[str] = mapped_column(String(64), nullable=False)
     job_type: Mapped[str] = mapped_column(String(96), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    idempotency_scope_key: Mapped[str] = mapped_column(
+        String(255), default="_library_", nullable=False
+    )
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)

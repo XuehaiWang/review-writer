@@ -177,6 +177,51 @@ class WorkflowRepositoryTests(unittest.TestCase):
                 {},
             )
 
+    def test_idempotency_is_scoped_by_project_and_job_type_and_rejects_payload_changes(self) -> None:
+        with self.sessions.begin() as session:
+            second_project = Project(
+                user_id=self.user_a.id, slug="second", topic="Second project"
+            )
+            session.add(second_project)
+            session.flush()
+            second_project_id = str(second_project.id)
+
+        first = self.repository.create_or_get_job(
+            self.ids["user_a"],
+            self.ids["project_a"],
+            "project",
+            "sections.generate",
+            "reused-browser-key",
+            {"section": "s1"},
+        )
+        other_project = self.repository.create_or_get_job(
+            self.ids["user_a"],
+            second_project_id,
+            "project",
+            "sections.generate",
+            "reused-browser-key",
+            {"section": "s1"},
+        )
+        other_type = self.repository.create_or_get_job(
+            self.ids["user_a"],
+            self.ids["project_a"],
+            "project",
+            "figures.redraw",
+            "reused-browser-key",
+            {"figure": "F001"},
+        )
+
+        self.assertEqual(3, len({first.id, other_project.id, other_type.id}))
+        with self.assertRaises(self.errors.WorkflowConflict):
+            self.repository.create_or_get_job(
+                self.ids["user_a"],
+                self.ids["project_a"],
+                "project",
+                "sections.generate",
+                "reused-browser-key",
+                {"section": "different"},
+            )
+
     def test_only_one_claim_can_transition_a_queued_job(self) -> None:
         queued = self.repository.create_or_get_job(
             self.ids["user_a"],
@@ -464,6 +509,91 @@ class PostgreSQLWorkflowRepositoryTests(unittest.TestCase):
         created_id = next(item[1] for item in outcomes if item[0] == "created")
         conflict_id = next(item[1] for item in outcomes if item[0] == "conflict")
         self.assertEqual(created_id, conflict_id)
+
+    def test_concurrent_idempotency_is_scoped_and_same_scope_duplicates_collapse(self) -> None:
+        with database_session(self.sessions) as session:
+            second = Project(
+                user_id=uuid.UUID(self.user_id),
+                slug=f"second-{uuid.uuid4().hex[:10]}",
+                topic="Second",
+            )
+            session.add(second)
+            session.flush()
+            second_project_id = str(second.id)
+
+        cross_project_barrier = threading.Barrier(2)
+
+        def create_for_project(project_id: str):
+            cross_project_barrier.wait(timeout=10)
+            return self.repository.create_or_get_job(
+                self.user_id,
+                project_id,
+                "project",
+                "scoped.idempotency",
+                "same-browser-key",
+                {"value": 1},
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            cross_project = list(
+                executor.map(create_for_project, (self.project_id, second_project_id))
+            )
+        self.assertNotEqual(cross_project[0].id, cross_project[1].id)
+
+        duplicate_barrier = threading.Barrier(2)
+
+        def duplicate():
+            duplicate_barrier.wait(timeout=10)
+            return self.repository.create_or_get_job(
+                self.user_id,
+                self.project_id,
+                "project",
+                "scoped.duplicate",
+                "duplicate-key",
+                {"value": 2},
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            duplicates = list(executor.map(lambda _index: duplicate(), range(2)))
+        self.assertEqual(duplicates[0].id, duplicates[1].id)
+
+    def test_cancel_races_finish_in_a_terminal_state(self) -> None:
+        for outcome in ("success", "failure"):
+            with self.subTest(outcome=outcome):
+                queued = self.repository.create_or_get_job(
+                    self.user_id,
+                    self.project_id,
+                    "project",
+                    f"race.{outcome}",
+                    uuid.uuid4().hex,
+                    {},
+                )
+                self.assertIsNotNone(self.repository.claim_job(queued.id))
+                barrier = threading.Barrier(2)
+
+                def finish():
+                    barrier.wait(timeout=10)
+                    if outcome == "success":
+                        terminal = self.repository.mark_job_succeeded(queued.id, {"ok": True})
+                    else:
+                        terminal = self.repository.mark_job_failed(
+                            queued.id,
+                            error_code="EXPECTED_FAILURE",
+                            error_message="Expected failure.",
+                        )
+                    if terminal is None:
+                        self.repository.mark_job_cancelled(queued.id)
+
+                def cancel():
+                    barrier.wait(timeout=10)
+                    self.repository.request_job_cancellation(self.user_id, queued.id)
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                    list(executor.map(lambda fn: fn(), (finish, cancel)))
+
+                final = self.repository.get_job(self.user_id, queued.id)
+                self.assertIn(final.status, {"succeeded", "failed", "cancelled"})
+                self.assertNotEqual("cancel_requested", final.status)
 
 
 if __name__ == "__main__":

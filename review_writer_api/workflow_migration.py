@@ -611,6 +611,9 @@ def _import_source(
             "scope": "library" if project_slug == LIBRARY_PROJECT_ID else "project",
             "job_type": str(row["job_type"]),
             "status": status,
+            "idempotency_scope_key": (
+                LIBRARY_PROJECT_ID if project_id is None else str(project_id)
+            ),
             "idempotency_key": legacy_id,
             "payload_json": payload,
             "result_json": result,

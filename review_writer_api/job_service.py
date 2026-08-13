@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import uuid
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait as wait_for_futures
 from typing import Any, Protocol
 
 from review_writer_api.errors import (
@@ -22,6 +22,10 @@ class JobCancellationRequested(Exception):
     """Internal cooperative cancellation signal; never persisted as an error."""
 
 
+class JobShutdownRequested(Exception):
+    """Internal shutdown signal recorded as interrupted rather than cancelled."""
+
+
 class JobHandler(Protocol):
     def __call__(
         self, context: "JobContext", payload: dict[str, Any]
@@ -29,8 +33,14 @@ class JobHandler(Protocol):
 
 
 class JobContext:
-    def __init__(self, repository: WorkflowRepository, job: JobRecord):
+    def __init__(
+        self,
+        repository: WorkflowRepository,
+        job: JobRecord,
+        shutdown_event: threading.Event,
+    ):
         self.repository = repository
+        self._shutdown_event = shutdown_event
         self.job_id = job.id
         self.user_id = job.user_id
         self.project_id = job.project_id
@@ -38,10 +48,17 @@ class JobContext:
         self.job_type = job.job_type
 
     def cancellation_requested(self) -> bool:
-        return self.repository.job_cancellation_requested(self.job_id)
+        return self.shutting_down() or self.repository.job_cancellation_requested(
+            self.job_id
+        )
+
+    def shutting_down(self) -> bool:
+        return self._shutdown_event.is_set()
 
     def checkpoint(self) -> None:
-        if self.cancellation_requested():
+        if self.shutting_down():
+            raise JobShutdownRequested()
+        if self.repository.job_cancellation_requested(self.job_id):
             raise JobCancellationRequested()
 
     def report_progress(self, current: int, total: int) -> JobRecord | None:
@@ -54,14 +71,22 @@ class JobService:
 
     RETRYABLE_STATUSES = frozenset({"failed", "interrupted", "cancelled"})
 
-    def __init__(self, repository: WorkflowRepository, *, max_workers: int = 2):
+    def __init__(
+        self,
+        repository: WorkflowRepository,
+        *,
+        max_workers: int = 2,
+        shutdown_grace_seconds: float = 5.0,
+    ):
         self.repository = repository
         self.max_workers = max(1, min(int(max_workers), 16))
+        self.shutdown_grace_seconds = max(0.0, float(shutdown_grace_seconds))
         self._handlers: dict[str, JobHandler] = {}
         self._executor: ThreadPoolExecutor | None = None
         self._futures: dict[str, Future] = {}
         self._lock = threading.RLock()
         self._started = False
+        self._shutdown_event = threading.Event()
 
     def register_handler(self, job_type: str, handler: JobHandler) -> None:
         normalized = str(job_type or "").strip()
@@ -81,6 +106,7 @@ class JobService:
         with self._lock:
             if self._started:
                 return 0
+            self._shutdown_event = threading.Event()
             interrupted = self.repository.mark_running_jobs_interrupted()
             self._executor = ThreadPoolExecutor(
                 max_workers=self.max_workers,
@@ -99,7 +125,14 @@ class JobService:
                 return
             self._executor = None
             self._started = False
-        executor.shutdown(wait=wait, cancel_futures=True)
+            futures = tuple(self._futures.values())
+            self._shutdown_event.set()
+        for future in futures:
+            future.cancel()
+        if wait and futures:
+            wait_for_futures(futures, timeout=self.shutdown_grace_seconds)
+        executor.shutdown(wait=False, cancel_futures=True)
+        self.repository.mark_running_jobs_interrupted()
 
     def submit(
         self,
@@ -193,15 +226,15 @@ class JobService:
             return
         with self._lock:
             handler = self._handlers.get(claimed.job_type)
+        context = JobContext(self.repository, claimed, self._shutdown_event)
         if handler is None:
-            self.repository.mark_job_failed(
-                claimed.id,
+            self._finish_failure(
+                context,
                 error_code="JOB_HANDLER_NOT_REGISTERED",
                 error_message="This job type is not available on the current server.",
             )
             return
 
-        context = JobContext(self.repository, claimed)
         try:
             context.checkpoint()
             result = handler(context, dict(claimed.payload or {}))
@@ -210,24 +243,47 @@ class JobService:
                 claimed.id, dict(result or {})
             )
             if completed is None and context.cancellation_requested():
-                self.repository.mark_job_cancelled(claimed.id)
+                if context.shutting_down():
+                    self.repository.mark_job_interrupted(claimed.id)
+                else:
+                    self.repository.mark_job_cancelled(claimed.id)
+        except JobShutdownRequested:
+            self.repository.mark_job_interrupted(claimed.id)
         except JobCancellationRequested:
             self.repository.mark_job_cancelled(claimed.id)
         except WorkflowError as exc:
-            if context.cancellation_requested():
-                self.repository.mark_job_cancelled(claimed.id)
-            else:
-                self.repository.mark_job_failed(
-                    claimed.id,
-                    error_code=exc.code,
-                    error_message=str(exc),
-                )
+            self._finish_failure(
+                context,
+                error_code=exc.code,
+                error_message=str(exc),
+            )
         except Exception:
-            if context.cancellation_requested():
-                self.repository.mark_job_cancelled(claimed.id)
-            else:
-                self.repository.mark_job_failed(
-                    claimed.id,
-                    error_code="JOB_EXECUTION_FAILED",
-                    error_message="Job execution failed.",
-                )
+            self._finish_failure(
+                context,
+                error_code="JOB_EXECUTION_FAILED",
+                error_message="Job execution failed.",
+            )
+
+    def _finish_failure(
+        self,
+        context: JobContext,
+        *,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        if context.shutting_down():
+            self.repository.mark_job_interrupted(context.job_id)
+            return
+        if self.repository.job_cancellation_requested(context.job_id):
+            self.repository.mark_job_cancelled(context.job_id)
+            return
+        failed = self.repository.mark_job_failed(
+            context.job_id,
+            error_code=error_code,
+            error_message=error_message,
+        )
+        if failed is None:
+            if context.shutting_down():
+                self.repository.mark_job_interrupted(context.job_id)
+            elif self.repository.job_cancellation_requested(context.job_id):
+                self.repository.mark_job_cancelled(context.job_id)

@@ -62,9 +62,9 @@ class ScientificRunnerTests(unittest.TestCase):
 
     def test_transient_503_retries_twice_then_succeeds(self) -> None:
         script = (
-            "import pathlib,sys; p=pathlib.Path('attempt.txt'); "
+            "import json,pathlib,sys; p=pathlib.Path('attempt.txt'); "
             "n=int(p.read_text() if p.exists() else '0')+1; p.write_text(str(n)); "
-            "sys.stderr.write('HTTP 503 temporary\\n') if n < 3 else pathlib.Path('done.txt').write_text('ok'); "
+            "sys.stderr.write('REVIEW_WRITER_ERROR:'+json.dumps({'category':'transient_service_unavailable','provider_call_completed':False})+'\\n') if n < 3 else pathlib.Path('done.txt').write_text('ok'); "
             "sys.exit(1 if n < 3 else 0)"
         )
         result = self.runner.run(
@@ -76,6 +76,54 @@ class ScientificRunnerTests(unittest.TestCase):
 
         self.assertEqual(3, result.attempts)
         self.assertEqual("3", (self.root / "attempt.txt").read_text())
+
+    def test_failed_attempt_output_is_not_accepted_as_a_later_success(self) -> None:
+        script = (
+            "import json,pathlib,sys; p=pathlib.Path('stale-attempt.txt'); "
+            "n=int(p.read_text() if p.exists() else '0')+1; p.write_text(str(n)); "
+            "pathlib.Path('done.txt').write_text('partial') if n == 1 else None; "
+            "sys.stderr.write('REVIEW_WRITER_ERROR:'+json.dumps({'category':'transient_service_unavailable','provider_call_completed':False})+'\\n') if n == 1 else None; "
+            "sys.exit(1 if n == 1 else 0)"
+        )
+        with self.assertRaises(self.OutputMissing) as missing:
+            self.runner.run(
+                [sys.executable, "-c", script],
+                cwd=self.root,
+                staging_directory=self.root,
+                expected_outputs=("done.txt",),
+            )
+        self.assertEqual(2, missing.exception.attempts)
+
+    def test_structured_validation_permission_and_post_call_failures_never_retry(self) -> None:
+        for category, completed in (
+            ("validation", False),
+            ("permission", False),
+            ("post_call_summary_failed", True),
+        ):
+            with self.subTest(category=category):
+                counter = self.root / f"{category}.txt"
+                script = (
+                    "import json,os,pathlib,sys; "
+                    f"p=pathlib.Path({str(counter)!r}); "
+                    "p.write_text(str(int(p.read_text() if p.exists() else '0')+1)); "
+                    + (
+                        "pathlib.Path(os.environ['REVIEW_WRITER_PROVIDER_CALL_COMPLETED_FILE']).write_text('done'); "
+                        if completed
+                        else ""
+                    )
+                    + "sys.stderr.write('HTTP 503 temporary text must not control retry\\n'); "
+                    + f"sys.stderr.write('REVIEW_WRITER_ERROR:'+json.dumps({{'category':{category!r},'provider_call_completed':{completed!r}}})+'\\n'); sys.exit(1)"
+                )
+                with self.assertRaises(self.RunFailed) as failed:
+                    self.runner.run(
+                        [sys.executable, "-c", script],
+                        cwd=self.root,
+                        staging_directory=self.root,
+                        expected_outputs=(f"{category}.out",),
+                    )
+                self.assertEqual(1, failed.exception.attempts)
+                self.assertFalse(failed.exception.retryable)
+                self.assertEqual("1", counter.read_text())
 
     def test_missing_output_and_invalid_paths_never_retry(self) -> None:
         counter = self.root / "counter.txt"
@@ -108,6 +156,13 @@ class ScientificRunnerTests(unittest.TestCase):
                 expected_outputs=(),
                 env={"OPENAI_API_KEY": "must-use-secret-env"},
             )
+        with self.assertRaisesRegex(WorkflowValidationError, "at least one"):
+            self.runner.run(
+                [sys.executable, "-c", "pass"],
+                cwd=self.root,
+                staging_directory=self.root,
+                expected_outputs=(),
+            )
 
     def test_cancellation_terminates_the_child_process(self) -> None:
         cancel = threading.Event()
@@ -117,7 +172,7 @@ class ScientificRunnerTests(unittest.TestCase):
                 [sys.executable, "-c", "import time; time.sleep(30)"],
                 cwd=self.root,
                 staging_directory=self.root,
-                expected_outputs=(),
+                expected_outputs=("never.txt",),
                 cancel_requested=cancel.is_set,
                 timeout_seconds=10,
             )
@@ -131,6 +186,36 @@ class ScientificRunnerTests(unittest.TestCase):
                 future.result(timeout=3)
         self.assertLess(time.monotonic() - started, 3)
 
+    def test_cancellation_terminates_spawned_descendants(self) -> None:
+        cancel = threading.Event()
+        grandchild = (
+            "import pathlib,time; time.sleep(0.8); "
+            "pathlib.Path('grandchild-survived.txt').write_text('bad')"
+        )
+        parent = (
+            "import subprocess,sys,time; "
+            f"subprocess.Popen([{sys.executable!r}, '-c', {grandchild!r}]); "
+            "time.sleep(30)"
+        )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                lambda: self.runner.run(
+                    [sys.executable, "-c", parent],
+                    cwd=self.root,
+                    staging_directory=self.root,
+                    expected_outputs=("never.txt",),
+                    cancel_requested=cancel.is_set,
+                    timeout_seconds=10,
+                )
+            )
+            time.sleep(0.15)
+            cancel.set()
+            with self.assertRaises(self.RunCancelled):
+                future.result(timeout=3)
+        time.sleep(1)
+        self.assertFalse((self.root / "grandchild-survived.txt").exists())
+
     def test_timeout_retries_at_most_three_attempts(self) -> None:
         script = (
             "import pathlib,time; p=pathlib.Path('timeouts.txt'); "
@@ -141,7 +226,7 @@ class ScientificRunnerTests(unittest.TestCase):
                 [sys.executable, "-c", script],
                 cwd=self.root,
                 staging_directory=self.root,
-                expected_outputs=(),
+                expected_outputs=("never.txt",),
                 timeout_seconds=0.08,
             )
         self.assertEqual(3, failed.exception.attempts)

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ctypes
+import json
 import os
 import re
+import signal
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -33,9 +36,13 @@ ENVIRONMENT_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SENSITIVE_ENVIRONMENT_KEY = re.compile(
     r"(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)", re.IGNORECASE
 )
-TRANSIENT_PATTERN = re.compile(
-    r"(?:\b429\b|\b503\b|rate[_ -]?limit|temporar(?:y|ily)|timed?\s*out|timeout)",
-    re.IGNORECASE,
+ERROR_ENVELOPE_PREFIX = "REVIEW_WRITER_ERROR:"
+TRANSIENT_ERROR_CATEGORIES = frozenset(
+    {
+        "transient_rate_limited",
+        "transient_service_unavailable",
+        "transient_timeout",
+    }
 )
 
 
@@ -123,9 +130,19 @@ class ScientificRunner:
             raise WorkflowValidationError("Scientific working directory does not exist.")
         if not staging.is_dir():
             raise WorkflowValidationError("Scientific staging directory does not exist.")
+        if not expected_outputs:
+            raise WorkflowValidationError(
+                "Scientific tasks must declare at least one required staging output."
+            )
         outputs = tuple(
             self._safe_output_path(staging, relative) for relative in expected_outputs
         )
+        runner_directory = staging / ".runner"
+        if runner_directory.is_symlink():
+            raise WorkflowValidationError("Scientific runner directory is not trusted.")
+        runner_directory.mkdir(parents=True, exist_ok=True)
+        if runner_directory.resolve().parent != staging:
+            raise WorkflowValidationError("Scientific runner directory escaped staging.")
         normal_environment = self._validate_environment(env or {})
         secrets = self._validate_environment(secret_env or {})
         sensitive_normal_keys = sorted(
@@ -158,11 +175,25 @@ class ScientificRunner:
         for attempt in range(1, self.max_attempts + 1):
             if cancellation():
                 raise ScientificRunCancelled(attempts=attempt)
+            self._remove_previous_outputs(outputs)
+            completion_marker = runner_directory / f"provider-attempt-{attempt}.completed"
+            completion_marker.unlink(missing_ok=True)
+            attempt_environment = dict(child_environment)
+            attempt_environment["REVIEW_WRITER_PROVIDER_CALL_COMPLETED_FILE"] = str(
+                completion_marker
+            )
+            process_options: dict = {}
+            if os.name == "nt":
+                process_options["creationflags"] = getattr(
+                    subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+                )
+            else:
+                process_options["start_new_session"] = True
             try:
                 process = subprocess.Popen(
                     list(safe_command),
                     cwd=working,
-                    env=child_environment,
+                    env=attempt_environment,
                     shell=False,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
@@ -170,6 +201,7 @@ class ScientificRunner:
                     text=True,
                     encoding="utf-8",
                     errors="replace",
+                    **process_options,
                 )
             except (FileNotFoundError, PermissionError, OSError) as exc:
                 raise WorkflowValidationError(
@@ -181,7 +213,7 @@ class ScientificRunner:
             timed_out = False
             while True:
                 if cancellation():
-                    stdout, stderr = self._terminate(process)
+                    self._terminate(process)
                     raise ScientificRunCancelled(attempts=attempt) from None
                 remaining = timeout - (time.monotonic() - started)
                 if remaining <= 0:
@@ -219,8 +251,15 @@ class ScientificRunner:
                     outputs=tuple(path.relative_to(staging).as_posix() for path in outputs),
                 )
 
-            transient = timed_out or bool(
-                TRANSIENT_PATTERN.search(f"{last_stdout}\n{last_stderr}")
+            envelope = self._error_envelope(last_stdout, last_stderr)
+            category = str(envelope.get("category") or "")
+            provider_call_completed = bool(
+                completion_marker.is_file()
+                or envelope.get("provider_call_completed") is True
+            )
+            transient = (
+                (timed_out or category in TRANSIENT_ERROR_CATEGORIES)
+                and not provider_call_completed
             )
             if not transient or attempt >= self.max_attempts:
                 reason = "Scientific task timed out." if timed_out else "Scientific task failed."
@@ -231,6 +270,8 @@ class ScientificRunner:
                     details={
                         "returncode": process.returncode,
                         "stderr": last_stderr,
+                        "category": category or ("transient_timeout" if timed_out else "unknown"),
+                        "provider_call_completed": provider_call_completed,
                     },
                 )
             self._wait_before_retry(cancellation, attempt)
@@ -271,17 +312,46 @@ class ScientificRunner:
             or posix.is_absolute()
             or windows.is_absolute()
             or windows.drive
+            or posix.parts[0] == ".runner"
             or any(part in {"", ".", ".."} for part in posix.parts)
         ):
             raise WorkflowValidationError("Expected output must be a safe relative path.")
-        path = (staging / Path(*posix.parts)).resolve()
+        lexical = staging / Path(*posix.parts)
+        path = lexical.resolve()
         try:
             path.relative_to(staging)
         except ValueError as exc:
             raise WorkflowValidationError(
                 "Expected output escaped the staging directory."
             ) from exc
+        if lexical.is_symlink() or path != lexical.absolute():
+            raise WorkflowValidationError(
+                "Expected output path must not contain symbolic links."
+            )
         return path
+
+    @staticmethod
+    def _remove_previous_outputs(outputs: Sequence[Path]) -> None:
+        for path in outputs:
+            if path.is_file() or path.is_symlink():
+                path.unlink()
+            elif path.exists():
+                raise WorkflowValidationError(
+                    "A required scientific output path is not a regular file."
+                )
+
+    @staticmethod
+    def _error_envelope(stdout: str, stderr: str) -> dict:
+        for line in reversed(f"{stderr}\n{stdout}".splitlines()):
+            stripped = line.strip()
+            if not stripped.startswith(ERROR_ENVELOPE_PREFIX):
+                continue
+            try:
+                payload = json.loads(stripped[len(ERROR_ENVELOPE_PREFIX) :])
+            except (json.JSONDecodeError, TypeError):
+                return {}
+            return payload if isinstance(payload, dict) else {}
+        return {}
 
     def _redact(self, value: str | None, secrets: Sequence[str]) -> str:
         redacted = str(value or "")
@@ -294,12 +364,108 @@ class ScientificRunner:
     @staticmethod
     def _terminate(process: subprocess.Popen) -> tuple[str, str]:
         if process.poll() is None:
-            process.terminate()
+            if os.name == "nt":
+                if not ScientificRunner._terminate_windows_tree(process.pid):
+                    process.kill()
+            else:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    process.terminate()
             try:
                 return process.communicate(timeout=1)
             except subprocess.TimeoutExpired:
-                process.kill()
-        return process.communicate()
+                if os.name != "nt":
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        process.kill()
+                else:
+                    process.kill()
+        try:
+            return process.communicate(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+            return "", "Process output was unavailable after forced termination."
+
+    @staticmethod
+    def _terminate_windows_tree(root_pid: int) -> bool:
+        if os.name != "nt":
+            return False
+
+        from ctypes import wintypes
+
+        class ProcessEntry(ctypes.Structure):
+            _fields_ = (
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            )
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ProcessEntry),
+        ]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ProcessEntry),
+        ]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+        invalid_handle = ctypes.c_void_p(-1).value
+        if snapshot == invalid_handle:
+            return False
+        parent_by_pid: dict[int, int] = {}
+        try:
+            entry = ProcessEntry()
+            entry.dwSize = ctypes.sizeof(ProcessEntry)
+            has_entry = bool(kernel32.Process32FirstW(snapshot, ctypes.byref(entry)))
+            while has_entry:
+                parent_by_pid[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+                has_entry = bool(kernel32.Process32NextW(snapshot, ctypes.byref(entry)))
+        finally:
+            kernel32.CloseHandle(snapshot)
+
+        descendants: set[int] = {int(root_pid)}
+        changed = True
+        while changed:
+            changed = False
+            for process_id, parent_id in parent_by_pid.items():
+                if parent_id in descendants and process_id not in descendants:
+                    descendants.add(process_id)
+                    changed = True
+
+        terminated = False
+        for process_id in sorted(descendants, key=lambda item: item == root_pid):
+            handle = kernel32.OpenProcess(0x0001, False, process_id)
+            if not handle:
+                continue
+            try:
+                if kernel32.TerminateProcess(handle, 1):
+                    terminated = True
+            finally:
+                kernel32.CloseHandle(handle)
+        return terminated
 
     def _wait_before_retry(
         self, cancellation: Callable[[], bool], attempt: int

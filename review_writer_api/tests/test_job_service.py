@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import tempfile
 import threading
 import time
@@ -283,6 +284,68 @@ class JobServiceTests(unittest.TestCase):
             hidden = client.get(f"/api/v1/jobs/{queued.id}")
             self.assertEqual(404, hidden.status_code)
             self.assertEqual("WORKFLOW_NOT_FOUND", hidden.json()["error"]["code"])
+
+    def test_app_shutdown_has_a_bounded_grace_period_for_non_cooperative_work(self) -> None:
+        bounded_service = job_service_class()(
+            self.repository, max_workers=1, shutdown_grace_seconds=0.1
+        )
+        started = threading.Event()
+        release = threading.Event()
+
+        def non_cooperative(_context, _payload):
+            started.set()
+            release.wait(5)
+            return {"released": True}
+
+        bounded_service.register_handler("shutdown.blocked", non_cooperative)
+        submitted_job: dict[str, str] = {}
+        settings = ApiSettings(
+            review_root=Path(self.temporary.name),
+            deployment_mode="hosted",
+            database_url=f"sqlite+pysqlite:///{(Path(self.temporary.name) / 'jobs.sqlite3').as_posix()}",
+            public_origin="http://testserver",
+            credential_encryption_key=TEST_KEY,
+            hosted_workspace_root=Path(self.temporary.name) / "shutdown-users",
+        )
+        app = create_app(
+            settings,
+            principal_provider=lambda: self.principal,
+            session_factory_override=self.sessions,
+            job_service_override=bounded_service,
+        )
+
+        def run_lifespan():
+            with TestClient(app):
+                submitted = bounded_service.submit(
+                    self.principal,
+                    scope="project",
+                    project_id=self.project_id,
+                    job_type="shutdown.blocked",
+                    idempotency_key="shutdown-blocked",
+                    payload={},
+                )
+                submitted_job["id"] = submitted.id
+                self.assertTrue(started.wait(2))
+
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(run_lifespan)
+        self.assertTrue(started.wait(2))
+        returned_within_grace = True
+        try:
+            future.result(timeout=0.5)
+        except concurrent.futures.TimeoutError:
+            returned_within_grace = False
+        finally:
+            release.set()
+            future.result(timeout=3)
+            executor.shutdown(wait=True)
+            bounded_service.shutdown(wait=False)
+
+        self.assertTrue(returned_within_grace)
+        stored = self.repository.get_job(
+            self.principal.user_id, submitted_job["id"]
+        )
+        self.assertEqual("interrupted", stored.status)
 
 
 if __name__ == "__main__":

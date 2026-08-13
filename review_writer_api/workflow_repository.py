@@ -474,8 +474,11 @@ class WorkflowRepository:
         normalized_scope = str(scope or "").strip().lower()
         if normalized_scope not in {"library", "project"}:
             raise WorkflowValidationError("Job scope must be library or project.")
-        if not str(idempotency_key or "").strip():
+        normalized_idempotency_key = str(idempotency_key or "").strip()
+        if not normalized_idempotency_key:
             raise WorkflowValidationError("An idempotency key is required.")
+        if len(normalized_idempotency_key) > 255:
+            raise WorkflowValidationError("The idempotency key is too long.")
         if normalized_scope == "library" and project_id is not None:
             raise WorkflowValidationError("Library jobs cannot reference a project.")
         if normalized_scope == "project" and project_id is None:
@@ -492,16 +495,24 @@ class WorkflowRepository:
             else None
         )
         scope_key = str(project_uuid) if project_uuid is not None else "_library_"
+        requested_payload = dict(payload or {})
 
         try:
             with database_session(self.session_factory) as session:
                 existing = session.scalar(
                     select(WorkflowJob).where(
                         WorkflowJob.user_id == user_uuid,
-                        WorkflowJob.idempotency_key == idempotency_key,
+                        WorkflowJob.idempotency_scope_key == scope_key,
+                        WorkflowJob.job_type == normalized_job_type,
+                        WorkflowJob.idempotency_key == normalized_idempotency_key,
                     )
                 )
                 if existing:
+                    if dict(existing.payload_json or {}) != requested_payload:
+                        raise WorkflowConflict(
+                            "The idempotency key was already used with a different payload.",
+                            details={"existing_job_id": str(existing.id)},
+                        )
                     return self._job_record(existing)
                 if project_uuid is not None and self._owned_project(
                     session, user_uuid, project_uuid
@@ -544,8 +555,9 @@ class WorkflowRepository:
                     scope=normalized_scope,
                     job_type=normalized_job_type,
                     status="queued",
-                    idempotency_key=idempotency_key,
-                    payload_json=dict(payload or {}),
+                    idempotency_scope_key=scope_key,
+                    idempotency_key=normalized_idempotency_key,
+                    payload_json=requested_payload,
                     retry_of_job_id=retry_uuid,
                 )
                 session.add(job)
@@ -571,10 +583,17 @@ class WorkflowRepository:
                 existing = session.scalar(
                     select(WorkflowJob).where(
                         WorkflowJob.user_id == user_uuid,
-                        WorkflowJob.idempotency_key == idempotency_key,
+                        WorkflowJob.idempotency_scope_key == scope_key,
+                        WorkflowJob.job_type == normalized_job_type,
+                        WorkflowJob.idempotency_key == normalized_idempotency_key,
                     )
                 )
                 if existing:
+                    if dict(existing.payload_json or {}) != requested_payload:
+                        raise WorkflowConflict(
+                            "The idempotency key was already used with a different payload.",
+                            details={"existing_job_id": str(existing.id)},
+                        )
                     return self._job_record(existing)
                 current = session.scalar(
                     select(WorkflowJob)
@@ -952,23 +971,44 @@ class WorkflowRepository:
         now = utc_now()
         with database_session(self.session_factory) as session:
             job = session.scalar(
-                select(WorkflowJob).where(
+                update(WorkflowJob)
+                .where(
                     WorkflowJob.id == job_uuid,
                     WorkflowJob.user_id == user_uuid,
+                    WorkflowJob.status == "queued",
                 )
+                .values(
+                    status="cancelled",
+                    cancellation_requested=True,
+                    updated_at=now,
+                    finished_at=now,
+                )
+                .returning(WorkflowJob)
             )
             if job is None:
-                return None
-            if job.status == "queued":
-                job.status = "cancelled"
-                job.cancellation_requested = True
-                job.finished_at = now
-            elif job.status == "running":
-                job.status = "cancel_requested"
-                job.cancellation_requested = True
-            job.updated_at = now
-            session.flush()
-            return self._job_record(job)
+                job = session.scalar(
+                    update(WorkflowJob)
+                    .where(
+                        WorkflowJob.id == job_uuid,
+                        WorkflowJob.user_id == user_uuid,
+                        WorkflowJob.status == "running",
+                        WorkflowJob.cancellation_requested.is_(False),
+                    )
+                    .values(
+                        status="cancel_requested",
+                        cancellation_requested=True,
+                        updated_at=now,
+                    )
+                    .returning(WorkflowJob)
+                )
+            if job is None:
+                job = session.scalar(
+                    select(WorkflowJob).where(
+                        WorkflowJob.id == job_uuid,
+                        WorkflowJob.user_id == user_uuid,
+                    )
+                )
+            return self._job_record(job) if job else None
 
     def job_cancellation_requested(self, job_id: str) -> bool:
         job_uuid = self._uuid(job_id, not_found_message="Job not found.")
@@ -995,12 +1035,34 @@ class WorkflowRepository:
                 update(WorkflowJob)
                 .where(
                     WorkflowJob.id == job_uuid,
-                    WorkflowJob.status.in_(("running", "cancel_requested")),
+                    WorkflowJob.status == "running",
+                    WorkflowJob.cancellation_requested.is_(False),
                 )
                 .values(
                     progress_current=safe_current,
                     progress_total=safe_total,
                     updated_at=utc_now(),
+                )
+                .returning(WorkflowJob)
+            )
+            return self._job_record(job) if job else None
+
+    def mark_job_interrupted(self, job_id: str) -> JobRecord | None:
+        job_uuid = self._uuid(job_id, not_found_message="Job not found.")
+        now = utc_now()
+        with database_session(self.session_factory) as session:
+            job = session.scalar(
+                update(WorkflowJob)
+                .where(
+                    WorkflowJob.id == job_uuid,
+                    WorkflowJob.status.in_(("running", "cancel_requested")),
+                )
+                .values(
+                    status="interrupted",
+                    error_code="PROCESS_INTERRUPTED",
+                    error_message="The server stopped while this job was running.",
+                    updated_at=now,
+                    finished_at=now,
                 )
                 .returning(WorkflowJob)
             )
@@ -1063,7 +1125,8 @@ class WorkflowRepository:
                 update(WorkflowJob)
                 .where(
                     WorkflowJob.id == job_uuid,
-                    WorkflowJob.status.in_(("running", "cancel_requested")),
+                    WorkflowJob.status == "running",
+                    WorkflowJob.cancellation_requested.is_(False),
                 )
                 .values(
                     status="failed",
