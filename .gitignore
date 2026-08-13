@@ -28,6 +28,8 @@
 !/migrations/**
 !/infra/
 !/infra/**
+!/docs/
+!/docs/**
 
 /.env
 /.env.*

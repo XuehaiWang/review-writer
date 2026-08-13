@@ -10,7 +10,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "127.0.0.1:5432:5432"
+      - "${REVIEW_WRITER_POSTGRES_BIND_ADDRESS:-127.0.0.1}:${REVIEW_WRITER_POSTGRES_BIND_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
@@ -19,10 +19,11 @@ services:
     restart: unless-stopped
 
   migrate:
+    image: review-writer-api:${REVIEW_WRITER_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile.api
-    command: ["alembic", "upgrade", "head"]
+    command: ["python", "-m", "review_writer_api.migration_bootstrap"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -33,11 +34,19 @@ services:
       REVIEW_WRITER_POSTGRES_PASSWORD: "${REVIEW_WRITER_POSTGRES_PASSWORD:?Set REVIEW_WRITER_POSTGRES_PASSWORD in .env}"
       REVIEW_WRITER_POSTGRES_DB: ${REVIEW_WRITER_POSTGRES_DB:-review_writer}
       REVIEW_WRITER_HOSTED_WORKSPACE_ROOT: /app/.review-writer/hosted-workspaces
+      REVIEW_WRITER_MIGRATION_BACKUP_ROOT: /app/migration-backups
+      REVIEW_WRITER_MIGRATION_REPORT_ROOT: /app/migration-reports
+      REVIEW_WRITER_MIGRATION_OWNER_EMAIL: ${REVIEW_WRITER_MIGRATION_OWNER_EMAIL:-}
+      REVIEW_WRITER_MIGRATION_ACCEPT_MISSING_FILES: ${REVIEW_WRITER_MIGRATION_ACCEPT_MISSING_FILES:-false}
+      REVIEW_WRITER_MIGRATION_ACCEPT_FILE_DRIFT: ${REVIEW_WRITER_MIGRATION_ACCEPT_FILE_DRIFT:-false}
     volumes:
       - review_state:/app/.review-writer
+      - "${REVIEW_WRITER_MIGRATION_REPORTS_DIR:-./migration-reports}:/app/migration-reports"
+      - "${REVIEW_WRITER_MIGRATION_BACKUPS_DIR:-./migration-backups}:/app/migration-backups"
     restart: "no"
 
   api:
+    image: review-writer-api:${REVIEW_WRITER_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile.api
@@ -68,9 +77,10 @@ services:
       SCIATLAS_TIMEOUT: ${SCIATLAS_TIMEOUT:-240}
       SCIATLAS_ALLOW_INSECURE_HTTP: ${SCIATLAS_ALLOW_INSECURE_HTTP:-false}
     ports:
-      - "${REVIEW_WRITER_BIND_ADDRESS:-127.0.0.1}:8770:8770"
+      - "${REVIEW_WRITER_BIND_ADDRESS:-127.0.0.1}:${REVIEW_WRITER_HTTP_PORT:-8770}:8770"
     volumes:
       - review_state:/app/.review-writer
+      - "${REVIEW_WRITER_MIGRATION_REPORTS_DIR:-./migration-reports}:/app/migration-reports:ro"
     restart: unless-stopped
 
 volumes:

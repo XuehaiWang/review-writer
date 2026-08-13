@@ -12,7 +12,7 @@ import uuid
 from contextlib import closing, redirect_stderr
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from sqlalchemy import create_engine, delete, event, func, select
 from sqlalchemy.orm import sessionmaker
@@ -341,6 +341,15 @@ class WorkflowMigrationTests(unittest.TestCase):
             missing = session.get(WorkflowArtifact, uuid.UUID(self.ids["artifact_missing"]))
             self.assertEqual("missing", missing.availability)
             self.assertEqual("missing.png", missing.relative_path)
+            alpha = session.scalar(
+                select(WorkflowArtifact).where(
+                    WorkflowArtifact.legacy_id == self.ids["artifact_alpha"]
+                )
+            )
+            self.assertTrue(alpha.relative_path.startswith(".artifacts/migrated/"))
+            migrated_alpha = self.review_root / "review-projects" / "alpha" / alpha.relative_path
+            self.assertEqual(shared_content := b'{"paper":"copper"}\n', migrated_alpha.read_bytes())
+            self.assertEqual(sha256(shared_content), alpha.content_sha256)
             library_job = session.get(WorkflowJob, uuid.UUID(self.ids["job_library"]))
             self.assertEqual(("library", None), (library_job.scope, library_job.project_id))
             self.assertIsNone(session.get(WorkflowSystemState, "workflow_ready"))
@@ -360,6 +369,119 @@ class WorkflowMigrationTests(unittest.TestCase):
         self.assertEqual(
             [], self.migration.validate_migrated_workflows(self.sessions, accepted)
         )
+
+    def test_file_hash_drift_requires_separate_acknowledgement_and_preserves_both_hashes(self) -> None:
+        changed = self.review_root / "review-projects" / "alpha" / "artifact.json"
+        changed.write_bytes(b'{"paper":"changed after legacy publication"}\n')
+        actual_sha256 = hashlib.sha256(changed.read_bytes()).hexdigest()
+
+        blocked = self.migration.migrate_legacy_workflows(
+            self.workspace_root,
+            self.backup_root,
+            self.sessions,
+            accept_missing_files=True,
+            accept_file_drift=False,
+        )
+
+        self.assertTrue(blocked.success)
+        self.assertFalse(blocked.ready)
+        self.assertEqual(1, len(blocked.drifted_files))
+        self.assertEqual(actual_sha256, blocked.drifted_files[0]["actual_sha256"])
+        with self.sessions() as session:
+            artifact = session.scalar(
+                select(WorkflowArtifact).where(
+                    WorkflowArtifact.legacy_id == self.ids["artifact_alpha"]
+                )
+            )
+            self.assertEqual("integrity_mismatch", artifact.availability)
+
+        accepted = self.migration.migrate_legacy_workflows(
+            self.workspace_root,
+            self.backup_root,
+            self.sessions,
+            accept_missing_files=True,
+            accept_file_drift=True,
+        )
+
+        self.assertTrue(accepted.ready)
+        with self.sessions() as session:
+            artifact = session.scalar(
+                select(WorkflowArtifact).where(
+                    WorkflowArtifact.legacy_id == self.ids["artifact_alpha"]
+                )
+            )
+            self.assertEqual("available", artifact.availability)
+            self.assertEqual(actual_sha256, artifact.content_sha256)
+            self.assertEqual(
+                sha256(b'{"paper":"copper"}\n'),
+                artifact.metadata_json["legacy_content_sha256"],
+            )
+            self.assertEqual(actual_sha256, artifact.metadata_json["migrated_actual_sha256"])
+
+    def test_container_absolute_library_and_external_artifact_paths_are_preserved(self) -> None:
+        metadata_path = (
+            self.review_root
+            / "review-library"
+            / "metadata"
+            / "papers"
+            / "P001.metadata.json"
+        )
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        prefix = "/app/.review-writer/hosted-workspaces/legacy-user"
+        metadata["source_paths"]["pdf"] = f"{prefix}/review-library/uploads/P001.pdf"
+        metadata["source_paths"]["markdown"] = f"{prefix}/mineru-outputs/markdown/P001.md"
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        external = self.review_root / "mineru-outputs" / "extracted" / "P999" / "images" / "figure.png"
+        external.parent.mkdir(parents=True, exist_ok=True)
+        external.write_bytes(b"legacy-external-image")
+        external_id = str(uuid.uuid4())
+        container_path = f"{prefix}/mineru-outputs/extracted/P999/images/figure.png"
+        with closing(sqlite3.connect(self.ids["database_path"])) as connection:
+            connection.execute(
+                """
+                INSERT INTO artifact_versions(
+                    artifact_version_id, project_id, logical_name, artifact_type, path,
+                    content_sha256, size_bytes, mtime_ns, producer_stage, producer_run_id,
+                    metadata_json, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    external_id,
+                    "alpha",
+                    container_path,
+                    "png",
+                    container_path,
+                    sha256(external.read_bytes()),
+                    external.stat().st_size,
+                    external.stat().st_mtime_ns,
+                    "figures",
+                    None,
+                    "{}",
+                    NOW,
+                ),
+            )
+            connection.commit()
+
+        report = self.migration.migrate_legacy_workflows(
+            self.workspace_root,
+            self.backup_root,
+            self.sessions,
+            accept_missing_files=False,
+        )
+
+        self.assertEqual(1, len(report.missing_files))
+        self.assertEqual("missing.png", report.missing_files[0]["logical_name"])
+        with self.sessions() as session:
+            artifact = session.scalar(
+                select(WorkflowArtifact).where(WorkflowArtifact.legacy_id == external_id)
+            )
+            self.assertEqual("available", artifact.availability)
+            self.assertTrue(artifact.relative_path.startswith(".artifacts/migrated/"))
+            destination = (
+                self.review_root / "review-projects" / "alpha" / artifact.relative_path
+            )
+            self.assertEqual(external.read_bytes(), destination.read_bytes())
 
     def test_migrated_library_metadata_edit_preserves_imported_artifact(self) -> None:
         report = self.migration.migrate_legacy_workflows(
@@ -517,6 +639,34 @@ class WorkflowMigrationTests(unittest.TestCase):
             )
         self.assertEqual(2, blocked)
         self.assertIn("--confirm-stopped", stderr.getvalue())
+
+    def test_formal_cli_returns_nonzero_until_missing_files_are_acknowledged(self) -> None:
+        cli = importlib.import_module("review_writer_api.migrate_workflow")
+        report_path = self.root / "reports" / "not-ready.json"
+        disposable_engine = Mock()
+
+        with patch.object(
+            cli, "_database", return_value=(self.sessions, disposable_engine)
+        ):
+            exit_code = cli.main(
+                [
+                    "migrate",
+                    "--workspace-root",
+                    str(self.workspace_root),
+                    "--backup-root",
+                    str(self.backup_root),
+                    "--report",
+                    str(report_path),
+                    "--confirm-stopped",
+                ]
+            )
+
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertTrue(payload["success"])
+        self.assertFalse(payload["ready"])
+        self.assertTrue(payload["missing_files"])
+        self.assertEqual(2, exit_code)
+        disposable_engine.dispose.assert_called_once_with()
 
 
 @unittest.skipUnless(

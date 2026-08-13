@@ -40,6 +40,7 @@ def _parser() -> argparse.ArgumentParser:
     migrate.add_argument("--dry-run", action="store_true")
     migrate.add_argument("--confirm-stopped", action="store_true")
     migrate.add_argument("--accept-missing-files", action="store_true")
+    migrate.add_argument("--accept-file-drift", action="store_true")
 
     validate = commands.add_parser("validate", help="Validate a saved migration report.")
     validate.add_argument("--workspace-root", required=True, type=Path)
@@ -78,6 +79,7 @@ def _load_report(path: Path) -> MigrationReport:
         missing_files=list(payload.get("missing_files") or []),
         backup_paths=list(payload.get("backup_paths") or []),
         errors=list(payload.get("errors") or []),
+        drifted_files=list(payload.get("drifted_files") or []),
     )
 
 
@@ -106,9 +108,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 owner_email=arguments.owner_email,
                 dry_run=arguments.dry_run,
                 accept_missing_files=arguments.accept_missing_files,
+                accept_file_drift=arguments.accept_file_drift,
             )
             _write_json(arguments.report, asdict(report))
-            return 0 if report.success else 2
+            completed = report.success and (report.dry_run or report.ready)
+            return 0 if completed else 2
 
         report = _load_report(arguments.report)
         expected_workspace = arguments.workspace_root.expanduser().resolve()

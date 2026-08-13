@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import uuid
@@ -47,6 +48,18 @@ LIBRARY_PROJECT_ID = "_library_"
 
 class WorkflowMigrationError(RuntimeError):
     pass
+
+
+def _filesystem_path(path: Path) -> Path:
+    """Use the Windows extended path form for long migration staging paths."""
+
+    if os.name != "nt":
+        return path
+    absolute = path.absolute()
+    text = str(absolute)
+    if text.startswith("\\\\?\\"):
+        return absolute
+    return Path(f"\\\\?\\{text}")
 
 
 def assert_application_stopped(session_factory, *, max_age_seconds: int = 30) -> None:
@@ -106,6 +119,7 @@ class MigrationSourceReport:
     backup_path: str = ""
     backup_sha256: str = ""
     errors: list[str] = field(default_factory=list)
+    drifted_files: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -120,11 +134,12 @@ class MigrationReport:
     missing_files: list[dict[str, str]]
     backup_paths: list[str]
     errors: list[str]
+    drifted_files: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    with _filesystem_path(path).open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -367,18 +382,58 @@ def _safe_artifact_path(
     logical_name = str(row.get("logical_name") or "").replace("\\", "/").strip()
     logical = PurePosixPath(logical_name)
     safe = bool(logical_name) and not logical.is_absolute() and ".." not in logical.parts
-    if safe:
-        relative_path = logical.as_posix()
-    else:
-        filename = Path(str(row.get("path") or "artifact.bin")).name or "artifact.bin"
-        relative_path = f"legacy-external/{artifact_id}/{filename}"
     project_root = (review_root / "review-projects" / project_slug).resolve()
-    candidate = (project_root / Path(relative_path)).resolve()
-    try:
-        candidate.relative_to(project_root)
-    except ValueError:
-        return relative_path, candidate, False
-    return relative_path, candidate, candidate.is_file()
+    source_candidates: list[Path] = []
+    if safe:
+        source_candidates.append(project_root / Path(logical.as_posix()))
+    raw_path = str(row.get("path") or "").strip()
+    recorded = Path(raw_path) if raw_path else None
+    if recorded is not None:
+        source_candidates.append(recorded if recorded.is_absolute() else review_root / recorded)
+        portable_parts = PurePosixPath(raw_path.replace("\\", "/")).parts
+        folded = [part.casefold() for part in portable_parts]
+        for marker in ("review-projects", "review-library", "mineru-outputs"):
+            if marker in folded:
+                source_candidates.append(
+                    review_root.joinpath(*portable_parts[folded.index(marker) :])
+                )
+
+    source_path: Path | None = None
+    seen: set[str] = set()
+    for candidate in source_candidates:
+        try:
+            lexical = candidate if candidate.is_absolute() else review_root / candidate
+            key = str(lexical)
+            if key in seen:
+                continue
+            seen.add(key)
+            trusted = _trusted_migration_path(review_root, lexical, label="artifact source")
+        except (ValueError, WorkflowMigrationError):
+            continue
+        if _filesystem_path(trusted).is_file():
+            source_path = trusted
+            break
+
+    if source_path is None:
+        relative_path = logical.as_posix() if safe else f"legacy-external/{artifact_id}/artifact.bin"
+        return relative_path, project_root / Path(relative_path), False
+
+    raw_name = logical.name if safe else PurePosixPath(raw_path.replace("\\", "/")).name
+    filename = "".join(
+        character if character.isalnum() or character in {".", "-", "_"} else "_"
+        for character in (raw_name or "artifact.bin")
+    )[:240] or "artifact.bin"
+    destination_root = _trusted_migration_directory(
+        project_root,
+        ".artifacts",
+        "migrated",
+        str(artifact_id),
+        label="artifact version",
+    )
+    destination = destination_root / filename
+    _publish_migrated_library_file(source_path, destination)
+    relative_path = destination.relative_to(project_root).as_posix()
+    return relative_path, destination, True
 
 
 def _normalize_job_status(status: str) -> str:
@@ -447,14 +502,21 @@ def _legacy_library_path(review_root: Path, raw: Any, fallback: Path) -> tuple[s
     value = str(raw or "").strip()
     recorded = Path(value) if value else fallback
     candidates = [recorded] if recorded.is_absolute() else [review_root / recorded]
-    if recorded.is_absolute() and not recorded.exists():
-        folded = [part.casefold() for part in recorded.parts]
-        for marker in ("review-library", "mineru-outputs"):
-            if marker in folded:
-                candidates.append(review_root.joinpath(*recorded.parts[folded.index(marker) :]))
+    portable_parts = PurePosixPath(value.replace("\\", "/")).parts if value else fallback.parts
+    folded = [part.casefold() for part in portable_parts]
+    for marker in ("review-library", "mineru-outputs"):
+        if marker in folded:
+            candidates.append(
+                review_root.joinpath(*portable_parts[folded.index(marker) :])
+            )
+    seen: set[str] = set()
     for candidate in candidates:
         try:
             lexical = candidate if candidate.is_absolute() else review_root / candidate
+            key = str(lexical)
+            if key in seen:
+                continue
+            seen.add(key)
             relative_path = lexical.relative_to(review_root)
         except ValueError:
             continue
@@ -476,18 +538,21 @@ def _publish_migrated_library_file(source: Path, destination: Path) -> None:
         raise WorkflowMigrationError(
             f"Immutable Library artifact is a symbolic link: {destination}"
         )
-    if destination.is_file():
+    source_io = _filesystem_path(source)
+    destination_io = _filesystem_path(destination)
+    if destination_io.is_file():
         if _sha256_file(destination) != _sha256_file(source):
             raise WorkflowMigrationError(
                 f"Immutable Library artifact has conflicting content: {destination}"
             )
         return
-    temporary = destination.parent / f".{destination.name}.{uuid.uuid4().hex}.part"
+    temporary = destination.parent / f".rw-{uuid.uuid4().hex[:8]}.part"
+    temporary_io = _filesystem_path(temporary)
     try:
-        shutil.copy2(source, temporary)
-        temporary.replace(destination)
+        shutil.copy2(source_io, temporary_io)
+        temporary_io.replace(destination_io)
     finally:
-        temporary.unlink(missing_ok=True)
+        temporary_io.unlink(missing_ok=True)
 
 
 def _publish_migrated_library_metadata(
@@ -500,19 +565,21 @@ def _publish_migrated_library_metadata(
         raise WorkflowMigrationError(
             f"Immutable Library metadata is a symbolic link: {destination}"
         )
-    if destination.is_file():
-        if destination.read_bytes() != content:
+    destination_io = _filesystem_path(destination)
+    if destination_io.is_file():
+        if destination_io.read_bytes() != content:
             raise WorkflowMigrationError(
                 f"Immutable Library metadata has conflicting content: {destination}"
             )
         return
-    temporary = destination.parent / f".{destination.name}.{uuid.uuid4().hex}.part"
+    temporary = destination.parent / f".rw-{uuid.uuid4().hex[:8]}.part"
+    temporary_io = _filesystem_path(temporary)
     try:
-        with temporary.open("xb") as handle:
+        with temporary_io.open("xb") as handle:
             handle.write(content)
-        temporary.replace(destination)
+        temporary_io.replace(destination_io)
     finally:
-        temporary.unlink(missing_ok=True)
+        temporary_io.unlink(missing_ok=True)
 
 
 def _import_library_catalog(
@@ -648,7 +715,7 @@ def _import_library_catalog(
         }
         for kind, (path, ready) in artifact_sources.items():
             artifact = session.get(LibraryArtifact, artifact_ids[kind])
-            stat = path.stat() if ready else None
+            stat = _filesystem_path(path).stat() if ready else None
             artifact_values = {
                 "user_id": owner.id,
                 "paper_id": paper_id,
@@ -751,6 +818,7 @@ def _import_source(
     *,
     owner_email: str | None,
     accept_missing_files: bool,
+    accept_file_drift: bool,
 ) -> MigrationSourceReport:
     report = MigrationSourceReport(
         source_path=source.source_path,
@@ -850,11 +918,24 @@ def _import_source(
         relative_path, file_path, available = _safe_artifact_path(
             review_root, project_slug, row, artifact_id
         )
+        actual_sha256 = ""
+        expected_sha256 = str(row["content_sha256"])
+        drifted = False
         if available:
             actual_sha256 = _sha256_file(file_path)
-            if actual_sha256 != str(row["content_sha256"]):
-                raise WorkflowMigrationError(
-                    f"Artifact hash mismatch for {file_path}: expected {row['content_sha256']}, got {actual_sha256}."
+            drifted = actual_sha256 != expected_sha256
+            if drifted:
+                report.drifted_files.append(
+                    {
+                        "source_path": source.source_path,
+                        "project_id": project_slug,
+                        "logical_name": str(row.get("logical_name") or ""),
+                        "legacy_path": str(row.get("path") or ""),
+                        "expected_sha256": expected_sha256,
+                        "actual_sha256": actual_sha256,
+                        "expected_size_bytes": int(row.get("size_bytes") or 0),
+                        "actual_size_bytes": _filesystem_path(file_path).stat().st_size,
+                    }
                 )
         else:
             report.missing_files.append(
@@ -874,19 +955,54 @@ def _import_source(
         if not isinstance(metadata, dict):
             metadata = {"legacy_metadata": metadata}
         metadata.update(
-            {"legacy_path": str(row.get("path") or ""), "legacy_source": source.source_path}
+            {
+                "legacy_artifact_version_id": legacy_id,
+                "legacy_path": str(row.get("path") or ""),
+                "legacy_source": source.source_path,
+            }
         )
+        if drifted:
+            metadata.update(
+                {
+                    "legacy_content_sha256": expected_sha256,
+                    "migrated_actual_sha256": actual_sha256,
+                    "legacy_size_bytes": int(row.get("size_bytes") or 0),
+                    "file_drift_acknowledged": bool(accept_file_drift),
+                }
+            )
         producer_run = str(row.get("producer_run_id") or "")
+        lineage_sha256 = hashlib.sha256(
+            json.dumps(
+                metadata,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        admitted_drift = bool(drifted and accept_file_drift)
+        content_sha256 = actual_sha256 if admitted_drift else expected_sha256
+        migrated_stat = _filesystem_path(file_path).stat() if admitted_drift else None
+        size_bytes = migrated_stat.st_size if migrated_stat else int(row.get("size_bytes") or 0)
+        mtime_ns = migrated_stat.st_mtime_ns if migrated_stat else int(row.get("mtime_ns") or 0)
+        availability = (
+            "missing"
+            if not available
+            else "integrity_mismatch"
+            if drifted and not accept_file_drift
+            else "available"
+        )
         values = {
             "legacy_id": legacy_id,
             "project_id": project_id,
             "logical_name": str(row["logical_name"]),
             "artifact_type": str(row["artifact_type"]),
             "relative_path": relative_path,
-            "content_sha256": str(row["content_sha256"]),
-            "size_bytes": int(row.get("size_bytes") or 0),
-            "mtime_ns": int(row.get("mtime_ns") or 0),
-            "availability": "available" if available else "missing",
+            "content_sha256": content_sha256,
+            "lineage_sha256": lineage_sha256,
+            "size_bytes": size_bytes,
+            "mtime_ns": mtime_ns,
+            "availability": availability,
             "producer_stage": str(row.get("producer_stage") or ""),
             "producer_run_id": run_map.get(producer_run) if producer_run else None,
             "metadata_json": metadata,
@@ -1011,11 +1127,11 @@ def _import_source(
         "current_jobs": len(tables["current_jobs"]),
         "library_papers": library_paper_count,
     }
-    report.status = (
-        "requires_acknowledgement"
-        if report.missing_files and not accept_missing_files
-        else "succeeded"
+    acknowledgement_required = bool(
+        (report.missing_files and not accept_missing_files)
+        or (report.drifted_files and not accept_file_drift)
     )
+    report.status = "requires_acknowledgement" if acknowledgement_required else "succeeded"
     _upsert_ledger(
         session,
         source,
@@ -1024,6 +1140,8 @@ def _import_source(
             "imported_counts": report.imported_counts,
             "missing_files": report.missing_files,
             "accept_missing_files": accept_missing_files,
+            "drifted_files": report.drifted_files,
+            "accept_file_drift": accept_file_drift,
         },
     )
     return report
@@ -1117,6 +1235,7 @@ def migrate_legacy_workflows(
     owner_email: str | None = None,
     dry_run: bool = False,
     accept_missing_files: bool = False,
+    accept_file_drift: bool = False,
 ) -> MigrationReport:
     inventory = inventory_legacy_workflows(workspace_root, session_factory)
     if not inventory.sources:
@@ -1145,6 +1264,7 @@ def migrate_legacy_workflows(
         missing_files=[],
         backup_paths=[],
         errors=[],
+        drifted_files=[],
     )
     if dry_run:
         return report
@@ -1166,6 +1286,7 @@ def migrate_legacy_workflows(
                     source,
                     owner_email=owner_email,
                     accept_missing_files=accept_missing_files,
+                    accept_file_drift=accept_file_drift,
                 )
                 imported.backup_path = str(backup_path)
                 imported.backup_sha256 = source_report.backup_sha256
@@ -1194,12 +1315,17 @@ def migrate_legacy_workflows(
     report.missing_files = [
         item for source in source_reports for item in source.missing_files
     ]
+    report.drifted_files = [
+        item for source in source_reports for item in source.drifted_files
+    ]
     validation_errors = validate_migrated_workflows(session_factory, report)
     if validation_errors:
         report.errors = list(dict.fromkeys(report.errors + validation_errors))
         report.success = False
     report.ready = bool(
-        report.success and (accept_missing_files or not report.missing_files)
+        report.success
+        and (accept_missing_files or not report.missing_files)
+        and (accept_file_drift or not report.drifted_files)
     )
     if report.ready:
         with database_session(session_factory) as session:
@@ -1210,6 +1336,7 @@ def migrate_legacy_workflows(
                     "completed_at": utc_now().isoformat(),
                     "source_count": len(source_reports),
                     "accept_missing_files": accept_missing_files,
+                    "accept_file_drift": accept_file_drift,
                 },
             )
             existing = session.get(WorkflowSystemState, "workflow_ready")

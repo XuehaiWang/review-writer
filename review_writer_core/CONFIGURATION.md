@@ -63,3 +63,21 @@ REVIEW_MAX_LITERATURE_BATCH=30
 ```
 
 Values are validated centrally and reject invalid or unsafe ranges.
+
+## Hosted PostgreSQL deployment
+
+Compose runs only PostgreSQL, the one-shot migration gate, and FastAPI. The API
+starts only after schema upgrade and any discovered legacy SQLite import has
+validated. Migration reports and verified SQLite backup copies are written to
+the host directories configured by `REVIEW_WRITER_MIGRATION_REPORTS_DIR` and
+`REVIEW_WRITER_MIGRATION_BACKUPS_DIR`; keep both outside Git and include them in
+server backups. Missing legacy files are fail-closed unless an operator explicitly
+sets `REVIEW_WRITER_MIGRATION_ACCEPT_MISSING_FILES=true` after inspecting the report.
+Legacy ledger/file SHA-256 drift is a separate fail-closed condition controlled by
+`REVIEW_WRITER_MIGRATION_ACCEPT_FILE_DRIFT`; accepting it preserves the expected and
+actual hashes plus a unique legacy lineage while snapshotting the actual bytes.
+
+`REVIEW_WRITER_BIND_ADDRESS` defaults to `127.0.0.1`. Set it to `0.0.0.0` only for
+a deliberately trusted LAN or behind a firewall/reverse proxy, and set
+`REVIEW_WRITER_PUBLIC_ORIGIN` to the exact browser origin. See
+`docs/postgresql-workflow-migration.md` for startup, validation, and rollback.

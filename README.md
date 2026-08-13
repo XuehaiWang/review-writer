@@ -94,10 +94,10 @@ Library → Discovery → Analysis & Planning → Sections
 
 ## 快速开始
 
-### 1. 获取 `dy` 分支
+### 1. 获取 `dy-launch` 分支
 
 ```powershell
-git clone --branch dy https://github.com/XuehaiWang/review-writer.git
+git clone --branch dy-launch https://github.com/XuehaiWang/review-writer.git
 Set-Location review-writer
 ```
 
@@ -173,7 +173,7 @@ docker compose --env-file .env.hosted logs -f api
 docker compose --env-file .env.hosted down
 ```
 
-每次启动都会先等待 PostgreSQL 健康检查，再幂等执行 `alembic upgrade head`；普通重启不需要手动运行迁移。不要给 `down` 添加 `-v`，否则会删除 PostgreSQL 和用户工作区数据卷。
+每次启动都会先等待 PostgreSQL 健康检查，再幂等升级表结构并自动清点旧 SQLite。发现旧数据时会先干跑、生成校验报告与独立备份，再导入 PostgreSQL；只有迁移就绪后 API 才启动。普通重启不会重复导入同一份数据。完整步骤、缺失文件处理和回滚方式见 [PostgreSQL 工作流迁移与回滚手册](docs/postgresql-workflow-migration.md)。不要给 `down` 添加 `-v`，否则会删除 PostgreSQL 和用户工作区数据卷。
 
 本地开发地址：
 
@@ -185,57 +185,15 @@ docker compose --env-file .env.hosted down
 
 `REVIEW_WRITER_PUBLIC_ORIGIN`、数据库地址、Cookie 名称、有效期、HTTPS Cookie 开关和监听地址都由环境变量配置，不写死在前后端。生产环境必须把 `REVIEW_WRITER_PUBLIC_ORIGIN` 设置为实际 HTTPS 域名，并设置 `REVIEW_WRITER_SESSION_COOKIE_SECURE=true`。
 
-托管模式的文本模型、图像模型和 MinerU 密钥通过 `/api/v1/provider-settings` 按当前登录用户保存。API 只返回是否已配置及末四位提示，密钥使用 AES-256-GCM 加密落库；`REVIEW_WRITER_CREDENTIAL_ENCRYPTION_KEY` 必须作为部署密钥长期安全保存，不能提交到 Git，也不能随意更换，否则已有模型密钥将无法解密。本地单用户模式仍沿用 `.review-writer/provider-settings.json`。
+托管模式的文本模型、图像模型和 MinerU 密钥通过 `/api/v1/provider-settings` 按当前登录用户保存。API 只返回是否已配置及末四位提示，密钥使用 AES-256-GCM 加密落库；`REVIEW_WRITER_CREDENTIAL_ENCRYPTION_KEY` 必须作为部署密钥长期安全保存，不能提交到 Git，也不能随意更换，否则已有模型密钥将无法解密。在线运行不读取共享的 `.review-writer/provider-settings.json`。
 
 托管模式默认关闭 `/api/docs` 和 `/api/openapi.json`；确需内部调试时可临时设置 `REVIEW_WRITER_EXPOSE_API_DOCS=true`。
 
 ### 旧 SQLite 工作流一次性迁移
 
-工作流切换到 PostgreSQL 前必须停掉 API 写入，但 PostgreSQL 要保持运行。迁移器只读打开每个
-`workflow.sqlite3`，先用 SQLite Backup API 建立一致备份，再按用户和项目导入；任何源失败时都不会写入
-`workflow_ready`。原 SQLite 文件不会自动删除，迁移后继续作为只读回滚备份保留。
+Compose 的 `migrate` 服务会自动完成停机迁移：只读清点每个 `workflow.sqlite3`，先写 inventory 与 dry-run 报告，再用 SQLite Backup API 建立并校验副本，最后按用户和项目导入。任何源失败或未确认的缺失文件都会阻止 `workflow_ready` 和 API 启动；原 SQLite 永不自动删除。
 
-```powershell
-# 1. 只清点，不写 PostgreSQL，也不创建备份
-.\.venv\Scripts\python.exe -m review_writer_api.migrate_workflow inventory `
-  --workspace-root .review-writer\hosted-workspaces `
-  --report migration-reports\inventory.json
-
-# 2. 干跑；本地单用户根目录还必须增加 --owner-email user@example.com
-.\.venv\Scripts\python.exe -m review_writer_api.migrate_workflow migrate `
-  --workspace-root .review-writer\hosted-workspaces `
-  --backup-root migration-backups `
-  --report migration-reports\dry-run.json `
-  --dry-run
-
-# 3. 正式导入。先不要加入 --accept-missing-files
-docker compose --env-file .env.hosted stop api
-.\.venv\Scripts\python.exe -m review_writer_api.migrate_workflow migrate `
-  --workspace-root .review-writer\hosted-workspaces `
-  --backup-root migration-backups `
-  --report migration-reports\migration.json `
-  --confirm-stopped
-
-# 4. 检查报告中的 missing_files；人工确认这些历史文件确实已不存在后，幂等重跑并允许缺失
-.\.venv\Scripts\python.exe -m review_writer_api.migrate_workflow migrate `
-  --workspace-root .review-writer\hosted-workspaces `
-  --backup-root migration-backups `
-  --report migration-reports\migration-accepted.json `
-  --confirm-stopped `
-  --accept-missing-files
-
-# 5. 按保存的报告复核迁移台账、校验和与当前指针
-.\.venv\Scripts\python.exe -m review_writer_api.migrate_workflow validate `
-  --workspace-root .review-writer\hosted-workspaces `
-  --report migration-reports\migration-accepted.json
-```
-
-托管工作区的一级目录名必须是已存在用户的 UUID；本地单用户数据库必须通过 `--owner-email` 明确指定
-接收用户。备份目录、迁移报告和旧 SQLite 文件都不要放入 Git，也不要在验证完成后立即删除。
-
-正式迁移前还要对当前 PostgreSQL 做一次独立备份。若报告失败或校验失败，保持 API 停止，不要写
-`workflow_ready`，恢复迁移前的 PostgreSQL 备份后再排查；SQLite 源文件和迁移器生成的时间戳备份均未被
-修改，可以重新清点和干跑。只有 `validate` 返回 0 且报告显示 `ready: true` 后才能重新启动 API。
+迁移证据默认保存在宿主机 `migration-reports/`，备份默认保存在 `migration-backups/`。旧单用户数据库需要在 `.env.hosted` 设置 `REVIEW_WRITER_MIGRATION_OWNER_EMAIL`。不要在首次运行前启用 `REVIEW_WRITER_MIGRATION_ACCEPT_MISSING_FILES` 或 `REVIEW_WRITER_MIGRATION_ACCEPT_FILE_DRIFT`；缺文件与旧哈希/实际文件漂移必须在完整报告中分别核对和确认。手工清点、校验、PostgreSQL 备份和回滚命令见 [迁移手册](docs/postgresql-workflow-migration.md)。
 
 ## API 设置
 
@@ -428,6 +386,7 @@ git status --short
 
 ```powershell
 $env:REVIEW_WRITER_PUBLIC_ORIGIN='http://192.168.0.5:8770'
+$env:REVIEW_WRITER_BIND_ADDRESS='0.0.0.0'
 docker compose --env-file .env.hosted up -d --build
 ```
 
@@ -446,7 +405,7 @@ docker compose --env-file .env.hosted up -d --build
 ## 安全边界
 
 - 只处理用户有权访问的论文和开放获取来源。
-- API key 仅保存在本地 `.env` 或 `.review-writer/provider-settings.json`，不得写入代码、README、截图或提交历史。
-- 删除项目会永久删除 `review-projects/<project-id>` 及其输出，界面要求输入完整 project ID 二次确认。
+- API key 仅按用户加密保存在 PostgreSQL，部署加密密钥只放服务器环境变量；不得写入代码、README、截图或提交历史。
+- 删除项目会先软删除数据库记录并把项目文件原子移动到该用户的可恢复 trash，不会触碰其他用户文件。
 - AI 生成的化学结构、机理、箭头和文字必须经过人工审核。
-- 对外提供网站服务前，需要另行实现 HTTPS、用户认证、权限隔离、配额、对象存储和数据库备份；当前本地存储模式主要面向单机或可信局域网使用。
+- 当前版本已经包含登录、用户/API/项目隔离和 PostgreSQL；公网部署仍必须配置 HTTPS、防火墙、配额与数据库/工作区备份。单机或可信局域网可继续使用 Docker Volume，无需额外引入对象存储。
