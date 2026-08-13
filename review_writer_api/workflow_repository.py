@@ -8,6 +8,8 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
 from review_writer_api.database import Project, database_session, utc_now
@@ -636,21 +638,12 @@ class WorkflowRepository:
                 )
                 session.add(artifact)
                 session.flush()
-                pointer = session.get(
-                    WorkflowCurrentArtifact,
-                    {"project_id": project_uuid, "logical_name": logical_name},
+                self._upsert_current_artifact(
+                    session,
+                    project_id=project_uuid,
+                    logical_name=logical_name,
+                    artifact_id=artifact_uuid,
                 )
-                if pointer is None:
-                    session.add(
-                        WorkflowCurrentArtifact(
-                            project_id=project_uuid,
-                            logical_name=logical_name,
-                            artifact_id=artifact_uuid,
-                        )
-                    )
-                else:
-                    pointer.artifact_id = artifact_uuid
-                    pointer.updated_at = utc_now()
                 session.flush()
                 return self._artifact_record(artifact)
         except IntegrityError as exc:
@@ -701,23 +694,66 @@ class WorkflowRepository:
             )
             if artifact is None:
                 raise WorkflowNotFound("Artifact not found.")
-            pointer = session.get(
-                WorkflowCurrentArtifact,
-                {"project_id": project_uuid, "logical_name": logical_name},
+            self._upsert_current_artifact(
+                session,
+                project_id=project_uuid,
+                logical_name=logical_name,
+                artifact_id=artifact_uuid,
             )
-            if pointer is None:
-                session.add(
-                    WorkflowCurrentArtifact(
-                        project_id=project_uuid,
-                        logical_name=logical_name,
-                        artifact_id=artifact_uuid,
-                    )
-                )
-            else:
-                pointer.artifact_id = artifact_uuid
-                pointer.updated_at = utc_now()
             session.flush()
             return self._artifact_record(artifact)
+
+    @staticmethod
+    def _upsert_current_artifact(
+        session,
+        *,
+        project_id: uuid.UUID,
+        logical_name: str,
+        artifact_id: uuid.UUID,
+    ) -> None:
+        """Atomically create or replace a logical artifact pointer."""
+
+        values = {
+            "project_id": project_id,
+            "logical_name": logical_name,
+            "artifact_id": artifact_id,
+            "updated_at": utc_now(),
+        }
+        dialect = session.get_bind().dialect.name
+        if dialect == "postgresql":
+            statement = postgresql_insert(WorkflowCurrentArtifact).values(**values)
+            session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["project_id", "logical_name"],
+                    set_={
+                        "artifact_id": statement.excluded.artifact_id,
+                        "updated_at": statement.excluded.updated_at,
+                    },
+                )
+            )
+            return
+        if dialect == "sqlite":
+            statement = sqlite_insert(WorkflowCurrentArtifact).values(**values)
+            session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["project_id", "logical_name"],
+                    set_={
+                        "artifact_id": statement.excluded.artifact_id,
+                        "updated_at": statement.excluded.updated_at,
+                    },
+                )
+            )
+            return
+
+        pointer = session.get(
+            WorkflowCurrentArtifact,
+            {"project_id": project_id, "logical_name": logical_name},
+        )
+        if pointer is None:
+            session.add(WorkflowCurrentArtifact(**values))
+        else:
+            pointer.artifact_id = artifact_id
+            pointer.updated_at = values["updated_at"]
 
     def get_current_artifact(
         self, user_id: str, project_id: str, logical_name: str

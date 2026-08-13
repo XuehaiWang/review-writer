@@ -19,7 +19,7 @@ from .config import ApiSettings
 from .container import ApplicationContainer
 from .credentials import CredentialCipher, ProviderSettingsError, ProviderSettingsService
 from .database import create_session_factory, utc_now
-from .errors import WorkflowError
+from .errors import ProjectArchiveFailed, WorkflowError
 from .repositories import (
     HostedProjectRepository,
     LocalProjectRepository,
@@ -446,7 +446,14 @@ def create_app(
         if not project_service.delete_project(principal, record.project_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
         if artifact_service is not None:
-            artifact_service.trash_project(principal.user_id, record.slug)
+            try:
+                artifact_service.trash_project(principal.user_id, record.slug)
+            except Exception as exc:
+                restored = project_service.restore_project(principal, record.project_id)
+                raise ProjectArchiveFailed(
+                    "The project files could not be archived; database deletion was rolled back.",
+                    details={"database_restored": restored},
+                ) from exc
 
     if provider_settings_service is not None:
 

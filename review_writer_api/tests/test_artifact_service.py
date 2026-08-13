@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import sessionmaker
@@ -193,6 +194,41 @@ class ArtifactServiceTests(unittest.TestCase):
 
         with self.assertRaises(Exception):
             self.service.stage_run_directory(other_id, self.project_id, run.id)
+
+    def test_special_storage_roots_must_not_be_symbolic_links(self) -> None:
+        run = self.repository.create_stage_run(
+            self.user_id, self.project_id, "figures", status="running"
+        )
+
+        with patch.object(
+            Path,
+            "is_symlink",
+            new=lambda path: path.name == ".staging",
+        ), self.assertRaisesRegex(WorkflowValidationError, "symbolic link"):
+            self.service.stage_run_directory(self.user_id, self.project_id, run.id)
+
+        staged_run, _source = self._stage(b"<svg>safe source</svg>")
+        with patch.object(
+            Path,
+            "is_symlink",
+            new=lambda path: path.name == ".artifacts",
+        ), self.assertRaisesRegex(WorkflowValidationError, "symbolic link"):
+            self.service.publish(
+                self.user_id,
+                self.project_id,
+                staged_run.id,
+                "F001.svg",
+                logical_name="figures/F001.svg",
+                artifact_type="svg",
+                producer_stage="figures",
+            )
+
+        with patch.object(
+            Path,
+            "is_symlink",
+            new=lambda path: path.name == ".trash",
+        ), self.assertRaisesRegex(WorkflowValidationError, "symbolic link"):
+            self.service.trash_project(self.user_id, "copper")
 
 
 if __name__ == "__main__":

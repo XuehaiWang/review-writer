@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Request, status
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from review_writer_api.artifact_service import ArtifactService
 from review_writer_api.errors import ArtifactRangeNotSatisfiable
@@ -83,14 +83,24 @@ def build_file_router(
                 headers=common_headers,
             )
 
-        start, end = _byte_range(requested_range, artifact.size_bytes)
+        try:
+            start, end = _byte_range(requested_range, artifact.size_bytes)
+        except ArtifactRangeNotSatisfiable as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=exc.payload(),
+                headers={
+                    **common_headers,
+                    "Content-Range": f"bytes */{artifact.size_bytes}",
+                },
+            )
         length = end - start + 1
         headers = {
             **common_headers,
             "Content-Range": f"bytes {start}-{end}/{artifact.size_bytes}",
             "Content-Length": str(length),
             "Content-Disposition": (
-                "inline; filename*=UTF-8''" + quote(resolved.path.name, safe="")
+                "attachment; filename*=UTF-8''" + quote(resolved.path.name, safe="")
             ),
         }
         return StreamingResponse(

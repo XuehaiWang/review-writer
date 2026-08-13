@@ -107,6 +107,7 @@ class ArtifactFileApiTests(unittest.TestCase):
         self.assertEqual("bytes", response.headers["accept-ranges"])
         self.assertEqual(f'"{self.artifact.content_sha256}"', response.headers["etag"])
         self.assertIn("figure.bin", response.headers["content-disposition"])
+        self.assertTrue(response.headers["content-disposition"].startswith("attachment;"))
 
     def test_single_byte_range_returns_bounded_206_response(self) -> None:
         with TestClient(self.app) as client:
@@ -122,6 +123,22 @@ class ArtifactFileApiTests(unittest.TestCase):
             f"bytes 0-99/{len(self.content)}", response.headers["content-range"]
         )
         self.assertEqual("bytes", response.headers["accept-ranges"])
+        self.assertTrue(response.headers["content-disposition"].startswith("attachment;"))
+
+    def test_unsatisfiable_range_reports_complete_artifact_size(self) -> None:
+        with TestClient(self.app) as client:
+            response = client.get(
+                f"/api/v1/artifacts/{self.artifact.id}/content",
+                headers={"Range": f"bytes={len(self.content)}-"},
+            )
+
+        self.assertEqual(416, response.status_code)
+        self.assertEqual(
+            "ARTIFACT_RANGE_NOT_SATISFIABLE", response.json()["error"]["code"]
+        )
+        self.assertEqual(
+            f"bytes */{len(self.content)}", response.headers["content-range"]
+        )
 
     def test_cross_user_and_unauthenticated_reads_do_not_expose_artifact(self) -> None:
         self.current_principal = self.second
@@ -181,6 +198,36 @@ class ArtifactFileApiTests(unittest.TestCase):
                 f"/api/v1/artifacts/{self.artifact.id}/content"
             )
         self.assertEqual(404, unavailable.status_code)
+
+    def test_project_delete_restores_database_state_when_trash_move_fails(self) -> None:
+        project_path = self.app.state.hosted_workspace_manager.project_path(
+            self.first.user_id, "copper"
+        )
+        with patch.object(
+            self.app.state.artifact_service,
+            "trash_project",
+            side_effect=OSError("simulated move failure"),
+        ), TestClient(self.app, raise_server_exceptions=False) as client:
+            failed = client.delete(
+                f"/api/v1/projects/{self.project_id}",
+                headers={"Origin": "http://testserver"},
+            )
+
+        self.assertEqual(500, failed.status_code)
+        self.assertEqual("PROJECT_ARCHIVE_FAILED", failed.json()["error"]["code"])
+        self.assertTrue(failed.json()["error"]["retryable"])
+        with self.sessions() as session:
+            project = session.get(Project, uuid.UUID(self.project_id))
+            self.assertIsNone(project.deleted_at)
+            self.assertEqual("active", project.status)
+        self.assertTrue(project_path.is_dir())
+
+        with TestClient(self.app) as client:
+            retried = client.delete(
+                f"/api/v1/projects/{self.project_id}",
+                headers={"Origin": "http://testserver"},
+            )
+        self.assertEqual(204, retried.status_code)
 
 
 if __name__ == "__main__":

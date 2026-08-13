@@ -61,3 +61,9 @@ class ArtifactFileMissing(WorkflowError):
 class ArtifactRangeNotSatisfiable(WorkflowError):
     code = "ARTIFACT_RANGE_NOT_SATISFIABLE"
     status_code = 416
+
+
+class ProjectArchiveFailed(WorkflowError):
+    code = "PROJECT_ARCHIVE_FAILED"
+    status_code = 500
+    retryable = True

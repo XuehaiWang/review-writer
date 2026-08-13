@@ -38,6 +38,10 @@ class ProjectService:
         principal.require(Permission.PROJECT_DELETE)
         return self.repository.delete_for_user(principal.user_id, project_id)
 
+    def restore_project(self, principal: Principal, project_id: str) -> bool:
+        principal.require(Permission.PROJECT_DELETE)
+        return self.repository.restore_for_user(principal.user_id, project_id)
+
     def update_project_topic(
         self,
         principal: Principal,

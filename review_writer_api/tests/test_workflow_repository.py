@@ -19,7 +19,11 @@ from review_writer_api.app import create_app
 from review_writer_api.config import ApiSettings, database_url_from_env
 from review_writer_api.database import Base, Project, User, create_session_factory, database_session
 from review_writer_api.security import Principal, Role
-from review_writer_api.workflow_models import WorkflowJob, WorkflowSystemState
+from review_writer_api.workflow_models import (
+    WorkflowArtifact,
+    WorkflowJob,
+    WorkflowSystemState,
+)
 
 
 TEST_CREDENTIAL_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("=")
@@ -395,6 +399,45 @@ class PostgreSQLWorkflowRepositoryTests(unittest.TestCase):
             claims = list(executor.map(lambda _index: claim(), range(2)))
 
         self.assertEqual(1, sum(item is not None for item in claims))
+
+    def test_concurrent_artifact_publications_keep_both_versions_and_one_current_pointer(self) -> None:
+        barrier = threading.Barrier(2)
+
+        def publish(index: int):
+            artifact_id = str(uuid.uuid4())
+            barrier.wait(timeout=10)
+            return self.repository.publish_artifact(
+                user_id=self.user_id,
+                project_id=self.project_id,
+                artifact_id=artifact_id,
+                logical_name="figures/F001.svg",
+                artifact_type="svg",
+                relative_path=f".artifacts/F001/{artifact_id}/F001.svg",
+                content_sha256=f"{index + 1:064x}",
+                size_bytes=index + 1,
+                mtime_ns=index + 1,
+                producer_stage="figures",
+                producer_run_id=None,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            published = list(executor.map(publish, range(2)))
+
+        current = self.repository.get_current_artifact(
+            self.user_id, self.project_id, "figures/F001.svg"
+        )
+        self.assertIsNotNone(current)
+        self.assertIn(current.id, {artifact.id for artifact in published})
+        with database_session(self.sessions) as session:
+            count = session.scalar(
+                select(func.count())
+                .select_from(WorkflowArtifact)
+                .where(
+                    WorkflowArtifact.project_id == uuid.UUID(self.project_id),
+                    WorkflowArtifact.logical_name == "figures/F001.svg",
+                )
+            )
+        self.assertEqual(2, count)
 
 
 if __name__ == "__main__":

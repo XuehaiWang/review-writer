@@ -57,6 +57,28 @@ class ArtifactService:
                 digest.update(chunk)
         return digest.hexdigest()
 
+    @staticmethod
+    def _secure_storage_root(parent: Path, name: str) -> Path:
+        """Create one trusted internal directory without following a root symlink."""
+
+        parent = parent.resolve()
+        candidate = parent / name
+        if candidate.is_symlink():
+            raise WorkflowValidationError(
+                f"Internal storage directory {name} must not be a symbolic link."
+            )
+        resolved = candidate.resolve()
+        if resolved.parent != parent:
+            raise WorkflowValidationError(
+                f"Internal storage directory {name} escaped its workspace."
+            )
+        resolved.mkdir(parents=True, exist_ok=True)
+        if candidate.is_symlink() or resolved.parent != parent:
+            raise WorkflowValidationError(
+                f"Internal storage directory {name} is not trusted."
+            )
+        return resolved
+
     def _project(self, user_id: str, project_id: str):
         project = self.repository.get_owned_project(user_id, project_id)
         if project is None:
@@ -73,8 +95,8 @@ class ArtifactService:
         except ValueError as exc:
             raise WorkflowValidationError("Stage run ID is invalid.") from exc
         project_root = self.workspace_manager.project_path(user_id, project.slug)
-        directory = (project_root / ".staging" / safe_run_id).resolve()
-        expected_parent = (project_root / ".staging").resolve()
+        expected_parent = self._secure_storage_root(project_root, ".staging")
+        directory = (expected_parent / safe_run_id).resolve()
         if directory.parent != expected_parent:
             raise WorkflowValidationError("Stage directory escaped the project workspace.")
         directory.mkdir(parents=True, exist_ok=True)
@@ -118,14 +140,13 @@ class ArtifactService:
 
         artifact_id = str(uuid.uuid4())
         project_root = self.workspace_manager.project_path(user_id, project.slug)
+        artifacts_root = self._secure_storage_root(project_root, ".artifacts")
         destination = (
-            project_root
-            / ".artifacts"
+            artifacts_root
             / Path(*logical.parts)
             / artifact_id
             / source.name
         ).resolve()
-        artifacts_root = (project_root / ".artifacts").resolve()
         try:
             destination.relative_to(artifacts_root)
         except ValueError as exc:
@@ -183,8 +204,7 @@ class ArtifactService:
         if not source.exists():
             return None
         user_root = self.workspace_manager.user_root(user_id)
-        trash_root = (user_root / ".trash").resolve()
-        trash_root.mkdir(parents=True, exist_ok=True)
+        trash_root = self._secure_storage_root(user_root, ".trash")
         if source.stat().st_dev != trash_root.stat().st_dev:
             raise WorkflowValidationError(
                 "Project workspace and trash must use the same filesystem."

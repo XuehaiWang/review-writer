@@ -73,6 +73,8 @@ class ProjectRepository(Protocol):
 
     def delete_for_user(self, user_id: str, project_id: str) -> bool: ...
 
+    def restore_for_user(self, user_id: str, project_id: str) -> bool: ...
+
     def sync_stage_states_for_user(
         self,
         user_id: str,
@@ -165,6 +167,9 @@ class LocalProjectRepository:
 
     def delete_for_user(self, user_id: str, project_id: str) -> bool:
         raise ProjectOperationError("Delete the local project from the workflow dashboard.")
+
+    def restore_for_user(self, user_id: str, project_id: str) -> bool:
+        return self.get_for_user(user_id, project_id) is not None
 
     def update_topic_for_user(
         self, user_id: str, project_id: str, *, topic: str, taxonomy_profile: str
@@ -297,6 +302,27 @@ class HostedProjectRepository:
                 return False
             project.status = "deleted"
             project.deleted_at = utc_now()
+            return True
+
+    def restore_for_user(self, user_id: str, project_id: str) -> bool:
+        user_uuid = uuid.UUID(user_id)
+        try:
+            parsed_id = uuid.UUID(project_id)
+        except ValueError:
+            parsed_id = None
+        with database_session(self.session_factory) as session:
+            query = select(Project).where(Project.user_id == user_uuid)
+            query = (
+                query.where(Project.id == parsed_id)
+                if parsed_id
+                else query.where(Project.slug == project_id)
+            )
+            project = session.scalar(query)
+            if project is None:
+                return False
+            project.status = "active"
+            project.deleted_at = None
+            project.updated_at = utc_now()
             return True
 
     def update_topic_for_user(
