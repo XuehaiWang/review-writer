@@ -24,6 +24,7 @@ from review_writer_api.workflow_models import (
     WorkflowApproval,
     WorkflowArtifact,
     WorkflowCurrentArtifact,
+    WorkflowCurrentJob,
     WorkflowJob,
     WorkflowMigration,
     WorkflowStageRun,
@@ -64,6 +65,7 @@ class JobRecord:
     cancellation_requested: bool
     error_code: str
     error_message: str
+    retry_of_job_id: str | None
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None
@@ -201,6 +203,7 @@ class WorkflowRepository:
             cancellation_requested=job.cancellation_requested,
             error_code=job.error_code,
             error_message=job.error_message,
+            retry_of_job_id=(str(job.retry_of_job_id) if job.retry_of_job_id else None),
             created_at=job.created_at,
             updated_at=job.updated_at,
             started_at=job.started_at,
@@ -465,6 +468,7 @@ class WorkflowRepository:
         job_type: str,
         idempotency_key: str,
         payload: dict[str, Any],
+        retry_of_job_id: str | None = None,
     ) -> JobRecord:
         user_uuid = self._uuid(user_id, not_found_message="User not found.")
         normalized_scope = str(scope or "").strip().lower()
@@ -476,9 +480,18 @@ class WorkflowRepository:
             raise WorkflowValidationError("Library jobs cannot reference a project.")
         if normalized_scope == "project" and project_id is None:
             raise WorkflowValidationError("Project jobs require a project.")
+        normalized_job_type = str(job_type or "").strip()
+        if not normalized_job_type:
+            raise WorkflowValidationError("A job type is required.")
         project_uuid = (
             self._uuid(project_id, not_found_message="Project not found.") if project_id else None
         )
+        retry_uuid = (
+            self._uuid(retry_of_job_id, not_found_message="Retry source job not found.")
+            if retry_of_job_id
+            else None
+        )
+        scope_key = str(project_uuid) if project_uuid is not None else "_library_"
 
         try:
             with database_session(self.session_factory) as session:
@@ -494,16 +507,63 @@ class WorkflowRepository:
                     session, user_uuid, project_uuid
                 ) is None:
                     raise WorkflowNotFound("Project not found.")
+                if retry_uuid is not None:
+                    retry_source = session.scalar(
+                        select(WorkflowJob.id).where(
+                            WorkflowJob.id == retry_uuid,
+                            WorkflowJob.user_id == user_uuid,
+                        )
+                    )
+                    if retry_source is None:
+                        raise WorkflowNotFound("Retry source job not found.")
+                pointer_query = select(WorkflowCurrentJob).where(
+                    WorkflowCurrentJob.user_id == user_uuid,
+                    WorkflowCurrentJob.scope_key == scope_key,
+                    WorkflowCurrentJob.job_type == normalized_job_type,
+                )
+                if session.get_bind().dialect.name == "postgresql":
+                    pointer_query = pointer_query.with_for_update()
+                pointer = session.scalar(pointer_query)
+                if pointer is not None:
+                    current = session.get(WorkflowJob, pointer.job_id)
+                    if current is not None and current.status in {
+                        "queued",
+                        "running",
+                        "cancel_requested",
+                    }:
+                        raise WorkflowConflict(
+                            "Another job of this type is already active for this scope.",
+                            details={
+                                "current_job_id": str(current.id),
+                                "current_status": current.status,
+                            },
+                        )
                 job = WorkflowJob(
                     user_id=user_uuid,
                     project_id=project_uuid,
                     scope=normalized_scope,
-                    job_type=str(job_type or "").strip(),
+                    job_type=normalized_job_type,
                     status="queued",
                     idempotency_key=idempotency_key,
                     payload_json=dict(payload or {}),
+                    retry_of_job_id=retry_uuid,
                 )
                 session.add(job)
+                session.flush()
+                if pointer is None:
+                    session.add(
+                        WorkflowCurrentJob(
+                            user_id=user_uuid,
+                            scope_key=scope_key,
+                            job_type=normalized_job_type,
+                            project_id=project_uuid,
+                            job_id=job.id,
+                        )
+                    )
+                else:
+                    pointer.project_id = project_uuid
+                    pointer.job_id = job.id
+                    pointer.updated_at = utc_now()
                 session.flush()
                 return self._job_record(job)
         except IntegrityError:
@@ -516,6 +576,27 @@ class WorkflowRepository:
                 )
                 if existing:
                     return self._job_record(existing)
+                current = session.scalar(
+                    select(WorkflowJob)
+                    .join(WorkflowCurrentJob, WorkflowCurrentJob.job_id == WorkflowJob.id)
+                    .where(
+                        WorkflowCurrentJob.user_id == user_uuid,
+                        WorkflowCurrentJob.scope_key == scope_key,
+                        WorkflowCurrentJob.job_type == normalized_job_type,
+                    )
+                )
+                if current is not None and current.status in {
+                    "queued",
+                    "running",
+                    "cancel_requested",
+                }:
+                    raise WorkflowConflict(
+                        "Another job of this type is already active for this scope.",
+                        details={
+                            "current_job_id": str(current.id),
+                            "current_status": current.status,
+                        },
+                    )
             raise WorkflowConflict("A conflicting workflow job already exists.")
 
     def get_job(self, user_id: str, job_id: str) -> JobRecord | None:
@@ -855,12 +936,152 @@ class WorkflowRepository:
             )
             return self._job_record(job) if job else None
 
+    def list_queued_jobs(self, job_types: set[str] | None = None) -> list[JobRecord]:
+        with database_session(self.session_factory) as session:
+            query = select(WorkflowJob).where(WorkflowJob.status == "queued")
+            if job_types is not None:
+                if not job_types:
+                    return []
+                query = query.where(WorkflowJob.job_type.in_(sorted(job_types)))
+            jobs = session.scalars(query.order_by(WorkflowJob.created_at.asc())).all()
+            return [self._job_record(job) for job in jobs]
+
+    def request_job_cancellation(self, user_id: str, job_id: str) -> JobRecord | None:
+        user_uuid = self._uuid(user_id, not_found_message="Job not found.")
+        job_uuid = self._uuid(job_id, not_found_message="Job not found.")
+        now = utc_now()
+        with database_session(self.session_factory) as session:
+            job = session.scalar(
+                select(WorkflowJob).where(
+                    WorkflowJob.id == job_uuid,
+                    WorkflowJob.user_id == user_uuid,
+                )
+            )
+            if job is None:
+                return None
+            if job.status == "queued":
+                job.status = "cancelled"
+                job.cancellation_requested = True
+                job.finished_at = now
+            elif job.status == "running":
+                job.status = "cancel_requested"
+                job.cancellation_requested = True
+            job.updated_at = now
+            session.flush()
+            return self._job_record(job)
+
+    def job_cancellation_requested(self, job_id: str) -> bool:
+        job_uuid = self._uuid(job_id, not_found_message="Job not found.")
+        with database_session(self.session_factory) as session:
+            job = session.get(WorkflowJob, job_uuid)
+            return bool(
+                job
+                and (
+                    job.cancellation_requested
+                    or job.status in {"cancel_requested", "cancelled"}
+                )
+            )
+
+    def update_job_progress(
+        self, job_id: str, current: int, total: int
+    ) -> JobRecord | None:
+        job_uuid = self._uuid(job_id, not_found_message="Job not found.")
+        safe_total = max(0, int(total))
+        safe_current = max(0, int(current))
+        if safe_total:
+            safe_current = min(safe_current, safe_total)
+        with database_session(self.session_factory) as session:
+            job = session.scalar(
+                update(WorkflowJob)
+                .where(
+                    WorkflowJob.id == job_uuid,
+                    WorkflowJob.status.in_(("running", "cancel_requested")),
+                )
+                .values(
+                    progress_current=safe_current,
+                    progress_total=safe_total,
+                    updated_at=utc_now(),
+                )
+                .returning(WorkflowJob)
+            )
+            return self._job_record(job) if job else None
+
+    def mark_job_succeeded(
+        self, job_id: str, result: dict[str, Any] | None = None
+    ) -> JobRecord | None:
+        job_uuid = self._uuid(job_id, not_found_message="Job not found.")
+        now = utc_now()
+        with database_session(self.session_factory) as session:
+            job = session.scalar(
+                update(WorkflowJob)
+                .where(
+                    WorkflowJob.id == job_uuid,
+                    WorkflowJob.status == "running",
+                    WorkflowJob.cancellation_requested.is_(False),
+                )
+                .values(
+                    status="succeeded",
+                    result_json=dict(result or {}),
+                    error_code="",
+                    error_message="",
+                    updated_at=now,
+                    finished_at=now,
+                )
+                .returning(WorkflowJob)
+            )
+            return self._job_record(job) if job else None
+
+    def mark_job_cancelled(self, job_id: str) -> JobRecord | None:
+        job_uuid = self._uuid(job_id, not_found_message="Job not found.")
+        now = utc_now()
+        with database_session(self.session_factory) as session:
+            job = session.scalar(
+                update(WorkflowJob)
+                .where(
+                    WorkflowJob.id == job_uuid,
+                    WorkflowJob.status.in_(("queued", "running", "cancel_requested")),
+                )
+                .values(
+                    status="cancelled",
+                    cancellation_requested=True,
+                    error_code="",
+                    error_message="",
+                    updated_at=now,
+                    finished_at=now,
+                )
+                .returning(WorkflowJob)
+            )
+            return self._job_record(job) if job else None
+
+    def mark_job_failed(
+        self, job_id: str, *, error_code: str, error_message: str
+    ) -> JobRecord | None:
+        job_uuid = self._uuid(job_id, not_found_message="Job not found.")
+        now = utc_now()
+        with database_session(self.session_factory) as session:
+            job = session.scalar(
+                update(WorkflowJob)
+                .where(
+                    WorkflowJob.id == job_uuid,
+                    WorkflowJob.status.in_(("running", "cancel_requested")),
+                )
+                .values(
+                    status="failed",
+                    error_code=str(error_code or "JOB_EXECUTION_FAILED")[:96],
+                    error_message=str(error_message or "Job execution failed."),
+                    updated_at=now,
+                    finished_at=now,
+                )
+                .returning(WorkflowJob)
+            )
+            return self._job_record(job) if job else None
+
     def mark_running_jobs_interrupted(self) -> int:
         now = utc_now()
         with database_session(self.session_factory) as session:
             result = session.execute(
                 update(WorkflowJob)
-                .where(WorkflowJob.status == "running")
+                .where(WorkflowJob.status.in_(("running", "cancel_requested")))
                 .values(
                     status="interrupted",
                     error_code="PROCESS_INTERRUPTED",

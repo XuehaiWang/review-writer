@@ -355,7 +355,7 @@ class WorkflowReadinessApiTests(unittest.TestCase):
 )
 class PostgreSQLWorkflowRepositoryTests(unittest.TestCase):
     def setUp(self) -> None:
-        _errors, repository_module = repository_api()
+        self.errors, repository_module = repository_api()
         self.sessions, self.engine = create_session_factory(database_url_from_env())
         self.repository = repository_module.WorkflowRepository(self.sessions)
         marker = uuid.uuid4().hex
@@ -438,6 +438,32 @@ class PostgreSQLWorkflowRepositoryTests(unittest.TestCase):
                 )
             )
         self.assertEqual(2, count)
+
+    def test_concurrent_project_jobs_allow_only_one_active_job_type(self) -> None:
+        barrier = threading.Barrier(2)
+
+        def create(index: int):
+            barrier.wait(timeout=10)
+            try:
+                job = self.repository.create_or_get_job(
+                    self.user_id,
+                    self.project_id,
+                    "project",
+                    "sections.concurrent",
+                    f"concurrent-{index}-{uuid.uuid4()}",
+                    {"index": index},
+                )
+                return "created", job.id
+            except self.errors.WorkflowConflict as exc:
+                return "conflict", exc.details.get("current_job_id")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(create, range(2)))
+
+        self.assertEqual(["conflict", "created"], sorted(item[0] for item in outcomes))
+        created_id = next(item[1] for item in outcomes if item[0] == "created")
+        conflict_id = next(item[1] for item in outcomes if item[0] == "conflict")
+        self.assertEqual(created_id, conflict_id)
 
 
 if __name__ == "__main__":

@@ -81,3 +81,23 @@ class ProviderSettingsUpdateRequest(BaseModel):
     wire_api: str = Field(default="", max_length=64)
     api_key: str | None = Field(default=None, max_length=16_384)
     enabled: bool = True
+
+
+class JobResponse(BaseModel):
+    id: str
+    project_id: str | None
+    scope: str
+    job_type: str
+    status: str
+    result: dict
+    progress_current: int
+    progress_total: int
+    cancellation_requested: bool
+    error_code: str
+    error_message: str
+    retry_of_job_id: str | None
+    created_at: str
+    updated_at: str
+    started_at: str | None
+    finished_at: str | None
+    available_actions: list[str]

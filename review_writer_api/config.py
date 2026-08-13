@@ -31,6 +31,7 @@ class ApiSettings:
     session_cookie_secure: bool = False
     expose_api_docs: bool = True
     hosted_workspace_root: Path | None = None
+    job_worker_count: int = 2
 
     @classmethod
     def from_env(cls, review_root: str | Path | None = None) -> "ApiSettings":
@@ -52,6 +53,9 @@ class ApiSettings:
             "REVIEW_WRITER_SESSION_COOKIE_SECURE", raw_mode == "hosted"
         )
         expose_docs = _environment_flag("REVIEW_WRITER_EXPOSE_API_DOCS", raw_mode == "local")
+        job_worker_count = _environment_integer(
+            "REVIEW_WRITER_JOB_WORKERS", 2, minimum=1, maximum=16
+        )
         raw_workspace_root = str(
             os.environ.get("REVIEW_WRITER_HOSTED_WORKSPACE_ROOT") or ""
         ).strip()
@@ -97,6 +101,7 @@ class ApiSettings:
             session_cookie_secure=cookie_secure,
             expose_api_docs=expose_docs,
             hosted_workspace_root=hosted_workspace_root,
+            job_worker_count=job_worker_count,
         )
 
 

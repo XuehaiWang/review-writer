@@ -20,6 +20,7 @@ from .container import ApplicationContainer
 from .credentials import CredentialCipher, ProviderSettingsError, ProviderSettingsService
 from .database import create_session_factory, utc_now
 from .errors import ProjectArchiveFailed, WorkflowError
+from .job_service import JobService
 from .repositories import (
     HostedProjectRepository,
     LocalProjectRepository,
@@ -42,6 +43,8 @@ from .schemas import (
 from .security import AuthorizationError, Principal, local_owner_principal
 from .services import ProjectService
 from .routers.files import build_file_router
+from .routers.jobs import build_job_router
+from .scientific_runner import ScientificRunner
 from .workflow_compat import WorkflowCompatibilityGateway
 from .workflow_repository import WorkflowRepository
 from .workspaces import HostedWorkspaceManager
@@ -57,6 +60,7 @@ def create_app(
     session_factory_override: Any | None = None,
     project_repository: ProjectRepository | None = None,
     workflow_repository_override: WorkflowRepository | None = None,
+    job_service_override: JobService | None = None,
 ) -> FastAPI:
     resolved = settings or ApiSettings.from_env()
     engine = None
@@ -102,12 +106,26 @@ def create_app(
         if workflow_repository is not None and hosted_workspace_manager is not None
         else None
     )
+    job_service = (
+        job_service_override
+        or JobService(workflow_repository, max_workers=resolved.job_worker_count)
+        if workflow_repository is not None
+        else None
+    )
+    scientific_runner = ScientificRunner() if workflow_repository is not None else None
     container = (
         ApplicationContainer(
             workflow_repository=workflow_repository,
             artifact_service=artifact_service,
+            job_service=job_service,
+            scientific_runner=scientific_runner,
         )
-        if workflow_repository is not None and artifact_service is not None
+        if (
+            workflow_repository is not None
+            and artifact_service is not None
+            and job_service is not None
+            and scientific_runner is not None
+        )
         else None
     )
     workflow_gateway = WorkflowCompatibilityGateway(
@@ -131,6 +149,7 @@ def create_app(
 
         try:
             if workflow_repository is not None:
+                job_service.start()
                 workflow_repository.set_system_state(
                     "application_heartbeat",
                     {"status": "running", "observed_at": utc_now().isoformat()},
@@ -138,6 +157,8 @@ def create_app(
                 heartbeat_task = asyncio.create_task(heartbeat_loop())
             yield
         finally:
+            if job_service is not None:
+                job_service.shutdown(wait=True)
             if heartbeat_task is not None:
                 heartbeat_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -167,6 +188,8 @@ def create_app(
     app.state.workflow_compatibility_gateway = workflow_gateway
     app.state.workflow_repository = workflow_repository
     app.state.artifact_service = artifact_service
+    app.state.job_service = job_service
+    app.state.scientific_runner = scientific_runner
     app.state.container = container
     web_root = Path(__file__).resolve().parent / "web"
 
@@ -510,6 +533,8 @@ def create_app(
 
     if artifact_service is not None:
         app.include_router(build_file_router(current_principal, artifact_service))
+    if job_service is not None:
+        app.include_router(build_job_router(current_principal, job_service))
     workflow_gateway.register_routes(app, current_principal)
 
     return app
