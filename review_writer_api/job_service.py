@@ -66,6 +66,11 @@ class JobContext:
         self.checkpoint()
         return self.repository.update_job_progress(self.job_id, current, total)
 
+    def report_partial_result(self, result: dict[str, Any]) -> JobRecord | None:
+        # Do not checkpoint first: a just-completed item must remain observable
+        # even when cancellation arrives between artifact publication and here.
+        return self.repository.update_job_result(self.job_id, result)
+
 
 class JobService:
     """Bounded executor whose observable state lives in PostgreSQL."""
@@ -144,6 +149,7 @@ class JobService:
         job_type: str,
         idempotency_key: str,
         payload: dict[str, Any] | None,
+        retry_of_job_id: str | None = None,
     ) -> JobRecord:
         principal.require(Permission.PROJECT_WRITE)
         normalized_type = str(job_type or "").strip()
@@ -153,6 +159,17 @@ class JobService:
                     "No executable handler is registered for this job type.",
                     details={"job_type": normalized_type},
                 )
+        retry_source = None
+        if retry_of_job_id:
+            retry_source = self.status(principal, retry_of_job_id)
+            if (
+                retry_source.job_type != normalized_type
+                or retry_source.scope != scope
+                or retry_source.project_id != project_id
+            ):
+                raise WorkflowValidationError(
+                    "Retry source does not belong to the same workflow operation."
+                )
         self.start()
         job = self.repository.create_or_get_job(
             principal.user_id,
@@ -161,6 +178,7 @@ class JobService:
             normalized_type,
             idempotency_key,
             dict(payload or {}),
+            retry_of_job_id=retry_source.id if retry_source else None,
         )
         if job.status == "queued":
             self._schedule(job)

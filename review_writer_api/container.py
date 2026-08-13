@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from review_writer_api.artifact_service import ArtifactService
 from review_writer_api.domain_services.discovery import DiscoveryService
+from review_writer_api.domain_services.figures import FiguresService
 from review_writer_api.domain_services.library import LibraryService
 from review_writer_api.domain_services.planning import PlanningService
 from review_writer_api.domain_services.sections import SectionsService
@@ -24,3 +25,4 @@ class ApplicationContainer:
     discovery_service: DiscoveryService
     planning_service: PlanningService
     sections_service: SectionsService
+    figures_service: FiguresService

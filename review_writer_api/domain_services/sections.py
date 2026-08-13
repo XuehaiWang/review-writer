@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import threading
 import uuid
-from pathlib import Path
+from copy import deepcopy
+from pathlib import Path, PurePosixPath
 from typing import Any
 
+from PIL import UnidentifiedImageError
 from sqlalchemy import select
 
 from review_writer_api.artifact_service import ArtifactService
@@ -23,8 +27,9 @@ from review_writer_api.errors import (
     WorkflowNotFound,
     WorkflowValidationError,
 )
+from review_writer_api.figure_rules import image_size
 from review_writer_api.security import Permission, Principal
-from review_writer_api.workflow_models import LibraryPaper
+from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
 from review_writer_api.workflow_repository import ArtifactRecord, JobRecord, WorkflowRepository
 
 
@@ -212,6 +217,10 @@ class SectionsService:
             "matrix": matrix,
             "outline_md": str(outline.get("outline_md") or ""),
             "tasks": tasks,
+            "library_metadata": {
+                paper_id: dict(catalog[paper_id].metadata_json or {})
+                for paper_id in assigned
+            },
         }
 
     def publish_generation(
@@ -306,6 +315,9 @@ class SectionsService:
             (json.dumps(index, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
             "json",
         )
+        paper_candidates = deepcopy(built.get("paper_figure_candidates")) if isinstance(built, dict) else None
+        figure_candidates = deepcopy(built.get("figure_candidates")) if isinstance(built, dict) else None
+        default_reviews = deepcopy(built.get("default_figure_reviews")) if isinstance(built, dict) else None
         with self._write_lock:
             run = self.repository.create_stage_run(
                 principal.user_id,
@@ -323,6 +335,306 @@ class SectionsService:
                 principal.user_id, project_id, run.id
             )
             published: dict[str, ArtifactRecord] = {}
+            source_artifacts: dict[str, ArtifactRecord] = {}
+            if isinstance(paper_candidates, dict) and isinstance(figure_candidates, list):
+                valid_anchors = {
+                    str(paragraph.get("paragraph_id") or "")
+                    for section in index_sections
+                    for paragraph in section.get("paragraphs") or []
+                    if isinstance(paragraph, dict) and paragraph.get("paragraph_id")
+                }
+                user_root = self.artifacts.workspace_manager.user_root(principal.user_id)
+                figure_counts: dict[str, int] = {}
+                mineru_ids: dict[str, uuid.UUID] = {}
+                for paper_id, metadata in (payload.get("library_metadata") or {}).items():
+                    raw_id = str(
+                        ((metadata or {}).get("_artifact_ids") or {}).get("mineru")
+                        or ""
+                    ).strip()
+                    if not raw_id:
+                        continue
+                    try:
+                        mineru_ids[str(paper_id)] = uuid.UUID(raw_id)
+                    except ValueError as exc:
+                        raise WorkflowValidationError(
+                            "A paper has an invalid registered MinerU artifact."
+                        ) from exc
+                registered_mineru: dict[uuid.UUID, LibraryArtifact] = {}
+                if mineru_ids:
+                    with database_session(self.repository.session_factory) as session:
+                        rows = session.scalars(
+                            select(LibraryArtifact).where(
+                                LibraryArtifact.id.in_(tuple(mineru_ids.values())),
+                                LibraryArtifact.user_id == uuid.UUID(principal.user_id),
+                                LibraryArtifact.kind == "mineru",
+                                LibraryArtifact.availability == "available",
+                            )
+                        ).all()
+                        registered_mineru = {row.id: row for row in rows}
+
+                def trusted_extracted_root(paper_id: str) -> Path | None:
+                    artifact_id = mineru_ids.get(paper_id)
+                    artifact = registered_mineru.get(artifact_id) if artifact_id else None
+                    if artifact is None or artifact.paper_id != paper_id:
+                        return None
+                    relative = PurePosixPath(str(artifact.relative_path or ""))
+                    if relative.is_absolute() or any(
+                        part in {"", ".", ".."} for part in relative.parts
+                    ):
+                        raise WorkflowValidationError(
+                            "A paper's registered MinerU artifact path is not trusted."
+                        )
+                    lexical_content = user_root.joinpath(*relative.parts)
+                    version_root = (
+                        user_root
+                        / "review-library"
+                        / ".artifacts"
+                        / paper_id
+                        / str(artifact.id)
+                    )
+                    lexical_root = version_root / "extracted"
+                    try:
+                        lexical_content.relative_to(lexical_root)
+                    except ValueError as exc:
+                        raise WorkflowValidationError(
+                            "A paper's registered MinerU artifact is outside its immutable version."
+                        ) from exc
+                    current = user_root
+                    for part in lexical_content.relative_to(user_root).parts:
+                        current = current / part
+                        if current.is_symlink() or (
+                            hasattr(current, "is_junction") and current.is_junction()
+                        ):
+                            raise WorkflowValidationError(
+                                "A paper's MinerU extraction directory is not trusted."
+                            )
+                    resolved_root = lexical_root.resolve()
+                    try:
+                        resolved_root.relative_to(user_root)
+                        lexical_content.resolve().relative_to(resolved_root)
+                    except ValueError as exc:
+                        raise WorkflowValidationError(
+                            "A paper's registered MinerU artifact escaped its immutable version."
+                        ) from exc
+                    return (
+                        resolved_root
+                        if resolved_root.is_dir() and lexical_content.is_file()
+                        else None
+                    )
+
+                def prepare_candidate(candidate: dict[str, Any]) -> None:
+                    paper_id = str(candidate.get("paper_id") or "")
+                    raw_path = str(candidate.get("source_image_path") or "").strip()
+                    for path_field in (
+                        "source_image_path",
+                        "source_pdf",
+                        "source_content_list",
+                        "image_path",
+                        "path",
+                    ):
+                        candidate.pop(path_field, None)
+                    if not re.fullmatch(r"P[0-9]+", paper_id):
+                        return
+                    anchor = str(
+                        candidate.get("target_paragraph_id")
+                        or candidate.get("paragraph_id")
+                        or ""
+                    )
+                    if anchor and anchor not in valid_anchors:
+                        raise WorkflowValidationError(
+                            "A generated source figure references an unknown manuscript paragraph.",
+                            details={"paper_id": paper_id, "paragraph_id": anchor},
+                        )
+                    if not raw_path:
+                        return
+                    allowed_root = trusted_extracted_root(paper_id)
+                    if allowed_root is None:
+                        raise WorkflowValidationError(
+                            "A generated source figure has no current MinerU extraction root."
+                        )
+                    raw_source = Path(raw_path)
+                    lexical_source = (
+                        raw_source if raw_source.is_absolute() else user_root / raw_source
+                    )
+                    try:
+                        lexical_relative = lexical_source.relative_to(user_root)
+                    except ValueError as exc:
+                        raise WorkflowValidationError(
+                            "A generated source figure escaped the user workspace."
+                        ) from exc
+                    if any(part in {"", ".", ".."} for part in lexical_relative.parts):
+                        raise WorkflowValidationError(
+                            "A generated source figure path is not trusted."
+                        )
+                    current = user_root
+                    for part in lexical_relative.parts:
+                        current = current / part
+                        if current.is_symlink() or (
+                            hasattr(current, "is_junction") and current.is_junction()
+                        ):
+                            raise WorkflowValidationError(
+                                "A generated source figure path is not trusted."
+                            )
+                    source = lexical_source.resolve()
+                    try:
+                        source.relative_to(user_root)
+                    except ValueError as exc:
+                        raise WorkflowValidationError(
+                            "A generated source figure escaped the user workspace."
+                        ) from exc
+                    try:
+                        relative_source = source.relative_to(allowed_root)
+                    except ValueError as exc:
+                        raise WorkflowValidationError(
+                            "A generated source figure does not belong to its paper's MinerU extraction."
+                        ) from exc
+                    current = allowed_root
+                    for part in relative_source.parts:
+                        current = current / part
+                        if current.is_symlink() or (
+                            hasattr(current, "is_junction") and current.is_junction()
+                        ):
+                            raise WorkflowValidationError(
+                                "A generated source figure path is not trusted."
+                            )
+                    if not source.is_file():
+                        return
+                    try:
+                        image_size(source)
+                    except (OSError, UnidentifiedImageError):
+                        return
+                    source_key = str(source)
+                    artifact = source_artifacts.get(source_key)
+                    if artifact is None:
+                        candidate_index = candidate.get("candidate_index")
+                        safe_index = (
+                            int(candidate_index)
+                            if isinstance(candidate_index, int)
+                            and not isinstance(candidate_index, bool)
+                            else len(source_artifacts)
+                        )
+                        suffix = source.suffix.casefold() or ".png"
+                        staged_name = f"source-{len(source_artifacts):04d}{suffix}"
+                        shutil.copy2(source, staging / staged_name)
+                        artifact = self.artifacts.publish(
+                            principal.user_id,
+                            project_id,
+                            run.id,
+                            staged_name,
+                            logical_name=f"sections/source-images/{paper_id}/{safe_index}{suffix}",
+                            artifact_type=suffix.lstrip("."),
+                            producer_stage="sections",
+                            make_current=False,
+                            metadata={"paper_id": paper_id, "candidate_index": safe_index},
+                        )
+                        source_artifacts[source_key] = artifact
+                    candidate["source_image_artifact_id"] = artifact.id
+
+                for paper in paper_candidates.get("papers") or []:
+                    if not isinstance(paper, dict):
+                        continue
+                    paper_id = str(paper.get("paper_id") or "")
+                    for candidate in paper.get("candidates") or []:
+                        if not isinstance(candidate, dict):
+                            continue
+                        figure_counts[paper_id] = figure_counts.get(paper_id, 0) + 1
+                        candidate.setdefault(
+                            "figure_id",
+                            f"{paper_id}-F{figure_counts[paper_id]:02d}",
+                        )
+                        prepare_candidate(candidate)
+                lookup = {
+                    (
+                        str(candidate.get("paper_id") or ""),
+                        candidate.get("candidate_index"),
+                    ): candidate
+                    for paper in paper_candidates.get("papers") or []
+                    if isinstance(paper, dict)
+                    for candidate in paper.get("candidates") or []
+                    if isinstance(candidate, dict)
+                }
+                lookup_by_label = {
+                    (
+                        str(candidate.get("paper_id") or ""),
+                        str(candidate.get("source_label") or ""),
+                    ): candidate
+                    for paper in paper_candidates.get("papers") or []
+                    if isinstance(paper, dict)
+                    for candidate in paper.get("candidates") or []
+                    if isinstance(candidate, dict)
+                }
+                for index, candidate in enumerate(figure_candidates):
+                    if not isinstance(candidate, dict):
+                        continue
+                    matching = lookup.get(
+                        (
+                            str(candidate.get("paper_id") or ""),
+                            candidate.get("candidate_index"),
+                        )
+                    )
+                    if matching is None:
+                        matching = lookup_by_label.get(
+                            (
+                                str(candidate.get("paper_id") or ""),
+                                str(candidate.get("source_label") or ""),
+                            )
+                        )
+                    if matching:
+                        candidate.update(
+                            {
+                                key: value
+                                for key, value in matching.items()
+                                if key in {
+                                    "figure_id",
+                                    "source_image_artifact_id",
+                                    "target_paragraph_id",
+                                    "paragraph_id",
+                                }
+                            }
+                        )
+                    candidate.setdefault(
+                        "figure_id", f"FIG-{index + 1:03d}"
+                    )
+                    prepare_candidate(candidate)
+                reviews_payload = (
+                    default_reviews
+                    if isinstance(default_reviews, dict)
+                    else {"papers": {}}
+                )
+                review_rows = reviews_payload.get("papers")
+                if isinstance(review_rows, dict):
+                    for paper_id, review in review_rows.items():
+                        if not isinstance(review, dict):
+                            continue
+                        review.pop("selected_source_image_path", None)
+                        selected_candidate = lookup.get(
+                            (str(paper_id), review.get("selected_candidate_index"))
+                        )
+                        if selected_candidate and selected_candidate.get(
+                            "source_image_artifact_id"
+                        ):
+                            review["selected_source_artifact_id"] = selected_candidate[
+                                "source_image_artifact_id"
+                            ]
+                files["sections/paper_figure_candidates.json"] = (
+                    (json.dumps(paper_candidates, ensure_ascii=False, indent=2) + "\n").encode(),
+                    "json",
+                )
+                files["sections/figure_candidates.json"] = (
+                    (json.dumps(figure_candidates, ensure_ascii=False, indent=2) + "\n").encode(),
+                    "json",
+                )
+                files["sections/default_figure_reviews.json"] = (
+                    (
+                        json.dumps(
+                            reviews_payload,
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                        + "\n"
+                    ).encode(),
+                    "json",
+                )
             for index_number, (logical_name, (content, artifact_type)) in enumerate(
                 files.items()
             ):
@@ -348,8 +660,8 @@ class SectionsService:
                 project_id,
                 "sections",
                 artifact_ids={
-                    logical_name: artifact.id
-                    for logical_name, artifact in published.items()
+                    artifact.logical_name: artifact.id
+                    for artifact in [*source_artifacts.values(), *published.values()]
                 },
                 run_id=run.id,
                 expected_revision=int(payload["expected_sections_revision"]),

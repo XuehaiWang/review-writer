@@ -274,6 +274,53 @@ class LibraryService:
         source_paths = dict(stored_metadata.get("source_paths") or {})
         source_paths["pdf"] = str(pdf_destination)
         source_paths["markdown"] = str(markdown_destination)
+        mineru_content_destination: Path | None = None
+        raw_extracted = str(source_paths.get("extracted_dir") or "").strip()
+        raw_content_list = str(source_paths.get("content_list") or "").strip()
+        if raw_extracted and raw_content_list:
+            extracted_source = Path(raw_extracted).resolve()
+            content_source = Path(raw_content_list).resolve()
+            try:
+                extracted_source.relative_to(root)
+                content_relative = content_source.relative_to(extracted_source)
+            except ValueError as exc:
+                raise WorkflowValidationError(
+                    "MinerU extracted output escaped the user workspace."
+                ) from exc
+            if not extracted_source.is_dir() or not content_source.is_file():
+                raise WorkflowValidationError(
+                    "MinerU extracted output is incomplete."
+                )
+            for item in extracted_source.rglob("*"):
+                if item.is_symlink() or (
+                    hasattr(item, "is_junction") and item.is_junction()
+                ):
+                    raise WorkflowValidationError(
+                        "MinerU extracted output cannot contain symbolic links or junctions."
+                    )
+                try:
+                    item.resolve().relative_to(extracted_source)
+                except ValueError as exc:
+                    raise WorkflowValidationError(
+                        "MinerU extracted output escaped its directory."
+                    ) from exc
+            artifact_ids["mineru"] = str(uuid.uuid4())
+            mineru_version = paper_root / artifact_ids["mineru"]
+            mineru_destination = mineru_version / "extracted"
+            shutil.copytree(extracted_source, mineru_destination)
+            mineru_content_destination = mineru_destination / content_relative
+            if not mineru_content_destination.is_file():
+                raise WorkflowValidationError(
+                    "Published MinerU content list is unavailable."
+                )
+            source_paths["extracted_dir"] = str(mineru_destination)
+            source_paths["content_list"] = str(mineru_content_destination)
+            extraction = dict(stored_metadata.get("extraction") or {})
+            extraction_inputs = dict(extraction.get("inputs") or {})
+            extraction_inputs["extracted_dir"] = str(mineru_destination)
+            extraction_inputs["content_list"] = str(mineru_content_destination)
+            extraction["inputs"] = extraction_inputs
+            stored_metadata["extraction"] = extraction
         stored_metadata["source_paths"] = source_paths
         source_file = dict(stored_metadata.get("source_file") or {})
         source_file["pdf_name"] = pdf_destination.name
@@ -284,6 +331,10 @@ class LibraryService:
             "pdf": pdf_destination.relative_to(root).as_posix(),
             "markdown": markdown_destination.relative_to(root).as_posix(),
         }
+        if mineru_content_destination is not None:
+            artifact_paths["mineru"] = mineru_content_destination.relative_to(
+                root
+            ).as_posix()
         stored_metadata["_artifact_ids"] = dict(artifact_ids)
         metadata_version = paper_root / artifact_ids["metadata"]
         metadata_version.mkdir(exist_ok=False)
@@ -299,7 +350,10 @@ class LibraryService:
             ("pdf", pdf_destination),
             ("markdown", markdown_destination),
             ("metadata", metadata_destination),
+            ("mineru", mineru_content_destination),
         ):
+            if path is None:
+                continue
             stat = path.stat()
             artifact_rows.append(
                 LibraryArtifact(
@@ -1022,6 +1076,51 @@ class LibraryService:
                         "metadata-artifact.json",
                     )
                 )
+            mineru_artifact_id = record.artifact_ids.get("mineru")
+            mineru_relative = (record.metadata.get("_artifact_paths") or {}).get(
+                "mineru"
+            )
+            if mineru_artifact_id and mineru_relative:
+                content_path = self._safe_stored_path(root, mineru_relative)
+                version_root = (
+                    root
+                    / "review-library"
+                    / ".artifacts"
+                    / paper_id
+                    / str(uuid.UUID(mineru_artifact_id))
+                )
+                raw_version_root = version_root
+                version_root = version_root.resolve()
+                try:
+                    content_path.relative_to(version_root)
+                    relative_version = version_root.relative_to(root)
+                except ValueError as exc:
+                    raise WorkflowValidationError(
+                        "MinerU artifact path does not match its immutable version."
+                    ) from exc
+                current = root
+                for part in relative_version.parts:
+                    current = current / part
+                    if current.is_symlink() or (
+                        hasattr(current, "is_junction") and current.is_junction()
+                    ):
+                        raise WorkflowValidationError(
+                            "MinerU artifact directory is not trusted."
+                        )
+                current = version_root
+                for part in content_path.relative_to(version_root).parts:
+                    current = current / part
+                    if current.is_symlink() or (
+                        hasattr(current, "is_junction") and current.is_junction()
+                    ):
+                        raise WorkflowValidationError(
+                            "MinerU artifact content path is not trusted."
+                        )
+                if raw_version_root.is_symlink() or not version_root.is_dir():
+                    raise WorkflowValidationError(
+                        "MinerU artifact directory is unavailable."
+                    )
+                sources.append((version_root, "mineru-artifact"))
             compatibility_metadata = self.workspace_manager.trusted_user_directory(
                 principal.user_id, "review-library", "metadata", "papers"
             ) / f"{paper_id}.metadata.json"

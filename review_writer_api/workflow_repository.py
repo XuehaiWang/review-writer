@@ -923,6 +923,8 @@ class WorkflowRepository:
         status: str = "review",
         invalidate_stages: tuple[str, ...] = (),
         approve_stages: dict[str, int] | None = None,
+        approval_events: list[dict[str, Any]] | None = None,
+        expected_current_artifacts: dict[str, str] | None = None,
     ) -> StageStateRecord:
         """Promote one or more immutable outputs and advance their stage in one commit."""
 
@@ -936,6 +938,15 @@ class WorkflowRepository:
                 "Unknown downstream workflow stage.", details={"stages": invalid}
             )
         approvals = dict(approve_stages or {})
+        pending_approvals = [dict(event) for event in approval_events or []]
+        expected_currents = {
+            str(logical_name): self._uuid(
+                artifact_id, not_found_message="Expected current artifact not found."
+            )
+            for logical_name, artifact_id in (
+                expected_current_artifacts or {}
+            ).items()
+        }
         invalid_approvals = sorted(set(approvals) - set(INTERNAL_STAGES))
         if invalid_approvals or stage_id in approvals:
             raise WorkflowValidationError(
@@ -963,6 +974,26 @@ class WorkflowRepository:
             )
             if project is None:
                 raise WorkflowNotFound("Project not found.")
+            if expected_currents:
+                current_rows = session.scalars(
+                    select(WorkflowCurrentArtifact)
+                    .where(
+                        WorkflowCurrentArtifact.project_id == project_uuid,
+                        WorkflowCurrentArtifact.logical_name.in_(
+                            tuple(expected_currents)
+                        ),
+                    )
+                    .with_for_update()
+                ).all()
+                actual_currents = {
+                    row.logical_name: row.artifact_id for row in current_rows
+                }
+                for logical_name, expected_id in expected_currents.items():
+                    if actual_currents.get(logical_name) != expected_id:
+                        raise WorkflowConflict(
+                            "A current workflow artifact changed since it was loaded.",
+                            details={"logical_name": logical_name},
+                        )
             run = session.scalar(
                 select(WorkflowStageRun).where(
                     WorkflowStageRun.id == run_uuid,
@@ -1028,6 +1059,28 @@ class WorkflowRepository:
                             },
                         )
             now = utc_now()
+            for event in pending_approvals:
+                approval_id = self._uuid(
+                    event.get("id"), not_found_message="Approval ID is invalid."
+                )
+                event_stage = str(event.get("stage_id") or "")
+                if event_stage != stage_id:
+                    raise WorkflowValidationError(
+                        "Approval event does not belong to the promoted stage."
+                    )
+                session.add(
+                    WorkflowApproval(
+                        id=approval_id,
+                        project_id=project_uuid,
+                        stage_id=event_stage,
+                        subject_type=str(event.get("subject_type") or ""),
+                        subject_id=str(event.get("subject_id") or ""),
+                        decision=str(event.get("decision") or ""),
+                        decided_by_user_id=user_uuid,
+                        details_json=dict(event.get("details") or {}),
+                        created_at=event.get("created_at") or now,
+                    )
+                )
             for logical_name, artifact_uuid in parsed_artifacts.items():
                 self._upsert_current_artifact(
                     session,
@@ -1769,6 +1822,24 @@ class WorkflowRepository:
                     progress_total=safe_total,
                     updated_at=utc_now(),
                 )
+                .returning(WorkflowJob)
+            )
+            return self._job_record(job) if job else None
+
+    def update_job_result(
+        self, job_id: str, result: dict[str, Any]
+    ) -> JobRecord | None:
+        """Persist an incremental result without changing terminal job state."""
+
+        job_uuid = self._uuid(job_id, not_found_message="Job not found.")
+        with database_session(self.session_factory) as session:
+            job = session.scalar(
+                update(WorkflowJob)
+                .where(
+                    WorkflowJob.id == job_uuid,
+                    WorkflowJob.status.in_(("running", "cancel_requested")),
+                )
+                .values(result_json=dict(result or {}), updated_at=utc_now())
                 .returning(WorkflowJob)
             )
             return self._job_record(job) if job else None

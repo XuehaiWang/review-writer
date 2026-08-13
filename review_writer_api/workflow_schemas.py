@@ -93,3 +93,35 @@ class SectionsGenerateRequest(BaseModel):
 
 class SectionsConfirmRequest(BaseModel):
     revision: StrictInt = Field(ge=0)
+
+
+class FigureReviewSelectionRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+    candidate_index: StrictInt = Field(ge=0)
+    review_note: StrictStr = Field(default="", max_length=10_000)
+
+
+class FigureReviewConfirmRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+
+
+class FigureRedrawRequest(BaseModel):
+    figure_ids: list[StrictStr] = Field(default_factory=list, max_length=500)
+    figure_type: StrictStr = Field(default="auto", max_length=64)
+    retry_of_job_id: StrictStr | None = Field(default=None, max_length=64)
+
+
+class FigureConfirmRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+
+
+class FigureFullSvgRequest(BaseModel):
+    base_mode: StrictStr = Field(default="source", pattern="^(source|redrawn)$")
+
+
+class FigureManualEditRequest(BaseModel):
+    image_png_data_url: StrictStr = Field(min_length=32, max_length=36_000_000)
+    operations: list[dict[str, Any]] = Field(default_factory=list, max_length=10_000)
+    base_mode: StrictStr = Field(default="source", pattern="^(source|redrawn)$")
+    editable_svg: StrictStr = Field(default="", max_length=26_500_000)
+    full_vector_svg: StrictStr = Field(default="", max_length=26_500_000)

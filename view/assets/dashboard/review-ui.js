@@ -73,13 +73,13 @@
     };
     if (stageId === "images" && tab === "review") return {
       backendStage: "figure-review",
-      endpoint: `/api/project/${encoded}/run/figure-review`,
+      endpoint: `/api/v1/projects/${encoded}/figures/review/confirm`,
       nextPath: withProject("/images?tab=redraw", projectId),
       label: "Confirm Source Figures and Continue to AI Redraw",
     };
     if (stageId === "images") return {
       backendStage: "figures",
-      endpoint: `/api/project/${encoded}/run/figures`,
+      endpoint: `/api/v1/projects/${encoded}/figures/confirm`,
       nextPath: withProject("/draft", projectId),
       label: "Confirm Images and Enter Draft",
     };
@@ -295,6 +295,13 @@
           : {};
         request.headers = { "Content-Type": "application/json" };
         request.body = JSON.stringify({ revision: Number(planning.blueprintRevision || 0) });
+      }
+      if (current.id === "images") {
+        const imageState = activeWorkspaceTab(current.id, location.search) === "review"
+          ? (typeof window.reviewFigureReviewState === "function" ? window.reviewFigureReviewState() : {})
+          : (typeof window.reviewFiguresState === "function" ? window.reviewFiguresState() : {});
+        request.headers = { "Content-Type": "application/json" };
+        request.body = JSON.stringify({ revision: Number(imageState.revision || 0) });
       }
       const response = await fetch(endpoint, request);
       const result = await response.json().catch(() => ({ ok: false, error: message("serverReturned", { status: response.status }) }));

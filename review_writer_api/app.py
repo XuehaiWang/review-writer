@@ -24,6 +24,7 @@ from .job_service import JobService
 from .native_handlers import NativeWorkflowHandlers
 from .domain_services.library import LibraryService
 from .domain_services.discovery import DiscoveryService
+from .domain_services.figures import FiguresService
 from .domain_services.planning import PlanningService
 from .domain_services.sections import SectionsService
 from .repositories import (
@@ -53,6 +54,7 @@ from .routers.library import build_library_router
 from .routers.discovery import build_discovery_router
 from .routers.planning import build_planning_router
 from .routers.sections import build_sections_router
+from .routers.figures import build_figures_router
 from .scientific_runner import ScientificRunner
 from .workflow_compat import WorkflowCompatibilityGateway
 from .workflow_repository import WorkflowRepository
@@ -154,6 +156,11 @@ def create_app(
         if workflow_repository is not None and artifact_service is not None
         else None
     )
+    figures_service = (
+        FiguresService(workflow_repository, artifact_service)
+        if workflow_repository is not None and artifact_service is not None
+        else None
+    )
     native_handlers = (
         NativeWorkflowHandlers(
             scientific_runner,
@@ -174,6 +181,7 @@ def create_app(
             discovery_service=discovery_service,
             planning_service=planning_service,
             sections_service=sections_service,
+            figures_service=figures_service,
         )
         if (
             workflow_repository is not None
@@ -249,6 +257,7 @@ def create_app(
     app.state.discovery_service = discovery_service
     app.state.planning_service = planning_service
     app.state.sections_service = sections_service
+    app.state.figures_service = figures_service
     app.state.container = container
     web_root = Path(__file__).resolve().parent / "web"
 
@@ -613,6 +622,15 @@ def create_app(
             build_sections_router(
                 current_principal,
                 sections_service,
+                job_service,
+                native_handlers,
+            )
+        )
+    if figures_service is not None and job_service is not None:
+        app.include_router(
+            build_figures_router(
+                current_principal,
+                figures_service,
                 job_service,
                 native_handlers,
             )

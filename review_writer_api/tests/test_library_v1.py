@@ -89,6 +89,24 @@ class LibraryV1Tests(unittest.TestCase):
             pdf_path.write_bytes(staged_pdf.read_bytes())
             md_path = markdown / f"{paper_id}.md"
             md_path.write_text(f"# Copper catalysis {paper_id}\n\nallene keyword", encoding="utf-8")
+            extracted_dir = user_root / ".upload-staging" / f"{paper_id}-extracted"
+            extracted_dir.mkdir(parents=True, exist_ok=True)
+            source_image = extracted_dir / "images" / "scheme.png"
+            source_image.parent.mkdir(parents=True, exist_ok=True)
+            source_image.write_bytes(b"image-bytes")
+            content_list = extracted_dir / f"{paper_id}_content_list.json"
+            content_list.write_text(
+                json.dumps(
+                    [
+                        {
+                            "type": "image",
+                            "img_path": "images/scheme.png",
+                            "image_caption": ["Scheme 1"],
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
             metadata = {
                 "paper_id": paper_id,
                 "title": {"value": f"Copper catalysis {paper_id}"},
@@ -98,6 +116,8 @@ class LibraryV1Tests(unittest.TestCase):
                 "source_paths": {
                     "pdf": str(pdf_path),
                     "markdown": str(md_path),
+                    "content_list": str(content_list),
+                    "extracted_dir": str(extracted_dir),
                 },
             }
             meta_path = metadata_dir / f"{paper_id}.metadata.json"
@@ -213,6 +233,21 @@ class LibraryV1Tests(unittest.TestCase):
         self.assertEqual(502, rejected.status_code)
         self.assertEqual("MINERU_PRECISE_PARSE_FAILED", rejected.json()["error"]["code"])
         self.assertEqual(1, admitted.json()["library_count"])
+
+    def test_upload_persists_mineru_content_and_images_before_staging_cleanup(self) -> None:
+        with TestClient(self.app) as client:
+            admitted = self.upload(client, "figures.pdf", fake_pdf(b"F"))
+        self.assertEqual(201, admitted.status_code, admitted.text)
+        paper = self.app.state.library_service.get(
+            self.first, admitted.json()["paper_id"]
+        )
+        paths = paper.metadata["source_paths"]
+        content_list = Path(paths["content_list"])
+        extracted = Path(paths["extracted_dir"])
+        self.assertTrue(content_list.is_file())
+        self.assertTrue((extracted / "images" / "scheme.png").is_file())
+        self.assertIn("mineru", paper.artifact_ids)
+        self.assertIn("review-library/.artifacts/", content_list.as_posix())
 
     def test_duplicate_upload_is_idempotent(self) -> None:
         content = fake_pdf()
@@ -477,6 +512,10 @@ class LibraryV1Tests(unittest.TestCase):
     def test_delete_moves_owned_paper_to_trash(self) -> None:
         with TestClient(self.app) as client:
             paper = self.upload(client, "copper.pdf", fake_pdf()).json()
+            stored = self.app.state.library_service.get(
+                self.first, paper["paper_id"]
+            )
+            extracted_dir = Path(stored.metadata["source_paths"]["extracted_dir"])
             artifact_ids = {
                 uuid.UUID(artifact_id) for artifact_id in paper["artifact_ids"].values()
             }
@@ -497,7 +536,9 @@ class LibraryV1Tests(unittest.TestCase):
         self.assertEqual(0, listing["count"])
         trash = self.settings.hosted_workspace_root / self.first.user_id / ".trash" / "library"
         trash_entry = next(trash.iterdir())
-        self.assertEqual(4, len(list(trash_entry.iterdir())))
+        self.assertEqual(5, len(list(trash_entry.iterdir())))
+        self.assertFalse(extracted_dir.exists())
+        self.assertTrue((trash_entry / "mineru-artifact" / "extracted").is_dir())
         self.assertFalse(metadata.exists())
         with self.sessions() as session:
             self.assertEqual(

@@ -5,10 +5,12 @@ import json
 import tempfile
 import time
 import unittest
+import uuid
 from copy import deepcopy
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from PIL import Image
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
@@ -16,7 +18,7 @@ from review_writer_api.app import create_app
 from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User
 from review_writer_api.security import Principal, Role
-from review_writer_api.workflow_models import LibraryPaper
+from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
 from review_writer_api.domain_services.planning import BLUEPRINT_LOGICAL_NAME
 
 
@@ -27,6 +29,7 @@ class SectionsV1Tests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         root = Path(self.temporary.name)
+        self.root = root
         database_url = f"sqlite+pysqlite:///{(root / 'sections.sqlite3').as_posix()}"
         self.engine = create_engine(database_url, connect_args={"check_same_thread": False})
 
@@ -47,8 +50,36 @@ class SectionsV1Tests(unittest.TestCase):
             other = Project(user_id=second.id, slug="other", topic="Hidden")
             session.add_all([project, other])
             session.flush()
-            session.add_all(
-                [
+            mineru_artifact_id = uuid.uuid4()
+            mineru_version = (
+                root
+                / "users"
+                / str(first.id)
+                / "review-library"
+                / ".artifacts"
+                / "P001"
+                / str(mineru_artifact_id)
+                / "extracted"
+            )
+            mineru_version.mkdir(parents=True)
+            self.mineru_source = mineru_version / "scheme.png"
+            Image.new("RGB", (16, 8), "white").save(self.mineru_source)
+            content_list = mineru_version / "content_list.json"
+            content_list.write_text("[]\n", encoding="utf-8")
+            papers = []
+            for index, paper_id in enumerate(("P001", "P002", "P003"), start=1):
+                metadata = {
+                    "paper_id": paper_id,
+                    "title": {"value": f"Paper {index}"},
+                    "abstract": {"value": f"Grounded evidence for {paper_id}."},
+                }
+                if paper_id == "P001":
+                    metadata["_artifact_ids"] = {"mineru": str(mineru_artifact_id)}
+                    metadata["source_paths"] = {
+                        "extracted_dir": str(mineru_version),
+                        "content_list": str(content_list),
+                    }
+                papers.append(
                     LibraryPaper(
                         user_id=first.id,
                         paper_id=paper_id,
@@ -58,16 +89,27 @@ class SectionsV1Tests(unittest.TestCase):
                         authors_json=[f"Author {index}"],
                         keywords_json=["copper"],
                         tags_json={},
-                        metadata_json={
-                            "paper_id": paper_id,
-                            "title": {"value": f"Paper {index}"},
-                            "abstract": {"value": f"Grounded evidence for {paper_id}."},
-                        },
+                        metadata_json=metadata,
                         pdf_relative_path=f"review-library/uploads/{paper_id}.pdf",
                         markdown_relative_path=f"review-library/markdown/{paper_id}.md",
                     )
-                    for index, paper_id in enumerate(("P001", "P002", "P003"), start=1)
-                ]
+                )
+            session.add_all(papers)
+            stat = content_list.stat()
+            session.add(
+                LibraryArtifact(
+                    id=mineru_artifact_id,
+                    user_id=first.id,
+                    paper_id="P001",
+                    kind="mineru",
+                    relative_path=content_list.relative_to(
+                        root / "users" / str(first.id)
+                    ).as_posix(),
+                    content_sha256="a" * 64,
+                    size_bytes=stat.st_size,
+                    mtime_ns=stat.st_mtime_ns,
+                    availability="available",
+                )
             )
             self.project_id = str(project.id)
             self.other_project_id = str(other.id)
@@ -76,6 +118,8 @@ class SectionsV1Tests(unittest.TestCase):
         self.current = self.first
         self.writer_calls = 0
         self.transient_failures = 0
+        self.include_figures = False
+        self.figure_source_outside_recorded_extraction = False
 
         def writer(context, payload):
             self.writer_calls += 1
@@ -105,12 +149,72 @@ class SectionsV1Tests(unittest.TestCase):
                         "draft_md": markdown,
                     }
                 )
-            return {
+            result = {
                 "sections": sections,
                 "section_drafts_md": "\n".join(section["draft_md"] for section in sections),
                 "report_md": f"# Section Drafting Report\n\nGenerated {len(sections)} sections.\n",
                 "attempts": 1,
             }
+            if self.include_figures:
+                source = self.mineru_source
+                if self.figure_source_outside_recorded_extraction:
+                    source = (
+                        root
+                        / "users"
+                        / context.user_id
+                        / ".review-writer"
+                        / "staging"
+                        / "other-project"
+                        / "scheme.png"
+                    )
+                source.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("RGB", (16, 8), "white").save(source)
+                first_task = payload["tasks"][0]
+                paper_id = first_task["allowed_papers"][0]
+                if self.figure_source_outside_recorded_extraction:
+                    payload["library_metadata"][paper_id].setdefault(
+                        "source_paths", {}
+                    )["extracted_dir"] = str(source.parent)
+                paragraph_id = f"{first_task['section_id']}-p1"
+                candidate = {
+                    "paper_id": paper_id,
+                    "candidate_index": 0,
+                    "source_label": "Scheme 1",
+                    "source_type": "image",
+                    "source_image_path": str(source),
+                    "source_pdf": str(self.root / "users" / context.user_id / "paper.pdf"),
+                    "source_content_list": str(self.root / "users" / context.user_id / "content.json"),
+                    "target_paragraph_id": paragraph_id,
+                    "section_id": first_task["section_id"],
+                    "section_heading": first_task["heading"],
+                    "score": 8,
+                    "manuscript_selected": True,
+                }
+                result.update(
+                    {
+                        "paper_figure_candidates": {
+                            "project_id": self.project_id,
+                            "papers": [
+                                {
+                                    "paper_id": paper_id,
+                                    "candidates": [dict(candidate)],
+                                    "selected_candidate_index": 0,
+                                }
+                            ],
+                        },
+                        "figure_candidates": [dict(candidate)],
+                        "default_figure_reviews": {
+                            "papers": {
+                                paper_id: {
+                                    "selected_candidate_index": 0,
+                                    "selected_source_image_path": str(source),
+                                    "reviewed_at": "2026-08-13T00:00:00+00:00",
+                                }
+                            }
+                        },
+                    }
+                )
+            return result
 
         settings = ApiSettings(
             review_root=root,
@@ -316,6 +420,55 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertIn(first["id"], job_ids)
         self.assertIn(second["id"], job_ids)
         self.assertEqual(payload["section_tasks"].__len__(), payload["report"]["current_task_count"])
+
+    def test_generation_publishes_anchored_source_images_as_project_artifacts(self) -> None:
+        self.include_figures = True
+        with TestClient(self.app) as client:
+            job = self.start(client, "figure-candidates")
+        self.assertEqual("succeeded", job["status"], job)
+        repository = self.app.state.workflow_repository
+        candidate_artifact = repository.get_current_artifact(
+            self.first.user_id,
+            self.project_id,
+            "sections/paper_figure_candidates.json",
+        )
+        self.assertIsNotNone(candidate_artifact)
+        resolved = self.app.state.artifact_service.resolve_owned_artifact(
+            self.first.user_id, candidate_artifact.id
+        )
+        payload = json.loads(resolved.path.read_text(encoding="utf-8"))
+        candidate = payload["papers"][0]["candidates"][0]
+        self.assertNotIn("source_image_path", candidate)
+        self.assertNotIn(str(self.root), json.dumps(payload))
+        self.assertTrue(candidate["source_image_artifact_id"])
+        image = self.app.state.artifact_service.resolve_owned_artifact(
+            self.first.user_id, candidate["source_image_artifact_id"]
+        )
+        self.assertTrue(image.path.is_file())
+        defaults = repository.get_current_artifact(
+            self.first.user_id,
+            self.project_id,
+            "sections/default_figure_reviews.json",
+        )
+        default_payload = json.loads(
+            self.app.state.artifact_service.resolve_owned_artifact(
+                self.first.user_id, defaults.id
+            ).path.read_text(encoding="utf-8")
+        )
+        review = default_payload["papers"][candidate["paper_id"]]
+        self.assertNotIn("selected_source_image_path", review)
+        self.assertEqual(
+            candidate["source_image_artifact_id"],
+            review["selected_source_artifact_id"],
+        )
+
+    def test_generation_rejects_source_image_outside_registered_mineru_artifact(self) -> None:
+        self.include_figures = True
+        self.figure_source_outside_recorded_extraction = True
+        with TestClient(self.app) as client:
+            job = self.start(client, "wrong-paper-source")
+        self.assertEqual("failed", job["status"])
+        self.assertEqual("WORKFLOW_VALIDATION_FAILED", job["error_code"])
 
     def test_handoff_requires_current_section_outputs(self) -> None:
         with TestClient(self.app) as client:
