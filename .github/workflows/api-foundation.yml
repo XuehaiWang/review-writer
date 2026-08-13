@@ -2,7 +2,7 @@ name: API foundation
 
 on:
   push:
-    branches: [dy]
+    branches: [dy, dy-launch]
   pull_request:
 
 permissions:
@@ -22,9 +22,14 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Compile application modules
         run: python -m compileall -q review_writer_api review_writer_core view
-      - name: Run migration and API compatibility tests
+      - name: Run database migration
         env:
-          REVIEW_WRITER_DATABASE_URL: sqlite+pysqlite:///:memory:
-        run: |
-          alembic upgrade head
-          python -m unittest view.tests.test_fastapi_foundation view.tests.test_project_deletion
+          REVIEW_WRITER_DATABASE_URL: "sqlite+pysqlite:///:memory:"
+        run: alembic upgrade head
+      - name: Run maintained dashboard checks
+        working-directory: view
+        run: python -m unittest discover -s . -p "*_checks.py"
+      - name: Run dashboard integration tests
+        run: python -m unittest discover -s view/tests -p "test_*.py"
+      - name: Run native API tests
+        run: python -m unittest discover -s review_writer_api/tests -p "test_*.py"

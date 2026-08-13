@@ -45,6 +45,7 @@
 
 **Files:**
 - Create: `docs/workflow-feature-parity.md`
+- Create: `review_writer_api/parity.py`
 - Create: `review_writer_api/tests/__init__.py`
 - Create: `review_writer_api/tests/test_workflow_contract_inventory.py`
 - Modify: `.github/workflows/api-foundation.yml`
@@ -53,7 +54,7 @@
 - Consumes: current unversioned dashboard endpoints, seven HTML pages, current checks, and `DashboardHandler` route dispatch.
 - Produces: a machine-checkable parity table whose row IDs are referenced by later domain tests.
 
-- [ ] **Step 1: Write the failing inventory test**
+- [x] **Step 1: Write the failing inventory test**
 
 ```python
 class WorkflowContractInventoryTests(unittest.TestCase):
@@ -64,17 +65,17 @@ class WorkflowContractInventoryTests(unittest.TestCase):
         self.assertTrue(all(row.native_test for row in rows))
 ```
 
-- [ ] **Step 2: Run the test and verify it fails because the inventory loader or document is absent**
+- [x] **Step 2: Run the test and verify it fails because the inventory loader or document is absent**
 
 Run: `.venv\Scripts\python.exe -m unittest review_writer_api.tests.test_workflow_contract_inventory -v`
 
 Expected: failure naming the missing parity document or loader.
 
-- [ ] **Step 3: Add an explicit parity table**
+- [x] **Step 3: Add an explicit parity table**
 
 Use columns `ID`, `Stage`, `Current route/action`, `Inputs`, `Observable result`, `Artifacts/state`, `Native test`, and `Status`. Include every current GET/POST/PUT/DELETE handler and every user-facing control, including PDF range viewing, top-N selection, custom blank outlines, Ketcher, SVG crop/save, human warning approval, issue images, rewrite states, overview editing, and DOCX export.
 
-- [ ] **Step 4: Implement the minimal Markdown table loader in the test module and make missing fields fail clearly**
+- [x] **Step 4: Implement the minimal Markdown table loader in `review_writer_api/parity.py` and make missing fields fail clearly**
 
 ```python
 @dataclass(frozen=True)
@@ -84,7 +85,7 @@ class ParityRow:
     status: str
 ```
 
-- [ ] **Step 5: Expand CI to run maintained check suites and all package tests**
+- [x] **Step 5: Expand CI to run maintained check suites and all package tests**
 
 CI commands must include:
 
@@ -96,7 +97,7 @@ CI commands must include:
 
 Do not add the currently stale root tests until Task 11 classifies and replaces them.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 Run the inventory test, `git diff --check`, and YAML syntax inspection. Commit:
 
