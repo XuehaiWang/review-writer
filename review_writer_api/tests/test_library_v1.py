@@ -10,6 +10,7 @@ import unittest
 import uuid
 from pathlib import Path
 from threading import Event
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
@@ -401,6 +402,58 @@ class LibraryV1Tests(unittest.TestCase):
                 404,
                 client.get(f"/api/v1/artifacts/{pdf_artifact_id}/content").status_code,
             )
+
+    def test_mineru_assets_are_served_by_versioned_user_scoped_route(self) -> None:
+        with TestClient(self.app) as client:
+            paper = self.upload(client, "asset.pdf", fake_pdf()).json()
+            paper_id = paper["paper_id"]
+            asset = client.get(
+                f"/api/v1/library/papers/{paper_id}/asset",
+                params={"path": "images/scheme.png"},
+            )
+            traversal = client.get(
+                f"/api/v1/library/papers/{paper_id}/asset",
+                params={"path": "../paper.pdf"},
+            )
+            non_image = client.get(
+                f"/api/v1/library/papers/{paper_id}/asset",
+                params={"path": f"{paper_id}_content_list.json"},
+            )
+            self.current = self.second
+            isolated = client.get(
+                f"/api/v1/library/papers/{paper_id}/asset",
+                params={"path": "images/scheme.png"},
+            )
+        self.assertEqual(200, asset.status_code, asset.text)
+        self.assertEqual(b"image-bytes", asset.content)
+        self.assertEqual(404, traversal.status_code, traversal.text)
+        self.assertEqual(404, non_image.status_code, non_image.text)
+        self.assertEqual(404, isolated.status_code, isolated.text)
+
+    def test_mineru_asset_rejects_lexical_extracted_directory_symlink(self) -> None:
+        with TestClient(self.app) as client:
+            paper = self.upload(client, "symlink-asset.pdf", fake_pdf()).json()
+            paper_id = paper["paper_id"]
+            record = self.app.state.library_service.get(self.first, paper_id)
+            extracted = (
+                self.app.state.hosted_workspace_manager.user_root(self.first.user_id)
+                / "review-library"
+                / ".artifacts"
+                / paper_id
+                / record.artifact_ids["mineru"]
+                / "extracted"
+            )
+            original_is_symlink = Path.is_symlink
+
+            def reports_extracted_symlink(path: Path) -> bool:
+                return path == extracted or original_is_symlink(path)
+
+            with patch.object(Path, "is_symlink", reports_extracted_symlink):
+                response = client.get(
+                    f"/api/v1/library/papers/{paper_id}/asset",
+                    params={"path": "images/scheme.png"},
+                )
+        self.assertEqual(404, response.status_code, response.text)
 
     def test_metadata_edit_publishes_a_new_immutable_metadata_artifact(self) -> None:
         with TestClient(self.app) as client:

@@ -12,6 +12,23 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: review_writer
+          POSTGRES_PASSWORD: ci-review-writer-password
+          POSTGRES_DB: review_writer_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U review_writer -d review_writer_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      REVIEW_WRITER_DATABASE_URL: postgresql+psycopg://review_writer:ci-review-writer-password@127.0.0.1:5432/review_writer_test
+      REVIEW_WRITER_RUN_POSTGRES_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,8 +40,6 @@ jobs:
       - name: Compile application modules
         run: python -m compileall -q review_writer_api review_writer_core view
       - name: Run database migration
-        env:
-          REVIEW_WRITER_DATABASE_URL: "sqlite+pysqlite:///:memory:"
         run: alembic upgrade head
       - name: Run maintained dashboard checks
         working-directory: view

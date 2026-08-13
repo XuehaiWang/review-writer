@@ -166,11 +166,13 @@
       }
       button.disabled = true;
       try {
-        const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
-        const result = await response.json().catch(() => ({ ok: false, error: message("serverReturned", { status: response.status }) }));
-        if (!response.ok || !result.ok) throw new Error(result.error || message("serverReturned", { status: response.status }));
-        const projects = await (await fetch("/api/projects")).json();
-        const nextProjectId = projects[0]?.project_id || "";
+        const response = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+        if (!response.ok) {
+          const result = await response.json().catch(() => ({}));
+          throw new Error(result.detail || result.error?.message || message("serverReturned", { status: response.status }));
+        }
+        const projectPayload = await (await fetch("/api/v1/projects")).json();
+        const nextProjectId = projectPayload.items?.[0]?.project_id || "";
         const url = new URL(location.href);
         if (nextProjectId) url.searchParams.set("project", nextProjectId);
         else url.searchParams.delete("project");
@@ -269,13 +271,7 @@
       activeWorkspaceTab(current.id, location.search),
       projectId,
     );
-    const runnableStages = new Set(["sections", "figures", "figure-review", "final"]);
-    const backendStage = workspaceAction?.backendStage || current.id;
-    const endpoint = workspaceAction?.endpoint || (backendStage === "blueprint"
-      ? `/api/project/${encodeURIComponent(projectId)}/section-tasks`
-      : runnableStages.has(backendStage)
-        ? `/api/project/${encodeURIComponent(projectId)}/run/${encodeURIComponent(backendStage)}`
-        : `/api/project/${encodeURIComponent(projectId)}/handoff/${encodeURIComponent(backendStage)}`);
+    const endpoint = workspaceAction?.endpoint || "";
     try {
       if (current.id === "draft" && typeof window.reviewDraftSaveForHandoff === "function") {
         status.textContent = t("Saving current draft...");
@@ -287,7 +283,10 @@
           if (!approved) throw new Error(t("Evaluate and approve the current draft before continuing."));
         }
         status.textContent = t("Handing off current draft...");
+        window.location.assign(`/final?project=${encodeURIComponent(projectId)}`);
+        return;
       }
+      if (!workspaceAction) throw new Error(t("This stage has no pending transition action."));
       const request = { method: "POST" };
       if (current.id === "planning") {
         const planning = typeof window.reviewPlanningState === "function"
@@ -306,9 +305,7 @@
       const response = await fetch(endpoint, request);
       const result = await response.json().catch(() => ({ ok: false, error: message("serverReturned", { status: response.status }) }));
       if (!response.ok || result?.ok === false) throw new Error(result?.error?.message || result?.detail || result?.error || message("serverReturned", { status: response.status }));
-      const nextPath = workspaceAction?.nextPath || (backendStage === "blueprint"
-        ? `/sections?project=${encodeURIComponent(projectId)}`
-        : result.next_path);
+      const nextPath = workspaceAction.nextPath || result.next_path;
       if (nextPath) {
         window.location.assign(nextPath);
       } else {

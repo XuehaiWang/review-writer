@@ -35,8 +35,8 @@ Open `/library` and choose **Find & Download OA**. Enter:
 - an optional email used only to enable the final Unpaywall fallback.
 
 Select candidate rows, then choose **Download selected**. Search and download states are
-persisted in `.review-writer/workflow.sqlite3` and executed through Prefect when the dashboard
-is running in its normal Prefect-backed mode. When no automated OA source succeeds, use
+persisted as PostgreSQL-backed `/api/v1` jobs and executed by the native scientific runner.
+When no automated OA source succeeds, use
 **Open article page** and import a legally obtained PDF through the normal local-PDF input.
 
 ## Script

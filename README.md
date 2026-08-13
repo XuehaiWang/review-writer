@@ -2,13 +2,13 @@
 
 Review Writer 是一个面向化学综述写作的本地、可审计工作流。它把论文入库、主题检索、文献分析与写作规划、分节写作、化学图像审核与重绘、初稿编辑与质量确认、终稿审计和 Word 导出连接成一个可恢复的七阶段前端流程；后台任务和产物边界仍保持独立。
 
-当前 `dy` 分支的核心设计是：
+当前架构的核心设计是：
 
 - **科学产物保存在普通文件中**：Markdown、JSON、PNG、SVG 和 DOCX 可以直接检查、备份和迁移。
-- **运行状态持久化到 SQLite**：页面切换或服务重启后，阶段状态、重绘进度和失败记录不会丢失。
+- **运行状态持久化到 PostgreSQL**：页面切换或服务重启后，用户、项目、阶段状态、重绘进度和失败记录不会丢失。
 - **产物按 SHA-256 版本化**：上游内容变化时，下游旧产物会被标记为过期，避免混用旧图、旧草稿或旧 Word。
 - **阶段依赖显式声明**：每个阶段都从当前有效的上一阶段产物读取，而不是凭文件是否存在猜测。
-- **Prefect 3 负责编排**：记录 flow/task 运行并处理有限的瞬时故障重试；正文和图片不存入 Prefect 数据库。
+- **FastAPI 原生任务编排**：记录 Job、进度、取消和重试链，并通过隔离的科学子进程处理耗时任务。
 
 ## 工作流总览
 
@@ -101,59 +101,38 @@ git clone --branch dy https://github.com/XuehaiWang/review-writer.git
 Set-Location review-writer
 ```
 
-### 2. 创建 Python 环境
+### 2. 配置托管环境
 
-建议使用 Python 3.11 或更新版本，并始终用同一个虚拟环境启动前端和执行依赖安装：
+复制托管环境模板，至少替换 PostgreSQL 密码和凭据加密密钥：
 
 ```powershell
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item .env.hosted.example .env.hosted
+# 编辑 .env.hosted
 ```
 
-`requirements.txt` 是本地工作流与托管 API 共用的唯一 Python 依赖清单。
+`REVIEW_WRITER_CREDENTIAL_ENCRYPTION_KEY` 必须是 32 个随机字节的 URL-safe Base64；不要提交 `.env.hosted`。
 
-### 3. 启动前端
+### 3. 启动应用
 
 ```powershell
-.\.venv\Scripts\python.exe view\serve_review_dashboard.py `
-  --review-root . `
-  --host 127.0.0.1 `
-  --port 8765
+docker compose --env-file .env.hosted up -d --build
 ```
 
 打开：
 
-- 工作台：<http://127.0.0.1:8765/>
-- API 设置：<http://127.0.0.1:8765/settings>
+- 工作台：<http://127.0.0.1:8770/>
+- 健康检查：<http://127.0.0.1:8770/api/v1/health>
 
-若提示 Prefect 未安装，通常是启动前端时用了系统 Python。请重新使用 `.venv\Scripts\python.exe` 启动。
+### 4. FastAPI 与版本化 API
 
-### 4. FastAPI 开发入口
-
-当前版本提供一个小型单体 FastAPI 应用，同时提供网页和版本化 API。开发模式仍可直接读取现有本地项目：
-
-七阶段页面和静态资源已经由 FastAPI 直接、安全地提供。页面暂时仍使用的未版本化
-`/api/...` 请求集中在 `review_writer_api/workflow_compat.py`，响应带有
-`Deprecation: true`，新功能必须进入 `/api/v1/...`；底层 HTTP 适配只保留在
-`review_writer_api/dashboard_executor.py`，用于尚未逐项迁移的工作流端点和受控文件预览。
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m review_writer_api `
-  --review-root . `
-  --host 127.0.0.1 `
-  --port 8770
-```
+当前版本使用一个小型单体 FastAPI 应用和 PostgreSQL 同时提供七阶段网页与 `/api/v1/...` 接口。旧 Dashboard HTTP 服务器、local workflow mode、兼容路由、Prefect 运行时和 SQLite 业务状态库均不再参与在线运行。
 
 可访问：
 
 - 健康检查：<http://127.0.0.1:8770/api/v1/health>
-- 当前本地身份：<http://127.0.0.1:8770/api/v1/me>
+- 当前登录身份：<http://127.0.0.1:8770/api/v1/me>
 - 项目列表：<http://127.0.0.1:8770/api/v1/projects>
 - OpenAPI：<http://127.0.0.1:8770/api/docs>
-
-本地开发模式是单用户模式，不要求登录。需要验证多用户登录注册时，使用下面的 PostgreSQL Compose 部署。
 
 托管数据库迁移使用：
 
@@ -167,6 +146,12 @@ $env:REVIEW_WRITER_POSTGRES_DB='review_writer'
 ```
 
 也可以用 `REVIEW_WRITER_DATABASE_URL` 直接覆盖上述五项配置。
+
+Provider 安全边界：公开部署只允许设置 `REVIEW_WRITER_ALLOWED_PROVIDER_HOSTS`
+中列出的精确域名（逗号分隔，Compose 默认包含 `api.openai.com` 和 `mineru.net`）。增加兼容模型
+服务前，先由管理员把可信域名加入该列表。只有可信局域网内的私有模型地址才可设置
+`REVIEW_WRITER_ALLOW_PRIVATE_PROVIDER_URLS=true`；关闭时，科学任务会在每次连接和
+重定向时再次拒绝回环或私网目标。
 
 ### 5. 小型线上部署：FastAPI + PostgreSQL
 
@@ -338,18 +323,12 @@ review-projects/<project-id>/
 
 这些是用户运行数据，不属于发布代码。仓库只保留 `review-library/.gitkeep`；干净克隆首次启动时会自动创建其余目录。
 
-### SQLite 工作流状态
+### PostgreSQL 工作流状态
 
-服务首次启动时创建：
-
-```text
-.review-writer/workflow.sqlite3
-```
-
-它只保存编排信息，不保存论文正文和图片二进制：
+在线业务状态统一保存在 PostgreSQL：
 
 - 项目、阶段状态和明确依赖；
-- stage run、错误、时间和 Prefect run ID；
+- stage run、任务、错误、时间、取消与重试关系；
 - 文件 SHA-256、逻辑产物名、不可变版本与当前版本指针；
 - 输出版本对输入版本的 lineage；
 - 批量重绘进度、重试和停止状态。
@@ -357,12 +336,12 @@ review-projects/<project-id>/
 项目状态可通过只读接口检查：
 
 ```text
-GET /api/project/<project-id>/workflow-state
+GET /api/v1/projects/<project-id>/stages
 ```
 
 ### Handoff 与过期判断
 
-各阶段继续输出人类可读的 JSON handoff。SQLite 中的产物版本和 handoff 中的内容哈希共同完成衔接：
+各阶段继续输出人类可读的 JSON handoff。PostgreSQL 中的不可变产物版本、当前指针和 lineage 共同完成衔接：
 
 1. 阶段成功后登记输入和输出的 SHA-256；
 2. 下游只消费当前版本；
@@ -370,32 +349,14 @@ GET /api/project/<project-id>/workflow-state
 4. 旧文件保留在磁盘以便追溯，但不会自动显示或进入新终稿；
 5. 重新执行相应阶段后建立新的 handoff 和依赖版本。
 
-## Prefect 3 的作用
+## 原生后台任务
 
-前端启动时自动启用 Prefect：
+耗时的 MinerU、章节写作、图像重绘、评估和导出任务由 FastAPI 内置的持久化任务服务执行：
 
-- 每个可执行阶段形成 flow/task 运行记录；
-- 对超时、连接中断、429 和部分 5xx 做有限重试；
-- 400、401、403、404 和确定性校验错误不会盲目重试；
-- Prefect 服务短暂启动失败时会处理本地 `/api/health` 的 502/503/504；
-- 业务进度仍写入 `workflow.sqlite3`，因此不依赖 Prefect UI 才能恢复任务；
-- Windows 下按当前账户使用 `.review-writer/prefect-<account>/`，减少多账户 ACL 冲突。
-
-默认使用按需启动的本地临时 Prefect 服务。如需长期查看 Prefect UI：
-
-```powershell
-$env:PREFECT_HOME=(Resolve-Path '.review-writer\prefect-local').Path
-.\.venv\Scripts\prefect.exe server start --host 127.0.0.1 --port 4200
-```
-
-在另一个 PowerShell 窗口中：
-
-```powershell
-$env:PREFECT_API_URL='http://127.0.0.1:4200/api'
-.\.venv\Scripts\python.exe view\serve_review_dashboard.py --review-root . --host 127.0.0.1 --port 8765
-```
-
-Prefect UI：<http://127.0.0.1:4200>
+- 任务状态、进度、取消、失败原因和重试链保存在 PostgreSQL；
+- 429、临时 5xx 等可重试错误按受控策略处理，确定性校验错误不会盲目重试；
+- 科学脚本在受限子进程中运行，输出先进入 staging，校验通过后才发布为不可变产物；
+- 服务重启时会把未完成任务标为 interrupted，前端可显式重试，不依赖独立编排服务。
 
 ## Taxonomy 与项目级配置
 
@@ -420,12 +381,13 @@ REVIEW_CLASSIFICATION_RULES=review_writer_core/taxonomies/my_topic.py
 
 ```text
 skills/                     各阶段 Skill、脚本、references 与校验器
-view/                       七阶段前端网页、兼容 HTTP API、SQLite 与 Prefect flow
+view/                       七阶段前端网页与可复用科学处理脚本
+review_writer_api/          FastAPI、认证、PostgreSQL 仓储、任务与阶段 API
 review_writer_core/         跨阶段共享配置、provider、taxonomy 和图像路由
 review-library/             本地文献库（运行时数据，Git 忽略）
 review-projects/            每个综述项目的阶段产物（运行时数据，Git 忽略）
 examples/reference-reviews/ 示例综述与测试资源
-prefect.toml                Prefect 本地配置
+alembic.ini                 PostgreSQL 数据库迁移配置
 requirements.txt            Python 依赖（工作流与 API 共用）
 ```
 
@@ -462,24 +424,18 @@ git status --short
 
 ## 局域网临时共享
 
-默认只监听 `127.0.0.1`。若要在可信局域网中临时共享，必须设置访问密码：
+默认只监听 `127.0.0.1`。若要在可信局域网中共享，使用托管模式的注册/登录和 PostgreSQL，并把公开来源设置为本机局域网地址：
 
 ```powershell
-$env:REVIEW_DASHBOARD_ACCESS_TOKEN='replace-with-a-long-random-password'
-.\.venv\Scripts\python.exe view\serve_review_dashboard.py `
-  --review-root . `
-  --host 0.0.0.0 `
-  --port 8765
+$env:REVIEW_WRITER_PUBLIC_ORIGIN='http://192.168.0.5:8770'
+docker compose --env-file .env.hosted up -d --build
 ```
 
-也可用 `--access-token` 传入密码。浏览器使用 HTTP Basic 登录，用户名可任意填写，密码为上述 token。
-
-这只是可信网络中的临时保护，不是完整的多租户认证、项目隔离或公网部署方案。不要直接把本地服务暴露到互联网。
+同一 Wi-Fi 的测试用户访问 `http://192.168.0.5:8770/` 后自行注册。每个用户的项目、API、文献、密钥和产物均按 `user_id` 隔离。公网部署必须改用 HTTPS 域名并开启 Secure Cookie。
 
 ## 常见问题
 
 - **设置保存后任务仍访问 `https://api.openai.com`**：确认设置页显示的 active workspace 与当前部署目录一致，然后重新保存；不要同时启动多个指向不同 `--review-root` 的服务。
-- **`Prefect is not installed`**：使用 `.venv\Scripts\python.exe` 启动，或重新安装 `requirements.txt`。
 - **MinerU 没有生成 `content_list.json`**：该 PDF 不会正式入库；先检查 MinerU token、网络和解析日志，再重新上传。
 - **`model_not_found` 或 `No available channel`**：服务商当前没有所填模型的可用渠道，应在 Settings 中改为该服务商实际支持的模型。
 - **图像接口只返回 `choices`、没有 image**：服务商的 Chat Completions 通道没有返回图片内容；切换到真正支持图片输出的模型/令牌，或使用 `images` wire API。

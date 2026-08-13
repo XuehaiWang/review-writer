@@ -1,9 +1,0 @@
-# The dashboard sets account-specific PREFECT_HOME/result paths at runtime.
-# This avoids Windows ACL conflicts when Codex checks and the desktop service
-# run under different effective accounts.
-logging.level = "INFO"
-results.persist_by_default = true
-server.ephemeral.enabled = true
-server.ephemeral.startup_timeout_seconds = 60
-cloud.enable_orchestration_telemetry = false
-telemetry.enable_resource_metrics = false

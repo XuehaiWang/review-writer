@@ -211,6 +211,19 @@ def build_library_router(
             },
         )
 
+    @router.get("/papers/{paper_id}/asset")
+    def mineru_asset(
+        paper_id: str,
+        path: str,
+        principal: Principal = Depends(principal_dependency),
+    ) -> FileResponse:
+        resolved = library_service.mineru_asset(principal, paper_id, path)
+        return FileResponse(
+            resolved,
+            media_type=mimetypes.guess_type(resolved.name)[0] or "application/octet-stream",
+            headers={"Cache-Control": "private, no-cache"},
+        )
+
     @router.delete("/papers/{paper_id}", status_code=status.HTTP_204_NO_CONTENT)
     def delete_paper(
         paper_id: str,

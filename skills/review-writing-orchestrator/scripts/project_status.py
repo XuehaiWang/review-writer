@@ -6,7 +6,6 @@ import hashlib
 import json
 from pathlib import Path
 import re
-import sys
 from typing import Any
 
 from PIL import Image as PILImage
@@ -915,57 +914,10 @@ def summarize(review_root: Path, project_id: str) -> dict[str, Any]:
             stage["semantic_issues"].append(issue)
         stage["complete"] = False
 
-    # Use the same SHA-256 handoff resolvers as the dashboard. File existence
-    # alone is not evidence that an artifact belongs to the current upstream
-    # version.
-    view_dir = review_root / "view"
-    if str(view_dir) not in sys.path:
-        sys.path.insert(0, str(view_dir))
-    try:
-        import serve_review_dashboard as dashboard
-
-        blueprint_state = dashboard.project_blueprint_payload(review_root, project_id).get("freshness") or {}
-        sections_state = dashboard.project_sections_payload(review_root, project_id).get("handoff") or {}
-        figures_state = dashboard.project_figures_payload(review_root, project_id).get("freshness") or {}
-        draft_state = dashboard.project_draft_payload(review_root, project_id).get("freshness") or {}
-        final_payload = dashboard.project_final_payload(review_root, project_id)
-        final_state = final_payload.get("freshness") or {}
-        if blueprint_state.get("stale"):
-            invalidate("section_blueprint", "blueprint_handoff_stale")
-        if sections_state.get("drafts_stale"):
-            invalidate("section_drafting", "section_handoff_stale")
-        if figures_state.get("stale"):
-            invalidate(
-                "figure_redraw",
-                f"figure_handoff_stale_{figures_state.get('usable_count', 0)}_of_{figures_state.get('selected_count', 0)}_usable",
-            )
-        if draft_state.get("stale"):
-            invalidate("first_draft", "draft_handoff_stale")
-        conclusion_current = bool(final_payload.get("conclusion_current"))
-        if by_id["conclusion_generation"].get("optional_skipped"):
-            by_id["conclusion_generation"]["complete"] = False
-        elif not conclusion_current:
-            invalidate("conclusion_generation", "conclusion_source_stale")
-        # A generated conclusion is optional.  When its lineage is stale, it
-        # must not make the current base-draft-only final invalid merely
-        # because an obsolete conclusion file still exists on disk.
-        if not conclusion_current:
-            by_id["final_audit"]["semantic_issues"] = [
-                issue
-                for issue in by_id["final_audit"]["semantic_issues"]
-                if issue != "generated_conclusion_missing_from_final_draft"
-            ]
-        elif not final_payload.get("conclusion_integration_current"):
-            invalidate(
-                "final_audit",
-                "generated_conclusion_missing_from_final_draft",
-            )
-        if final_state.get("stale"):
-            invalidate("final_audit", "final_handoff_stale")
-        if not final_payload.get("final_draft_docx_exists"):
-            invalidate("docx_export", "docx_source_stale")
-    except Exception as exc:
-        invalidate("section_drafting", f"lineage_check_failed:{type(exc).__name__}")
+    # This command remains a read-only filesystem diagnostic for exported or
+    # archived projects. Live freshness, lineage and approval state belong to
+    # the PostgreSQL-backed /api/v1 workflow and must not be reconstructed by
+    # importing the retired dashboard runtime.
 
     prerequisites = {
         "matrix_outline": ("discovery",),

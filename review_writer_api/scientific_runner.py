@@ -106,11 +106,13 @@ class ScientificRunner:
         retry_delay_seconds: float = 0.5,
         poll_interval: float = 0.1,
         max_diagnostic_chars: int = 32_000,
+        allow_private_networks: bool = False,
     ):
         self.max_attempts = max(1, min(int(max_attempts), 3))
         self.retry_delay_seconds = max(0.0, float(retry_delay_seconds))
         self.poll_interval = max(0.01, float(poll_interval))
         self.max_diagnostic_chars = max(1_024, int(max_diagnostic_chars))
+        self.allow_private_networks = bool(allow_private_networks)
 
     def run(
         self,
@@ -167,6 +169,9 @@ class ScientificRunner:
         child_environment.update(normal_environment)
         child_environment.update(secrets)
         child_environment.setdefault("PYTHONIOENCODING", "utf-8")
+        child_environment["REVIEW_WRITER_ALLOW_PRIVATE_EGRESS"] = (
+            "1" if self.allow_private_networks else "0"
+        )
         cancellation = cancel_requested or (lambda: False)
         timeout = max(self.poll_interval, float(timeout_seconds))
 

@@ -3,7 +3,7 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    REVIEW_WRITER_DEPLOYMENT_MODE=local
+    REVIEW_WRITER_DEPLOYMENT_MODE=hosted
 
 WORKDIR /app
 
@@ -19,7 +19,7 @@ COPY review_writer_core ./review_writer_core
 COPY review_writer_api ./review_writer_api
 COPY skills ./skills
 COPY view ./view
-COPY prefect.toml alembic.ini pyproject.toml ./
+COPY alembic.ini pyproject.toml ./
 COPY migrations ./migrations
 
 RUN useradd --create-home --uid 10001 reviewwriter && \

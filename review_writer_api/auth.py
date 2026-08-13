@@ -6,7 +6,10 @@ import base64
 import hashlib
 import hmac
 import secrets
+import threading
+import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -27,6 +30,48 @@ SCRYPT_DKLEN = 32
 
 class AuthError(ValueError):
     pass
+
+
+class AuthRateLimited(AuthError):
+    pass
+
+
+class AuthAttemptThrottle:
+    """Small in-process sliding-window throttle for a single API instance."""
+
+    def __init__(
+        self,
+        *,
+        max_attempts: int = 12,
+        window_seconds: int = 60,
+        max_keys: int = 10_000,
+        clock=time.monotonic,
+    ) -> None:
+        self.max_attempts = max(1, int(max_attempts))
+        self.window_seconds = max(1, int(window_seconds))
+        self.max_keys = max(1, int(max_keys))
+        self.clock = clock
+        self._attempts: OrderedDict[str, list[float]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def consume(self, key: str) -> None:
+        now = float(self.clock())
+        cutoff = now - self.window_seconds
+        normalized = str(key or "unknown")[:512]
+        with self._lock:
+            if normalized not in self._attempts and len(self._attempts) >= self.max_keys:
+                self._attempts.popitem(last=False)
+            attempts = [value for value in self._attempts.get(normalized, []) if value > cutoff]
+            if len(attempts) >= self.max_attempts:
+                self._attempts[normalized] = attempts
+                raise AuthRateLimited("尝试次数过多，请稍后再试。")
+            attempts.append(now)
+            self._attempts[normalized] = attempts
+            self._attempts.move_to_end(normalized)
+
+    def clear(self, key: str) -> None:
+        with self._lock:
+            self._attempts.pop(str(key or "unknown")[:512], None)
 
 
 @dataclass(frozen=True)

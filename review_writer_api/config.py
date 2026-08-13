@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from sqlalchemy.engine import URL
+from sqlalchemy.engine import URL, make_url
 
 from review_writer_core.workspace import discover_review_root
 
@@ -32,13 +32,21 @@ class ApiSettings:
     expose_api_docs: bool = True
     hosted_workspace_root: Path | None = None
     job_worker_count: int = 2
+    auth_rate_limit_attempts: int = 12
+    auth_rate_limit_window_seconds: int = 60
+    allow_private_provider_urls: bool = False
+    allowed_provider_hosts: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls, review_root: str | Path | None = None) -> "ApiSettings":
         root = Path(review_root).expanduser().resolve() if review_root else discover_review_root()
-        raw_mode = str(os.environ.get("REVIEW_WRITER_DEPLOYMENT_MODE") or "local").strip().casefold()
+        raw_mode = str(os.environ.get("REVIEW_WRITER_DEPLOYMENT_MODE") or "hosted").strip().casefold()
         if raw_mode not in {"local", "hosted"}:
             raise ValueError("REVIEW_WRITER_DEPLOYMENT_MODE must be 'local' or 'hosted'.")
+        if raw_mode == "local":
+            raise ValueError(
+                "Local workflow mode is no longer supported; use hosted mode with PostgreSQL."
+            )
 
         database_url = database_url_from_env()
         public_origin = str(os.environ.get("REVIEW_WRITER_PUBLIC_ORIGIN") or "").strip().rstrip("/")
@@ -56,6 +64,19 @@ class ApiSettings:
         job_worker_count = _environment_integer(
             "REVIEW_WRITER_JOB_WORKERS", 2, minimum=1, maximum=16
         )
+        auth_rate_limit_attempts = _environment_integer(
+            "REVIEW_WRITER_AUTH_RATE_LIMIT_ATTEMPTS", 12, minimum=2, maximum=100
+        )
+        auth_rate_limit_window_seconds = _environment_integer(
+            "REVIEW_WRITER_AUTH_RATE_LIMIT_WINDOW_SECONDS",
+            60,
+            minimum=10,
+            maximum=3600,
+        )
+        allow_private_provider_urls = _environment_flag(
+            "REVIEW_WRITER_ALLOW_PRIVATE_PROVIDER_URLS", False
+        )
+        allowed_provider_hosts = _environment_hosts("REVIEW_WRITER_ALLOWED_PROVIDER_HOSTS")
         raw_workspace_root = str(
             os.environ.get("REVIEW_WRITER_HOSTED_WORKSPACE_ROOT") or ""
         ).strip()
@@ -73,6 +94,8 @@ class ApiSettings:
                     "Hosted mode requires PostgreSQL connection settings and "
                     "REVIEW_WRITER_PUBLIC_ORIGIN."
                 )
+            if make_url(database_url).get_backend_name() != "postgresql":
+                raise ValueError("Hosted mode requires a PostgreSQL database URL.")
             parsed_origin = urlparse(public_origin)
             if (
                 parsed_origin.scheme not in {"http", "https"}
@@ -102,6 +125,10 @@ class ApiSettings:
             expose_api_docs=expose_docs,
             hosted_workspace_root=hosted_workspace_root,
             job_worker_count=job_worker_count,
+            auth_rate_limit_attempts=auth_rate_limit_attempts,
+            auth_rate_limit_window_seconds=auth_rate_limit_window_seconds,
+            allow_private_provider_urls=allow_private_provider_urls,
+            allowed_provider_hosts=allowed_provider_hosts,
         )
 
 
@@ -166,3 +193,15 @@ def _environment_integer(name: str, default: int, *, minimum: int, maximum: int)
     if value < minimum or value > maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}.")
     return value
+
+
+def _environment_hosts(name: str) -> tuple[str, ...]:
+    values: list[str] = []
+    for raw in str(os.environ.get(name) or "").split(","):
+        host = raw.strip().casefold().rstrip(".")
+        if not host:
+            continue
+        if not re.fullmatch(r"[a-z0-9.-]+", host) or ".." in host:
+            raise ValueError(f"{name} must contain comma-separated DNS hostnames.")
+        values.append(host)
+    return tuple(dict.fromkeys(values))

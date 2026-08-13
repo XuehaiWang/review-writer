@@ -7,9 +7,6 @@ import importlib.util
 import json
 import sys
 import tempfile
-import threading
-import urllib.request
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 
@@ -143,17 +140,6 @@ def check_ingestion_and_downstream_reuse() -> None:
         assert len(list(metadata_path.parent.glob("P*.metadata.json"))) == 1
 
 
-def check_dashboard_wiring() -> None:
-    html = (ROOT / "view" / "assets" / "dashboard" / "library.html").read_text(encoding="utf-8")
-    server = (ROOT / "view" / "serve_review_dashboard.py").read_text(encoding="utf-8")
-    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
-    assert 'id="localPdfInput"' in html and "multiple" in html
-    assert "/api/library/upload-pdf?filename=" in html
-    assert "MinerU precise parsing" in html
-    assert 'parsed.path == "/api/library/upload-pdf"' in server
-    assert "pypdf" in requirements.casefold()
-
-
 def check_figure_inventory_rejects_incomplete_mineru_metadata() -> None:
     inventory_module = load_module(
         "local_pdf_inventory_checks_target",
@@ -225,49 +211,12 @@ def check_legacy_upload_is_upgraded_in_place() -> None:
         assert metadata["human_review"]["status"] == "reviewed"
 
 
-def check_http_upload_boundary() -> None:
-    sample = ROOT / "examples" / "reference-reviews" / "allenation-of-terminal-alkynes-with-aldehydes-and-ketones.pdf"
-    dashboard = load_module("local_pdf_dashboard_checks_target", ROOT / "view" / "serve_review_dashboard.py")
-    with tempfile.TemporaryDirectory() as raw:
-        review_root = Path(raw)
-        (review_root / "review-library" / "metadata" / "papers").mkdir(parents=True)
-        dashboard.DashboardHandler.review_root = review_root
-        dashboard.ingest_local_pdf = lambda root, filename, staged: ingestion.ingest_local_pdf(
-            root, filename, staged
-        )
-        original_runner = ingestion._run_mineru_parser
-        ingestion._run_mineru_parser = fake_mineru_runner
-        server = ThreadingHTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            request = urllib.request.Request(
-                f"http://127.0.0.1:{server.server_port}/api/library/upload-pdf?filename=sample.pdf",
-                data=sample.read_bytes(),
-                method="POST",
-                headers={"Content-Type": "application/pdf"},
-            )
-            with urllib.request.urlopen(request, timeout=60) as response:
-                assert response.status == 201
-                payload = json.loads(response.read().decode("utf-8"))
-            assert payload["ok"] is True and payload["paper_id"] == "P001"
-            assert payload["mineru_ready"] is True
-            assert (review_root / "mineru-outputs" / "markdown" / "p001.md").is_file()
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=5)
-            ingestion._run_mineru_parser = original_runner
-
-
 def main() -> int:
     checks = [
         ("filename boundary", check_filename_boundary),
         ("ingestion/downstream reuse", check_ingestion_and_downstream_reuse),
-        ("dashboard wiring", check_dashboard_wiring),
         ("incomplete MinerU inventory guard", check_figure_inventory_rejects_incomplete_mineru_metadata),
         ("legacy upload MinerU upgrade", check_legacy_upload_is_upgraded_in_place),
-        ("HTTP upload boundary", check_http_upload_boundary),
     ]
     for name, check in checks:
         check()

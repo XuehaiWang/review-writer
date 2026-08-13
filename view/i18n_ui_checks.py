@@ -115,15 +115,16 @@ process.stdout.write(JSON.stringify([
         self.assertIn(r"^Claim Type: (.+)$", source)
         self.assertIn(r"^Candidate Papers: (.+)$", source)
 
-    def test_sections_workspace_removes_redundant_report_and_adapts_tabs(self) -> None:
+    def test_sections_workspace_adapts_tabs_and_uses_persisted_job_report(self) -> None:
         source = (ASSET_DIR / "sections.html").read_text(encoding="utf-8")
         self.assertIn('id="sectionTabs"', source)
         self.assertIn("function renderTabs()", source)
-        self.assertIn("taskOnlyMode()?[['tasks','Writing Requirements']]", source)
+        self.assertIn("taskOnlyMode()?[['tasks','Writing Requirements'],['report','Generation Report']]", source)
         self.assertIn("['section','Section Draft']", source)
         self.assertIn("['drafts','Merged Preview']", source)
         self.assertIn("function renderFigureRequirements", source)
-        self.assertNotIn('data-tab="report"', source)
+        self.assertIn("['report','Generation Report']", source)
+        self.assertIn("report().jobs", source)
         self.assertNotIn("section_drafting_report_md", source)
 
     def test_stage_actions_mount_by_stable_dom_contract_in_every_language(self) -> None:
@@ -155,7 +156,7 @@ process.stdout.write(JSON.stringify([
         self.assertNotIn("function enterSections()", blueprint)
         self.assertIn('stageId === "planning"', source)
         self.assertIn('backendStage: "blueprint"', source)
-        self.assertIn("/section-tasks`", source)
+        self.assertIn("/planning/blueprint/confirm", source)
 
 
 if __name__ == "__main__":

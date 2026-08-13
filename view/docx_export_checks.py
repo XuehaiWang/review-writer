@@ -12,7 +12,6 @@ from zipfile import ZipFile
 ROOT = Path(__file__).resolve().parents[1]
 EXPORTER = ROOT / "skills" / "review-export-docx" / "scripts" / "md2docx.py"
 EXPORT_WRAPPER = ROOT / "skills" / "review-export-docx" / "scripts" / "run_md2docx.py"
-DASHBOARD_SERVER = ROOT / "view" / "serve_review_dashboard.py"
 FINAL_DASHBOARD = ROOT / "view" / "assets" / "dashboard" / "final.html"
 SECTION_GENERATOR = (
     ROOT
@@ -50,15 +49,10 @@ class DocxUnicodeCompatibilityChecks(unittest.TestCase):
         self.assertIn("skills/review-export-docx/.deps", dockerignore)
 
     def test_docx_download_keeps_filename_extension(self) -> None:
-        server_source = DASHBOARD_SERVER.read_text(encoding="utf-8")
         dashboard_source = FINAL_DASHBOARD.read_text(encoding="utf-8")
 
-        self.assertIn('"download_name": docx_path.name', server_source)
-        self.assertIn('download_name=path.name if path.suffix.lower() == ".docx" else None', server_source)
-        self.assertIn('self.send_header(\n                    "Content-Disposition"', server_source)
-        self.assertIn("const docxDownloadName=", dashboard_source)
-        self.assertIn("download=\"'+esc(docxDownloadName(payload.final_draft_docx_path))+'\"", dashboard_source)
-        self.assertIn("link.download=docxDownloadName(result.download_name||result.path)", dashboard_source)
+        self.assertIn('download="final_draft.docx"', dashboard_source)
+        self.assertIn("link.download=job.result.download_name||'final_draft.docx'", dashboard_source)
 
     def test_repairs_known_relay_truncation(self) -> None:
         damaged = "C\x13X; \x03b1/\x03b3; SN2\x02; C\x03C; \x00"

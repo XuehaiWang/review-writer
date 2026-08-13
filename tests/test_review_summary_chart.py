@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 
 SCRIPT_PATH = (
@@ -37,19 +37,24 @@ class ResolveDraftTests(unittest.TestCase):
         self.assertIn("1 Introduction", mermaid)
         self.assertNotIn("Detailed mechanism", mermaid)
 
-    def test_full_chart_export_html_is_an_isolated_mermaid_render(self) -> None:
-        """Catches the PNG export drifting back to a separate Pillow card layout."""
-        mermaid = 'graph TD\n    N1["Review"] --> N2["Conclusion"]'
+    def test_full_chart_export_uses_the_browser_free_renderer(self) -> None:
+        """Keeps chart generation independent of Edge, a CDN, and machine state."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "full-review.png"
+            section = chart.ReviewSection("1 Introduction", 2, 1)
 
-        html = chart.generate_full_chart_export_html(mermaid)
+            entry = chart.render_full_chart_png(
+                'graph LR\n    R["Review"] --> N1["Introduction"]',
+                image_path,
+                sections=[section],
+                review_title="Review",
+            )
 
-        self.assertIn("Full-Review Structure Chart", html)
-        self.assertIn(f'<div class="mermaid">{mermaid}</div>', html)
-        self.assertIn("mermaid.initialize", html)
-        self.assertEqual(html.count('class="mermaid"'), 1)
+            self.assertEqual("pillow-static", entry["renderer"])
+            self.assertTrue(image_path.is_file())
 
-    def test_full_chart_png_is_rendered_from_mermaid_source(self) -> None:
-        """Catches the full PNG using a separate hand-drawn card layout."""
+    def test_full_chart_png_is_written_with_a_content_hash(self) -> None:
+        """Catches a manifest that does not identify the emitted immutable image."""
         with tempfile.TemporaryDirectory() as temp_dir:
             image_path = Path(temp_dir) / "full-review.png"
 
@@ -58,30 +63,28 @@ class ResolveDraftTests(unittest.TestCase):
             self.assertEqual(entry["path"], "full-review.png")
             self.assertTrue(image_path.exists())
             self.assertGreater(image_path.stat().st_size, 0)
+            self.assertEqual(chart.sha256_file(image_path), entry["sha256"])
 
     def test_full_chart_export_has_room_for_tall_primary_section_layout(self) -> None:
         """Catches an LR outline being clipped at the fixed browser viewport height."""
         with tempfile.TemporaryDirectory() as temp_dir:
             image_path = Path(temp_dir) / "tall-review.png"
-            children = "\n".join(f'    R --> N{index}["Section {index}"]' for index in range(1, 13))
+            sections = [
+                chart.ReviewSection(f"Section {index}", 2, index)
+                for index in range(1, 13)
+            ]
+            children = "\n".join(
+                f'    R --> N{index}["Section {index}"]' for index in range(1, 13)
+            )
 
-            chart.render_full_chart_png(f"graph LR\n    R[\"Review\"]\n{children}", image_path)
+            chart.render_full_chart_png(
+                f"graph LR\n    R[\"Review\"]\n{children}",
+                image_path,
+                sections=sections,
+            )
 
             with Image.open(image_path) as rendered:
                 self.assertGreater(rendered.height, 900)
-
-    def test_trim_browser_screenshot_removes_only_canvas_background(self) -> None:
-        """Catches a fixed browser viewport leaving a large blank image footer."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            image_path = Path(temp_dir) / "full-review.png"
-            image = Image.new("RGB", (400, 300), "#f5f5f5")
-            ImageDraw.Draw(image).rectangle((20, 20, 380, 120), fill="white")
-            image.save(image_path)
-
-            chart.trim_browser_screenshot(image_path, "#f5f5f5")
-
-            with Image.open(image_path) as trimmed:
-                self.assertEqual(trimmed.size, (400, 145))
 
     def test_plain_text_converts_common_latex_for_chart_labels(self) -> None:
         """Catches raw TeX commands leaking into the raster chart labels."""

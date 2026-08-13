@@ -643,7 +643,7 @@
         [...node.attributes].forEach(attr => {
           const name = attr.name.toLowerCase();
           if (!['colspan', 'rowspan', 'open', 'class', 'src', 'alt'].includes(name)) node.removeAttribute(attr.name);
-          if (name === 'src' && !String(attr.value || '').startsWith('/file?')) node.removeAttribute(attr.name);
+          if (name === 'src' && !String(attr.value || '').startsWith('/api/v1/library/papers/')) node.removeAttribute(attr.name);
         });
         [...node.childNodes].forEach(walk);
       };
@@ -661,7 +661,7 @@
       text = text.replace(/<details[\s\S]*?<\/details>/gi, match => stash(`<div class="raw-block">${match}</div>`));
       text = text.replace(/<table[\s\S]*?<\/table>/gi, match => stash(match));
       text = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, path) => {
-        const src = `/file?paper_id=${encodeURIComponent(selected || '')}&path=${encodeURIComponent(path)}`;
+        const src = `/api/v1/library/papers/${encodeURIComponent(selected || '')}/asset?path=${encodeURIComponent(path)}`;
         return stash(`<img alt="${escapeHtml(alt)}" src="${src}">`);
       });
       const html = text.split(/\n{2,}/).map(rawBlock => {

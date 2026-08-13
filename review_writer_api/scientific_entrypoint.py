@@ -9,6 +9,7 @@ later parsing/publication work can fail.
 from __future__ import annotations
 
 import json
+import ipaddress
 import os
 import runpy
 import socket
@@ -22,6 +23,43 @@ from typing import Any
 
 ERROR_ENVELOPE_PREFIX = "REVIEW_WRITER_ERROR:"
 COMPLETION_FILE_ENV = "REVIEW_WRITER_PROVIDER_CALL_COMPLETED_FILE"
+PRIVATE_EGRESS_ENV = "REVIEW_WRITER_ALLOW_PRIVATE_EGRESS"
+
+
+def guarded_getaddrinfo(original, *, allow_private_networks: bool):
+    """Validate the exact addresses returned to the connection attempt.
+
+    Redirects and DNS rebinding both create a new connection-time lookup, so
+    wrapping ``socket.getaddrinfo`` protects every hop instead of trusting an
+    earlier settings-page lookup.
+    """
+
+    def resolve(host, port, *args, **kwargs):
+        answers = original(host, port, *args, **kwargs)
+        if allow_private_networks:
+            return answers
+        for answer in answers:
+            try:
+                address = ipaddress.ip_address(str(answer[4][0]).split("%", 1)[0])
+            except (IndexError, TypeError, ValueError) as exc:
+                raise OSError("Provider destination could not be safely resolved.") from exc
+            if not address.is_global:
+                raise OSError("Provider connection to a private destination is blocked.")
+        if not answers:
+            raise OSError("Provider destination could not be safely resolved.")
+        return answers
+
+    return resolve
+
+
+def install_network_guard() -> None:
+    allow_private = os.environ.get(PRIVATE_EGRESS_ENV, "0").strip().casefold() in {
+        "1", "true", "yes", "on"
+    }
+    socket.getaddrinfo = guarded_getaddrinfo(
+        socket.getaddrinfo,
+        allow_private_networks=allow_private,
+    )
 
 
 def emit_error(
@@ -100,6 +138,7 @@ def run_python(command: list[str]) -> int:
     arguments = command[1:]
     if not arguments:
         return 0
+    install_network_guard()
     install_urllib_protocol()
     if arguments[0] == "-c" and len(arguments) >= 2:
         sys.argv = ["-c", *arguments[2:]]

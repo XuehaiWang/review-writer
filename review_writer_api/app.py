@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from contextlib import asynccontextmanager, suppress
 from collections.abc import Callable, Mapping
@@ -10,10 +11,16 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from .auth import PASSWORD_MIN_LENGTH, AuthError, AuthService
+from .auth import (
+    PASSWORD_MIN_LENGTH,
+    AuthAttemptThrottle,
+    AuthError,
+    AuthRateLimited,
+    AuthService,
+)
 from .artifact_service import ArtifactService
 from .config import ApiSettings
 from .container import ApplicationContainer
@@ -60,9 +67,9 @@ from .routers.planning import build_planning_router
 from .routers.sections import build_sections_router
 from .routers.figures import build_figures_router
 from .scientific_runner import ScientificRunner
-from .workflow_compat import WorkflowCompatibilityGateway
 from .workflow_repository import WorkflowRepository
 from .workspaces import HostedWorkspaceManager
+from review_writer_core.dashboard_assets import dashboard_page_paths
 
 
 API_VERSION = "v1"
@@ -95,6 +102,8 @@ def create_app(
         ProviderSettingsService(
             session_factory,
             CredentialCipher(resolved.credential_encryption_key),
+            allow_private_urls=resolved.allow_private_provider_urls,
+            allowed_hosts=resolved.allowed_provider_hosts,
         )
         if resolved.deployment_mode == "hosted"
         else None
@@ -103,6 +112,14 @@ def create_app(
         AuthService(session_factory, session_days=resolved.session_days)
         if resolved.deployment_mode == "hosted"
         else None
+    )
+    auth_throttle = AuthAttemptThrottle(
+        max_attempts=resolved.auth_rate_limit_attempts,
+        window_seconds=resolved.auth_rate_limit_window_seconds,
+    )
+    auth_ip_throttle = AuthAttemptThrottle(
+        max_attempts=resolved.auth_rate_limit_attempts * 10,
+        window_seconds=resolved.auth_rate_limit_window_seconds,
     )
     workflow_repository = (
         workflow_repository_override or WorkflowRepository(session_factory)
@@ -128,7 +145,13 @@ def create_app(
         if workflow_repository is not None
         else None
     )
-    scientific_runner = ScientificRunner() if workflow_repository is not None else None
+    scientific_runner = (
+        ScientificRunner(
+            allow_private_networks=resolved.allow_private_provider_urls,
+        )
+        if workflow_repository is not None
+        else None
+    )
     native_overrides = dict(native_workflow_overrides or {})
     library_service = (
         LibraryService(
@@ -209,13 +232,6 @@ def create_app(
         )
         else None
     )
-    workflow_gateway = WorkflowCompatibilityGateway(
-        review_root=resolved.review_root,
-        project_service=project_service,
-        workspace_manager=hosted_workspace_manager,
-        provider_settings_service=provider_settings_service,
-    )
-
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         heartbeat_task = None
@@ -264,9 +280,10 @@ def create_app(
     app.state.project_service = project_service
     app.state.provider_settings_service = provider_settings_service
     app.state.auth_service = auth_service
+    app.state.auth_throttle = auth_throttle
+    app.state.auth_ip_throttle = auth_ip_throttle
     app.state.session_factory = session_factory
     app.state.hosted_workspace_manager = hosted_workspace_manager
-    app.state.workflow_compatibility_gateway = workflow_gateway
     app.state.workflow_repository = workflow_repository
     app.state.artifact_service = artifact_service
     app.state.job_service = job_service
@@ -280,6 +297,8 @@ def create_app(
     app.state.final_service = final_service
     app.state.container = container
     web_root = Path(__file__).resolve().parent / "web"
+    view_root = Path(__file__).resolve().parents[1] / "view"
+    dashboard_pages = dashboard_page_paths(view_root)
 
     def portal_csp() -> str:
         return "; ".join(
@@ -319,8 +338,7 @@ def create_app(
         # Keep every other route non-embeddable and never allow cross-origin
         # framing of these two narrowly scoped surfaces.
         same_origin_frame = (
-            request.url.path == "/file"
-            or request.url.path.startswith("/assets/ketcher/")
+            request.url.path.startswith("/assets/ketcher/")
             or (
                 request.url.path.startswith("/api/v1/library/papers/")
                 and request.url.path.endswith("/pdf")
@@ -355,7 +373,6 @@ def create_app(
             "/figures",
             "/draft",
             "/final",
-            "/file",
         }:
             return True
         if not path.startswith("/api/"):
@@ -460,13 +477,23 @@ def create_app(
             status_code=status.HTTP_201_CREATED,
             tags=["identity"],
         )
-        def register(payload: RegisterRequest, response: Response) -> PrincipalResponse:
+        def register(
+            payload: RegisterRequest, request: Request, response: Response
+        ) -> PrincipalResponse:
+            throttle_key = f"register:{request.client.host if request.client else 'unknown'}"
             try:
+                auth_throttle.consume(throttle_key)
                 authenticated = auth_service.register(
                     email=payload.email,
                     password=payload.password,
                     display_name=payload.display_name,
                 )
+            except AuthRateLimited as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=str(exc),
+                    headers={"Retry-After": str(resolved.auth_rate_limit_window_seconds)},
+                ) from exc
             except AuthError as exc:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
             set_session_cookie(response, authenticated.token)
@@ -477,11 +504,28 @@ def create_app(
             response_model=PrincipalResponse,
             tags=["identity"],
         )
-        def login(payload: LoginRequest, response: Response) -> PrincipalResponse:
+        def login(
+            payload: LoginRequest, request: Request, response: Response
+        ) -> PrincipalResponse:
+            client_host = request.client.host if request.client else "unknown"
+            identity_hash = hashlib.sha256(
+                str(payload.email or "").strip().casefold().encode("utf-8")
+            ).hexdigest()
+            throttle_key = f"login:{client_host}:{identity_hash}"
+            ip_throttle_key = f"login-ip:{client_host}"
             try:
+                auth_ip_throttle.consume(ip_throttle_key)
+                auth_throttle.consume(throttle_key)
                 authenticated = auth_service.login(email=payload.email, password=payload.password)
+            except AuthRateLimited as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=str(exc),
+                    headers={"Retry-After": str(resolved.auth_rate_limit_window_seconds)},
+                ) from exc
             except AuthError as exc:
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+            auth_throttle.clear(throttle_key)
             set_session_cookie(response, authenticated.token)
             return principal_response(authenticated.principal)
 
@@ -612,6 +656,90 @@ def create_app(
         return FileResponse(web_root / "index.html", media_type="text/html")
 
     app.mount("/assets/app", StaticFiles(directory=web_root), name="hosted-portal-assets")
+    app.mount(
+        "/assets",
+        StaticFiles(directory=view_root / "assets"),
+        name="workflow-assets",
+    )
+
+    def dashboard_response(route: str) -> FileResponse:
+        return FileResponse(
+            dashboard_pages[route],
+            media_type="text/html",
+            headers={"Cache-Control": "no-store, max-age=0, must-revalidate"},
+        )
+
+    def require_native_workflow() -> None:
+        if workflow_repository is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+
+    @app.get("/settings", include_in_schema=False)
+    def workflow_settings_redirect(
+        _principal: Principal = Depends(current_principal),
+    ) -> RedirectResponse:
+        return RedirectResponse(url="/#settings", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+    @app.get("/library", include_in_schema=False)
+    @app.get("/discovery", include_in_schema=False)
+    @app.get("/sections", include_in_schema=False)
+    @app.get("/draft", include_in_schema=False)
+    @app.get("/final", include_in_schema=False)
+    def workflow_page(
+        request: Request,
+        _principal: Principal = Depends(current_principal),
+        _workflow: None = Depends(require_native_workflow),
+    ) -> FileResponse:
+        return dashboard_response(request.url.path)
+
+    @app.get("/planning", include_in_schema=False)
+    def planning_page(
+        request: Request,
+        _principal: Principal = Depends(current_principal),
+        _workflow: None = Depends(require_native_workflow),
+    ) -> FileResponse:
+        route = "/blueprint" if request.query_params.get("tab") == "blueprint" else "/matrix"
+        return dashboard_response(route)
+
+    @app.get("/images", include_in_schema=False)
+    def image_page(
+        request: Request,
+        _principal: Principal = Depends(current_principal),
+        _workflow: None = Depends(require_native_workflow),
+    ) -> FileResponse:
+        route = "/figures" if request.query_params.get("tab") == "redraw" else "/figure-review"
+        return dashboard_response(route)
+
+    @app.get("/matrix", include_in_schema=False)
+    def matrix_redirect(
+        request: Request, _workflow: None = Depends(require_native_workflow)
+    ) -> RedirectResponse:
+        query = str(request.url.query or "")
+        suffix = f"&{query}" if query else ""
+        return RedirectResponse(f"/planning?tab=matrix{suffix}", status_code=307)
+
+    @app.get("/blueprint", include_in_schema=False)
+    def blueprint_redirect(
+        request: Request, _workflow: None = Depends(require_native_workflow)
+    ) -> RedirectResponse:
+        query = str(request.url.query or "")
+        suffix = f"&{query}" if query else ""
+        return RedirectResponse(f"/planning?tab=blueprint{suffix}", status_code=307)
+
+    @app.get("/figure-review", include_in_schema=False)
+    def figure_review_redirect(
+        request: Request, _workflow: None = Depends(require_native_workflow)
+    ) -> RedirectResponse:
+        query = str(request.url.query or "")
+        suffix = f"&{query}" if query else ""
+        return RedirectResponse(f"/images?tab=review{suffix}", status_code=307)
+
+    @app.get("/figures", include_in_schema=False)
+    def figures_redirect(
+        request: Request, _workflow: None = Depends(require_native_workflow)
+    ) -> RedirectResponse:
+        query = str(request.url.query or "")
+        suffix = f"&{query}" if query else ""
+        return RedirectResponse(f"/images?tab=redraw{suffix}", status_code=307)
 
     if artifact_service is not None:
         app.include_router(build_file_router(current_principal, artifact_service))
@@ -673,6 +801,4 @@ def create_app(
                 native_handlers,
             )
         )
-    workflow_gateway.register_routes(app, current_principal)
-
     return app

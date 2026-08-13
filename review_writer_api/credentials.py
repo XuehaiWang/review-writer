@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import os
+import socket
 import uuid
 from dataclasses import dataclass
 from enum import StrEnum
+from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import delete, select
 
 from .database import ProviderCredential, database_session
 from .security import Permission, Principal
+from review_writer_core.providers import DEFAULT_OPENAI_BASE_URL
 
 
 class ProviderKind(StrEnum):
@@ -26,10 +30,108 @@ WIRE_APIS: dict[ProviderKind, frozenset[str]] = {
     ProviderKind.TEXT: frozenset({"chat-completions", "responses"}),
     ProviderKind.IMAGE: frozenset({"images", "chat-completions"}),
 }
+DEFAULT_PROVIDER_BASE_URLS: dict[ProviderKind, str] = {
+    ProviderKind.MINERU: "https://mineru.net",
+    ProviderKind.TEXT: DEFAULT_OPENAI_BASE_URL,
+    ProviderKind.IMAGE: DEFAULT_OPENAI_BASE_URL,
+}
 
 
 class ProviderSettingsError(ValueError):
     pass
+
+
+def effective_provider_base_url(provider_kind: ProviderKind | str, raw_url: str) -> str:
+    try:
+        kind = (
+            provider_kind
+            if isinstance(provider_kind, ProviderKind)
+            else ProviderKind(str(provider_kind or "").strip().casefold())
+        )
+    except ValueError as exc:
+        raise ProviderSettingsError("Provider must be one of: mineru, text, image.") from exc
+    submitted = str(raw_url or "").strip().rstrip("/")
+    default = DEFAULT_PROVIDER_BASE_URLS[kind]
+    if kind is ProviderKind.MINERU:
+        if submitted and submitted != default:
+            raise ProviderSettingsError(
+                "MinerU uses a fixed https://mineru.net provider URL."
+            )
+        return default
+    return submitted or default
+
+
+def validate_provider_base_url(
+    raw_url: str,
+    *,
+    allow_private_urls: bool,
+    allowed_hosts=(),
+    resolver=None,
+) -> str:
+    value = str(raw_url or "").strip().rstrip("/")
+    if not value:
+        raise ProviderSettingsError("Provider base URL is required.")
+    if any(ord(character) < 32 or character.isspace() for character in value):
+        raise ProviderSettingsError("Provider base URL contains unsupported whitespace.")
+    try:
+        parsed = urlsplit(value)
+        hostname = str(parsed.hostname or "").casefold().rstrip(".")
+        _port = parsed.port
+    except ValueError as exc:
+        raise ProviderSettingsError("Provider base URL is invalid.") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ProviderSettingsError(
+            "Provider base URL must be an http(s) URL without credentials, query, or fragment."
+        )
+    private = hostname == "localhost" or hostname.endswith(
+        (".localhost", ".local", ".internal")
+    )
+    try:
+        address = ipaddress.ip_address(hostname.split("%", 1)[0])
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
+        private = True
+    if address is None and not private:
+        resolve = resolver or socket.getaddrinfo
+        try:
+            answers = resolve(
+                hostname,
+                parsed.port or (443 if parsed.scheme == "https" else 80),
+                type=socket.SOCK_STREAM,
+            )
+            addresses = {
+                ipaddress.ip_address(str(answer[4][0]).split("%", 1)[0])
+                for answer in answers
+            }
+        except (OSError, ValueError, IndexError, TypeError) as exc:
+            raise ProviderSettingsError("Provider hostname could not be safely resolved.") from exc
+        if not addresses:
+            raise ProviderSettingsError("Provider hostname could not be safely resolved.")
+        private = any(not item.is_global for item in addresses)
+    if private and not allow_private_urls:
+        raise ProviderSettingsError(
+            "Private or loopback provider URLs require trusted-LAN mode."
+        )
+    normalized_allowed_hosts = {
+        str(item or "").strip().casefold().rstrip(".") for item in allowed_hosts
+    }
+    if not private and hostname not in normalized_allowed_hosts:
+        raise ProviderSettingsError(
+            "Public provider hostname is not in the administrator allowlist."
+        )
+    if parsed.scheme == "http" and not (allow_private_urls and private):
+        raise ProviderSettingsError(
+            "Plain HTTP is allowed only for a private provider in trusted-LAN mode."
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -105,9 +207,18 @@ def _secret_hint(secret: str) -> str:
 
 
 class ProviderSettingsService:
-    def __init__(self, session_factory, cipher: CredentialCipher):
+    def __init__(
+        self,
+        session_factory,
+        cipher: CredentialCipher,
+        *,
+        allow_private_urls: bool = False,
+        allowed_hosts=(),
+    ):
         self.session_factory = session_factory
         self.cipher = cipher
+        self.allow_private_urls = bool(allow_private_urls)
+        self.allowed_hosts = tuple(allowed_hosts)
 
     @staticmethod
     def _kind(raw_kind: str) -> ProviderKind:
@@ -120,7 +231,7 @@ class ProviderSettingsService:
     def _record(row: ProviderCredential) -> ProviderSettingsRecord:
         return ProviderSettingsRecord(
             provider_kind=row.provider_kind,
-            base_url=row.base_url,
+            base_url=effective_provider_base_url(row.provider_kind, row.base_url),
             model_name=row.model_name,
             wire_api=row.wire_api,
             api_key_configured=bool(row.encrypted_secret),
@@ -156,9 +267,11 @@ class ProviderSettingsService:
         if normalized_wire_api not in WIRE_APIS[kind]:
             allowed = ", ".join(sorted(value for value in WIRE_APIS[kind] if value)) or "blank"
             raise ProviderSettingsError(f"Unsupported wire API for {kind.value}; expected {allowed}.")
-        normalized_base_url = str(base_url or "").strip()
-        if normalized_base_url and not normalized_base_url.startswith(("https://", "http://")):
-            raise ProviderSettingsError("Provider base URL must use http:// or https://.")
+        normalized_base_url = validate_provider_base_url(
+            effective_provider_base_url(kind, base_url),
+            allow_private_urls=self.allow_private_urls,
+            allowed_hosts=self.allowed_hosts,
+        )
 
         user_uuid = uuid.UUID(principal.user_id)
         with database_session(self.session_factory) as session:
@@ -236,6 +349,14 @@ class ProviderSettingsService:
 
         environment: dict[str, str] = {}
         for row in rows:
+            # Re-resolve immediately before handing a provider URL to a worker.
+            # This closes saved-DNS drift and fails closed on rebinding to a
+            # loopback/private destination.
+            effective_base_url = validate_provider_base_url(
+                effective_provider_base_url(row.provider_kind, row.base_url),
+                allow_private_urls=self.allow_private_urls,
+                allowed_hosts=self.allowed_hosts,
+            )
             secret = self.cipher.decrypt(principal.user_id, row.provider_kind, row.encrypted_secret)
             if row.provider_kind == ProviderKind.MINERU.value:
                 environment["MINERU_API_TOKEN"] = secret
@@ -247,9 +368,8 @@ class ProviderSettingsService:
                         "REVIEW_CONCLUSION_API_KEY": secret,
                     }
                 )
-                if row.base_url:
-                    environment["OPENAI_BASE_URL"] = row.base_url
-                    environment["REVIEW_WRITING_BASE_URL"] = row.base_url
+                environment["OPENAI_BASE_URL"] = effective_base_url
+                environment["REVIEW_WRITING_BASE_URL"] = effective_base_url
                 if row.model_name:
                     environment["REVIEW_WRITING_MODEL"] = row.model_name
                     environment["REVIEW_CONCLUSION_MODEL"] = row.model_name
@@ -258,8 +378,7 @@ class ProviderSettingsService:
                     environment["REVIEW_CONCLUSION_WIRE_API"] = row.wire_api
             elif row.provider_kind == ProviderKind.IMAGE.value:
                 environment["IMAGE_OPENAI_API_KEY"] = secret
-                if row.base_url:
-                    environment["IMAGE_OPENAI_BASE_URL"] = row.base_url
+                environment["IMAGE_OPENAI_BASE_URL"] = effective_base_url
                 if row.model_name:
                     environment["IMAGE_OPENAI_MODEL"] = row.model_name
                     environment["IMAGE_FALLBACK_MODEL"] = row.model_name

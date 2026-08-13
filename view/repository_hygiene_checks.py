@@ -62,19 +62,50 @@ class RepositoryHygieneChecks(unittest.TestCase):
             text = (ROOT / "view" / "assets" / "dashboard" / name).read_text(encoding="utf-8")
             self.assertIsNone(assignments.search(text), name)
 
-    def test_fastapi_shell_keeps_dashboard_transport_behind_one_boundary(self) -> None:
+    def test_fastapi_serves_native_dashboard_without_legacy_transport(self) -> None:
         api = ROOT / "review_writer_api"
         app = (api / "app.py").read_text(encoding="utf-8")
-        gateway = (api / "workflow_compat.py").read_text(encoding="utf-8")
-        executor = (api / "dashboard_executor.py").read_text(encoding="utf-8")
 
-        self.assertFalse((api / "legacy_adapter.py").exists())
+        for path in (
+            api / "legacy_adapter.py",
+            api / "workflow_compat.py",
+            api / "dashboard_executor.py",
+            ROOT / "view" / "prefect_runtime.py",
+            ROOT / "view" / "prefect_flows.py",
+        ):
+            self.assertFalse(path.exists(), path)
         self.assertNotIn("DashboardHandler", app)
         self.assertNotIn("serve_review_dashboard", app)
         self.assertNotIn("dispatch_legacy", app)
-        self.assertIn("workflow_gateway.register_routes", app)
-        self.assertIn('"Deprecation": "true"', gateway)
-        self.assertIn("DashboardHandler", executor)
+        self.assertIn("dashboard_page_paths", app)
+        self.assertIn('app.mount(\n        "/assets"', app)
+
+    def test_paragraph_edit_skill_uses_only_native_draft_artifacts(self) -> None:
+        skill = (
+            ROOT / "skills" / "review-paragraph-edit" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        for retired in (
+            "review-projects/",
+            "first_draft.md",
+            "citations.json",
+            "figure_candidates.json",
+            "paragraph_history.json",
+            "versions/first_draft_",
+            "paragraph_manifest_builder.py",
+        ):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, skill)
+        for required in (
+            "/api/v1/projects/<id>/draft",
+            "/api/v1/projects/<id>/draft/paragraphs/<pid>",
+            "/api/v1/projects/<id>/draft/restore",
+            "revision",
+            "409",
+            "immutable",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, skill)
+        self.assertIn("not supported", skill.casefold())
 
 
 if __name__ == "__main__":

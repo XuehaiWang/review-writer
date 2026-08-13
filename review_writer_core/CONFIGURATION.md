@@ -38,6 +38,13 @@ The runtime normalizes provider URLs, endpoints, wire APIs, and key precedence
 through `review_writer_core/providers.py`; provider hostnames no longer select
 behavior implicitly.
 
+Public deployments accept only exact provider hostnames listed by the administrator
+in the comma-separated `REVIEW_WRITER_ALLOWED_PROVIDER_HOSTS` setting. The default
+Compose configuration permits `api.openai.com` and the fixed `mineru.net` API; add other trusted compatible provider
+hosts explicitly. `REVIEW_WRITER_ALLOW_PRIVATE_PROVIDER_URLS=true` is only for a
+trusted LAN. Scientific Python workers re-check every connection-time DNS result,
+including redirect targets, and reject private destinations when that switch is false.
+
 Optional advanced environment settings:
 
 ```dotenv

@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from review_writer_api.errors import WorkflowValidationError
@@ -35,10 +36,52 @@ class ScientificRunnerTests(unittest.TestCase):
         self.OutputMissing = output_missing
         self.RunCancelled = run_cancelled
         self.RunFailed = run_failed
-        self.runner = runner(max_attempts=3, retry_delay_seconds=0, poll_interval=0.02)
+        self.runner = runner(
+            max_attempts=3,
+            retry_delay_seconds=0,
+            poll_interval=0.02,
+            allow_private_networks=True,
+        )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_connection_resolver_rejects_private_redirect_and_rebinding_targets(self) -> None:
+        from review_writer_api.scientific_entrypoint import guarded_getaddrinfo
+
+        private_answer = [
+            (2, 1, 6, "", ("127.0.0.1", 443)),
+        ]
+        guarded = guarded_getaddrinfo(
+            lambda *_args, **_kwargs: private_answer,
+            allow_private_networks=False,
+        )
+        with self.assertRaisesRegex(OSError, "private"):
+            guarded("provider.example", 443)
+
+        public_answer = [
+            (2, 1, 6, "", ("93.184.216.34", 443)),
+        ]
+        guarded = guarded_getaddrinfo(
+            lambda *_args, **_kwargs: public_answer,
+            allow_private_networks=False,
+        )
+        self.assertEqual(public_answer, guarded("provider.example", 443))
+
+    def test_runner_enables_connection_time_network_guard_by_default(self) -> None:
+        _output, _cancelled, _failed, runner = runner_api()
+        guarded_runner = runner(max_attempts=1, retry_delay_seconds=0)
+        with patch("review_writer_api.scientific_runner.subprocess.Popen") as popen:
+            popen.side_effect = OSError("stop after environment capture")
+            with self.assertRaises(WorkflowValidationError):
+                guarded_runner.run(
+                    [sys.executable, "-c", "pass"],
+                    cwd=self.root,
+                    staging_directory=self.root,
+                    expected_outputs=("done.txt",),
+                )
+        child_environment = popen.call_args.kwargs["env"]
+        self.assertEqual("0", child_environment["REVIEW_WRITER_ALLOW_PRIVATE_EGRESS"])
 
     def test_secret_is_child_scoped_and_redacted_from_retained_diagnostics(self) -> None:
         secret = "sk-runner-secret"

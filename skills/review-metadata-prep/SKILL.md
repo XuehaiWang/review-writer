@@ -32,13 +32,13 @@ python <review-root>/skills/review-metadata-prep/scripts/validate_metadata.py \
   --review-root <review-root>
 ```
 
-3. Launch the local review dashboard from the separate view module when human audit is needed:
+3. Launch the FastAPI application when human audit is needed:
 
 ```bash
-python <review-root>/view/serve_review_dashboard.py \
+python -m review_writer_api \
   --review-root <review-root> \
   --host 127.0.0.1 \
-  --port 8765
+  --port 8770
 ```
 
 Open:
@@ -198,7 +198,7 @@ The dashboard code lives outside this skill:
 <review-root>/view/
 ```
 
-The dashboard is a local review console, not the source of truth. The source of truth is the JSON file on disk.
+The dashboard is a review console. In hosted mode PostgreSQL owns user, project, audit and current-artifact state; immutable JSON metadata remains the scientific interchange artifact.
 
 The dashboard should support:
 

@@ -12,5 +12,5 @@ interface:
     through --query-plan. Stop for clarification before invoking discover.py if
     the plan is unresolved-only or has no meaningful keyword; otherwise review
     unresolved concepts before searching local and optional web sources. Use
-    <review-root>/view/serve_review_dashboard.py only when the
+    FastAPI `/library` or `/discovery` pages only when the
     human-check UI is needed.

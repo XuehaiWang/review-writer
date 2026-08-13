@@ -5,7 +5,6 @@
 !/.github/**
 !/README.md
 !/集成说明.txt
-!/prefect.toml
 !/requirements.txt
 !/pyproject.toml
 !/alembic.ini

@@ -29,7 +29,7 @@
     let projects=[],selectedProject='',payload=null,selected='',tab='section';
     const $=id=>document.getElementById(id), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
     const files=()=>payload?.section_files||[]; const tasks=()=>Array.isArray(payload?.section_tasks)?payload.section_tasks:[]; const handoff=()=>payload?.handoff||{}; const report=()=>payload?.report||{};
-    function fileUrl(path){return path?`/file?path=${encodeURIComponent(path)}`:''}
+    function fileUrl(path){return String(path||'').startsWith('/api/v1/artifacts/')?String(path):''}
     function imageSrc(p,base=''){return fileUrl(p.startsWith('/')?p:[base,p].filter(Boolean).join('/'))}
     function inlineMd(text,base=''){let out='',last=0,re=/!\[([^\]]*)\]\(([^)]+)\)/g,m;while((m=re.exec(text))){out+=esc(text.slice(last,m.index));out+=`<img alt="${esc(m[1])}" src="${imageSrc(m[2],base)}">`;last=re.lastIndex}return(out+esc(text.slice(last))).replace(/\n/g,'<br>')}
     function md(s,base=''){return String(s||'').split(/\n{2,}/).map(b=>{b=b.trim();if(!b)return'';let m=b.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);if(m)return`<p><img alt="${esc(m[1])}" src="${imageSrc(m[2],base)}"></p>`;m=b.match(/^###\s+(.+)/);if(m)return`<h3>${esc(m[1])}</h3>`;m=b.match(/^##\s+(.+)/);if(m)return`<h2>${esc(m[1])}</h2>`;m=b.match(/^#\s+(.+)/);if(m)return`<h1>${esc(m[1])}</h1>`;return`<p>${inlineMd(b,base)}</p>`}).join('')}

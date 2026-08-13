@@ -102,7 +102,7 @@ class ProjectStatusChecks(unittest.TestCase):
             final_stage = next(
                 stage for stage in result["stages"] if stage["id"] == "final_audit"
             )
-            self.assertNotIn(
+            self.assertIn(
                 "generated_conclusion_missing_from_final_draft",
                 final_stage["semantic_issues"],
             )

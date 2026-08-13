@@ -58,6 +58,9 @@ def _field_value(value: Any) -> Any:
 class LibraryService:
     MAX_PDF_BYTES = 80 * 1024 * 1024
     PAPER_ID = re.compile(r"^P[0-9]{1,93}$")
+    SAFE_MINERU_ASSET_SUFFIXES = frozenset(
+        {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+    )
 
     def __init__(
         self,
@@ -1034,6 +1037,85 @@ class LibraryService:
         return self._safe_stored_path(
             self.workspace_manager.user_root(principal.user_id), relative
         )
+
+    def mineru_asset(self, principal: Principal, paper_id: str, raw_path: str) -> Path:
+        """Resolve one file inside the current immutable MinerU extraction."""
+
+        record = self.get(principal, paper_id)
+        artifact_id = str(record.artifact_ids.get("mineru") or "")
+        try:
+            artifact_uuid = uuid.UUID(artifact_id)
+        except ValueError as exc:
+            raise WorkflowNotFound("Library file not found.") from exc
+        with database_session(self.session_factory) as session:
+            artifact = session.scalar(
+                select(LibraryArtifact).where(
+                    LibraryArtifact.id == artifact_uuid,
+                    LibraryArtifact.user_id == uuid.UUID(principal.user_id),
+                    LibraryArtifact.paper_id == record.paper_id,
+                    LibraryArtifact.kind == "mineru",
+                    LibraryArtifact.availability == "available",
+                )
+            )
+        if artifact is None:
+            raise WorkflowNotFound("Library file not found.")
+        root = self.workspace_manager.user_root(principal.user_id)
+        artifacts_root = root / "review-library" / ".artifacts"
+        raw_version_root = artifacts_root / record.paper_id / artifact_id
+        raw_extracted_root = raw_version_root / "extracted"
+        for boundary in (
+            root / "review-library",
+            artifacts_root,
+            artifacts_root / record.paper_id,
+            raw_version_root,
+            raw_extracted_root,
+        ):
+            if boundary.is_symlink() or (
+                hasattr(boundary, "is_junction") and boundary.is_junction()
+            ):
+                raise WorkflowNotFound("Library file not found.")
+        trusted_artifacts_root = artifacts_root.resolve()
+        version_root = raw_version_root.resolve()
+        try:
+            version_root.relative_to(trusted_artifacts_root)
+        except ValueError as exc:
+            raise WorkflowNotFound("Library file not found.") from exc
+        # Resolve the registered content-list leaf first so a forged database
+        # path or symlinked immutable version can never widen the file scope.
+        content_list = self._safe_stored_path(root, artifact.relative_path)
+        extracted_root = (version_root / "extracted").resolve()
+        try:
+            content_list.relative_to(extracted_root)
+        except ValueError as exc:
+            raise WorkflowNotFound("Library file not found.") from exc
+        normalized = str(raw_path or "").replace("\\", "/")
+        relative = PurePosixPath(normalized)
+        if (
+            not normalized
+            or relative.is_absolute()
+            or PureWindowsPath(normalized).drive
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or PurePosixPath(normalized).suffix.casefold()
+            not in self.SAFE_MINERU_ASSET_SUFFIXES
+        ):
+            raise WorkflowNotFound("Library file not found.")
+        candidate = extracted_root.joinpath(*relative.parts).resolve()
+        try:
+            candidate.relative_to(extracted_root)
+        except ValueError as exc:
+            raise WorkflowNotFound("Library file not found.") from exc
+        current = raw_extracted_root
+        if current.is_symlink() or not current.is_dir():
+            raise WorkflowNotFound("Library file not found.")
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink() or (
+                hasattr(current, "is_junction") and current.is_junction()
+            ):
+                raise WorkflowNotFound("Library file not found.")
+        if not candidate.is_file():
+            raise WorkflowNotFound("Library file not found.")
+        return candidate
 
     def delete(self, principal: Principal, paper_id: str) -> None:
         principal.require(Permission.PROJECT_DELETE)
