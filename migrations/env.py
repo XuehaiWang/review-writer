@@ -9,6 +9,7 @@ from sqlalchemy import engine_from_config, pool
 
 from review_writer_api.config import database_url_from_env
 from review_writer_api.database import Base
+import review_writer_api.workflow_models  # noqa: F401 - registers workflow metadata
 
 
 config = context.config

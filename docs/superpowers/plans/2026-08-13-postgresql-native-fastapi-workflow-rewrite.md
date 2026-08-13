@@ -114,22 +114,23 @@ test: freeze seven-stage workflow parity contract
 - Create: `review_writer_api/workflow_contracts.py`
 - Create: `migrations/versions/20260813_0002_postgres_workflow.py`
 - Create: `review_writer_api/tests/test_workflow_models.py`
-- Modify: `review_writer_api/database.py`
+- Create: `review_writer_api/tests/test_workflow_migrations.py`
+- Modify: `migrations/versions/20260811_0001_hosted_foundation.py`
 - Modify: `migrations/env.py`
 
 **Interfaces:**
 - Consumes: `review_writer_api.database.Base`, existing `Project` and `User` UUIDs, legacy `STAGE_SPECS` meanings.
 - Produces: `WorkflowStageState`, `WorkflowStageRun`, `WorkflowArtifact`, `WorkflowCurrentArtifact`, `WorkflowArtifactDependency`, `WorkflowJob`, `WorkflowCurrentJob`, `WorkflowApproval`, `WorkflowMigration`, and `WorkflowSystemState` models.
 
-- [ ] **Step 1: Write failing model tests**
+- [x] **Step 1: Write failing model tests**
 
 Create tests that construct two users with the same project slug, persist independent stage rows, reject duplicate `(project_id, stage_id)`, preserve JSON snapshots, and cascade project deletion into workflow rows. Assert the seven-stage composite mapping returns the expected user-facing stage.
 
-- [ ] **Step 2: Run the focused test and verify missing models fail**
+- [x] **Step 2: Run the focused test and verify missing models fail**
 
 Run: `.venv\Scripts\python.exe -m unittest review_writer_api.tests.test_workflow_models -v`
 
-- [ ] **Step 3: Define workflow constants and pure state functions**
+- [x] **Step 3: Define workflow constants and pure state functions**
 
 ```python
 INTERNAL_STAGES = ("discovery", "matrix", "blueprint", "sections", "figure-review", "figures", "draft", "final")
@@ -139,19 +140,19 @@ TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled", "interrupted"}
 
 Implement `composite_stage(internal_stage: str) -> str` and `current_user_stage(states: Mapping[str, str]) -> str` as pure tested functions.
 
-- [ ] **Step 4: Implement SQLAlchemy models with explicit constraints**
+- [x] **Step 4: Implement SQLAlchemy models with explicit constraints**
 
 Use UUID primary keys for new rows, nullable project IDs only for library-scoped jobs, `JSON` fields for portable unit tests, timezone-aware timestamps, named unique constraints, and indexes for user/project/status polling. Add `legacy_id` columns where IDs must be preserved.
 
-- [ ] **Step 5: Write an explicit Alembic upgrade and downgrade**
+- [x] **Step 5: Write an explicit Alembic upgrade and downgrade**
 
 Use `op.create_table`, `op.create_index`, foreign keys, unique constraints, and server-safe defaults. Do not call `Base.metadata.create_all` in the new revision.
 
-- [ ] **Step 6: Verify SQLite model tests and real PostgreSQL migration**
+- [x] **Step 6: Verify SQLite model tests and real PostgreSQL migration**
 
 Run model tests against an in-memory database. Start the Compose PostgreSQL service, run `alembic upgrade head`, inspect the created tables, then run `alembic downgrade 20260811_0001` and upgrade again.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```text
 feat: add PostgreSQL workflow schema
