@@ -291,29 +291,29 @@ feat: migrate legacy workflow state to PostgreSQL
 - Consumes: workflow repository, hosted workspace manager, and authenticated project ownership.
 - Produces: `ArtifactService.stage_run_directory()`, `publish()`, `resolve_owned_artifact()`, and `/api/v1/artifacts/{artifact_id}/content`.
 
-- [ ] **Step 1: Write failing publication and path-escape tests**
+- [x] **Step 1: Write failing publication and path-escape tests**
 
 Assert publication creates immutable version paths, updates the current pointer only after validation, preserves the prior version, rejects `..` and external paths, and leaves a DB-invisible orphan if the simulated DB commit fails.
 
-- [ ] **Step 2: Write failing streaming tests**
+- [x] **Step 2: Write failing streaming tests**
 
 Assert unauthenticated and cross-user reads fail, `Range: bytes=0-99` returns 206 with correct headers, normal reads stream without buffering the entire file, and missing files return stable `ARTIFACT_FILE_MISSING` errors.
 
-- [ ] **Step 3: Verify RED**
+- [x] **Step 3: Verify RED**
 
 Run both focused test modules.
 
-- [ ] **Step 4: Implement staging and publication**
+- [x] **Step 4: Implement staging and publication**
 
 Use `<project>/.staging/<run-id>` for temporary outputs and `<project>/.artifacts/<logical-name>/<artifact-id>/<filename>` for immutable publication. Require same-filesystem `Path.replace`, calculate SHA-256 and size before repository commit, and never overwrite a current artifact.
 
-- [ ] **Step 5: Implement authenticated streaming**
+- [x] **Step 5: Implement authenticated streaming**
 
 Resolve only database artifact IDs after ownership checks. Use `FileResponse` for complete files and a bounded iterator for one validated byte range. Add `Accept-Ranges`, `Content-Range`, `ETag`, and safe content disposition.
 
 Implement project deletion as a PostgreSQL soft delete followed by an atomic move into a user-scoped trash directory. Permanent recursive cleanup is a separate maintenance operation and never runs inside the delete request.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 Run artifact/file tests and FastAPI foundation tests. Commit:
 

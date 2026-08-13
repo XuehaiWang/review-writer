@@ -51,3 +51,13 @@ class WorkflowMigrationRequired(WorkflowError):
         details: dict[str, Any] | None = None,
     ):
         super().__init__(message, details=details)
+
+
+class ArtifactFileMissing(WorkflowError):
+    code = "ARTIFACT_FILE_MISSING"
+    status_code = 404
+
+
+class ArtifactRangeNotSatisfiable(WorkflowError):
+    code = "ARTIFACT_RANGE_NOT_SATISFIABLE"
+    status_code = 416

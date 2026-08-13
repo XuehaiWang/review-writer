@@ -14,7 +14,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .auth import PASSWORD_MIN_LENGTH, AuthError, AuthService
+from .artifact_service import ArtifactService
 from .config import ApiSettings
+from .container import ApplicationContainer
 from .credentials import CredentialCipher, ProviderSettingsError, ProviderSettingsService
 from .database import create_session_factory, utc_now
 from .errors import WorkflowError
@@ -39,6 +41,7 @@ from .schemas import (
 )
 from .security import AuthorizationError, Principal, local_owner_principal
 from .services import ProjectService
+from .routers.files import build_file_router
 from .workflow_compat import WorkflowCompatibilityGateway
 from .workflow_repository import WorkflowRepository
 from .workspaces import HostedWorkspaceManager
@@ -92,6 +95,19 @@ def create_app(
             or (resolved.review_root / ".review-writer" / "hosted-workspaces")
         )
         if resolved.deployment_mode == "hosted"
+        else None
+    )
+    artifact_service = (
+        ArtifactService(workflow_repository, hosted_workspace_manager)
+        if workflow_repository is not None and hosted_workspace_manager is not None
+        else None
+    )
+    container = (
+        ApplicationContainer(
+            workflow_repository=workflow_repository,
+            artifact_service=artifact_service,
+        )
+        if workflow_repository is not None and artifact_service is not None
         else None
     )
     workflow_gateway = WorkflowCompatibilityGateway(
@@ -150,6 +166,8 @@ def create_app(
     app.state.hosted_workspace_manager = hosted_workspace_manager
     app.state.workflow_compatibility_gateway = workflow_gateway
     app.state.workflow_repository = workflow_repository
+    app.state.artifact_service = artifact_service
+    app.state.container = container
     web_root = Path(__file__).resolve().parent / "web"
 
     def portal_csp() -> str:
@@ -413,6 +431,23 @@ def create_app(
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
         return ProjectResponse.model_validate(record)
 
+    @app.delete(
+        "/api/v1/projects/{project_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["projects"],
+    )
+    def delete_project(
+        project_id: str,
+        principal: Principal = Depends(current_principal),
+    ) -> None:
+        record = project_service.get_project(principal, project_id)
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+        if not project_service.delete_project(principal, record.project_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+        if artifact_service is not None:
+            artifact_service.trash_project(principal.user_id, record.slug)
+
     if provider_settings_service is not None:
 
         @app.get(
@@ -466,6 +501,8 @@ def create_app(
 
     app.mount("/assets/app", StaticFiles(directory=web_root), name="hosted-portal-assets")
 
+    if artifact_service is not None:
+        app.include_router(build_file_router(current_principal, artifact_service))
     workflow_gateway.register_routes(app, current_principal)
 
     return app

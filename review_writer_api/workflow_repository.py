@@ -128,6 +128,19 @@ class MigrationRecord:
     finished_at: datetime | None
 
 
+@dataclass(frozen=True)
+class OwnedProjectRecord:
+    id: str
+    user_id: str
+    slug: str
+
+
+@dataclass(frozen=True)
+class OwnedArtifactRecord:
+    artifact: ArtifactRecord
+    project_slug: str
+
+
 class WorkflowRepository:
     """Transactional repository that includes ownership in every user-facing query."""
 
@@ -269,6 +282,17 @@ class WorkflowRepository:
                 Project.deleted_at.is_(None),
             )
         )
+
+    def get_owned_project(self, user_id: str, project_id: str) -> OwnedProjectRecord | None:
+        user_uuid = self._uuid(user_id, not_found_message="Project not found.")
+        project_uuid = self._uuid(project_id, not_found_message="Project not found.")
+        with database_session(self.session_factory) as session:
+            project = self._owned_project(session, user_uuid, project_uuid)
+            if project is None:
+                return None
+            return OwnedProjectRecord(
+                id=str(project.id), user_id=str(project.user_id), slug=project.slug
+            )
 
     def get_stage_state(
         self, user_id: str, project_id: str, stage_id: str
@@ -555,6 +579,105 @@ class WorkflowRepository:
             session.add(artifact)
             session.flush()
             return self._artifact_record(artifact)
+
+    def publish_artifact(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+        artifact_id: str,
+        logical_name: str,
+        artifact_type: str,
+        relative_path: str,
+        content_sha256: str,
+        size_bytes: int,
+        mtime_ns: int,
+        producer_stage: str,
+        producer_run_id: str | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> ArtifactRecord:
+        """Insert an immutable artifact and update its current pointer atomically."""
+
+        user_uuid = self._uuid(user_id, not_found_message="Project not found.")
+        project_uuid = self._uuid(project_id, not_found_message="Project not found.")
+        artifact_uuid = self._uuid(artifact_id, not_found_message="Artifact ID is invalid.")
+        run_uuid = (
+            self._uuid(producer_run_id, not_found_message="Stage run not found.")
+            if producer_run_id
+            else None
+        )
+        try:
+            with database_session(self.session_factory) as session:
+                if self._owned_project(session, user_uuid, project_uuid) is None:
+                    raise WorkflowNotFound("Project not found.")
+                if run_uuid is not None:
+                    owned_run = session.scalar(
+                        select(WorkflowStageRun.id).where(
+                            WorkflowStageRun.id == run_uuid,
+                            WorkflowStageRun.project_id == project_uuid,
+                            WorkflowStageRun.requested_by_user_id == user_uuid,
+                        )
+                    )
+                    if owned_run is None:
+                        raise WorkflowNotFound("Stage run not found.")
+                artifact = WorkflowArtifact(
+                    id=artifact_uuid,
+                    project_id=project_uuid,
+                    logical_name=logical_name,
+                    artifact_type=artifact_type,
+                    relative_path=relative_path,
+                    content_sha256=content_sha256,
+                    size_bytes=max(0, int(size_bytes)),
+                    mtime_ns=max(0, int(mtime_ns)),
+                    availability="available",
+                    producer_stage=producer_stage,
+                    producer_run_id=run_uuid,
+                    metadata_json=dict(metadata or {}),
+                )
+                session.add(artifact)
+                session.flush()
+                pointer = session.get(
+                    WorkflowCurrentArtifact,
+                    {"project_id": project_uuid, "logical_name": logical_name},
+                )
+                if pointer is None:
+                    session.add(
+                        WorkflowCurrentArtifact(
+                            project_id=project_uuid,
+                            logical_name=logical_name,
+                            artifact_id=artifact_uuid,
+                        )
+                    )
+                else:
+                    pointer.artifact_id = artifact_uuid
+                    pointer.updated_at = utc_now()
+                session.flush()
+                return self._artifact_record(artifact)
+        except IntegrityError as exc:
+            raise WorkflowConflict(
+                "Artifact publication conflicted with an existing immutable version."
+            ) from exc
+
+    def get_artifact(self, user_id: str, artifact_id: str) -> OwnedArtifactRecord | None:
+        user_uuid = self._uuid(user_id, not_found_message="Artifact not found.")
+        artifact_uuid = self._uuid(artifact_id, not_found_message="Artifact not found.")
+        with database_session(self.session_factory) as session:
+            row = session.execute(
+                select(WorkflowArtifact, Project.slug)
+                .join(Project, Project.id == WorkflowArtifact.project_id)
+                .where(
+                    WorkflowArtifact.id == artifact_uuid,
+                    Project.user_id == user_uuid,
+                    Project.deleted_at.is_(None),
+                )
+            ).one_or_none()
+            if row is None:
+                return None
+            artifact, project_slug = row
+            return OwnedArtifactRecord(
+                artifact=self._artifact_record(artifact),
+                project_slug=str(project_slug),
+            )
 
     def set_current_artifact(
         self,
