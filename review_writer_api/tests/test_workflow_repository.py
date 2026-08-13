@@ -579,6 +579,114 @@ class PostgreSQLWorkflowRepositoryTests(unittest.TestCase):
         self.assertEqual("approved", matrix_state.status)
         self.assertEqual(2, matrix_state.revision)
 
+    def test_draft_gate_and_upstream_change_never_publish_unapproved_snapshot(self) -> None:
+        def staged(stage: str, logical_name: str, seed: int, *, current: bool):
+            run = self.repository.create_stage_run(
+                self.user_id, self.project_id, stage, status="succeeded"
+            )
+            artifact = self.repository.publish_artifact(
+                user_id=self.user_id,
+                project_id=self.project_id,
+                artifact_id=str(uuid.uuid4()),
+                logical_name=logical_name,
+                artifact_type="json" if logical_name.endswith(".json") else "markdown",
+                relative_path=f".artifacts/{stage}/{seed}",
+                content_sha256=f"{seed:064x}",
+                size_bytes=seed,
+                mtime_ns=seed,
+                producer_stage=stage,
+                producer_run_id=run.id,
+                make_current=current,
+            )
+            return artifact, run
+
+        sections, sections_run = staged(
+            "sections", "sections/section_drafts.json", 1101, current=True
+        )
+        sections_state = self.repository.compare_and_set_stage(
+            self.user_id,
+            self.project_id,
+            "sections",
+            0,
+            status="approved",
+            current_run_id=sections_run.id,
+        )
+        manifest, figures_run = staged(
+            "figures", "figures/manifest.json", 1102, current=True
+        )
+        figures_state = self.repository.compare_and_set_stage(
+            self.user_id,
+            self.project_id,
+            "figures",
+            0,
+            status="approved",
+            current_run_id=figures_run.id,
+        )
+        draft, draft_run = staged(
+            "draft", "draft/manuscript.md", 1103, current=False
+        )
+        changed_sections, changed_run = staged(
+            "sections", "sections/section_drafts.json", 1104, current=False
+        )
+        barrier = threading.Barrier(2)
+
+        def assemble():
+            barrier.wait(timeout=10)
+            try:
+                self.repository.promote_stage_artifacts_atomically(
+                    self.user_id,
+                    self.project_id,
+                    "draft",
+                    artifact_ids={"draft/manuscript.md": draft.id},
+                    run_id=draft_run.id,
+                    expected_revision=0,
+                    expected_current_artifacts={
+                        "sections/section_drafts.json": sections.id,
+                        "figures/manifest.json": manifest.id,
+                    },
+                    expected_stage_states={
+                        "figures": {
+                            "revision": figures_state.revision,
+                            "status": "approved",
+                        }
+                    },
+                )
+                return "assembled"
+            except self.errors.WorkflowConflict:
+                return "conflict"
+
+        def change_sections():
+            barrier.wait(timeout=10)
+            self.repository.promote_stage_artifacts_atomically(
+                self.user_id,
+                self.project_id,
+                "sections",
+                artifact_ids={"sections/section_drafts.json": changed_sections.id},
+                run_id=changed_run.id,
+                expected_revision=sections_state.revision,
+                status="approved",
+                expected_current_artifacts={
+                    "sections/section_drafts.json": sections.id
+                },
+                invalidate_stages=("figures", "draft", "final"),
+            )
+            return "changed"
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(lambda fn: fn(), (assemble, change_sections)))
+        self.assertIn("changed", outcomes)
+        self.assertIsNone(
+            self.repository.get_current_artifact(
+                self.user_id, self.project_id, "draft/manuscript.md"
+            )
+        )
+        self.assertEqual(
+            "pending",
+            self.repository.get_stage_state(
+                self.user_id, self.project_id, "figures"
+            ).status,
+        )
+
     def test_concurrent_discovery_replacements_promote_one_complete_transition(self) -> None:
         def stage_artifact(stage: str, logical_name: str, seed: int, *, current: bool):
             run = self.repository.create_stage_run(

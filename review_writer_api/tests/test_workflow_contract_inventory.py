@@ -44,7 +44,9 @@ class WorkflowContractInventoryTests(unittest.TestCase):
         for row in rows:
             expected = (
                 "passed"
-                if row.row_id.startswith(("LIB-", "DIS-", "PLN-", "SEC-", "FIG-"))
+                if row.row_id.startswith(
+                    ("LIB-", "DIS-", "PLN-", "SEC-", "FIG-", "DRF-", "FIN-")
+                )
                 else "baseline"
             )
             self.assertEqual(expected, row.status, row.row_id)

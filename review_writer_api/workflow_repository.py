@@ -21,6 +21,8 @@ from review_writer_api.errors import (
 )
 from review_writer_api.workflow_contracts import INTERNAL_STAGES, current_user_stage
 from review_writer_api.workflow_models import (
+    LibraryArtifact,
+    LibraryPaper,
     WorkflowApproval,
     WorkflowArtifact,
     WorkflowCurrentArtifact,
@@ -98,12 +100,14 @@ class ArtifactRecord:
     artifact_type: str
     relative_path: str
     content_sha256: str
+    lineage_sha256: str
     size_bytes: int
     mtime_ns: int
     availability: str
     producer_stage: str
     producer_run_id: str | None
     metadata: dict[str, Any]
+    created_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -137,6 +141,7 @@ class OwnedProjectRecord:
     id: str
     user_id: str
     slug: str
+    topic: str
 
 
 @dataclass(frozen=True)
@@ -240,12 +245,14 @@ class WorkflowRepository:
             artifact_type=artifact.artifact_type,
             relative_path=artifact.relative_path,
             content_sha256=artifact.content_sha256,
+            lineage_sha256=artifact.lineage_sha256,
             size_bytes=artifact.size_bytes,
             mtime_ns=artifact.mtime_ns,
             availability=artifact.availability,
             producer_stage=artifact.producer_stage,
             producer_run_id=str(artifact.producer_run_id) if artifact.producer_run_id else None,
             metadata=dict(artifact.metadata_json or {}),
+            created_at=artifact.created_at,
         )
 
     @staticmethod
@@ -296,7 +303,10 @@ class WorkflowRepository:
             if project is None:
                 return None
             return OwnedProjectRecord(
-                id=str(project.id), user_id=str(project.user_id), slug=project.slug
+                id=str(project.id),
+                user_id=str(project.user_id),
+                slug=project.slug,
+                topic=project.topic,
             )
 
     def get_stage_state(
@@ -925,6 +935,8 @@ class WorkflowRepository:
         approve_stages: dict[str, int] | None = None,
         approval_events: list[dict[str, Any]] | None = None,
         expected_current_artifacts: dict[str, str] | None = None,
+        expected_stage_states: dict[str, dict[str, Any]] | None = None,
+        expected_library_sources: list[str] | None = None,
     ) -> StageStateRecord:
         """Promote one or more immutable outputs and advance their stage in one commit."""
 
@@ -947,6 +959,28 @@ class WorkflowRepository:
                 expected_current_artifacts or {}
             ).items()
         }
+        expected_states = {
+            str(expected_stage): {
+                "revision": int((expected_value or {}).get("revision", 0)),
+                "status": str((expected_value or {}).get("status") or ""),
+            }
+            for expected_stage, expected_value in (
+                expected_stage_states or {}
+            ).items()
+        }
+        invalid_expected_states = sorted(set(expected_states) - set(INTERNAL_STAGES))
+        if invalid_expected_states:
+            raise WorkflowValidationError(
+                "Unknown expected workflow stage.",
+                details={"stages": invalid_expected_states},
+            )
+        expected_sources = tuple(
+            dict.fromkeys(
+                str(paper_id).strip()
+                for paper_id in (expected_library_sources or [])
+                if str(paper_id).strip()
+            )
+        )
         invalid_approvals = sorted(set(approvals) - set(INTERNAL_STAGES))
         if invalid_approvals or stage_id in approvals:
             raise WorkflowValidationError(
@@ -974,6 +1008,42 @@ class WorkflowRepository:
             )
             if project is None:
                 raise WorkflowNotFound("Project not found.")
+            if expected_sources:
+                source_rows = session.scalars(
+                    select(LibraryPaper)
+                    .where(
+                        LibraryPaper.user_id == user_uuid,
+                        LibraryPaper.paper_id.in_(expected_sources),
+                    )
+                    .with_for_update()
+                ).all()
+                active_sources = {
+                    row.paper_id
+                    for row in source_rows
+                    if row.status == "active" and row.deleted_at is None
+                }
+                artifact_rows = session.scalars(
+                    select(LibraryArtifact)
+                    .where(
+                        LibraryArtifact.user_id == user_uuid,
+                        LibraryArtifact.paper_id.in_(expected_sources),
+                    )
+                    .with_for_update()
+                ).all()
+                available_sources = {
+                    row.paper_id
+                    for row in artifact_rows
+                    if row.availability == "available"
+                }
+                unavailable = sorted(
+                    (set(expected_sources) - active_sources)
+                    | (set(expected_sources) - available_sources)
+                )
+                if unavailable:
+                    raise WorkflowConflict(
+                        "A required Library source changed or became unavailable.",
+                        details={"paper_ids": unavailable},
+                    )
             if expected_currents:
                 current_rows = session.scalars(
                     select(WorkflowCurrentArtifact)
@@ -1035,6 +1105,34 @@ class WorkflowRepository:
                         "actual_revision": actual,
                     },
                 )
+            if expected_states:
+                expected_rows = session.scalars(
+                    select(WorkflowStageState)
+                    .where(
+                        WorkflowStageState.project_id == project_uuid,
+                        WorkflowStageState.stage_id.in_(tuple(expected_states)),
+                    )
+                    .with_for_update()
+                ).all()
+                actual_states = {row.stage_id: row for row in expected_rows}
+                for expected_stage, expected_value in expected_states.items():
+                    row = actual_states.get(expected_stage)
+                    actual_revision = row.revision if row else 0
+                    actual_status = row.status if row else "pending"
+                    if (
+                        actual_revision != expected_value["revision"]
+                        or actual_status != expected_value["status"]
+                    ):
+                        raise WorkflowConflict(
+                            "A required workflow stage changed since it was loaded.",
+                            details={
+                                "stage_id": expected_stage,
+                                "expected_revision": expected_value["revision"],
+                                "actual_revision": actual_revision,
+                                "expected_status": expected_value["status"],
+                                "actual_status": actual_status,
+                            },
+                        )
             predecessor_states: dict[str, WorkflowStageState] = {}
             if approvals:
                 rows = session.scalars(
@@ -1393,6 +1491,7 @@ class WorkflowRepository:
         artifact_type: str,
         relative_path: str,
         content_sha256: str,
+        lineage_sha256: str = "",
         size_bytes: int,
         mtime_ns: int,
         producer_stage: str,
@@ -1425,6 +1524,7 @@ class WorkflowRepository:
                 artifact_type=str(artifact_type),
                 relative_path=str(relative_path),
                 content_sha256=str(content_sha256),
+                lineage_sha256=str(lineage_sha256),
                 size_bytes=max(0, int(size_bytes)),
                 mtime_ns=max(0, int(mtime_ns)),
                 availability=str(availability),
@@ -1446,6 +1546,7 @@ class WorkflowRepository:
         artifact_type: str,
         relative_path: str,
         content_sha256: str,
+        lineage_sha256: str = "",
         size_bytes: int,
         mtime_ns: int,
         producer_stage: str,
@@ -1484,6 +1585,7 @@ class WorkflowRepository:
                     artifact_type=artifact_type,
                     relative_path=relative_path,
                     content_sha256=content_sha256,
+                    lineage_sha256=lineage_sha256,
                     size_bytes=max(0, int(size_bytes)),
                     mtime_ns=max(0, int(mtime_ns)),
                     availability="available",
@@ -1633,12 +1735,35 @@ class WorkflowRepository:
             )
             return self._artifact_record(artifact) if artifact else None
 
+    def list_artifacts(
+        self,
+        user_id: str,
+        project_id: str,
+        logical_name: str,
+    ) -> list[ArtifactRecord]:
+        user_uuid = self._uuid(user_id, not_found_message="Project not found.")
+        project_uuid = self._uuid(project_id, not_found_message="Project not found.")
+        with database_session(self.session_factory) as session:
+            if self._owned_project(session, user_uuid, project_uuid) is None:
+                raise WorkflowNotFound("Project not found.")
+            artifacts = session.scalars(
+                select(WorkflowArtifact)
+                .where(
+                    WorkflowArtifact.project_id == project_uuid,
+                    WorkflowArtifact.logical_name == str(logical_name),
+                    WorkflowArtifact.availability == "available",
+                )
+                .order_by(WorkflowArtifact.created_at.desc(), WorkflowArtifact.id.desc())
+            ).all()
+            return [self._artifact_record(artifact) for artifact in artifacts]
+
     def get_artifact_by_content(
         self,
         user_id: str,
         project_id: str,
         logical_name: str,
         content_sha256: str,
+        lineage_sha256: str = "",
     ) -> ArtifactRecord | None:
         user_uuid = self._uuid(user_id, not_found_message="Artifact not found.")
         project_uuid = self._uuid(project_id, not_found_message="Artifact not found.")
@@ -1650,6 +1775,7 @@ class WorkflowRepository:
                     WorkflowArtifact.project_id == project_uuid,
                     WorkflowArtifact.logical_name == logical_name,
                     WorkflowArtifact.content_sha256 == content_sha256,
+                    WorkflowArtifact.lineage_sha256 == lineage_sha256,
                     Project.user_id == user_uuid,
                     Project.deleted_at.is_(None),
                 )
@@ -1875,11 +2001,11 @@ class WorkflowRepository:
                 update(WorkflowJob)
                 .where(
                     WorkflowJob.id == job_uuid,
-                    WorkflowJob.status == "running",
-                    WorkflowJob.cancellation_requested.is_(False),
+                    WorkflowJob.status.in_(("running", "cancel_requested")),
                 )
                 .values(
                     status="succeeded",
+                    cancellation_requested=False,
                     result_json=dict(result or {}),
                     error_code="",
                     error_message="",

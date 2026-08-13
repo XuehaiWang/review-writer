@@ -58,6 +58,7 @@ def build_figures_router(
                 )
                 try:
                     built = builder(context, item)
+                    context.checkpoint()
                     result = figures_service.publish_redraw(
                         principal,
                         str(context.project_id),
@@ -106,7 +107,9 @@ def build_figures_router(
                             "errors": errors,
                         }
                     )
-                context.report_progress(index, len(figure_ids))
+                context.repository.update_job_progress(
+                    context.job_id, index, len(figure_ids)
+                )
             return {
                 "figure_count": len(results),
                 "figure_ids": figure_ids,

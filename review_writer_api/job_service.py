@@ -257,7 +257,6 @@ class JobService:
         try:
             context.checkpoint()
             result = handler(context, dict(claimed.payload or {}))
-            context.checkpoint()
             completed = self.repository.mark_job_succeeded(
                 claimed.id, dict(result or {})
             )

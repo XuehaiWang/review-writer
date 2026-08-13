@@ -125,3 +125,47 @@ class FigureManualEditRequest(BaseModel):
     base_mode: StrictStr = Field(default="source", pattern="^(source|redrawn)$")
     editable_svg: StrictStr = Field(default="", max_length=26_500_000)
     full_vector_svg: StrictStr = Field(default="", max_length=26_500_000)
+
+
+class DraftTextSaveRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+    text: StrictStr = Field(min_length=1, max_length=10_000_000)
+
+
+class DraftParagraphSaveRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+    text: StrictStr = Field(min_length=1, max_length=2_000_000)
+
+
+class DraftRestoreRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+    artifact_id: StrictStr = Field(min_length=36, max_length=36)
+
+
+class DraftEvaluationRequest(BaseModel):
+    goal: float = Field(default=90.0, ge=90, le=100)
+
+
+class DraftRewriteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class DraftRewriteDecisionRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+
+
+class DraftApprovalRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+    override_low_score: StrictBool = False
+    override_reason: StrictStr = Field(default="", max_length=10_000)
+
+
+class FinalActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class FinalOverviewTextRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+    title: StrictStr = Field(min_length=1, max_length=500)
+    subtitle: StrictStr = Field(default="", max_length=1_000)
+    labels: list[StrictStr] = Field(default_factory=list, max_length=100)

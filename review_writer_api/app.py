@@ -24,6 +24,8 @@ from .job_service import JobService
 from .native_handlers import NativeWorkflowHandlers
 from .domain_services.library import LibraryService
 from .domain_services.discovery import DiscoveryService
+from .domain_services.drafts import DraftsService
+from .domain_services.final import FinalService
 from .domain_services.figures import FiguresService
 from .domain_services.planning import PlanningService
 from .domain_services.sections import SectionsService
@@ -52,6 +54,8 @@ from .routers.files import build_file_router
 from .routers.jobs import build_job_router
 from .routers.library import build_library_router
 from .routers.discovery import build_discovery_router
+from .routers.drafts import build_drafts_router
+from .routers.final import build_final_router
 from .routers.planning import build_planning_router
 from .routers.sections import build_sections_router
 from .routers.figures import build_figures_router
@@ -161,6 +165,18 @@ def create_app(
         if workflow_repository is not None and artifact_service is not None
         else None
     )
+    drafts_service = (
+        DraftsService(workflow_repository, artifact_service)
+        if workflow_repository is not None and artifact_service is not None
+        else None
+    )
+    final_service = (
+        FinalService(workflow_repository, artifact_service, drafts_service)
+        if workflow_repository is not None
+        and artifact_service is not None
+        and drafts_service is not None
+        else None
+    )
     native_handlers = (
         NativeWorkflowHandlers(
             scientific_runner,
@@ -182,6 +198,8 @@ def create_app(
             planning_service=planning_service,
             sections_service=sections_service,
             figures_service=figures_service,
+            drafts_service=drafts_service,
+            final_service=final_service,
         )
         if (
             workflow_repository is not None
@@ -258,6 +276,8 @@ def create_app(
     app.state.planning_service = planning_service
     app.state.sections_service = sections_service
     app.state.figures_service = figures_service
+    app.state.drafts_service = drafts_service
+    app.state.final_service = final_service
     app.state.container = container
     web_root = Path(__file__).resolve().parent / "web"
 
@@ -631,6 +651,24 @@ def create_app(
             build_figures_router(
                 current_principal,
                 figures_service,
+                job_service,
+                native_handlers,
+            )
+        )
+    if drafts_service is not None and job_service is not None:
+        app.include_router(
+            build_drafts_router(
+                current_principal,
+                drafts_service,
+                job_service,
+                native_handlers,
+            )
+        )
+    if final_service is not None and job_service is not None:
+        app.include_router(
+            build_final_router(
+                current_principal,
+                final_service,
                 job_service,
                 native_handlers,
             )

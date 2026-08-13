@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -60,6 +61,17 @@ class ArtifactService:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
+
+    @staticmethod
+    def _lineage_sha256(metadata: dict[str, Any] | None) -> str:
+        canonical = json.dumps(
+            dict(metadata or {}),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
 
     @staticmethod
     def _secure_storage_root(parent: Path, name: str) -> Path:
@@ -144,11 +156,14 @@ class ArtifactService:
                 ) from exc
 
         digest = self._sha256(source)
+        artifact_metadata = dict(metadata or {})
+        lineage_sha256 = self._lineage_sha256(artifact_metadata)
         existing = self.repository.get_artifact_by_content(
             user_id,
             project_id,
             logical.as_posix(),
             digest,
+            lineage_sha256,
         )
         if existing is not None:
             source.unlink()
@@ -189,11 +204,12 @@ class ArtifactService:
             artifact_type=str(artifact_type or destination.suffix.lstrip(".") or "file"),
             relative_path=relative_path,
             content_sha256=digest,
+            lineage_sha256=lineage_sha256,
             size_bytes=stat.st_size,
             mtime_ns=stat.st_mtime_ns,
             producer_stage=producer_stage,
             producer_run_id=run_id,
-            metadata=metadata,
+            metadata=artifact_metadata,
             make_current=make_current,
         )
 
@@ -230,12 +246,14 @@ class ArtifactService:
                     artifact_type=library.kind,
                     relative_path=library.relative_path,
                     content_sha256=library.content_sha256,
+                    lineage_sha256="",
                     size_bytes=library.size_bytes,
                     mtime_ns=library.mtime_ns,
                     availability=library.availability,
                     producer_stage="library",
                     producer_run_id=None,
                     metadata={"paper_id": library.paper_id, "kind": library.kind},
+                    created_at=library.created_at,
                 )
             if record.availability != "available" or not path.is_file():
                 raise ArtifactFileMissing(

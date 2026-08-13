@@ -224,6 +224,39 @@ class JobServiceTests(unittest.TestCase):
         self.assertEqual("JOB_EXECUTION_FAILED", final.error_code)
         self.assertNotIn("sk-do-not-store", final.error_message)
 
+    def test_completion_wins_when_cancel_arrives_after_handler_commit_point(self) -> None:
+        entered_completion = threading.Event()
+        release_completion = threading.Event()
+        original = self.repository.mark_job_succeeded
+
+        def delayed_completion(job_id, result=None):
+            entered_completion.set()
+            release_completion.wait(2)
+            return original(job_id, result)
+
+        self.repository.mark_job_succeeded = delayed_completion
+        self.service.register_handler(
+            "completion-wins", lambda _context, _payload: {"published": True}
+        )
+        self.service.start()
+        job = self.service.submit(
+            self.principal,
+            scope="project",
+            project_id=self.project_id,
+            job_type="completion-wins",
+            idempotency_key="completion-wins",
+            payload={},
+        )
+        self.assertTrue(entered_completion.wait(2))
+        requested = self.service.request_cancel(self.principal, job.id)
+        self.assertEqual("cancel_requested", requested.status)
+        release_completion.set()
+        completed = self._wait_for(job.id)
+        self.repository.mark_job_succeeded = original
+        self.assertEqual("succeeded", completed.status)
+        self.assertFalse(completed.cancellation_requested)
+        self.assertEqual({"published": True}, completed.result)
+
     def test_startup_interrupts_running_work_and_retry_creates_a_linked_attempt(self) -> None:
         original = self.repository.create_or_get_job(
             self.principal.user_id,

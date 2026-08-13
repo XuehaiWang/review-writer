@@ -16,6 +16,7 @@ from sqlalchemy.orm import sessionmaker
 from review_writer_api.app import create_app
 from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User
+from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
 from review_writer_api.security import Principal, Role
 
 
@@ -56,6 +57,35 @@ class NativeFigureApiTestCase(unittest.TestCase):
             self.other_project_id = str(other.id)
             self.first = Principal(str(first.id), frozenset({Role.USER}), first.email)
             self.second = Principal(str(second.id), frozenset({Role.USER}), second.email)
+            for index, paper_id in enumerate(("P001", "P002"), start=1):
+                session.add(
+                    LibraryPaper(
+                        user_id=first.id,
+                        paper_id=paper_id,
+                        content_sha256=f"{index:064x}",
+                        original_filename=f"{paper_id}.pdf",
+                        title=f"Source {paper_id}",
+                        authors_json=[],
+                        keywords_json=[],
+                        tags_json={},
+                        metadata_json={},
+                        pdf_relative_path=f"review-library/{paper_id}.pdf",
+                        markdown_relative_path=f"review-library/{paper_id}.md",
+                        status="active",
+                    )
+                )
+                session.add(
+                    LibraryArtifact(
+                        user_id=first.id,
+                        paper_id=paper_id,
+                        kind="pdf",
+                        relative_path=f"review-library/.artifacts/{paper_id}.pdf",
+                        content_sha256=f"{index + 100:064x}",
+                        size_bytes=1,
+                        mtime_ns=index,
+                        availability="available",
+                    )
+                )
         self.current = self.first
         self.output_size = (20, 10)
         self.integrity_status = "pass"
@@ -125,9 +155,15 @@ class NativeFigureApiTestCase(unittest.TestCase):
             settings,
             principal_provider=lambda: self.current,
             session_factory_override=self.sessions,
-            native_workflow_overrides={"figures.redraw": redraw},
+            native_workflow_overrides={
+                "figures.redraw": redraw,
+                **self.extra_native_workflow_overrides(),
+            },
         )
         self._seed_sections()
+
+    def extra_native_workflow_overrides(self) -> dict:
+        return {}
 
     def tearDown(self) -> None:
         Base.metadata.drop_all(self.engine)

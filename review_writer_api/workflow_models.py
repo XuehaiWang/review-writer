@@ -157,7 +157,8 @@ class WorkflowArtifact(Base):
             "project_id",
             "logical_name",
             "content_sha256",
-            name="uq_workflow_artifact_project_logical_content",
+            "lineage_sha256",
+            name="uq_workflow_artifact_project_logical_content_lineage",
         ),
         Index("ix_workflow_artifacts_project_type", "project_id", "artifact_type"),
     )
@@ -171,6 +172,9 @@ class WorkflowArtifact(Base):
     artifact_type: Mapped[str] = mapped_column(String(96), nullable=False)
     relative_path: Mapped[str] = mapped_column(String(2048), nullable=False)
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    lineage_sha256: Mapped[str] = mapped_column(
+        String(64), default="", nullable=False
+    )
     size_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     mtime_ns: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     availability: Mapped[str] = mapped_column(String(32), default="available", nullable=False)

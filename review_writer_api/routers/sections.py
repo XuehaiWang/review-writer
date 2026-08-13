@@ -62,6 +62,7 @@ def build_sections_router(
                         raise
                     context.checkpoint()
             principal = Principal(context.user_id, frozenset({Role.USER}))
+            context.checkpoint()
             result = sections_service.publish_generation(
                 principal,
                 str(context.project_id),
@@ -69,7 +70,7 @@ def build_sections_router(
                 built,
                 attempts=attempts,
             )
-            context.report_progress(total, total)
+            context.repository.update_job_progress(context.job_id, total, total)
             return result
 
         job_service.register_handler("sections.generate", section_handler)
