@@ -12,6 +12,7 @@ dynamic = ["dependencies"]
 
 [project.scripts]
 review-writer-api = "review_writer_api.__main__:main"
+review-writer-migrate-workflow = "review_writer_api.migrate_workflow:main"
 
 [tool.setuptools.packages.find]
 include = ["review_writer_core*", "review_writer_api*"]

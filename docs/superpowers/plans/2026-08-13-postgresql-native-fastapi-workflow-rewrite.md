@@ -234,39 +234,39 @@ feat: add isolated PostgreSQL workflow repository
 - Consumes: read-only legacy schema from `view/workflow_store.py`, Task 3 repository, hosted workspace layout, and explicit local owner email.
 - Produces: `MigrationInventory`, `MigrationReport`, `inventory_legacy_workflows()`, `migrate_legacy_workflows()`, and `validate_migrated_workflows()`.
 
-- [ ] **Step 1: Write representative legacy SQLite fixtures in tests**
+- [x] **Step 1: Write representative legacy SQLite fixtures in tests**
 
 Create SQLite files at test runtime containing all legacy tables, two projects, stage runs and states, artifact versions and dependencies, current pointers, project and library jobs, stale states, duplicate content hashes, one available file, and one pre-existing missing file.
 
-- [ ] **Step 2: Write failing dry-run, import, idempotency, and failure-marker tests**
+- [x] **Step 2: Write failing dry-run, import, idempotency, and failure-marker tests**
 
 Assert dry-run changes no PostgreSQL rows; successful import preserves IDs/counts/JSON/timestamps; rerun does not duplicate; a broken foreign key or ownership mapping leaves readiness unset; missing files are imported as `availability=missing` and require explicit acknowledgement.
 
-- [ ] **Step 3: Verify RED**
+- [x] **Step 3: Verify RED**
 
 Run: `.venv\Scripts\python.exe -m unittest review_writer_api.tests.test_workflow_migration -v`
 
-- [ ] **Step 4: Implement consistent SQLite backup and inventory**
+- [x] **Step 4: Implement consistent SQLite backup and inventory**
 
 Open sources read-only, use `sqlite3.Connection.backup()` into a timestamped backup directory, hash the backup, record table counts, and reject a local workspace without `--owner-email`.
 
-- [ ] **Step 5: Implement transactional import and validation**
+- [x] **Step 5: Implement transactional import and validation**
 
 Map hosted directory user UUIDs and project slugs to PostgreSQL UUIDs. Convert absolute paths to safe relative paths. Map `_library_` jobs to `scope=library`. Preserve legacy IDs and original diagnostic paths in migration metadata. Insert the ready marker only after every report is successful and any missing-file report is explicitly accepted.
 
-- [ ] **Step 6: Add the maintenance CLI**
+- [x] **Step 6: Add the maintenance CLI**
 
 Expose:
 
 ```text
 review-writer-migrate-workflow inventory --workspace-root PATH --report report.json
-review-writer-migrate-workflow migrate --workspace-root PATH --backup-root PATH --report report.json
+review-writer-migrate-workflow migrate --workspace-root PATH --backup-root PATH --report report.json --confirm-stopped
 review-writer-migrate-workflow validate --workspace-root PATH --report report.json
 ```
 
 `migrate` requires a stopped-mode confirmation flag and refuses to run when an application heartbeat is current.
 
-- [ ] **Step 7: Verify, document rollback, and commit**
+- [x] **Step 7: Verify, document rollback, and commit**
 
 Run migration tests twice, inspect the JSON report, and document backup, dry run, migration, validation, acknowledgement, and rollback commands. Commit:
 

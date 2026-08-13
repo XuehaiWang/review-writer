@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from .auth import PASSWORD_MIN_LENGTH, AuthError, AuthService
 from .config import ApiSettings
 from .credentials import CredentialCipher, ProviderSettingsError, ProviderSettingsService
-from .database import create_session_factory
+from .database import create_session_factory, utc_now
 from .errors import WorkflowError
 from .repositories import (
     HostedProjectRepository,
@@ -102,9 +103,35 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        yield
-        if engine is not None:
-            engine.dispose()
+        heartbeat_task = None
+
+        async def heartbeat_loop() -> None:
+            while True:
+                workflow_repository.set_system_state(
+                    "application_heartbeat",
+                    {"status": "running", "observed_at": utc_now().isoformat()},
+                )
+                await asyncio.sleep(10)
+
+        try:
+            if workflow_repository is not None:
+                workflow_repository.set_system_state(
+                    "application_heartbeat",
+                    {"status": "running", "observed_at": utc_now().isoformat()},
+                )
+                heartbeat_task = asyncio.create_task(heartbeat_loop())
+            yield
+        finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await heartbeat_task
+                workflow_repository.set_system_state(
+                    "application_heartbeat",
+                    {"status": "stopped", "observed_at": utc_now().isoformat()},
+                )
+            if engine is not None:
+                engine.dispose()
 
     app = FastAPI(
         title="Review Writer API",

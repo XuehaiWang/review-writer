@@ -204,6 +204,54 @@ docker compose --env-file .env.hosted down
 
 托管模式默认关闭 `/api/docs` 和 `/api/openapi.json`；确需内部调试时可临时设置 `REVIEW_WRITER_EXPOSE_API_DOCS=true`。
 
+### 旧 SQLite 工作流一次性迁移
+
+工作流切换到 PostgreSQL 前必须停掉 API 写入，但 PostgreSQL 要保持运行。迁移器只读打开每个
+`workflow.sqlite3`，先用 SQLite Backup API 建立一致备份，再按用户和项目导入；任何源失败时都不会写入
+`workflow_ready`。原 SQLite 文件不会自动删除，迁移后继续作为只读回滚备份保留。
+
+```powershell
+# 1. 只清点，不写 PostgreSQL，也不创建备份
+.\.venv\Scripts\python.exe -m review_writer_api.migrate_workflow inventory `
+  --workspace-root .review-writer\hosted-workspaces `
+  --report migration-reports\inventory.json
+
+# 2. 干跑；本地单用户根目录还必须增加 --owner-email user@example.com
+.\.venv\Scripts\python.exe -m review_writer_api.migrate_workflow migrate `
+  --workspace-root .review-writer\hosted-workspaces `
+  --backup-root migration-backups `
+  --report migration-reports\dry-run.json `
+  --dry-run
+
+# 3. 正式导入。先不要加入 --accept-missing-files
+docker compose --env-file .env.hosted stop api
+.\.venv\Scripts\python.exe -m review_writer_api.migrate_workflow migrate `
+  --workspace-root .review-writer\hosted-workspaces `
+  --backup-root migration-backups `
+  --report migration-reports\migration.json `
+  --confirm-stopped
+
+# 4. 检查报告中的 missing_files；人工确认这些历史文件确实已不存在后，幂等重跑并允许缺失
+.\.venv\Scripts\python.exe -m review_writer_api.migrate_workflow migrate `
+  --workspace-root .review-writer\hosted-workspaces `
+  --backup-root migration-backups `
+  --report migration-reports\migration-accepted.json `
+  --confirm-stopped `
+  --accept-missing-files
+
+# 5. 按保存的报告复核迁移台账、校验和与当前指针
+.\.venv\Scripts\python.exe -m review_writer_api.migrate_workflow validate `
+  --workspace-root .review-writer\hosted-workspaces `
+  --report migration-reports\migration-accepted.json
+```
+
+托管工作区的一级目录名必须是已存在用户的 UUID；本地单用户数据库必须通过 `--owner-email` 明确指定
+接收用户。备份目录、迁移报告和旧 SQLite 文件都不要放入 Git，也不要在验证完成后立即删除。
+
+正式迁移前还要对当前 PostgreSQL 做一次独立备份。若报告失败或校验失败，保持 API 停止，不要写
+`workflow_ready`，恢复迁移前的 PostgreSQL 备份后再排查；SQLite 源文件和迁移器生成的时间戳备份均未被
+修改，可以重新清点和干跑。只有 `validate` 返回 0 且报告显示 `ready: true` 后才能重新启动 API。
+
 ## API 设置
 
 推荐在网页的 **API Settings** 中配置，而不是直接编辑代码。设置页包含：
