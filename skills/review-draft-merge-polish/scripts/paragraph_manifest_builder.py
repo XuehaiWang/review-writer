@@ -2,9 +2,24 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
+
+_BOOTSTRAP_ROOT = next(
+    (parent for parent in Path(__file__).resolve().parents if (parent / "review_writer_core").is_dir()),
+    None,
+)
+if _BOOTSTRAP_ROOT is None:
+    raise RuntimeError("Could not locate the Review Writer workspace")
+if str(_BOOTSTRAP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BOOTSTRAP_ROOT))
+
+from review_writer_core.paragraph_markers import (  # noqa: E402
+    build_paragraph_manifest,
+    ensure_prose_paragraph_markers,
+)
 
 PARAGRAPH_ID_RE = re.compile(
     r"<!--\s*paragraph_id:\s*([A-Za-z0-9_.:-]+)\s*-->"
@@ -79,39 +94,14 @@ def build_manifest(review_root: Path, project_id: str) -> tuple[dict[str, Any], 
     stage_dir = Path(review_root) / "review-projects" / project_id / "04_first_draft"
     draft_path = stage_dir / "first_draft.md"
     raw = draft_path.read_text(encoding="utf-8")
-    body, references = split_body_and_references(raw)
-    sections = _numbered_sections(body)
-    rebuilt: list[str] = []
-    position = 0
-    manifest_sections: list[dict[str, Any]] = []
-    changed = False
-
-    for start, end, section_id, heading in sections:
-        rebuilt.append(body[position:start])
-        section_text, paragraph_ids, section_changed = _inject_section_markers(
-            body[start:end], section_id
-        )
-        rebuilt.append(section_text)
-        changed = changed or section_changed
-        manifest_sections.append(
-            {
-                "section_id": section_id,
-                "heading": heading,
-                "paragraph_count": len(paragraph_ids),
-                "paragraphs": [
-                    {"paragraph_id": paragraph_id} for paragraph_id in paragraph_ids
-                ],
-            }
-        )
-        position = end
-    rebuilt.append(body[position:])
+    rebuilt, marker_report = ensure_prose_paragraph_markers(raw)
+    changed = bool(marker_report.get("changed"))
     if changed:
-        draft_path.write_text("".join(rebuilt) + references, encoding="utf-8")
+        temporary = draft_path.with_suffix(".md.markers.tmp")
+        temporary.write_text(rebuilt, encoding="utf-8")
+        temporary.replace(draft_path)
 
-    manifest = {
-        "project_id": project_id,
-        "paragraph_count": sum(section["paragraph_count"] for section in manifest_sections),
-        "sections": manifest_sections,
-    }
+    manifest = build_paragraph_manifest(rebuilt, project_id)
+    manifest["marker_report"] = marker_report
     _write_json(stage_dir / "paragraph_manifest.json", manifest)
     return manifest, changed

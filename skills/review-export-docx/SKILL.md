@@ -28,11 +28,13 @@ review-projects/<project_id>/05_final_audit/final_draft.md
 
 ## Dependencies
 
-The dashboard uses `scripts/run_md2docx.py`, which installs `python-docx` and
-Pillow once into `review-export-docx/.deps/` when they are not already present.
-This keeps the global Python installation unchanged. `latex2word` remains
-optional; without it, math is rendered as italic plain text and a warning is
-printed.
+The dashboard uses `scripts/run_md2docx.py`. It first validates the
+`python-docx` and Pillow packages supplied by the active deployment, including
+Pillow's compiled `PIL._imaging` extension. On a clean workstation it installs
+a fallback into a Python-ABI/platform-specific directory below
+`review-export-docx/.deps/`. Incomplete caches and caches from another OS or
+Python version are never reused. `latex2word` remains optional; without it,
+math is rendered as italic plain text and a warning is printed.
 
 MinerU LaTeX is normalized before export. Known wrappers and symbols such as
 `\\mathrm`, `\\mathsf`, `\\mathbf`, and `\\prime` are converted to Word math

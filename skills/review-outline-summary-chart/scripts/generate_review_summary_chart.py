@@ -5,9 +5,9 @@ Runs at the end of the review-writing workflow. Reads the final (or first)
 draft of the review and produces a visual content-summary chart at two
 granularities:
 
-- **full** (全文大纲): a review-level Mermaid flowchart showing the section
-  hierarchy, the number of cited papers per section, and the logical flow
-  between sections.
+- **full** (全文大纲): a review-level flowchart showing the section hierarchy,
+  the number of cited papers per section, and the logical flow between
+  sections. HTML/JSON retain Mermaid data; PNG output uses Pillow directly.
 - **section** (小节大纲): per-section detail cards listing each subsection,
   its key summary sentence, and the papers cited inside it (mapped from [n]
   callouts via citations.json, enriched by section_blueprint.json claims).
@@ -36,17 +36,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
-import shutil
-import subprocess
-import tempfile
 import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageChops, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 
 
 # ── Data structures ──────────────────────────────────────────────────────────
@@ -499,26 +497,53 @@ def generate_section_mermaid(section: ReviewSection) -> str:
 
 # ── Offline PNG output ───────────────────────────────────────────────────────
 
-_FONT_CANDIDATES = {
-    "regular": [
-        Path("C:/Windows/Fonts/msyh.ttc"),
-        Path("C:/Windows/Fonts/arial.ttf"),
-        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-    ],
-    "bold": [
-        Path("C:/Windows/Fonts/msyhbd.ttc"),
-        Path("C:/Windows/Fonts/arialbd.ttf"),
-        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
-    ],
-}
+def _font_candidates(*, bold: bool) -> list[Path]:
+    """Return configurable, cross-platform font candidates in priority order."""
+    env_name = (
+        "REVIEW_WRITER_CHART_FONT_BOLD" if bold else "REVIEW_WRITER_CHART_FONT_REGULAR"
+    )
+    candidates: list[Path] = []
+    configured = os.environ.get(env_name, "").strip()
+    if configured:
+        candidates.append(Path(configured).expanduser())
+
+    windows_dir = os.environ.get("WINDIR", "").strip()
+    if windows_dir:
+        font_dir = Path(windows_dir) / "Fonts"
+        candidates.extend(
+            [
+                font_dir / ("msyhbd.ttc" if bold else "msyh.ttc"),
+                font_dir / ("arialbd.ttf" if bold else "arial.ttf"),
+            ]
+        )
+
+    candidates.extend(
+        [
+            Path(
+                "/usr/share/fonts/opentype/noto/"
+                + ("NotoSansCJK-Bold.ttc" if bold else "NotoSansCJK-Regular.ttc")
+            ),
+            Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+            Path(
+                "/usr/share/fonts/truetype/dejavu/"
+                + ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf")
+            ),
+            Path(
+                "/Library/Fonts/"
+                + ("Arial Bold.ttf" if bold else "Arial.ttf")
+            ),
+        ]
+    )
+    return candidates
 
 
 def _font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
-    for candidate in _FONT_CANDIDATES["bold" if bold else "regular"]:
+    for candidate in _font_candidates(bold=bold):
         if candidate.exists():
-            return ImageFont.truetype(str(candidate), size=size)
+            try:
+                return ImageFont.truetype(str(candidate), size=size)
+            except OSError:
+                continue
     return ImageFont.load_default()
 
 
@@ -571,97 +596,83 @@ def _save_png(image: Image.Image, path: Path) -> dict[str, str]:
     return {"path": path.name, "sha256": sha256_file(path)}
 
 
-_EDGE_EXECUTABLE_CANDIDATES = (
-    Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"),
-    Path("C:/Program Files/Microsoft/Edge/Application/msedge.exe"),
-)
+def render_full_static_png(
+    sections: list[ReviewSection], review_title: str, path: Path
+) -> dict[str, str]:
+    """Render an offline full-review flow chart when no browser is installed."""
+    rows = sections or [ReviewSection("Review content", 1, 0)]
+    width = 1800
+    margin = 90
+    header_height = 150
+    row_height = 126
+    gap = 40
+    height = max(720, margin * 2 + header_height + 70 + len(rows) * (row_height + gap))
+    image = Image.new("RGB", (width, height), "#f5f5f5")
+    draw = ImageDraw.Draw(image)
+    title_font = _font(38, bold=True)
+    heading_font = _font(27, bold=True)
+    meta_font = _font(20)
 
+    header = (margin, margin, width - margin, margin + header_height)
+    draw.rounded_rectangle(header, radius=24, fill="#e8eaf6", outline="#3f51b5", width=4)
+    title_lines = _wrapped_lines(
+        draw, plain_chart_text(review_title) or "Review Article", title_font, width - 2 * margin - 100
+    )[:2]
+    _draw_centered_lines(draw, header, title_lines, title_font, fill="#283593")
 
-def find_edge_executable() -> Path | None:
-    """Return the local headless browser used to rasterize Mermaid itself."""
-    for candidate in _EDGE_EXECUTABLE_CANDIDATES:
-        if candidate.exists():
-            return candidate
-    for command in ("msedge.exe", "msedge"):
-        resolved = shutil.which(command)
-        if resolved:
-            return Path(resolved)
-    return None
-
-
-def generate_full_chart_export_html(full_mermaid: str) -> str:
-    """Make a minimal page containing the same full-review Mermaid figure."""
-    return f"""<!DOCTYPE html>
-<html lang=\"en\">
-<head>
-<meta charset=\"UTF-8\">
-<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
-<title>Full-Review Structure Chart</title>
-<script src=\"https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js\"></script>
-<style>
-* {{ box-sizing: border-box; margin: 0; padding: 0; }}
-body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; padding: 24px; }}
-.chart-section {{ background: white; border-radius: 8px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow-x: auto; }}
-.chart-section h2 {{ font-size: 1.2rem; margin-bottom: 16px; color: #555; }}
-</style>
-</head>
-<body>
-<div class=\"chart-section\">
-    <h2>📊 全文大纲 · Full-Review Structure Chart</h2>
-    <div class=\"mermaid\">{full_mermaid}</div>
-</div>
-<script>mermaid.initialize({{ startOnLoad: true, theme: 'default', flowchart: {{ useMaxWidth: true, htmlLabels: true }} }});</script>
-</body>
-</html>"""
-
-
-def trim_browser_screenshot(path: Path, background: str) -> None:
-    """Remove the unused lower browser viewport while preserving chart margins."""
-    image = Image.open(path).convert("RGB")
-    canvas = Image.new("RGB", image.size, background)
-    bbox = ImageChops.difference(image, canvas).getbbox()
-    if bbox is None:
-        return
-    bottom = min(image.height, bbox[3] + 24)
-    if bottom < image.height:
-        image.crop((0, 0, image.width, bottom)).save(path, format="PNG", optimize=True)
-
-
-def render_full_mermaid_png(full_mermaid: str, path: Path) -> dict[str, str]:
-    """Rasterize the HTML's Full-Review Structure Chart with local Edge."""
-    edge = find_edge_executable()
-    if edge is None:
-        raise RuntimeError("Microsoft Edge is required to render the Mermaid full-review chart PNG.")
-
-    with tempfile.TemporaryDirectory(prefix=".review-summary-chart-", dir=path.parent) as temp_dir:
-        temp = Path(temp_dir)
-        html_path = temp / "full-review-structure-chart.html"
-        profile_path = temp / "edge-profile"
-        write_text(html_path, generate_full_chart_export_html(full_mermaid))
-        result = subprocess.run(
-            [
-                str(edge), "--headless=new", "--disable-gpu", "--no-first-run", "--no-sandbox",
-                f"--user-data-dir={profile_path}", "--allow-file-access-from-files",
-                "--run-all-compositor-stages-before-draw", "--virtual-time-budget=8000",
-                "--window-size=1800,1600", f"--screenshot={path}", html_path.as_uri(),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
+    palette = {
+        "abstract": ("#e8f5e9", "#4caf50"),
+        "introduction": ("#e3f2fd", "#2196f3"),
+        "results": ("#fff3e0", "#ff9800"),
+        "discussion": ("#f3e5f5", "#9c27b0"),
+        "conclusion": ("#fce4ec", "#e91e63"),
+        "methods": ("#e0f7fa", "#00bcd4"),
+    }
+    previous_bottom = header[3]
+    for index, section in enumerate(rows, start=1):
+        top = previous_bottom + gap
+        box = (margin + 120, top, width - margin - 120, top + row_height)
+        center_x = width // 2
+        draw.line((center_x, previous_bottom, center_x, top - 13), fill="#94a3b8", width=4)
+        draw.polygon(
+            [(center_x - 9, top - 23), (center_x + 9, top - 23), (center_x, top - 11)],
+            fill="#94a3b8",
         )
-        if result.returncode or not path.exists() or path.stat().st_size == 0:
-            detail = result.stdout.strip() or f"exit code {result.returncode}"
-            raise RuntimeError(f"Edge could not render the Mermaid full-review chart: {detail}")
-        trim_browser_screenshot(path, "#f5f5f5")
-    return {"path": path.name, "sha256": sha256_file(path)}
+        fill, stroke = palette.get(section.section_type, ("#fafafa", "#9ca3af"))
+        draw.rounded_rectangle(box, radius=20, fill=fill, outline=stroke, width=4)
+        label = plain_chart_text(section.heading) or f"Section {index}"
+        lines = _wrapped_lines(draw, label, heading_font, box[2] - box[0] - 260)[:2]
+        text_box = (box[0] + 34, box[1] + 12, box[2] - 220, box[3] - 12)
+        _draw_centered_lines(draw, text_box, lines, heading_font, fill="#1f2937", spacing=5)
+        paper_count = len(section.cited_paper_ids)
+        badge = (box[2] - 190, box[1] + 30, box[2] - 30, box[3] - 30)
+        draw.rounded_rectangle(badge, radius=15, fill="#ffffff", outline=stroke, width=2)
+        _draw_centered_lines(
+            draw,
+            badge,
+            [f"{paper_count} papers"],
+            meta_font,
+            fill="#475569",
+            spacing=4,
+        )
+        previous_bottom = box[3]
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = _save_png(image, path)
+    manifest["renderer"] = "pillow-static"
+    return manifest
 
 
-def render_full_chart_png(full_mermaid: str, path: Path) -> dict[str, str]:
-    """Export the actual Full-Review Structure Chart, rather than a proxy layout."""
-    return render_full_mermaid_png(full_mermaid, path)
+def render_full_chart_png(
+    full_mermaid: str,
+    path: Path,
+    *,
+    sections: list[ReviewSection] | None = None,
+    review_title: str = "Review Article",
+) -> dict[str, str]:
+    """Export the full chart with the same browser-free renderer on every host."""
+    _ = full_mermaid  # Retained in the call contract and JSON/HTML artifacts.
+    return render_full_static_png(sections or [], review_title, path)
 
 
 def render_section_chart_png(section: ReviewSection, path: Path) -> dict[str, str]:
@@ -954,6 +965,8 @@ def run(args: argparse.Namespace) -> int:
         image_manifest["full"] = render_full_chart_png(
             full_mermaid,
             out_dir / "review_summary_chart.png",
+            sections=body_sections or sections,
+            review_title=review_title,
         )
     if args.scope in ("section", "both"):
         for index, section in enumerate(body_chart_sections, start=1):

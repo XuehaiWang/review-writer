@@ -62,6 +62,20 @@ class RepositoryHygieneChecks(unittest.TestCase):
             text = (ROOT / "view" / "assets" / "dashboard" / name).read_text(encoding="utf-8")
             self.assertIsNone(assignments.search(text), name)
 
+    def test_fastapi_shell_keeps_dashboard_transport_behind_one_boundary(self) -> None:
+        api = ROOT / "review_writer_api"
+        app = (api / "app.py").read_text(encoding="utf-8")
+        gateway = (api / "workflow_compat.py").read_text(encoding="utf-8")
+        executor = (api / "dashboard_executor.py").read_text(encoding="utf-8")
+
+        self.assertFalse((api / "legacy_adapter.py").exists())
+        self.assertNotIn("DashboardHandler", app)
+        self.assertNotIn("serve_review_dashboard", app)
+        self.assertNotIn("dispatch_legacy", app)
+        self.assertIn("workflow_gateway.register_routes", app)
+        self.assertIn('"Deprecation": "true"', gateway)
+        self.assertIn("DashboardHandler", executor)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,7 +22,7 @@ STAGES: list[dict[str, Any]] = [
             "topic_input.md",
             "selected_discovery_results.json",
         ],
-        "human_check": "Check keywords and selected papers in http://127.0.0.1:8765/discovery.",
+        "human_check": "Check keywords and selected papers on the /discovery page.",
         "confirmed_by": ["selected_discovery_results.json"],
     },
     {
@@ -94,7 +94,7 @@ STAGES: list[dict[str, Any]] = [
             "merge_report.md",
             "remaining_issues.md",
         ],
-        "human_check": "Review the unified first draft in http://127.0.0.1:8765/draft.",
+        "human_check": "Review the unified first draft on the /draft page.",
     },
     {
         "id": "draft_feedback_loop",

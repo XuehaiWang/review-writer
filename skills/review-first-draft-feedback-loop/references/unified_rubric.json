@@ -55,7 +55,7 @@
     {"id": "G09", "weight": 2, "rule": "Keep figure, caption, and nearby quantitative-claim identity linked to the source record."},
     {"id": "G10", "weight": 1, "rule": "Give every blocking finding a precise location, severity, confidence, and rewrite route."},
     {"id": "G11", "weight": 1, "rule": "Do not mechanically penalize passive methods-style prose; require meaning-preserving edits."},
-    {"id": "G12", "weight": 2, "rule": "Require first-draft release before conclusion/final polish and final-release approval before export."}
+    {"id": "G12", "weight": 2, "rule": "Report draft-quality and final-release state accurately without making the host's independent optional generation actions depend on this quality loop."}
   ],
   "hard_regressions": [
     "invalid or missing citation map",

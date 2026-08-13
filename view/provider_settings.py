@@ -7,10 +7,24 @@ import json
 import os
 import re
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+# The legacy dashboard can import this file as top-level ``provider_settings``
+# while FastAPI imports it as ``view.provider_settings``. Both names must point
+# to one module because decrypted hosted credentials live only in this
+# process-local registry.
+_THIS_MODULE = sys.modules[__name__]
+if __name__ == "provider_settings":
+    sys.modules.setdefault("view.provider_settings", _THIS_MODULE)
+    _VIEW_PACKAGE = sys.modules.get("view")
+    if _VIEW_PACKAGE is not None:
+        setattr(_VIEW_PACKAGE, "provider_settings", _THIS_MODULE)
+elif __name__ == "view.provider_settings":
+    sys.modules.setdefault("provider_settings", _THIS_MODULE)
 
 REVIEW_ROOT = Path(__file__).resolve().parents[1]
 if str(REVIEW_ROOT) not in sys.path:
@@ -29,6 +43,28 @@ SETTINGS_RELATIVE_PATH = Path(".review-writer") / "provider-settings.json"
 TEXT_WIRE_APIS = {"chat-completions", "responses"}
 IMAGE_WIRE_APIS = {"images", "chat-completions"}
 _MODEL_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,128}$")
+_RUNTIME_ENVIRONMENT_LOCK = threading.RLock()
+_RUNTIME_ENVIRONMENTS: dict[str, dict[str, str]] = {}
+_ISOLATED_RUNTIME_ROOTS: set[str] = set()
+PROVIDER_ENVIRONMENT_KEYS = frozenset(
+    {
+        "MINERU_API_TOKEN",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "REVIEW_WRITING_API_KEY",
+        "REVIEW_WRITING_BASE_URL",
+        "REVIEW_WRITING_MODEL",
+        "REVIEW_WRITING_WIRE_API",
+        "REVIEW_CONCLUSION_API_KEY",
+        "REVIEW_CONCLUSION_MODEL",
+        "REVIEW_CONCLUSION_WIRE_API",
+        "IMAGE_OPENAI_API_KEY",
+        "IMAGE_OPENAI_BASE_URL",
+        "IMAGE_OPENAI_MODEL",
+        "IMAGE_OPENAI_WIRE_API",
+        "IMAGE_FALLBACK_MODEL",
+    }
+)
 
 
 def utc_now() -> str:
@@ -166,6 +202,32 @@ def apply_saved_provider_settings(review_root: Path) -> dict[str, str]:
     return values
 
 
+def register_runtime_provider_environment(
+    review_root: Path,
+    values: dict[str, str],
+    *,
+    isolated: bool = False,
+) -> None:
+    """Register in-memory provider values for one hosted user workspace.
+
+    Hosted credentials stay encrypted in PostgreSQL.  They are decrypted only
+    when a workflow is invoked and are never written to the user's workspace.
+    """
+
+    key = str(Path(review_root).resolve())
+    cleaned = {
+        str(name): str(value)
+        for name, value in values.items()
+        if name in PROVIDER_ENVIRONMENT_KEYS and str(value).strip()
+    }
+    with _RUNTIME_ENVIRONMENT_LOCK:
+        _RUNTIME_ENVIRONMENTS[key] = cleaned
+        if isolated:
+            _ISOLATED_RUNTIME_ROOTS.add(key)
+        else:
+            _ISOLATED_RUNTIME_ROOTS.discard(key)
+
+
 def provider_subprocess_environment(review_root: Path) -> dict[str, str]:
     """Build a fresh environment for every workflow subprocess.
 
@@ -176,6 +238,13 @@ def provider_subprocess_environment(review_root: Path) -> dict[str, str]:
     """
     root = Path(review_root).resolve()
     environment = dict(os.environ)
+    runtime_key = str(root)
+    with _RUNTIME_ENVIRONMENT_LOCK:
+        runtime_values = dict(_RUNTIME_ENVIRONMENTS.get(runtime_key) or {})
+        isolated = runtime_key in _ISOLATED_RUNTIME_ROOTS
+    if isolated:
+        for key in PROVIDER_ENVIRONMENT_KEYS:
+            environment.pop(key, None)
     environment.update(_read_dotenv_values(root))
     saved = {
         str(key): str(value)
@@ -183,6 +252,7 @@ def provider_subprocess_environment(review_root: Path) -> dict[str, str]:
         if str(key).strip() and isinstance(value, str)
     }
     environment.update(saved)
+    environment.update(runtime_values)
     return environment
 
 

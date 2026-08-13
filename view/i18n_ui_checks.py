@@ -78,7 +78,12 @@ class DashboardI18nChecks(unittest.TestCase):
     def test_stage_actions_mount_by_stable_dom_contract_in_every_language(self) -> None:
         source = (ASSET_DIR / "review-ui.js").read_text(encoding="utf-8")
         self.assertIn("function stageActionHost(current)", source)
-        for selector in ('library: "#libraryStageAction"', 'matrix: "#summary"', 'blueprint: "#summary"', '"figure-review": "#savedStatus"', 'draft: "#summaryBox"'):
+        for selector in (
+            'library: "#libraryStageAction"',
+            'planning: "#summary"',
+            'images: workspaceTab === "review" ? "#savedStatus" : "#summary"',
+            'draft: "#summaryBox"',
+        ):
             self.assertIn(selector, source)
         library_html = (ASSET_DIR / "library.html").read_text(encoding="utf-8")
         self.assertIn('id="libraryStageAction"', library_html)
@@ -97,7 +102,8 @@ class DashboardI18nChecks(unittest.TestCase):
         self.assertIn(".tabs.rw-workspace-tabs", css)
         self.assertNotIn('id="enterSections"', blueprint)
         self.assertNotIn("function enterSections()", blueprint)
-        self.assertIn('current.id === "blueprint"', source)
+        self.assertIn('stageId === "planning"', source)
+        self.assertIn('backendStage: "blueprint"', source)
         self.assertIn("/section-tasks`", source)
 
 

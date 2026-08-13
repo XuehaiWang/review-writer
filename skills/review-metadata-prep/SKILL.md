@@ -44,7 +44,7 @@ python <review-root>/view/serve_review_dashboard.py \
 Open:
 
 ```text
-http://127.0.0.1:8765/library
+/library
 ```
 
 ## LLM Mode

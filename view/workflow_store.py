@@ -114,6 +114,7 @@ STAGE_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
             "04_first_draft/first_draft.md",
             "04_first_draft/citations.json",
             "04_first_draft/figures/*",
+            "04_first_draft/draft_approval.json",
         ),
     },
     "draft-feedback-loop": {
@@ -137,6 +138,8 @@ STAGE_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
             "04_first_draft/first_draft_final_polish_queue.json",
             "04_first_draft/feedback_loop_status.json",
             "04_first_draft/feedback_loop_rewrites.json",
+            "04_first_draft/feedback_rewrite_candidates.json",
+            "04_first_draft/paragraph_marker_report.json",
             "04_first_draft/feedback_loop/runs/*",
         ),
     },

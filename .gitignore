@@ -1,9 +1,18 @@
 /*
 !/.gitignore
+!/.dockerignore
+!/.github/
+!/.github/**
 !/README.md
 !/集成说明.txt
 !/prefect.toml
-!/requirements-workflow.txt
+!/requirements.txt
+!/pyproject.toml
+!/alembic.ini
+!/Dockerfile.api
+!/compose.yaml
+!/review_writer_api/
+!/review_writer_api/**
 !/skills/
 !/skills/**
 !/view/
@@ -16,9 +25,14 @@
 !/examples/**
 !/review_writer_core/
 !/review_writer_core/**
+!/migrations/
+!/migrations/**
+!/infra/
+!/infra/**
 
 /.env
 /.env.*
+!/.env.hosted.example
 
 /skills/**/__pycache__/
 /view/**/__pycache__/

@@ -22,7 +22,7 @@ import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urlparse
 
 from PIL import Image
 
@@ -31,6 +31,7 @@ _VIEW_SCRIPTS = Path(__file__).resolve().parent
 if str(_VIEW_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_VIEW_SCRIPTS))
 _WORKSPACE_ROOT = _VIEW_SCRIPTS.parent
+_WORKFLOW_SKILLS_ROOT = _WORKSPACE_ROOT / "skills"
 if str(_WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(_WORKSPACE_ROOT))
 from workflow_store import WorkflowStore
@@ -67,8 +68,14 @@ from provider_settings import (
     save_provider_settings,
 )
 from review_writer_core.runtime_config import literature_batch_limit
+from review_writer_core.dashboard_assets import dashboard_assets
 from review_writer_core.providers import DEFAULT_IMAGE_MODEL
 from review_writer_core.text_safety import make_xml_compatible
+from review_writer_core.project_catalog import (
+    infer_project_topic as catalog_project_topic,
+    list_review_projects,
+    project_summary,
+)
 from review_writer_core.project_config import (
     load_project_config,
     project_taxonomy_profile,
@@ -144,7 +151,7 @@ def execute_dashboard_stage(
         result = validate_figure_review(project, project_id)
         next_stage = "figures"
     elif stage_id == "figures":
-        result = regenerate_figures_and_first_draft(review_root, project_id)
+        result = confirm_figures_and_build_draft(review_root, project_id)
         next_stage = "draft"
     elif stage_id == "draft":
         # Stage 8 is a human-editing boundary. Entering Final must hand off the
@@ -164,7 +171,9 @@ def execute_dashboard_stage(
             max_case_words=int(stage_options.get("max_case_words", 280)),
             evaluate_only=bool(stage_options.get("evaluate_only", False)),
         )
-        next_stage = "final"
+        # Quality evaluation belongs to the Stage-8 editing workspace. Keep
+        # the user there to inspect, edit, and approve the resulting draft.
+        next_stage = "draft"
     elif stage_id == "final-conclusion":
         result = generate_final_conclusion(review_root, project_id)
         next_stage = "final"
@@ -177,6 +186,18 @@ def execute_dashboard_stage(
     else:
         raise ValueError("This page does not have a runnable generation step.")
     return {"result": result, "next_stage": next_stage}
+
+
+def stage_next_path(stage_id: str, next_stage: str | None, project_id: str) -> str:
+    """Build the next-stage route with Stage 9 opening at final preparation."""
+    if not next_stage:
+        return ""
+    query = f"project={quote(project_id, safe='')}"
+    if stage_id == "draft" and next_stage == "final":
+        query += "&doc=preparation"
+    elif stage_id == "draft-feedback-loop" and next_stage == "draft":
+        query += "&tab=quality"
+    return f"/{next_stage}?{query}"
 
 
 def discovery_script_path() -> Path:
@@ -218,6 +239,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
     draft_app_path: Path
     final_app_path: Path
     settings_app_path: Path
+
+    def redirect_legacy_workspace(self, parsed, workspace: str, tab: str) -> None:
+        pairs = [
+            (key, value)
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if key != "tab"
+        ]
+        pairs.append(("tab", tab))
+        self.send_response(HTTPStatus.TEMPORARY_REDIRECT)
+        self.send_header("Location", f"/{workspace}?{urlencode(pairs, doseq=True)}")
+        self.end_headers()
     external_file_allowlist: frozenset[Path] = frozenset()
     external_directory_allowlist: frozenset[Path] = frozenset()
     access_token: str = ""
@@ -268,16 +300,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_file(self.library_app_path, "text/html; charset=utf-8")
         elif parsed.path == "/discovery":
             self.send_file(self.discovery_app_path, "text/html; charset=utf-8")
+        elif parsed.path == "/planning":
+            tab = str(parse_qs(parsed.query).get("tab", ["matrix"])[0]).casefold()
+            page = self.blueprint_app_path if tab == "blueprint" else self.matrix_app_path
+            self.send_file(page, "text/html; charset=utf-8")
+        elif parsed.path == "/images":
+            tab = str(parse_qs(parsed.query).get("tab", ["review"])[0]).casefold()
+            page = self.figures_app_path if tab == "redraw" else self.figure_review_app_path
+            self.send_file(page, "text/html; charset=utf-8")
         elif parsed.path == "/matrix":
-            self.send_file(self.matrix_app_path, "text/html; charset=utf-8")
+            self.redirect_legacy_workspace(parsed, "planning", "matrix")
         elif parsed.path == "/blueprint":
-            self.send_file(self.blueprint_app_path, "text/html; charset=utf-8")
+            self.redirect_legacy_workspace(parsed, "planning", "blueprint")
         elif parsed.path == "/sections":
             self.send_file(self.sections_app_path, "text/html; charset=utf-8")
         elif parsed.path == "/figures":
-            self.send_file(self.figures_app_path, "text/html; charset=utf-8")
+            self.redirect_legacy_workspace(parsed, "images", "redraw")
         elif parsed.path == "/figure-review":
-            self.send_file(self.figure_review_app_path, "text/html; charset=utf-8")
+            self.redirect_legacy_workspace(parsed, "images", "review")
         elif parsed.path == "/draft":
             self.send_file(self.draft_app_path, "text/html; charset=utf-8")
         elif parsed.path == "/final":
@@ -428,6 +468,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if len(parts) == 5 and parts[0:2] == ["api", "project"]:
                 self.handle_feedback_loop_stop(unquote(parts[2]))
                 return
+        if parsed.path.startswith("/api/project/") and parsed.path.endswith("/draft/approve"):
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) == 5 and parts[0:2] == ["api", "project"]:
+                self.handle_draft_approval(unquote(parts[2]))
+                return
+        if parsed.path.startswith("/api/project/") and "/paragraph/" in parsed.path:
+            parts = parsed.path.strip("/").split("/")
+            if (
+                len(parts) == 6
+                and parts[0:2] == ["api", "project"]
+                and parts[3] == "paragraph"
+                and parts[5] == "ai-rewrite"
+            ):
+                self.handle_ai_rewrite_candidate(unquote(parts[2]), unquote(parts[4]))
+                return
+            if (
+                len(parts) == 7
+                and parts[0:2] == ["api", "project"]
+                and parts[3] == "paragraph"
+                and parts[5] == "ai-rewrite"
+                and parts[6] in {"accept", "reject"}
+            ):
+                self.handle_ai_rewrite_candidate_decision(
+                    unquote(parts[2]),
+                    unquote(parts[4]),
+                    parts[6],
+                )
+                return
         if parsed.path.startswith("/api/project/") and "/figures/" in parsed.path:
             parts = parsed.path.strip("/").split("/")
             if len(parts) == 6 and parts[0:2] == ["api", "project"] and parts[3] == "figures" and parts[5] == "redraw":
@@ -562,7 +630,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         value, error = validate_discovery_start_payload(
             payload,
-            lambda project_id: (self.review_root / "review-projects" / project_id).exists(),
+            lambda project_id: (
+                self.review_root
+                / "review-projects"
+                / project_id
+                / "00_discovery"
+                / "combined_results_by_keyword.json"
+            ).is_file(),
         )
         if error or value is None:
             self.send_json(
@@ -578,13 +652,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def handle_project_export_docx(self, project_id: str) -> None:
         project = self.review_root / "review-projects" / project_id
+        if not draft_approval_state(project)["current"]:
+            self.send_json(
+                {"ok": False, "error": "Human-approve the current Stage-8 draft before exporting Word."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
         stage = project / "05_final_audit"
         md_path = stage / "final_draft.md"
         if not md_path.exists():
             self.send_error(HTTPStatus.BAD_REQUEST, "final_draft.md not found")
             return
         docx_path = stage / "final_draft.docx"
-        script = self.review_root / "skills" / "review-export-docx" / "scripts" / "run_md2docx.py"
+        script = _WORKFLOW_SKILLS_ROOT / "review-export-docx" / "scripts" / "run_md2docx.py"
         if not script.exists():
             self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "DOCX export runner not found")
             return
@@ -649,6 +729,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_json({
             "ok": True,
             "path": str(docx_path),
+            "download_name": docx_path.name,
             "size": docx_path.stat().st_size,
             "fallback": fallback,
             "message": (
@@ -929,7 +1010,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         selected = selected_from_combined(data.get("results", []), project_id)
         selected_paper_ids = discovery_selected_paper_ids(selected)
         selection_fingerprint = discovery_selection_fingerprint(selected_paper_ids)
-        selected["human_confirmed"] = bool(confirm)
+        confirmation_error = (
+            "Select at least one local paper before confirming Discovery."
+            if confirm and not selected_paper_ids
+            else ""
+        )
+        confirmed = bool(confirm and not confirmation_error)
+        selected["human_confirmed"] = confirmed
         selected["selection_mode"] = "explicit"
         selected["selection"] = {
             "paper_ids": selected_paper_ids,
@@ -945,8 +1032,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             json.dumps(
                 {
                     "project_id": project_id,
-                    "status": "confirmed" if confirm else "pending",
-                    "confirmed_at": now_utc() if confirm else None,
+                    "status": "confirmed" if confirmed else "pending",
+                    "confirmed_at": now_utc() if confirmed else None,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -954,11 +1041,53 @@ class DashboardHandler(BaseHTTPRequestHandler):
             + "\n",
             encoding="utf-8",
         )
-        matrix_sync = sync_matrix_from_discovery(self.review_root, project_id) if confirm else None
+        if confirmation_error:
+            self.send_json(
+                {
+                    "ok": False,
+                    "confirmed": False,
+                    "selection": selected["selection"],
+                    "error": confirmation_error,
+                },
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        try:
+            matrix_sync = sync_matrix_from_discovery(self.review_root, project_id) if confirmed else None
+        except (ValueError, RuntimeError, OSError) as exc:
+            selected["human_confirmed"] = False
+            (path.parent / "selected_discovery_results.json").write_text(
+                json.dumps(selected, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            (path.parent / "human_check_state.json").write_text(
+                json.dumps(
+                    {
+                        "project_id": project_id,
+                        "status": "pending",
+                        "confirmed_at": None,
+                        "error": str(exc),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.send_json(
+                {
+                    "ok": False,
+                    "confirmed": False,
+                    "selection": selected["selection"],
+                    "error": str(exc),
+                },
+                status=HTTPStatus.CONFLICT,
+            )
+            return
         self.send_json(
             {
                 "ok": True,
-                "confirmed": confirm,
+                "confirmed": confirmed,
                 "selection": selected["selection"],
                 "matrix_sync": matrix_sync,
             }
@@ -1235,6 +1364,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not project.exists():
             self.send_json({"ok": False, "error": "Project not found."}, status=HTTPStatus.NOT_FOUND)
             return
+        if stage_id in {"final-conclusion", "final-overview-figure", "final"}:
+            approval = draft_approval_state(project)
+            if not approval["current"]:
+                self.send_json(
+                    {
+                        "ok": False,
+                        "error": (
+                            "The current first draft has not been evaluated and human-approved in Stage 8."
+                        ),
+                    },
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
         store = workflow_store(self.review_root)
         run_id = store.start_stage_run(project_id, stage_id, metadata={"trigger": "dashboard"})
         try:
@@ -1252,6 +1394,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             execution = orchestration["result"]
             result = execution["result"]
             next_stage = execution["next_stage"]
+        except FigureToDraftBlocked as exc:
+            store.finish_stage_run(run_id, "failed", error_message=str(exc))
+            self.send_json(
+                {"ok": False, "error": str(exc), "readiness": exc.readiness},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
         except (RuntimeError, ValueError) as exc:
             store.finish_stage_run(run_id, "failed", error_message=str(exc))
             self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
@@ -1289,7 +1438,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "stage_id": stage_id,
             "result": result,
             "next_stage": next_stage,
-            "next_path": f"/{next_stage}?project={quote(project_id)}" if next_stage else "",
+            "next_path": stage_next_path(stage_id, next_stage, project_id),
         })
 
     def handle_feedback_loop_stop(self, project_id: str) -> None:
@@ -1301,6 +1450,124 @@ class DashboardHandler(BaseHTTPRequestHandler):
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("stop requested\n", encoding="utf-8")
         self.send_json({"ok": True, "status": "stop_requested"})
+
+    def handle_draft_approval(self, project_id: str) -> None:
+        project = self.review_root / "review-projects" / project_id
+        if not project.is_dir():
+            self.send_json({"ok": False, "error": "Project not found."}, status=HTTPStatus.NOT_FOUND)
+            return
+        try:
+            payload = self.read_json_object() if int(self.headers.get("Content-Length") or 0) else {}
+            result = approve_current_draft(
+                self.review_root,
+                project_id,
+                override_low_score=bool(payload.get("override_low_score", False)),
+                override_reason=str(payload.get("override_reason") or ""),
+            )
+        except (RuntimeError, ValueError) as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        self.send_json(
+            result,
+            status=HTTPStatus.OK if result.get("ok") else HTTPStatus.CONFLICT,
+        )
+
+    def handle_ai_rewrite_candidate(self, project_id: str, paragraph_id: str) -> None:
+        project = self.review_root / "review-projects" / project_id
+        if not project.is_dir():
+            self.send_json({"ok": False, "error": "Project not found."}, status=HTTPStatus.NOT_FOUND)
+            return
+        quality = draft_quality_state(project)
+        status = quality["feedback_loop_status"]
+        if quality["feedback_loop_running"]:
+            self.send_json(
+                {"ok": False, "error": "Wait for the current quality run to finish first."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        script = (
+            _WORKFLOW_SKILLS_ROOT
+            / "review-first-draft-feedback-loop"
+            / "scripts"
+            / "propose_paragraph_rewrite.py"
+        )
+        try:
+            output = run_project_script(
+                script,
+                self.review_root,
+                project_id,
+                timeout=900,
+                extra=[
+                    "--paragraph-id",
+                    paragraph_id,
+                    "--min-case-words",
+                    str(int(status.get("min_case_words") or 140)),
+                    "--max-case-words",
+                    str(int(status.get("max_case_words") or 280)),
+                ],
+            )
+            result = json.loads(output.splitlines()[-1])
+        except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        self.send_json({"ok": True, "candidate": result})
+
+    def handle_ai_rewrite_candidate_decision(
+        self,
+        project_id: str,
+        paragraph_id: str,
+        decision: str,
+    ) -> None:
+        project = self.review_root / "review-projects" / project_id
+        path = project / "04_first_draft" / "feedback_rewrite_candidates.json"
+        payload = read_json_if_exists(path) or {}
+        entries = payload.get("entries") if isinstance(payload, dict) else None
+        entry = entries.get(paragraph_id) if isinstance(entries, dict) else None
+        if not isinstance(entry, dict) or entry.get("status") != "pending_human_review":
+            self.send_json(
+                {"ok": False, "error": "No pending AI rewrite candidate exists for this paragraph."},
+                status=HTTPStatus.NOT_FOUND,
+            )
+            return
+        if decision == "reject":
+            entry["status"] = "rejected"
+            entry["reviewed_at"] = now_utc()
+            write_json(path, payload)
+            self.send_json({"ok": True, "status": "rejected"})
+            return
+        editor = self._paragraph_mutation_editor(project_id)
+        if editor is None:
+            return
+        current = editor.get_paragraph(paragraph_id)
+        if "error" in current:
+            self.send_json(current, status=HTTPStatus.NOT_FOUND)
+            return
+        current_hash = hashlib.sha256(str(current.get("text") or "").encode("utf-8")).hexdigest()
+        if current_hash != str(entry.get("source_text_sha256") or ""):
+            entry["status"] = "conflict"
+            entry["reviewed_at"] = now_utc()
+            write_json(path, payload)
+            self.send_json(
+                {
+                    "ok": False,
+                    "error": "The paragraph changed after this candidate was generated. Generate a new candidate.",
+                },
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        result = editor.update_paragraph(
+            paragraph_id,
+            str(entry.get("candidate_text") or ""),
+            "accepted AI rewrite candidate",
+        )
+        if "error" in result:
+            self.send_json(result, status=HTTPStatus.BAD_REQUEST)
+            return
+        entry["status"] = "accepted"
+        entry["reviewed_at"] = now_utc()
+        write_json(path, payload)
+        refresh_manual_draft_outputs(self.review_root, project_id)
+        self.send_json({"ok": True, "status": "accepted", "paragraph_id": paragraph_id})
 
     def handle_project_handoff(self, project_id: str, stage_id: str) -> None:
         project = self.review_root / "review-projects" / project_id
@@ -1417,7 +1684,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "project_id": project_id,
                 "stage_id": stage_id,
                 "next_stage": next_stage,
-                "next_path": f"/{next_stage}?project={project_id}" if next_stage else "",
+                "next_path": stage_next_path(stage_id, next_stage, project_id),
             }
         )
 
@@ -1441,7 +1708,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not project.exists():
             self.send_error(HTTPStatus.NOT_FOUND, "project not found")
             return
-        freshness = project_draft_payload(self.review_root, project_id).get("freshness", {})
+        draft_payload = project_draft_payload(self.review_root, project_id)
+        freshness = draft_payload.get("freshness", {})
         if freshness.get("upstream_stale"):
             self.send_json(
                 {
@@ -1450,6 +1718,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "The current sections or approved figures changed. Regenerate the first draft "
                         "before saving manual draft edits."
                     ),
+                },
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        if draft_payload.get("feedback_loop_running"):
+            self.send_json(
+                {
+                    "ok": False,
+                    "error": "Stop or finish the current evaluation before saving the full draft.",
                 },
                 status=HTTPStatus.CONFLICT,
             )
@@ -1523,10 +1800,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _paragraph_mutation_editor(self, project_id: str) -> ParagraphEditor | None:
         editor = self._paragraph_editor(project_id)
-        freshness = project_draft_payload(self.review_root, project_id).get("freshness", {})
+        draft_payload = project_draft_payload(self.review_root, project_id)
+        freshness = draft_payload.get("freshness", {})
         if editor and freshness.get("upstream_stale"):
             self.send_json(
                 {"ok": False, "error": "draft upstream inputs are stale"},
+                status=HTTPStatus.CONFLICT,
+            )
+            return None
+        if editor and draft_payload.get("feedback_loop_running"):
+            self.send_json(
+                {"ok": False, "error": "Stop or finish the current evaluation before editing paragraphs."},
                 status=HTTPStatus.CONFLICT,
             )
             return None
@@ -1840,7 +2124,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # Files exposed through this route are mutable project artifacts. SVG
         # saves deliberately replace the same PNG path, so browser caching can
         # hide the just-saved pixels until a later navigation or hard refresh.
-        self.send_file(path, ctype, no_store=True)
+        self.send_file(
+            path,
+            ctype,
+            no_store=True,
+            download_name=path.name if path.suffix.lower() == ".docx" else None,
+        )
 
     def load_meta(self, paper_id: str) -> dict | None:
         path = self.metadata_dir / f"{paper_id}.metadata.json"
@@ -1859,11 +2148,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def send_file(self, path: Path, content_type: str, *, no_store: bool = False) -> None:
+    def send_file(
+        self,
+        path: Path,
+        content_type: str,
+        *,
+        no_store: bool = False,
+        download_name: str | None = None,
+    ) -> None:
         try:
             size = path.stat().st_size
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
+            if download_name:
+                safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(download_name).name)
+                if not safe_name.lower().endswith(".docx"):
+                    safe_name = f"{safe_name.rstrip('.') or 'final_draft'}.docx"
+                encoded_name = quote(Path(download_name).name, safe="")
+                self.send_header(
+                    "Content-Disposition",
+                    f"attachment; filename=\"{safe_name}\"; filename*=UTF-8''{encoded_name}",
+                )
             if no_store or (
                 content_type.startswith("text/html")
                 or content_type.startswith("text/css")
@@ -2035,7 +2340,7 @@ def validate_new_project_id(project_id: object) -> tuple[str | None, str | None]
 
 
 def validate_discovery_start_payload(
-    payload: object, project_exists: callable
+    payload: object, discovery_exists: callable
 ) -> tuple[dict[str, object] | None, str | None]:
     if not isinstance(payload, dict):
         return None, "Discovery payload must be a JSON object."
@@ -2047,12 +2352,17 @@ def validate_discovery_start_payload(
         return None, "Topic is required."
     if len(topic) > 500:
         return None, "Topic must be 500 characters or fewer."
-    if project_exists(project_id):
+    existing_discovery = bool(discovery_exists(project_id))
+    restart_existing = payload.get("restart_existing") is True
+    if existing_discovery and not restart_existing:
         return None, "A project with this ID already exists."
+    if restart_existing and not existing_discovery:
+        return None, "The project does not have Discovery results to restart."
     value: dict[str, object] = {
         "project_id": project_id,
         "topic": topic,
         "web_search": bool(payload.get("web_search", False)),
+        "restart_existing": restart_existing,
     }
     keywords = re.sub(r"\s+", " ", str(payload.get("keywords") or "").strip())
     if keywords:
@@ -2067,6 +2377,8 @@ def build_discovery_command(
     web_search: bool,
     keywords: str = "",
     query_plan_path: Path | None = None,
+    output_project_dir: Path | None = None,
+    taxonomy_profile: str = "",
 ) -> list[str]:
     script = discovery_script_path()
     plan_path = query_plan_path or (
@@ -2086,6 +2398,10 @@ def build_discovery_command(
     ]
     if keywords:
         command.extend(["--keywords", keywords])
+    if output_project_dir is not None:
+        command.extend(["--output-project-dir", str(output_project_dir)])
+    if taxonomy_profile:
+        command.extend(["--taxonomy-profile", taxonomy_profile])
     if web_search:
         command.append("--web-search")
     return command
@@ -2097,7 +2413,19 @@ def start_discovery(
     runner: callable | None = None,
 ) -> dict[str, object]:
     project_id = str(payload["project_id"])
-    project = review_root / "review-projects" / project_id
+    projects_root = (review_root / "review-projects").resolve()
+    project = (projects_root / project_id).resolve()
+    if project.parent != projects_root:
+        return {"ok": False, "project_id": project_id, "error": "Project path is invalid."}
+    existing_project = project.is_dir()
+    existing_discovery = (
+        project / "00_discovery" / "combined_results_by_keyword.json"
+    ).is_file()
+    restart_existing = payload.get("restart_existing") is True
+    if existing_discovery and not restart_existing:
+        return {"ok": False, "project_id": project_id, "error": "A project with this ID already exists."}
+    if restart_existing and not existing_discovery:
+        return {"ok": False, "project_id": project_id, "error": "The project does not have Discovery results to restart."}
     try:
         query_plan = build_and_validate_query_plan(
             str(payload["topic"]),
@@ -2109,41 +2437,100 @@ def start_discovery(
             "project_id": project_id,
             "error": f"Query plan needs clarification: {exc}",
         }
-    project.mkdir(parents=True, exist_ok=False)
-    save_project_config(
-        review_root,
-        project_id,
-        topic=str(payload["topic"]),
-        taxonomy_profile=suggest_taxonomy_profile(str(payload["topic"])),
-    )
-    query_plan_path = write_query_plan(project, query_plan)
-    command = build_discovery_command(
-        review_root,
-        project_id,
-        str(payload["topic"]),
-        bool(payload.get("web_search")),
-        str(payload.get("keywords") or ""),
-        query_plan_path,
-    )
-    run = runner or (lambda args: subprocess.run(args, capture_output=True, text=True, timeout=180))
+    topic = str(payload["topic"])
+    taxonomy_profile = suggest_taxonomy_profile(topic)
+    staging_root = review_root / ".review-writer" / "discovery-staging"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    staging_container = Path(tempfile.mkdtemp(prefix=f"{project_id}-", dir=staging_root))
+    staged_project = staging_container / "project"
+    staged_project.mkdir()
     try:
-        result = run(command)
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "project_id": project_id, "error": "Discovery timed out after 180 seconds."}
-    output = "\n".join(part for part in [getattr(result, "stdout", ""), getattr(result, "stderr", "")] if part).strip()
-    if getattr(result, "returncode", 1) != 0:
+        query_plan_path = write_query_plan(staged_project, query_plan)
+        command = build_discovery_command(
+            review_root,
+            project_id,
+            topic,
+            bool(payload.get("web_search")),
+            str(payload.get("keywords") or ""),
+            query_plan_path,
+            staged_project,
+            taxonomy_profile,
+        )
+        run = runner or (
+            lambda args: subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env=provider_subprocess_environment(review_root),
+            )
+        )
+        try:
+            result = run(command)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "project_id": project_id, "error": "Discovery timed out after 180 seconds."}
+        output = "\n".join(part for part in [getattr(result, "stdout", ""), getattr(result, "stderr", "")] if part).strip()
+        if getattr(result, "returncode", 1) != 0:
+            return {
+                "ok": False,
+                "project_id": project_id,
+                "error": "Discovery failed.",
+                "output": "\n".join(output.splitlines()[-20:]),
+            }
+        required_output = staged_project / "00_discovery" / "combined_results_by_keyword.json"
+        if not required_output.is_file():
+            return {
+                "ok": False,
+                "project_id": project_id,
+                "error": "Discovery finished without producing a candidate set.",
+            }
+
+        backup_container: Path | None = None
+        backup_project: Path | None = None
+        try:
+            if existing_project:
+                backup_root = review_root / ".review-writer" / "discovery-rollback"
+                backup_root.mkdir(parents=True, exist_ok=True)
+                backup_container = Path(tempfile.mkdtemp(prefix=f"{project_id}-", dir=backup_root))
+                backup_project = backup_container / "project"
+                project.replace(backup_project)
+            projects_root.mkdir(parents=True, exist_ok=True)
+            staged_project.replace(project)
+            save_project_config(
+                review_root,
+                project_id,
+                topic=topic,
+                taxonomy_profile=taxonomy_profile,
+            )
+        except Exception as exc:
+            if project.exists():
+                shutil.rmtree(project)
+            if backup_project is not None and backup_project.exists():
+                backup_project.replace(project)
+            return {
+                "ok": False,
+                "project_id": project_id,
+                "error": f"Could not activate the new Discovery results: {exc}",
+            }
+        finally:
+            if backup_container is not None and backup_container.exists():
+                shutil.rmtree(backup_container)
+
+        workflow_store(review_root).delete_project(project_id)
+        with _BATCH_REDRAW_LOCK:
+            _BATCH_REDRAW_JOBS.pop(_batch_redraw_key(review_root, project_id), None)
+        with _FIGURE_REDRAW_STATE_LOCK:
+            _FIGURE_REDRAW_STATES.pop(_figure_redraw_state_key(review_root, project_id), None)
         return {
-            "ok": False,
+            "ok": True,
             "project_id": project_id,
-            "error": "Discovery failed.",
-            "output": "\n".join(output.splitlines()[-20:]),
+            "output": output,
+            "query_plan_path": str(project / "00_discovery" / "query_plan.draft.json"),
+            "restarted": existing_discovery,
         }
-    return {
-        "ok": True,
-        "project_id": project_id,
-        "output": output,
-        "query_plan_path": str(query_plan_path),
-    }
+    finally:
+        if staging_container.exists():
+            shutil.rmtree(staging_container)
 
 
 def optional_year(value: object) -> int | None:
@@ -2670,7 +3057,7 @@ def run_project_script(script: Path, review_root: Path, project_id: str, timeout
 
 def refresh_final_overview_chart(review_root: Path, project_id: str, draft_path: Path) -> str:
     """Build only the single full-review overview chart for the final manuscript."""
-    chart_script = review_root / "skills" / "review-outline-summary-chart" / "scripts" / "generate_review_summary_chart.py"
+    chart_script = _WORKFLOW_SKILLS_ROOT / "review-outline-summary-chart" / "scripts" / "generate_review_summary_chart.py"
     return run_project_script(
         chart_script,
         review_root,
@@ -2728,7 +3115,7 @@ def regenerate_section_drafting(review_root: Path, project_id: str) -> dict[str,
     # Review prose is produced by the section-writing skill, not by a server-side
     # title/abstract concatenation fallback. The latter created bibliography-like
     # output that looked complete but was not a review.
-    scripts = review_root / "skills" / "review-section-drafting-figure-picking" / "scripts"
+    scripts = _WORKFLOW_SKILLS_ROOT / "review-section-drafting-figure-picking" / "scripts"
     run_project_script(scripts / "generate_section_drafts.py", review_root, project_id, timeout=900)
     drafts = read_json_if_exists(stage / "section_drafts.json") or {}
     generated_sections = drafts.get("sections") if isinstance(drafts, dict) else []
@@ -2928,11 +3315,79 @@ def regenerate_section_tasks(review_root: Path, project_id: str) -> dict[str, An
     return {"task_count": len(tasks), "section_ids": [task["section_id"] for task in tasks]}
 
 
-def regenerate_figures_and_first_draft(review_root: Path, project_id: str) -> dict[str, Any]:
-    """Keep the Figures-to-Draft action atomic from the user's perspective."""
-    figures = regenerate_figures(review_root, project_id)
+class FigureToDraftBlocked(RuntimeError):
+    """Raised when current manuscript figures cannot safely enter Draft."""
+
+    def __init__(self, readiness: dict[str, Any]) -> None:
+        self.readiness = readiness
+        super().__init__(str(readiness.get("message") or "Figure processing is incomplete."))
+
+
+def figure_to_draft_readiness(payload: dict[str, Any]) -> dict[str, Any]:
+    """Summarize whether all manuscript-selected figures are current and usable."""
+    freshness = payload.get("freshness") if isinstance(payload, dict) else {}
+    freshness = freshness if isinstance(freshness, dict) else {}
+    selected_count = max(0, int(freshness.get("selected_count") or 0))
+    usable_count = max(0, int(freshness.get("usable_count") or 0))
+    usable_count = min(selected_count, usable_count)
+    remaining_count = max(0, selected_count - usable_count)
+    batch = payload.get("batch_redraw") if isinstance(payload, dict) else {}
+    batch = batch if isinstance(batch, dict) else {}
+    states = payload.get("figure_redraw_states") if isinstance(payload, dict) else {}
+    states = states if isinstance(states, dict) else {}
+    generation_active = bool(
+        str(batch.get("status") or "") in {"running", "stopping"}
+        or any(
+            isinstance(state, dict)
+            and str(state.get("status") or "") in ACTIVE_FIGURE_REDRAW_STATUSES
+            for state in states.values()
+        )
+    )
+    stale = bool(freshness.get("stale"))
+    source_stale = bool(freshness.get("source_stale"))
+
+    if generation_active:
+        code = "generating"
+        message = "Figure generation is still running. Wait until it finishes before entering Draft."
+    elif selected_count <= 0:
+        code = "no_selection"
+        message = (
+            "No manuscript figure is selected. Return to Source Figure Review and select at least one figure."
+        )
+    elif remaining_count > 0:
+        code = "incomplete"
+        message = (
+            f"{usable_count}/{selected_count} selected manuscript figures are usable; "
+            f"{remaining_count} still need redraw or approval."
+        )
+    elif stale or source_stale:
+        code = "out_of_date"
+        message = "Figure outputs are out of date. Redraw the affected figures before entering Draft."
+    else:
+        code = "ready"
+        message = (
+            f"All {selected_count} selected manuscript figures are usable. You can enter Draft."
+        )
+
+    return {
+        "ready": code == "ready",
+        "code": code,
+        "selected_count": selected_count,
+        "usable_count": usable_count,
+        "remaining_count": remaining_count,
+        "generation_active": generation_active,
+        "stale": stale or source_stale,
+        "message": message,
+    }
+
+
+def confirm_figures_and_build_draft(review_root: Path, project_id: str) -> dict[str, Any]:
+    """Validate current figures and build Draft without invoking image generation."""
+    readiness = figure_to_draft_readiness(project_figures_payload(review_root, project_id))
+    if not readiness["ready"]:
+        raise FigureToDraftBlocked(readiness)
     draft = regenerate_first_draft(review_root, project_id)
-    return {"figures": figures, "draft": draft}
+    return {"readiness": readiness, "draft": draft}
 
 
 _MECHANISM_ARROW_PROFILE_PATTERN = re.compile(
@@ -3976,7 +4431,11 @@ def redraw_current_figure(
     source_faithful_scope = False
     source_faithful_multipanel = False
     hollow_color_fills = figure_type == FIGURE_TYPE_COLORED
-    image_model = os.environ.get("IMAGE_OPENAI_MODEL", DEFAULT_IMAGE_MODEL).strip() or DEFAULT_IMAGE_MODEL
+    image_environment = provider_subprocess_environment(review_root)
+    image_model = (
+        str(image_environment.get("IMAGE_OPENAI_MODEL") or DEFAULT_IMAGE_MODEL).strip()
+        or DEFAULT_IMAGE_MODEL
+    )
     extra = [
         "--figure-id",
         figure_id,
@@ -4622,6 +5081,27 @@ def persist_batch_redraw_job(review_root: Path, project_id: str, job: dict[str, 
     job["job_id"] = saved["job_id"]
 
 
+def _batch_redraw_key(review_root: Path | None, project_id: str) -> str:
+    root = str(Path(review_root).resolve()) if review_root is not None else ""
+    return f"{root}::{project_id}" if root else project_id
+
+
+def _existing_batch_redraw_key(review_root: Path | None, project_id: str) -> str:
+    """Resolve an existing job without weakening hosted user isolation.
+
+    Hosted HTTP callers always supply their user-scoped review root.  The
+    optional-root form predates hosted mode and is still used by local callers
+    and tests; it may resolve a scoped key only when exactly one matching job
+    exists, so identical slugs owned by multiple users are never ambiguous.
+    """
+    exact = _batch_redraw_key(review_root, project_id)
+    if exact in _BATCH_REDRAW_JOBS or review_root is not None:
+        return exact
+    suffix = f"::{project_id}"
+    matches = [key for key in _BATCH_REDRAW_JOBS if key.endswith(suffix)]
+    return matches[0] if len(matches) == 1 else exact
+
+
 def public_batch_redraw_state(job: dict[str, object]) -> dict[str, object]:
     result = {
         key: value
@@ -4635,7 +5115,8 @@ def public_batch_redraw_state(job: dict[str, object]) -> dict[str, object]:
 def batch_figure_redraw_status(project_id: str, review_root: Path | None = None) -> dict[str, object]:
     """Return batch state from memory, falling back to durable SQLite state."""
     with _BATCH_REDRAW_LOCK:
-        job = _BATCH_REDRAW_JOBS.get(project_id)
+        job_key = _existing_batch_redraw_key(review_root, project_id)
+        job = _BATCH_REDRAW_JOBS.get(job_key)
         if not job and review_root is not None:
             persisted = workflow_store(review_root).load_job(project_id, "figure-redraw-all")
             if persisted:
@@ -4686,7 +5167,8 @@ def stop_batch_figure_redraw(project_id: str, review_root: Path | None = None) -
     manifest write remain atomic.  Every remaining queued figure is skipped.
     """
     with _BATCH_REDRAW_LOCK:
-        job = _BATCH_REDRAW_JOBS.get(project_id)
+        job_key = _existing_batch_redraw_key(review_root, project_id)
+        job = _BATCH_REDRAW_JOBS.get(job_key)
         if not job and review_root is not None:
             persisted = workflow_store(review_root).load_job(project_id, "figure-redraw-all")
             job = dict(persisted) if persisted else None
@@ -4725,9 +5207,10 @@ def stop_batch_figure_redraw(project_id: str, review_root: Path | None = None) -
 
 def run_batch_figure_redraw(review_root: Path, project_id: str, figure_ids: list[str]) -> None:
     """Run redraws sequentially so provider requests and manifests cannot race."""
+    job_key = _batch_redraw_key(review_root, project_id)
     for figure_id in figure_ids:
         with _BATCH_REDRAW_LOCK:
-            job = _BATCH_REDRAW_JOBS.get(project_id)
+            job = _BATCH_REDRAW_JOBS.get(job_key)
             if not job:
                 return
             if bool(job.get("stop_requested")):
@@ -4763,7 +5246,7 @@ def run_batch_figure_redraw(review_root: Path, project_id: str, figure_ids: list
                     error=str(exc),
                 )
             with _BATCH_REDRAW_LOCK:
-                job = _BATCH_REDRAW_JOBS.get(project_id)
+                job = _BATCH_REDRAW_JOBS.get(job_key)
                 if not job:
                     return
                 job["failed"] = int(job.get("failed") or 0) + 1
@@ -4780,7 +5263,7 @@ def run_batch_figure_redraw(review_root: Path, project_id: str, figure_ids: list
                 result=result,
             )
             with _BATCH_REDRAW_LOCK:
-                job = _BATCH_REDRAW_JOBS.get(project_id)
+                job = _BATCH_REDRAW_JOBS.get(job_key)
                 if not job:
                     return
                 job["succeeded"] = int(job.get("succeeded") or 0) + 1
@@ -4789,7 +5272,7 @@ def run_batch_figure_redraw(review_root: Path, project_id: str, figure_ids: list
                 job["last_redrawn_image"] = str(result.get("redrawn_image") or "")
         finally:
             with _BATCH_REDRAW_LOCK:
-                job = _BATCH_REDRAW_JOBS.get(project_id)
+                job = _BATCH_REDRAW_JOBS.get(job_key)
                 if job:
                     job["completed"] = int(job.get("completed") or 0) + 1
                     completed_ids = job.setdefault("completed_figure_ids", [])
@@ -4798,7 +5281,7 @@ def run_batch_figure_redraw(review_root: Path, project_id: str, figure_ids: list
                     job["updated_at"] = now_utc()
                     persist_batch_redraw_job(review_root, project_id, job)
     with _BATCH_REDRAW_LOCK:
-        job = _BATCH_REDRAW_JOBS.get(project_id)
+        job = _BATCH_REDRAW_JOBS.get(job_key)
         if job:
             job["status"] = "stopped" if bool(job.get("stop_requested")) else "completed"
             job["current_figure_id"] = ""
@@ -4811,9 +5294,11 @@ def run_batch_figure_redraw(review_root: Path, project_id: str, figure_ids: list
 def run_batch_figure_redraw_orchestrated(review_root: Path, project_id: str, figure_ids: list[str]) -> None:
     """Run the durable sequential queue as a Prefect flow/task."""
 
+    job_key = _batch_redraw_key(review_root, project_id)
+
     if not prefect_orchestration_enabled():
         with _BATCH_REDRAW_LOCK:
-            job = _BATCH_REDRAW_JOBS.get(project_id)
+            job = _BATCH_REDRAW_JOBS.get(job_key)
             if job:
                 job["workflow_engine"] = "native-fallback"
                 persist_batch_redraw_job(review_root, project_id, job)
@@ -4822,7 +5307,7 @@ def run_batch_figure_redraw_orchestrated(review_root: Path, project_id: str, fig
 
     def flow_started(flow_run_id: str) -> None:
         with _BATCH_REDRAW_LOCK:
-            job = _BATCH_REDRAW_JOBS.get(project_id)
+            job = _BATCH_REDRAW_JOBS.get(job_key)
             if job:
                 job["workflow_engine"] = "prefect"
                 job["prefect_flow_run_id"] = flow_run_id
@@ -4843,7 +5328,7 @@ def run_batch_figure_redraw_orchestrated(review_root: Path, project_id: str, fig
         )
     except Exception as exc:
         with _BATCH_REDRAW_LOCK:
-            job = _BATCH_REDRAW_JOBS.get(project_id)
+            job = _BATCH_REDRAW_JOBS.get(job_key)
             if not job:
                 return
             job["status"] = "failed"
@@ -4858,7 +5343,7 @@ def run_batch_figure_redraw_orchestrated(review_root: Path, project_id: str, fig
             persist_batch_redraw_job(review_root, project_id, job)
         return
     with _BATCH_REDRAW_LOCK:
-        job = _BATCH_REDRAW_JOBS.get(project_id)
+        job = _BATCH_REDRAW_JOBS.get(job_key)
         if job:
             job["workflow_engine"] = "prefect"
             job["prefect_flow_run_id"] = orchestration.get("prefect_flow_run_id")
@@ -4872,8 +5357,9 @@ def start_batch_figure_redraw(review_root: Path, project_id: str) -> dict[str, o
     if not project.is_dir():
         raise ValueError("Project not found.")
     figure_ids = batch_redraw_figure_ids(review_root, project_id)
+    job_key = _batch_redraw_key(review_root, project_id)
     with _BATCH_REDRAW_LOCK:
-        existing = _BATCH_REDRAW_JOBS.get(project_id)
+        existing = _BATCH_REDRAW_JOBS.get(job_key)
         if existing and existing.get("status") in {"running", "stopping"}:
             return batch_figure_redraw_status(project_id, review_root)
         persisted = workflow_store(review_root).load_job(project_id, "figure-redraw-all")
@@ -4903,7 +5389,7 @@ def start_batch_figure_redraw(review_root: Path, project_id: str) -> dict[str, o
         if resumable and persisted and persisted.get("job_id"):
             job["job_id"] = str(persisted["job_id"])
         persist_batch_redraw_job(review_root, project_id, job)
-        _BATCH_REDRAW_JOBS[project_id] = job
+        _BATCH_REDRAW_JOBS[job_key] = job
         queue_figure_redraw_states(review_root, project_id, remaining_figure_ids)
         if not remaining_figure_ids:
             job["status"] = "completed"
@@ -5205,7 +5691,7 @@ def regenerate_first_draft(review_root: Path, project_id: str) -> dict[str, Any]
     # The merge skill supplies review-level framing and transitions. Do not
     # fall back to concatenating source snippets into a pseudo-manuscript.
     run_project_script(
-        review_root / "skills" / "review-draft-merge-polish" / "scripts" / "merge_polish_draft.py",
+        _WORKFLOW_SKILLS_ROOT / "review-draft-merge-polish" / "scripts" / "merge_polish_draft.py",
         review_root,
         project_id,
         timeout=900,
@@ -5228,13 +5714,13 @@ def regenerate_first_draft(review_root: Path, project_id: str) -> dict[str, Any]
     draft_path = stage / "first_draft.md"
     draft_text = draft_path.read_text(encoding="utf-8", errors="ignore")
     draft_path.write_text(replace_reference_section(draft_text, render_reference_section(project, citation_entries)), encoding="utf-8")
-    run_project_script(review_root / "skills" / "review-draft-merge-polish" / "scripts" / "insert_figures_into_draft.py", review_root, project_id)
+    run_project_script(_WORKFLOW_SKILLS_ROOT / "review-draft-merge-polish" / "scripts" / "insert_figures_into_draft.py", review_root, project_id)
     # Feedback-loop rewrites live in a Stage-8 overlay so rebuilding the draft
     # cannot mutate Stage-5 source outputs or invalidate figure selection. A
     # rewrite is replayed only when its paragraph ID and original-text hash
     # still match the newly merged manuscript.
     run_project_script(
-        review_root / "skills" / "review-first-draft-feedback-loop" / "scripts" / "apply_feedback_overlays.py",
+        _WORKFLOW_SKILLS_ROOT / "review-first-draft-feedback-loop" / "scripts" / "apply_feedback_overlays.py",
         review_root,
         project_id,
     )
@@ -5260,8 +5746,10 @@ def run_first_draft_feedback_loop(
     evaluate_only: bool = False,
 ) -> dict[str, Any]:
     """Run the optional Stage-9 quality loop and preserve all existing routes."""
-    if not 0 <= goal <= 100 or not 0 <= paragraph_goal <= 100:
-        raise ValueError("Feedback goals must be between 0 and 100.")
+    if not 90 <= goal <= 100:
+        raise ValueError("The overall feedback goal must be between the rubric threshold (90) and 100.")
+    if not 0 <= paragraph_goal <= 100:
+        raise ValueError("The paragraph feedback goal must be between 0 and 100.")
     if not 1 <= max_iterations <= 10:
         raise ValueError("Feedback max iterations must be between 1 and 10.")
     if min_case_words < 1 or max_case_words < min_case_words:
@@ -5272,8 +5760,7 @@ def run_first_draft_feedback_loop(
     if not draft_path.is_file():
         raise RuntimeError("Create and save the first draft before running the quality loop.")
     script = (
-        Path(review_root)
-        / "skills"
+        _WORKFLOW_SKILLS_ROOT
         / "review-first-draft-feedback-loop"
         / "scripts"
         / "feedback_loop.py"
@@ -5324,6 +5811,7 @@ def run_first_draft_feedback_loop(
             "first_draft_final_polish_queue.json",
             "feedback_loop_status.json",
             "feedback_loop_rewrites.json",
+            "paragraph_marker_report.json",
         )),
     ]
     record_stage_outputs(gate_handoff, [path for path in outputs if path.is_file()], "draft-feedback-loop")
@@ -5515,7 +6003,7 @@ def regenerate_final_audit(review_root: Path, project_id: str) -> dict[str, Any]
     )
     if conclusion_current:
         run_project_script(
-            review_root / "skills" / "review-final-audit-release" / "scripts" / "integrate_generated_conclusion.py",
+            _WORKFLOW_SKILLS_ROOT / "review-final-audit-release" / "scripts" / "integrate_generated_conclusion.py",
             review_root,
             project_id,
         )
@@ -5553,7 +6041,7 @@ def regenerate_final_audit(review_root: Path, project_id: str) -> dict[str, Any]
     # conclusion integration so any future template or manual ordering change
     # cannot leave captions/references with draft-manifest numbering.
     run_project_script(
-        review_root / "skills" / "review-draft-merge-polish" / "scripts" / "renumber_figures_in_draft.py",
+        _WORKFLOW_SKILLS_ROOT / "review-draft-merge-polish" / "scripts" / "renumber_figures_in_draft.py",
         review_root,
         project_id,
         extra=["--stage", "05_final_audit"],
@@ -5574,7 +6062,7 @@ def regenerate_final_audit(review_root: Path, project_id: str) -> dict[str, Any]
             + ", ".join(missing_paragraphs)
             + "."
         )
-    run_project_script(review_root / "skills" / "review-final-audit-release" / "scripts" / "final_audit_scan.py", review_root, project_id)
+    run_project_script(_WORKFLOW_SKILLS_ROOT / "review-final-audit-release" / "scripts" / "final_audit_scan.py", review_root, project_id)
     final_outputs = [final_stage / "final_draft.md"]
     if overview.get("included"):
         final_outputs.append(final_stage / "overview_figure.png")
@@ -5612,7 +6100,7 @@ def generate_final_overview_figure(review_root: Path, project_id: str) -> dict[s
             project / "04_first_draft" / "first_draft.md",
         ],
     )
-    overview_script = review_root / "skills" / "review-figure-style-redraw" / "scripts" / "generate_overview_figure.py"
+    overview_script = _WORKFLOW_SKILLS_ROOT / "review-figure-style-redraw" / "scripts" / "generate_overview_figure.py"
     # Resolve the same Settings-backed image provider used by Stage 7. Pass
     # non-secret routing values explicitly so the overview subprocess cannot
     # fall back to an older inherited endpoint or probe a different API family.
@@ -5663,7 +6151,7 @@ def generate_final_overview_figure(review_root: Path, project_id: str) -> dict[s
         # numbering path.  This is intentionally safe to repeat: the injector
         # removes its managed block before adding the updated overview figure.
         run_project_script(
-            review_root / "skills" / "review-draft-merge-polish" / "scripts" / "renumber_figures_in_draft.py",
+            _WORKFLOW_SKILLS_ROOT / "review-draft-merge-polish" / "scripts" / "renumber_figures_in_draft.py",
             review_root,
             project_id,
             extra=["--stage", "05_final_audit"],
@@ -5715,7 +6203,7 @@ def regenerate_final_draft_bundle(review_root: Path, project_id: str) -> dict[st
         raise RuntimeError("The generated overview figure could not be inserted into final_draft.md.")
     if overview.get("included"):
         run_project_script(
-            review_root / "skills" / "review-draft-merge-polish" / "scripts" / "renumber_figures_in_draft.py",
+            _WORKFLOW_SKILLS_ROOT / "review-draft-merge-polish" / "scripts" / "renumber_figures_in_draft.py",
             review_root,
             project_id,
             extra=["--stage", "05_final_audit"],
@@ -5741,7 +6229,7 @@ def generate_final_conclusion(review_root: Path, project_id: str) -> dict[str, A
     if not draft_path.exists():
         raise RuntimeError("Create the first draft before generating a conclusion.")
     run_project_script(
-        review_root / "skills" / "review-conclusion-generator" / "scripts" / "generate_conclusion1.py",
+        _WORKFLOW_SKILLS_ROOT / "review-conclusion-generator" / "scripts" / "generate_conclusion1.py",
         review_root,
         project_id,
         timeout=900,
@@ -6627,6 +7115,12 @@ def handoff_current_draft(review_root: Path, project_id: str) -> dict[str, Any]:
             "reviewed figures before continuing to Final."
         )
 
+    approval = draft_approval_state(project)
+    if not approval["current"]:
+        raise RuntimeError(
+            "Evaluate and human-approve the current first draft before continuing to Final."
+        )
+
     final_handoff = project / "05_final_audit" / "final_handoff.json"
     write_stage_handoff(
         final_handoff,
@@ -6635,6 +7129,9 @@ def handoff_current_draft(review_root: Path, project_id: str) -> dict[str, Any]:
         metadata={
             "dependency_profile": "stage8-human-reviewed-draft-v1",
             "preserves_manual_draft": True,
+            "draft_approval_sha256": sha256_file(
+                draft_stage / "draft_approval.json"
+            ),
         },
     )
     return {
@@ -6645,46 +7142,8 @@ def handoff_current_draft(review_root: Path, project_id: str) -> dict[str, Any]:
 
 
 def infer_project_topic(project: Path) -> str:
-    project_config = load_project_config(project.parent.parent, project.name)
-    if project_config.get("topic"):
-        return str(project_config["topic"])
-    discovery = read_json_if_exists(project / "00_discovery" / "combined_results_by_keyword.json")
-    if isinstance(discovery, dict) and discovery.get("topic"):
-        return str(discovery.get("topic"))
-    topic_input = project / "00_discovery" / "topic_input.md"
-    if topic_input.exists():
-        for line in topic_input.read_text(encoding="utf-8", errors="ignore").splitlines():
-            line = line.strip()
-            if line.startswith("# "):
-                return line[2:].strip()
-    bundle = read_json_if_exists(project / "04_first_draft" / "draft_bundle.json")
-    if isinstance(bundle, dict) and bundle.get("topic"):
-        return str(bundle.get("topic"))
-    return ""
-
-
-def list_review_projects(review_root: Path) -> list[dict[str, Any]]:
-    base = review_root / "review-projects"
-    projects: list[dict[str, Any]] = []
-    if not base.exists():
-        return projects
-    for project in sorted(p for p in base.iterdir() if p.is_dir()):
-        discovery_state = read_json_if_exists(project / "00_discovery" / "human_check_state.json") or {}
-        projects.append(
-            {
-                "project_id": project.name,
-                "topic": infer_project_topic(project),
-                "has_discovery": (project / "00_discovery" / "combined_results_by_keyword.json").exists(),
-                "discovery_status": discovery_state.get("status") or "pending",
-                "has_matrix_outline": (project / "01_matrix_outline" / "literature_matrix.json").exists(),
-                "has_blueprint": (project / "01_matrix_outline" / "section_blueprint.json").exists(),
-                "has_section_drafting": (project / "02_section_drafting" / "section_drafts.md").exists(),
-                "has_figure_redraw": (project / "03_figure_redraw" / "redrawn_figure_manifest.json").exists(),
-                "has_first_draft": (project / "04_first_draft" / "first_draft.md").exists(),
-                "has_final_audit": (project / "05_final_audit" / "final_draft.md").exists(),
-            }
-        )
-    return projects
+    """Compatibility wrapper around the shared read-only project catalog."""
+    return catalog_project_topic(project.parent.parent, project.name)
 
 
 def delete_review_project(review_root: Path, project_id: str) -> dict[str, str]:
@@ -6700,12 +7159,8 @@ def delete_review_project(review_root: Path, project_id: str) -> dict[str, str]:
     shutil.rmtree(target)
     workflow_store(review_root).delete_project(project_id)
     with _BATCH_REDRAW_LOCK:
-        _BATCH_REDRAW_JOBS.pop(project_id, None)
+        _BATCH_REDRAW_JOBS.pop(_batch_redraw_key(review_root, project_id), None)
     return {"deleted_project_id": project_id}
-
-
-def project_summary(review_root: Path, project_id: str) -> dict[str, Any] | None:
-    return next((p for p in list_review_projects(review_root) if p["project_id"] == project_id), None)
 
 
 def project_matrix_payload(review_root: Path, project_id: str) -> dict[str, Any]:
@@ -7243,6 +7698,232 @@ def final_audit_report_text(stage: Path) -> str:
     )
 
 
+def feedback_paragraph_contents(draft_path: Path) -> dict[str, dict[str, Any]]:
+    """Return current manuscript text and its locally managed figures by paragraph."""
+    if not draft_path.is_file():
+        return {}
+    markdown = draft_path.read_text(encoding="utf-8", errors="replace")
+    references = re.search(
+        r"^\s*#{1,6}\s*(?:references|reference list|bibliography|cited literature)\s*$",
+        markdown,
+        re.I | re.M,
+    )
+    body = markdown[: references.start()] if references else markdown
+    marker_re = re.compile(r"<!--\s*paragraph_id:\s*([A-Za-z0-9_.:-]+)\s*-->")
+    heading_re = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.M)
+    image_re = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+    headings = list(heading_re.finditer(body))
+    previous_end = 0
+    result: dict[str, dict[str, Any]] = {}
+
+    stage_root = draft_path.parent.resolve()
+    project_root = draft_path.parents[1].resolve() if len(draft_path.parents) > 1 else stage_root
+
+    def local_images(fragment: str) -> list[dict[str, str]]:
+        images: list[dict[str, str]] = []
+        for image in image_re.finditer(fragment):
+            raw_path = image.group(2).strip().strip("<>")
+            if not raw_path or re.match(r"^(?:https?:|data:)", raw_path, re.I):
+                continue
+            candidate_path = Path(raw_path.replace("\\", "/"))
+            resolved = (
+                candidate_path.resolve()
+                if candidate_path.is_absolute()
+                else (stage_root / candidate_path).resolve()
+            )
+            if resolved != project_root and project_root not in resolved.parents:
+                continue
+            if not resolved.is_file():
+                continue
+            images.append(
+                {
+                    "alt": image.group(1).strip() or "Figure",
+                    "path": str(resolved),
+                }
+            )
+        return images
+
+    def extend_unique(paragraph_id: str, images: list[dict[str, str]]) -> None:
+        item = result.get(paragraph_id)
+        if not item:
+            return
+        current = item.setdefault("images", [])
+        known = {str(image.get("path") or "") for image in current}
+        for image in images:
+            if image["path"] not in known:
+                current.append(image)
+                known.add(image["path"])
+
+    for marker in marker_re.finditer(body):
+        preceding = [heading for heading in headings if heading.end() <= marker.start()]
+        boundary = max(preceding[-1].end() if preceding else previous_end, previous_end)
+        fragment = body[boundary:marker.start()].strip()
+        images = local_images(fragment)
+        text = fragment
+        text = re.sub(r"<!--.*?-->", "", text, flags=re.S).strip()
+        text = image_re.sub("", text).strip()
+        paragraph_id = marker.group(1)
+        result[paragraph_id] = {
+            "heading": preceding[-1].group(2).strip() if preceding else "",
+            "text": text,
+            "images": images,
+        }
+        previous_end = marker.end()
+
+    # Managed figures normally follow the prose marker and declare the prose
+    # paragraph they illustrate. Attach those images to that target instead of
+    # whichever later caption marker happens to delimit the Markdown block.
+    metadata_markers = list(_INSERTED_FIGURE_METADATA_RE.finditer(body))
+    for index, metadata_marker in enumerate(metadata_markers):
+        try:
+            metadata = json.loads(metadata_marker.group(1))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        target_id = str(metadata.get("target_paragraph_id") or "").strip()
+        if not target_id:
+            continue
+        fragment_end = (
+            metadata_markers[index + 1].start()
+            if index + 1 < len(metadata_markers)
+            else len(body)
+        )
+        extend_unique(target_id, local_images(body[metadata_marker.end() : fragment_end]))
+    return result
+
+
+def draft_quality_state(project: Path) -> dict[str, Any]:
+    """Return Stage-8 quality artifacts bound to the current manuscript bytes."""
+    draft_stage = project / "04_first_draft"
+    draft_path = draft_stage / "first_draft.md"
+    status = read_json_if_exists(draft_stage / "feedback_loop_status.json") or {}
+    gate = read_json_if_exists(draft_stage / "first_draft_gate_status.json") or {}
+    rewrite_queue = read_json_if_exists(
+        draft_stage / "first_draft_rewrite_queue.json"
+    ) or {}
+    reviewer_findings = read_json_if_exists(draft_stage / "reviewer_findings.json") or []
+    rewrite_candidates = read_json_if_exists(
+        draft_stage / "feedback_rewrite_candidates.json"
+    ) or {"entries": {}}
+    current_hash = sha256_file(draft_path) if draft_path.is_file() else ""
+    evaluated_hash = str(
+        status.get("output_draft_sha256")
+        or status.get("source_draft_sha256")
+        or ""
+    )
+    evaluation_current = bool(
+        current_hash
+        and evaluated_hash
+        and current_hash == evaluated_hash
+        and str(status.get("status") or "")
+        in {"completed", "needs_human_review", "stopped"}
+    )
+    return {
+        "feedback_loop_status": status,
+        "feedback_gate_status": gate,
+        "feedback_rewrite_queue": rewrite_queue,
+        "feedback_reviewer_findings": reviewer_findings,
+        "feedback_rewrite_candidates": rewrite_candidates,
+        "feedback_paragraphs": feedback_paragraph_contents(draft_path),
+        "feedback_loop_current": evaluation_current,
+        "feedback_loop_running": str(status.get("status") or "") == "running",
+        "draft_sha256": current_hash,
+        "evaluated_draft_sha256": evaluated_hash,
+    }
+
+
+def draft_approval_state(project: Path) -> dict[str, Any]:
+    """Return whether human approval still describes the exact current draft."""
+    draft_path = project / "04_first_draft" / "first_draft.md"
+    approval = read_json_if_exists(
+        project / "04_first_draft" / "draft_approval.json"
+    ) or {}
+    current_hash = sha256_file(draft_path) if draft_path.is_file() else ""
+    approved_hash = str(approval.get("draft_sha256") or "")
+    current = bool(
+        approval.get("status") == "approved"
+        and current_hash
+        and approved_hash == current_hash
+    )
+    return {
+        "record": approval,
+        "current": current,
+        "draft_sha256": current_hash,
+        "approved_draft_sha256": approved_hash,
+        "reason": (
+            "current"
+            if current
+            else "not_approved"
+            if not approval
+            else "draft_changed_after_approval"
+        ),
+    }
+
+
+def approve_current_draft(
+    review_root: Path,
+    project_id: str,
+    *,
+    override_low_score: bool = False,
+    override_reason: str = "",
+) -> dict[str, Any]:
+    """Approve the evaluated current Stage-8 draft for final generation."""
+    project = Path(review_root) / "review-projects" / project_id
+    draft_path = project / "04_first_draft" / "first_draft.md"
+    if not draft_path.is_file():
+        raise RuntimeError("Create and save the first draft before approving it.")
+    freshness = project_draft_payload(review_root, project_id).get("freshness", {})
+    if freshness.get("upstream_stale"):
+        raise RuntimeError(
+            "The first draft is out of date with the current sections or reviewed figures."
+        )
+    quality = draft_quality_state(project)
+    status = quality["feedback_loop_status"]
+    if quality["feedback_loop_running"]:
+        raise RuntimeError("Wait for the current evaluation or rewrite to stop before approval.")
+    if not quality["feedback_loop_current"]:
+        raise RuntimeError("Evaluate the saved current draft before approving it.")
+    gate = quality["feedback_gate_status"]
+    hard_failures = [
+        str(value) for value in gate.get("hard_gate_failures") or [] if str(value).strip()
+    ]
+    if hard_failures:
+        raise RuntimeError(
+            "Resolve the hard integrity failures before approval: " + "; ".join(hard_failures)
+        )
+    score = float(status.get("score") or gate.get("unified_rubric_score") or 0)
+    goal = float(status.get("goal") or 90)
+    if score < goal and not override_low_score:
+        return {
+            "ok": False,
+            "requires_override": True,
+            "score": score,
+            "goal": goal,
+            "error": (
+                f"The current score is {score:.1f}, below the target {goal:.1f}. "
+                "Human confirmation is required to continue."
+            ),
+        }
+    approval = {
+        "schema_version": 1,
+        "project_id": project_id,
+        "status": "approved",
+        "approved_at": now_utc(),
+        "draft_sha256": quality["draft_sha256"],
+        "evaluated_draft_sha256": quality["evaluated_draft_sha256"],
+        "score": score,
+        "goal": goal,
+        "below_goal_override": bool(score < goal),
+        "override_reason": clean_publication_text(override_reason).strip()
+        if score < goal
+        else "",
+        "hard_gate_failures": [],
+    }
+    write_json(project / "04_first_draft" / "draft_approval.json", approval)
+    return {"ok": True, **draft_approval_state(project)}
+
+
 def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     project = review_root / "review-projects" / project_id
     stage = project / "05_final_audit"
@@ -7257,18 +7938,7 @@ def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
     draft_path = draft_stage / "first_draft.md"
     conclusion_path = draft_stage / "conclusion_generated.md"
     conclusion_report = read_json_if_exists(draft_stage / "conclusion_quality_report.json") or {}
-    feedback_loop_status = read_json_if_exists(draft_stage / "feedback_loop_status.json") or {}
-    feedback_gate_status = read_json_if_exists(draft_stage / "first_draft_gate_status.json") or {}
-    feedback_output_hash = str(
-        feedback_loop_status.get("output_draft_sha256")
-        or feedback_loop_status.get("source_draft_sha256")
-        or ""
-    )
-    feedback_loop_current = bool(
-        draft_path.is_file()
-        and re.fullmatch(r"[0-9a-f]{64}", feedback_output_hash)
-        and sha256_file(draft_path) == feedback_output_hash
-    )
+    approval = draft_approval_state(project)
     overview_figure = stage / "overview_figure.png"
     release_full_png = stage / "review_summary_chart.png"
     final_draft_text = read_text_if_exists(final_draft_path)
@@ -7311,9 +7981,8 @@ def project_final_payload(review_root: Path, project_id: str) -> dict[str, Any]:
         "conclusion_generated_md": read_text_if_exists(conclusion_path),
         "conclusion_current": conclusion_current,
         "conclusion_integration_current": conclusion_integration_current,
-        "feedback_loop_status": feedback_loop_status,
-        "feedback_gate_status": feedback_gate_status,
-        "feedback_loop_current": feedback_loop_current,
+        "draft_approval": approval,
+        "draft_approval_current": approval["current"],
         "final_draft_docx_path": str(docx_path),
         "final_draft_docx_exists": docx_current,
         "final_draft_docx_stale": docx_path.exists() and not docx_current,
@@ -7357,6 +8026,8 @@ def project_draft_payload(review_root: Path, project_id: str) -> dict[str, Any]:
         if isinstance(row, dict):
             redrawn.append(row)
     upstream_stale = bool(source_freshness["stale"] or figures_freshness["stale"])
+    quality = draft_quality_state(project)
+    approval = draft_approval_state(project)
     return {
         "project_id": project_id,
         "topic": infer_project_topic(project),
@@ -7367,6 +8038,9 @@ def project_draft_payload(review_root: Path, project_id: str) -> dict[str, Any]:
         "remaining_issues_md": read_text_if_exists(stage_dir / "remaining_issues.md"),
         "section_drafts": section_drafts,
         "redrawn_figures": redrawn,
+        **quality,
+        "draft_approval": approval,
+        "draft_approval_current": approval["current"],
         "freshness": {
             "source_stale": source_freshness["stale"],
             "draft_stale": draft_freshness["stale"],
@@ -7459,24 +8133,6 @@ def reconcile_project_semantic_states(review_root: Path, project_id: str) -> Non
             reported_feedback_status,
             error_message=str(feedback_status.get("error") or "").strip(),
         )
-
-
-def dashboard_assets(view_root: Path) -> tuple[Path, ...]:
-    dashboard = view_root / "assets" / "dashboard"
-    library_path = dashboard / "library.html"
-    discovery_path = dashboard / "discovery.html"
-    matrix_path = dashboard / "matrix.html"
-    blueprint_path = dashboard / "blueprint.html"
-    sections_path = dashboard / "sections.html"
-    figures_path = dashboard / "figures.html"
-    figure_review_path = dashboard / "figure-review.html"
-    draft_path = dashboard / "draft.html"
-    final_path = dashboard / "final.html"
-    settings_path = dashboard / "settings.html"
-    paths = [library_path, discovery_path, matrix_path, blueprint_path, sections_path, figures_path, figure_review_path, draft_path, final_path, settings_path]
-    if any(not path.exists() for path in paths):
-        raise FileNotFoundError(f"dashboard assets not found under {view_root / 'assets' / 'dashboard'}")
-    return tuple(paths)
 
 
 def acquire_dashboard_instance_lock(review_root: Path, host: str, port: int):

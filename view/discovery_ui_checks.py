@@ -30,9 +30,12 @@ class DiscoveryResultInteractionChecks(unittest.TestCase):
     def test_summary_uses_unique_paper_ids_and_labels_keyword_hits_separately(self) -> None:
         self.assertIn("function discoveryCounts", self.source)
         self.assertIn("uniqueLocal: new Set(localKeys).size", self.source)
-        self.assertIn("['Selected papers', stats.uniqueLocal]", self.source)
-        self.assertIn("['Candidate papers', stats.candidateLocal]", self.source)
+        self.assertIn("selectedLocal: new Set(selectedLocalKeys).size", self.source)
+        self.assertIn("['Unique papers', stats.uniqueLocal]", self.source)
+        self.assertIn("['Selected papers', stats.selectedLocal]", self.source)
         self.assertIn("['Keyword hits', stats.localHits]", self.source)
+        self.assertIn("const localRows = groups.flatMap(group => group.local_results || [])", self.source)
+        self.assertIn("const selectedLocalRows = localRows.filter(candidateSelected)", self.source)
         self.assertNotIn("${localMatches} local matches", self.source)
 
     def test_paper_choice_is_explicit_and_shared_across_duplicate_keyword_hits(self) -> None:
@@ -50,14 +53,44 @@ class DiscoveryResultInteractionChecks(unittest.TestCase):
 
     def test_confirmation_verifies_matrix_membership_before_redirecting(self) -> None:
         self.assertIn("result.matrix_sync?.selection_current", self.source)
+        self.assertIn("const expectedCount = discoveryCounts(data).selectedLocal", self.source)
         self.assertIn("count !== expectedCount", self.source)
         self.assertIn("selection_fingerprint", self.source)
+
+    def test_top_ranked_candidates_can_replace_the_local_matrix_selection(self) -> None:
+        self.assertIn('id="topPaperCount"', self.source)
+        self.assertIn('id="selectTopPapers"', self.source)
+        self.assertIn("function rankedLocalCandidates", self.source)
+        self.assertIn("function selectTopCandidates", self.source)
+        self.assertIn("(b.score - a.score) || (a.sourceOrder - b.sourceOrder)", self.source)
+        self.assertIn("const selectedIds = new Set(candidates.slice(0, count)", self.source)
+        self.assertIn("row.selected_for_matrix = selectedForMatrix", self.source)
+        self.assertIn("els.selectTopPapers.addEventListener('click', selectTopCandidates)", self.source)
+
+    def test_middle_toolbar_groups_keyword_and_bulk_selection_actions(self) -> None:
+        self.assertIn('class="toolbar keyword-result-toolbar"', self.source)
+        self.assertIn('class="keyword-review-actions"', self.source)
+        self.assertIn("grid-template-columns: max-content 72px minmax(0, 1fr);", self.source)
+        toolbar_start = self.source.index('class="toolbar keyword-result-toolbar"')
+        toolbar_end = self.source.index('<div id="results"', toolbar_start)
+        toolbar = self.source[toolbar_start:toolbar_end]
+        self.assertLess(toolbar.index('id="toggleKeywordBtn"'), toolbar.index('id="clearPaperSelection"'))
+        self.assertLess(toolbar.index('id="clearPaperSelection"'), toolbar.index('class="top-selection-control"'))
 
     def test_new_candidates_start_unselected_and_can_be_cleared_in_bulk(self) -> None:
         discovery_script = DISCOVERY_SCRIPT.read_text(encoding="utf-8")
         self.assertGreaterEqual(discovery_script.count('"selected_for_matrix": False'), 3)
         self.assertIn("clearPaperSelection", self.source)
         self.assertIn("function clearCandidateSelection", self.source)
+
+    def test_existing_project_can_change_topic_with_explicit_reset_confirmation(self) -> None:
+        self.assertIn('id="restartDiscoveryBtn"', self.source)
+        self.assertIn('id="restartNotice"', self.source)
+        self.assertIn("function prepareDiscoveryRestart", self.source)
+        self.assertIn("restart_existing: discoveryFormMode === 'restart'", self.source)
+        self.assertIn("window.confirm(tr('Replace this project topic", self.source)
+        self.assertIn("The current project is changed only after Discovery succeeds.", self.source)
+        self.assertIn('id="cancelRestartBtn"', self.source)
 
     def test_left_review_column_keeps_keyword_list_visible(self) -> None:
         self.assertIn('class="panel discovery-sidebar"', self.source)

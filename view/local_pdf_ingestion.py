@@ -107,7 +107,7 @@ def _pdf_reader(path: Path):
         from pypdf import PdfReader
     except ImportError as exc:
         raise RuntimeError(
-            "Local PDF parsing requires pypdf. Install requirements-workflow.txt in the active Python environment."
+            "Local PDF parsing requires pypdf. Install requirements.txt in the active Python environment."
         ) from exc
     reader = PdfReader(str(path), strict=False)
     if reader.is_encrypted:
@@ -330,7 +330,7 @@ def _run_mineru_parser(review_root: Path, pdf_path: Path, slug: str) -> dict[str
     """Run the canonical MinerU single-PDF workflow and validate its required outputs."""
     root = Path(review_root).resolve()
     script = (
-        root
+        Path(__file__).resolve().parents[1]
         / "skills"
         / "mineru-precise-parse-review-writer"
         / "scripts"
@@ -354,6 +354,8 @@ def _run_mineru_parser(review_root: Path, pdf_path: Path, slug: str) -> dict[str
         str(artifacts["manifest"]),
         "--force",
     ]
+    from provider_settings import provider_subprocess_environment
+
     try:
         completed = subprocess.run(
             command,
@@ -362,6 +364,7 @@ def _run_mineru_parser(review_root: Path, pdf_path: Path, slug: str) -> dict[str
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=provider_subprocess_environment(root),
             timeout=MINERU_UPLOAD_TIMEOUT_SECONDS,
             check=False,
         )

@@ -267,8 +267,54 @@
     .check-help { margin:0 0 10px; color:var(--muted); font-size:13px; line-height:1.45; }
     .check-content { padding-top:8px; border-top:1px solid #e5dac6; }
     .check-content.markdown { height:auto; overflow:visible; padding:8px 0 0; background:transparent; font-size:14px; }
+    .quality-config { padding: 12px; margin-bottom: 14px; border: 1px solid var(--line); border-radius: 12px; background: #fffdf7; }
+    .quality-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 9px 0 11px; }
+    .quality-grid label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; }
+    .quality-grid input { width: 100%; padding: 7px 8px; border: 1px solid var(--line); border-radius: 7px; background: white; }
+    .quality-view, .approval-view { min-height: 100%; padding: 24px 28px; background: #fffdf7; overflow: auto; }
+    .quality-status { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; margin-bottom: 14px; }
+    .quality-stat { padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: #fffaf1; }
+    .quality-stat strong { display: block; margin-top: 4px; font-size: 21px; color: var(--green); }
+    .quality-stat.stale strong { color: #9a6b28; }
+    .rewrite-current { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; padding: 11px 13px; border: 1px solid #8bb9aa; border-radius: 9px; background: #eef8f4; }
+    .spinner { width: 15px; height: 15px; border: 2px solid #a8cec1; border-top-color: var(--green); border-radius: 50%; animation: qualitySpin .8s linear infinite; }
+    .quality-queue-head { display: flex; justify-content: space-between; align-items: end; gap: 12px; margin: 18px 0 9px; }
+    .quality-score-list { display: grid; gap: 9px; }
+    .quality-score-card { padding: 12px 14px; border: 1px solid var(--line); border-left: 4px solid #a58145; border-radius: 8px; background: #fffdf7; }
+    .quality-score-card.rewriting { border-left-color: #237c66; background: #f4fbf8; }
+    .quality-score-card.completed { border-left-color: #488f52; }
+    .quality-score-card.rejected { border-left-color: #a64132; }
+    .quality-score-head, .quality-score-tools, .quality-score-title, .candidate-actions { display: flex; align-items: center; gap: 8px; }
+    .quality-score-head { justify-content: space-between; }
+    .quality-score-title { min-width: 0; }
+    .quality-score-tools { flex-wrap: wrap; justify-content: flex-end; }
+    .quality-score-value { font-size: 18px; }
+    .quality-score-meta { margin-top: 5px; color: var(--muted); font-size: 12px; }
+    .rewrite-state { display: inline-flex; padding: 3px 8px; border-radius: 999px; background: #eee4d1; color: #6f592f; font-size: 11px; }
+    .rewrite-state.rewriting { background: #dcefe8; color: #145c4b; }
+    .rewrite-state.completed { background: #e4f1e3; color: #356e3d; }
+    .rewrite-state.rejected { background: #f6e1dc; color: #8b3025; }
+    .rewrite-state.review { background: #eee9f6; color: #665183; }
+    .issue-toggle { display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 1px solid var(--line); border-radius: 7px; background: white; cursor: pointer; color: var(--green); font-size: 18px; }
+    .issue-content { margin-top: 11px; padding: 12px; border-top: 1px solid var(--line); background: white; }
+    .issue-heading { margin-bottom: 6px; color: var(--green); font-weight: 700; }
+    .issue-body { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
+    .issue-images { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 10px; margin: 8px 0 12px; }
+    .issue-image { margin: 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: #fffdf7; text-align: center; }
+    .issue-image img { display: block; width: 100%; max-height: 360px; object-fit: contain; border: 0; background: white; }
+    .candidate-review { margin-top: 12px; padding: 12px; border: 1px solid #9ebfaf; border-radius: 9px; background: #f4fbf8; }
+    .candidate-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 9px 0; }
+    .candidate-column { padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: white; white-space: pre-wrap; }
+    .approval-card { margin-bottom: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: #fffaf1; }
+    .approval-card.current { border-color: #78a992; background: #eef8f4; }
+    .approval-card.blocked { border-color: #c4976e; background: #fff6e9; }
+    .btn.danger { color: #8f3527; border-color: #cda89f; background: #fff7f4; }
+    .btn.small { padding: 5px 8px; font-size: 12px; }
+    .btn:disabled { opacity: .55; cursor: not-allowed; }
+    @keyframes qualitySpin { to { transform: rotate(360deg); } }
+    @media(max-width:1050px) { .quality-status,.candidate-columns { grid-template-columns: 1fr; } }
   </style>
-  <link rel="stylesheet" href="/assets/dashboard/review-ui.css?v=20260803">
+<link rel="stylesheet" href="/assets/dashboard/review-ui.css?v=20260813g">
 </head>
 <body>
   <nav class="nav">
@@ -276,16 +322,7 @@
     <div class="nav-center">
       <select id="projectSelect" class="project-select"></select>
     </div>
-    <div class="nav-right">
-      <a href="/library">Library</a>
-      <a href="/discovery">Discovery</a>
-      <a href="/matrix">Matrix</a>
-      <a href="/blueprint">Blueprint</a>
-      <a href="/sections">Sections</a>
-      <a href="/figures">Figures</a>
-      <a class="active" href="/draft">Draft</a>
-      <a href="/final">Final</a>
-    </div>
+    <div class="nav-right"></div>
   </nav>
   <main class="app">
     <section class="panel">
@@ -307,14 +344,16 @@
       <div class="tabs">
         <button class="tab active" data-tab="preview">Draft Preview</button>
         <button class="tab" data-tab="edit">Full-text Edit</button>
-        <button class="tab" data-tab="checks">Review Checks</button>
+        <button class="tab" data-tab="quality">Draft Quality</button>
+        <button class="tab" data-tab="approval">Human Approval</button>
       </div>
       <div class="detail-body">
         <div id="preview" class="draft-view"></div>
         <div id="edit" class="edit-pane" style="display:none">
           <textarea id="draftEditor" class="editor" spellcheck="false"></textarea>
         </div>
-        <div id="checks" class="checks-view" style="display:none"></div>
+        <div id="quality" class="quality-view" style="display:none"></div>
+        <div id="approval" class="approval-view" style="display:none"></div>
       </div>
     </section>
     <section class="panel">
@@ -323,18 +362,39 @@
         <div class="sub">Same project across discovery, drafting, redraw, and merge.</div>
       </div>
       <div class="side-body">
+        <section class="quality-config" aria-label="First draft quality controls">
+          <div class="label">Draft quality controls</div>
+          <div class="quality-grid">
+            <label>Overall goal<input id="feedbackGoal" type="number" min="90" max="100" value="90"></label>
+            <label>Paragraph goal<input id="feedbackParagraphGoal" type="number" min="0" max="100" value="85"></label>
+            <label>Max iterations<input id="feedbackMaxIterations" type="number" min="1" max="10" value="3"></label>
+            <label>Minimum words<input id="feedbackMinWords" type="number" min="1" max="2000" step="10" value="140"></label>
+            <label>Maximum words<input id="feedbackMaxWords" type="number" min="1" max="2000" step="10" value="280"></label>
+          </div>
+          <div class="actions">
+            <button class="btn primary" data-feedback-action="evaluate">Evaluate Current Draft</button>
+            <button class="btn" data-feedback-action="improve">Batch Safe Optimize</button>
+            <button class="btn danger" data-feedback-action="stop">Stop</button>
+          </div>
+          <div id="feedbackActionStatus" class="sub" role="status" aria-live="polite"></div>
+        </section>
         <div id="summaryBox"></div>
       </div>
     </section>
   </main>
   <div id="message" class="message"></div>
-  <script src="/assets/dashboard/review-i18n.js?v=20260805d"></script>
-  <script src="/assets/dashboard/review-ui.js?v=20260805d"></script>
+<script src="/assets/dashboard/review-i18n.js?v=20260813g"></script>
+<script src="/assets/dashboard/review-ui.js?v=20260813g"></script>
   <script>
     let projects = [];
     let selectedProject = '';
     let payload = null;
-    let activeTab = 'preview';
+    const requestedTab = new URLSearchParams(window.location.search).get('tab');
+    let activeTab = ['preview','edit','quality','approval'].includes(requestedTab) ? requestedTab : 'preview';
+    let feedbackPollTimer = null;
+    let feedbackRequestPending = false;
+    let draftDirty = false;
+    const expandedFeedbackIssues = new Set();
     const els = {
       projectSelect: document.getElementById('projectSelect'),
       projectInfo: document.getElementById('projectInfo'),
@@ -343,7 +403,8 @@
       detailMeta: document.getElementById('detailMeta'),
       preview: document.getElementById('preview'),
       draftEditor: document.getElementById('draftEditor'),
-      checks: document.getElementById('checks'),
+      quality: document.getElementById('quality'),
+      approval: document.getElementById('approval'),
       summaryBox: document.getElementById('summaryBox'),
       message: document.getElementById('message')
     };
@@ -481,6 +542,150 @@
     async function insertParagraph(id) { const text = prompt(`在 ${id} 后插入段落`); if (text) await paragraphRequest('/paragraph', 'POST', {after_paragraph_id:id, text}); }
     async function historyParagraph(id) { const res = await fetch(`/api/project/${encodeURIComponent(selectedProject)}/paragraph/${encodeURIComponent(id)}/history`); const history = await res.json(); if (!history.length) { msg('该段落暂无历史版本。'); return; } const options = history.map((item, index) => `${index}: ${item.timestamp} ${item.operation}`).join('\n'); const choice = prompt(`输入要恢复的版本序号：\n${options}`, String(history.length - 1)); if (choice !== null && /^-?\d+$/.test(choice) && confirm('恢复后将创建新的历史记录。')) await paragraphRequest(`/paragraph/${encodeURIComponent(id)}/rollback`, 'POST', {version:Number(choice)}); }
     async function deleteParagraph(id) { if (confirm(`删除段落 ${id}？将自动重排引用编号。`)) await paragraphRequest(`/paragraph/${encodeURIComponent(id)}`, 'DELETE', {reason:'dashboard delete'}); }
+
+    function qualityText(en, zh) { return document.documentElement.lang === 'zh-CN' ? zh : en; }
+    function feedbackRunning() { return payload?.feedback_loop_running === true; }
+    function feedbackIssueState(item, status, stateById) {
+      const paragraphId = String(item?.paragraph_id || ''), live = stateById.get(paragraphId);
+      if (live?.status === 'rewriting' || (feedbackRunning() && status.current_paragraph_id === paragraphId)) return {key:'rewriting',label:qualityText('Rewriting','重写中')};
+      if (live?.status === 'completed') return {key:'completed',label:qualityText('Rewrite complete','重写完毕')};
+      if (live?.status === 'rejected') return {key:'rejected',label:qualityText('Rewrite failed','重写失败')};
+      if (item?.route === 'human_confirmation' || item?.route === 'local_source_recheck') return {key:'review',label:qualityText('Human review','人工核查')};
+      return {key:'pending',label:qualityText('Pending','待处理')};
+    }
+    function feedbackPhaseLabel(status) {
+      const phase = String(status?.phase || 'not started').replaceAll('_',' ');
+      const total = Number(status?.rewrite_total || 0), completed = Number(status?.rewrite_completed || 0);
+      const current = status?.current_paragraph_id ? ` · ${status.current_paragraph_id}` : '';
+      return phase + (total ? ` · ${completed}/${total}` : '') + current;
+    }
+    function candidateFor(paragraphId) {
+      const entry = payload?.feedback_rewrite_candidates?.entries?.[paragraphId];
+      return entry?.status === 'pending_human_review' && entry?.draft_sha256 === payload?.draft_sha256 ? entry : null;
+    }
+    function renderCandidateReview(candidate) {
+      if (!candidate) return '';
+      return `<div class="candidate-review">
+        <strong>${esc(qualityText('AI rewrite candidate — not applied','AI 重写候选——尚未写入正文'))}</strong>
+        <div class="candidate-columns">
+          <div><div class="label">${esc(qualityText('Current paragraph','当前段落'))}</div><div class="candidate-column">${esc(candidate.original_text || '')}</div></div>
+          <div><div class="label">${esc(qualityText('Proposed rewrite','重写建议'))}</div><div class="candidate-column">${esc(candidate.candidate_text || '')}</div></div>
+        </div>
+        <div class="candidate-actions">
+          <button class="btn primary small" data-quality-action="accept-candidate" data-paragraph-id="${esc(candidate.paragraph_id)}">${esc(qualityText('Accept','接受'))}</button>
+          <button class="btn small" data-quality-action="manual-edit" data-paragraph-id="${esc(candidate.paragraph_id)}">${esc(qualityText('Edit manually','人工编辑'))}</button>
+          <button class="btn danger small" data-quality-action="reject-candidate" data-paragraph-id="${esc(candidate.paragraph_id)}">${esc(qualityText('Reject','拒绝'))}</button>
+        </div>
+      </div>`;
+    }
+    function renderFeedbackQuality() {
+      const status = payload?.feedback_loop_status || {}, scores = Array.isArray(status.paragraph_scores) ? status.paragraph_scores : [];
+      const queue = Array.isArray(payload?.feedback_rewrite_queue?.items) ? payload.feedback_rewrite_queue.items : [];
+      const issues = queue.length ? queue : scores.filter(item => Number(item.score || 0) < Number(status.paragraph_goal || 85) || !['pass','final_polish'].includes(String(item.route || '')));
+      const score = status.score === undefined || status.score === null ? '—' : Number(status.score).toFixed(1);
+      const current = payload?.feedback_loop_current === true && !draftDirty;
+      const stateById = new Map((Array.isArray(status.rewrite_items) ? status.rewrite_items : []).map(item => [String(item.paragraph_id || ''), item]));
+      const cards = issues.length ? issues.map(item => {
+        const paragraphId = String(item.paragraph_id || 'Paragraph'), paragraph = payload?.feedback_paragraphs?.[paragraphId] || {};
+        const state = feedbackIssueState(item, status, stateById), expanded = expandedFeedbackIssues.has(paragraphId);
+        const failed = Array.isArray(item.failed_dimensions) ? item.failed_dimensions.join(', ') : '';
+        const candidate = candidateFor(paragraphId);
+        return `<section class="quality-score-card ${state.key}" data-feedback-issue="${esc(paragraphId)}">
+          <div class="quality-score-head"><div class="quality-score-title"><strong>${esc(paragraphId)}</strong><span class="rewrite-state ${state.key}">${esc(state.label)}</span></div>
+          <div class="quality-score-tools"><strong class="quality-score-value">${Number(item.score || 0).toFixed(1)}</strong>
+          <button class="btn small" data-quality-action="manual-edit" data-paragraph-id="${esc(paragraphId)}">${esc(qualityText('Manual edit','人工编辑'))}</button>
+          <button class="btn small" data-quality-action="ai-rewrite" data-paragraph-id="${esc(paragraphId)}" ${candidate || feedbackRunning() ? 'disabled' : ''}>${esc(qualityText('AI rewrite','AI 重写'))}</button>
+          <button class="issue-toggle" data-issue-toggle="${esc(paragraphId)}" aria-expanded="${expanded}">${expanded ? '⌃' : '⌄'}</button></div></div>
+          <div class="quality-score-meta">${esc(item.route || 'review')}${failed ? ' · ' + esc(failed) : ''}</div>
+          ${item.diagnosis ? `<p>${esc(item.diagnosis)}</p>` : ''}
+          ${expanded ? `<div class="issue-content">${paragraph.heading ? `<div class="issue-heading">${esc(paragraph.heading)}</div>` : ''}<div class="issue-image-anchor"></div>${paragraph.text ? `<div class="issue-body">${esc(paragraph.text)}</div>` : `<div class="sub">${esc(qualityText('The current paragraph could not be found.','未找到当前正文段落。'))}</div>`}</div>` : ''}
+          ${renderCandidateReview(candidate)}
+        </section>`;
+      }).join('') : `<p>${esc(scores.length ? qualityText('No blocking problems are currently queued.','当前没有待处理的阻塞问题。') : qualityText('Save and evaluate the current draft to create a problem queue.','保存并评估当前初稿后生成问题队列。'))}</p>`;
+      const live = feedbackRunning() ? `<div class="rewrite-current"><span class="spinner"></span><div><strong>${esc(qualityText('Evaluation and rewriting in progress','正在评估与重写'))}</strong><div class="sub">${esc(feedbackPhaseLabel(status))}</div></div></div>` : '';
+      return `<div class="quality-status">
+        <div class="quality-stat ${current ? '' : 'stale'}"><span class="label">${esc(current ? qualityText('Current overall score','当前全文分数') : qualityText('Previous score (out of date)','旧评分（已失效）'))}</span><strong>${score}</strong></div>
+        <div class="quality-stat"><span class="label">${esc(qualityText('Evaluation state','评估状态'))}</span><strong style="font-size:15px">${esc(feedbackPhaseLabel(status))}</strong></div>
+        <div class="quality-stat"><span class="label">${esc(qualityText('Human approval','人工确认'))}</span><strong style="font-size:15px">${esc(payload?.draft_approval_current && !draftDirty ? qualityText('Approved','已确认') : qualityText('Required','待确认'))}</strong></div>
+      </div>${live}<div class="quality-queue-head"><h3>${esc(qualityText('Problem queue','问题队列'))}</h3><span class="sub">${issues.length} ${esc(qualityText('items','项'))}</span></div><div class="quality-score-list">${cards}</div>`;
+    }
+    function decorateFeedbackIssueImages() {
+      els.quality.querySelectorAll('.quality-score-card[data-feedback-issue] .issue-image-anchor').forEach(anchor => {
+        const paragraphId = anchor.closest('[data-feedback-issue]')?.dataset.feedbackIssue || '';
+        const images = Array.isArray(payload?.feedback_paragraphs?.[paragraphId]?.images) ? payload.feedback_paragraphs[paragraphId].images : [];
+        if (!images.length) return;
+        const gallery = document.createElement('div'); gallery.className = 'issue-images';
+        images.forEach(image => {
+          const figure = document.createElement('figure'), element = document.createElement('img'), caption = document.createElement('figcaption');
+          figure.className = 'issue-image'; element.src = fileUrlForMarkdownPath(image.path); element.alt = String(image.alt || 'Figure'); caption.textContent = element.alt;
+          figure.append(element, caption); gallery.append(figure);
+        });
+        anchor.replaceWith(gallery);
+      });
+    }
+    function feedbackOptions(evaluateOnly) {
+      const minimum = Number(document.getElementById('feedbackMinWords').value), maximum = Number(document.getElementById('feedbackMaxWords').value);
+      if (!Number.isInteger(minimum) || minimum < 1 || !Number.isInteger(maximum) || maximum < minimum) throw new Error(qualityText('Enter a valid paragraph word range.','请输入有效的段落词数范围。'));
+      return {goal:Number(document.getElementById('feedbackGoal').value),paragraph_goal:Number(document.getElementById('feedbackParagraphGoal').value),max_iterations:Number(document.getElementById('feedbackMaxIterations').value),min_case_words:minimum,max_case_words:maximum,evaluate_only:Boolean(evaluateOnly)};
+    }
+    async function runFeedbackLoop(evaluateOnly) {
+      const status = document.getElementById('feedbackActionStatus');
+      if (!await saveDraft({silent:true})) return;
+      let options; try { options = feedbackOptions(evaluateOnly); } catch (error) { status.textContent = error.message; return; }
+      activeTab = 'quality'; feedbackRequestPending = true; status.textContent = evaluateOnly ? qualityText('Evaluating the saved draft…','正在评估已保存初稿…') : qualityText('Evaluating and safely optimizing…','正在评估并进行安全优化…');
+      syncFeedbackPolling(); renderCurrent();
+      try {
+        const response = await fetch(`/api/project/${encodeURIComponent(selectedProject)}/run/draft-feedback-loop`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(options)});
+        const result = await response.json().catch(() => ({ok:false,error:`Server returned ${response.status}.`}));
+        if (!response.ok || !result.ok) throw new Error(result.error || 'Draft quality run failed.');
+        await loadProject(selectedProject); status.textContent = qualityText('Draft quality run completed.','初稿质量处理完成。');
+      } catch (error) { status.textContent = error.message || String(error); await loadProject(selectedProject); }
+      finally { feedbackRequestPending = false; syncFeedbackPolling(); }
+    }
+    async function stopFeedbackLoop() {
+      const status = document.getElementById('feedbackActionStatus');
+      const response = await fetch(`/api/project/${encodeURIComponent(selectedProject)}/feedback-loop/stop`, {method:'POST'});
+      const result = await response.json().catch(() => ({}));
+      status.textContent = response.ok ? qualityText('Stop requested.','已请求停止。') : (result.error || 'Stop request failed.');
+    }
+    function syncFeedbackPolling() {
+      if ((feedbackRunning() || feedbackRequestPending) && !feedbackPollTimer) feedbackPollTimer = setInterval(async () => {
+        try { const response = await fetch(`/api/project/${encodeURIComponent(selectedProject)}/draft`); if (!response.ok) return; payload = await response.json(); renderSummary(); renderCurrent(); if (!feedbackRunning() && !feedbackRequestPending) syncFeedbackPolling(); } catch (_error) {}
+      }, 1000);
+      if (!feedbackRunning() && !feedbackRequestPending && feedbackPollTimer) { clearInterval(feedbackPollTimer); feedbackPollTimer = null; }
+    }
+    async function requestAiRewrite(paragraphId) {
+      const status = document.getElementById('feedbackActionStatus'); status.textContent = `${qualityText('Generating candidate for','正在生成候选')} ${paragraphId}…`;
+      const response = await fetch(`/api/project/${encodeURIComponent(selectedProject)}/paragraph/${encodeURIComponent(paragraphId)}/ai-rewrite`, {method:'POST'});
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) { status.textContent = result.error || qualityText('AI rewrite failed.','AI 重写失败。'); return; }
+      await loadProject(selectedProject); activeTab = 'quality'; renderCurrent(); status.textContent = qualityText('Candidate ready for human review.','候选重写已生成，等待人工确认。');
+    }
+    async function decideAiRewrite(paragraphId, decision) {
+      const response = await fetch(`/api/project/${encodeURIComponent(selectedProject)}/paragraph/${encodeURIComponent(paragraphId)}/ai-rewrite/${decision}`, {method:'POST'});
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) { msg(result.error || qualityText('Candidate decision failed.','候选处理失败。')); return; }
+      await loadProject(selectedProject); activeTab = 'quality'; renderCurrent();
+      msg(decision === 'accept' ? qualityText('Rewrite accepted. Re-evaluate the changed draft.','已接受重写，请重新评估修改后的初稿。') : qualityText('Rewrite rejected.','已拒绝重写。'));
+    }
+    function openParagraphEditor(paragraphId) {
+      activeTab = 'preview'; renderCurrent();
+      const block = els.preview.querySelector(`[data-paragraph-id="${CSS.escape(paragraphId)}"]`); block?.scrollIntoView({block:'center'});
+      beginParagraphEdit(paragraphId);
+    }
+    async function approveDraftForHandoff() {
+      const request = async override => {
+        const response = await fetch(`/api/project/${encodeURIComponent(selectedProject)}/draft/approve`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({override_low_score:override,override_reason:override ? 'Human approved the evaluated draft below the configured score target.' : ''})});
+        return {response,result:await response.json().catch(() => ({}))};
+      };
+      let {response,result} = await request(false);
+      if (!response.ok && result.requires_override) {
+        if (!confirm(`${result.error}\n\n${qualityText('Continue with human approval?','是否仍由人工确认并继续？')}`)) return false;
+        ({response,result} = await request(true));
+      }
+      if (!response.ok || !result.ok) { msg(result.error || qualityText('Draft approval failed.','初稿确认失败。')); activeTab = 'approval'; renderCurrent(); return false; }
+      await loadProject(selectedProject); return true;
+    }
     async function loadProjects() {
       projects = await (await fetch('/api/projects')).json();
       els.projectSelect.innerHTML = projects.map(p => `<option value="${esc(p.project_id)}">${esc(p.project_id)}</option>`).join('');
@@ -499,10 +704,12 @@
       const editingBlocked = Boolean(payload?.freshness?.editing_blocked);
       els.draftEditor.value = editingBlocked ? '' : (payload.first_draft_md || '');
       els.draftEditor.disabled = editingBlocked;
-      document.getElementById('saveBtn').disabled = editingBlocked;
+      draftDirty = false;
+      document.getElementById('saveBtn').disabled = editingBlocked || feedbackRunning();
       renderLeft();
       renderSummary();
       renderCurrent();
+      syncFeedbackPolling();
     }
     function renderLeft() {
       const stale = Boolean(payload?.freshness?.stale);
@@ -510,7 +717,8 @@
         <div class="draft-workflow">
           <div class="workflow-step"><strong>1. Draft Preview</strong><span>Read the composed manuscript and edit individual paragraphs in context.</span></div>
           <div class="workflow-step"><strong>2. Full-text Edit</strong><span>Edit the complete Markdown source when structure or multiple paragraphs must change together.</span></div>
-          <div class="workflow-step"><strong>3. Review Checks</strong><span>Review merge notes and unresolved human checks together before Stage 9.</span></div>
+          <div class="workflow-step"><strong>3. Draft Quality</strong><span>Evaluate the saved version, inspect problem paragraphs, and review AI rewrite candidates.</span></div>
+          <div class="workflow-step"><strong>4. Human Approval</strong><span>Resolve integrity failures and approve the exact draft version before Final.</span></div>
           ${stale ? '<div class="workflow-step"><span class="pill warn">outdated</span><span>Upstream content changed; regenerate the first draft before editing.</span></div>' : payload?.summary?.has_figure_redraw ? '<div class="workflow-step"><span class="pill">figures ready</span><span>Reviewed figures are available to the current draft.</span></div>' : ''}
         </div>`;
       els.projectInfo.textContent = `${selectedProject} · ${payload?.topic || ''}`;
@@ -520,6 +728,8 @@
       const redrawn = payload?.redrawn_figures || [];
       const stale = Boolean(payload?.freshness?.stale);
       const editingBlocked = Boolean(payload?.freshness?.editing_blocked);
+      const qualityStatus = payload?.feedback_loop_status || {};
+      const score = qualityStatus.score === undefined || qualityStatus.score === null ? '—' : Number(qualityStatus.score).toFixed(1);
       els.summaryBox.innerHTML = `
         <div class="field"><div class="label">Current Draft</div><div class="value">${editingBlocked ? '已过期：请基于当前章节和已审核图片重新生成初稿。' : stale ? '当前文件包含尚未登记的修改，可以检查后保存。' : 'current'}</div></div>
         <div class="field"><div class="label">Project</div><div class="value">${esc(selectedProject)}</div></div>
@@ -532,14 +742,20 @@
           <span class="pill">draft=${esc(Boolean(s.has_first_draft))}</span>
         </div></div>
         <div class="field"><div class="label">Redrawn Figures</div><div class="value">${esc(redrawn.length)}</div></div>
+        <div class="field"><div class="label">Draft Quality</div><div class="value">${esc(score)} · ${payload?.feedback_loop_current && !draftDirty ? qualityText('current','当前版本') : qualityText('evaluation required','需要重新评估')}</div></div>
+        <div class="field"><div class="label">Human Approval</div><div class="value">${payload?.draft_approval_current && !draftDirty ? qualityText('approved for Final','已确认进入最终阶段') : qualityText('not approved','尚未确认')}</div></div>
         <div class="field"><div class="label">Draft Files</div><div class="value">${esc(payload?.paths?.stage_dir || '')}</div></div>
       `;
     }
-    function renderReviewChecks() {
+    function renderHumanApproval() {
       const mergeReport = String(payload?.merge_report_md || '').trim();
       const remainingIssues = String(payload?.remaining_issues_md || '').trim();
+      const gate = payload?.feedback_gate_status || {}, hard = Array.isArray(gate.hard_gate_failures) ? gate.hard_gate_failures : [];
+      const evaluationState = payload?.feedback_loop_current && !draftDirty ? qualityText('Current draft evaluated','当前初稿已完成评估') : qualityText('Evaluation required for the current saved draft','当前保存版本需要重新评估');
+      const approvalCurrent = payload?.draft_approval_current && !draftDirty;
+      const approvalState = approvalCurrent ? qualityText('Human-approved for Final','已人工确认，可进入最终生成') : qualityText('Human approval required','等待人工确认');
       return `
-        <div class="checks-intro">Merge notes and remaining issues are read-only evidence, so they are grouped here. Correct manuscript text in Draft Preview or Full-text Edit.</div>
+        <section class="approval-card ${approvalCurrent ? 'current' : 'blocked'}"><h3>${esc(approvalState)}</h3><p>${esc(evaluationState)}</p>${hard.length ? `<p><strong>${esc(qualityText('Hard integrity failures','硬性完整性错误'))}:</strong> ${esc(hard.join('; '))}</p>` : ''}<p class="sub">${esc(qualityText('Use the stage confirmation button after saving and evaluating. A below-target score may be accepted only through an explicit human override.','保存并评估后使用阶段确认按钮。低于目标分数时必须由人工明确确认后才能继续。'))}</p></section>
         <section class="check-card">
           <div class="check-card-head"><h3>Merge and normalization</h3><span class="check-status">${mergeReport ? 'report available' : 'no report'}</span></div>
           <p class="check-help">Confirms how section text, transitions, terminology, citations, and figures were assembled. It is not a second editable draft.</p>
@@ -547,12 +763,12 @@
         </section>
         <section class="check-card">
           <div class="check-card-head"><h3>Human review items</h3><span class="check-status ${remainingIssues ? 'review' : ''}">${remainingIssues ? 'review required' : 'none recorded'}</span></div>
-          <p class="check-help">Check scientific interpretation, scope boundaries, citations, and every retained figure before continuing to Stage 9.</p>
+          <p class="check-help">Check scientific interpretation, scope boundaries, citations, and every retained figure before continuing to Final.</p>
           <div class="check-content markdown">${remainingIssues ? renderMarkdown(remainingIssues, payload?.paths?.stage_dir || '') : '<p>No remaining issue file was produced.</p>'}</div>
         </section>`;
     }
     function syncActiveTab() {
-      const valid = new Set(['preview', 'edit', 'checks']);
+      const valid = new Set(['preview', 'edit', 'quality', 'approval']);
       if (!valid.has(activeTab)) activeTab = 'preview';
       document.querySelectorAll('.tab').forEach(tab => tab.classList.toggle('active', tab.dataset.tab === activeTab));
       for (const id of valid) document.getElementById(id).style.display = id === activeTab ? 'block' : 'none';
@@ -563,23 +779,31 @@
         els.detailTitle.textContent = '初稿已过期';
         els.detailMeta.textContent = '当前 Blueprint、章节或审核图片已经更新。';
         els.preview.innerHTML = '<div class="empty">请重新生成初稿。旧初稿保留在磁盘中，但不会作为当前流程内容显示或保存。</div>';
-        els.checks.innerHTML = '';
+        els.quality.innerHTML = '';
+        els.approval.innerHTML = '';
         syncActiveTab();
         return;
       }
       const titles = {
         preview:['Draft Preview','Read the manuscript and edit individual paragraphs in context.'],
         edit:['Full-text Edit','Edit and save the complete Markdown source.'],
-        checks:['Review Checks','Merge evidence and open human-review items before Stage 9.']
+        quality:['Draft Quality','Evaluate the saved manuscript, inspect problem paragraphs, and review AI rewrite candidates.'],
+        approval:['Human Approval','Confirm merge evidence, hard integrity checks, and the exact approved Draft version before Final.']
       };
       els.detailTitle.textContent = titles[activeTab][0];
       els.detailMeta.textContent = titles[activeTab][1];
       els.preview.innerHTML = renderMarkdownWithParagraphs(els.draftEditor.value || '', payload?.paths?.first_draft_base_dir || payload?.paths?.stage_dir || '');
-      els.checks.innerHTML = renderReviewChecks();
+      els.quality.innerHTML = renderFeedbackQuality();
+      els.approval.innerHTML = renderHumanApproval();
       syncActiveTab();
+      if (activeTab === 'quality') decorateFeedbackIssueImages();
     }
     async function saveDraft(options = {}) {
       if (!selectedProject) return false;
+      if (feedbackRunning()) {
+        msg(qualityText('Stop or finish the current quality run before saving.','请先停止或等待当前质量任务完成后再保存。'));
+        return false;
+      }
       if (document.querySelector('.para-inline-editor')) {
         msg('请先保存或取消当前段落编辑。');
         return false;
@@ -596,16 +820,41 @@
       if (!res.ok) { msg(await res.text()); return false; }
       if (!silent) msg('Draft saved');
       await loadProject(selectedProject);
+      draftDirty = false;
       return true;
     }
     window.reviewDraftSaveForHandoff = () => saveDraft({silent:true});
+    window.reviewDraftApproveForHandoff = () => approveDraftForHandoff();
     document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => {
       activeTab = tab.dataset.tab;
       renderCurrent();
     }));
     els.projectSelect.addEventListener('change', e => loadProject(e.target.value));
+    els.draftEditor.addEventListener('input', () => { draftDirty = true; renderSummary(); if (activeTab === 'quality' || activeTab === 'approval') renderCurrent(); });
     document.getElementById('reloadBtn').addEventListener('click', () => selectedProject && loadProject(selectedProject));
     document.getElementById('saveBtn').addEventListener('click', saveDraft);
+    document.addEventListener('click', event => {
+      const issueButton = event.target.closest('[data-issue-toggle]');
+      if (issueButton) {
+        const id = String(issueButton.dataset.issueToggle || '');
+        if (expandedFeedbackIssues.has(id)) expandedFeedbackIssues.delete(id); else expandedFeedbackIssues.add(id);
+        renderCurrent(); return;
+      }
+      const feedbackButton = event.target.closest('[data-feedback-action]');
+      if (feedbackButton) {
+        const action = feedbackButton.dataset.feedbackAction;
+        if (action === 'stop') stopFeedbackLoop(); else runFeedbackLoop(action === 'evaluate');
+        return;
+      }
+      const qualityButton = event.target.closest('[data-quality-action]');
+      if (!qualityButton) return;
+      const paragraphId = String(qualityButton.dataset.paragraphId || ''), action = qualityButton.dataset.qualityAction;
+      if (action === 'manual-edit') openParagraphEditor(paragraphId);
+      else if (action === 'ai-rewrite') requestAiRewrite(paragraphId);
+      else if (action === 'accept-candidate') decideAiRewrite(paragraphId, 'accept');
+      else if (action === 'reject-candidate') decideAiRewrite(paragraphId, 'reject');
+    });
+    window.addEventListener('review-language-change', () => { renderLeft(); renderSummary(); renderCurrent(); });
     loadProjects().catch(err => msg(err.message));
   </script>
 </body>

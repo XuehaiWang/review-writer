@@ -21,6 +21,10 @@ final-audit checkpoint has approved the final draft.
 - Fallback artifacts do not satisfy the orchestrated summary stage;
   standalone selection remains final > first > section draft.
 - JSON `stats.image_manifest` records every PNG path and exact-byte SHA-256.
+- Full-chart PNG rendering prefers any installed Edge, Chrome, or Chromium
+  executable. When a deployment has no headless browser, use the built-in
+  Pillow structure-chart renderer; record its renderer name in the image
+  manifest and do not block final-draft generation.
 - A missing, wrong-source, stale, or hash-mismatched chart blocks DOCX export.
 - Generation makes no network request, though rendered HTML may load Mermaid from a CDN.
 

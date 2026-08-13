@@ -59,10 +59,11 @@ If `--agent-keywords` is omitted, discovery runs on `--keywords` alone (no expan
 
 ```text
 <skill-root>/scripts/discover.py
-<skill-root>/scripts/sciatlas_client.py   (imported by discover.py; not run directly)
+<review-root>/review_writer_core/sciatlas_client.py   (shared SciAtlas API client)
 ```
 
-where `<skill-root>` is the directory containing this `SKILL.md` file.
+where `<skill-root>` is the directory containing this `SKILL.md` file and
+`<review-root>` is the Review Writer workspace root.
 
 ## Three-phase flow (plus an optional pre-flight probe)
 
@@ -108,7 +109,7 @@ At least one of `--sciatlas-search`/`--web-search` is required — with neither,
 
 Both can run together: results are merged and deduplicated by DOI (falling back to URL, then title) via `merge_external_results()`. A paper found by both sources is kept once, with `sources` recording every source that returned it. Each result carries a `pdf_url` field when the source itself exposed a direct PDF link (Crossref's `link` array with a `pdf` content-type, or SciAtlas's own `pdf_url`) — kept separate from `url` (the landing page), since Phase 2's download step needs to know specifically "this is downloadable," not just "this is *a* link."
 
-**SciAtlas** requires `SCIATLAS_API_KEY` (env var, `<review-root>/.env`, or `--sciatlas-api-key`). If the key is missing or the `/healthz` check fails, `discover.py` does not error — it records the reason in `online_search_results_by_keyword.json`'s `status` field (e.g. `missing_api_key`, `health_failed: ...`) and falls back to whatever other source is active. Useful flags:
+**SciAtlas** requires both `SCIATLAS_API_BASE_URL` and `SCIATLAS_API_KEY` (env vars, `<review-root>/.env`, or CLI overrides). The URL should use HTTPS. If configuration is incomplete or the `/healthz` check fails, `discover.py` does not error — it records the reason in `online_search_results_by_keyword.json`'s `status` field (e.g. `missing_configuration`, `health_failed: ...`) and falls back to whatever other source is active. Useful flags:
 
 ```text
 --sciatlas-limit        results per keyword (default 8)

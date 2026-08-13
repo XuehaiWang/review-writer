@@ -38,6 +38,11 @@ paragraph_scores[]:
   paragraph_id, score, severity, route, failed_dimensions, diagnosis
 ```
 
+Each paragraph score also records `source_check_status`, validated
+`source_evidence_refs`, and `unsupported_claims`. `original_source_check.json`
+stores the page-anchored MinerU/PDF passages used by the optimization run and
+their paragraph/paper mapping. Passage refs have the form `P001:p5:b2`.
+
 Every dimension in `unified_rubric.json` must appear exactly once and the
 weights must total 100.
 
@@ -81,6 +86,9 @@ hash_manifest_created = false
 Do not treat an empty rewrite queue as release when the score is below 90 or a
 hard regression remains.
 
+The configured overall goal may raise this threshold but must never lower it
+below the rubric's `pass_threshold`.
+
 ## Bounded loop status
 
 `feedback_loop_status.json` is the durable status used by the web interface:
@@ -89,13 +97,16 @@ hard regression remains.
 project_id
 run_id
 status = running | completed | needs_human_review | stopped | failed
-phase = preflight | scoring | evaluated | rewriting | released | plateau |
+phase = preflight | source_checking | scoring | evaluated | rewriting | released | plateau |
         rewrite_blocked | iteration_limit | stopped | failed
 iteration
 max_iterations
 goal
 paragraph_goal
 score
+best_score
+best_iteration
+best_score_restored
 paragraph_total
 paragraph_completed
 paragraph_scores[]
@@ -137,3 +148,19 @@ conflicts instead of overwriting newer upstream content.
 In the host project, `feedback_loop_handoff.json` may additionally record the
 current input/output hashes. This host-level handoff does not replace the
 portable skill artifacts above.
+
+## Human-reviewed rewrite candidates
+
+`feedback_rewrite_candidates.json` stores per-paragraph AI proposals that have
+passed protected-fact validation but have not yet changed the manuscript. Each
+entry records the source paragraph hash, draft hash, original text, candidate
+text, status, and review timestamps. Accept a candidate only while its source
+paragraph hash still matches; otherwise mark it as a conflict.
+
+## Stage-8 human approval
+
+`draft_approval.json` records the exact evaluated draft hash, score, target,
+approval time, and any explicit below-target override. Stage 9 may use the
+draft only while the approval hash equals the current `first_draft.md` hash.
+Any later manual or AI edit invalidates the approval without deleting its
+audit record.

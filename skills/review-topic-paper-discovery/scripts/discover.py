@@ -40,7 +40,11 @@ from review_writer_core.project_config import (  # noqa: E402
     save_project_config,
 )
 from review_writer_core.workspace import discover_review_root  # noqa: E402
-from sciatlas_client import SciAtlasClient, load_config, papers_from_response
+from review_writer_core.sciatlas_client import (  # noqa: E402
+    SciAtlasClient,
+    load_config,
+    papers_from_response,
+)
 
 
 def utc_now() -> str:
@@ -1217,18 +1221,23 @@ def _load_dotenv_if_present(review_root: Path) -> None:
 def run(args: argparse.Namespace) -> int:
     review_root = Path(args.review_root).resolve()
     project_id = args.project_id or slugify(args.topic)
-    project = resolve_project_path(review_root, project_id)
-    taxonomy_profile = project_taxonomy_profile(
-        review_root,
-        project_id,
-        topic=args.topic,
-    )
-    save_project_config(
-        review_root,
-        project_id,
-        topic=args.topic,
-        taxonomy_profile=taxonomy_profile,
-    )
+    registered_project = resolve_project_path(review_root, project_id)
+    output_project_dir = str(getattr(args, "output_project_dir", "") or "").strip()
+    project = Path(output_project_dir).resolve() if output_project_dir else registered_project
+    taxonomy_profile = str(getattr(args, "taxonomy_profile", "") or "").strip()
+    if not taxonomy_profile:
+        taxonomy_profile = project_taxonomy_profile(
+            review_root,
+            project_id,
+            topic=args.topic,
+        )
+    if not output_project_dir:
+        save_project_config(
+            review_root,
+            project_id,
+            topic=args.topic,
+            taxonomy_profile=taxonomy_profile,
+        )
     _load_dotenv_if_present(review_root)
     user_keywords = split_keywords(args.keywords)
     query_plan_path = getattr(args, "query_plan", "")
@@ -1293,15 +1302,20 @@ def run(args: argparse.Namespace) -> int:
     sciatlas_client: SciAtlasClient | None = None
     sciatlas_status = "disabled"
     if sciatlas_requested:
-        config = load_config(
-            base_url=args.sciatlas_base_url or None,
-            api_key=args.sciatlas_api_key or None,
-            timeout=args.sciatlas_timeout or None,
-        )
-        if not config.configured:
-            sciatlas_status = "missing_api_key"
+        try:
+            config = load_config(
+                base_url=args.sciatlas_base_url or None,
+                api_key=args.sciatlas_api_key or None,
+                timeout=args.sciatlas_timeout or None,
+            )
+        except ValueError as exc:
+            sciatlas_status = f"invalid_configuration: {exc}"
         else:
-            sciatlas_client = SciAtlasClient(config=config)
+            if not config.configured:
+                sciatlas_status = "missing_configuration"
+            else:
+                sciatlas_client = SciAtlasClient(config=config)
+        if sciatlas_client is not None:
             try:
                 sciatlas_client.health()
                 sciatlas_status = "ok"
@@ -1425,6 +1439,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--topic", required=True)
     parser.add_argument("--keywords", default="")
     parser.add_argument("--query-plan", default="", help="Path to a validated query-plan JSON file.")
+    parser.add_argument(
+        "--output-project-dir",
+        default="",
+        help="Write project artifacts to a staging directory without mutating the registered project.",
+    )
+    parser.add_argument(
+        "--taxonomy-profile",
+        default="",
+        help="Use an explicitly selected taxonomy profile for a staged discovery run.",
+    )
     parser.add_argument("--web-search", action="store_true", help="Fallback: query Crossref when SciAtlas is unavailable.")
     parser.add_argument("--web-limit", type=int, default=8)
     parser.add_argument("--web-delay", type=float, default=0.2)

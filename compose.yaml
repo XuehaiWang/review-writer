@@ -1,0 +1,70 @@
+name: review-writer
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${REVIEW_WRITER_POSTGRES_DB:-review_writer}
+      POSTGRES_USER: ${REVIEW_WRITER_POSTGRES_USER:-review_writer}
+      POSTGRES_PASSWORD: "${REVIEW_WRITER_POSTGRES_PASSWORD:?Set REVIEW_WRITER_POSTGRES_PASSWORD in .env}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      REVIEW_WRITER_POSTGRES_HOST: postgres
+      REVIEW_WRITER_POSTGRES_PORT: 5432
+      REVIEW_WRITER_POSTGRES_USER: ${REVIEW_WRITER_POSTGRES_USER:-review_writer}
+      REVIEW_WRITER_POSTGRES_PASSWORD: "${REVIEW_WRITER_POSTGRES_PASSWORD:?Set REVIEW_WRITER_POSTGRES_PASSWORD in .env}"
+      REVIEW_WRITER_POSTGRES_DB: ${REVIEW_WRITER_POSTGRES_DB:-review_writer}
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      REVIEW_WRITER_DEPLOYMENT_MODE: hosted
+      REVIEW_WRITER_POSTGRES_HOST: postgres
+      REVIEW_WRITER_POSTGRES_PORT: 5432
+      REVIEW_WRITER_POSTGRES_USER: ${REVIEW_WRITER_POSTGRES_USER:-review_writer}
+      REVIEW_WRITER_POSTGRES_PASSWORD: "${REVIEW_WRITER_POSTGRES_PASSWORD:?Set REVIEW_WRITER_POSTGRES_PASSWORD in .env}"
+      REVIEW_WRITER_POSTGRES_DB: ${REVIEW_WRITER_POSTGRES_DB:-review_writer}
+      REVIEW_WRITER_PUBLIC_ORIGIN: ${REVIEW_WRITER_PUBLIC_ORIGIN:-http://127.0.0.1:8770}
+      REVIEW_WRITER_SESSION_COOKIE_SECURE: ${REVIEW_WRITER_SESSION_COOKIE_SECURE:-false}
+      REVIEW_WRITER_SESSION_DAYS: ${REVIEW_WRITER_SESSION_DAYS:-7}
+      REVIEW_WRITER_SESSION_COOKIE_NAME: ${REVIEW_WRITER_SESSION_COOKIE_NAME:-review_writer_session}
+      REVIEW_WRITER_CREDENTIAL_ENCRYPTION_KEY: "${REVIEW_WRITER_CREDENTIAL_ENCRYPTION_KEY:?Set REVIEW_WRITER_CREDENTIAL_ENCRYPTION_KEY in .env}"
+      REVIEW_WRITER_EXPOSE_API_DOCS: ${REVIEW_WRITER_EXPOSE_API_DOCS:-false}
+      REVIEW_WRITER_HOSTED_WORKSPACE_ROOT: /app/.review-writer/hosted-workspaces
+      SCIATLAS_API_BASE_URL: ${SCIATLAS_API_BASE_URL:-}
+      SCIATLAS_API_KEY: ${SCIATLAS_API_KEY:-}
+      SCIATLAS_TIMEOUT: ${SCIATLAS_TIMEOUT:-240}
+      SCIATLAS_ALLOW_INSECURE_HTTP: ${SCIATLAS_ALLOW_INSECURE_HTTP:-false}
+    ports:
+      - "${REVIEW_WRITER_BIND_ADDRESS:-127.0.0.1}:8770:8770"
+    volumes:
+      - review_state:/app/.review-writer
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  review_state:
