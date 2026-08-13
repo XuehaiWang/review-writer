@@ -47,6 +47,26 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    connection = op.get_bind()
+    rows = connection.execute(
+        sa.text(
+            "SELECT id, user_id, idempotency_key FROM workflow_jobs "
+            "ORDER BY user_id, idempotency_key, created_at, id"
+        )
+    ).mappings()
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        identity = (str(row["user_id"]), str(row["idempotency_key"]))
+        if identity not in seen:
+            seen.add(identity)
+            continue
+        replacement = f"downgraded:{row['id']}:{row['idempotency_key']}"[:255]
+        connection.execute(
+            sa.text(
+                "UPDATE workflow_jobs SET idempotency_key = :replacement WHERE id = :job_id"
+            ),
+            {"replacement": replacement, "job_id": row["id"]},
+        )
     with op.batch_alter_table("workflow_jobs") as batch:
         batch.drop_constraint("uq_workflow_job_scoped_idempotency", type_="unique")
         batch.create_unique_constraint(

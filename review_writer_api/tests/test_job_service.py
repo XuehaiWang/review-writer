@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import base64
 import concurrent.futures
+import subprocess
+import sys
 import tempfile
 import threading
+import textwrap
 import time
 import unittest
 import uuid
@@ -346,6 +349,89 @@ class JobServiceTests(unittest.TestCase):
             self.principal.user_id, submitted_job["id"]
         )
         self.assertEqual("interrupted", stored.status)
+
+    def test_non_cooperative_worker_does_not_block_python_process_exit(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        script = textwrap.dedent(
+            """
+            import tempfile
+            import time
+            from pathlib import Path
+
+            from sqlalchemy import create_engine
+            from sqlalchemy.orm import sessionmaker
+
+            from review_writer_api.database import Base, Project, User
+            from review_writer_api.job_service import JobService
+            from review_writer_api.security import Principal, Role
+            from review_writer_api.workflow_repository import WorkflowRepository
+
+            temporary = tempfile.TemporaryDirectory()
+            database_path = Path(temporary.name) / "process-exit.sqlite3"
+            engine = create_engine(
+                f"sqlite+pysqlite:///{database_path.as_posix()}",
+                connect_args={"check_same_thread": False},
+            )
+            Base.metadata.create_all(engine)
+            sessions = sessionmaker(bind=engine, expire_on_commit=False)
+            with sessions.begin() as session:
+                user = User(email="exit@example.com", display_name="Exit", password_hash="hash")
+                session.add(user)
+                session.flush()
+                project = Project(user_id=user.id, slug="exit", topic="Exit")
+                session.add(project)
+                session.flush()
+                principal = Principal(
+                    user_id=str(user.id),
+                    roles=frozenset({Role.USER}),
+                    email=user.email,
+                )
+                project_id = str(project.id)
+
+            repository = WorkflowRepository(sessions)
+            service = JobService(repository, max_workers=1, shutdown_grace_seconds=0.05)
+
+            def never_returns(_context, _payload):
+                while True:
+                    time.sleep(60)
+
+            service.register_handler("shutdown.never", never_returns)
+            job = service.submit(
+                principal,
+                scope="project",
+                project_id=project_id,
+                job_type="shutdown.never",
+                idempotency_key="never",
+                payload={},
+            )
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if repository.get_job(principal.user_id, job.id).status == "running":
+                    break
+                time.sleep(0.01)
+            service.shutdown(wait=True)
+            print("shutdown-returned", flush=True)
+            """
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", script],
+            cwd=project_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate(timeout=2)
+            self.fail(
+                "Python process remained blocked by the job executor after shutdown. "
+                f"stdout={stdout!r} stderr={stderr!r}"
+            )
+
+        self.assertEqual(0, process.returncode, stderr)
+        self.assertIn("shutdown-returned", stdout)
 
 
 if __name__ == "__main__":

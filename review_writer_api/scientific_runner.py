@@ -8,6 +8,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -189,9 +190,15 @@ class ScientificRunner:
                 )
             else:
                 process_options["start_new_session"] = True
+            adapter_command = (
+                sys.executable,
+                str(Path(__file__).with_name("scientific_entrypoint.py")),
+                "--",
+                *safe_command,
+            )
             try:
                 process = subprocess.Popen(
-                    list(safe_command),
+                    list(adapter_command),
                     cwd=working,
                     env=attempt_environment,
                     shell=False,

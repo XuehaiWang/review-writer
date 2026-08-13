@@ -5,9 +5,10 @@ from __future__ import annotations
 import threading
 import uuid
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor, wait as wait_for_futures
+from concurrent.futures import Future, wait as wait_for_futures
 from typing import Any, Protocol
 
+from review_writer_api.daemon_executor import DaemonWorkerPool
 from review_writer_api.errors import (
     WorkflowConflict,
     WorkflowError,
@@ -82,7 +83,7 @@ class JobService:
         self.max_workers = max(1, min(int(max_workers), 16))
         self.shutdown_grace_seconds = max(0.0, float(shutdown_grace_seconds))
         self._handlers: dict[str, JobHandler] = {}
-        self._executor: ThreadPoolExecutor | None = None
+        self._executor: DaemonWorkerPool | None = None
         self._futures: dict[str, Future] = {}
         self._lock = threading.RLock()
         self._started = False
@@ -108,8 +109,8 @@ class JobService:
                 return 0
             self._shutdown_event = threading.Event()
             interrupted = self.repository.mark_running_jobs_interrupted()
-            self._executor = ThreadPoolExecutor(
-                max_workers=self.max_workers,
+            self._executor = DaemonWorkerPool(
+                self.max_workers,
                 thread_name_prefix="review-writer-job",
             )
             self._started = True

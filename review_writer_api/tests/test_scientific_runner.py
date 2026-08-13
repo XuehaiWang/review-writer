@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import concurrent.futures
+import http.server
+import json
 import os
 import sys
 import tempfile
@@ -76,6 +78,100 @@ class ScientificRunnerTests(unittest.TestCase):
 
         self.assertEqual(3, result.attempts)
         self.assertEqual("3", (self.root / "attempt.txt").read_text())
+
+    def test_urllib_provider_errors_are_structured_by_the_production_adapter(self) -> None:
+        class Provider(http.server.BaseHTTPRequestHandler):
+            attempts = 0
+
+            def do_POST(self):
+                type(self).attempts += 1
+                if type(self).attempts < 3:
+                    self.send_response(503)
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"temporarily unavailable"}')
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+
+            def log_message(self, _format, *_args):
+                return
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        script = self.root / "provider_script.py"
+        script.write_text(
+            "import pathlib,sys,urllib.request\n"
+            "request=urllib.request.Request(sys.argv[1], data=b'{}', method='POST')\n"
+            "with urllib.request.urlopen(request, timeout=2) as response:\n"
+            "    response.read()\n"
+            "pathlib.Path('provider-output.json').write_text('{\"ok\":true}')\n",
+            encoding="utf-8",
+        )
+        try:
+            result = self.runner.run(
+                [
+                    sys.executable,
+                    str(script),
+                    f"http://127.0.0.1:{server.server_port}/v1/responses",
+                ],
+                cwd=self.root,
+                staging_directory=self.root,
+                expected_outputs=("provider-output.json",),
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
+        self.assertEqual(3, result.attempts)
+        self.assertEqual(3, Provider.attempts)
+        self.assertEqual(
+            {"ok": True},
+            json.loads((self.root / "provider-output.json").read_text()),
+        )
+
+    def test_real_inventory_script_runs_through_the_scientific_adapter(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        review_root = self.root / "review-root"
+        project = review_root / "review-projects" / "adapter-probe"
+        discovery = project / "00_discovery"
+        staging = project / "02_section_drafting"
+        discovery.mkdir(parents=True)
+        staging.mkdir(parents=True)
+        (discovery / "selected_discovery_results.json").write_text(
+            '{"local_papers": []}', encoding="utf-8"
+        )
+        script = (
+            project_root
+            / "skills"
+            / "review-section-drafting-figure-picking"
+            / "scripts"
+            / "build_paper_figure_inventory.py"
+        )
+
+        result = self.runner.run(
+            [
+                sys.executable,
+                str(script),
+                "--review-root",
+                str(review_root),
+                "--project-id",
+                "adapter-probe",
+            ],
+            cwd=project_root,
+            staging_directory=staging,
+            expected_outputs=("paper_figure_inventory.json",),
+        )
+
+        self.assertEqual(1, result.attempts)
+        inventory = json.loads(
+            (staging / "paper_figure_inventory.json").read_text()
+        )
+        self.assertEqual("adapter-probe", inventory["project_id"])
+        self.assertEqual(0, inventory["paper_count"])
 
     def test_failed_attempt_output_is_not_accepted_as_a_later_success(self) -> None:
         script = (
@@ -227,7 +323,7 @@ class ScientificRunnerTests(unittest.TestCase):
                 cwd=self.root,
                 staging_directory=self.root,
                 expected_outputs=("never.txt",),
-                timeout_seconds=0.08,
+                timeout_seconds=0.3,
             )
         self.assertEqual(3, failed.exception.attempts)
         self.assertTrue(failed.exception.retryable)
