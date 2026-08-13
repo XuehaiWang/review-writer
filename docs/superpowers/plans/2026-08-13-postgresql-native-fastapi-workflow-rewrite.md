@@ -172,15 +172,15 @@ feat: add PostgreSQL workflow schema
 - Consumes: Task 2 workflow models and authenticated `Principal`.
 - Produces: `WorkflowRepository` methods for stage runs, state revisions, artifacts, jobs, approvals, migration ledger, and readiness.
 
-- [ ] **Step 1: Write failing ownership, revision, and job-claim tests**
+- [x] **Step 1: Write failing ownership, revision, and job-claim tests**
 
 Tests must prove a second user cannot read or mutate another user's workflow, an outdated stage revision raises `WorkflowConflict`, the same idempotency key returns the existing active job, and only one transaction claims a queued job.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `.venv\Scripts\python.exe -m unittest review_writer_api.tests.test_workflow_repository -v`
 
-- [ ] **Step 3: Define stable domain errors**
+- [x] **Step 3: Define stable domain errors**
 
 ```python
 class WorkflowError(Exception):
@@ -195,7 +195,7 @@ class WorkflowConflict(WorkflowError):
 
 Register one FastAPI exception handler that returns the approved nested `error` object.
 
-- [ ] **Step 4: Implement repository methods with ownership in every query**
+- [x] **Step 4: Implement repository methods with ownership in every query**
 
 Required signatures include:
 
@@ -207,11 +207,11 @@ def claim_job(self, job_id: str) -> JobRecord | None
 def mark_running_jobs_interrupted(self) -> int
 ```
 
-- [ ] **Step 5: Add workflow-ready startup enforcement**
+- [x] **Step 5: Add workflow-ready startup enforcement**
 
 If a legacy source inventory is recorded but `WorkflowSystemState(key="workflow_ready")` is not `ready`, workflow routers return `503 WORKFLOW_MIGRATION_REQUIRED`. Identity and health routes remain available.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 Run repository tests, API foundation tests, and `git diff --check`. Commit:
 

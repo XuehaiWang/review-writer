@@ -16,6 +16,7 @@ from .auth import PASSWORD_MIN_LENGTH, AuthError, AuthService
 from .config import ApiSettings
 from .credentials import CredentialCipher, ProviderSettingsError, ProviderSettingsService
 from .database import create_session_factory
+from .errors import WorkflowError
 from .repositories import (
     HostedProjectRepository,
     LocalProjectRepository,
@@ -38,6 +39,7 @@ from .schemas import (
 from .security import AuthorizationError, Principal, local_owner_principal
 from .services import ProjectService
 from .workflow_compat import WorkflowCompatibilityGateway
+from .workflow_repository import WorkflowRepository
 from .workspaces import HostedWorkspaceManager
 
 
@@ -50,6 +52,7 @@ def create_app(
     principal_provider: Callable[[], Principal] | None = None,
     session_factory_override: Any | None = None,
     project_repository: ProjectRepository | None = None,
+    workflow_repository_override: WorkflowRepository | None = None,
 ) -> FastAPI:
     resolved = settings or ApiSettings.from_env()
     engine = None
@@ -74,6 +77,11 @@ def create_app(
     )
     auth_service = (
         AuthService(session_factory, session_days=resolved.session_days)
+        if resolved.deployment_mode == "hosted"
+        else None
+    )
+    workflow_repository = (
+        workflow_repository_override or WorkflowRepository(session_factory)
         if resolved.deployment_mode == "hosted"
         else None
     )
@@ -114,6 +122,7 @@ def create_app(
     app.state.session_factory = session_factory
     app.state.hosted_workspace_manager = hosted_workspace_manager
     app.state.workflow_compatibility_gateway = workflow_gateway
+    app.state.workflow_repository = workflow_repository
     web_root = Path(__file__).resolve().parent / "web"
 
     def portal_csp() -> str:
@@ -169,6 +178,42 @@ def create_app(
             response.headers["Cache-Control"] = "no-store"
         return response
 
+    def workflow_error_response(exc: WorkflowError) -> JSONResponse:
+        return JSONResponse(status_code=exc.status_code, content=exc.payload())
+
+    def is_workflow_surface(path: str) -> bool:
+        if path in {
+            "/library",
+            "/discovery",
+            "/planning",
+            "/matrix",
+            "/blueprint",
+            "/sections",
+            "/images",
+            "/figure-review",
+            "/figures",
+            "/draft",
+            "/final",
+            "/file",
+        }:
+            return True
+        if not path.startswith("/api/"):
+            return False
+        allowed_exact = {"/api/v1/health", "/api/v1/me", "/api/openapi.json"}
+        allowed_prefixes = ("/api/v1/auth", "/api/v1/provider-settings", "/api/docs")
+        return path not in allowed_exact and not any(
+            path == prefix or path.startswith(f"{prefix}/") for prefix in allowed_prefixes
+        )
+
+    @app.middleware("http")
+    async def workflow_readiness(request: Request, call_next):
+        if workflow_repository is not None and is_workflow_surface(request.url.path):
+            try:
+                workflow_repository.require_workflow_ready()
+            except WorkflowError as exc:
+                return workflow_error_response(exc)
+        return await call_next(request)
+
     if principal_provider is not None:
         def current_principal() -> Principal:
             return principal_provider()
@@ -192,6 +237,10 @@ def create_app(
             status_code=status.HTTP_403_FORBIDDEN,
             content={"detail": str(exc)},
         )
+
+    @app.exception_handler(WorkflowError)
+    async def workflow_error(_request: Request, exc: WorkflowError):
+        return workflow_error_response(exc)
 
     @app.exception_handler(ProjectOperationError)
     async def project_operation_error(_request: Request, exc: ProjectOperationError):
