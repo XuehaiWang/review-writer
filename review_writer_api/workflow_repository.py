@@ -683,6 +683,23 @@ class WorkflowRepository:
                 logical_name="matrix/literature_matrix.json",
                 artifact_id=artifact_uuid,
             )
+            downstream = tuple(
+                stage
+                for stage in INTERNAL_STAGES
+                if INTERNAL_STAGES.index(stage) >= INTERNAL_STAGES.index("matrix")
+            )
+            derived_artifacts = select(WorkflowArtifact.id).where(
+                WorkflowArtifact.project_id == project_uuid,
+                WorkflowArtifact.producer_stage.in_(downstream),
+            )
+            session.execute(
+                delete(WorkflowCurrentArtifact).where(
+                    WorkflowCurrentArtifact.project_id == project_uuid,
+                    WorkflowCurrentArtifact.logical_name
+                    != "matrix/literature_matrix.json",
+                    WorkflowCurrentArtifact.artifact_id.in_(derived_artifacts),
+                )
+            )
             if matrix is None:
                 matrix = WorkflowStageState(
                     project_id=project_uuid,
@@ -713,6 +730,29 @@ class WorkflowRepository:
                 "status": discovery.status,
                 "revision": discovery.revision,
             }
+            stale_states = session.scalars(
+                select(WorkflowStageState).where(
+                    WorkflowStageState.project_id == project_uuid,
+                    WorkflowStageState.stage_id.in_(
+                        tuple(
+                            stage
+                            for stage in downstream
+                            if stage not in {"matrix"}
+                        )
+                    ),
+                )
+            ).all()
+            for stale in stale_states:
+                stale.status = "pending"
+                stale.current_run_id = None
+                stale.error_code = ""
+                stale.error_message = ""
+                stale.revision += 1
+                stale.updated_at = now
+                stored[stale.stage_id] = {
+                    "status": "pending",
+                    "revision": stale.revision,
+                }
             project.stage_states = stored
             project.current_stage = current_user_stage(
                 {
@@ -870,6 +910,202 @@ class WorkflowRepository:
                 "Workflow stage changed since it was loaded.",
                 details={"expected_revision": expected_revision},
             ) from exc
+
+    def promote_stage_artifacts_atomically(
+        self,
+        user_id: str,
+        project_id: str,
+        stage_id: str,
+        *,
+        artifact_ids: dict[str, str],
+        run_id: str,
+        expected_revision: int,
+        status: str = "review",
+        invalidate_stages: tuple[str, ...] = (),
+        approve_stages: dict[str, int] | None = None,
+    ) -> StageStateRecord:
+        """Promote one or more immutable outputs and advance their stage in one commit."""
+
+        if stage_id not in INTERNAL_STAGES:
+            raise WorkflowValidationError(f"Unknown workflow stage: {stage_id}")
+        if not artifact_ids:
+            raise WorkflowValidationError("At least one staged artifact is required.")
+        invalid = sorted(set(invalidate_stages) - set(INTERNAL_STAGES))
+        if invalid:
+            raise WorkflowValidationError(
+                "Unknown downstream workflow stage.", details={"stages": invalid}
+            )
+        approvals = dict(approve_stages or {})
+        invalid_approvals = sorted(set(approvals) - set(INTERNAL_STAGES))
+        if invalid_approvals or stage_id in approvals:
+            raise WorkflowValidationError(
+                "Invalid predecessor stage approval.",
+                details={"stages": invalid_approvals or [stage_id]},
+            )
+        user_uuid = self._uuid(user_id, not_found_message="Project not found.")
+        project_uuid = self._uuid(project_id, not_found_message="Project not found.")
+        run_uuid = self._uuid(run_id, not_found_message="Stage run not found.")
+        parsed_artifacts = {
+            str(logical_name): self._uuid(
+                artifact_id, not_found_message="Artifact not found."
+            )
+            for logical_name, artifact_id in artifact_ids.items()
+        }
+        with database_session(self.session_factory) as session:
+            project = session.scalar(
+                select(Project)
+                .where(
+                    Project.id == project_uuid,
+                    Project.user_id == user_uuid,
+                    Project.deleted_at.is_(None),
+                )
+                .with_for_update()
+            )
+            if project is None:
+                raise WorkflowNotFound("Project not found.")
+            run = session.scalar(
+                select(WorkflowStageRun).where(
+                    WorkflowStageRun.id == run_uuid,
+                    WorkflowStageRun.project_id == project_uuid,
+                    WorkflowStageRun.stage_id == stage_id,
+                )
+            )
+            if run is None:
+                raise WorkflowNotFound("Stage run not found.")
+            artifacts = session.scalars(
+                select(WorkflowArtifact).where(
+                    WorkflowArtifact.id.in_(tuple(parsed_artifacts.values())),
+                    WorkflowArtifact.project_id == project_uuid,
+                    WorkflowArtifact.producer_stage == stage_id,
+                )
+            ).all()
+            by_id = {artifact.id: artifact for artifact in artifacts}
+            if len(by_id) != len(set(parsed_artifacts.values())):
+                raise WorkflowNotFound("Artifact not found.")
+            for logical_name, artifact_uuid in parsed_artifacts.items():
+                if by_id[artifact_uuid].logical_name != logical_name:
+                    raise WorkflowValidationError(
+                        "Artifact logical name does not match its promotion target."
+                    )
+            state = session.scalar(
+                select(WorkflowStageState)
+                .where(
+                    WorkflowStageState.project_id == project_uuid,
+                    WorkflowStageState.stage_id == stage_id,
+                )
+                .with_for_update()
+            )
+            actual = state.revision if state else 0
+            if actual != int(expected_revision):
+                raise WorkflowConflict(
+                    "Workflow stage changed since it was loaded.",
+                    details={
+                        "expected_revision": int(expected_revision),
+                        "actual_revision": actual,
+                    },
+                )
+            predecessor_states: dict[str, WorkflowStageState] = {}
+            if approvals:
+                rows = session.scalars(
+                    select(WorkflowStageState)
+                    .where(
+                        WorkflowStageState.project_id == project_uuid,
+                        WorkflowStageState.stage_id.in_(tuple(approvals)),
+                    )
+                    .with_for_update()
+                ).all()
+                predecessor_states = {row.stage_id: row for row in rows}
+                for predecessor, expected in approvals.items():
+                    row = predecessor_states.get(predecessor)
+                    actual_predecessor = row.revision if row else 0
+                    if row is None or actual_predecessor != int(expected):
+                        raise WorkflowConflict(
+                            "A predecessor stage changed since it was loaded.",
+                            details={
+                                "stage_id": predecessor,
+                                "expected_revision": int(expected),
+                                "actual_revision": actual_predecessor,
+                            },
+                        )
+            now = utc_now()
+            for logical_name, artifact_uuid in parsed_artifacts.items():
+                self._upsert_current_artifact(
+                    session,
+                    project_id=project_uuid,
+                    logical_name=logical_name,
+                    artifact_id=artifact_uuid,
+                )
+            if state is None:
+                state = WorkflowStageState(
+                    project_id=project_uuid,
+                    stage_id=stage_id,
+                    status=str(status),
+                    revision=1,
+                    current_run_id=run_uuid,
+                )
+                session.add(state)
+            else:
+                state.status = str(status)
+                state.revision = actual + 1
+                state.current_run_id = run_uuid
+                state.error_code = ""
+                state.error_message = ""
+                state.updated_at = now
+
+            stored = dict(project.stage_states or {})
+            stored[stage_id] = {"status": state.status, "revision": state.revision}
+            for predecessor, row in predecessor_states.items():
+                row.status = "approved"
+                row.revision += 1
+                row.error_code = ""
+                row.error_message = ""
+                row.updated_at = now
+                stored[predecessor] = {
+                    "status": "approved",
+                    "revision": row.revision,
+                }
+            if invalidate_stages:
+                derived_artifacts = select(WorkflowArtifact.id).where(
+                    WorkflowArtifact.project_id == project_uuid,
+                    WorkflowArtifact.producer_stage.in_(invalidate_stages),
+                )
+                session.execute(
+                    delete(WorkflowCurrentArtifact).where(
+                        WorkflowCurrentArtifact.project_id == project_uuid,
+                        WorkflowCurrentArtifact.artifact_id.in_(derived_artifacts),
+                    )
+                )
+                stale_states = session.scalars(
+                    select(WorkflowStageState).where(
+                        WorkflowStageState.project_id == project_uuid,
+                        WorkflowStageState.stage_id.in_(invalidate_stages),
+                    )
+                ).all()
+                for stale in stale_states:
+                    stale.status = "pending"
+                    stale.current_run_id = None
+                    stale.error_code = ""
+                    stale.error_message = ""
+                    stale.revision += 1
+                    stale.updated_at = now
+                    stored[stale.stage_id] = {
+                        "status": "pending",
+                        "revision": stale.revision,
+                    }
+            project.stage_states = stored
+            project.current_stage = current_user_stage(
+                {
+                    key: (
+                        value.get("status", "pending")
+                        if isinstance(value, dict)
+                        else str(value)
+                    )
+                    for key, value in stored.items()
+                }
+            )
+            project.updated_at = now
+            session.flush()
+            return self._stage_record(state)
 
     def create_or_get_job(
         self,
@@ -1040,6 +1276,32 @@ class WorkflowRepository:
                 )
             )
             return self._job_record(job) if job else None
+
+    def list_project_jobs(
+        self,
+        user_id: str,
+        project_id: str,
+        *,
+        job_type: str | None = None,
+        limit: int = 100,
+    ) -> list[JobRecord]:
+        user_uuid = self._uuid(user_id, not_found_message="Project not found.")
+        project_uuid = self._uuid(project_id, not_found_message="Project not found.")
+        with database_session(self.session_factory) as session:
+            if self._owned_project(session, user_uuid, project_uuid) is None:
+                raise WorkflowNotFound("Project not found.")
+            statement = select(WorkflowJob).where(
+                WorkflowJob.user_id == user_uuid,
+                WorkflowJob.project_id == project_uuid,
+            )
+            if job_type:
+                statement = statement.where(WorkflowJob.job_type == str(job_type))
+            rows = session.scalars(
+                statement.order_by(WorkflowJob.created_at.desc()).limit(
+                    max(1, min(int(limit), 500))
+                )
+            ).all()
+            return [self._job_record(row) for row in rows]
 
     def get_current_job(
         self,

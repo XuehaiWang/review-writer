@@ -34,6 +34,7 @@ class NativeWorkflowHandlers:
             "library.search": self.library_search,
             "library.download": self.library_download,
             "discovery.search": self.discovery_search,
+            "sections.generate": self.sections_generate,
         }
 
     def _environment(self, user_id: str) -> tuple[dict[str, str], dict[str, str]]:
@@ -164,3 +165,71 @@ class NativeWorkflowHandlers:
             cancel_requested=context.cancellation_requested,
         )
         return self._result(staging, "00_discovery/combined_results_by_keyword.json")
+
+    def sections_generate(self, context, payload):
+        """Run the established section writer in an isolated compatibility workspace."""
+
+        staging = self._staging(context.user_id, context.job_id)
+        workspace = staging / "section-workspace"
+        project_id = str(payload["project_id"])
+        project = workspace / "review-projects" / project_id
+        planning = project / "01_matrix_outline"
+        section_stage = project / "02_section_drafting"
+        planning.mkdir(parents=True, exist_ok=True)
+        section_stage.mkdir(parents=True, exist_ok=True)
+        (planning / "literature_matrix.json").write_text(
+            json.dumps(payload["matrix"], ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        (planning / "section_blueprint.json").write_text(
+            json.dumps(payload["blueprint"], ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        (planning / "selected_outline.md").write_text(
+            str(payload.get("outline_md") or ""), encoding="utf-8"
+        )
+        (section_stage / "section_tasks.json").write_text(
+            json.dumps(payload["tasks"], ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        normal, secrets = self._environment(context.user_id)
+        relative_stage = Path("section-workspace") / "review-projects" / project_id / "02_section_drafting"
+        self.runner.run(
+            [
+                sys.executable,
+                str(
+                    self.root
+                    / "skills"
+                    / "review-section-drafting-figure-picking"
+                    / "scripts"
+                    / "generate_section_drafts.py"
+                ),
+                "--review-root",
+                str(workspace),
+                "--project-id",
+                project_id,
+            ],
+            cwd=self.root,
+            staging_directory=staging,
+            expected_outputs=(
+                (relative_stage / "section_drafts.json").as_posix(),
+                (relative_stage / "section_drafts.md").as_posix(),
+                (relative_stage / "section_drafting_report.md").as_posix(),
+            ),
+            env=normal,
+            secret_env=secrets,
+            cancel_requested=context.cancellation_requested,
+            timeout_seconds=15 * 60,
+        )
+        drafts = json.loads(
+            (section_stage / "section_drafts.json").read_text(encoding="utf-8")
+        )
+        return {
+            "sections": drafts.get("sections") or [],
+            "section_drafts_md": (section_stage / "section_drafts.md").read_text(
+                encoding="utf-8"
+            ),
+            "report_md": (
+                section_stage / "section_drafting_report.md"
+            ).read_text(encoding="utf-8"),
+        }

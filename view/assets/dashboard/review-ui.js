@@ -43,6 +43,10 @@
   function activeWorkspaceTab(stageId, search = "") {
     const tabs = workspaceDefinitions[stageId] || [];
     if (!tabs.length) return "";
+    if (stageId === "planning" && typeof location !== "undefined") {
+      if (/\/blueprint\/?$/.test(location.pathname)) return "blueprint";
+      if (/\/matrix\/?$/.test(location.pathname)) return "matrix";
+    }
     const requested = new URLSearchParams(String(search || "").replace(/^\?/, "")).get("tab") || "";
     return tabs.some((tab) => tab.id === requested) ? requested : tabs[0].id;
   }
@@ -57,15 +61,15 @@
     const encoded = encodeURIComponent(projectId || "");
     if (stageId === "planning" && tab === "matrix") return {
       backendStage: "matrix",
-      endpoint: `/api/project/${encoded}/handoff/matrix`,
+      endpoint: `/api/v1/projects/${encoded}/planning/blueprint`,
       nextPath: withProject("/planning?tab=blueprint", projectId),
-      label: "Confirm Matrix and Continue to Outline & Blueprint",
+      label: "Generate Blueprint from Current Matrix and Outline",
     };
     if (stageId === "planning") return {
       backendStage: "blueprint",
-      endpoint: `/api/project/${encoded}/section-tasks`,
+      endpoint: `/api/v1/projects/${encoded}/planning/blueprint/confirm`,
       nextPath: withProject("/sections", projectId),
-      label: "Generate Writing Tasks and Enter Sections",
+      label: "Confirm Blueprint and Enter Sections",
     };
     if (stageId === "images" && tab === "review") return {
       backendStage: "figure-review",
@@ -246,6 +250,20 @@
     setProject(projectId);
     button.disabled = true;
     status.textContent = t("Generating stage outputs...");
+    if (current.id === "sections" && typeof window.reviewSectionsExecuteStage === "function") {
+      try {
+        const result = await window.reviewSectionsExecuteStage({ button, status, projectId });
+        if (result?.nextPath) window.location.assign(result.nextPath);
+        else {
+          button.disabled = false;
+          status.textContent = t("Current section outputs are ready for review.");
+        }
+      } catch (error) {
+        button.disabled = false;
+        status.textContent = t(error.message || String(error));
+      }
+      return;
+    }
     const workspaceAction = stageActionSpec(
       current.id,
       activeWorkspaceTab(current.id, location.search),
@@ -270,9 +288,17 @@
         }
         status.textContent = t("Handing off current draft...");
       }
-      const response = await fetch(endpoint, { method: "POST" });
+      const request = { method: "POST" };
+      if (current.id === "planning") {
+        const planning = typeof window.reviewPlanningState === "function"
+          ? window.reviewPlanningState()
+          : {};
+        request.headers = { "Content-Type": "application/json" };
+        request.body = JSON.stringify({ revision: Number(planning.blueprintRevision || 0) });
+      }
+      const response = await fetch(endpoint, request);
       const result = await response.json().catch(() => ({ ok: false, error: message("serverReturned", { status: response.status }) }));
-      if (!response.ok || !result.ok) throw new Error(result.error || message("serverReturned", { status: response.status }));
+      if (!response.ok || result?.ok === false) throw new Error(result?.error?.message || result?.detail || result?.error || message("serverReturned", { status: response.status }));
       const nextPath = workspaceAction?.nextPath || (backendStage === "blueprint"
         ? `/sections?project=${encodeURIComponent(projectId)}`
         : result.next_path);

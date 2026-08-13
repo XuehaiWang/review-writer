@@ -28,25 +28,27 @@
   <script>
     let projects=[],selectedProject='',payload=null,selected='',tab='section';
     const $=id=>document.getElementById(id), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
-    const files=()=>payload?.section_files||[]; const tasks=()=>Array.isArray(payload?.section_tasks)?payload.section_tasks:[]; const handoff=()=>payload?.handoff||{}; const candidates=()=>Array.isArray(payload?.figure_candidates)?payload.figure_candidates:(payload?.figure_candidates?.figures||payload?.figure_candidates?.candidates||[]);
+    const files=()=>payload?.section_files||[]; const tasks=()=>Array.isArray(payload?.section_tasks)?payload.section_tasks:[]; const handoff=()=>payload?.handoff||{}; const report=()=>payload?.report||{};
     function fileUrl(path){return path?`/file?path=${encodeURIComponent(path)}`:''}
     function imageSrc(p,base=''){return fileUrl(p.startsWith('/')?p:[base,p].filter(Boolean).join('/'))}
     function inlineMd(text,base=''){let out='',last=0,re=/!\[([^\]]*)\]\(([^)]+)\)/g,m;while((m=re.exec(text))){out+=esc(text.slice(last,m.index));out+=`<img alt="${esc(m[1])}" src="${imageSrc(m[2],base)}">`;last=re.lastIndex}return(out+esc(text.slice(last))).replace(/\n/g,'<br>')}
     function md(s,base=''){return String(s||'').split(/\n{2,}/).map(b=>{b=b.trim();if(!b)return'';let m=b.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);if(m)return`<p><img alt="${esc(m[1])}" src="${imageSrc(m[2],base)}"></p>`;m=b.match(/^###\s+(.+)/);if(m)return`<h3>${esc(m[1])}</h3>`;m=b.match(/^##\s+(.+)/);if(m)return`<h2>${esc(m[1])}</h2>`;m=b.match(/^#\s+(.+)/);if(m)return`<h1>${esc(m[1])}</h1>`;return`<p>${inlineMd(b,base)}</p>`}).join('')}
-    async function loadProjects(){projects=await(await fetch('/api/projects')).json();$('projectSelect').innerHTML=projects.map(p=>`<option value="${esc(p.project_id)}">${esc(p.project_id)}</option>`).join('');const initial=window.reviewUi?.initialProject(projects)||projects[0];if(initial){$('projectSelect').value=initial.project_id;loadProject(initial.project_id)}}
+    async function loadProjects(){const result=await(await fetch('/api/v1/projects')).json();projects=result.items||[];$('projectSelect').innerHTML=projects.map(p=>`<option value="${esc(p.project_id)}">${esc(p.slug||p.project_id)}</option>`).join('');const initial=window.reviewUi?.initialProject(projects)||projects[0];if(initial){$('projectSelect').value=initial.project_id;loadProject(initial.project_id)}}
     const taskOnlyMode=()=>Boolean(handoff().drafts_stale||!files().length);
     const wordCount=value=>String(value||'').split(/\s+/).filter(Boolean).length;
     function taskFor(value){const id=String(value||'').replace(/\.md$/i,'');return tasks().find(task=>String(task.section_id||'')===id)||tasks().find(task=>String(task.heading||'')===value)||null}
     function activeTask(){return taskFor(selected)||tasks()[0]||null}
     async function loadProject(id){
       selectedProject=id;
-      payload=await(await fetch(`/api/project/${encodeURIComponent(id)}/sections`)).json();
+      const response=await fetch(`/api/v1/projects/${encodeURIComponent(id)}/sections`,{cache:'no-store'});
+      payload=await response.json();
+      if(!response.ok)throw new Error(payload?.error?.message||payload?.detail||'Unable to load sections.');
       selected=taskOnlyMode()?String(tasks()[0]?.section_id||''):String(files()[0]?.name||'');
       tab=taskOnlyMode()?'tasks':'section';
       render();
     }
     function renderTabs(){
-      const options=taskOnlyMode()?[['tasks','Writing Requirements']]:[['section','Section Draft'],['drafts','Merged Preview'],['tasks','Writing Requirements']];
+      const options=taskOnlyMode()?[['tasks','Writing Requirements'],['report','Generation Report']]:[['section','Section Draft'],['drafts','Merged Preview'],['tasks','Writing Requirements'],['report','Generation Report']];
       if(!options.some(([id])=>id===tab))tab=options[0][0];
       $('sectionTabs').innerHTML=options.map(([id,label])=>`<button type="button" class="tab ${id===tab?'active':''}" data-tab="${id}">${label}</button>`).join('');
     }
@@ -72,6 +74,13 @@
     function renderMain(){
       const main=$('main');
       main.className=`main ${tab==='tasks'?'tasks-view':''}`;
+      if(tab==='report'){
+        const jobs=report().jobs||[];
+        $('mainTitle').textContent='Generation Report';
+        $('mainMeta').textContent=`${jobs.length} persisted generation jobs`;
+        main.innerHTML=`<article class="task-sheet"><header class="task-head"><span class="task-kicker">REPORT</span><h3>Current section generation</h3><p>${esc(report().current_output_count||0)} / ${esc(report().current_task_count||tasks().length)} current outputs</p></header><div class="task-grid"><section class="task-block wide"><div class="task-label">Jobs</div>${jobs.length?jobs.map(job=>`<div class="task-figure"><strong>${esc(job.status)} · ${esc(job.id)}</strong><div>${esc(job.progress_current)}/${esc(job.progress_total)}${job.error_message?` · ${esc(job.error_message)}`:''}</div></div>`).join(''):'<div class="workspace-empty">No generation job has been started.</div>'}</section></div></article>`;
+        return;
+      }
       if(tab==='tasks'||taskOnlyMode()){
         tab='tasks';
         $('mainTitle').textContent='Writing Requirements';
@@ -83,15 +92,17 @@
       if(tab==='drafts'){
         $('mainTitle').textContent='Merged Preview';
         $('mainMeta').textContent=`${files().length} section drafts`;
-        main.innerHTML=md(payload?.section_drafts_md,payload?.paths?.stage_dir||'');
+        main.innerHTML=md(payload?.section_drafts_md);
         return;
       }
       $('mainTitle').textContent=task?.heading||file.name||'Section Preview';
       $('mainMeta').textContent=`${String(file.name||'').replace(/\.md$/i,'')} · ${wordCount(file.content)} words`;
-      main.innerHTML=md(file.content,payload?.paths?.sections_dir||'');
+      main.innerHTML=md(file.content);
     }
-    function renderSummary(){const fs=files();const figs=candidates();const unresolved=figs.filter(x=>String(x.resolution_status||'').includes('need')).length;const noFigure=figs.filter(x=>String(x.resolution_status||x.no_useful_figure_reason||'').includes('no_useful')).length;const status=handoff().drafts_stale?'The planning blueprint changed. Regenerate section drafts from the current writing requirements.':fs.length&&figs.length?'Ready for figure check':'Needs section/figure check';const humanCheck=['1. 每节是否是完整综述段落，而不是提纲。','2. 每段是否围绕一篇文献工作展开。','3. 图候选是否真实对应段落内容。','4. 未定位的图片是否已回到原文定位。'].join(String.fromCharCode(10));$('projectInfo').textContent=`${selectedProject} · ${payload?.topic||''}`;$('summary').innerHTML=`<div class="field"><div class="label">Status</div><div class="value">${status}</div></div><div class="field"><div class="label">Writing Requirements</div><div class="value">${tasks().length}</div></div><div class="field"><div class="label">Section Drafts</div><div class="value">${fs.length}${handoff().drafts_stale?'（已过期）':''}</div></div><div class="field"><div class="label">Figure Candidates</div><div class="value">${figs.length}</div></div><div class="field"><div class="label">Unresolved Source Images</div><div class="value">${unresolved}</div></div><div class="field"><div class="label">No Useful Figure Notes</div><div class="value">${noFigure}</div></div><div class="field"><div class="label">Human Check</div><div class="value">${esc(humanCheck)}</div></div>`}
+    function renderSummary(){const fs=files(),current=Boolean(handoff().current),jobs=report().jobs||[],latest=jobs[0]||{},status=handoff().drafts_stale?'Planning changed; regenerate sections.':current?'Current drafts are ready for human review.':latest.status==='running'||latest.status==='queued'?'Section generation is running.':'Generate drafts from the current writing requirements.';const humanCheck=['1. 每节是否是完整综述段落，而不是提纲。','2. 每段引用是否来自该节允许的论文。','3. 是否保留证据边界与不确定性。','4. 确认后再进入图像处理。'].join(String.fromCharCode(10));$('projectInfo').textContent=`${selectedProject}`;$('summary').innerHTML=`<div class="field"><div class="label">Status</div><div class="value">${status}</div></div><div class="field"><div class="label">Writing Requirements</div><div class="value">${tasks().length}</div></div><div class="field"><div class="label">Current Section Drafts</div><div class="value">${fs.length}/${tasks().length}${handoff().drafts_stale?'（已过期）':''}</div></div><div class="field"><div class="label">Latest Job</div><div class="value">${latest.status||'not started'}${latest.progress_total?` · ${latest.progress_current}/${latest.progress_total}`:''}</div></div><div class="field"><div class="label">Human Check</div><div class="value">${esc(humanCheck)}</div></div>`;const button=$('stageExecute');if(button)button.textContent=current?'Confirm Sections and Enter Image Processing':'Generate All Section Drafts'}
     function render(){renderTabs();renderList();renderMain();renderSummary()}
+    const wait=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
+    window.reviewSectionsExecuteStage=async({status})=>{if(!selectedProject)return null;if(handoff().current){const response=await fetch(`/api/v1/projects/${encodeURIComponent(selectedProject)}/sections/confirm`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:payload.revision})});const result=await response.json();if(!response.ok)throw new Error(result?.error?.message||'Unable to confirm sections.');return{nextPath:`/images?tab=review&project=${encodeURIComponent(selectedProject)}`}}const active=(report().jobs||[]).find(job=>['queued','running','cancel_requested'].includes(job.status));let submitted=active;if(!submitted){const response=await fetch(`/api/v1/projects/${encodeURIComponent(selectedProject)}/sections/jobs`,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':`sections:${payload.blueprint_artifact_id}:${Date.now()}`},body:'{}'});submitted=await response.json();if(!response.ok)throw new Error(submitted?.error?.message||submitted?.detail||'Unable to start section generation.')}for(let attempt=0;attempt<900;attempt+=1){const job=await(await fetch(`/api/v1/jobs/${encodeURIComponent(submitted.id)}`,{cache:'no-store'})).json();status.textContent=`${job.status} · ${job.progress_current}/${job.progress_total}`;if(['succeeded','failed','cancelled','interrupted'].includes(job.status)){if(job.status!=='succeeded')throw new Error(job.error_message||`Section generation ${job.status}.`);await loadProject(selectedProject);return{nextPath:''}}await wait(1000)}throw new Error('Section generation is still running; check the report tab for progress.')};
     $('projectSelect').addEventListener('change',e=>loadProject(e.target.value));
     $('sectionList').addEventListener('click',e=>{const button=e.target.closest('[data-id],[data-task]');if(!button)return;selected=button.dataset.id||button.dataset.task;if(taskOnlyMode())tab='tasks';else if(tab!=='tasks')tab='section';render()});
     $('sectionTabs').addEventListener('click',e=>{const button=e.target.closest('[data-tab]');if(!button)return;tab=button.dataset.tab;render()});

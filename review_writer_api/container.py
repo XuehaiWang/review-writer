@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from review_writer_api.artifact_service import ArtifactService
 from review_writer_api.domain_services.discovery import DiscoveryService
 from review_writer_api.domain_services.library import LibraryService
+from review_writer_api.domain_services.planning import PlanningService
+from review_writer_api.domain_services.sections import SectionsService
 from review_writer_api.job_service import JobService
 from review_writer_api.scientific_runner import ScientificRunner
 from review_writer_api.workflow_repository import WorkflowRepository
@@ -20,3 +22,5 @@ class ApplicationContainer:
     scientific_runner: ScientificRunner
     library_service: LibraryService
     discovery_service: DiscoveryService
+    planning_service: PlanningService
+    sections_service: SectionsService

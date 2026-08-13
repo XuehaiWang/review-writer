@@ -58,3 +58,38 @@ class DiscoveryTopSelectionRequest(BaseModel):
 
 class DiscoveryConfirmRequest(BaseModel):
     revision: StrictInt = Field(ge=0)
+
+
+class MatrixRowUpdateRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+    main_content: StrictStr | None = Field(default=None, max_length=2_000_000)
+    most_relevant_figure: dict[str, Any] | None = None
+    mark_complete: StrictBool = False
+
+
+class OutlineSaveRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+    outline_style: StrictStr = Field(min_length=1, max_length=160)
+    outline_md: StrictStr | None = Field(default=None, max_length=250_000)
+
+
+class ReferenceOutlineUploadRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+    filename: StrictStr = Field(min_length=1, max_length=255)
+    content_base64: StrictStr = Field(min_length=1, max_length=42_000_000)
+
+
+class BlueprintGenerateRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+
+
+class BlueprintConfirmRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+
+
+class SectionsGenerateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class SectionsConfirmRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)

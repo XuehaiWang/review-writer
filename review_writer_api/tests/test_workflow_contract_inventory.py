@@ -42,7 +42,11 @@ class WorkflowContractInventoryTests(unittest.TestCase):
         self.assertTrue(all(row.native_test for row in rows))
         self.assertTrue(all(row.status in {"baseline", "passed"} for row in rows))
         for row in rows:
-            expected = "passed" if row.row_id.startswith(("LIB-", "DIS-")) else "baseline"
+            expected = (
+                "passed"
+                if row.row_id.startswith(("LIB-", "DIS-", "PLN-", "SEC-"))
+                else "baseline"
+            )
             self.assertEqual(expected, row.status, row.row_id)
 
 

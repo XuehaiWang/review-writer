@@ -454,6 +454,7 @@ class DiscoveryService:
         ).hexdigest()
         matrix = {
             "project_id": project_id,
+            "review_topic": str(current.get("topic") or ""),
             "rows": rows,
             "sync": {
                 "selection_fingerprint": fingerprint,

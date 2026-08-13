@@ -484,6 +484,101 @@ class PostgreSQLWorkflowRepositoryTests(unittest.TestCase):
             )
         self.assertEqual(2, count)
 
+    def test_concurrent_planning_promotions_keep_pointer_and_revision_together(self) -> None:
+        candidates = []
+        for index in range(2):
+            run = self.repository.create_stage_run(
+                self.user_id,
+                self.project_id,
+                "matrix",
+                status="succeeded",
+            )
+            artifact_id = str(uuid.uuid4())
+            artifact = self.repository.publish_artifact(
+                user_id=self.user_id,
+                project_id=self.project_id,
+                artifact_id=artifact_id,
+                logical_name="matrix/literature_matrix.json",
+                artifact_type="json",
+                relative_path=f".artifacts/matrix/{artifact_id}/matrix.json",
+                content_sha256=f"{index + 501:064x}",
+                size_bytes=index + 1,
+                mtime_ns=index + 1,
+                producer_stage="matrix",
+                producer_run_id=run.id,
+                make_current=False,
+            )
+            candidates.append((artifact, run))
+        barrier = threading.Barrier(2)
+
+        def promote(candidate):
+            artifact, run = candidate
+            barrier.wait(timeout=10)
+            try:
+                state = self.repository.promote_stage_artifacts_atomically(
+                    self.user_id,
+                    self.project_id,
+                    "matrix",
+                    artifact_ids={"matrix/literature_matrix.json": artifact.id},
+                    run_id=run.id,
+                    expected_revision=0,
+                )
+                return "promoted", artifact, run, state
+            except self.errors.WorkflowConflict:
+                return "conflict", artifact, run, None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(promote, candidates))
+
+        self.assertEqual(1, sum(item[0] == "promoted" for item in outcomes))
+        winner = next(item for item in outcomes if item[0] == "promoted")
+        current = self.repository.get_current_artifact(
+            self.user_id,
+            self.project_id,
+            "matrix/literature_matrix.json",
+        )
+        state = self.repository.get_stage_state(
+            self.user_id, self.project_id, "matrix"
+        )
+        self.assertEqual(winner[1].id, current.id)
+        self.assertEqual(winner[2].id, state.current_run_id)
+        self.assertEqual(1, state.revision)
+        blueprint_run = self.repository.create_stage_run(
+            self.user_id,
+            self.project_id,
+            "blueprint",
+            status="succeeded",
+        )
+        blueprint_id = str(uuid.uuid4())
+        blueprint = self.repository.publish_artifact(
+            user_id=self.user_id,
+            project_id=self.project_id,
+            artifact_id=blueprint_id,
+            logical_name="blueprint/section_blueprint.json",
+            artifact_type="json",
+            relative_path=f".artifacts/blueprint/{blueprint_id}/blueprint.json",
+            content_sha256=f"{999:064x}",
+            size_bytes=1,
+            mtime_ns=1,
+            producer_stage="blueprint",
+            producer_run_id=blueprint_run.id,
+            make_current=False,
+        )
+        self.repository.promote_stage_artifacts_atomically(
+            self.user_id,
+            self.project_id,
+            "blueprint",
+            artifact_ids={"blueprint/section_blueprint.json": blueprint.id},
+            run_id=blueprint_run.id,
+            expected_revision=0,
+            approve_stages={"matrix": 1},
+        )
+        matrix_state = self.repository.get_stage_state(
+            self.user_id, self.project_id, "matrix"
+        )
+        self.assertEqual("approved", matrix_state.status)
+        self.assertEqual(2, matrix_state.revision)
+
     def test_concurrent_discovery_replacements_promote_one_complete_transition(self) -> None:
         def stage_artifact(stage: str, logical_name: str, seed: int, *, current: bool):
             run = self.repository.create_stage_run(
