@@ -159,7 +159,7 @@ def create_app(
             hosted_workspace_manager,
             precise_ingest=native_overrides.get("library.precise_ingest"),
             runtime_environment=(
-                provider_settings_service.runtime_environment
+                provider_settings_service.mineru_environment
                 if provider_settings_service is not None
                 else None
             ),

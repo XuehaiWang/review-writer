@@ -43,6 +43,12 @@ FAILURE_STATES = {"failed", "error"}
 TERMINAL_STATES = SUCCESS_STATES | FAILURE_STATES
 
 
+class MinerUHTTPError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int):
+        super().__init__(message)
+        self.status_code = int(status_code)
+
+
 @dataclass
 class ParseJob:
     index: int
@@ -282,6 +288,47 @@ def mineru_headers(token: str) -> Dict[str, str]:
     }
 
 
+def raise_for_mineru_http_error(response: requests.Response, operation: str) -> None:
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if 200 <= status_code < 300:
+        return
+
+    payload: Dict[str, Any] = {}
+    try:
+        parsed = response.json()
+        if isinstance(parsed, dict):
+            payload = parsed
+    except (TypeError, ValueError, requests.RequestException):
+        pass
+
+    code = payload.get("code", payload.get("Code"))
+    message = payload.get("msg", payload.get("message", payload.get("Message")))
+    if not message and payload.get("detail") is not None:
+        detail = payload["detail"]
+        message = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
+    trace_id = payload.get(
+        "trace_id",
+        payload.get("request_id", payload.get("RequestId")),
+    )
+    details: List[str] = []
+    if code not in (None, ""):
+        details.append(f"code={code}")
+    if message:
+        details.append(re.sub(r"\s+", " ", str(message)).strip()[:800])
+    if trace_id:
+        details.append(f"trace_id={str(trace_id).strip()[:160]}")
+    if not details:
+        raw = re.sub(r"\s+", " ", str(getattr(response, "text", "") or "")).strip()
+        if raw:
+            details.append(raw[:800])
+
+    suffix = f": {'; '.join(details)}" if details else ""
+    raise MinerUHTTPError(
+        f"MinerU HTTP {status_code} while {operation}{suffix}",
+        status_code=status_code,
+    )
+
+
 def api_post_json(session: requests.Session, token: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     response = session.post(
         f"{MINERU_BASE_URL}{path}",
@@ -289,7 +336,7 @@ def api_post_json(session: requests.Session, token: str, path: str, payload: Dic
         json=payload,
         timeout=60,
     )
-    response.raise_for_status()
+    raise_for_mineru_http_error(response, f"requesting {path}")
     data = response.json()
     if data.get("code") != 0:
         raise RuntimeError(f"MinerU API error for {path}: {data.get('msg') or data}")
@@ -302,7 +349,7 @@ def api_get_json(session: requests.Session, token: str, path: str) -> Dict[str, 
         headers={"Authorization": f"Bearer {token}"},
         timeout=60,
     )
-    response.raise_for_status()
+    raise_for_mineru_http_error(response, f"requesting {path}")
     data = response.json()
     if data.get("code") != 0:
         raise RuntimeError(f"MinerU API error for {path}: {data.get('msg') or data}")
@@ -349,10 +396,20 @@ def upload_batch_files(
             try:
                 with job.pdf_path.open("rb") as handle:
                     response = requests.put(upload_url, data=handle, timeout=300)
-                response.raise_for_status()
+                raise_for_mineru_http_error(
+                    response,
+                    f"uploading {job.relative_pdf_path}",
+                )
                 print(f"[upload] {job.relative_pdf_path}")
                 break
-            except requests.RequestException as exc:
+            except (requests.RequestException, MinerUHTTPError) as exc:
+                if isinstance(exc, MinerUHTTPError) and exc.status_code not in {
+                    429,
+                    502,
+                    503,
+                    504,
+                }:
+                    raise
                 if attempt + 1 >= attempts:
                     raise
                 delay = max(0.1, retry_delay) * (2 ** attempt)
@@ -414,7 +471,7 @@ def prepare_target(path: Path, force: bool) -> None:
 def download_binary(url: str, dest: Path) -> None:
     ensure_parent(dest)
     with requests.get(url, stream=True, timeout=300) as response:
-        response.raise_for_status()
+        raise_for_mineru_http_error(response, "downloading parsed output")
         with dest.open("wb") as handle:
             for chunk in response.iter_content(chunk_size=1024 * 1024):
                 if chunk:

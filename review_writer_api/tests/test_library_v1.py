@@ -4,6 +4,7 @@ import base64
 import concurrent.futures
 import json
 import os
+import socket
 import tempfile
 import time
 import unittest
@@ -338,6 +339,69 @@ class LibraryV1Tests(unittest.TestCase):
             "https://mineru.example.test", captured["env"]["MINERU_BASE_URL"]
         )
         self.assertTrue(callable(captured["cancel_requested"]))
+
+    def test_library_mineru_environment_ignores_unrelated_provider_dns_failure(self) -> None:
+        provider_service = self.app.state.provider_settings_service
+        provider_service.allowed_hosts = ("mineru.net", "blocked.example")
+
+        def public_resolver(host, port, *_args, **_kwargs):
+            return [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    ("93.184.216.34", port),
+                )
+            ]
+
+        with patch(
+            "review_writer_api.credentials.socket.getaddrinfo",
+            side_effect=public_resolver,
+        ):
+            provider_service.save_settings(
+                self.first,
+                "mineru",
+                base_url="",
+                model_name="",
+                wire_api="",
+                api_key="mineru-secret",
+                enabled=True,
+            )
+            provider_service.save_settings(
+                self.first,
+                "text",
+                base_url="https://blocked.example/v1",
+                model_name="text-model",
+                wire_api="responses",
+                api_key="text-secret",
+                enabled=True,
+            )
+
+        def task_resolver(host, port, *_args, **_kwargs):
+            address = "93.184.216.34" if str(host).casefold() == "mineru.net" else "127.0.0.1"
+            return [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    (address, port),
+                )
+            ]
+
+        with patch(
+            "review_writer_api.credentials.socket.getaddrinfo",
+            side_effect=task_resolver,
+        ):
+            try:
+                environment = self.app.state.library_service.runtime_environment(
+                    self.first
+                )
+            except Exception as exc:
+                self.fail(f"An unrelated provider blocked MinerU: {exc}")
+
+        self.assertEqual({"MINERU_API_TOKEN": "mineru-secret"}, environment)
 
     def test_native_runner_failure_preserves_mineru_upload_error_contract(self) -> None:
         class FailingRunner:

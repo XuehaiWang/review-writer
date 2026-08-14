@@ -7,6 +7,7 @@ import ipaddress
 import os
 import socket
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import urlsplit
@@ -334,18 +335,31 @@ class ProviderSettingsService:
                 raise ProviderSettingsError(f"No enabled {kind.value} provider is configured.")
             return self.cipher.decrypt(user_id, kind.value, row.encrypted_secret)
 
-    def runtime_environment(self, principal: Principal) -> dict[str, str]:
+    def runtime_environment(
+        self,
+        principal: Principal,
+        *,
+        provider_kinds: Iterable[ProviderKind | str] | None = None,
+    ) -> dict[str, str]:
         """Build the workflow environment without persisting plaintext secrets."""
 
         principal.require(Permission.PROVIDER_MANAGE)
         user_uuid = uuid.UUID(principal.user_id)
+        selected_kinds = (
+            {self._kind(kind).value for kind in provider_kinds}
+            if provider_kinds is not None
+            else None
+        )
         with database_session(self.session_factory) as session:
-            rows = session.scalars(
-                select(ProviderCredential).where(
-                    ProviderCredential.user_id == user_uuid,
-                    ProviderCredential.enabled.is_(True),
+            query = select(ProviderCredential).where(
+                ProviderCredential.user_id == user_uuid,
+                ProviderCredential.enabled.is_(True),
+            )
+            if selected_kinds is not None:
+                query = query.where(
+                    ProviderCredential.provider_kind.in_(sorted(selected_kinds))
                 )
-            ).all()
+            rows = session.scalars(query).all()
 
         environment: dict[str, str] = {}
         for row in rows:
@@ -385,3 +399,11 @@ class ProviderSettingsService:
                 if row.wire_api:
                     environment["IMAGE_OPENAI_WIRE_API"] = row.wire_api
         return environment
+
+    def mineru_environment(self, principal: Principal) -> dict[str, str]:
+        """Return only the credential required by precise PDF parsing."""
+
+        return self.runtime_environment(
+            principal,
+            provider_kinds=(ProviderKind.MINERU,),
+        )
