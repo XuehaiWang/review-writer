@@ -35,7 +35,7 @@
 
 Add `ROOT / "view" / "provider_settings.py"` to `REMOVED_RUNTIME` and `"view.provider_settings"` to `LEGACY_IMPORTS` in `review_writer_api/tests/test_no_legacy_runtime.py`.
 
-Add a `check_mineru_inherits_task_scoped_environment()` check to `view/local_pdf_ingestion_checks.py`. It must set a sentinel `MINERU_API_TOKEN`, replace `ingestion.subprocess.run` with a fake that records `env`, creates `markdown`, `full.md`, `content_list.json`, and manifest files under `ingestion._mineru_artifact_paths(...)`, then assert the captured environment contains the sentinel. The check must restore the environment and original runner in `finally`.
+Add a `check_mineru_inherits_task_scoped_environment()` check to `view/local_pdf_ingestion_checks.py`. It must set a sentinel `MINERU_API_TOKEN`, write a conflicting token to `<review-root>/.env`, replace `ingestion.subprocess.run` with a fake that records `env`, creates `markdown`, `full.md`, `content_list.json`, and manifest files under `ingestion._mineru_artifact_paths(...)`, then assert the captured environment contains the task sentinel rather than the workspace value. The check must restore the environment and original runner in `finally`.
 
 - [ ] **Step 2: Run focused checks and verify RED**
 
@@ -50,7 +50,7 @@ Expected: the no-legacy test fails because `view/provider_settings.py` still exi
 
 - [ ] **Step 3: Use only the task environment and delete the old module**
 
-In `view/local_pdf_ingestion.py`, remove the `from provider_settings import provider_subprocess_environment` import and replace:
+In `view/local_pdf_ingestion.py`, delete `_load_dotenv_if_present`, remove its call from `_run_mineru_parser`, remove the `from provider_settings import provider_subprocess_environment` import, and replace:
 
 ```python
 env=provider_subprocess_environment(root),
