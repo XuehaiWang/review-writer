@@ -529,6 +529,19 @@ def summarize_batch_states(results: Dict[str, Dict[str, Any]]) -> Dict[str, int]
     return counts
 
 
+def emit_failed_job_diagnostics(manifest: Dict[str, Any]) -> None:
+    for record in manifest.get("failed") or []:
+        if not isinstance(record, dict):
+            continue
+        filename = re.sub(r"\s+", " ", str(record.get("pdf_name") or "PDF")).strip()
+        reason = re.sub(
+            r"\s+",
+            " ",
+            str(record.get("err_msg") or record.get("state") or "unknown failure"),
+        ).strip()
+        print(f"[failed] {filename[:240]}: {reason[:1200]}", file=sys.stderr)
+
+
 def run_batch(
     session: requests.Session,
     token: str,
@@ -651,6 +664,8 @@ def main() -> int:
     manifest["completed_count"] = len(manifest["completed"])
     manifest["failed_count"] = len(manifest["failed"])
     write_json(manifest_path, manifest)
+    if manifest["failed_count"]:
+        emit_failed_job_diagnostics(manifest)
 
     print(
         json.dumps(

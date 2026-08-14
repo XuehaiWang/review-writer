@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -110,6 +112,26 @@ class MinerUHttpErrorTests(unittest.TestCase):
         self.assertIn("The request body is invalid.", message)
         self.assertIn("oss-request-422", message)
         self.assertNotIn("signed-upload.example", message)
+
+    def test_failed_job_diagnostic_includes_provider_message(self) -> None:
+        stderr = io.StringIO()
+        manifest = {
+            "failed": [
+                {
+                    "pdf_name": "paper.pdf",
+                    "state": "failed",
+                    "err_msg": "unsupported encrypted document",
+                }
+            ]
+        }
+
+        with redirect_stderr(stderr):
+            self.client.emit_failed_job_diagnostics(manifest)
+
+        self.assertEqual(
+            "[failed] paper.pdf: unsupported encrypted document\n",
+            stderr.getvalue(),
+        )
 
 
 if __name__ == "__main__":

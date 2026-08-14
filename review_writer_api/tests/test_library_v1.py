@@ -407,7 +407,19 @@ class LibraryV1Tests(unittest.TestCase):
         class FailingRunner:
             def run(self, _command, **_kwargs):
                 raise ScientificRunFailed(
-                    "MinerU subprocess failed.", attempts=1, retryable=False
+                    "Scientific task failed.",
+                    attempts=1,
+                    retryable=False,
+                    details={
+                        "returncode": 1,
+                        "category": "unknown",
+                        "provider_call_completed": True,
+                        "stderr": (
+                            "Traceback (most recent call last):\n"
+                            "RuntimeError: MinerU precise parsing failed; "
+                            "[failed] paper.pdf: unsupported encrypted document\n"
+                        ),
+                    },
                 )
 
         service = self.app.state.library_service
@@ -419,6 +431,12 @@ class LibraryV1Tests(unittest.TestCase):
         self.assertEqual(502, response.status_code)
         self.assertEqual(
             "MINERU_PRECISE_PARSE_FAILED", response.json()["error"]["code"]
+        )
+        message = response.json()["error"]["message"]
+        self.assertIn("unsupported encrypted document", message)
+        self.assertNotIn("Traceback", message)
+        self.assertEqual(
+            "unknown", response.json()["error"]["details"]["category"]
         )
 
     def test_batch_upload_reports_real_outcomes(self) -> None:

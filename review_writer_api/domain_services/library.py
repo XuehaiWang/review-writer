@@ -55,6 +55,18 @@ def _field_value(value: Any) -> Any:
     return value.get("value") if isinstance(value, dict) and "value" in value else value
 
 
+def _scientific_failure_diagnostic(exc: ScientificRunError) -> str:
+    stderr = str((getattr(exc, "details", None) or {}).get("stderr") or "")
+    for raw_line in reversed(stderr.splitlines()):
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line or line.startswith(("Traceback ", "File ", "REVIEW_WRITER_ERROR:")):
+            continue
+        if set(line) <= {"^", "~", "-", " "}:
+            continue
+        return line[:1800]
+    return ""
+
+
 class LibraryService:
     MAX_PDF_BYTES = 80 * 1024 * 1024
     PAPER_ID = re.compile(r"^P[0-9]{1,93}$")
@@ -138,7 +150,22 @@ class LibraryService:
             result_ready = True
             return result
         except ScientificRunError as exc:
-            raise MinerUPreciseParseFailed(str(exc)) from exc
+            diagnostic = _scientific_failure_diagnostic(exc)
+            message = str(exc).strip() or "Scientific task failed."
+            if diagnostic and diagnostic not in message:
+                message = f"{message} {diagnostic}"
+            source_details = dict(getattr(exc, "details", None) or {})
+            public_details = {
+                key: source_details[key]
+                for key in ("returncode", "category", "provider_call_completed")
+                if key in source_details
+            }
+            if diagnostic:
+                public_details["diagnostic"] = diagnostic
+            raise MinerUPreciseParseFailed(
+                message,
+                details=public_details,
+            ) from exc
         except (OSError, json.JSONDecodeError) as exc:
             raise MinerUPreciseParseFailed(
                 "MinerU precise parsing returned an unreadable result."
