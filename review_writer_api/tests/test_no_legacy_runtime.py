@@ -28,12 +28,14 @@ REMOVED_RUNTIME = (
     ROOT / "view" / "serve_review_dashboard.py",
     ROOT / "view" / "prefect_runtime.py",
     ROOT / "view" / "prefect_flows.py",
+    ROOT / "view" / "provider_settings.py",
 )
 LEGACY_IMPORTS = (
     "view.serve_review_dashboard",
     "view.workflow_store",
     "view.prefect_runtime",
     "view.prefect_flows",
+    "view.provider_settings",
     "review_writer_api.workflow_compat",
     "review_writer_api.dashboard_executor",
 )

@@ -278,20 +278,6 @@ def _rebuild_registry(review_root: Path) -> None:
     rebuild_registry(Path(review_root))
 
 
-def _load_dotenv_if_present(review_root: Path) -> None:
-    path = Path(review_root) / ".env"
-    if not path.is_file():
-        return
-    for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        if key:
-            os.environ.setdefault(key, value.strip().strip("'\""))
-
-
 def _mineru_content_list(extracted_dir: Path) -> Path | None:
     direct = sorted(extracted_dir.glob("*_content_list.json"))
     if direct:
@@ -340,7 +326,6 @@ def _run_mineru_parser(review_root: Path, pdf_path: Path, slug: str) -> dict[str
         raise RuntimeError(f"MinerU parser script is missing: {script}")
     artifacts = _mineru_artifact_paths(root, slug)
     artifacts["manifest"].parent.mkdir(parents=True, exist_ok=True)
-    _load_dotenv_if_present(root)
     command = [
         sys.executable,
         str(script),
@@ -354,8 +339,6 @@ def _run_mineru_parser(review_root: Path, pdf_path: Path, slug: str) -> dict[str
         str(artifacts["manifest"]),
         "--force",
     ]
-    from provider_settings import provider_subprocess_environment
-
     try:
         completed = subprocess.run(
             command,
@@ -364,7 +347,7 @@ def _run_mineru_parser(review_root: Path, pdf_path: Path, slug: str) -> dict[str
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=provider_subprocess_environment(root),
+            env=dict(os.environ),
             timeout=MINERU_UPLOAD_TIMEOUT_SECONDS,
             check=False,
         )

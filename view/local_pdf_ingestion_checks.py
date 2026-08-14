@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -69,6 +70,50 @@ def check_filename_boundary() -> None:
         assert "Only .pdf" in str(exc)
     else:
         raise AssertionError("A non-PDF filename passed validation.")
+
+
+def check_mineru_inherits_task_scoped_environment() -> None:
+    sentinel = "task-scoped-mineru-token"
+    original = os.environ.get("MINERU_API_TOKEN")
+    original_run = ingestion.subprocess.run
+    captured: dict[str, str] = {}
+    with tempfile.TemporaryDirectory() as raw:
+        review_root = Path(raw)
+        pdf_path = review_root / "paper.pdf"
+        pdf_path.write_bytes(b"%PDF-1.7\n%%EOF")
+        (review_root / ".env").write_text(
+            "MINERU_API_TOKEN=workspace-file-token\n",
+            encoding="utf-8",
+        )
+
+        def fake_run(command, **kwargs):
+            captured.update(kwargs["env"])
+            artifacts = ingestion._mineru_artifact_paths(review_root, "paper")
+            artifacts["markdown"].parent.mkdir(parents=True, exist_ok=True)
+            artifacts["extracted_dir"].mkdir(parents=True, exist_ok=True)
+            artifacts["manifest"].parent.mkdir(parents=True, exist_ok=True)
+            artifacts["markdown"].write_text("# Parsed\n", encoding="utf-8")
+            (artifacts["extracted_dir"] / "full.md").write_text(
+                "# Parsed\n", encoding="utf-8"
+            )
+            (artifacts["extracted_dir"] / "paper_content_list.json").write_text(
+                "[]", encoding="utf-8"
+            )
+            artifacts["manifest"].write_text("{}", encoding="utf-8")
+            return ingestion.subprocess.CompletedProcess(command, 0, "", "")
+
+        os.environ["MINERU_API_TOKEN"] = sentinel
+        ingestion.subprocess.run = fake_run
+        try:
+            ingestion._run_mineru_parser(review_root, pdf_path, "paper")
+        finally:
+            ingestion.subprocess.run = original_run
+            if original is None:
+                os.environ.pop("MINERU_API_TOKEN", None)
+            else:
+                os.environ["MINERU_API_TOKEN"] = original
+
+    assert captured["MINERU_API_TOKEN"] == sentinel
 
 
 def check_ingestion_and_downstream_reuse() -> None:
@@ -214,6 +259,7 @@ def check_legacy_upload_is_upgraded_in_place() -> None:
 def main() -> int:
     checks = [
         ("filename boundary", check_filename_boundary),
+        ("task-scoped MinerU environment", check_mineru_inherits_task_scoped_environment),
         ("ingestion/downstream reuse", check_ingestion_and_downstream_reuse),
         ("incomplete MinerU inventory guard", check_figure_inventory_rejects_incomplete_mineru_metadata),
         ("legacy upload MinerU upgrade", check_legacy_upload_is_upgraded_in_place),
