@@ -29,6 +29,7 @@ REMOVED_RUNTIME = (
     ROOT / "view" / "prefect_runtime.py",
     ROOT / "view" / "prefect_flows.py",
     ROOT / "view" / "provider_settings.py",
+    ROOT / "view" / "workflow_store.py",
 )
 LEGACY_IMPORTS = (
     "view.serve_review_dashboard",

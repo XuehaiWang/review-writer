@@ -72,6 +72,8 @@ class RepositoryHygieneChecks(unittest.TestCase):
             api / "dashboard_executor.py",
             ROOT / "view" / "prefect_runtime.py",
             ROOT / "view" / "prefect_flows.py",
+            ROOT / "view" / "provider_settings.py",
+            ROOT / "view" / "workflow_store.py",
         ):
             self.assertFalse(path.exists(), path)
         self.assertNotIn("DashboardHandler", app)

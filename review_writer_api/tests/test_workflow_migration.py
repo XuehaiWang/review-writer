@@ -42,9 +42,6 @@ from review_writer_api.workflow_models import (
     WorkflowSystemState,
 )
 from review_writer_api.workspaces import HostedWorkspaceManager
-from view.workflow_store import WorkflowStore
-
-
 NOW = "2026-08-01T10:00:00+00:00"
 
 
@@ -76,9 +73,99 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def create_legacy_schema(database_path: Path) -> None:
+    with closing(sqlite3.connect(database_path)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.executescript(
+            """
+            CREATE TABLE projects (
+                project_id TEXT PRIMARY KEY,
+                root_path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE stage_runs (
+                run_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+                stage_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempt INTEGER NOT NULL DEFAULT 1,
+                input_fingerprint TEXT NOT NULL DEFAULT '',
+                input_snapshot_json TEXT NOT NULL DEFAULT '[]',
+                output_fingerprint TEXT NOT NULL DEFAULT '',
+                output_snapshot_json TEXT NOT NULL DEFAULT '[]',
+                progress_current INTEGER NOT NULL DEFAULT 0,
+                progress_total INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                finished_at TEXT
+            );
+            CREATE TABLE stage_state (
+                project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+                stage_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_run_id TEXT,
+                input_fingerprint TEXT NOT NULL DEFAULT '',
+                output_fingerprint TEXT NOT NULL DEFAULT '',
+                error_message TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(project_id, stage_id)
+            );
+            CREATE TABLE artifact_versions (
+                artifact_version_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+                logical_name TEXT NOT NULL,
+                artifact_type TEXT NOT NULL,
+                path TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                producer_stage TEXT NOT NULL DEFAULT '',
+                producer_run_id TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                UNIQUE(project_id, logical_name, content_sha256)
+            );
+            CREATE TABLE current_artifacts (
+                project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+                logical_name TEXT NOT NULL,
+                artifact_version_id TEXT NOT NULL REFERENCES artifact_versions(artifact_version_id) ON DELETE CASCADE,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(project_id, logical_name)
+            );
+            CREATE TABLE artifact_dependencies (
+                output_artifact_version_id TEXT NOT NULL REFERENCES artifact_versions(artifact_version_id) ON DELETE CASCADE,
+                input_artifact_version_id TEXT NOT NULL REFERENCES artifact_versions(artifact_version_id) ON DELETE CASCADE,
+                dependency_role TEXT NOT NULL DEFAULT 'input',
+                PRIMARY KEY(output_artifact_version_id, input_artifact_version_id, dependency_role)
+            );
+            CREATE TABLE jobs (
+                job_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+                job_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                finished_at TEXT
+            );
+            CREATE TABLE current_jobs (
+                project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+                job_type TEXT NOT NULL,
+                job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(project_id, job_type)
+            );
+            """
+        )
+
+
 def create_legacy_fixture(review_root: Path) -> dict[str, str]:
-    store = WorkflowStore(review_root)
-    database_path = store.database_path
+    database_path = review_root / ".review-writer" / "workflow.sqlite3"
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    create_legacy_schema(database_path)
     alpha_root = review_root / "review-projects" / "alpha"
     beta_root = review_root / "review-projects" / "beta"
     alpha_root.mkdir(parents=True, exist_ok=True)
