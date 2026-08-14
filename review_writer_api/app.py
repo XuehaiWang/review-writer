@@ -104,6 +104,7 @@ def create_app(
             CredentialCipher(resolved.credential_encryption_key),
             allow_private_urls=resolved.allow_private_provider_urls,
             allowed_hosts=resolved.allowed_provider_hosts,
+            trusted_proxy_networks=resolved.trusted_proxy_networks,
         )
         if resolved.deployment_mode == "hosted"
         else None
@@ -148,6 +149,7 @@ def create_app(
     scientific_runner = (
         ScientificRunner(
             allow_private_networks=resolved.allow_private_provider_urls,
+            trusted_proxy_networks=resolved.trusted_proxy_networks,
         )
         if workflow_repository is not None
         else None

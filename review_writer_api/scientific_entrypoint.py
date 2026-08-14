@@ -24,15 +24,27 @@ from typing import Any
 ERROR_ENVELOPE_PREFIX = "REVIEW_WRITER_ERROR:"
 COMPLETION_FILE_ENV = "REVIEW_WRITER_PROVIDER_CALL_COMPLETED_FILE"
 PRIVATE_EGRESS_ENV = "REVIEW_WRITER_ALLOW_PRIVATE_EGRESS"
+TRUSTED_PROXY_NETWORKS_ENV = "REVIEW_WRITER_TRUSTED_PROXY_NETWORKS"
 
 
-def guarded_getaddrinfo(original, *, allow_private_networks: bool):
+def guarded_getaddrinfo(
+    original,
+    *,
+    allow_private_networks: bool,
+    trusted_proxy_networks=(),
+):
     """Validate the exact addresses returned to the connection attempt.
 
     Redirects and DNS rebinding both create a new connection-time lookup, so
     wrapping ``socket.getaddrinfo`` protects every hop instead of trusting an
     earlier settings-page lookup.
     """
+
+    networks = tuple(
+        ipaddress.ip_network(str(item), strict=True)
+        for item in trusted_proxy_networks
+        if str(item).strip()
+    )
 
     def resolve(host, port, *args, **kwargs):
         answers = original(host, port, *args, **kwargs)
@@ -43,7 +55,7 @@ def guarded_getaddrinfo(original, *, allow_private_networks: bool):
                 address = ipaddress.ip_address(str(answer[4][0]).split("%", 1)[0])
             except (IndexError, TypeError, ValueError) as exc:
                 raise OSError("Provider destination could not be safely resolved.") from exc
-            if not address.is_global:
+            if not address.is_global and not any(address in network for network in networks):
                 raise OSError("Provider connection to a private destination is blocked.")
         if not answers:
             raise OSError("Provider destination could not be safely resolved.")
@@ -56,9 +68,15 @@ def install_network_guard() -> None:
     allow_private = os.environ.get(PRIVATE_EGRESS_ENV, "0").strip().casefold() in {
         "1", "true", "yes", "on"
     }
+    trusted_proxy_networks = tuple(
+        item.strip()
+        for item in os.environ.get(TRUSTED_PROXY_NETWORKS_ENV, "").split(",")
+        if item.strip()
+    )
     socket.getaddrinfo = guarded_getaddrinfo(
         socket.getaddrinfo,
         allow_private_networks=allow_private,
+        trusted_proxy_networks=trusted_proxy_networks,
     )
 
 

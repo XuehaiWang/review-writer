@@ -67,6 +67,7 @@ def validate_provider_base_url(
     *,
     allow_private_urls: bool,
     allowed_hosts=(),
+    trusted_proxy_networks=(),
     resolver=None,
 ) -> str:
     value = str(raw_url or "").strip().rstrip("/")
@@ -91,6 +92,17 @@ def validate_provider_base_url(
         raise ProviderSettingsError(
             "Provider base URL must be an http(s) URL without credentials, query, or fragment."
         )
+    try:
+        proxy_networks = tuple(
+            ipaddress.ip_network(str(item), strict=True)
+            for item in trusted_proxy_networks
+        )
+    except ValueError as exc:
+        raise ProviderSettingsError("Trusted proxy network configuration is invalid.") from exc
+
+    def is_trusted_proxy(candidate) -> bool:
+        return any(candidate in network for network in proxy_networks)
+
     private = hostname == "localhost" or hostname.endswith(
         (".localhost", ".local", ".internal")
     )
@@ -98,7 +110,7 @@ def validate_provider_base_url(
         address = ipaddress.ip_address(hostname.split("%", 1)[0])
     except ValueError:
         address = None
-    if address is not None and not address.is_global:
+    if address is not None and not address.is_global and not is_trusted_proxy(address):
         private = True
     if address is None and not private:
         resolve = resolver or socket.getaddrinfo
@@ -116,7 +128,9 @@ def validate_provider_base_url(
             raise ProviderSettingsError("Provider hostname could not be safely resolved.") from exc
         if not addresses:
             raise ProviderSettingsError("Provider hostname could not be safely resolved.")
-        private = any(not item.is_global for item in addresses)
+        private = any(
+            not item.is_global and not is_trusted_proxy(item) for item in addresses
+        )
     if private and not allow_private_urls:
         raise ProviderSettingsError(
             "Private or loopback provider URLs require trusted-LAN mode."
@@ -215,11 +229,13 @@ class ProviderSettingsService:
         *,
         allow_private_urls: bool = False,
         allowed_hosts=(),
+        trusted_proxy_networks=(),
     ):
         self.session_factory = session_factory
         self.cipher = cipher
         self.allow_private_urls = bool(allow_private_urls)
         self.allowed_hosts = tuple(allowed_hosts)
+        self.trusted_proxy_networks = tuple(trusted_proxy_networks)
 
     @staticmethod
     def _kind(raw_kind: str) -> ProviderKind:
@@ -272,6 +288,7 @@ class ProviderSettingsService:
             effective_provider_base_url(kind, base_url),
             allow_private_urls=self.allow_private_urls,
             allowed_hosts=self.allowed_hosts,
+            trusted_proxy_networks=self.trusted_proxy_networks,
         )
 
         user_uuid = uuid.UUID(principal.user_id)
@@ -370,6 +387,7 @@ class ProviderSettingsService:
                 effective_provider_base_url(row.provider_kind, row.base_url),
                 allow_private_urls=self.allow_private_urls,
                 allowed_hosts=self.allowed_hosts,
+                trusted_proxy_networks=self.trusted_proxy_networks,
             )
             secret = self.cipher.decrypt(principal.user_id, row.provider_kind, row.encrypted_secret)
             if row.provider_kind == ProviderKind.MINERU.value:

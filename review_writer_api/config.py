@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import os
 import re
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ class ApiSettings:
     auth_rate_limit_window_seconds: int = 60
     allow_private_provider_urls: bool = False
     allowed_provider_hosts: tuple[str, ...] = ()
+    trusted_proxy_networks: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls, review_root: str | Path | None = None) -> "ApiSettings":
@@ -77,6 +79,9 @@ class ApiSettings:
             "REVIEW_WRITER_ALLOW_PRIVATE_PROVIDER_URLS", False
         )
         allowed_provider_hosts = _environment_hosts("REVIEW_WRITER_ALLOWED_PROVIDER_HOSTS")
+        trusted_proxy_networks = _environment_networks(
+            "REVIEW_WRITER_TRUSTED_PROXY_NETWORKS"
+        )
         raw_workspace_root = str(
             os.environ.get("REVIEW_WRITER_HOSTED_WORKSPACE_ROOT") or ""
         ).strip()
@@ -129,6 +134,7 @@ class ApiSettings:
             auth_rate_limit_window_seconds=auth_rate_limit_window_seconds,
             allow_private_provider_urls=allow_private_provider_urls,
             allowed_provider_hosts=allowed_provider_hosts,
+            trusted_proxy_networks=trusted_proxy_networks,
         )
 
 
@@ -204,4 +210,20 @@ def _environment_hosts(name: str) -> tuple[str, ...]:
         if not re.fullmatch(r"[a-z0-9.-]+", host) or ".." in host:
             raise ValueError(f"{name} must contain comma-separated DNS hostnames.")
         values.append(host)
+    return tuple(dict.fromkeys(values))
+
+
+def _environment_networks(name: str) -> tuple[str, ...]:
+    values: list[str] = []
+    for raw in str(os.environ.get(name) or "").split(","):
+        value = raw.strip()
+        if not value:
+            continue
+        try:
+            network = ipaddress.ip_network(value, strict=True)
+        except ValueError as exc:
+            raise ValueError(
+                f"{name} must contain comma-separated canonical IP networks."
+            ) from exc
+        values.append(str(network))
     return tuple(dict.fromkeys(values))

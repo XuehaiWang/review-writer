@@ -68,6 +68,26 @@ class ScientificRunnerTests(unittest.TestCase):
         )
         self.assertEqual(public_answer, guarded("provider.example", 443))
 
+    def test_connection_resolver_allows_only_configured_proxy_networks(self) -> None:
+        from review_writer_api.scientific_entrypoint import guarded_getaddrinfo
+
+        proxy_answer = [(2, 1, 6, "", ("198.18.0.74", 443))]
+        guarded = guarded_getaddrinfo(
+            lambda *_args, **_kwargs: proxy_answer,
+            allow_private_networks=False,
+            trusted_proxy_networks=("198.18.0.0/15",),
+        )
+        self.assertEqual(proxy_answer, guarded("mineru.net", 443))
+
+        lan_answer = [(2, 1, 6, "", ("192.168.0.9", 443))]
+        guarded = guarded_getaddrinfo(
+            lambda *_args, **_kwargs: lan_answer,
+            allow_private_networks=False,
+            trusted_proxy_networks=("198.18.0.0/15",),
+        )
+        with self.assertRaisesRegex(OSError, "private"):
+            guarded("internal.example", 443)
+
     def test_runner_enables_connection_time_network_guard_by_default(self) -> None:
         _output, _cancelled, _failed, runner = runner_api()
         guarded_runner = runner(max_attempts=1, retry_delay_seconds=0)
@@ -82,6 +102,28 @@ class ScientificRunnerTests(unittest.TestCase):
                 )
         child_environment = popen.call_args.kwargs["env"]
         self.assertEqual("0", child_environment["REVIEW_WRITER_ALLOW_PRIVATE_EGRESS"])
+
+    def test_runner_passes_explicit_proxy_networks_to_child(self) -> None:
+        _output, _cancelled, _failed, runner = runner_api()
+        guarded_runner = runner(
+            max_attempts=1,
+            retry_delay_seconds=0,
+            trusted_proxy_networks=("198.18.0.0/15", "fdfe:dcba:9876::/64"),
+        )
+        with patch("review_writer_api.scientific_runner.subprocess.Popen") as popen:
+            popen.side_effect = OSError("stop after environment capture")
+            with self.assertRaises(WorkflowValidationError):
+                guarded_runner.run(
+                    [sys.executable, "-c", "pass"],
+                    cwd=self.root,
+                    staging_directory=self.root,
+                    expected_outputs=("done.txt",),
+                )
+        child_environment = popen.call_args.kwargs["env"]
+        self.assertEqual(
+            "198.18.0.0/15,fdfe:dcba:9876::/64",
+            child_environment["REVIEW_WRITER_TRUSTED_PROXY_NETWORKS"],
+        )
 
     def test_secret_is_child_scoped_and_redacted_from_retained_diagnostics(self) -> None:
         secret = "sk-runner-secret"

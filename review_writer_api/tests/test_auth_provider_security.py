@@ -68,6 +68,7 @@ class AuthProviderSecurityTests(unittest.TestCase):
             "REVIEW_WRITER_AUTH_RATE_LIMIT_WINDOW_SECONDS",
             "REVIEW_WRITER_ALLOW_PRIVATE_PROVIDER_URLS",
             "REVIEW_WRITER_ALLOWED_PROVIDER_HOSTS",
+            "REVIEW_WRITER_TRUSTED_PROXY_NETWORKS",
         ):
             with self.subTest(name=name):
                 self.assertIn(name, compose)
@@ -246,6 +247,34 @@ class AuthProviderSecurityTests(unittest.TestCase):
                     allow_private_urls=False,
                     resolver=self.resolver(address),
                 )
+
+    def test_provider_url_accepts_only_explicit_proxy_networks(self) -> None:
+        self.assertEqual(
+            "https://mineru.net",
+            validate_provider_base_url(
+                "https://mineru.net",
+                allow_private_urls=False,
+                allowed_hosts={"mineru.net"},
+                trusted_proxy_networks={"198.18.0.0/15", "fdfe:dcba:9876::/64"},
+                resolver=self.resolver("198.18.0.74"),
+            ),
+        )
+        with self.assertRaisesRegex(ProviderSettingsError, "[Pp]rivate"):
+            validate_provider_base_url(
+                "https://mineru.net",
+                allow_private_urls=False,
+                allowed_hosts={"mineru.net"},
+                trusted_proxy_networks={"198.18.0.0/15"},
+                resolver=self.resolver("192.168.0.9"),
+            )
+        with self.assertRaisesRegex(ProviderSettingsError, "allowlist"):
+            validate_provider_base_url(
+                "https://not-approved.example",
+                allow_private_urls=False,
+                allowed_hosts={"mineru.net"},
+                trusted_proxy_networks={"198.18.0.0/15"},
+                resolver=self.resolver("198.18.0.74"),
+            )
 
     def test_trusted_lan_mode_allows_private_http_but_not_public_http(self) -> None:
         self.assertEqual(
