@@ -4,7 +4,6 @@
 !/.github/
 !/.github/**
 !/README.md
-!/集成说明.txt
 !/requirements.txt
 !/pyproject.toml
 !/alembic.ini
@@ -30,6 +29,8 @@
 !/infra/**
 !/docs/
 !/docs/**
+!/tests/
+!/tests/**
 
 /.env
 /.env.*

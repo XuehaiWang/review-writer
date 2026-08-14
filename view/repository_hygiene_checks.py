@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -9,6 +10,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RepositoryHygieneChecks(unittest.TestCase):
+    def test_root_test_sources_are_not_hidden_by_blanket_ignore(self) -> None:
+        result = subprocess.run(
+            ["git", "check-ignore", "--no-index", "tests/future_cleanup_check.py"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(1, result.returncode, result.stdout or result.stderr)
+
     def test_skill_docs_do_not_contain_machine_or_retired_paths(self) -> None:
         forbidden = re.compile(
             r"(?:[A-Za-z]:\\|/home/|/Users/|/mnt/|review-writer-main|"
