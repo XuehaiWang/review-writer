@@ -1,5 +1,6 @@
 # Review Writer application dependencies.
 fastapi>=0.135,<1
+httpx2>=2.10,<3
 uvicorn[standard]>=0.40,<1
 sqlalchemy>=2.0,<3
 alembic>=1.18,<2
