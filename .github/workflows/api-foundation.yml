@@ -47,4 +47,19 @@ jobs:
       - name: Run dashboard integration tests
         run: python -m unittest discover -s view/tests -p "test_*.py"
       - name: Run native API tests
-        run: python -m unittest discover -s review_writer_api/tests -p "test_*.py"
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m unittest discover -s review_writer_api/tests -p "test_*.py" 2>&1 | tee native-api-tests.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            {
+              echo "## Native API test failure"
+              echo '```text'
+              tail -n 120 native-api-tests.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            message=$(tail -n 80 native-api-tests.log | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')
+            echo "::error title=Native API tests failed::$message"
+          fi
+          exit "$status"
