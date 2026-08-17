@@ -62,7 +62,8 @@ class DiscoveryResultInteractionChecks(unittest.TestCase):
         self.assertIn("confirmed.matrix_sync?.selection_current", self.source)
         self.assertIn("const expectedCount = discoveryCounts(data).selectedLocal", self.source)
         self.assertIn("count !== expectedCount", self.source)
-        self.assertIn("selection_fingerprint", self.source)
+        self.assertIn("confirmed.matrix_sync?.synchronized_paper_count !== expectedCount", self.source)
+        self.assertNotIn("selection_fingerprint", self.source)
 
     def test_top_ranked_candidates_can_replace_the_local_matrix_selection(self) -> None:
         self.assertIn('id="topPaperCount"', self.source)
