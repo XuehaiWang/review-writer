@@ -25,7 +25,10 @@ Rules:
   - `leaving_group`
   - `reaction_type`
   - `document_scope`
-- If a keyword does not fit cleanly, classify it as `reaction_type` rather than inventing a new category.
+  - `unclassified` (Discovery routing only; it is not stored as a ninth metadata tag)
+- If a keyword does not fit cleanly, classify it as `unclassified`. The local
+  retriever will search it across all eight structured metadata fields and the
+  parsed source text. Never force an unknown concept into `reaction_type`.
 - Mark each keyword source as `user` or `agent`.
 - Convert relative-year requests against the current calendar year and use an
   inclusive range. For example, in 2026, "past five years" means

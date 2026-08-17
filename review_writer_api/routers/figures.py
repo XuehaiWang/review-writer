@@ -152,6 +152,16 @@ def build_figures_router(
             principal, project_id, revision=payload.revision
         )
 
+    @router.post("/review/sync")
+    def sync_review_inputs(
+        project_id: str,
+        payload: FigureReviewConfirmRequest,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        return figures_service.sync_review_inputs(
+            principal, project_id, revision=payload.revision
+        )
+
     @router.get("")
     def get_figures(
         project_id: str,
@@ -182,6 +192,11 @@ def build_figures_router(
             idempotency_key=idempotency_key.strip() or str(uuid.uuid4()),
             payload=job_payload,
             retry_of_job_id=payload.retry_of_job_id,
+            operation_key=(
+                f"figure:{job_payload['figure_ids'][0]}"
+                if origin == "single" and len(job_payload["figure_ids"]) == 1
+                else ""
+            ),
         )
         return _job_response(job)
 

@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from review_writer_api.database import Base, Project, User
-from review_writer_api.errors import WorkflowValidationError
+from review_writer_api.errors import WorkflowConflict, WorkflowValidationError
 from review_writer_api.workflow_models import WorkflowArtifact
 from review_writer_api.workflow_repository import WorkflowRepository
 from review_writer_api.workspaces import HostedWorkspaceManager
@@ -183,6 +183,47 @@ class ArtifactServiceTests(unittest.TestCase):
         self.assertEqual(1, len(orphan_files))
         with self.sessions() as session:
             self.assertEqual(0, session.scalar(select(func.count()).select_from(WorkflowArtifact)))
+
+    def test_concurrent_same_content_publication_returns_winner_without_orphan(self) -> None:
+        first_run, _first_source = self._stage(b"<svg>same</svg>")
+        first = self.service.publish(
+            self.user_id,
+            self.project_id,
+            first_run.id,
+            "F001.svg",
+            logical_name="figures/editor-workspaces/F001.svg",
+            artifact_type="svg",
+            producer_stage="figures",
+            make_current=False,
+        )
+        second_run, _second_source = self._stage(b"<svg>same</svg>")
+        with patch.object(
+            self.repository,
+            "get_artifact_by_content",
+            side_effect=[None, first],
+        ), patch.object(
+            self.repository,
+            "publish_artifact",
+            side_effect=WorkflowConflict("simulated concurrent winner"),
+        ):
+            recovered = self.service.publish(
+                self.user_id,
+                self.project_id,
+                second_run.id,
+                "F001.svg",
+                logical_name="figures/editor-workspaces/F001.svg",
+                artifact_type="svg",
+                producer_stage="figures",
+                make_current=False,
+            )
+        self.assertEqual(first.id, recovered.id)
+        project_root = self.workspace_manager.project_path(self.user_id, "copper")
+        artifacts = [
+            path
+            for path in project_root.glob(".artifacts/**/F001.svg")
+            if path.is_file()
+        ]
+        self.assertEqual(1, len(artifacts))
 
     def test_stage_run_and_project_must_belong_to_authenticated_user(self) -> None:
         run, _source = self._stage(b"<svg />")

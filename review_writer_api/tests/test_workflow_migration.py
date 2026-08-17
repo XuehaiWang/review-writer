@@ -177,12 +177,21 @@ def create_legacy_fixture(review_root: Path) -> dict[str, str]:
     beta_file.write_bytes(shared_content)
     library_pdf = review_root / "review-library" / "uploads" / "P001.pdf"
     library_markdown = review_root / "mineru-outputs" / "markdown" / "P001.md"
+    library_extracted = review_root / "mineru-outputs" / "extracted" / "P001"
+    library_content_list = library_extracted / "P001_content_list.json"
+    library_figure = library_extracted / "images" / "figure-1.jpg"
     library_metadata = review_root / "review-library" / "metadata" / "papers" / "P001.metadata.json"
     library_pdf.parent.mkdir(parents=True, exist_ok=True)
     library_markdown.parent.mkdir(parents=True, exist_ok=True)
     library_metadata.parent.mkdir(parents=True, exist_ok=True)
+    library_figure.parent.mkdir(parents=True, exist_ok=True)
     library_pdf.write_bytes(b"%PDF-1.7\nlegacy\n%%EOF")
     library_markdown.write_text("# Legacy copper paper\n", encoding="utf-8")
+    library_figure.write_bytes(b"legacy-mineru-figure")
+    library_content_list.write_text(
+        json.dumps([{"type": "image", "img_path": "images/figure-1.jpg"}]),
+        encoding="utf-8",
+    )
     library_metadata.write_text(
         json.dumps(
             {
@@ -198,6 +207,14 @@ def create_legacy_fixture(review_root: Path) -> dict[str, str]:
                 "source_paths": {
                     "pdf": str(library_pdf),
                     "markdown": str(library_markdown),
+                    "extracted_dir": str(library_extracted),
+                    "content_list": str(library_content_list),
+                },
+                "extraction": {
+                    "inputs": {
+                        "extracted_dir": str(library_extracted),
+                        "content_list": str(library_content_list),
+                    }
                 },
             }
         ),
@@ -405,7 +422,7 @@ class WorkflowMigrationTests(unittest.TestCase):
         self.assertEqual(2, self._count(WorkflowJob))
         self.assertEqual(2, self._count(WorkflowCurrentJob))
         self.assertEqual(1, self._count(LibraryPaper))
-        self.assertEqual(3, self._count(LibraryArtifact))
+        self.assertEqual(4, self._count(LibraryArtifact))
         self.assertEqual(1, self._count(WorkflowMigration))
 
         with self.sessions() as session:
@@ -415,7 +432,7 @@ class WorkflowMigrationTests(unittest.TestCase):
             artifacts = list(session.scalars(select(LibraryArtifact)))
             self.assertEqual("P001", paper.paper_id)
             self.assertEqual(
-                {"pdf", "markdown", "metadata"},
+                {"pdf", "markdown", "metadata", "mineru"},
                 {artifact.kind for artifact in artifacts},
             )
             self.assertEqual(
@@ -424,6 +441,12 @@ class WorkflowMigrationTests(unittest.TestCase):
             )
             self.assertEqual("Legacy copper paper", paper.title)
             self.assertIn("review-library/.artifacts/P001/", paper.pdf_relative_path)
+            mineru = next(artifact for artifact in artifacts if artifact.kind == "mineru")
+            self.assertIn("/extracted/", mineru.relative_path)
+            self.assertTrue((self.review_root / mineru.relative_path).is_file())
+            self.assertTrue(
+                Path(paper.metadata_json["source_paths"]["extracted_dir"]).is_dir()
+            )
             self.assertEqual(self.ids["run_alpha"], run.legacy_id)
             missing = session.get(WorkflowArtifact, uuid.UUID(self.ids["artifact_missing"]))
             self.assertEqual("missing", missing.availability)

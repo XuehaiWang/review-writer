@@ -116,8 +116,8 @@ When `review_summary_chart.json` exists beside the selected Markdown, validate
 that it was generated from the current draft with `generation_scope: full` or
 the legacy-compatible `both`. Validate every PNG path and SHA-256 in
 `stats.image_manifest`, then insert the full-review chart at the managed
-manuscript position. Missing, stale, or unsafe chart entries stop export with a
-clear error instead of being skipped.
+manuscript position immediately before the Introduction. Missing, stale, or
+unsafe chart entries stop export with a clear error instead of being skipped.
 
 ## Boundary
 

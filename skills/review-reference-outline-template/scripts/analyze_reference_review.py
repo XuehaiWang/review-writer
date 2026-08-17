@@ -866,13 +866,21 @@ def candidate_markdown(sections: list[dict[str, Any]], paper_count: int) -> str:
             lines.extend(
                 [
                     f"## {body_index}. {section['title']}",
+                    "Section role: body",
                     f"Assigned papers: {', '.join(section['assigned_paper_ids'])}.",
                     f"Purpose: {section['purpose']}",
                     "",
                 ]
             )
         else:
-            lines.extend([f"## {section['title']}", f"Purpose: {section['purpose']}", ""])
+            lines.extend(
+                [
+                    f"## {section['title']}",
+                    f"Section role: {role}",
+                    f"Purpose: {section['purpose']}",
+                    "",
+                ]
+            )
     return "\n".join(lines)
 
 

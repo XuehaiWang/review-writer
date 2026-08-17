@@ -238,6 +238,39 @@ class WorkflowRepositoryTests(unittest.TestCase):
         self.assertEqual("running", first_claim.status)
         self.assertIsNone(second_claim)
 
+    def test_operation_keys_allow_different_active_figures_but_block_duplicates(self) -> None:
+        first = self.repository.create_or_get_job(
+            self.ids["user_a"],
+            self.ids["project_a"],
+            "project",
+            "figures.redraw",
+            "figure-one",
+            {"figure_ids": ["P001-F01"]},
+            operation_key="figure:P001-F01",
+        )
+        second = self.repository.create_or_get_job(
+            self.ids["user_a"],
+            self.ids["project_a"],
+            "project",
+            "figures.redraw",
+            "figure-two",
+            {"figure_ids": ["P001-F02"]},
+            operation_key="figure:P001-F02",
+        )
+
+        self.assertNotEqual(first.id, second.id)
+        self.assertNotEqual(first.idempotency_scope_key, second.idempotency_scope_key)
+        with self.assertRaises(self.errors.WorkflowConflict):
+            self.repository.create_or_get_job(
+                self.ids["user_a"],
+                self.ids["project_a"],
+                "project",
+                "figures.redraw",
+                "duplicate-figure-one",
+                {"figure_ids": ["P001-F01"]},
+                operation_key="figure:P001-F01",
+            )
+
     def test_running_jobs_are_marked_interrupted_on_startup(self) -> None:
         first = self.repository.create_or_get_job(
             self.ids["user_a"], None, "library", "pdf-parse", "lib-one", {}

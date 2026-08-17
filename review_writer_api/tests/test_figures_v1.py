@@ -17,6 +17,7 @@ class FiguresV1Tests(NativeFigureApiTestCase):
         self.assertEqual(200, response.status_code, response.text)
         payload = response.json()
         paper = payload["papers"][0]
+        self.assertEqual("P001", payload["paper_display_labels"][paper["paper_id"]])
         self.assertEqual(1, paper["selected_candidate_index"])
         selected = next(
             row for row in paper["candidates"] if row["candidate_index"] == 1
@@ -24,6 +25,39 @@ class FiguresV1Tests(NativeFigureApiTestCase):
         self.assertEqual("table", selected["source_type"])
         self.assertEqual("S1-p1", selected["target_paragraph_id"])
         self.assertTrue(selected["source_image_url"].startswith("/api/v1/artifacts/"))
+
+    def test_opening_redraw_materializes_defaults_once_and_is_idempotent(self) -> None:
+        with TestClient(self.app) as client:
+            review = client.get(
+                f"/api/v1/projects/{self.project_id}/figures/review"
+            ).json()
+            first = client.post(
+                f"/api/v1/projects/{self.project_id}/figures/review/sync",
+                json={"revision": review["revision"]},
+                headers=self.headers("sync-default-selection"),
+            )
+            self.assertEqual(200, first.status_code, first.text)
+            figures = client.get(
+                f"/api/v1/projects/{self.project_id}/figures"
+            )
+            second = client.post(
+                f"/api/v1/projects/{self.project_id}/figures/review/sync",
+                json={"revision": first.json()["revision"]},
+                headers=self.headers("sync-default-selection-again"),
+            )
+        self.assertEqual(200, figures.status_code, figures.text)
+        self.assertEqual(1, len(figures.json()["figure_candidates"]))
+        figure = figures.json()["figure_candidates"][0]
+        self.assertEqual(
+            "P001",
+            figures.json()["paper_display_labels"][figure["paper_id"]],
+        )
+        self.assertFalse(first.json()["unchanged"])
+        self.assertTrue(second.json()["unchanged"])
+        self.assertEqual(
+            first.json()["selected_figures_artifact_id"],
+            second.json()["selected_figures_artifact_id"],
+        )
 
     def test_selection_requires_a_matching_manuscript_paragraph_anchor(self) -> None:
         with TestClient(self.app) as client:
@@ -35,6 +69,33 @@ class FiguresV1Tests(NativeFigureApiTestCase):
         self.assertEqual(409, response.status_code, response.text)
         self.assertEqual(
             "FIGURE_PARAGRAPH_ANCHOR_MISSING", response.json()["error"]["code"]
+        )
+
+    def test_selection_immediately_updates_redraw_source_without_confirmation(self) -> None:
+        with TestClient(self.app) as client:
+            saved = client.put(
+                f"/api/v1/projects/{self.project_id}/figures/review/P001",
+                json={
+                    "revision": 0,
+                    "candidate_index": 0,
+                    "review_note": "live source",
+                },
+                headers=self.headers("live-source-selection"),
+            )
+            figures = client.get(
+                f"/api/v1/projects/{self.project_id}/figures"
+            )
+        self.assertEqual(200, saved.status_code, saved.text)
+        self.assertEqual(200, figures.status_code, figures.text)
+        self.assertEqual(1, saved.json()["selected_count"])
+        self.assertTrue(saved.json()["selection_complete"])
+        self.assertEqual(
+            ["P001-F01"],
+            [row["figure_id"] for row in figures.json()["figure_candidates"]],
+        )
+        self.assertEqual(
+            "live source",
+            figures.json()["figure_candidates"][0]["source_review_note"],
         )
 
     def test_selection_versions_review_and_confirmation_builds_exact_inputs(self) -> None:
@@ -101,6 +162,38 @@ class FiguresV1Tests(NativeFigureApiTestCase):
             ].startswith("/api/v1/artifacts/")
         )
 
+    def test_two_different_individual_figures_can_redraw_concurrently(self) -> None:
+        self.block_redraw = True
+        with TestClient(self.app) as client:
+            self.confirm_review(client)
+            self.add_second_confirmed_figure()
+            first = client.post(
+                f"/api/v1/projects/{self.project_id}/figures/P001-F01/jobs",
+                json={},
+                headers=self.headers("parallel-redraw-one"),
+            )
+            second = client.post(
+                f"/api/v1/projects/{self.project_id}/figures/P001-F02/jobs",
+                json={},
+                headers=self.headers("parallel-redraw-two"),
+            )
+            self.assertEqual(202, first.status_code, first.text)
+            self.assertEqual(202, second.status_code, second.text)
+            self.assertTrue(self.redraw_both_started.wait(2))
+
+            duplicate = client.post(
+                f"/api/v1/projects/{self.project_id}/figures/P001-F01/jobs",
+                json={},
+                headers=self.headers("parallel-redraw-one-again"),
+            )
+            self.assertEqual(409, duplicate.status_code, duplicate.text)
+            self.redraw_release.set()
+            first_done = self.wait_job(client, first.json()["id"])
+            second_done = self.wait_job(client, second.json()["id"])
+
+        self.assertEqual("succeeded", first_done["status"])
+        self.assertEqual("succeeded", second_done["status"])
+
     def test_finished_redraw_remains_visible_in_batch_and_per_figure_status(self) -> None:
         with TestClient(self.app) as client:
             self.confirm_review(client)
@@ -155,7 +248,7 @@ class FiguresV1Tests(NativeFigureApiTestCase):
         self.assertFalse(row["usable"])
         self.assertEqual(0, payload["freshness"]["usable_count"])
 
-    def test_ai_canvas_mismatch_cannot_be_approved_as_current(self) -> None:
+    def test_ai_canvas_mismatch_can_be_manually_approved(self) -> None:
         self.output_size = (10, 10)
         with TestClient(self.app) as client:
             self.confirm_review(client)
@@ -168,8 +261,13 @@ class FiguresV1Tests(NativeFigureApiTestCase):
                 f"/api/v1/projects/{self.project_id}/figures/{figure_id}/approve",
                 headers=self.headers(),
             )
-        self.assertEqual(409, approved.status_code, approved.text)
-        self.assertEqual("FIGURE_CANVAS_MISMATCH", approved.json()["error"]["code"])
+            current = client.get(
+                f"/api/v1/projects/{self.project_id}/figures"
+            ).json()
+        self.assertEqual(200, approved.status_code, approved.text)
+        row = current["redrawn_manifest"]["figures"][0]
+        self.assertTrue(row["usable"])
+        self.assertTrue(row["human_approval"]["manual_canvas_override"])
 
     def test_provider_adult_content_block_has_stable_job_error(self) -> None:
         self.redraw_error = "Image request rejected: adult content safety policy"
@@ -304,7 +402,7 @@ class FiguresV1Tests(NativeFigureApiTestCase):
         self.assertEqual("succeeded", retried["status"])
         self.assertEqual(job["id"], retried["retry_of_job_id"])
 
-    def test_approve_all_skips_canvas_mismatch_instead_of_failing_batch(self) -> None:
+    def test_approve_all_human_approves_generated_canvas_warnings(self) -> None:
         self.output_size = (10, 10)
         with TestClient(self.app) as client:
             self.confirm_review(client)
@@ -313,9 +411,15 @@ class FiguresV1Tests(NativeFigureApiTestCase):
                 f"/api/v1/projects/{self.project_id}/figures/approve-successful",
                 headers=self.headers("bulk-mismatch-approve"),
             )
+            current = client.get(
+                f"/api/v1/projects/{self.project_id}/figures"
+            ).json()
         self.assertEqual(200, approved.status_code, approved.text)
-        self.assertEqual(0, approved.json()["approved_count"])
-        self.assertEqual(1, approved.json()["skipped_count"])
+        self.assertEqual(1, approved.json()["approved_count"])
+        self.assertEqual(0, approved.json()["skipped_count"])
+        row = current["redrawn_manifest"]["figures"][0]
+        self.assertTrue(row["usable"])
+        self.assertTrue(row["human_approval"]["manual_canvas_override"])
 
     def test_approve_all_does_not_duplicate_current_human_approval(self) -> None:
         self.integrity_status = "failed"

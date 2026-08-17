@@ -31,6 +31,17 @@ class LibraryStageNavigationTests(unittest.TestCase):
         self.assertIn("terms.every(term => documentText.includes(term))", library)
         self.assertIn('class="search-empty" role="status"', library)
 
+    def test_lan_pages_do_not_require_crypto_random_uuid(self) -> None:
+        dashboard = Path(__file__).parents[1] / "assets" / "dashboard"
+        script = (dashboard / "review-ui.js").read_text(encoding="utf-8")
+        pages = "\n".join(
+            path.read_text(encoding="utf-8") for path in dashboard.glob("*.html")
+        )
+
+        self.assertIn("function requestId", script)
+        self.assertIn("window.reviewRequestId = requestId", script)
+        self.assertNotIn("crypto.randomUUID()", pages)
+
 
 if __name__ == "__main__":
     unittest.main()

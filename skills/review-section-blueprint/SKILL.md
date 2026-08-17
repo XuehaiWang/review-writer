@@ -56,6 +56,8 @@ target_paragraphs
 target_words
 dominant_logic
 major_papers
+primary_papers
+supporting_papers
 review_claims
 figure_or_table_needs
 depth_requirements
@@ -69,10 +71,17 @@ avoid_patterns
 
 ```text
 No section may be only a title.
-Every section must have major_papers.
+Each paper may have at most one primary body-section owner.
+`major_papers` and `primary_papers` are the same primary-owner set.
+Introduction and conclusion keep `major_papers` empty and use a bounded
+`supporting_papers` set for concise framing or cross-section synthesis.
+Repeated assignments in later body sections become `supporting_papers` and
+must not trigger a second full paper description.
 Every section must have review_claims.
 Every section must have figure_or_table_needs, or explicitly state no figure/table is useful.
 The blueprint is a plan, not prose. Keep it compact and enforceable.
+The assignment policy is domain-independent. Do not hard-code topic names,
+paper IDs, catalyst classes, diseases, materials, or other subject entities.
 ```
 
 Stop after blueprint for human check if interactive.

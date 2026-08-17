@@ -125,6 +125,27 @@ class ScientificRunnerTests(unittest.TestCase):
             child_environment["REVIEW_WRITER_TRUSTED_PROXY_NETWORKS"],
         )
 
+    def test_runner_can_import_application_modules_outside_repository_cwd(self) -> None:
+        _output, _cancelled, _failed, runner = runner_api()
+        isolated_runner = runner(max_attempts=1, retry_delay_seconds=0)
+        result = isolated_runner.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    "import review_writer_api.scientific_tasks; "
+                    "Path('module-imported.txt').write_text('ok', encoding='utf-8')"
+                ),
+            ],
+            cwd=self.root,
+            staging_directory=self.root,
+            expected_outputs=("module-imported.txt",),
+        )
+
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("ok", (self.root / "module-imported.txt").read_text())
+
     def test_secret_is_child_scoped_and_redacted_from_retained_diagnostics(self) -> None:
         secret = "sk-runner-secret"
         os.environ.pop("TASK_ONLY_SECRET", None)
@@ -146,6 +167,31 @@ class ScientificRunnerTests(unittest.TestCase):
         self.assertIn("[REDACTED]", result.stderr)
         self.assertNotIn(secret, " ".join(result.command))
         self.assertEqual(1, result.attempts)
+
+    def test_non_transient_failure_exposes_a_redacted_actionable_last_line(self) -> None:
+        secret = "sk-diagnostic-secret"
+        script = (
+            "import os,sys; "
+            "sys.stderr.write('Traceback (most recent call last):\\n'); "
+            "sys.stderr.write('RuntimeError: Candidate integrity failed for '+"
+            "os.environ['TASK_ONLY_SECRET']+'\\n'); "
+            "sys.exit(1)"
+        )
+        with self.assertRaises(self.RunFailed) as failed:
+            self.runner.run(
+                [sys.executable, "-c", script],
+                cwd=self.root,
+                staging_directory=self.root,
+                expected_outputs=("never-created.txt",),
+                secret_env={"TASK_ONLY_SECRET": secret},
+            )
+
+        self.assertEqual(1, failed.exception.attempts)
+        self.assertIn(
+            "Scientific task failed: Candidate integrity failed for [REDACTED]",
+            str(failed.exception),
+        )
+        self.assertNotIn(secret, str(failed.exception))
 
     def test_transient_503_retries_twice_then_succeeds(self) -> None:
         script = (
@@ -217,6 +263,77 @@ class ScientificRunnerTests(unittest.TestCase):
             {"ok": True},
             json.loads((self.root / "provider-output.json").read_text()),
         )
+
+    def test_cloudflare_524_is_retried_by_the_production_adapter(self) -> None:
+        class Provider(http.server.BaseHTTPRequestHandler):
+            attempts = 0
+
+            def do_POST(self):
+                type(self).attempts += 1
+                if type(self).attempts < 3:
+                    self.send_response(524)
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"origin response timeout"}')
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+
+            def log_message(self, _format, *_args):
+                return
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        script = self.root / "provider_524_script.py"
+        script.write_text(
+            "import pathlib,sys,urllib.request\n"
+            "request=urllib.request.Request(sys.argv[1], data=b'{}', method='POST')\n"
+            "with urllib.request.urlopen(request, timeout=2) as response:\n"
+            "    response.read()\n"
+            "pathlib.Path('provider-524-output.json').write_text('{\"ok\":true}')\n",
+            encoding="utf-8",
+        )
+        try:
+            result = self.runner.run(
+                [
+                    sys.executable,
+                    str(script),
+                    f"http://127.0.0.1:{server.server_port}/v1/responses",
+                ],
+                cwd=self.root,
+                staging_directory=self.root,
+                expected_outputs=("provider-524-output.json",),
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
+        self.assertEqual(3, result.attempts)
+        self.assertEqual(3, Provider.attempts)
+
+    def test_exhausted_524_reports_an_actionable_timeout(self) -> None:
+        script = (
+            "import json,sys; "
+            "sys.stderr.write('REVIEW_WRITER_ERROR:'+json.dumps({"
+            "'category':'transient_service_unavailable',"
+            "'provider_call_completed':False,'http_status':524})+'\\n'); "
+            "sys.exit(1)"
+        )
+        with self.assertRaises(self.RunFailed) as failed:
+            self.runner.run(
+                [sys.executable, "-c", script],
+                cwd=self.root,
+                staging_directory=self.root,
+                expected_outputs=("provider-timeout-output.json",),
+            )
+
+        self.assertEqual(3, failed.exception.attempts)
+        self.assertTrue(failed.exception.retryable)
+        self.assertEqual(524, failed.exception.details["http_status"])
+        self.assertIn("timed out (HTTP 524) after 3 attempts", str(failed.exception))
 
     def test_real_inventory_script_runs_through_the_scientific_adapter(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
@@ -413,6 +530,28 @@ class ScientificRunnerTests(unittest.TestCase):
         self.assertEqual(3, failed.exception.attempts)
         self.assertTrue(failed.exception.retryable)
         self.assertEqual("3", (self.root / "timeouts.txt").read_text())
+        self.assertIn("execution time limit after 3 task attempts", str(failed.exception))
+        self.assertEqual(0.3, failed.exception.details["timeout_seconds"])
+
+    def test_task_limit_after_a_completed_provider_call_is_not_mislabeled(self) -> None:
+        script = (
+            "import os,pathlib,time; "
+            "pathlib.Path(os.environ['REVIEW_WRITER_PROVIDER_CALL_COMPLETED_FILE']).write_text('done'); "
+            "time.sleep(30)"
+        )
+        with self.assertRaises(self.RunFailed) as failed:
+            self.runner.run(
+                [sys.executable, "-c", script],
+                cwd=self.root,
+                staging_directory=self.root,
+                expected_outputs=("never.txt",),
+                timeout_seconds=0.3,
+            )
+
+        self.assertEqual(1, failed.exception.attempts)
+        self.assertFalse(failed.exception.retryable)
+        self.assertIn("execution time limit after 1 task attempt", str(failed.exception))
+        self.assertNotIn("provider timed out", str(failed.exception).casefold())
 
 
 if __name__ == "__main__":

@@ -110,6 +110,11 @@ selected_outline.md
 The dashboard may create this artifact from a built-in structure, a reference
 review, or a custom outline. A newly selected custom outline starts completely
 blank and is not ready for Blueprint until the reviewer writes and saves it.
+Reference-review uploads must run through `review-reference-outline-template`:
+learn only hierarchy, section-role sequence, pacing, and writing conventions,
+then generate all heading wording and scientific meaning from the current topic
+and Matrix. Legacy direct-heading-extraction candidates are unsafe and must not
+be offered for selection.
 The dashboard's default editor is a visual section-card builder. Reviewers can
 edit section titles and purposes, assign papers with checkboxes, request a
 metadata-based paper recommendation, and reorder sections without knowing the

@@ -12,14 +12,44 @@ from pathlib import Path
 from typing import Any
 
 from review_writer_api.credentials import ProviderSettingsService
-from review_writer_api.scientific_runner import ScientificRunner
+from review_writer_api.errors import LiteratureSearchFailed, WorkflowValidationError
+from review_writer_api.scientific_runner import ScientificRunFailed, ScientificRunner
 from review_writer_api.security import Principal, Role
 from review_writer_api.workspaces import HostedWorkspaceManager
+from review_writer_core.providers import DEFAULT_IMAGE_MODEL
 
 
 SENSITIVE_KEY = re.compile(r"(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)", re.I)
 ARTIFACT_URL = re.compile(r"/api/v1/artifacts/([0-9a-fA-F-]{36})/content")
 SAFE_PROJECT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}")
+EVALUATE_DRAFT_TIMEOUT_SECONDS = 30 * 60
+OPTIMIZE_DRAFT_MIN_TIMEOUT_SECONDS = 2 * 60 * 60
+OPTIMIZE_DRAFT_TIMEOUT_PER_ITERATION_SECONDS = 45 * 60
+OPTIMIZE_DRAFT_MAX_TIMEOUT_SECONDS = 6 * 60 * 60
+
+
+def _literature_search_failure_message(error: ScientificRunFailed) -> str:
+    diagnostic = str((error.details or {}).get("stderr") or "")
+    lowered = diagnostic.casefold()
+    if "private destination is blocked" in lowered:
+        return (
+            "Crossref resolved through a private or transparent-proxy address that is not "
+            "trusted by this deployment. Configure REVIEW_WRITER_TRUSTED_PROXY_NETWORKS "
+            "and retry."
+        )
+    if any(marker in lowered for marker in ("[winerror 10060]", "timed out", "timeouterror")):
+        return "Crossref did not respond before timeout. Check this server's outbound network or proxy, then retry."
+    if any(marker in lowered for marker in ("getaddrinfo failed", "name or service not known", "temporary failure in name resolution", "nodename nor servname")):
+        return "Crossref could not be resolved by DNS. Check this server's DNS and outbound network, then retry."
+    if "certificate_verify_failed" in lowered or "certificate verify failed" in lowered:
+        return "Crossref TLS certificate verification failed. Check this server's certificate trust store or HTTPS proxy."
+    if "http error 429" in lowered:
+        return "Crossref rate-limited the literature search. Wait briefly and retry; providing a contact email may improve reliability."
+    if "http error 403" in lowered:
+        return "Crossref rejected the literature search request. Check the server network or proxy policy, then retry."
+    if re.search(r"http error 5\d\d", lowered):
+        return "Crossref is temporarily unavailable. Retry the literature search shortly."
+    return "Crossref literature search failed before results were returned. Check outbound access to https://api.crossref.org and retry."
 
 
 class NativeWorkflowHandlers:
@@ -42,7 +72,9 @@ class NativeWorkflowHandlers:
             "sections.generate": self.sections_generate,
             "figures.redraw": self.figures_redraw,
             "draft.evaluate": self.draft_evaluate,
+            "draft.optimize": self.draft_optimize,
             "draft.rewrite": self.draft_rewrite,
+            "draft.accept-rewrite": self.draft_accept_rewrite,
             "final.conclusion": self.final_conclusion,
             "final.overview": self.final_overview,
             "final.export": self.final_export,
@@ -176,6 +208,9 @@ class NativeWorkflowHandlers:
         (first / "first_draft.md").write_text(
             draft_text.rstrip() + "\n", encoding="utf-8"
         )
+        rewrite_overlays = payload.get("rewrite_overlays")
+        if isinstance(rewrite_overlays, dict) and rewrite_overlays:
+            self._write_json(first / "feedback_loop_rewrites.json", rewrite_overlays)
         citations = []
         for index, row in enumerate(matrix.get("rows") or matrix.get("papers") or [], 1):
             if not isinstance(row, dict) or not row.get("paper_id"):
@@ -212,7 +247,6 @@ class NativeWorkflowHandlers:
 
     def library_search(self, context, payload):
         staging = self._staging(context.user_id, context.job_id)
-        normal, secrets = self._environment(context.user_id)
         command = [
             sys.executable,
             "-m",
@@ -232,15 +266,24 @@ class NativeWorkflowHandlers:
                 command.extend([flag, str(int(payload[key]))])
         if payload.get("email"):
             command.extend(["--mailto", str(payload["email"])])
-        self.runner.run(
-            command,
-            cwd=self.root,
-            staging_directory=staging,
-            expected_outputs=("search-result.json",),
-            env=normal,
-            secret_env=secrets,
-            cancel_requested=context.cancellation_requested,
-        )
+        try:
+            self.runner.run(
+                command,
+                cwd=self.root,
+                staging_directory=staging,
+                expected_outputs=("search-result.json",),
+                env={},
+                secret_env={},
+                cancel_requested=context.cancellation_requested,
+            )
+        except ScientificRunFailed as exc:
+            raise LiteratureSearchFailed(
+                _literature_search_failure_message(exc),
+                details={
+                    "attempts": exc.attempts,
+                    "category": str((exc.details or {}).get("category") or "unknown"),
+                },
+            ) from exc
         return self._result(staging, "search-result.json")
 
     def library_download(self, context, payload):
@@ -252,7 +295,6 @@ class NativeWorkflowHandlers:
         (staging / "candidates.json").write_text(
             json.dumps(payload["candidates"], ensure_ascii=False), encoding="utf-8"
         )
-        normal, secrets = self._environment(context.user_id)
         command = [
             sys.executable,
             "-m",
@@ -272,8 +314,11 @@ class NativeWorkflowHandlers:
             cwd=self.root,
             staging_directory=staging,
             expected_outputs=("download-result.json",),
-            env=normal,
-            secret_env=secrets,
+            # OA resolution uses Crossref/Europe PMC/Semantic Scholar and the
+            # optional email supplied in the request. It must not depend on
+            # unrelated text, image, or MinerU provider settings.
+            env={},
+            secret_env={},
             cancel_requested=context.cancellation_requested,
             timeout_seconds=35 * 60,
         )
@@ -282,6 +327,9 @@ class NativeWorkflowHandlers:
     def discovery_search(self, context, payload):
         staging = self._staging(context.user_id, context.job_id)
         normal, secrets = self._environment(context.user_id)
+        report_progress = getattr(context, "report_progress", None)
+        if callable(report_progress):
+            report_progress(1, 4)
         command = [
             sys.executable,
             str(
@@ -299,11 +347,14 @@ class NativeWorkflowHandlers:
             str(payload["topic"]),
             "--keywords",
             str(payload.get("keywords") or ""),
+            "--auto-query-plan",
             "--output-project-dir",
             str(staging),
         ]
         if payload.get("web_search"):
             command.append("--web-search")
+        if callable(report_progress):
+            report_progress(2, 4)
         self.runner.run(
             command,
             cwd=self.root,
@@ -312,7 +363,14 @@ class NativeWorkflowHandlers:
             env=normal,
             secret_env=secrets,
             cancel_requested=context.cancellation_requested,
+            progress_callback=(
+                (lambda: report_progress(2, 4))
+                if callable(report_progress)
+                else None
+            ),
         )
+        if callable(report_progress):
+            report_progress(3, 4)
         return self._result(staging, "00_discovery/combined_results_by_keyword.json")
 
     def sections_generate(self, context, payload):
@@ -502,6 +560,10 @@ class NativeWorkflowHandlers:
             encoding="utf-8",
         )
         normal, secrets = self._environment(context.user_id)
+        requested_figure_type = str(payload.get("figure_type") or "auto")
+        image_model = str(
+            normal.get("IMAGE_OPENAI_MODEL") or DEFAULT_IMAGE_MODEL
+        ).strip() or DEFAULT_IMAGE_MODEL
         relative_manifest = (
             Path("figure-workspace")
             / "review-projects"
@@ -509,8 +571,7 @@ class NativeWorkflowHandlers:
             / "03_figure_redraw"
             / "redrawn_figure_manifest.json"
         )
-        self.runner.run(
-            [
+        command = [
                 sys.executable,
                 str(
                     self.root
@@ -525,17 +586,25 @@ class NativeWorkflowHandlers:
                 project_id,
                 "--figure-id",
                 figure_id,
+                "--model",
+                image_model,
                 "--figure-type",
-                str(payload.get("figure_type") or "auto"),
+                requested_figure_type,
+                "--render-mode",
+                "ai-edit",
                 "--require-redrawn",
-            ],
+            ]
+        if requested_figure_type.strip().casefold() != "auto":
+            command.append("--force-standard-ai-edit")
+        self.runner.run(
+            command,
             cwd=self.root,
             staging_directory=staging,
             expected_outputs=(relative_manifest.as_posix(),),
             env=normal,
             secret_env=secrets,
             cancel_requested=context.cancellation_requested,
-            timeout_seconds=15 * 60,
+            timeout_seconds=20 * 60,
         )
         manifest = json.loads(
             (staging / relative_manifest).read_text(encoding="utf-8")
@@ -561,7 +630,61 @@ class NativeWorkflowHandlers:
             raise RuntimeError("The figure redraw output path is missing.")
         return {**row, "output_path": output}
 
-    def draft_evaluate(self, context, payload):
+    @staticmethod
+    def _restore_artifact_urls(markdown: str, paths: dict[str, Any]) -> str:
+        restored = str(markdown or "")
+        for artifact_id, raw_path in (paths or {}).items():
+            path = str(raw_path or "")
+            if path:
+                restored = restored.replace(
+                    path, f"/api/v1/artifacts/{artifact_id}/content"
+                )
+        return restored
+
+    @staticmethod
+    def _feedback_progress_callback(context, status_file: Path, *, optimize: bool):
+        previous = ""
+
+        def callback() -> None:
+            nonlocal previous
+            try:
+                if not status_file.is_file():
+                    return
+                status = json.loads(status_file.read_text(encoding="utf-8"))
+                if not isinstance(status, dict):
+                    return
+                fingerprint = json.dumps(status, ensure_ascii=False, sort_keys=True)
+                if fingerprint == previous:
+                    return
+                previous = fingerprint
+                if hasattr(context, "report_partial_result"):
+                    context.report_partial_result({"feedback_status": status})
+                if hasattr(context, "report_progress"):
+                    phase = str(status.get("phase") or "")
+                    if optimize:
+                        current = {
+                            "preflight": 1,
+                            "source_checking": 2,
+                            "scoring": 2,
+                            "evaluated": 3,
+                            "rewriting": 3,
+                            "plateau": 4,
+                            "rewrite_blocked": 4,
+                            "iteration_limit": 4,
+                            "released": 4,
+                        }.get(phase, 1)
+                        context.report_progress(current, 5)
+                    else:
+                        current = 2 if phase in {"scoring", "evaluated", "released"} else 1
+                        context.report_progress(current, 3)
+            except Exception:
+                # Progress reporting is observational and must never invalidate
+                # a scientifically valid result that is ready to publish.
+                return
+
+        return callback
+
+    def _draft_feedback(self, context, payload, *, evaluate_only: bool):
         staging, workspace, project = self._compatibility_workspace(
             context, payload, name="draft-workspace"
         )
@@ -573,8 +696,7 @@ class NativeWorkflowHandlers:
             / "04_first_draft"
         )
         normal, secrets = self._environment(context.user_id)
-        self.runner.run(
-            [
+        command = [
                 sys.executable,
                 str(
                     self.root
@@ -589,8 +711,32 @@ class NativeWorkflowHandlers:
                 project_id,
                 "--goal",
                 str(float(payload.get("goal") or 90)),
-                "--evaluate-only",
-            ],
+                "--paragraph-goal",
+                str(float(payload.get("paragraph_goal") or 85)),
+                "--max-iterations",
+                str(int(payload.get("max_iterations") or 3)),
+                "--min-case-words",
+                str(int(payload.get("min_case_words") or 140)),
+                "--max-case-words",
+                str(int(payload.get("max_case_words") or 280)),
+            ]
+        if evaluate_only:
+            command.append("--evaluate-only")
+        first = project / "04_first_draft"
+        max_iterations = int(payload.get("max_iterations") or 3)
+        timeout_seconds = (
+            EVALUATE_DRAFT_TIMEOUT_SECONDS
+            if evaluate_only
+            else min(
+                OPTIMIZE_DRAFT_MAX_TIMEOUT_SECONDS,
+                max(
+                    OPTIMIZE_DRAFT_MIN_TIMEOUT_SECONDS,
+                    max_iterations * OPTIMIZE_DRAFT_TIMEOUT_PER_ITERATION_SECONDS,
+                ),
+            )
+        )
+        self.runner.run(
+            command,
             cwd=self.root,
             staging_directory=staging,
             expected_outputs=(
@@ -603,9 +749,13 @@ class NativeWorkflowHandlers:
             env=normal,
             secret_env=secrets,
             cancel_requested=context.cancellation_requested,
-            timeout_seconds=15 * 60,
+            progress_callback=self._feedback_progress_callback(
+                context,
+                first / "feedback_loop_status.json",
+                optimize=not evaluate_only,
+            ),
+            timeout_seconds=timeout_seconds,
         )
-        first = project / "04_first_draft"
         evaluation = json.loads(
             (first / "rubric_evaluation.json").read_text(encoding="utf-8")
         )
@@ -621,13 +771,27 @@ class NativeWorkflowHandlers:
         source_check = json.loads(
             (first / "original_source_check.json").read_text(encoding="utf-8")
         )
+        paragraph_scores = {
+            str(item.get("paragraph_id") or ""): item
+            for item in evaluation.get("paragraph_scores") or []
+            if isinstance(item, dict)
+        }
         issues = []
         for index, finding in enumerate(findings if isinstance(findings, list) else [], 1):
             if not isinstance(finding, dict):
                 continue
+            paragraph_id = str(finding.get("paragraph_id") or "")
+            paragraph_score = paragraph_scores.get(paragraph_id, {})
             issues.append(
                 {
                     **finding,
+                    "score": paragraph_score.get("score"),
+                    "route": str(
+                        paragraph_score.get("route") or finding.get("route") or ""
+                    ),
+                    "failed_dimensions": list(
+                        paragraph_score.get("failed_dimensions") or []
+                    ),
                     "issue_id": str(finding.get("id") or f"PAR-{index:03d}"),
                     "message": str(
                         finding.get("diagnosis")
@@ -636,7 +800,25 @@ class NativeWorkflowHandlers:
                     ),
                 }
             )
-        return {
+        status_file = first / "feedback_loop_status.json"
+        feedback_status = (
+            json.loads(status_file.read_text(encoding="utf-8"))
+            if status_file.is_file()
+            else {}
+        )
+        overlay_file = first / "feedback_loop_rewrites.json"
+        rewrite_overlays = (
+            json.loads(overlay_file.read_text(encoding="utf-8"))
+            if overlay_file.is_file()
+            else dict(payload.get("rewrite_overlays") or {})
+        )
+        batch_review_file = first / "batch_review_candidates.json"
+        batch_review = (
+            json.loads(batch_review_file.read_text(encoding="utf-8"))
+            if batch_review_file.is_file()
+            else {}
+        )
+        result = {
             **evaluation,
             "score": float(evaluation.get("total_score") or 0),
             "goal": float(
@@ -651,9 +833,83 @@ class NativeWorkflowHandlers:
             "preflight": preflight,
             "source_check": source_check,
             "gate": gate,
+            "feedback_status": feedback_status,
         }
+        if not evaluate_only:
+            result["draft_text"] = self._restore_artifact_urls(
+                (first / "first_draft.md").read_text(encoding="utf-8"),
+                dict(payload.get("figure_artifact_paths") or {}),
+            )
+            result["rewrite_overlays"] = rewrite_overlays
+            if isinstance(batch_review, dict):
+                result["review_candidate_draft_text"] = self._restore_artifact_urls(
+                    str(batch_review.get("candidate_draft_text") or ""),
+                    dict(payload.get("figure_artifact_paths") or {}),
+                )
+                result["review_candidate_score"] = batch_review.get(
+                    "candidate_score"
+                )
+                result["review_changes"] = list(
+                    batch_review.get("changes") or []
+                )
+                result["review_excluded"] = list(
+                    batch_review.get("excluded") or []
+                )
+        return result
+
+    def draft_evaluate(self, context, payload):
+        return self._draft_feedback(context, payload, evaluate_only=True)
+
+    def draft_optimize(self, context, payload):
+        return self._draft_feedback(context, payload, evaluate_only=False)
+
+    @staticmethod
+    def _retain_manual_confirmation_route(
+        candidate_evaluation: dict[str, Any],
+        generation_entry: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Prevent a style-only rewrite from clearing an evidence conflict."""
+
+        if not bool(generation_entry.get("requires_manual_confirmation")):
+            return candidate_evaluation
+        result = dict(candidate_evaluation)
+        paragraph_score = dict(result.get("paragraph_score") or {})
+        paragraph_score["score"] = min(
+            float(paragraph_score.get("score") or 0),
+            79.0,
+        )
+        paragraph_score["severity"] = "major"
+        paragraph_score["route"] = "human_confirmation"
+        failed = [
+            str(value)
+            for value in paragraph_score.get("failed_dimensions") or []
+            if str(value).strip()
+        ]
+        if "manual_source_confirmation" not in failed:
+            failed.append("manual_source_confirmation")
+        paragraph_score["failed_dimensions"] = failed
+        paragraph_score["diagnosis"] = str(
+            generation_entry.get("diagnosis")
+            or paragraph_score.get("diagnosis")
+            or "Manual source or figure-identity confirmation remains required."
+        )
+        result.update(
+            {
+                "paragraph_score": paragraph_score,
+                "requires_manual_confirmation": True,
+                "manual_confirmation_reason": paragraph_score["diagnosis"],
+            }
+        )
+        return result
 
     def draft_rewrite(self, context, payload):
+        """Generate one paragraph candidate, then score only that candidate."""
+
+        if not str(payload.get("draft_text") or "").strip():
+            raise WorkflowValidationError(
+                "The rewrite task did not receive the current Draft content. "
+                "Refresh the Draft and generate the rewrite candidate again."
+            )
         staging, workspace, project = self._compatibility_workspace(
             context, payload, name="draft-workspace"
         )
@@ -661,28 +917,106 @@ class NativeWorkflowHandlers:
         paragraph_id = str(payload["paragraph_id"])
         first = project / "04_first_draft"
         quality = dict(payload.get("quality") or {})
+        goal = float(payload.get("goal") or quality.get("goal") or 90)
+        paragraph_goal = float(
+            payload.get("paragraph_goal")
+            or quality.get("paragraph_pass_threshold")
+            or quality.get("paragraph_goal")
+            or 85
+        )
+        min_case_words = int(payload.get("min_case_words") or 140)
+        max_case_words = int(payload.get("max_case_words") or 280)
+        raw_issues = payload.get("issues")
+        if not isinstance(raw_issues, list):
+            raw_issues = quality.get("issues") or []
         issues = [
             item
-            for item in (quality.get("issues") or payload.get("issues") or [])
+            for item in raw_issues
             if isinstance(item, dict)
+            and str(item.get("paragraph_id") or "") == paragraph_id
         ]
-        failures = quality.get("paragraph_failures")
-        if not isinstance(failures, list):
-            failures = [
-                {
-                    **item,
-                    "diagnosis": str(item.get("diagnosis") or item.get("message") or ""),
-                    "score": float(item.get("score") or 0),
-                    "route": str(item.get("route") or "section_rewrite"),
-                }
-                for item in issues
-            ]
-        evaluation = {**quality, "paragraph_failures": failures}
+        normal, secrets = self._environment(context.user_id)
+        paragraph_evaluation_output = (
+            Path("draft-workspace")
+            / "review-projects"
+            / project_id
+            / "04_first_draft"
+            / "paragraph_candidate_evaluation.json"
+        )
+        report_progress = getattr(context, "report_progress", None)
+        finding = next(
+            (
+                dict(item)
+                for item in quality.get("paragraph_scores") or []
+                if isinstance(item, dict)
+                and str(item.get("paragraph_id") or "") == paragraph_id
+            ),
+            {},
+        )
+        prior_issue = dict(issues[0]) if issues else {}
+        if not finding:
+            finding = dict(prior_issue)
+        if not finding:
+            raise RuntimeError(
+                "The selected paragraph has no stored score or issue context. "
+                "Evaluate the current Draft before generating a candidate."
+            )
+        finding = {
+            **prior_issue,
+            **finding,
+            "paragraph_id": paragraph_id,
+            "severity": str(
+                finding.get("severity")
+                or prior_issue.get("severity")
+                or "minor"
+            ),
+            "route": str(
+                finding.get("route")
+                or prior_issue.get("route")
+                or "section_rewrite"
+            ),
+            "diagnosis": str(
+                finding.get("diagnosis")
+                or prior_issue.get("diagnosis")
+                or prior_issue.get("message")
+                or "Polish this paragraph while preserving all protected facts and citations."
+            ),
+            "failed_dimensions": list(
+                finding.get("failed_dimensions")
+                or prior_issue.get("failed_dimensions")
+                or []
+            ),
+        }
+        source_paragraph_evaluation = {
+            "evaluation_scope": "single_paragraph",
+            "evaluation_mode": "stored_source_score",
+            "paragraph_id": paragraph_id,
+            "paragraph_score": finding,
+        }
+
+        evaluation = {
+            **quality,
+            "goal": goal,
+            "paragraph_pass_threshold": paragraph_goal,
+            "paragraph_scores": [finding],
+            "paragraph_failures": [finding],
+            "blocking_paragraph_failures": [finding],
+        }
         self._write_json(first / "rubric_evaluation.json", evaluation)
         source_check = quality.get("source_check")
+        source_check = source_check if isinstance(source_check, dict) else {}
+        source_entry = next(
+            (
+                item
+                for item in source_check.get("entries") or []
+                if isinstance(item, dict)
+                and str(item.get("paragraph_id") or "") == paragraph_id
+            ),
+            None,
+        )
         self._write_json(
             first / "original_source_check.json",
-            source_check if isinstance(source_check, dict) else {"entries": []},
+            {"entries": [source_entry]} if isinstance(source_entry, dict) and source_entry else {"entries": []},
         )
         preflight = quality.get("preflight")
         self._write_json(
@@ -696,13 +1030,14 @@ class NativeWorkflowHandlers:
             {
                 "status": "completed",
                 "phase": "evaluated",
-                "goal": float(quality.get("goal") or 90),
-                "paragraph_goal": 85,
+                "goal": goal,
+                "paragraph_goal": paragraph_goal,
+                "min_case_words": min_case_words,
+                "max_case_words": max_case_words,
                 "source_draft_sha256": digest,
                 "output_draft_sha256": digest,
             },
         )
-        normal, secrets = self._environment(context.user_id)
         relative_output = (
             Path("draft-workspace")
             / "review-projects"
@@ -726,6 +1061,10 @@ class NativeWorkflowHandlers:
                 project_id,
                 "--paragraph-id",
                 paragraph_id,
+                "--min-case-words",
+                str(min_case_words),
+                "--max-case-words",
+                str(max_case_words),
             ],
             cwd=self.root,
             staging_directory=staging,
@@ -741,15 +1080,179 @@ class NativeWorkflowHandlers:
         entry = (candidates.get("entries") or {}).get(paragraph_id)
         if not isinstance(entry, dict) or not str(entry.get("candidate_text") or "").strip():
             raise RuntimeError("The paragraph rewrite produced no candidate.")
+        candidate_text = str(entry["candidate_text"]).strip()
+        if callable(report_progress):
+            report_progress(2, 4)
+
+        original_draft = draft_path.read_text(encoding="utf-8")
+        requested_paragraph = str(payload["paragraph_text"]).strip()
+        # The proposal script is the final reader of the materialized Markdown.
+        # Use the exact source span it rewrote for both replacement and the
+        # second integrity check.  Mixing this value with an API/UI paragraph
+        # projection previously compared a figure-bearing candidate against a
+        # prose-only source, causing false image/metadata/number failures and
+        # even duplicating the adjacent figure in the temporary scoring draft.
+        original_paragraph = str(
+            entry.get("original_text") or requested_paragraph
+        ).strip()
+        normalize = lambda value: " ".join(str(value or "").split())
+        if normalize(original_paragraph) != normalize(requested_paragraph):
+            raise RuntimeError(
+                "The paragraph rewrite source boundary did not match the selected "
+                "paragraph; the candidate was discarded before scoring."
+            )
+        if original_paragraph not in original_draft:
+            raise RuntimeError(
+                "The selected paragraph changed before candidate scoring."
+            )
+        candidate_draft = original_draft.replace(
+            original_paragraph, candidate_text, 1
+        )
+        draft_path.write_text(candidate_draft, encoding="utf-8")
+        self._write_json(
+            first / "paragraph_candidate_evaluation_request.json",
+            {
+                "evaluation_mode": "accepted_candidate",
+                "paragraph_id": paragraph_id,
+                "original_text": original_paragraph,
+                "candidate_text": candidate_text,
+                "allowed_unsupported_claims": list(
+                    finding.get("unsupported_claims") or []
+                ),
+                "word_range_applicable": bool(
+                    payload.get("word_range_applicable", True)
+                ),
+            },
+        )
+        self.runner.run(
+            [
+                sys.executable,
+                str(
+                    self.root
+                    / "skills"
+                    / "review-first-draft-feedback-loop"
+                    / "scripts"
+                    / "evaluate_paragraph_candidate.py"
+                ),
+                "--review-root",
+                str(workspace),
+                "--project-id",
+                project_id,
+                "--paragraph-id",
+                paragraph_id,
+                "--goal",
+                str(goal),
+                "--paragraph-goal",
+                str(paragraph_goal),
+                "--min-case-words",
+                str(min_case_words),
+                "--max-case-words",
+                str(max_case_words),
+            ],
+            cwd=self.root,
+            staging_directory=staging,
+            expected_outputs=(paragraph_evaluation_output.as_posix(),),
+            env=normal,
+            secret_env=secrets,
+            cancel_requested=context.cancellation_requested,
+            timeout_seconds=15 * 60,
+        )
+        candidate_evaluation = json.loads(
+            (first / "paragraph_candidate_evaluation.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        candidate_evaluation = self._retain_manual_confirmation_route(
+            candidate_evaluation,
+            entry,
+        )
+        if callable(report_progress):
+            report_progress(3, 4)
         return {
-            "candidate_text": str(entry["candidate_text"]).strip(),
+            "candidate_text": candidate_text,
             "resolved_issue_ids": [
                 str(item.get("issue_id") or item.get("id") or "")
                 for item in issues
                 if str(item.get("issue_id") or item.get("id") or "")
             ],
             "report": entry,
+            "source_paragraph_evaluation": source_paragraph_evaluation,
+            "candidate_evaluation": candidate_evaluation,
         }
+
+    def draft_accept_rewrite(self, context, payload):
+        """Evaluate only the accepted candidate paragraph in an isolated workspace."""
+
+        staging, workspace, project = self._compatibility_workspace(
+            context,
+            payload,
+            name="draft-workspace",
+            markdown_key="candidate_draft_text",
+        )
+        project_id = str(payload["project_id"])
+        paragraph_id = str(payload["paragraph_id"])
+        first = project / "04_first_draft"
+        self._write_json(
+            first / "paragraph_candidate_evaluation_request.json",
+            {
+                "evaluation_mode": "accepted_candidate",
+                "paragraph_id": paragraph_id,
+                "original_text": str(payload["paragraph_text"]),
+                "candidate_text": str(payload["candidate_text"]),
+                "allowed_unsupported_claims": list(
+                    payload.get("allowed_unsupported_claims") or []
+                ),
+                "word_range_applicable": bool(
+                    payload.get("word_range_applicable", True)
+                ),
+            },
+        )
+        normal, secrets = self._environment(context.user_id)
+        relative_output = (
+            Path("draft-workspace")
+            / "review-projects"
+            / project_id
+            / "04_first_draft"
+            / "paragraph_candidate_evaluation.json"
+        )
+        self.runner.run(
+            [
+                sys.executable,
+                str(
+                    self.root
+                    / "skills"
+                    / "review-first-draft-feedback-loop"
+                    / "scripts"
+                    / "evaluate_paragraph_candidate.py"
+                ),
+                "--review-root",
+                str(workspace),
+                "--project-id",
+                project_id,
+                "--paragraph-id",
+                paragraph_id,
+                "--goal",
+                str(float(payload.get("goal") or 90)),
+                "--paragraph-goal",
+                str(float(payload.get("paragraph_goal") or 85)),
+                "--min-case-words",
+                str(int(payload.get("min_case_words") or 140)),
+                "--max-case-words",
+                str(int(payload.get("max_case_words") or 280)),
+            ],
+            cwd=self.root,
+            staging_directory=staging,
+            expected_outputs=(relative_output.as_posix(),),
+            env=normal,
+            secret_env=secrets,
+            cancel_requested=context.cancellation_requested,
+            timeout_seconds=15 * 60,
+        )
+        return json.loads(
+            (first / "paragraph_candidate_evaluation.json").read_text(
+                encoding="utf-8"
+            )
+        )
 
     def final_conclusion(self, context, payload):
         staging, workspace, project = self._compatibility_workspace(

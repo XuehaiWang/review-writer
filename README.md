@@ -4,6 +4,7 @@ Review Writer 是一个面向化学综述写作的本地、可审计工作流。
 
 当前架构的核心设计是：
 
+- **React + TypeScript 单页前端**：Vite 构建同一套七阶段界面，浏览器切换阶段时不再整页刷新；TanStack Query 负责服务端状态同步，React Hook Form 负责表单，Zustand 只保存语言等非敏感偏好。
 - **科学产物保存在普通文件中**：Markdown、JSON、PNG、SVG 和 DOCX 可以直接检查、备份和迁移。
 - **运行状态持久化到 PostgreSQL**：页面切换或服务重启后，用户、项目、阶段状态、重绘进度和失败记录不会丢失。
 - **产物按 SHA-256 版本化**：上游内容变化时，下游旧产物会被标记为过期，避免混用旧图、旧草稿或旧 Word。
@@ -83,7 +84,7 @@ Library → Discovery → Analysis & Planning → Sections
 ### Draft、Final 与 Word
 
 - Draft 可以直接编辑段落或全文；保存后更新 handoff 和内容哈希。
-- Draft Quality Feedback Loop 位于 Draft 内：按 rubric 评估全文与每个段落，AI 只生成候选重写，人工接受后才修改正文，并尽量保护引用、数值和化学信息。
+- Draft Quality Feedback Loop 位于 Draft 内：按 rubric 评估全文与每个段落；单段 AI 候选会在写入正文前自动完成候选段落评分并显示原分/候选分，人工保存时直接复用该评分增量更新总分，同时保护引用、数值和化学信息。
 - 进入 Final 前必须对当前精确 Draft 版本完成评估和人工确认；正文再次修改后，旧评分与旧确认自动失效。
 - Conclusion、Overview Figure 和 Generate Final Draft 相互独立；生成终稿时使用当时存在且仍为当前版本的可选产物，不要求按按钮顺序依次执行。
 - Overview Figure 使用 Settings 中同一套图像服务配置，并按服务商支持情况协商画布尺寸。
@@ -125,7 +126,17 @@ docker compose --env-file .env.hosted up -d --build
 
 ### 4. FastAPI 与版本化 API
 
-当前版本使用一个小型单体 FastAPI 应用和 PostgreSQL 同时提供七阶段网页与 `/api/v1/...` 接口。旧 Dashboard HTTP 服务器、local workflow mode、兼容路由、Prefect 运行时和 SQLite 业务状态库均不再参与在线运行。
+当前版本使用一个小型单体 FastAPI 应用和 PostgreSQL 提供 `/api/v1/...` 接口，并直接托管 Vite 构建后的 React + TypeScript SPA。原有页面 URL 保持不变，现有书签和阶段跳转无需修改。旧 Dashboard HTTP 服务器、local workflow mode、Prefect 运行时和 SQLite 业务状态库均不再参与在线运行；在线 SVG/Ketcher 编辑器也已经作为 React 工作区直接集成到第七阶段。
+
+本地开发前端时，可以让 Vite 把 API 请求代理到 `127.0.0.1:8770`：
+
+```powershell
+Set-Location frontend
+npm.cmd ci
+npm.cmd run dev
+```
+
+生产构建由 `Dockerfile.api` 的 Node 构建阶段自动执行 `npm test` 和 `npm run build`，最终 Python 镜像只包含构建产物，不携带 `node_modules`。
 
 可访问：
 
@@ -339,7 +350,8 @@ REVIEW_CLASSIFICATION_RULES=review_writer_core/taxonomies/my_topic.py
 
 ```text
 skills/                     各阶段 Skill、脚本、references 与校验器
-view/                       七阶段前端网页与可复用科学处理脚本
+frontend/                   React + TypeScript + Vite 单页前端
+view/                       内置 Ketcher 静态资源与可复用科学处理脚本
 review_writer_api/          FastAPI、认证、PostgreSQL 仓储、任务与阶段 API
 review_writer_core/         跨阶段共享配置、provider、taxonomy 和图像路由
 review-library/             本地文献库（运行时数据，Git 忽略）
@@ -363,7 +375,23 @@ requirements.txt            Python 依赖（工作流与 API 共用）
 
 ## 测试
 
-项目的发布级检查文件位于 `view/*_checks.py`。在项目根目录执行：
+前端类型检查、单元测试和生产构建：
+
+```powershell
+Set-Location frontend
+npm.cmd test
+npm.cmd run build
+Set-Location ..
+```
+
+FastAPI 与完整阶段回归测试：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s review_writer_api/tests -p 'test_*.py'
+.\.venv\Scripts\python.exe -m unittest discover -s view/tests -p 'test_*.py'
+```
+
+项目的发布级科学检查文件位于 `view/*_checks.py`。在项目根目录执行：
 
 ```powershell
 Set-Location view

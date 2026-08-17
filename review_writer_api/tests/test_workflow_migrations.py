@@ -45,7 +45,7 @@ class WorkflowMigrationTests(unittest.TestCase):
     def test_workflow_schema_has_separate_workflow_and_job_scope_revisions(self) -> None:
         script = ScriptDirectory.from_config(self.alembic_config())
 
-        self.assertEqual(["20260813_0006"], script.get_heads())
+        self.assertEqual(["20260814_0007"], script.get_heads())
         workflow_revision = script.get_revision("20260813_0002")
         self.assertEqual("20260811_0001", workflow_revision.down_revision)
         job_scope_revision = script.get_revision("20260813_0003")
@@ -54,6 +54,10 @@ class WorkflowMigrationTests(unittest.TestCase):
         self.assertEqual("20260813_0003", library_revision.down_revision)
         library_artifact_revision = script.get_revision("20260813_0005")
         self.assertEqual("20260813_0004", library_artifact_revision.down_revision)
+        artifact_lineage_revision = script.get_revision("20260813_0006")
+        self.assertEqual("20260813_0005", artifact_lineage_revision.down_revision)
+        mineru_artifact_revision = script.get_revision("20260814_0007")
+        self.assertEqual("20260813_0006", mineru_artifact_revision.down_revision)
 
     def test_foundation_and_workflow_revisions_upgrade_independently(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

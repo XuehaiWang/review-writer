@@ -14,7 +14,6 @@ STAGE_PAGES = (
     "blueprint.html",
     "sections.html",
     "figure-review.html",
-    "figures.html",
     "draft.html",
     "final.html",
 )

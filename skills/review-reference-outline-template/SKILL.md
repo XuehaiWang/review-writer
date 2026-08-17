@@ -13,7 +13,7 @@ Use this skill after Discovery has a confirmed paper set and before Blueprint. K
 4. Require pass 2 to receive only the abstract style profile plus the current Matrix. Never include the reference text or reference headings in the transfer prompt.
 5. Generate the wording and scientific meaning of every heading level—title, body section, subsection, and deeper label—only from the current topic and Matrix papers. Transfer hierarchy depth, heading length, grammatical form, and rhetorical order only. Never translate, paraphrase, reconstruct, or semantically imitate a source-review heading.
 6. Validate every body heading against current-Matrix vocabulary and against source-heading semantics. Retry an ungrounded or source-derived outline up to three times; reject it if no isolated result is produced.
-7. Build numbered body sections from current Matrix vocabulary and assign every Matrix paper exactly once. Repair missing or duplicate assignments deterministically.
+7. Build numbered body sections from current Matrix vocabulary and assign every Matrix paper exactly once. Repair missing or duplicate assignments deterministically. Mark introduction and conclusion roles explicitly so the application can attach current-Matrix evidence without copying reference content.
 8. Let the user select the candidate in Matrix. Do not select it automatically.
 9. Treat the resulting `selected_outline.md` as the sole structure input for Blueprint and later stages.
 

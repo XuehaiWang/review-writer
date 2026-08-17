@@ -976,8 +976,13 @@
   }
 
   function init() {
-    mountSettingsLink();
-    mountSwitch();
+    // React owns the application shell, navigation, and language switch on the
+    // SPA routes.  Keep this script as the shared translation dictionary and
+    // dynamic text translator without mounting duplicate legacy controls.
+    if (document.body?.dataset.reviewWriterReact !== "true") {
+      mountSettingsLink();
+      mountSwitch();
+    }
     applyLanguage();
     observeDynamicUi();
   }

@@ -31,6 +31,10 @@ from review_writer_api.figure_rules import image_size
 from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
 from review_writer_api.workflow_repository import ArtifactRecord, JobRecord, WorkflowRepository
+from review_writer_core.review_structure import (
+    assign_primary_paper_sections,
+    infer_section_role,
+)
 
 
 SECTION_INDEX_LOGICAL_NAME = "sections/section_drafts.json"
@@ -110,25 +114,99 @@ class SectionsService:
             raise WorkflowConflict(
                 "No Blueprint sections are available. Generate Blueprint first."
             )
+        policy = blueprint.get("paper_assignment_policy")
+        policy_mode = (
+            str(policy.get("mode") or "") if isinstance(policy, dict) else ""
+        )
+        normalized_sections = sections
+        if policy_mode != "single_primary_section_with_supporting_cross_references":
+            legacy_input: list[dict[str, Any]] = []
+            legacy_order: list[str] = []
+            for index, section in enumerate(sections, start=1):
+                if not isinstance(section, dict):
+                    continue
+                assigned = [
+                    str(paper_id)
+                    for paper_id in section.get("major_papers") or []
+                    if str(paper_id or "").strip()
+                ]
+                legacy_order.extend(assigned)
+                explicit_role = str(section.get("section_role") or "")
+                # Older generated Blueprints labelled every section as body,
+                # including headings named Introduction and Conclusion.
+                if explicit_role == "body":
+                    explicit_role = ""
+                legacy_input.append(
+                    {
+                        **section,
+                        "section_id": str(
+                            section.get("section_id") or f"S{index:02d}"
+                        ),
+                        "section_role": infer_section_role(
+                            section.get("title"), explicit_role
+                        ),
+                        "paper_ids": assigned,
+                    }
+                )
+            normalized_sections, _owners = assign_primary_paper_sections(
+                legacy_input, legacy_order
+            )
+
         tasks: list[dict[str, Any]] = []
-        for section in sections:
+        for section in normalized_sections:
             if not isinstance(section, dict) or not str(section.get("section_id") or ""):
                 continue
             claims = section.get("review_claims") or []
+            if policy_mode == "single_primary_section_with_supporting_cross_references":
+                primary_source = [
+                    *(section.get("primary_papers") or []),
+                    *(section.get("major_papers") or []),
+                ]
+            else:
+                primary_source = (
+                    section.get("primary_papers")
+                    if "primary_papers" in section
+                    else section.get("major_papers")
+                )
+            primary_papers = list(
+                dict.fromkeys(
+                    str(paper_id)
+                    for paper_id in primary_source or []
+                    if str(paper_id or "").strip()
+                )
+            )
+            supporting_papers = list(
+                dict.fromkeys(
+                    str(paper_id)
+                    for paper_id in section.get("supporting_papers") or []
+                    if str(paper_id or "").strip()
+                    and str(paper_id) not in primary_papers
+                )
+            )
             tasks.append(
                 {
                     "section_id": str(section["section_id"]),
                     "heading": str(section.get("title") or section["section_id"]),
+                    "section_role": str(section.get("section_role") or "body"),
                     "core_argument": str(
                         section.get("section_thesis")
                         or section.get("review_problem")
                         or ""
                     ),
-                    "allowed_papers": [
-                        str(paper_id)
-                        for paper_id in section.get("major_papers") or []
-                        if str(paper_id or "").strip()
-                    ],
+                    "primary_papers": primary_papers,
+                    "supporting_papers": supporting_papers,
+                    "allowed_papers": [*primary_papers, *supporting_papers],
+                    "writing_mode": (
+                        "framing_synthesis"
+                        if str(section.get("section_role") or "body")
+                        == "introduction"
+                        else "cross_section_synthesis"
+                        if str(section.get("section_role") or "body")
+                        == "conclusion"
+                        else "primary_evidence_synthesis"
+                        if primary_papers
+                        else "cross_section_synthesis"
+                    ),
                     "must_cover_points": [
                         str(claim.get("claim") or "")
                         for claim in claims
@@ -238,11 +316,16 @@ class SectionsService:
         current_matrix = self.repository.get_current_artifact(
             principal.user_id, project_id, MATRIX_LOGICAL_NAME
         )
+        current_outline = self.repository.get_current_artifact(
+            principal.user_id, project_id, OUTLINE_LOGICAL_NAME
+        )
         if (
             current_blueprint is None
             or current_matrix is None
+            or current_outline is None
             or current_blueprint.id != payload["source_blueprint_artifact_id"]
             or current_matrix.id != payload["source_matrix_artifact_id"]
+            or current_outline.id != payload["source_outline_artifact_id"]
         ):
             raise WorkflowConflict(
                 "Planning changed while sections were being generated. Run section generation again."
@@ -306,6 +389,7 @@ class SectionsService:
             "project_id": project_id,
             "source_blueprint_artifact_id": payload["source_blueprint_artifact_id"],
             "source_matrix_artifact_id": payload["source_matrix_artifact_id"],
+            "source_outline_artifact_id": payload["source_outline_artifact_id"],
             "generated_at": utc_now().isoformat(),
             "sections": index_sections,
             "section_drafts_md": merged + "\n",
@@ -328,6 +412,7 @@ class SectionsService:
                 input_snapshot={
                     "blueprint_artifact_id": payload["source_blueprint_artifact_id"],
                     "matrix_artifact_id": payload["source_matrix_artifact_id"],
+                    "outline_artifact_id": payload["source_outline_artifact_id"],
                     "section_ids": list(expected_tasks),
                 },
             )
@@ -685,8 +770,11 @@ class SectionsService:
         blueprint, blueprint_artifact = self._read_json_artifact(
             principal, project_id, BLUEPRINT_LOGICAL_NAME
         )
-        matrix, _matrix_artifact = self._read_json_artifact(
+        matrix, matrix_artifact = self._read_json_artifact(
             principal, project_id, MATRIX_LOGICAL_NAME
+        )
+        _outline, outline_artifact = self._read_json_artifact(
+            principal, project_id, OUTLINE_LOGICAL_NAME
         )
         tasks = self.tasks_from_blueprint(blueprint)
         assigned = list(
@@ -705,12 +793,29 @@ class SectionsService:
             for paper_id in assigned
             if paper_id in catalog
         ]
+        matrix_rows = matrix.get("rows") if isinstance(matrix, dict) else []
+        matrix_order = [
+            str(row.get("paper_id"))
+            for row in matrix_rows
+            if isinstance(row, dict) and str(row.get("paper_id") or "").strip()
+        ]
+        label_width = max(3, len(str(len(matrix_order))))
+        paper_display_labels = {
+            paper_id: f"P{index:0{label_width}d}"
+            for index, paper_id in enumerate(dict.fromkeys(matrix_order), start=1)
+        }
         index, index_artifact = self._read_json_artifact(
             principal, project_id, SECTION_INDEX_LOGICAL_NAME, required=False
         )
         current = bool(
             index
             and index.get("source_blueprint_artifact_id") == blueprint_artifact.id
+            and index.get("source_matrix_artifact_id") == matrix_artifact.id
+            and (
+                index.get("source_outline_artifact_id")
+                or blueprint.get("source_outline_artifact_id")
+            )
+            == outline_artifact.id
         )
         section_files: list[dict[str, Any]] = []
         if current:
@@ -749,6 +854,7 @@ class SectionsService:
             "blueprint_artifact_id": blueprint_artifact.id,
             "section_tasks": tasks,
             "papers": papers,
+            "paper_display_labels": paper_display_labels,
             "section_drafts": index if current else None,
             "section_drafts_md": str((index or {}).get("section_drafts_md") or "")
             if current

@@ -17,6 +17,7 @@ from sqlalchemy.orm import sessionmaker
 from review_writer_api.app import create_app
 from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User
+from review_writer_api.errors import WorkflowConflict
 from review_writer_api.security import Principal, Role
 from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
 from review_writer_api.domain_services.planning import BLUEPRINT_LOGICAL_NAME
@@ -337,7 +338,77 @@ class SectionsV1Tests(unittest.TestCase):
             {"P001", "P002", "P003"},
             {paper["paper_id"] for paper in payload["papers"]},
         )
+        self.assertEqual(
+            {"P001": "P001", "P002": "P002", "P003": "P003"},
+            payload["paper_display_labels"],
+        )
         self.assertEqual(len(payload["section_blueprint"]["sections"]), len(payload["section_tasks"]))
+        introduction = next(
+            task
+            for task in payload["section_tasks"]
+            if task["section_role"] == "introduction"
+        )
+        conclusion = next(
+            task
+            for task in payload["section_tasks"]
+            if task["section_role"] == "conclusion"
+        )
+        self.assertEqual([], introduction["primary_papers"])
+        self.assertEqual("framing_synthesis", introduction["writing_mode"])
+        self.assertEqual([], conclusion["primary_papers"])
+        self.assertEqual("cross_section_synthesis", conclusion["writing_mode"])
+        primary_occurrences = [
+            paper_id
+            for task in payload["section_tasks"]
+            for paper_id in task["primary_papers"]
+        ]
+        self.assertEqual(len(primary_occurrences), len(set(primary_occurrences)))
+
+    def test_legacy_blueprint_is_normalized_before_section_generation(self) -> None:
+        tasks = self.app.state.sections_service.tasks_from_blueprint(
+            {
+                "sections": [
+                    {
+                        "section_id": "S01",
+                        "title": "Introduction",
+                        "section_role": "body",
+                        "major_papers": ["P001"],
+                    },
+                    {
+                        "section_id": "S02",
+                        "title": "Primary evidence theme",
+                        "section_role": "body",
+                        "major_papers": ["P001", "P002"],
+                    },
+                    {
+                        "section_id": "S03",
+                        "title": "Cross-category comparison and conclusion",
+                        "section_role": "body",
+                        "major_papers": ["P001"],
+                    },
+                ]
+            }
+        )
+        by_id = {task["section_id"]: task for task in tasks}
+        self.assertEqual("introduction", by_id["S01"]["section_role"])
+        self.assertEqual([], by_id["S01"]["primary_papers"])
+        self.assertEqual(["P001"], by_id["S01"]["supporting_papers"])
+        self.assertEqual(["P001", "P002"], by_id["S02"]["primary_papers"])
+        self.assertEqual("conclusion", by_id["S03"]["section_role"])
+        self.assertEqual([], by_id["S03"]["primary_papers"])
+
+    def test_publish_rejects_a_changed_outline_dependency(self) -> None:
+        service = self.app.state.sections_service
+        payload = service.generation_payload(self.first, self.project_id)
+        payload["source_outline_artifact_id"] = str(uuid.uuid4())
+        with self.assertRaises(WorkflowConflict):
+            service.publish_generation(
+                self.first,
+                self.project_id,
+                payload,
+                {},
+                attempts=1,
+            )
 
     def test_missing_blueprint_paper_blocks_generation(self) -> None:
         service = self.app.state.planning_service
@@ -410,6 +481,17 @@ class SectionsV1Tests(unittest.TestCase):
                 f"sections/{payload['section_files'][0]['section_id']}.md",
             ).id,
         )
+        index_artifact = self.app.state.workflow_repository.get_current_artifact(
+            self.first.user_id,
+            self.project_id,
+            "sections/section_drafts.json",
+        )
+        index = json.loads(
+            self.app.state.artifact_service.resolve_owned_artifact(
+                self.first.user_id, index_artifact.id
+            ).path.read_text(encoding="utf-8")
+        )
+        self.assertTrue(index["source_outline_artifact_id"])
 
     def test_report_uses_current_jobs(self) -> None:
         with TestClient(self.app) as client:

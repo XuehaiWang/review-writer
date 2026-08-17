@@ -1,6 +1,6 @@
 ---
 name: review-topic-paper-discovery
-description: Start a review project from a user topic, expand keywords against the eight LLM allene classification tags, retrieve the complete local candidate set from the metadata library, and optionally enrich it with the hosted SciAtlas knowledge-graph search; let a human choose which candidates enter the Matrix.
+description: Start a review project from a user topic, build a categorized multi-theme query plan against the active eight-field taxonomy profile, retrieve the de-duplicated local candidate set from the metadata library, and optionally enrich it with external search; let a human choose which candidates enter the Matrix.
 ---
 
 # Review Topic Paper Discovery
@@ -16,7 +16,7 @@ selects it in Discovery.
 ## Hard Rules
 
 ```text
-Use only the 8 LLM structured tag categories for local retrieval:
+Use the 8 LLM structured tag categories for metadata retrieval:
 product
 substrate
 catalyst_or_method
@@ -27,7 +27,38 @@ reaction_type
 document_scope
 ```
 
+Discovery query plans may additionally use `unclassified` as a temporary
+routing category when a meaningful topic phrase cannot safely fit one of the
+eight tags. It is never written into paper metadata and never becomes a ninth
+Matrix field. The retriever evaluates it across all eight tags and parsed
+source text. Never force an unknown phrase into `reaction_type`.
+
 Use the shared taxonomy loader as the tag vocabulary and synonym source. The default profile is `<review-root>/review_writer_core/taxonomies/allene.py`; `REVIEW_TAXONOMY_PROFILE` selects a built-in profile and `REVIEW_CLASSIFICATION_RULES` selects a custom rules file. Discovery outputs must record the active taxonomy path and SHA-256 identity. Do not rank local papers by metadata abstract.
+
+Match short taxonomy aliases such as `Cu`, `Pd`, `Au`, and `Ni` only as whole
+tokens, never as substrings inside ordinary words. Canonicalize exact aliases
+to their taxonomy label and de-duplicate them before retrieval. For
+`catalyst_or_method`, require independent support from the paper title or
+parsed source text before trusting an existing base Tag; this lets Discovery
+safely correct metadata created by older substring-matching versions without
+mutating the Library record.
+
+Treat Library Metadata Tags and project Tags as separate layers:
+
+```text
+base_tags                    immutable snapshot from Library metadata
+project_tag_assessment       topic-scoped automatic Tags plus matching evidence
+confirmed_project_tags       legacy human override retained for compatibility
+tag_review_status            legacy pending | confirmed state
+```
+
+Never write project Tags or legacy confirmations back into Library metadata.
+Synchronize the project Tag assessment across duplicate keyword hits for the
+same `paper_id`. When the human selects a paper for Matrix, automatically apply
+`project_tag_assessment.suggested_tags`. If an older project already contains
+`confirmed_project_tags` with `tag_review_status=confirmed`, preserve that
+explicit legacy override instead. Per-paper Tag confirmation is not a workflow
+step.
 
 External retrieval (both run in parallel when requested):
 
@@ -97,9 +128,11 @@ metadata is filtered independently and inclusively by `filters.year_from` and
 replace or alter the local query-plan year bounds.
 
 Direct script execution without `--query-plan` retains the deterministic
-fallback for compatibility, but Codex and discovery agents must use the query
-plan handoff. Every keyword category and `group_by` value must be one of the
-eight structured tag categories above.
+fallback for compatibility. The dashboard uses `--auto-query-plan`: it first
+uses the active text-provider settings and falls back to deterministic theme
+splitting when the provider is unavailable. Every `group_by` value must be one
+of the eight structured tag categories above; keyword categories may also use
+the Discovery-only `unclassified` route.
 
 ## External Source: SciAtlas
 
@@ -170,9 +203,19 @@ the human reviewer; there is no fixed paper-count cap. External (SciAtlas/Crossr
 the local `paper_id` registry and the matrix stage may cite them only as
 references without assigning a `paper_id`.
 
+Each local result carries the immutable `base_tags` and the generated
+`project_tag_assessment`. Legacy `confirmed_project_tags` and
+`tag_review_status` fields may remain in serialized artifacts for backward
+compatibility, but the current workflow does not ask the human to edit or
+confirm them. The Matrix handoff retains base Tags separately and automatically
+adds the current project suggestions, so downstream outline grouping can use
+the topic-specific interpretation without changing reusable metadata.
+
 ## Human Check
 
 Stop after discovery. The human checks `/discovery`, explicitly includes or
-excludes candidate papers, and confirms the selected set. SciAtlas papers are visible
+excludes candidate papers, compares base Tags with topic-specific suggestions,
+assigns paper roles when needed, and then confirms the selected set. Project
+Tags are read-only evidence in the UI and are applied automatically. SciAtlas papers are visible
 in the same "external" panel as Crossref papers; deletions take effect for
 both sources.

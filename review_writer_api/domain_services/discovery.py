@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import threading
 import uuid
@@ -29,6 +28,17 @@ MUTABLE_ROLES = {
     "uncertain",
     "excluded",
 }
+PROJECT_TAG_KEYS = {
+    "product",
+    "substrate",
+    "catalyst_or_method",
+    "organometallic_partner",
+    "ligand_or_chiral_source",
+    "leaving_group",
+    "reaction_type",
+    "document_scope",
+}
+TAG_REVIEW_STATUSES = {"pending", "confirmed"}
 
 
 class DiscoverySelectionNotInLibrary(WorkflowValidationError):
@@ -54,12 +64,57 @@ def _field_value(value: Any) -> Any:
     return value.get("value") if isinstance(value, dict) and "value" in value else value
 
 
+def _normalize_project_tags(value: Any, *, field: str) -> dict[str, list[str]]:
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise WorkflowValidationError(f"{field} must be an object.")
+    normalized: dict[str, list[str]] = {}
+    for raw_category, raw_values in value.items():
+        category = str(raw_category or "").strip()
+        if category not in PROJECT_TAG_KEYS:
+            raise WorkflowValidationError(
+                f"{field} contains unsupported category {category!r}."
+            )
+        values = raw_values if isinstance(raw_values, list) else [raw_values]
+        clean: list[str] = []
+        seen: set[str] = set()
+        for raw in values:
+            tag = " ".join(str(raw or "").split()).strip()
+            if not tag or tag.casefold() in seen:
+                continue
+            if len(tag) > 200:
+                raise WorkflowValidationError(f"{field} Tag values must be 200 characters or fewer.")
+            seen.add(tag.casefold())
+            clean.append(tag)
+        if clean:
+            normalized[category] = clean[:32]
+    return normalized
+
+
+def _normalize_tag_assessment(value: Any) -> dict[str, Any]:
+    if value in (None, "") or value == {}:
+        return {}
+    if not isinstance(value, dict):
+        raise WorkflowValidationError("project_tag_assessment must be an object.")
+    assessment = deepcopy(value)
+    assessment["suggested_tags"] = _normalize_project_tags(
+        assessment.get("suggested_tags"), field="project_tag_assessment.suggested_tags"
+    )
+    evidence = assessment.get("evidence") or []
+    if not isinstance(evidence, list) or any(not isinstance(item, dict) for item in evidence):
+        raise WorkflowValidationError("project_tag_assessment.evidence must be a list of objects.")
+    assessment["evidence"] = evidence[:100]
+    return assessment
+
+
 def normalize_review(payload: dict[str, Any]) -> dict[str, Any]:
     review = deepcopy(payload)
     results = review.get("results")
     if not isinstance(results, list):
         raise WorkflowValidationError("Discovery results must be a list.")
     local_selected: dict[str, bool] = {}
+    local_tag_reviews: dict[str, tuple[dict[str, list[str]], str]] = {}
     for group in results:
         if not isinstance(group, dict) or not str(group.get("keyword") or "").strip():
             raise WorkflowValidationError("Every Discovery group needs a keyword.")
@@ -74,13 +129,34 @@ def normalize_review(payload: dict[str, Any]) -> dict[str, Any]:
             row["role"] = role if role in MUTABLE_ROLES else "uncertain"
             chosen = bool(row.get("selected_for_matrix")) and row["role"] != "excluded"
             local_selected[paper_id] = local_selected.get(paper_id, False) or chosen
+            row["base_tags"] = dict(row.get("base_tags") or {}) if isinstance(row.get("base_tags") or {}, dict) else {}
+            row["project_tag_assessment"] = _normalize_tag_assessment(
+                row.get("project_tag_assessment")
+            )
+            confirmed_tags = _normalize_project_tags(
+                row.get("confirmed_project_tags"), field="confirmed_project_tags"
+            )
+            review_status = str(row.get("tag_review_status") or "pending").strip()
+            if review_status not in TAG_REVIEW_STATUSES:
+                review_status = "pending"
+            state = (confirmed_tags, review_status)
+            previous = local_tag_reviews.get(paper_id)
+            if previous is not None and previous != state:
+                raise WorkflowValidationError(
+                    "Duplicate Discovery hits for one paper must carry the same project Tag review."
+                )
+            local_tag_reviews[paper_id] = state
         for row in group.get("web_results") or []:
             if not isinstance(row, dict) or not _candidate_id(row, external=True):
                 raise WorkflowValidationError("External candidates need a stable source identity.")
             row["selected_for_matrix"] = bool(row.get("selected_for_matrix"))
     for group in results:
         for row in group.get("local_results") or []:
-            row["selected_for_matrix"] = local_selected[_candidate_id(row, external=False)]
+            paper_id = _candidate_id(row, external=False)
+            row["selected_for_matrix"] = local_selected[paper_id]
+            confirmed_tags, review_status = local_tag_reviews[paper_id]
+            row["confirmed_project_tags"] = deepcopy(confirmed_tags)
+            row["tag_review_status"] = review_status
     review["selection_mode"] = "explicit"
     return review
 
@@ -92,12 +168,31 @@ def statistics(review: dict[str, Any]) -> dict[str, int]:
     local_ids = {_candidate_id(row, external=False) for row in local_rows}
     selected_ids = {_candidate_id(row, external=False) for row in local_rows if _selected(row)}
     external_ids = {_candidate_id(row, external=True) for row in external_rows}
+    reviewed_ids = {
+        _candidate_id(row, external=False)
+        for row in local_rows
+        if str(row.get("tag_review_status") or "pending") == "confirmed"
+    }
+    selected_reviewed_ids = {
+        _candidate_id(row, external=False)
+        for row in local_rows
+        if _selected(row) and str(row.get("tag_review_status") or "pending") == "confirmed"
+    }
+    categories = {
+        str(group.get("category") or "unclassified") for group in groups
+    }
     return {
         "candidate_count": len(local_ids),
         "keyword_hit_count": len(local_rows),
         "selected_count": len(selected_ids),
         "keyword_group_count": len(groups),
         "external_candidate_count": len(external_ids),
+        "category_count": len(categories),
+        "unclassified_keyword_group_count": sum(
+            1 for group in groups if str(group.get("category") or "unclassified") == "unclassified"
+        ),
+        "tag_reviewed_candidate_count": len(reviewed_ids),
+        "tag_reviewed_selected_count": len(selected_reviewed_ids),
     }
 
 
@@ -169,6 +264,7 @@ class DiscoveryService:
         review = normalize_review(payload)
         return {
             **review,
+            "project_id": project_id,
             "artifact_id": artifact.id,
             "revision": state.revision if state else 0,
             "statistics": statistics(review),
@@ -223,6 +319,12 @@ class DiscoveryService:
                 role = str(source.get("role") or "uncertain")
                 row["role"] = role if role in MUTABLE_ROLES else "uncertain"
                 row["selected_for_matrix"] = bool(source.get("selected_for_matrix")) and row["role"] != "excluded"
+                row["confirmed_project_tags"] = deepcopy(
+                    source.get("confirmed_project_tags") or {}
+                )
+                row["tag_review_status"] = str(
+                    source.get("tag_review_status") or "pending"
+                )
             for row in group.get("web_results") or []:
                 identity = _candidate_id(row, external=True)
                 if identity not in proposed_external:
@@ -414,6 +516,40 @@ class DiscoveryService:
             value = row.metadata_json.get(key)
             return _field_value(value) if value is not None else default
 
+        project_tag_reviews: dict[str, dict[str, Any]] = {}
+        for group in current.get("results") or []:
+            if group.get("keep") is False:
+                continue
+            for row in group.get("local_results") or []:
+                paper_id = _candidate_id(row, external=False)
+                if paper_id not in selected_ids:
+                    continue
+                status = str(row.get("tag_review_status") or "pending")
+                assessment = row.get("project_tag_assessment") or {}
+                suggested_tags = _normalize_project_tags(
+                    assessment.get("suggested_tags") if isinstance(assessment, dict) else {},
+                    field="project_tag_assessment.suggested_tags",
+                )
+                confirmed_tags = deepcopy(row.get("confirmed_project_tags") or {})
+                if status == "confirmed":
+                    applied_tags = confirmed_tags
+                    applied_status = "confirmed"
+                elif suggested_tags:
+                    applied_tags = suggested_tags
+                    applied_status = "automatic"
+                else:
+                    applied_tags = {}
+                    applied_status = "base_only"
+                project_tag_reviews[paper_id] = {
+                    "status": applied_status,
+                    "tags": applied_tags,
+                    "topic_fingerprint": str(
+                        (assessment.get("topic_fingerprint") or "")
+                        if isinstance(assessment, dict)
+                        else ""
+                    ),
+                }
+
         rows = [
             {
                 "paper_id": paper_id,
@@ -445,19 +581,29 @@ class DiscoveryService:
                 "year": metadata_value(catalog_by_id[paper_id], "year", None),
                 "journal": metadata_value(catalog_by_id[paper_id], "journal", "") or "",
                 "doi": metadata_value(catalog_by_id[paper_id], "doi", "") or "",
+                "base_tags": metadata_value(
+                    catalog_by_id[paper_id], "structured_tags", {}
+                )
+                or {},
+                "project_tags": deepcopy(
+                    project_tag_reviews.get(paper_id, {}).get("tags") or {}
+                ),
+                "project_tag_review_status": str(
+                    project_tag_reviews.get(paper_id, {}).get("status") or "pending"
+                ),
+                "project_tag_topic_fingerprint": str(
+                    project_tag_reviews.get(paper_id, {}).get("topic_fingerprint") or ""
+                ),
                 "matrix_status": "needs_full_reading",
             }
             for paper_id in selected_ids
         ]
-        fingerprint = hashlib.sha256(
-            "\n".join(sorted(selected_ids)).encode("utf-8")
-        ).hexdigest()
         matrix = {
             "project_id": project_id,
             "review_topic": str(current.get("topic") or ""),
             "rows": rows,
             "sync": {
-                "selection_fingerprint": fingerprint,
+                "selected_paper_ids": sorted(selected_ids),
                 "selected_paper_count": len(selected_ids),
                 "synchronized_paper_count": len(rows),
                 "synced_at": utc_now().isoformat(),

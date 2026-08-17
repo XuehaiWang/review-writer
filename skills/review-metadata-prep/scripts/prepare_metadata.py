@@ -798,6 +798,24 @@ def taxonomy_profile_for_text(text: str) -> str:
     return configured or suggest_taxonomy_profile(text)
 
 
+def taxonomy_phrase_matches(needle: str, haystack: str) -> bool:
+    """Match one taxonomy alias as a token/phrase instead of a substring.
+
+    Short chemistry aliases such as ``Cu``, ``Au``, and ``Ni`` must not match
+    ordinary words such as ``molecular`` or ``calculation``.  The taxonomy is
+    user-configurable, so the matcher keeps punctuation in aliases intact and
+    only treats whitespace between words as flexible.
+    """
+
+    chunks = re.split(r"\s+", str(needle or "").strip())
+    if not chunks or not chunks[0]:
+        return False
+    pattern = r"(?<![A-Za-z0-9])" + r"\s+".join(
+        re.escape(chunk) for chunk in chunks
+    ) + r"(?![A-Za-z0-9])"
+    return re.search(pattern, str(haystack or ""), re.I) is not None
+
+
 def structured_tags_from_classification_rules(
     review_root: Path,
     text: str,
@@ -809,15 +827,29 @@ def structured_tags_from_classification_rules(
         review_root,
         profile=profile or taxonomy_profile_for_text(text),
     )
-    haystack = text.casefold()
+    matches: dict[str, tuple[int, str]] = {}
     for item in rules:
         if not isinstance(item, tuple) or len(item) < 3:
             continue
         label, category, needles = item[0], item[1], item[2]
-        if category not in values or values[category] != "not specified":
+        if category not in values:
             continue
-        if any(str(needle).casefold() in haystack for needle in needles if str(needle).strip()):
-            values[category] = str(label)
+        matched_needles = [
+            str(needle).strip()
+            for needle in [label, *needles]
+            if str(needle).strip() and taxonomy_phrase_matches(str(needle), text)
+        ]
+        if not matched_needles:
+            continue
+        # Prefer the most specific explicit phrase when several labels in one
+        # category occur.  Taxonomy declaration order is no longer allowed to
+        # make the first short symbol (historically ``Cu``) win every paper.
+        specificity = max(len(re.sub(r"[^A-Za-z0-9]+", "", needle)) for needle in matched_needles)
+        current = matches.get(category)
+        if current is None or specificity > current[0]:
+            matches[category] = (specificity, str(label))
+    for category, (_specificity, label) in matches.items():
+        values[category] = label
     return values
 
 

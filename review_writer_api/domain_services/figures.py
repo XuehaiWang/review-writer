@@ -29,6 +29,7 @@ from review_writer_api.figure_rules import (
     canvas_policy_matches,
     image_size,
     png_size,
+    svg_workspace_size,
     validate_svg_markup,
     validated_content_crop,
 )
@@ -43,6 +44,7 @@ DEFAULT_REVIEWS = "sections/default_figure_reviews.json"
 REVIEW_SELECTIONS = "figure-review/selections.json"
 REVIEW_INPUTS = "figure-review/selected_figures.json"
 FIGURE_MANIFEST = "figures/manifest.json"
+MATRIX_LOGICAL_NAME = "matrix/literature_matrix.json"
 PNG_DATA_URL = re.compile(r"^data:image/png;base64,(.+)$", re.DOTALL)
 SAFETY_ERROR = re.compile(
     r"adult content|sexual content|safety policy|safety review|moderation",
@@ -71,10 +73,6 @@ class FigureOutputsIncomplete(WorkflowConflict):
 
 
 class FigureCanvasMismatch(WorkflowValidationError):
-    code = "FIGURE_CANVAS_MISMATCH"
-
-
-class FigureCanvasApprovalBlocked(WorkflowConflict):
     code = "FIGURE_CANVAS_MISMATCH"
 
 
@@ -147,6 +145,29 @@ class FiguresService:
     def _papers(payload: Any) -> list[dict[str, Any]]:
         rows = payload.get("papers") if isinstance(payload, dict) else None
         return [dict(row) for row in rows or [] if isinstance(row, dict)]
+
+    def _paper_display_labels(
+        self,
+        principal: Principal,
+        project_id: str,
+        fallback_ids: list[str],
+    ) -> dict[str, str]:
+        matrix, _artifact = self._read_json(
+            principal, project_id, MATRIX_LOGICAL_NAME, required=False
+        )
+        rows = matrix.get("rows") if isinstance(matrix, dict) else []
+        ordered = [
+            str(row.get("paper_id") or "").strip()
+            for row in rows or []
+            if isinstance(row, dict) and str(row.get("paper_id") or "").strip()
+        ]
+        ordered.extend(str(value or "").strip() for value in fallback_ids)
+        ordered = list(dict.fromkeys(value for value in ordered if value))
+        width = max(3, len(str(len(ordered))))
+        return {
+            paper_id: f"P{index:0{width}d}"
+            for index, paper_id in enumerate(ordered, start=1)
+        }
 
     @staticmethod
     def _candidate(rows: list[dict[str, Any]], paper_id: str, index: int):
@@ -288,6 +309,11 @@ class FiguresService:
         return {
             "project_id": project_id,
             "papers": visible,
+            "paper_display_labels": self._paper_display_labels(
+                principal,
+                project_id,
+                [str(row.get("paper_id") or "") for row in visible],
+            ),
             "revision": state.revision if state else 0,
             "status": state.status if state else "pending",
             "source_paper_candidates_artifact_id": paper_artifact.id,
@@ -354,79 +380,13 @@ class FiguresService:
         )
         return published, state
 
-    def save_review_selection(
+    def _selected_review_rows(
         self,
         principal: Principal,
         project_id: str,
-        paper_id: str,
-        *,
-        revision: int,
-        candidate_index: int,
-        review_note: str,
-    ) -> dict[str, Any]:
-        principal.require(Permission.PROJECT_WRITE)
-        paper_payload, paper_artifact = self._read_json(
-            principal, project_id, PAPER_CANDIDATES
-        )
-        papers = self._papers(paper_payload)
-        _paper, candidate = self._candidate(papers, paper_id, candidate_index)
-        source_artifact, _source_path = self._validate_candidate(
-            principal, project_id, candidate
-        )
-        reviews, _current, _stale = self._effective_review(
-            principal, project_id, paper_artifact
-        )
-        reviews["project_id"] = project_id
-        reviews["source_paper_candidates_artifact_id"] = paper_artifact.id
-        reviews["updated_at"] = utc_now().isoformat()
-        review_rows = reviews.setdefault("papers", {})
-        review_rows[paper_id] = {
-            "selected_candidate_index": int(candidate_index),
-            "selected_source_artifact_id": source_artifact.id,
-            "review_note": str(review_note or "").strip(),
-            "selection_source": "human",
-            "reviewed_at": utc_now().isoformat(),
-        }
-        with self._write_lock:
-            published, state = self._publish_files(
-                principal,
-                project_id,
-                stage_id="figure-review",
-                files={
-                    REVIEW_SELECTIONS: (
-                        (json.dumps(reviews, ensure_ascii=False, indent=2) + "\n").encode(),
-                        "json",
-                    )
-                },
-                expected_revision=revision,
-                status="review",
-                invalidate_stages=("figures", "draft", "final"),
-                metadata={"source_paper_candidates_artifact_id": paper_artifact.id},
-            )
-        return {
-            "project_id": project_id,
-            "paper_id": paper_id,
-            "candidate_index": candidate_index,
-            "revision": state.revision,
-            "status": state.status,
-            "selection_artifact_id": published[REVIEW_SELECTIONS].id,
-        }
-
-    def confirm_review(
-        self,
-        principal: Principal,
-        project_id: str,
-        *,
-        revision: int,
-    ) -> dict[str, Any]:
-        principal.require(Permission.PROJECT_WRITE)
-        paper_payload, paper_artifact = self._read_json(
-            principal, project_id, PAPER_CANDIDATES
-        )
-        papers = self._papers(paper_payload)
-        reviews, _selection_artifact, _stale = self._effective_review(
-            principal, project_id, paper_artifact
-        )
+        papers: list[dict[str, Any]],
+        reviews: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
         review_rows = reviews.get("papers") or {}
         selected: list[dict[str, Any]] = []
         missing: list[str] = []
@@ -463,6 +423,163 @@ class FiguresService:
             candidate["source_image_artifact_id"] = source_artifact.id
             candidate["source_review_note"] = str(review.get("review_note") or "")
             selected.append(candidate)
+        return selected, missing
+
+    def _publish_review_inputs(
+        self,
+        principal: Principal,
+        project_id: str,
+        *,
+        reviews: dict[str, Any],
+        selected: list[dict[str, Any]],
+        paper_artifact: ArtifactRecord,
+        revision: int,
+        status: str,
+    ) -> tuple[ArtifactRecord, ArtifactRecord, Any]:
+        run = self.repository.create_stage_run(
+            principal.user_id,
+            project_id,
+            "figure-review",
+            status="succeeded",
+            input_snapshot={"source_paper_candidates_artifact_id": paper_artifact.id},
+        )
+        staging = self.artifacts.stage_run_directory(
+            principal.user_id, project_id, run.id
+        )
+        selections_path = staging / "selections.json"
+        selections_path.write_text(
+            json.dumps(reviews, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        selection_artifact = self.artifacts.publish(
+            principal.user_id,
+            project_id,
+            run.id,
+            selections_path.name,
+            logical_name=REVIEW_SELECTIONS,
+            artifact_type="json",
+            producer_stage="figure-review",
+            make_current=False,
+        )
+        inputs = {
+            "project_id": project_id,
+            "source_paper_candidates_artifact_id": paper_artifact.id,
+            "source_selection_artifact_id": selection_artifact.id,
+            "selected_at": utc_now().isoformat(),
+            "figures": selected,
+        }
+        inputs_path = staging / "selected-figures.json"
+        inputs_path.write_text(
+            json.dumps(inputs, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        inputs_artifact = self.artifacts.publish(
+            principal.user_id,
+            project_id,
+            run.id,
+            inputs_path.name,
+            logical_name=REVIEW_INPUTS,
+            artifact_type="json",
+            producer_stage="figure-review",
+            make_current=False,
+            metadata={
+                "source_paper_candidates_artifact_id": paper_artifact.id,
+                "source_selection_artifact_id": selection_artifact.id,
+            },
+        )
+        state = self.repository.promote_stage_artifacts_atomically(
+            principal.user_id,
+            project_id,
+            "figure-review",
+            artifact_ids={
+                REVIEW_SELECTIONS: selection_artifact.id,
+                REVIEW_INPUTS: inputs_artifact.id,
+            },
+            run_id=run.id,
+            expected_revision=int(revision),
+            status=status,
+            invalidate_stages=("figures", "draft", "final"),
+        )
+        return selection_artifact, inputs_artifact, state
+
+    def save_review_selection(
+        self,
+        principal: Principal,
+        project_id: str,
+        paper_id: str,
+        *,
+        revision: int,
+        candidate_index: int,
+        review_note: str,
+    ) -> dict[str, Any]:
+        principal.require(Permission.PROJECT_WRITE)
+        paper_payload, paper_artifact = self._read_json(
+            principal, project_id, PAPER_CANDIDATES
+        )
+        papers = self._papers(paper_payload)
+        _paper, candidate = self._candidate(papers, paper_id, candidate_index)
+        source_artifact, _source_path = self._validate_candidate(
+            principal, project_id, candidate
+        )
+        reviews, _current, _stale = self._effective_review(
+            principal, project_id, paper_artifact
+        )
+        reviews["project_id"] = project_id
+        reviews["source_paper_candidates_artifact_id"] = paper_artifact.id
+        reviews["updated_at"] = utc_now().isoformat()
+        review_rows = reviews.setdefault("papers", {})
+        review_rows[paper_id] = {
+            "selected_candidate_index": int(candidate_index),
+            "selected_source_artifact_id": source_artifact.id,
+            "review_note": str(review_note or "").strip(),
+            "selection_source": "human",
+            "reviewed_at": utc_now().isoformat(),
+        }
+        selected, missing = self._selected_review_rows(
+            principal, project_id, papers, reviews
+        )
+        selection_complete = bool(selected and not missing)
+        with self._write_lock:
+            selection_artifact, inputs_artifact, state = self._publish_review_inputs(
+                principal,
+                project_id,
+                reviews=reviews,
+                selected=selected,
+                paper_artifact=paper_artifact,
+                revision=revision,
+                status="approved" if selection_complete else "review",
+            )
+        return {
+            "project_id": project_id,
+            "paper_id": paper_id,
+            "candidate_index": candidate_index,
+            "revision": state.revision,
+            "status": state.status,
+            "selection_artifact_id": selection_artifact.id,
+            "selected_figures_artifact_id": inputs_artifact.id,
+            "selected_count": len(selected),
+            "missing_paper_ids": missing,
+            "selection_complete": selection_complete,
+        }
+
+    def confirm_review(
+        self,
+        principal: Principal,
+        project_id: str,
+        *,
+        revision: int,
+    ) -> dict[str, Any]:
+        principal.require(Permission.PROJECT_WRITE)
+        paper_payload, paper_artifact = self._read_json(
+            principal, project_id, PAPER_CANDIDATES
+        )
+        papers = self._papers(paper_payload)
+        reviews, _selection_artifact, _stale = self._effective_review(
+            principal, project_id, paper_artifact
+        )
+        selected, missing = self._selected_review_rows(
+            principal, project_id, papers, reviews
+        )
         if missing:
             raise FigureReviewIncomplete(
                 "Select one anchored source image for every cited paper before continuing.",
@@ -476,65 +593,14 @@ class FiguresService:
         reviews["project_id"] = project_id
         reviews["source_paper_candidates_artifact_id"] = paper_artifact.id
         with self._write_lock:
-            run = self.repository.create_stage_run(
-                principal.user_id,
+            _selection_artifact, inputs_artifact, state = self._publish_review_inputs(
+                principal,
                 project_id,
-                "figure-review",
-                status="succeeded",
-                input_snapshot={"source_paper_candidates_artifact_id": paper_artifact.id},
-            )
-            staging = self.artifacts.stage_run_directory(
-                principal.user_id, project_id, run.id
-            )
-            selections_path = staging / "selections.json"
-            selections_path.write_text(
-                json.dumps(reviews, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            selection_artifact = self.artifacts.publish(
-                principal.user_id,
-                project_id,
-                run.id,
-                selections_path.name,
-                logical_name=REVIEW_SELECTIONS,
-                artifact_type="json",
-                producer_stage="figure-review",
-                make_current=False,
-            )
-            inputs = {
-                "project_id": project_id,
-                "source_paper_candidates_artifact_id": paper_artifact.id,
-                "source_selection_artifact_id": selection_artifact.id,
-                "selected_at": utc_now().isoformat(),
-                "figures": selected,
-            }
-            inputs_path = staging / "selected-figures.json"
-            inputs_path.write_text(
-                json.dumps(inputs, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            inputs_artifact = self.artifacts.publish(
-                principal.user_id,
-                project_id,
-                run.id,
-                inputs_path.name,
-                logical_name=REVIEW_INPUTS,
-                artifact_type="json",
-                producer_stage="figure-review",
-                make_current=False,
-            )
-            state = self.repository.promote_stage_artifacts_atomically(
-                principal.user_id,
-                project_id,
-                "figure-review",
-                artifact_ids={
-                    REVIEW_SELECTIONS: selection_artifact.id,
-                    REVIEW_INPUTS: inputs_artifact.id,
-                },
-                run_id=run.id,
-                expected_revision=int(revision),
+                reviews=reviews,
+                selected=selected,
+                paper_artifact=paper_artifact,
+                revision=revision,
                 status="approved",
-                invalidate_stages=("figures", "draft", "final"),
             )
         return {
             "project_id": project_id,
@@ -545,21 +611,95 @@ class FiguresService:
             "next_tab": "redraw",
         }
 
-    def _selected_inputs(
-        self, principal: Principal, project_id: str
-    ) -> tuple[list[dict[str, Any]], ArtifactRecord]:
+    def sync_review_inputs(
+        self,
+        principal: Principal,
+        project_id: str,
+        *,
+        revision: int,
+    ) -> dict[str, Any]:
+        """Materialize the effective live selection for redraw without requiring completeness."""
+        principal.require(Permission.PROJECT_WRITE)
+        paper_payload, paper_artifact = self._read_json(
+            principal, project_id, PAPER_CANDIDATES
+        )
+        papers = self._papers(paper_payload)
+        reviews, _selection_artifact, _stale = self._effective_review(
+            principal, project_id, paper_artifact
+        )
+        selected, missing = self._selected_review_rows(
+            principal, project_id, papers, reviews
+        )
+        if not selected:
+            raise FigureReviewIncomplete(
+                "Select at least one anchored source image before opening AI redraw."
+            )
+        selection_complete = not missing
+        current_inputs, current_inputs_artifact = self._read_json(
+            principal, project_id, REVIEW_INPUTS, required=False
+        )
+        current_figures = (
+            current_inputs.get("figures")
+            if isinstance(current_inputs, dict)
+            else None
+        )
+        source_matches = bool(
+            isinstance(current_inputs, dict)
+            and current_inputs.get("source_paper_candidates_artifact_id")
+            == paper_artifact.id
+        )
         state = self.repository.get_stage_state(
             principal.user_id, project_id, "figure-review"
         )
-        if state is None or state.status != "approved":
-            raise FigureReviewIncomplete(
-                "Confirm source figure review before redrawing figures."
+        if (
+            current_inputs_artifact is not None
+            and source_matches
+            and current_figures == selected
+        ):
+            return {
+                "project_id": project_id,
+                "status": state.status if state else "review",
+                "revision": state.revision if state else int(revision),
+                "selected_count": len(selected),
+                "missing_paper_ids": missing,
+                "selection_complete": selection_complete,
+                "selected_figures_artifact_id": current_inputs_artifact.id,
+                "next_tab": "redraw",
+                "unchanged": True,
+            }
+        reviews = deepcopy(reviews)
+        reviews["project_id"] = project_id
+        reviews["source_paper_candidates_artifact_id"] = paper_artifact.id
+        with self._write_lock:
+            _selection_artifact, inputs_artifact, state = self._publish_review_inputs(
+                principal,
+                project_id,
+                reviews=reviews,
+                selected=selected,
+                paper_artifact=paper_artifact,
+                revision=revision,
+                status="approved" if selection_complete else "review",
             )
+        return {
+            "project_id": project_id,
+            "status": state.status,
+            "revision": state.revision,
+            "selected_count": len(selected),
+            "missing_paper_ids": missing,
+            "selection_complete": selection_complete,
+            "selected_figures_artifact_id": inputs_artifact.id,
+            "next_tab": "redraw",
+            "unchanged": False,
+        }
+
+    def _selected_inputs(
+        self, principal: Principal, project_id: str
+    ) -> tuple[list[dict[str, Any]], ArtifactRecord]:
         payload, artifact = self._read_json(principal, project_id, REVIEW_INPUTS)
         figures = payload.get("figures") if isinstance(payload, dict) else None
         rows = [dict(row) for row in figures or [] if isinstance(row, dict)]
         if not rows:
-            raise FigureReviewIncomplete("No confirmed source figures are available.")
+            raise FigureReviewIncomplete("No selected source figures are available.")
         return rows, artifact
 
     def redraw_job_payload(
@@ -581,7 +721,7 @@ class FiguresService:
         unknown = sorted(set(requested) - set(available))
         if unknown:
             raise WorkflowValidationError(
-                "One or more requested figures are not in the confirmed source set.",
+                "One or more requested figures are not in the current source selection.",
                 details={"figure_ids": unknown},
             )
         if retry_of_job_id:
@@ -649,7 +789,7 @@ class FiguresService:
             None,
         )
         if figure is None:
-            raise WorkflowNotFound("Confirmed figure was not found.")
+            raise WorkflowNotFound("Selected figure was not found.")
         _source, source_path = self._validate_candidate(
             principal, project_id, figure
         )
@@ -790,9 +930,7 @@ class FiguresService:
                     "target_paragraph_id": item["figure"].get("target_paragraph_id"),
                     "source_label": item["figure"].get("source_label"),
                     "source_artifact_id": source_artifact.id,
-                    "source_image_sha256": source_artifact.content_sha256,
                     "output_artifact_id": output_artifact.id,
-                    "output_image_sha256": output_artifact.content_sha256,
                     "producer_job_id": str(job_payload.get("producer_job_id") or ""),
                     "status": "redrawn",
                     "aspect_ratio_integrity": aspect_ratio_integrity(
@@ -914,7 +1052,10 @@ class FiguresService:
                 and approval.get("current_source_match")
                 and approval.get("current_output_match")
             )
-            policy_ok = canvas_policy_matches(row, integrity)
+            policy_ok = bool(
+                canvas_policy_matches(row, integrity)
+                or (approved and approval.get("manual_canvas_override"))
+            )
             if (
                 source_current
                 and output_current
@@ -1102,6 +1243,11 @@ class FiguresService:
         return {
             "project_id": project_id,
             "figure_candidates": public_figures,
+            "paper_display_labels": self._paper_display_labels(
+                principal,
+                project_id,
+                [str(row.get("paper_id") or "") for row in public_figures],
+            ),
             "redrawn_manifest": manifest,
             "revision": state.revision if state else 0,
             "status": state.status if state else "pending",
@@ -1119,7 +1265,13 @@ class FiguresService:
             "figure_type_options": [
                 {"value": "auto", "label": "Automatic"},
                 {"value": "mechanism-cycle", "label": "Mechanism"},
+                {"value": "simple-scheme", "label": "Simple reaction scheme"},
                 {"value": "reaction-scope", "label": "Reaction scope"},
+                {"value": "complex-multipanel", "label": "Complex multi-panel chemistry"},
+                {"value": "low-resolution", "label": "Low-resolution / thin-line chemistry"},
+                {"value": "colored-chemistry", "label": "Colored chemistry / remove decorative fills"},
+                {"value": "data-table", "label": "Data table"},
+                {"value": "scientific-plot", "label": "Scientific plot"},
                 {"value": "general-scientific", "label": "Overview"},
             ],
             "freshness": {
@@ -1150,6 +1302,7 @@ class FiguresService:
         if figure is None:
             raise WorkflowNotFound("Confirmed figure was not found.")
         _source, base_path = self._validate_candidate(principal, project_id, figure)
+        redrawn: dict[str, Any] | None = None
         if base_mode == "redrawn":
             payload = self.get(principal, project_id)
             manifest_rows = (payload.get("redrawn_manifest") or {}).get("figures") or []
@@ -1164,7 +1317,25 @@ class FiguresService:
             _output, base_path = self._artifact_path(
                 principal, project_id, redrawn["output_artifact_id"]
             )
-        svg = build_full_vector_svg(base_path)
+        reused_saved_workspace = False
+        width, height = image_size(base_path)
+        svg = ""
+        if base_mode == "redrawn" and redrawn:
+            saved_svg_id = str(redrawn.get("editable_svg_artifact_id") or "")
+            if saved_svg_id:
+                try:
+                    _saved_svg_artifact, saved_svg_path = self._artifact_path(
+                        principal, project_id, saved_svg_id
+                    )
+                    saved_svg = saved_svg_path.read_text(encoding="utf-8")
+                    validate_svg_markup(saved_svg, require_full_trace=True)
+                    width, height = svg_workspace_size(saved_svg)
+                    svg = saved_svg
+                    reused_saved_workspace = True
+                except (OSError, UnicodeError, ValueError, WorkflowNotFound):
+                    svg = ""
+        if not svg:
+            svg = build_full_vector_svg(base_path)
         run = self.repository.create_stage_run(
             principal.user_id,
             project_id,
@@ -1188,7 +1359,6 @@ class FiguresService:
             make_current=False,
             metadata={"base_mode": base_mode},
         )
-        width, height = image_size(base_path)
         return {
             "figure_id": figure_id,
             "base_mode": base_mode,
@@ -1198,6 +1368,7 @@ class FiguresService:
             "full_svg_url": artifact_url(artifact.id),
             "full_svg": artifact_url(artifact.id),
             "contains_embedded_raster": False,
+            "reused_saved_workspace": reused_saved_workspace,
         }
 
     @staticmethod
@@ -1250,6 +1421,7 @@ class FiguresService:
             str(figure.get("source_image_artifact_id") or ""),
         )
         base_path = source_path
+        existing_workspace_size: tuple[int, int] | None = None
         if base_mode == "redrawn":
             current = self.get(principal, project_id)
             current_rows = (current.get("redrawn_manifest") or {}).get("figures") or []
@@ -1262,6 +1434,17 @@ class FiguresService:
             _base_artifact, base_path = self._artifact_path(
                 principal, project_id, current_row["output_artifact_id"]
             )
+            saved_svg_id = str(current_row.get("editable_svg_artifact_id") or "")
+            if saved_svg_id:
+                try:
+                    _saved_svg_artifact, saved_svg_path = self._artifact_path(
+                        principal, project_id, saved_svg_id
+                    )
+                    saved_svg = saved_svg_path.read_text(encoding="utf-8")
+                    validate_svg_markup(saved_svg, require_full_trace=True)
+                    existing_workspace_size = svg_workspace_size(saved_svg)
+                except (OSError, UnicodeError, ValueError, WorkflowNotFound):
+                    existing_workspace_size = None
         if not svg:
             try:
                 svg = append_operation_overlays(
@@ -1269,7 +1452,7 @@ class FiguresService:
                 )
             except ValueError as exc:
                 raise WorkflowValidationError(str(exc)) from exc
-        base_size = image_size(base_path)
+        base_size = existing_workspace_size or image_size(base_path)
         submitted_size = png_size(png)
         try:
             crop = validated_content_crop(svg, base_size, submitted_size)
@@ -1358,9 +1541,7 @@ class FiguresService:
                 **figure,
                 "figure_id": figure_id,
                 "source_artifact_id": source_artifact.id,
-                "source_image_sha256": source_artifact.content_sha256,
                 "output_artifact_id": output_artifact.id,
-                "output_image_sha256": output_artifact.content_sha256,
                 "editable_svg_artifact_id": svg_artifact.id,
                 "audit_artifact_id": audit_artifact.id,
                 "render_mode": "manual-arrow-edit",
@@ -1437,7 +1618,7 @@ class FiguresService:
         project_id: str,
         figure_ids: set[str],
         *,
-        strict_canvas: bool,
+        allow_canvas_override: bool,
     ) -> tuple[
         dict[str, Any],
         list[str],
@@ -1497,21 +1678,16 @@ class FiguresService:
                 image_size(source_path), image_size(output_path)
             )
             crop = (row.get("manual_edit") or {}).get("canvas_crop") or {}
-            manual_override = bool(
+            verified_crop_override = bool(
                 row.get("render_mode") == "manual-arrow-edit"
                 and integrity.get("status") == "failed"
                 and crop.get("status") == "verified"
             )
+            canvas_warning = integrity.get("status") != "pass"
+            manual_override = bool(
+                verified_crop_override or (allow_canvas_override and canvas_warning)
+            )
             if integrity.get("status") != "pass" and not manual_override:
-                if strict_canvas:
-                    raise FigureCanvasApprovalBlocked(
-                        "The redraw canvas aspect ratio does not match the selected source. Use the SVG Crop Canvas workflow or redraw it before approval.",
-                        details={
-                            "figure_id": figure_id,
-                            "source_size": integrity.get("source_size"),
-                            "output_size": integrity.get("output_size"),
-                        },
-                    )
                 skipped.append(figure_id)
                 continue
             approval_id = str(uuid.uuid4())
@@ -1577,7 +1753,12 @@ class FiguresService:
                 approval_events,
                 expected_revision,
                 expected_manifest_id,
-            ) = self._approve_rows(principal, project_id, {figure_id}, strict_canvas=True)
+            ) = self._approve_rows(
+                principal,
+                project_id,
+                {figure_id},
+                allow_canvas_override=True,
+            )
             if figure_id in already_approved:
                 state = self.repository.get_stage_state(
                     principal.user_id, project_id, "figures"
@@ -1631,7 +1812,12 @@ class FiguresService:
                 approval_events,
                 expected_revision,
                 expected_manifest_id,
-            ) = self._approve_rows(principal, project_id, all_ids, strict_canvas=False)
+            ) = self._approve_rows(
+                principal,
+                project_id,
+                all_ids,
+                allow_canvas_override=True,
+            )
             if not approved:
                 return {
                     "approved_count": 0,

@@ -102,6 +102,32 @@ def validate_svg_markup(markup: str, *, require_full_trace: bool = False) -> Non
             raise ValueError("Full SVG cannot contain an embedded raster image")
 
 
+def svg_workspace_size(markup: str) -> tuple[int, int]:
+    """Return the source-pixel canvas represented by a saved editor SVG."""
+
+    try:
+        root = ElementTree.fromstring(markup)
+    except ElementTree.ParseError as exc:
+        raise ValueError("Figure editor SVG is not well formed") from exc
+    if root.tag.rsplit("}", 1)[-1].casefold() != "svg":
+        raise ValueError("Figure editor content must have an SVG root")
+
+    def dimension(name: str, fallback: str) -> int:
+        raw = str(root.attrib.get(name) or root.attrib.get(fallback) or "").strip()
+        match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(?:px)?", raw, re.IGNORECASE)
+        if not match:
+            raise ValueError(f"SVG workspace dimension {name} is missing or invalid")
+        value = round(float(match.group(1)))
+        if value < 1:
+            raise ValueError(f"SVG workspace dimension {name} is missing or invalid")
+        return value
+
+    return (
+        dimension("data-source-width", "data-original-width"),
+        dimension("data-source-height", "data-original-height"),
+    )
+
+
 def validated_content_crop(
     svg_markup: str,
     source_size: tuple[int, int],
@@ -185,26 +211,90 @@ def build_full_vector_svg(source_path: Path) -> str:
             )
         width, height = rgb.size
         pixels = rgb.load()
-        paths: list[str] = []
+        runs: list[tuple[int, int, int, tuple[int, int, int]]] = []
+        parents: list[int] = []
+
+        def find(index: int) -> int:
+            while parents[index] != index:
+                parents[index] = parents[parents[index]]
+                index = parents[index]
+            return index
+
+        def union(left: int, right: int) -> None:
+            left_root = find(left)
+            right_root = find(right)
+            if left_root == right_root:
+                return
+            if left_root < right_root:
+                parents[right_root] = left_root
+            else:
+                parents[left_root] = right_root
+
+        previous_row: list[int] = []
         for y in range(height):
             x = 0
+            current_row: list[int] = []
             while x < width:
                 red, green, blue = pixels[x, y]
                 if min(red, green, blue) >= 248:
                     x += 1
                     continue
-                quantized = (red // 16 * 16, green // 16 * 16, blue // 16 * 16)
+                # Eight levels per channel preserve chemistry colors while keeping
+                # the browser DOM small enough for interactive hit testing.
+                quantized = (red // 32 * 32, green // 32 * 32, blue // 32 * 32)
                 start = x
                 x += 1
                 while x < width:
                     next_pixel = pixels[x, y]
-                    next_quantized = tuple(channel // 16 * 16 for channel in next_pixel)
+                    next_quantized = tuple(channel // 32 * 32 for channel in next_pixel)
                     if min(next_pixel) >= 248 or next_quantized != quantized:
                         break
                     x += 1
-                paths.append(
-                    f'<path d="M{start} {y}h{x - start}v1h-{x - start}z" fill="{_color(quantized)}"/>'
-                )
+                index = len(runs)
+                runs.append((y, start, x, quantized))
+                parents.append(index)
+                if current_row and runs[current_row[-1]][2] >= start - 1:
+                    union(current_row[-1], index)
+                current_row.append(index)
+            previous_cursor = 0
+            for index in current_row:
+                _run_y, start, end, _run_color = runs[index]
+                while (
+                    previous_cursor < len(previous_row)
+                    and runs[previous_row[previous_cursor]][2] < start - 1
+                ):
+                    previous_cursor += 1
+                candidate_cursor = previous_cursor
+                while candidate_cursor < len(previous_row):
+                    previous_index = previous_row[candidate_cursor]
+                    _previous_y, previous_start, _previous_end, _previous_color = runs[
+                        previous_index
+                    ]
+                    if previous_start > end + 1:
+                        break
+                    union(index, previous_index)
+                    candidate_cursor += 1
+            previous_row = current_row
+        components: dict[int, dict[tuple[int, int, int], list[str]]] = {}
+        component_order: list[int] = []
+        for index, (y, start, end, quantized) in enumerate(runs):
+            root = find(index)
+            if root not in components:
+                components[root] = {}
+                component_order.append(root)
+            components[root].setdefault(quantized, []).append(
+                f"M{start} {y}h{end - start}v1h-{end - start}z"
+            )
+        trace_objects: list[str] = []
+        for object_index, root in enumerate(component_order):
+            paths = "".join(
+                f'<path d="{"".join(commands)}" fill="{_color(color)}"/>'
+                for color, commands in components[root].items()
+            )
+            trace_objects.append(
+                f'<g data-trace-object-id="trace-{object_index}" '
+                f'data-vector-kind="base-trace-object">{paths}</g>'
+            )
         title = html.escape("Full-image chemistry figure vector trace", quote=False)
         svg = (
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
@@ -212,7 +302,7 @@ def build_full_vector_svg(source_path: Path) -> str:
             f'data-original-height="{original_height}" data-source-width="{original_width}" '
             f'data-source-height="{original_height}" data-content-crop="false">'
             f"<title>{title}</title><rect width=\"{width}\" height=\"{height}\" fill=\"#fff\"/>"
-            f'<g id="full-image-vector-trace">{"".join(paths)}</g>'
+            f'<g id="full-image-vector-trace">{"".join(trace_objects)}</g>'
             '<g id="editable-arrow-overlays"></g></svg>'
         )
     if len(svg.encode("utf-8")) > MAX_EDITOR_BYTES:

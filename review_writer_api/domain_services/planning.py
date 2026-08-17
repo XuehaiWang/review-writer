@@ -3,26 +3,42 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import re
+import sys
+import tempfile
 import threading
 import uuid
-import zipfile
-from html import unescape
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
+
 from review_writer_api.artifact_service import ArtifactService
-from review_writer_api.database import utc_now
+from review_writer_api.credentials import (
+    ProviderKind,
+    ProviderSettingsError,
+    ProviderSettingsService,
+)
+from review_writer_api.database import database_session, utc_now
 from review_writer_api.errors import (
     WorkflowConflict,
     WorkflowNotFound,
     WorkflowValidationError,
 )
 from review_writer_api.security import Permission, Principal
+from review_writer_api.scientific_runner import (
+    SENSITIVE_ENVIRONMENT_KEY,
+    ScientificRunner,
+)
+from review_writer_api.workflow_models import LibraryPaper
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
+from review_writer_core.taxonomy import TaxonomyConfigurationError, load_taxonomy_rules
+from review_writer_core.review_structure import (
+    assign_primary_paper_sections,
+    infer_section_role,
+)
 
 
 MATRIX_LOGICAL_NAME = "matrix/literature_matrix.json"
@@ -36,16 +52,22 @@ OUTLINE_STYLES: dict[str, dict[str, str]] = {
         "en": "Substrate-classified",
         "zh": "按底物分类",
         "axis": "substrate classes and scope",
+        "tag_key": "substrate",
+        "introduction": "define the review scope and explain why substrate class is the primary comparison axis",
     },
     "catalyst": {
         "en": "Catalyst and method-classified",
         "zh": "按催化剂与方法分类",
         "axis": "catalysts, methods, and operating principles",
+        "tag_key": "catalyst_or_method",
+        "introduction": "compare how catalysts or methods shape outcomes, evidence quality, and applicability",
     },
     "reaction": {
         "en": "Reaction-type-classified",
         "zh": "按反应类型分类",
         "axis": "transformation and mechanistic strategy",
+        "tag_key": "reaction_type",
+        "introduction": "organize the literature by transformation logic and mechanistic strategy",
     },
 }
 
@@ -65,18 +87,45 @@ def _outline_sections(markdown: str) -> list[dict[str, Any]]:
         line = raw_line.strip()
         heading = re.match(r"^##\s+(?:\d+[.)]\s*)?(.+?)\s*$", line)
         if heading:
-            current = {"title": heading.group(1).strip(), "paper_ids": []}
+            title = heading.group(1).strip()
+            current = {
+                "title": title,
+                "paper_ids": [],
+                "section_role": infer_section_role(title),
+            }
             sections.append(current)
             continue
+        if current is not None and line.casefold().startswith("section role:"):
+            role = line.split(":", 1)[1].strip().casefold()
+            if role in {"introduction", "body", "conclusion", "references"}:
+                current["section_role"] = role
+            continue
         if current is not None and line.casefold().startswith("assigned papers:"):
-            current["paper_ids"] = list(dict.fromkeys(re.findall(r"\b[A-Za-z]+\d+\b", line)))
+            assigned = line.split(":", 1)[1].strip().rstrip(".。")
+            current["paper_ids"] = list(
+                dict.fromkeys(
+                    paper_id.strip()
+                    for paper_id in re.split(r"[,，;；]", assigned)
+                    if paper_id.strip()
+                )
+            )
     return sections
 
 
 class PlanningService:
-    def __init__(self, repository: WorkflowRepository, artifacts: ArtifactService):
+    def __init__(
+        self,
+        repository: WorkflowRepository,
+        artifacts: ArtifactService,
+        *,
+        scientific_runner: ScientificRunner | None = None,
+        provider_settings: ProviderSettingsService | None = None,
+    ):
         self.repository = repository
         self.artifacts = artifacts
+        self.scientific_runner = scientific_runner
+        self.provider_settings = provider_settings
+        self.root = Path(__file__).resolve().parents[2]
         self._write_lock = threading.RLock()
 
     def _owned_project(self, principal: Principal, project_id: str):
@@ -85,6 +134,21 @@ class PlanningService:
         if project is None:
             raise WorkflowNotFound("Project not found.")
         return project
+
+    @staticmethod
+    def _reference_candidate_is_isolated(candidate: Any) -> bool:
+        if not isinstance(candidate, dict):
+            return False
+        firewall = candidate.get("content_firewall")
+        return bool(
+            candidate.get("analysis_mode") == "ai_style_only_transfer_v2"
+            and candidate.get("content_source") == "current_matrix_only"
+            and candidate.get("reference_content_reused") is False
+            and isinstance(firewall, dict)
+            and firewall.get("transfer_received_reference_text") is False
+            and firewall.get("all_heading_levels_content_source")
+            == "current_matrix_only"
+        )
 
     def _read_json(
         self,
@@ -158,41 +222,221 @@ class PlanningService:
         return matrix, artifact
 
     @staticmethod
-    def _outline_document(style: str, rows: list[dict[str, Any]]) -> str:
+    def _tag_value(value: Any) -> str:
+        if isinstance(value, dict) and "value" in value:
+            value = value.get("value")
+        if isinstance(value, (list, tuple)):
+            value = next(
+                (
+                    item
+                    for item in value
+                    if str(item or "").strip()
+                    and str(item).strip().casefold()
+                    not in {"not specified", "none", "unknown"}
+                ),
+                "",
+            )
+        normalized = str(value or "").strip()
+        return (
+            ""
+            if normalized.casefold()
+            in {"not specified", "none", "unknown", "n/a"}
+            else normalized
+        )
+
+    def _outline_sources(
+        self,
+        principal: Principal,
+        rows: list[dict[str, Any]],
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+        paper_ids = _paper_ids(rows)
+        if not paper_ids:
+            return {}, {}
+        with database_session(self.repository.session_factory) as session:
+            records = session.scalars(
+                select(LibraryPaper).where(
+                    LibraryPaper.user_id == uuid.UUID(principal.user_id),
+                    LibraryPaper.paper_id.in_(tuple(paper_ids)),
+                    LibraryPaper.status == "active",
+                    LibraryPaper.deleted_at.is_(None),
+                )
+            ).all()
+        tags_by_paper: dict[str, dict[str, Any]] = {}
+        text_by_paper: dict[str, str] = {}
+        rows_by_id = {str(row.get("paper_id") or ""): row for row in rows}
+        for record in records:
+            metadata = (
+                record.metadata_json if isinstance(record.metadata_json, dict) else {}
+            )
+            structured = metadata.get("structured_tags")
+            if isinstance(structured, dict) and "value" in structured:
+                structured = structured.get("value")
+            tags = dict(structured) if isinstance(structured, dict) else {}
+            if isinstance(record.tags_json, dict):
+                tags.update(record.tags_json)
+            row = rows_by_id.get(record.paper_id) or {}
+            # Project Tags are scoped to the active project. Explicit legacy
+            # confirmations and the current automatic Discovery assessment
+            # both take precedence over reusable Library metadata without
+            # mutating the Library record.
+            project_tags = row.get("project_tags")
+            if (
+                row.get("project_tag_review_status") in {"confirmed", "automatic"}
+                and isinstance(project_tags, dict)
+            ):
+                tags.update(project_tags)
+            tags_by_paper[record.paper_id] = tags
+            parts = [
+                row.get("title"),
+                row.get("abstract"),
+                row.get("main_content"),
+                " ".join(str(item) for item in (row.get("keywords") or [])),
+                record.title,
+                " ".join(str(item) for item in (record.keywords_json or [])),
+            ]
+            text_by_paper[record.paper_id] = " ".join(
+                str(part) for part in parts if str(part or "").strip()
+            ).casefold()
+        return tags_by_paper, text_by_paper
+
+    @staticmethod
+    def _semantic_outline_groups(
+        rows: list[dict[str, Any]],
+        text_by_paper: dict[str, str],
+        *,
+        tag_key: str,
+        taxonomy_profile: str,
+    ) -> dict[str, list[str]]:
+        try:
+            rules = [
+                (label, aliases)
+                for label, category, aliases in load_taxonomy_rules(
+                    Path.cwd(), profile=taxonomy_profile
+                )
+                if category == tag_key
+            ]
+        except TaxonomyConfigurationError:
+            return {}
+        groups: dict[str, list[str]] = {}
+        other: list[str] = []
+        for row in rows:
+            paper_id = str(row.get("paper_id") or "").strip()
+            if not paper_id:
+                continue
+            text = text_by_paper.get(paper_id, "")
+            ranked: list[tuple[int, int, str]] = []
+            for index, (label, aliases) in enumerate(rules):
+                score = 0
+                for term in (label, *aliases):
+                    normalized = str(term or "").strip().casefold()
+                    if not normalized:
+                        continue
+                    pattern = rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])"
+                    if re.search(pattern, text):
+                        score = max(
+                            score,
+                            len(normalized.split()) * 10 + len(normalized),
+                        )
+                ranked.append((score, -index, label))
+            best = max(ranked, default=(0, 0, ""))
+            if best[0] > 0:
+                groups.setdefault(best[2], []).append(paper_id)
+            else:
+                other.append(paper_id)
+        if other:
+            groups["Other or unspecified"] = other
+        return groups
+
+    def _outline_groups(
+        self,
+        rows: list[dict[str, Any]],
+        tags_by_paper: dict[str, dict[str, Any]],
+        text_by_paper: dict[str, str],
+        *,
+        tag_key: str,
+        taxonomy_profile: str,
+    ) -> dict[str, list[str]]:
+        groups: dict[str, list[str]] = {}
+        other: list[str] = []
+        for row in rows:
+            paper_id = str(row.get("paper_id") or "").strip()
+            if not paper_id:
+                continue
+            label = self._tag_value(
+                (tags_by_paper.get(paper_id) or {}).get(tag_key)
+            )
+            if label:
+                groups.setdefault(label, []).append(paper_id)
+            else:
+                other.append(paper_id)
+        if other:
+            groups["Other or unspecified"] = other
+        meaningful = {
+            label: paper_ids
+            for label, paper_ids in groups.items()
+            if label != "Other or unspecified" and paper_ids
+        }
+        largest_share = max(
+            (len(paper_ids) for paper_ids in meaningful.values()), default=0
+        ) / max(1, len(rows))
+        if len(rows) < 6 or (len(meaningful) >= 2 and largest_share < 0.85):
+            return groups
+        semantic = self._semantic_outline_groups(
+            rows,
+            text_by_paper,
+            tag_key=tag_key,
+            taxonomy_profile=taxonomy_profile,
+        )
+        semantic_meaningful = [
+            paper_ids
+            for label, paper_ids in semantic.items()
+            if label != "Other or unspecified" and paper_ids
+        ]
+        return semantic if len(semantic_meaningful) >= 2 else groups
+
+    def _outline_document(
+        self,
+        style: str,
+        rows: list[dict[str, Any]],
+        *,
+        tags_by_paper: dict[str, dict[str, Any]],
+        text_by_paper: dict[str, str],
+        taxonomy_profile: str,
+    ) -> str:
         definition = OUTLINE_STYLES[style]
-        ids = _paper_ids(rows)
-        introduction = ids[: min(6, len(ids))]
-        midpoint = max(1, (len(ids) + 1) // 2)
-        first, second = ids[:midpoint], ids[midpoint:]
+        groups = self._outline_groups(
+            rows,
+            tags_by_paper,
+            text_by_paper,
+            tag_key=definition["tag_key"],
+            taxonomy_profile=taxonomy_profile,
+        )
         lines = [
             "# Selected Outline",
             "",
             f"Primary structure: {definition['en']}.",
             "This working outline remains fully editable before Blueprint generation.",
             "",
-            "## 1. Introduction",
-            f"Assigned papers: {', '.join(introduction)}.",
-            "Purpose: define scope, terminology, and the evidence-comparison criteria.",
-            "",
-            f"## 2. Evidence organized by {definition['axis']}",
-            f"Assigned papers: {', '.join(first)}.",
-            f"Purpose: compare the literature through {definition['axis']}.",
+            "## Introduction",
+            "Section role: introduction",
+            f"Purpose: {definition['introduction']}.",
             "",
         ]
-        if second:
+        for index, (label, paper_ids) in enumerate(groups.items(), start=1):
             lines.extend(
                 [
-                    "## 3. Complementary systems and limitations",
-                    f"Assigned papers: {', '.join(second)}.",
-                    "Purpose: contrast complementary systems, evidence boundaries, and limitations.",
+                    f"## {index}. {label}",
+                    "Section role: body",
+                    f"Assigned papers: {', '.join(paper_ids)}.",
+                    f"Purpose: compare the selected papers within this {definition['axis']} category.",
                     "",
                 ]
             )
         lines.extend(
             [
-                "## 4. Cross-category comparison and conclusion",
-                f"Assigned papers: {', '.join(ids)}.",
-                "Purpose: synthesize trends, unresolved questions, and future directions.",
+                "## Cross-category comparison and conclusion",
+                "Section role: conclusion",
+                "Purpose: compare the main systems, outcomes, evidence boundaries, limitations, and future directions.",
                 "",
             ]
         )
@@ -210,7 +454,13 @@ class PlanningService:
             raise WorkflowValidationError(
                 "Outline Markdown needs at least one level-2 heading (##)."
             )
-        missing = [section["title"] for section in sections if not section["paper_ids"]]
+        missing = [
+            section["title"]
+            for section in sections
+            if not section["paper_ids"]
+            and section.get("section_role")
+            not in {"introduction", "conclusion", "references"}
+        ]
         if missing:
             raise WorkflowValidationError(
                 "Every major section must assign at least one paper.",
@@ -252,6 +502,8 @@ class PlanningService:
             principal.user_id, project_id, "blueprint"
         )
         rows = matrix["rows"]
+        project = self._owned_project(principal, project_id)
+        tags_by_paper, text_by_paper = self._outline_sources(principal, rows)
         selected_ids: list[str] = []
         for group in (discovery or {}).get("results") or []:
             if not isinstance(group, dict) or group.get("keep") is False:
@@ -265,13 +517,9 @@ class PlanningService:
                     paper_id = str(row.get("paper_id") or "")
                     if paper_id and paper_id not in selected_ids:
                         selected_ids.append(paper_id)
-        selection_fingerprint = hashlib.sha256(
-            "\n".join(sorted(selected_ids)).encode("utf-8")
-        ).hexdigest()
         matrix_sync = dict(matrix.get("sync") or {})
         selection_current = bool(
             selected_ids
-            and matrix_sync.get("selection_fingerprint") == selection_fingerprint
             and set(_paper_ids(rows)) == set(selected_ids)
         )
         generated = [
@@ -279,7 +527,13 @@ class PlanningService:
                 "candidate_id": style,
                 "outline_style": style,
                 "labels": {"en": definition["en"], "zh": definition["zh"]},
-                "outline_md": self._outline_document(style, rows),
+                "outline_md": self._outline_document(
+                    style,
+                    rows,
+                    tags_by_paper=tags_by_paper,
+                    text_by_paper=text_by_paper,
+                    taxonomy_profile=project.taxonomy_profile,
+                ),
                 "source": "builtin",
             }
             for style, definition in OUTLINE_STYLES.items()
@@ -295,7 +549,12 @@ class PlanningService:
                     "artifact_id": outline_artifact.id,
                 }
             )
-        reference_candidates = list((references or {}).get("candidates") or [])
+        all_reference_candidates = list((references or {}).get("candidates") or [])
+        reference_candidates = [
+            candidate
+            for candidate in all_reference_candidates
+            if self._reference_candidate_is_isolated(candidate)
+        ]
         return {
             "project_id": project_id,
             "topic": str(matrix.get("review_topic") or (discovery or {}).get("topic") or ""),
@@ -306,7 +565,6 @@ class PlanningService:
             "discovery_selection": {
                 "selected_paper_count": len(selected_ids),
                 "selected_paper_ids": selected_ids,
-                "selection_fingerprint": selection_fingerprint,
                 "selection_current": selection_current,
             },
             "selected_outline_md": str((outline or {}).get("outline_md") or ""),
@@ -317,6 +575,8 @@ class PlanningService:
             ),
             "outline_candidates": generated + reference_candidates,
             "reference_outline_candidates": reference_candidates,
+            "legacy_reference_outline_count": len(all_reference_candidates)
+            - len(reference_candidates),
             "section_blueprint": blueprint,
             "blueprint_artifact_id": blueprint_artifact.id if blueprint_artifact else None,
             "blueprint_revision": blueprint_state.revision if blueprint_state else 0,
@@ -420,6 +680,7 @@ class PlanningService:
         principal.require(Permission.PROJECT_WRITE)
         matrix, matrix_artifact = self._matrix(principal, project_id)
         rows = matrix["rows"]
+        project = self._owned_project(principal, project_id)
         matrix_ids = set(_paper_ids(rows))
         style = str(outline_style or "").strip().casefold()
         if style == "custom" and not manual:
@@ -440,6 +701,10 @@ class PlanningService:
             )
             if not isinstance(candidate, dict):
                 raise WorkflowNotFound("Reference outline candidate was not found.")
+            if not self._reference_candidate_is_isolated(candidate):
+                raise WorkflowConflict(
+                    "This legacy reference outline did not pass content isolation. Upload the reference again to learn format only."
+                )
             markdown = self._validate_outline(
                 str(candidate.get("outline_md") or ""), matrix_ids
             )
@@ -452,7 +717,14 @@ class PlanningService:
         else:
             if style not in OUTLINE_STYLES:
                 raise WorkflowValidationError("Unknown outline style.")
-            markdown = self._outline_document(style, rows)
+            tags_by_paper, text_by_paper = self._outline_sources(principal, rows)
+            markdown = self._outline_document(
+                style,
+                rows,
+                tags_by_paper=tags_by_paper,
+                text_by_paper=text_by_paper,
+                taxonomy_profile=project.taxonomy_profile,
+            )
             complete = True
         payload = {
             "outline_style": style,
@@ -463,6 +735,36 @@ class PlanningService:
             "source_matrix_artifact_id": matrix_artifact.id,
             "saved_at": utc_now().isoformat(),
         }
+        current_outline, current_outline_artifact = self._read_json(
+            principal,
+            project_id,
+            OUTLINE_LOGICAL_NAME,
+            required=False,
+        )
+        current_state = self.repository.get_stage_state(
+            principal.user_id, project_id, "matrix"
+        )
+        if (
+            current_outline_artifact is not None
+            and isinstance(current_outline, dict)
+            and current_state is not None
+            and current_state.revision == int(revision)
+            and str(current_outline.get("outline_style") or "") == style
+            and str(current_outline.get("outline_md") or "") == markdown
+            and bool(current_outline.get("outline_complete")) == complete
+            and str(current_outline.get("source_matrix_artifact_id") or "")
+            == matrix_artifact.id
+        ):
+            return {
+                "project_id": project_id,
+                "outline_style": style,
+                "selected_outline_md": markdown,
+                "outline_complete": complete,
+                "blueprint_pending": complete,
+                "outline_artifact_id": current_outline_artifact.id,
+                "matrix_revision": current_state.revision,
+                "unchanged": True,
+            }
         with self._write_lock:
             published, run = self._publish_files(
                 principal,
@@ -498,6 +800,111 @@ class PlanningService:
             "matrix_revision": state.revision,
         }
 
+    def _analyze_reference_document(
+        self,
+        principal: Principal,
+        project_id: str,
+        *,
+        candidate_id: str,
+        safe_name: str,
+        raw: bytes,
+        matrix: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.scientific_runner is None:
+            raise WorkflowValidationError(
+                "Reference-format analysis is unavailable in this deployment."
+            )
+        environment: dict[str, str] = {}
+        if self.provider_settings is not None:
+            try:
+                environment = self.provider_settings.runtime_environment(
+                    principal,
+                    provider_kinds=(ProviderKind.TEXT,),
+                )
+            except ProviderSettingsError as exc:
+                raise WorkflowValidationError(
+                    "Configure and enable the text provider before analyzing a reference review."
+                ) from exc
+            if not environment.get("OPENAI_API_KEY"):
+                raise WorkflowValidationError(
+                    "Configure and enable the text provider before analyzing a reference review."
+                )
+        script = (
+            self.root
+            / "skills"
+            / "review-reference-outline-template"
+            / "scripts"
+            / "analyze_reference_review.py"
+        )
+        if not script.is_file():
+            raise WorkflowValidationError(
+                "The reference-format analysis skill is not installed."
+            )
+        staging_parent = self.artifacts.workspace_manager.trusted_user_directory(
+            principal.user_id,
+            ".review-writer",
+            "reference-outline-analysis",
+        )
+        with tempfile.TemporaryDirectory(
+            prefix=f"{candidate_id}-", dir=staging_parent
+        ) as temporary:
+            staging = Path(temporary).resolve()
+            source = staging / safe_name
+            matrix_path = staging / "literature_matrix.json"
+            output_path = staging / "candidate.json"
+            source.write_bytes(raw)
+            matrix_path.write_text(
+                json.dumps(matrix, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            normal_environment = {
+                key: value
+                for key, value in environment.items()
+                if not SENSITIVE_ENVIRONMENT_KEY.search(key)
+            }
+            secret_environment = {
+                key: value
+                for key, value in environment.items()
+                if SENSITIVE_ENVIRONMENT_KEY.search(key)
+            }
+            self.scientific_runner.run(
+                (
+                    sys.executable,
+                    str(script),
+                    "--input",
+                    str(source),
+                    "--matrix",
+                    str(matrix_path),
+                    "--output",
+                    str(output_path),
+                    "--project-id",
+                    project_id,
+                    "--candidate-id",
+                    candidate_id,
+                ),
+                cwd=self.root,
+                staging_directory=staging,
+                expected_outputs=("candidate.json",),
+                env=normal_environment,
+                secret_env=secret_environment,
+                timeout_seconds=900,
+            )
+            try:
+                result = json.loads(output_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise WorkflowConflict(
+                    "Reference-format analysis returned an unreadable result."
+                ) from exc
+        if not isinstance(result, dict):
+            raise WorkflowConflict(
+                "Reference-format analysis returned an invalid result."
+            )
+        if not self._reference_candidate_is_isolated(result):
+            raise WorkflowConflict(
+                "Reference analysis failed the content-isolation gate; the uploaded review was not added."
+            )
+        return result
+
     def register_reference(
         self,
         principal: Principal,
@@ -524,67 +931,20 @@ class PlanningService:
         if len(raw) > 30 * 1024 * 1024:
             raise WorkflowValidationError("Uploaded reference file exceeds 30 MB.")
         matrix, _matrix_artifact = self._matrix(principal, project_id)
-        if suffix in {".md", ".txt"}:
-            outline_text = raw.decode("utf-8", errors="replace")
-        elif suffix == ".docx":
-            try:
-                from io import BytesIO
-
-                with zipfile.ZipFile(BytesIO(raw)) as archive:
-                    xml = archive.read("word/document.xml").decode(
-                        "utf-8", errors="ignore"
-                    )
-            except (OSError, KeyError, zipfile.BadZipFile) as exc:
-                raise WorkflowValidationError("The DOCX reference is unreadable.") from exc
-            outline_text = unescape(
-                re.sub(r"<[^>]+>", "", re.sub(r"</w:p>", "\n", xml))
-            )
-        else:
-            try:
-                from io import BytesIO
-                from pypdf import PdfReader
-
-                outline_text = "\n".join(
-                    page.extract_text() or "" for page in PdfReader(BytesIO(raw)).pages
-                )
-            except Exception as exc:
-                raise WorkflowValidationError("The PDF reference is unreadable.") from exc
         matrix_ids = _paper_ids(matrix["rows"])
-        try:
-            outline_text = self._validate_outline(outline_text, set(matrix_ids))
-            analysis_mode = "provided_outline"
-        except WorkflowValidationError:
-            headings: list[str] = []
-            for raw_line in outline_text.splitlines():
-                value = re.sub(r"\s+", " ", raw_line).strip()
-                match = re.match(
-                    r"^(?:#{1,6}\s+|\d+(?:\.\d+){0,3}[.)]?\s+|[IVXLC]+[.)]\s+)(.+?)$",
-                    value,
-                    flags=re.IGNORECASE,
-                )
-                if match:
-                    title = match.group(1).strip(" -.:;")
-                    if title and title not in headings:
-                        headings.append(title)
-            headings = headings[: max(1, min(20, len(matrix_ids)))]
-            if not headings:
-                headings = ["Reference review organization"]
-            groups = [[] for _heading in headings]
-            for index, paper_id in enumerate(matrix_ids):
-                groups[index % len(groups)].append(paper_id)
-            lines = ["# Reference-derived Outline", ""]
-            for index, (heading, assigned) in enumerate(zip(headings, groups), start=1):
-                lines.extend(
-                    [
-                        f"## {index}. {heading}",
-                        f"Assigned papers: {', '.join(assigned)}.",
-                        "Purpose: adapt this reference-review section to the current Matrix evidence.",
-                        "",
-                    ]
-                )
-            outline_text = self._validate_outline("\n".join(lines), set(matrix_ids))
-            analysis_mode = "heading_extraction"
         candidate_id = f"reference-{uuid.uuid4().hex[:12]}"
+        analysis = self._analyze_reference_document(
+            principal,
+            project_id,
+            candidate_id=candidate_id,
+            safe_name=safe_name,
+            raw=raw,
+            matrix=matrix,
+        )
+        outline_text = self._validate_outline(
+            str(analysis.get("outline_md") or ""), set(matrix_ids)
+        )
+        analysis_mode = str(analysis.get("analysis_mode") or "")
         references, _references_artifact = self._read_json(
             principal, project_id, REFERENCE_INDEX_LOGICAL_NAME, required=False
         )
@@ -609,6 +969,13 @@ class PlanningService:
                 "source_name": safe_name,
                 "source_artifact_id": published[source_logical].id,
                 "analysis_mode": analysis_mode,
+                "content_source": "current_matrix_only",
+                "reference_content_reused": False,
+                "content_firewall": deepcopy(analysis.get("content_firewall") or {}),
+                "reference_structure_metrics": deepcopy(
+                    analysis.get("reference_structure_metrics") or {}
+                ),
+                "writing_style": deepcopy(analysis.get("writing_style") or {}),
                 "created_at": utc_now().isoformat(),
             }
             index["candidates"] = [*(index.get("candidates") or []), candidate]
@@ -659,8 +1026,14 @@ class PlanningService:
             )
         matrix_ids = set(_paper_ids(matrix["rows"]))
         parsed = _outline_sections(str(outline["outline_md"]))
-        sections: list[dict[str, Any]] = []
+        matrix_order = _paper_ids(matrix["rows"])
+        prepared = []
         for index, section in enumerate(parsed, start=1):
+            role = infer_section_role(
+                section.get("title"), section.get("section_role")
+            )
+            if role == "references":
+                continue
             assigned = list(dict.fromkeys(section["paper_ids"]))
             unknown = sorted(set(assigned) - matrix_ids)
             if unknown:
@@ -668,28 +1041,88 @@ class PlanningService:
                     "The selected outline refers to papers missing from the current Matrix.",
                     details={"paper_ids": unknown},
                 )
+            prepared.append(
+                {
+                    **section,
+                    "section_id": f"S{len(prepared) + 1:02d}",
+                    "section_role": role,
+                    "paper_ids": assigned,
+                }
+            )
+
+        normalized, primary_owner = assign_primary_paper_sections(
+            prepared, matrix_order
+        )
+        sections: list[dict[str, Any]] = []
+        for section in normalized:
+            role = section["section_role"]
+            primary = list(section["primary_papers"])
+            supporting = list(section["supporting_papers"])
+            evidence_papers = list(dict.fromkeys([*primary, *supporting]))
+            if role == "introduction":
+                thesis = (
+                    "Define the review scope, organizing question, and evidence landscape "
+                    "without repeating paper-level results from the body sections."
+                )
+                problem = "What problem, scope, and organizing logic does this review establish?"
+                claim = (
+                    "Frame the field and its evidence boundaries with brief representative "
+                    "citations; reserve detailed study descriptions for their primary sections."
+                )
+                figure_need = "None unless an overview figure materially clarifies the review scope."
+                target_words = 900
+            elif role == "conclusion":
+                thesis = (
+                    "Synthesize cross-section findings, limitations, and future directions "
+                    "without replaying individual paper summaries."
+                )
+                problem = "What conclusions hold across sections, and where do important limits remain?"
+                claim = (
+                    "Compare the body-section conclusions and cite prior evidence concisely; "
+                    "do not restate full methods, conditions, or paper-by-paper results."
+                )
+                figure_need = "None unless a cross-section synthesis figure adds new comparative value."
+                target_words = 900
+            else:
+                thesis = f"Synthesize evidence for {section['title']}."
+                problem = f"What does the current evidence establish about {section['title']}?"
+                if primary:
+                    claim = (
+                        f"Develop claim-centered synthesis from {len(primary)} primary papers, "
+                        "comparing convergent evidence, differences, and limitations."
+                    )
+                else:
+                    claim = (
+                        "Develop a cross-cutting comparison from previously introduced evidence "
+                        "without repeating full study descriptions."
+                    )
+                figure_need = f"Support the comparison in {section['title']} where source evidence permits."
+                target_words = max(700, 350 * max(1, len(primary)))
             sections.append(
                 {
-                    "section_id": f"S{index:02d}",
+                    "section_id": section["section_id"],
                     "title": section["title"],
-                    "section_thesis": f"Synthesize evidence for {section['title']}.",
-                    "review_problem": f"What does the current evidence establish about {section['title']}?",
-                    "major_papers": assigned,
-                    "review_claims": [
-                        {
-                            "claim": f"Compare the evidence, limitations, and implications across {len(assigned)} assigned papers."
-                        }
-                    ],
+                    "section_role": role,
+                    "section_thesis": thesis,
+                    "review_problem": problem,
+                    "major_papers": primary,
+                    "primary_papers": primary,
+                    "supporting_papers": supporting,
+                    "review_claims": [{"claim": claim}],
                     "figure_or_table_needs": [
                         {
                             "type": "Figure or table",
-                            "purpose": f"Support the comparison in {section['title']} where source evidence permits.",
-                            "candidate_papers": assigned[:3],
+                            "purpose": figure_need,
+                            "candidate_papers": primary[:3],
                         }
                     ],
-                    "avoid_patterns": ["Do not infer unsupported conditions or mechanisms."],
+                    "avoid_patterns": [
+                        "Do not infer unsupported conditions or mechanisms.",
+                        "Do not repeat a paper-level description already owned by another section.",
+                        "Do not organize prose as one title or one summary block per paper.",
+                    ],
                     "section_transition": "Connect this evidence to the next comparison axis.",
-                    "target_words": max(700, 350 * len(assigned)),
+                    "target_words": target_words,
                 }
             )
         if not sections:
@@ -710,10 +1143,17 @@ class PlanningService:
             "rule_pack": "general",
             "rule_pack_path": "references/rule_packs/general",
             "generated_at": utc_now().isoformat(),
+            "paper_assignment_policy": {
+                "mode": "single_primary_section_with_supporting_cross_references",
+                "primary_section_by_paper": primary_owner,
+                "introduction_and_conclusion_are_synthesis_only": True,
+            },
             "sections": sections,
             "section_writing_plan_md": "# Section Writing Plan\n\n"
             + "\n".join(
-                f"- {section['section_id']} {section['title']}: {len(section['major_papers'])} assigned papers."
+                f"- {section['section_id']} {section['title']}: "
+                f"{len(section['primary_papers'])} primary, "
+                f"{len(section['supporting_papers'])} supporting papers."
                 for section in sections
             )
             + "\n",

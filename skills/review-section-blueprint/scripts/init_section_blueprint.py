@@ -4,10 +4,30 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+_BOOTSTRAP_ROOT = next(
+    (
+        parent
+        for parent in Path(__file__).resolve().parents
+        if (parent / "review_writer_core").is_dir() and (parent / "skills").is_dir()
+    ),
+    None,
+)
+if _BOOTSTRAP_ROOT is None:
+    raise RuntimeError("Could not locate the Review Writer workspace")
+if str(_BOOTSTRAP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BOOTSTRAP_ROOT))
+
+from review_writer_core.review_structure import (  # noqa: E402
+    assign_primary_paper_sections,
+    infer_section_role,
+)
 
 
 STOPWORDS = {
@@ -102,15 +122,30 @@ def parse_outline_sections(text: str) -> list[dict[str, Any]]:
         if match:
             title = match.group(2).strip()
             if title:
-                current = {"section_id": f"sec{len(sections) + 1}", "title": title, "assigned_papers": []}
+                current = {
+                    "section_id": f"sec{len(sections) + 1}",
+                    "title": title,
+                    "section_role": infer_section_role(title),
+                    "assigned_papers": [],
+                }
                 sections.append(current)
             continue
         match = re.match(r"^##\s+(.+?)\s*$", line)
         if match:
             title = match.group(1).strip()
             if title:
-                current = {"section_id": f"sec{len(sections) + 1}", "title": title, "assigned_papers": []}
+                current = {
+                    "section_id": f"sec{len(sections) + 1}",
+                    "title": title,
+                    "section_role": infer_section_role(title),
+                    "assigned_papers": [],
+                }
                 sections.append(current)
+            continue
+        if current and line.lower().startswith("section role:"):
+            current["section_role"] = infer_section_role(
+                current.get("title"), line.split(":", 1)[1].strip()
+            )
             continue
         if current and line.lower().startswith("assigned papers:"):
             current["assigned_papers"] = re.findall(r"\b[A-Za-z]+\d+\b", line)
@@ -487,28 +522,49 @@ def build_section(
     rule_pack: str = "general",
 ) -> dict[str, Any]:
     title = section["title"]
-    assigned_ids = [str(paper_id) for paper_id in section.get("assigned_papers") or []]
+    role = infer_section_role(title, section.get("section_role"))
+    primary_source = (
+        section.get("primary_papers")
+        if "primary_papers" in section
+        else section.get("assigned_papers")
+    )
+    assigned_ids = [
+        str(paper_id)
+        for paper_id in primary_source or []
+    ]
+    supporting_ids = [
+        str(paper_id) for paper_id in section.get("supporting_papers") or []
+    ]
     papers_by_id = {str(paper.get("paper_id")): paper for paper in papers if paper.get("paper_id")}
     selected = [papers_by_id[paper_id] for paper_id in assigned_ids if paper_id in papers_by_id]
-    if not selected:
+    supporting = [
+        papers_by_id[paper_id]
+        for paper_id in supporting_ids
+        if paper_id in papers_by_id
+    ]
+    if not selected and not supporting and role == "body":
         selected = select_papers(title, papers, notes)
+    evidence_papers = selected or supporting
     paper_ids = [str(p.get("paper_id")) for p in selected if p.get("paper_id")]
     claim_count = 2 if title.lower() in {"introduction", "conclusion"} else min(4, max(2, len(selected) // 2 or 2))
     claims = []
     for idx in range(claim_count):
-        claim_papers = selected[idx * 2 : idx * 2 + 4] or selected[:4]
+        claim_papers = evidence_papers[idx * 2 : idx * 2 + 4] or evidence_papers[:4]
         claims.append(claim_from_papers(section["section_id"], title, idx, claim_papers, axes, rule_pack))
     dominant_logic = infer_logic(title, rule_pack)
     target_paragraphs, target_words = target_depth(title, len(selected))
     return {
         "section_id": section["section_id"],
         "title": title,
-        "section_thesis": section_thesis(title, selected, dominant_logic, rule_pack),
-        "review_problem": review_problem(title, selected, dominant_logic, rule_pack),
+        "section_role": role,
+        "section_thesis": section_thesis(title, evidence_papers, dominant_logic, rule_pack),
+        "review_problem": review_problem(title, evidence_papers, dominant_logic, rule_pack),
         "target_paragraphs": target_paragraphs,
         "target_words": target_words,
         "dominant_logic": dominant_logic,
         "major_papers": paper_ids,
+        "primary_papers": paper_ids,
+        "supporting_papers": supporting_ids,
         "review_claims": claims,
         "figure_or_table_needs": [
             {
@@ -540,6 +596,8 @@ def build_section(
         },
         "avoid_patterns": [
             "Do not summarize papers in chronological order unless chronology is the section logic.",
+            "Do not repeat a paper-level description already owned by another section.",
+            "Do not organize prose as one title or one summary block per paper.",
             (
                 "Do not collapse distinct activation modes into generic substitution language."
                 if rule_pack == "allenation"
@@ -607,10 +665,30 @@ def run(args: argparse.Namespace) -> int:
     effective_topic = configured_topic or topic
     rule_pack, rule_pack_path = select_rule_pack(skill_root, effective_topic or outline_text)
     notes = load_notes(notes_path)
+    assignment_input = [
+        {
+            **section,
+            "paper_ids": section.get("assigned_papers") or [],
+            "section_role": infer_section_role(
+                section.get("title"), section.get("section_role")
+            ),
+        }
+        for section in sections
+        if infer_section_role(section.get("title"), section.get("section_role"))
+        != "references"
+    ]
+    matrix_order = [
+        str(paper.get("paper_id"))
+        for paper in papers
+        if str(paper.get("paper_id") or "").strip()
+    ]
+    normalized_sections, primary_owner = assign_primary_paper_sections(
+        assignment_input, matrix_order
+    )
     blueprint_sections = []
-    for idx, section in enumerate(sections):
-        prev_title = sections[idx - 1]["title"] if idx > 0 else ""
-        next_title = sections[idx + 1]["title"] if idx + 1 < len(sections) else ""
+    for idx, section in enumerate(normalized_sections):
+        prev_title = normalized_sections[idx - 1]["title"] if idx > 0 else ""
+        next_title = normalized_sections[idx + 1]["title"] if idx + 1 < len(normalized_sections) else ""
         blueprint_sections.append(build_section(section, papers, axes, notes, prev_title, next_title, rule_pack))
 
     blueprint = {
@@ -622,6 +700,11 @@ def run(args: argparse.Namespace) -> int:
         "rule_pack_path": rule_pack_path,
         "created_at": utc_now(),
         "status": "draft_initialization_needs_semantic_review",
+        "paper_assignment_policy": {
+            "mode": "single_primary_section_with_supporting_cross_references",
+            "primary_section_by_paper": primary_owner,
+            "introduction_and_conclusion_are_synthesis_only": True,
+        },
         "sections": blueprint_sections,
     }
     out_json = stage_dir / "section_blueprint.json"

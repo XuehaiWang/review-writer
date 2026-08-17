@@ -533,6 +533,36 @@ def _legacy_library_path(review_root: Path, raw: Any, fallback: Path) -> tuple[s
     return relative, resolved, False
 
 
+def _legacy_library_directory(review_root: Path, raw: Any) -> Path | None:
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    recorded = Path(value)
+    portable_parts = PurePosixPath(value.replace("\\", "/")).parts
+    candidates = [recorded] if recorded.is_absolute() else [review_root / recorded]
+    folded = [part.casefold() for part in portable_parts]
+    for marker in ("review-library", "mineru-outputs"):
+        if marker in folded:
+            candidates.append(
+                review_root.joinpath(*portable_parts[folded.index(marker) :])
+            )
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            trusted = _trusted_migration_path(
+                review_root, candidate, label="MinerU extraction"
+            )
+        except WorkflowMigrationError:
+            continue
+        if trusted.is_dir():
+            return trusted
+    return None
+
+
 def _publish_migrated_library_file(source: Path, destination: Path) -> None:
     if destination.is_symlink():
         raise WorkflowMigrationError(
@@ -553,6 +583,47 @@ def _publish_migrated_library_file(source: Path, destination: Path) -> None:
         temporary_io.replace(destination_io)
     finally:
         temporary_io.unlink(missing_ok=True)
+
+
+def _mineru_tree_manifest(root: Path) -> tuple[tuple[str, str], ...]:
+    manifest: list[tuple[str, str]] = []
+    for item in sorted(root.rglob("*"), key=lambda path: path.as_posix()):
+        if item.is_symlink() or (hasattr(item, "is_junction") and item.is_junction()):
+            raise WorkflowMigrationError(
+                "Legacy MinerU extraction contains a symbolic link or junction."
+            )
+        try:
+            relative = item.resolve().relative_to(root)
+        except ValueError as exc:
+            raise WorkflowMigrationError(
+                "Legacy MinerU extraction escaped its source directory."
+            ) from exc
+        if item.is_file():
+            manifest.append((relative.as_posix(), _sha256_file(item)))
+    return tuple(manifest)
+
+
+def _publish_migrated_library_tree(source: Path, destination: Path) -> None:
+    source_manifest = _mineru_tree_manifest(source)
+    destination_io = _filesystem_path(destination)
+    if destination_io.exists():
+        if not destination_io.is_dir() or _mineru_tree_manifest(destination) != source_manifest:
+            raise WorkflowMigrationError(
+                f"Immutable MinerU artifact has conflicting content: {destination}"
+            )
+        return
+    temporary = destination.parent / f".rw-{uuid.uuid4().hex[:8]}.part"
+    temporary_io = _filesystem_path(temporary)
+    try:
+        shutil.copytree(_filesystem_path(source), temporary_io)
+        if _mineru_tree_manifest(temporary) != source_manifest:
+            raise WorkflowMigrationError(
+                "Published MinerU artifact does not match its source."
+            )
+        temporary_io.replace(destination_io)
+    finally:
+        if temporary_io.exists():
+            shutil.rmtree(temporary_io)
 
 
 def _publish_migrated_library_metadata(
@@ -616,6 +687,10 @@ def _import_library_catalog(
             raise WorkflowMigrationError(f"Legacy Library metadata is missing paper_id: {metadata_path}")
         source_paths = metadata.get("source_paths") if isinstance(metadata.get("source_paths"), dict) else {}
         source_file = metadata.get("source_file") if isinstance(metadata.get("source_file"), dict) else {}
+        extraction = metadata.get("extraction") if isinstance(metadata.get("extraction"), dict) else {}
+        extraction_inputs = (
+            extraction.get("inputs") if isinstance(extraction.get("inputs"), dict) else {}
+        )
         pdf_relative, pdf_path, pdf_ready = _legacy_library_path(
             review_root,
             source_paths.get("pdf") or source_file.get("relative_pdf_path"),
@@ -647,6 +722,27 @@ def _import_library_catalog(
             ).hexdigest()
         )
         source_metadata_sha256 = _sha256_file(metadata_path)
+        extracted_source = _legacy_library_directory(
+            review_root,
+            source_paths.get("extracted_dir") or extraction_inputs.get("extracted_dir"),
+        )
+        content_list_relative: Path | None = None
+        content_list_source: Path | None = None
+        raw_content_list = source_paths.get("content_list") or extraction_inputs.get("content_list")
+        if extracted_source is not None and raw_content_list:
+            _, candidate_content_list, content_ready = _legacy_library_path(
+                review_root, raw_content_list, Path("__missing_mineru_content_list__")
+            )
+            if content_ready:
+                try:
+                    content_list_relative = candidate_content_list.relative_to(extracted_source)
+                except ValueError:
+                    content_list_relative = None
+                else:
+                    content_list_source = candidate_content_list
+        mineru_sha256 = (
+            _sha256_file(content_list_source) if content_list_source is not None else ""
+        )
         artifact_ids = {
             kind: _stable_uuid(
                 str(review_root),
@@ -657,6 +753,7 @@ def _import_library_catalog(
                 "pdf": digest,
                 "markdown": markdown_sha256,
                 "metadata": source_metadata_sha256,
+                **({"mineru": mineru_sha256} if mineru_sha256 else {}),
             }.items()
         }
         artifact_paper_root = _trusted_migration_directory(
@@ -681,12 +778,31 @@ def _import_library_catalog(
                 artifact_version_roots["metadata"] / f"{paper_id}.metadata.json"
             ),
         }
+        if "mineru" in artifact_ids and content_list_relative is not None:
+            artifact_destinations["mineru"] = (
+                artifact_version_roots["mineru"]
+                / "extracted"
+                / content_list_relative
+            )
         if pdf_ready:
             _publish_migrated_library_file(pdf_path, artifact_destinations["pdf"])
         if markdown_ready:
             _publish_migrated_library_file(
                 markdown_path, artifact_destinations["markdown"]
             )
+        if (
+            "mineru" in artifact_ids
+            and extracted_source is not None
+            and content_list_relative is not None
+        ):
+            _publish_migrated_library_tree(
+                extracted_source,
+                artifact_version_roots["mineru"] / "extracted",
+            )
+            if not artifact_destinations["mineru"].is_file():
+                raise WorkflowMigrationError(
+                    f"Published MinerU content list is unavailable for {paper_id}."
+                )
         artifact_paths = {
             kind: destination.relative_to(review_root).as_posix()
             for kind, destination in artifact_destinations.items()
@@ -699,7 +815,20 @@ def _import_library_catalog(
         stored_source_paths = dict(metadata.get("source_paths") or {})
         stored_source_paths["pdf"] = str(artifact_destinations["pdf"])
         stored_source_paths["markdown"] = str(artifact_destinations["markdown"])
+        if "mineru" in artifact_destinations:
+            mineru_root = artifact_version_roots["mineru"] / "extracted"
+            stored_source_paths["extracted_dir"] = str(mineru_root)
+            stored_source_paths["content_list"] = str(artifact_destinations["mineru"])
         metadata["source_paths"] = stored_source_paths
+        if "mineru" in artifact_destinations:
+            stored_extraction = dict(metadata.get("extraction") or {})
+            stored_inputs = dict(stored_extraction.get("inputs") or {})
+            stored_inputs["extracted_dir"] = str(
+                artifact_version_roots["mineru"] / "extracted"
+            )
+            stored_inputs["content_list"] = str(artifact_destinations["mineru"])
+            stored_extraction["inputs"] = stored_inputs
+            metadata["extraction"] = stored_extraction
         stored_source_file = dict(metadata.get("source_file") or {})
         stored_source_file["pdf_name"] = artifact_destinations["pdf"].name
         stored_source_file["relative_pdf_path"] = artifact_paths["pdf"]
@@ -713,6 +842,8 @@ def _import_library_catalog(
             "markdown": (artifact_destinations["markdown"], markdown_ready),
             "metadata": (artifact_destinations["metadata"], True),
         }
+        if "mineru" in artifact_destinations:
+            artifact_sources["mineru"] = (artifact_destinations["mineru"], True)
         for kind, (path, ready) in artifact_sources.items():
             artifact = session.get(LibraryArtifact, artifact_ids[kind])
             stat = _filesystem_path(path).stat() if ready else None

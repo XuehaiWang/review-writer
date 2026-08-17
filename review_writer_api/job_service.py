@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import uuid
+import logging
 from collections.abc import Callable
 from concurrent.futures import Future, wait as wait_for_futures
 from typing import Any, Protocol
@@ -17,6 +18,9 @@ from review_writer_api.errors import (
 )
 from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_repository import JobRecord, WorkflowRepository
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class JobCancellationRequested(Exception):
@@ -150,6 +154,7 @@ class JobService:
         idempotency_key: str,
         payload: dict[str, Any] | None,
         retry_of_job_id: str | None = None,
+        operation_key: str = "",
     ) -> JobRecord:
         principal.require(Permission.PROJECT_WRITE)
         normalized_type = str(job_type or "").strip()
@@ -179,6 +184,7 @@ class JobService:
             idempotency_key,
             dict(payload or {}),
             retry_of_job_id=retry_source.id if retry_source else None,
+            operation_key=operation_key,
         )
         if job.status == "queued":
             self._schedule(job)
@@ -213,6 +219,11 @@ class JobService:
                     details={"job_type": source.job_type},
                 )
         self.start()
+        base_scope_key = source.project_id or "_library_"
+        operation_key = ""
+        operation_prefix = f"{base_scope_key}:"
+        if source.idempotency_scope_key.startswith(operation_prefix):
+            operation_key = source.idempotency_scope_key[len(operation_prefix) :]
         retried = self.repository.create_or_get_job(
             principal.user_id,
             source.project_id,
@@ -221,6 +232,7 @@ class JobService:
             f"retry:{source.id}:{uuid.uuid4()}",
             source.payload,
             retry_of_job_id=source.id,
+            operation_key=operation_key,
         )
         self._schedule(retried)
         return retried
@@ -275,7 +287,16 @@ class JobService:
                 error_code=exc.code,
                 error_message=str(exc),
             )
-        except Exception:
+        except Exception as exc:
+            # Do not include the exception message or traceback here: provider
+            # SDK errors can contain credentials or response bodies. The type
+            # is enough to distinguish an internal handler bug in server logs.
+            LOGGER.error(
+                "Unhandled workflow job failure (job_id=%s, job_type=%s, exception=%s)",
+                claimed.id,
+                claimed.job_type,
+                type(exc).__name__,
+            )
             self._finish_failure(
                 context,
                 error_code="JOB_EXECUTION_FAILED",

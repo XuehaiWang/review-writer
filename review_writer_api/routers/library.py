@@ -21,7 +21,7 @@ from review_writer_api.domain_services.library import (
     LibraryService,
     MinerUPreciseParseFailed,
 )
-from review_writer_api.errors import ArtifactRangeNotSatisfiable, WorkflowValidationError
+from review_writer_api.errors import ArtifactRangeNotSatisfiable, WorkflowNotFound, WorkflowValidationError
 from review_writer_api.job_service import JobService
 from review_writer_api.routers.files import _byte_range, _read_range
 from review_writer_api.routers.jobs import _job_response
@@ -66,6 +66,14 @@ def build_library_router(
     handlers: Mapping[str, Callable] | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/library", tags=["library"])
+
+    def acquisition_operation_key(principal: Principal, project_id: str) -> str:
+        normalized = str(project_id or "").strip()
+        if not normalized:
+            return ""
+        if job_service.repository.get_owned_project(principal.user_id, normalized) is None:
+            raise WorkflowNotFound("Project not found.")
+        return f"project:{normalized}"
     configured = dict(handlers or {})
     search_handler = configured.get("library.search")
     if search_handler is not None:
@@ -234,10 +242,15 @@ def build_library_router(
     @router.post("/search-jobs", status_code=status.HTTP_202_ACCEPTED)
     def search_job(
         payload: LiteratureSearchRequest,
+        project_id: str = "",
         idempotency_key: str = Header(default="", alias="Idempotency-Key"),
         principal: Principal = Depends(principal_dependency),
     ):
-        payload_data = payload.model_dump()
+        operation_key = acquisition_operation_key(principal, project_id)
+        payload_data = {
+            **payload.model_dump(),
+            **({"acquisition_project_id": project_id} if operation_key else {}),
+        }
         key = idempotency_key.strip() or str(uuid.uuid4())
         job = job_service.submit(
             principal,
@@ -246,25 +259,36 @@ def build_library_router(
             job_type="library.search",
             idempotency_key=key,
             payload=payload_data,
+            operation_key=operation_key,
         )
         return _job_response(job)
 
     @router.get("/search-jobs/current")
     def current_search_job(
+        project_id: str = "",
         principal: Principal = Depends(principal_dependency),
     ):
+        operation_key = acquisition_operation_key(principal, project_id)
         job = job_service.repository.get_current_job(
-            principal.user_id, scope="library", job_type="library.search"
+            principal.user_id,
+            scope="library",
+            job_type="library.search",
+            operation_key=operation_key,
         )
         return {"job": _job_response(job).model_dump() if job is not None else None}
 
     @router.post("/download-jobs", status_code=status.HTTP_202_ACCEPTED)
     def download_job(
         payload: LiteratureDownloadRequest,
+        project_id: str = "",
         idempotency_key: str = Header(default="", alias="Idempotency-Key"),
         principal: Principal = Depends(principal_dependency),
     ):
-        payload_data = payload.model_dump()
+        operation_key = acquisition_operation_key(principal, project_id)
+        payload_data = {
+            **payload.model_dump(),
+            **({"acquisition_project_id": project_id} if operation_key else {}),
+        }
         job = job_service.submit(
             principal,
             scope="library",
@@ -272,15 +296,21 @@ def build_library_router(
             job_type="library.download",
             idempotency_key=idempotency_key.strip() or str(uuid.uuid4()),
             payload=payload_data,
+            operation_key=operation_key,
         )
         return _job_response(job)
 
     @router.get("/download-jobs/current")
     def current_download_job(
+        project_id: str = "",
         principal: Principal = Depends(principal_dependency),
     ):
+        operation_key = acquisition_operation_key(principal, project_id)
         job = job_service.repository.get_current_job(
-            principal.user_id, scope="library", job_type="library.download"
+            principal.user_id,
+            scope="library",
+            job_type="library.download",
+            operation_key=operation_key,
         )
         return {"job": _job_response(job).model_dump() if job is not None else None}
 

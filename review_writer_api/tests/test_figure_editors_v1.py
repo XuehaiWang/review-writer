@@ -28,6 +28,8 @@ class FigureEditorsV1Tests(NativeFigureApiTestCase):
             payload = response.json()
             svg = client.get(payload["full_svg_url"]).text
         self.assertIn("full-image-vector-trace", svg)
+        self.assertIn("data-trace-object-id", svg)
+        self.assertIn('data-vector-kind="base-trace-object"', svg)
         self.assertNotIn("<image", svg.lower())
         self.assertTrue(payload["full_svg_url"].startswith("/api/v1/artifacts/"))
 
@@ -77,6 +79,53 @@ class FigureEditorsV1Tests(NativeFigureApiTestCase):
                 "manual_canvas_override"
             ]
         )
+
+    def test_reopening_cropped_redrawn_output_reuses_editable_workspace(self) -> None:
+        cropped_svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" '
+            'viewBox="0 0 10 10" data-vector-width="20" data-vector-height="10" '
+            'data-original-width="10" data-original-height="10" '
+            'data-source-width="20" data-source-height="10" data-content-crop="true" '
+            'data-crop-unit="source-px" data-crop-x="10" data-crop-y="0" '
+            'data-crop-width="10" data-crop-height="10">'
+            '<title>edited</title><g transform="translate(-10 0)">'
+            '<g id="full-image-vector-trace"><path d="M10 0h10v10H10z"/></g>'
+            '<g id="editor-inserted-elements"><text data-editor-element-id="text-1" '
+            'data-editor-element-type="text" x="12" y="5">kept</text></g></g></svg>'
+        )
+        body = {
+            "image_png_data_url": png_data_url((10, 10)),
+            "operations": [],
+            "base_mode": "source",
+            "editable_svg": cropped_svg,
+            "full_vector_svg": cropped_svg,
+        }
+        with TestClient(self.app) as client:
+            self.confirm_review(client)
+            first = client.post(
+                f"/api/v1/projects/{self.project_id}/figures/P001-F02/manual-edit",
+                json=body,
+                headers=self.headers(),
+            )
+            self.assertEqual(200, first.status_code, first.text)
+            reopened = client.post(
+                f"/api/v1/projects/{self.project_id}/figures/P001-F02/full-svg",
+                json={"base_mode": "redrawn"},
+                headers=self.headers(),
+            )
+            self.assertEqual(200, reopened.status_code, reopened.text)
+            workspace = client.get(reopened.json()["full_svg_url"]).text
+            second_body = {**body, "base_mode": "redrawn"}
+            second = client.post(
+                f"/api/v1/projects/{self.project_id}/figures/P001-F02/manual-edit",
+                json=second_body,
+                headers=self.headers(),
+            )
+        self.assertTrue(reopened.json()["reused_saved_workspace"])
+        self.assertEqual(20, reopened.json()["base_width"])
+        self.assertEqual(10, reopened.json()["base_height"])
+        self.assertIn('data-editor-element-id="text-1"', workspace)
+        self.assertEqual(200, second.status_code, second.text)
 
     def test_manual_canvas_mismatch_without_verified_crop_is_rejected(self) -> None:
         svg = (

@@ -181,6 +181,56 @@ class JobServiceTests(unittest.TestCase):
         self.assertTrue(all(job.progress_current == 2 for job in completed))
         self.assertTrue(all(job.progress_total == 2 for job in completed))
 
+    def test_same_job_type_can_run_for_two_operation_keys(self) -> None:
+        started: set[str] = set()
+        both_started = threading.Event()
+        release = threading.Event()
+        lock = threading.Lock()
+
+        def redraw(context, payload):
+            with lock:
+                started.add(payload["figure_id"])
+                if len(started) == 2:
+                    both_started.set()
+            while not release.wait(0.01):
+                context.checkpoint()
+            return {"figure_id": payload["figure_id"]}
+
+        self.service.register_handler("figures.redraw", redraw)
+        first = self.service.submit(
+            self.principal,
+            scope="project",
+            project_id=self.project_id,
+            job_type="figures.redraw",
+            idempotency_key="redraw-one",
+            payload={"figure_id": "P001-F01"},
+            operation_key="figure:P001-F01",
+        )
+        second = self.service.submit(
+            self.principal,
+            scope="project",
+            project_id=self.project_id,
+            job_type="figures.redraw",
+            idempotency_key="redraw-two",
+            payload={"figure_id": "P001-F02"},
+            operation_key="figure:P001-F02",
+        )
+
+        self.assertTrue(both_started.wait(2))
+        with self.assertRaises(WorkflowConflict):
+            self.service.submit(
+                self.principal,
+                scope="project",
+                project_id=self.project_id,
+                job_type="figures.redraw",
+                idempotency_key="redraw-one-again",
+                payload={"figure_id": "P001-F01"},
+                operation_key="figure:P001-F01",
+            )
+        release.set()
+        self.assertEqual("succeeded", self._wait_for(first.id).status)
+        self.assertEqual("succeeded", self._wait_for(second.id).status)
+
     def test_cancellation_and_failure_are_persisted_without_leaking_exception_text(self) -> None:
         started = threading.Event()
 

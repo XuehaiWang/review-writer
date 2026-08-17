@@ -126,6 +126,7 @@ class ScientificRunner:
         env: Mapping[str, str] | None = None,
         secret_env: Mapping[str, str] | None = None,
         cancel_requested: Callable[[], bool] | None = None,
+        progress_callback: Callable[[], None] | None = None,
         timeout_seconds: float = 900,
     ) -> ScientificRunResult:
         safe_command = self._validate_command(command)
@@ -171,6 +172,15 @@ class ScientificRunner:
         child_environment.update(normal_environment)
         child_environment.update(secrets)
         child_environment.setdefault("PYTHONIOENCODING", "utf-8")
+        application_root = str(Path(__file__).resolve().parents[1])
+        python_paths = [
+            item
+            for item in str(child_environment.get("PYTHONPATH") or "").split(os.pathsep)
+            if item
+        ]
+        child_environment["PYTHONPATH"] = os.pathsep.join(
+            [application_root, *(item for item in python_paths if item != application_root)]
+        )
         child_environment["REVIEW_WRITER_ALLOW_PRIVATE_EGRESS"] = (
             "1" if self.allow_private_networks else "0"
         )
@@ -243,11 +253,15 @@ class ScientificRunner:
                     )
                     break
                 except subprocess.TimeoutExpired:
+                    if progress_callback is not None:
+                        progress_callback()
                     continue
 
             last_stdout = self._redact(last_stdout, secret_values)
             last_stderr = self._redact(last_stderr, secret_values)
             if not timed_out and process.returncode == 0:
+                if progress_callback is not None:
+                    progress_callback()
                 missing = [
                     path.relative_to(staging).as_posix()
                     for path in outputs
@@ -279,7 +293,34 @@ class ScientificRunner:
                 and not provider_call_completed
             )
             if not transient or attempt >= self.max_attempts:
-                reason = "Scientific task timed out." if timed_out else "Scientific task failed."
+                http_status = envelope.get("http_status")
+                provider_timed_out = bool(
+                    category == "transient_timeout"
+                    or http_status in {408, 504, 524}
+                )
+                if timed_out:
+                    reason = (
+                        "Scientific task exceeded its execution time limit after "
+                        f"{attempt} task attempt{'s' if attempt != 1 else ''}."
+                    )
+                elif provider_timed_out:
+                    suffix = f" (HTTP {http_status})" if http_status else ""
+                    reason = (
+                        f"Scientific provider timed out{suffix} after "
+                        f"{attempt} attempts. Please retry the task."
+                    )
+                elif category == "transient_service_unavailable":
+                    reason = (
+                        "Scientific provider remained unavailable after "
+                        f"{attempt} attempts. Please retry the task."
+                    )
+                else:
+                    diagnostic = self._diagnostic_summary(last_stderr, last_stdout)
+                    reason = (
+                        f"Scientific task failed: {diagnostic}"
+                        if diagnostic
+                        else "Scientific task failed."
+                    )
                 raise ScientificRunFailed(
                     reason,
                     attempts=attempt,
@@ -288,6 +329,8 @@ class ScientificRunner:
                         "returncode": process.returncode,
                         "stderr": last_stderr,
                         "category": category or ("transient_timeout" if timed_out else "unknown"),
+                        "http_status": http_status,
+                        "timeout_seconds": timeout if timed_out else None,
                         "provider_call_completed": provider_call_completed,
                     },
                 )
@@ -298,6 +341,28 @@ class ScientificRunner:
             attempts=self.max_attempts,
             retryable=timed_out,
         )
+
+    @staticmethod
+    def _diagnostic_summary(stderr: str, stdout: str = "") -> str:
+        """Return one redacted, bounded, user-actionable failure line."""
+
+        lines = [
+            line.strip()
+            for line in f"{stderr}\n{stdout}".splitlines()
+            if line.strip()
+            and not line.lstrip().startswith(ERROR_ENVELOPE_PREFIX)
+        ]
+        if not lines:
+            return ""
+        diagnostic = lines[-1]
+        diagnostic = re.sub(
+            r"^(?:RuntimeError|ValueError|PermissionError|FileNotFoundError|Exception):\s*",
+            "",
+            diagnostic,
+        )
+        diagnostic = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", diagnostic)
+        diagnostic = re.sub(r"\s+", " ", diagnostic).strip()
+        return diagnostic[:700]
 
     @staticmethod
     def _validate_command(command: Sequence[str]) -> tuple[str, ...]:

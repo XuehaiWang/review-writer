@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
@@ -46,8 +47,28 @@ class PlanningV1Tests(unittest.TestCase):
             session.add_all([project, hidden])
             session.flush()
             papers = []
+            substrates = (
+                "aromatic substrates",
+                "small-molecule substrates",
+                "biomolecular substrates",
+            )
+            catalysts = (
+                "transition-metal catalysis",
+                "organocatalysis",
+                "photochemical methods",
+            )
+            reactions = (
+                "cross-coupling",
+                "addition reactions",
+                "cyclization and annulation",
+            )
             for index in range(1, 36):
                 paper_id = f"P{index:03d}"
+                structured_tags = {
+                    "substrate": substrates[(index - 1) % len(substrates)],
+                    "catalyst_or_method": catalysts[(index - 1) % len(catalysts)],
+                    "reaction_type": reactions[(index - 1) % len(reactions)],
+                }
                 papers.append(
                     LibraryPaper(
                         user_id=first.id,
@@ -57,7 +78,7 @@ class PlanningV1Tests(unittest.TestCase):
                         title=f"Paper {index}",
                         authors_json=[f"Author {index}"],
                         keywords_json=["allenation", "copper"],
-                        tags_json={"reaction_type": "allenation"},
+                        tags_json=structured_tags,
                         metadata_json={
                             "paper_id": paper_id,
                             "title": {"value": f"Paper {index}"},
@@ -65,6 +86,7 @@ class PlanningV1Tests(unittest.TestCase):
                             "keywords": {"value": ["allenation", "copper"]},
                             "abstract": {"value": f"Evidence for {paper_id}."},
                             "year": {"value": 2024},
+                            "structured_tags": {"value": structured_tags},
                         },
                         pdf_relative_path=f"review-library/uploads/{paper_id}.pdf",
                         markdown_relative_path=f"review-library/markdown/{paper_id}.md",
@@ -166,11 +188,52 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertEqual(200, response.status_code, response.text)
         return response.json()
 
+    @staticmethod
+    def isolated_reference_analysis(
+        _principal,
+        _project_id,
+        *,
+        candidate_id,
+        safe_name,
+        raw,
+        matrix,
+    ) -> dict:
+        del safe_name, raw
+        paper_ids = [row["paper_id"] for row in matrix["rows"]]
+        representatives = paper_ids[:6]
+        outline = (
+            "# Selected Outline\n\n"
+            "Scientific content source: current literature Matrix only.\n\n"
+            "## Introduction and scope\n"
+            f"Assigned papers: {', '.join(representatives)}.\n"
+            "Purpose: define the current review scope.\n\n"
+            "## 1. Copper allenation evidence\n"
+            f"Assigned papers: {', '.join(paper_ids)}.\n"
+            "Purpose: compare evidence from the current Matrix.\n\n"
+            "## Conclusion and outlook\n"
+            f"Assigned papers: {', '.join(representatives)}.\n"
+            "Purpose: synthesize limitations and future directions.\n"
+        )
+        return {
+            "candidate_id": candidate_id,
+            "analysis_mode": "ai_style_only_transfer_v2",
+            "content_source": "current_matrix_only",
+            "reference_content_reused": False,
+            "content_firewall": {
+                "transfer_received_reference_text": False,
+                "all_heading_levels_content_source": "current_matrix_only",
+            },
+            "reference_structure_metrics": {"heading_count": 3},
+            "writing_style": {"organization_pattern": "progressive comparison"},
+            "outline_md": outline,
+        }
+
     def test_matrix_contains_entire_confirmed_selection(self) -> None:
         with TestClient(self.app) as client:
             payload = self.planning(client)
         self.assertEqual(35, len(payload["literature_matrix"]["rows"]))
         self.assertEqual(35, payload["matrix_sync"]["selected_paper_count"])
+        self.assertNotIn("selection_fingerprint", payload["discovery_selection"])
 
     def test_reconfirmation_replaces_matrix_selection(self) -> None:
         with TestClient(self.app) as client:
@@ -235,8 +298,90 @@ class PlanningV1Tests(unittest.TestCase):
         with TestClient(self.app) as client:
             selected = self.choose_outline(client, "reaction")
         self.assertIn("##", selected["selected_outline_md"])
+        self.assertIn("## Introduction\nSection role: introduction", selected["selected_outline_md"])
+        self.assertIn(
+            "## Cross-category comparison and conclusion\nSection role: conclusion",
+            selected["selected_outline_md"],
+        )
+        self.assertIn("## 1. cross-coupling", selected["selected_outline_md"])
+        self.assertIn("## 2. addition reactions", selected["selected_outline_md"])
+        self.assertIn("## 3. cyclization and annulation", selected["selected_outline_md"])
         self.assertTrue(selected["outline_complete"])
         self.assertEqual("reaction", selected["outline_style"])
+
+    def test_reselecting_current_outline_is_idempotent(self) -> None:
+        with TestClient(self.app) as client:
+            selected = self.choose_outline(client, "reaction")
+            repeated = client.put(
+                f"/api/v1/projects/{self.project_id}/planning/outline",
+                json={
+                    "revision": selected["matrix_revision"],
+                    "outline_style": "reaction",
+                },
+                headers=self.headers(),
+            )
+        self.assertEqual(200, repeated.status_code, repeated.text)
+        payload = repeated.json()
+        self.assertTrue(payload["unchanged"])
+        self.assertEqual(selected["matrix_revision"], payload["matrix_revision"])
+        self.assertEqual(selected["outline_artifact_id"], payload["outline_artifact_id"])
+
+    def test_builtin_outline_styles_use_distinct_metadata_axes(self) -> None:
+        with TestClient(self.app) as client:
+            substrate = self.choose_outline(client, "substrate")["selected_outline_md"]
+            catalyst = self.choose_outline(client, "catalyst")["selected_outline_md"]
+            reaction = self.choose_outline(client, "reaction")["selected_outline_md"]
+        self.assertIn("## 1. aromatic substrates", substrate)
+        self.assertIn("## 1. transition-metal catalysis", catalyst)
+        self.assertIn("## 1. cross-coupling", reaction)
+        self.assertNotEqual(substrate, catalyst)
+        self.assertNotEqual(catalyst, reaction)
+
+    def test_outline_sources_prefer_confirmed_or_automatic_project_tags(self) -> None:
+        service = self.app.state.planning_service
+        confirmed_tags, _ = service._outline_sources(
+            self.first,
+            [
+                {
+                    "paper_id": "P001",
+                    "project_tag_review_status": "confirmed",
+                    "project_tags": {
+                        "reaction_type": ["project-specific transformation"]
+                    },
+                }
+            ],
+        )
+        pending_tags, _ = service._outline_sources(
+            self.first,
+            [
+                {
+                    "paper_id": "P001",
+                    "project_tag_review_status": "pending",
+                    "project_tags": {"reaction_type": ["unreviewed suggestion"]},
+                }
+            ],
+        )
+        automatic_tags, _ = service._outline_sources(
+            self.first,
+            [
+                {
+                    "paper_id": "P001",
+                    "project_tag_review_status": "automatic",
+                    "project_tags": {
+                        "reaction_type": ["automatically assessed transformation"]
+                    },
+                }
+            ],
+        )
+        self.assertEqual(
+            ["project-specific transformation"],
+            confirmed_tags["P001"]["reaction_type"],
+        )
+        self.assertEqual("cross-coupling", pending_tags["P001"]["reaction_type"])
+        self.assertEqual(
+            ["automatically assessed transformation"],
+            automatic_tags["P001"]["reaction_type"],
+        )
 
     def test_custom_outline_starts_blank(self) -> None:
         with TestClient(self.app) as client:
@@ -283,44 +428,80 @@ class PlanningV1Tests(unittest.TestCase):
 
     def test_reference_outline_is_registered(self) -> None:
         raw = "# Reference\n\n## 1. Mechanisms\nAssigned papers: P001.\nPurpose: compare.\n".encode()
-        with TestClient(self.app) as client:
-            current = self.planning(client)
-            response = client.post(
-                f"/api/v1/projects/{self.project_id}/planning/reference-outlines",
-                json={
-                    "revision": current["matrix_revision"],
-                    "filename": "reference.md",
-                    "content_base64": base64.b64encode(raw).decode(),
-                },
-                headers=self.headers(),
-            )
-            self.assertEqual(201, response.status_code, response.text)
-            payload = self.planning(client)
+        with patch.object(
+            self.app.state.planning_service,
+            "_analyze_reference_document",
+            side_effect=self.isolated_reference_analysis,
+        ):
+            with TestClient(self.app) as client:
+                current = self.planning(client)
+                response = client.post(
+                    f"/api/v1/projects/{self.project_id}/planning/reference-outlines",
+                    json={
+                        "revision": current["matrix_revision"],
+                        "filename": "reference.md",
+                        "content_base64": base64.b64encode(raw).decode(),
+                    },
+                    headers=self.headers(),
+                )
+                self.assertEqual(201, response.status_code, response.text)
+                payload = self.planning(client)
+                candidate_id = response.json()["candidate"]["candidate_id"]
+                selected_response = client.put(
+                    f"/api/v1/projects/{self.project_id}/planning/outline",
+                    json={
+                        "revision": payload["matrix_revision"],
+                        "outline_style": f"reference:{candidate_id}",
+                    },
+                    headers=self.headers(),
+                )
+                self.assertEqual(200, selected_response.status_code, selected_response.text)
         candidate = response.json()["candidate"]
         self.assertTrue(candidate["source_artifact_id"])
+        self.assertEqual("current_matrix_only", candidate["content_source"])
+        self.assertFalse(candidate["reference_content_reused"])
+        self.assertNotIn("Mechanisms", candidate["outline_md"])
         self.assertIn(candidate["candidate_id"], {item["candidate_id"] for item in payload["reference_outline_candidates"]})
+        self.assertNotIn("Mechanisms", selected_response.json()["selected_outline_md"])
 
-    def test_reference_docx_headings_become_an_editable_candidate(self) -> None:
+    def test_legacy_reference_candidate_fails_content_isolation(self) -> None:
+        service = self.app.state.planning_service
+        self.assertFalse(
+            service._reference_candidate_is_isolated(
+                {
+                    "analysis_mode": "heading_extraction",
+                    "outline_md": "## Source heading",
+                }
+            )
+        )
+
+    def test_reference_docx_content_is_not_used_as_candidate_headings(self) -> None:
         document = Document()
         document.add_heading("1. Mechanistic organization", level=1)
         document.add_paragraph("Reference discussion.")
         stream = BytesIO()
         document.save(stream)
-        with TestClient(self.app) as client:
-            current = self.planning(client)
-            response = client.post(
-                f"/api/v1/projects/{self.project_id}/planning/reference-outlines",
-                json={
-                    "revision": current["matrix_revision"],
-                    "filename": "reference.docx",
-                    "content_base64": base64.b64encode(stream.getvalue()).decode(),
-                },
-                headers=self.headers(),
-            )
+        with patch.object(
+            self.app.state.planning_service,
+            "_analyze_reference_document",
+            side_effect=self.isolated_reference_analysis,
+        ):
+            with TestClient(self.app) as client:
+                current = self.planning(client)
+                response = client.post(
+                    f"/api/v1/projects/{self.project_id}/planning/reference-outlines",
+                    json={
+                        "revision": current["matrix_revision"],
+                        "filename": "reference.docx",
+                        "content_base64": base64.b64encode(stream.getvalue()).decode(),
+                    },
+                    headers=self.headers(),
+                )
         self.assertEqual(201, response.status_code, response.text)
         candidate = response.json()["candidate"]
-        self.assertEqual("heading_extraction", candidate["analysis_mode"])
-        self.assertIn("## 1. Mechanistic organization", candidate["outline_md"])
+        self.assertEqual("ai_style_only_transfer_v2", candidate["analysis_mode"])
+        self.assertNotIn("Mechanistic organization", candidate["outline_md"])
+        self.assertIn("Copper allenation evidence", candidate["outline_md"])
 
     def test_blueprint_uses_current_matrix_and_outline(self) -> None:
         with TestClient(self.app) as client:
@@ -336,7 +517,73 @@ class PlanningV1Tests(unittest.TestCase):
         assigned = {paper_id for section in blueprint["sections"] for paper_id in section["major_papers"]}
         self.assertTrue(assigned)
         self.assertLessEqual(assigned, matrix_ids)
+        primary_occurrences = [
+            paper_id
+            for section in blueprint["sections"]
+            for paper_id in section["primary_papers"]
+        ]
+        self.assertEqual(len(primary_occurrences), len(set(primary_occurrences)))
+        introduction = next(
+            section
+            for section in blueprint["sections"]
+            if section["section_role"] == "introduction"
+        )
+        conclusion = next(
+            section
+            for section in blueprint["sections"]
+            if section["section_role"] == "conclusion"
+        )
+        self.assertEqual([], introduction["major_papers"])
+        self.assertEqual([], conclusion["major_papers"])
+        self.assertTrue(introduction["supporting_papers"])
+        self.assertTrue(conclusion["supporting_papers"])
+        self.assertTrue(
+            blueprint["paper_assignment_policy"][
+                "introduction_and_conclusion_are_synthesis_only"
+            ]
+        )
         self.assertEqual(selected["outline_artifact_id"], blueprint["source_outline_artifact_id"])
+
+    def test_duplicate_body_assignment_becomes_supporting_cross_reference(self) -> None:
+        with TestClient(self.app) as client:
+            selected = self.choose_outline(client, "custom")
+            outline = (
+                "# Review\n\n"
+                "## Introduction\n"
+                "Section role: introduction\n"
+                "Purpose: define scope.\n\n"
+                "## 1. First evidence theme\n"
+                "Section role: body\n"
+                "Assigned papers: P001, P002.\n\n"
+                "## 2. Cross-cutting theme\n"
+                "Section role: body\n"
+                "Assigned papers: P001, P003.\n\n"
+                "## Conclusion\n"
+                "Section role: conclusion\n"
+                "Purpose: synthesize findings.\n"
+            )
+            saved = client.put(
+                f"/api/v1/projects/{self.project_id}/planning/outline",
+                json={
+                    "revision": selected["matrix_revision"],
+                    "outline_style": "custom",
+                    "outline_md": outline,
+                },
+                headers=self.headers(),
+            )
+            self.assertEqual(200, saved.status_code, saved.text)
+            generated = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/blueprint",
+                json={"revision": 0},
+                headers=self.headers(),
+            )
+            self.assertEqual(200, generated.status_code, generated.text)
+        sections = generated.json()["section_blueprint"]["sections"]
+        first = next(section for section in sections if section["title"] == "First evidence theme")
+        second = next(section for section in sections if section["title"] == "Cross-cutting theme")
+        self.assertEqual(["P001", "P002"], first["primary_papers"])
+        self.assertEqual(["P003"], second["primary_papers"])
+        self.assertEqual(["P001"], second["supporting_papers"])
 
     def test_blueprint_confirmation_advances_to_sections(self) -> None:
         with TestClient(self.app) as client:

@@ -21,8 +21,6 @@ from review_writer_api.errors import (
 )
 from review_writer_api.workflow_contracts import INTERNAL_STAGES, current_user_stage
 from review_writer_api.workflow_models import (
-    LibraryArtifact,
-    LibraryPaper,
     WorkflowApproval,
     WorkflowArtifact,
     WorkflowCurrentArtifact,
@@ -59,6 +57,7 @@ class JobRecord:
     scope: str
     job_type: str
     status: str
+    idempotency_scope_key: str
     idempotency_key: str
     payload: dict[str, Any]
     result: dict[str, Any]
@@ -142,6 +141,7 @@ class OwnedProjectRecord:
     user_id: str
     slug: str
     topic: str
+    taxonomy_profile: str
 
 
 @dataclass(frozen=True)
@@ -200,6 +200,7 @@ class WorkflowRepository:
             scope=job.scope,
             job_type=job.job_type,
             status=job.status,
+            idempotency_scope_key=job.idempotency_scope_key,
             idempotency_key=job.idempotency_key,
             payload=dict(job.payload_json or {}),
             result=dict(job.result_json or {}),
@@ -307,6 +308,7 @@ class WorkflowRepository:
                 user_id=str(project.user_id),
                 slug=project.slug,
                 topic=project.topic,
+                taxonomy_profile=project.taxonomy_profile,
             )
 
     def get_stage_state(
@@ -936,7 +938,6 @@ class WorkflowRepository:
         approval_events: list[dict[str, Any]] | None = None,
         expected_current_artifacts: dict[str, str] | None = None,
         expected_stage_states: dict[str, dict[str, Any]] | None = None,
-        expected_library_sources: list[str] | None = None,
     ) -> StageStateRecord:
         """Promote one or more immutable outputs and advance their stage in one commit."""
 
@@ -974,13 +975,6 @@ class WorkflowRepository:
                 "Unknown expected workflow stage.",
                 details={"stages": invalid_expected_states},
             )
-        expected_sources = tuple(
-            dict.fromkeys(
-                str(paper_id).strip()
-                for paper_id in (expected_library_sources or [])
-                if str(paper_id).strip()
-            )
-        )
         invalid_approvals = sorted(set(approvals) - set(INTERNAL_STAGES))
         if invalid_approvals or stage_id in approvals:
             raise WorkflowValidationError(
@@ -1008,42 +1002,6 @@ class WorkflowRepository:
             )
             if project is None:
                 raise WorkflowNotFound("Project not found.")
-            if expected_sources:
-                source_rows = session.scalars(
-                    select(LibraryPaper)
-                    .where(
-                        LibraryPaper.user_id == user_uuid,
-                        LibraryPaper.paper_id.in_(expected_sources),
-                    )
-                    .with_for_update()
-                ).all()
-                active_sources = {
-                    row.paper_id
-                    for row in source_rows
-                    if row.status == "active" and row.deleted_at is None
-                }
-                artifact_rows = session.scalars(
-                    select(LibraryArtifact)
-                    .where(
-                        LibraryArtifact.user_id == user_uuid,
-                        LibraryArtifact.paper_id.in_(expected_sources),
-                    )
-                    .with_for_update()
-                ).all()
-                available_sources = {
-                    row.paper_id
-                    for row in artifact_rows
-                    if row.availability == "available"
-                }
-                unavailable = sorted(
-                    (set(expected_sources) - active_sources)
-                    | (set(expected_sources) - available_sources)
-                )
-                if unavailable:
-                    raise WorkflowConflict(
-                        "A required Library source changed or became unavailable.",
-                        details={"paper_ids": unavailable},
-                    )
             if expected_currents:
                 current_rows = session.scalars(
                     select(WorkflowCurrentArtifact)
@@ -1267,6 +1225,7 @@ class WorkflowRepository:
         idempotency_key: str,
         payload: dict[str, Any],
         retry_of_job_id: str | None = None,
+        operation_key: str = "",
     ) -> JobRecord:
         user_uuid = self._uuid(user_id, not_found_message="User not found.")
         normalized_scope = str(scope or "").strip().lower()
@@ -1292,7 +1251,15 @@ class WorkflowRepository:
             if retry_of_job_id
             else None
         )
-        scope_key = str(project_uuid) if project_uuid is not None else "_library_"
+        base_scope_key = str(project_uuid) if project_uuid is not None else "_library_"
+        normalized_operation_key = str(operation_key or "").strip()
+        scope_key = (
+            f"{base_scope_key}:{normalized_operation_key}"
+            if normalized_operation_key
+            else base_scope_key
+        )
+        if len(scope_key) > 255:
+            raise WorkflowValidationError("The job operation key is too long.")
         requested_payload = dict(payload or {})
 
         try:
@@ -1318,13 +1285,21 @@ class WorkflowRepository:
                     raise WorkflowNotFound("Project not found.")
                 if retry_uuid is not None:
                     retry_source = session.scalar(
-                        select(WorkflowJob.id).where(
+                        select(WorkflowJob).where(
                             WorkflowJob.id == retry_uuid,
                             WorkflowJob.user_id == user_uuid,
                         )
                     )
                     if retry_source is None:
                         raise WorkflowNotFound("Retry source job not found.")
+                    if (
+                        retry_source.job_type != normalized_job_type
+                        or retry_source.scope != normalized_scope
+                        or retry_source.project_id != project_uuid
+                    ):
+                        raise WorkflowValidationError(
+                            "Retry source does not belong to the same workflow operation."
+                        )
                 pointer_query = select(WorkflowCurrentJob).where(
                     WorkflowCurrentJob.user_id == user_uuid,
                     WorkflowCurrentJob.scope_key == scope_key,
@@ -1461,6 +1436,7 @@ class WorkflowRepository:
         scope: str,
         job_type: str,
         project_id: str | None = None,
+        operation_key: str = "",
     ) -> JobRecord | None:
         user_uuid = self._uuid(user_id, not_found_message="Job not found.")
         normalized_scope = str(scope or "").strip().lower()
@@ -1470,6 +1446,11 @@ class WorkflowRepository:
             scope_key = str(self._uuid(project_id, not_found_message="Project not found."))
         else:
             raise WorkflowValidationError("A valid job scope is required.")
+        normalized_operation_key = str(operation_key or "").strip()
+        if normalized_operation_key:
+            scope_key = f"{scope_key}:{normalized_operation_key}"
+        if len(scope_key) > 255:
+            raise WorkflowValidationError("The job operation key is too long.")
         with database_session(self.session_factory) as session:
             job = session.scalar(
                 select(WorkflowJob)

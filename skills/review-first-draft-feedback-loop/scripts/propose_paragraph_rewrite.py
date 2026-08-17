@@ -11,6 +11,12 @@ from pathlib import Path
 import feedback_loop as loop
 
 
+# Interactive paragraph review is user-triggered and must produce a comparison
+# before the user can decide.  Give repair prompts two more chances than the
+# automatic batch loop, while keeping the same protected-fact validator.
+INTERACTIVE_REWRITE_ATTEMPTS = max(loop.MAX_REWRITE_ATTEMPTS, 4)
+
+
 def source_entry(first: Path, paragraph_id: str) -> dict:
     report = loop.read_json(first / "original_source_check.json", {}) or {}
     return next(
@@ -86,7 +92,7 @@ def propose(args: argparse.Namespace) -> dict:
     if not finding:
         raise RuntimeError("This paragraph is not in the current problem queue.")
     evidence = paragraph_evidence(source_entry(first, args.paragraph_id))
-    rewrite_mode = loop.automatic_rewrite_mode(
+    rewrite_mode = loop.interactive_rewrite_mode(
         finding,
         evidence,
         paragraph_goal=float(status.get("paragraph_goal") or 85),
@@ -115,8 +121,9 @@ def propose(args: argparse.Namespace) -> dict:
     ]
     candidate = ""
     validation_errors: list[str] = []
+    validation_warnings: list[str] = []
     attempts = []
-    for attempt in range(1, loop.MAX_REWRITE_ATTEMPTS + 1):
+    for attempt in range(1, INTERACTIVE_REWRITE_ATTEMPTS + 1):
         prompt = (
             loop.rewrite_prompt(
                 paragraph,
@@ -142,18 +149,38 @@ def propose(args: argparse.Namespace) -> dict:
             prompt,
             label=f"Paragraph rewrite candidate {args.paragraph_id}",
         )
-        candidate = str(response.get("text") or "").strip()
-        validation_errors = loop.validate_rewrite(
+        candidate = loop.remove_edge_junk_tokens(
+            str(response.get("text") or "").strip()
+        )
+        validation_errors, validation_warnings = loop.validate_rewrite_report(
             str(paragraph["text"]),
             candidate,
             minimum,
             args.max_case_words,
             allowed_unsupported_claims=allowed_unsupported_claims,
         )
-        attempts.append({"attempt": attempt, "errors": validation_errors})
+        attempts.append(
+            {
+                "attempt": attempt,
+                "errors": validation_errors,
+                "warnings": validation_warnings,
+            }
+        )
         if not validation_errors:
             break
     if validation_errors:
+        loop.write_json(
+            first / "feedback_rewrite_failure.json",
+            {
+                "schema_version": 1,
+                "project_id": args.project_id,
+                "paragraph_id": args.paragraph_id,
+                "validation_errors": validation_errors,
+                "validation_warnings": validation_warnings,
+                "attempts": attempts,
+                "failed_at": loop.utc_now(),
+            },
+        )
         raise RuntimeError(
             "The proposed rewrite failed integrity validation: "
             + ", ".join(validation_errors)
@@ -173,8 +200,11 @@ def propose(args: argparse.Namespace) -> dict:
         "original_text": original,
         "candidate_text": candidate,
         "route": str(finding.get("route") or rewrite_mode),
+        "rewrite_mode": rewrite_mode,
+        "requires_manual_confirmation": rewrite_mode == "human_review_style_only",
         "diagnosis": str(finding.get("diagnosis") or ""),
         "validation_errors": [],
+        "validation_warnings": validation_warnings,
         "attempts": attempts,
         "created_at": loop.utc_now(),
     }

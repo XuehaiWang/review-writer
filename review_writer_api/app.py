@@ -176,7 +176,12 @@ def create_app(
         else None
     )
     planning_service = (
-        PlanningService(workflow_repository, artifact_service)
+        PlanningService(
+            workflow_repository,
+            artifact_service,
+            scientific_runner=scientific_runner,
+            provider_settings=provider_settings_service,
+        )
         if workflow_repository is not None and artifact_service is not None
         else None
     )
@@ -300,6 +305,9 @@ def create_app(
     app.state.container = container
     web_root = Path(__file__).resolve().parent / "web"
     view_root = Path(__file__).resolve().parents[1] / "view"
+    react_spa_root = Path(__file__).resolve().parents[1] / "frontend" / "dist"
+    react_spa_index = react_spa_root / "index.html"
+    react_spa_available = react_spa_index.is_file()
     dashboard_pages = dashboard_page_paths(view_root)
 
     def portal_csp() -> str:
@@ -311,7 +319,7 @@ def create_app(
                 "font-src 'self'",
                 "form-action 'self'",
                 "frame-ancestors 'none'",
-                "img-src 'self' data:",
+                "img-src 'self' data: blob:",
                 "object-src 'none'",
                 "script-src 'self'",
                 "style-src 'self'",
@@ -354,7 +362,17 @@ def create_app(
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
-        if request.url.path == "/":
+        if react_spa_available and request.url.path in {
+            "/",
+            "/settings",
+            "/library",
+            "/discovery",
+            "/planning",
+            "/sections",
+            "/images",
+            "/draft",
+            "/final",
+        }:
             response.headers["Content-Security-Policy"] = portal_csp()
             response.headers["Cache-Control"] = "no-store"
         return response
@@ -653,11 +671,25 @@ def create_app(
         ) -> None:
             provider_settings_service.delete_settings(principal, provider_kind)
 
+    def portal_response() -> FileResponse:
+        path = react_spa_index if react_spa_available else web_root / "index.html"
+        return FileResponse(
+            path,
+            media_type="text/html",
+            headers={"Cache-Control": "no-store, max-age=0, must-revalidate"},
+        )
+
     @app.get("/", include_in_schema=False)
     def hosted_portal() -> FileResponse:
-        return FileResponse(web_root / "index.html", media_type="text/html")
+        return portal_response()
 
     app.mount("/assets/app", StaticFiles(directory=web_root), name="hosted-portal-assets")
+    if react_spa_available:
+        app.mount(
+            "/assets/react",
+            StaticFiles(directory=react_spa_root),
+            name="react-spa-assets",
+        )
     app.mount(
         "/assets",
         StaticFiles(directory=view_root / "assets"),
@@ -676,9 +708,11 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
 
     @app.get("/settings", include_in_schema=False)
-    def workflow_settings_redirect(
+    def workflow_settings_page(
         _principal: Principal = Depends(current_principal),
-    ) -> RedirectResponse:
+    ) -> Response:
+        if react_spa_available:
+            return portal_response()
         return RedirectResponse(url="/#settings", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
     @app.get("/library", include_in_schema=False)
@@ -690,7 +724,9 @@ def create_app(
         request: Request,
         _principal: Principal = Depends(current_principal),
         _workflow: None = Depends(require_native_workflow),
-    ) -> FileResponse:
+    ) -> Response:
+        if react_spa_available:
+            return portal_response()
         return dashboard_response(request.url.path)
 
     @app.get("/planning", include_in_schema=False)
@@ -698,7 +734,9 @@ def create_app(
         request: Request,
         _principal: Principal = Depends(current_principal),
         _workflow: None = Depends(require_native_workflow),
-    ) -> FileResponse:
+    ) -> Response:
+        if react_spa_available:
+            return portal_response()
         route = "/blueprint" if request.query_params.get("tab") == "blueprint" else "/matrix"
         return dashboard_response(route)
 
@@ -707,9 +745,13 @@ def create_app(
         request: Request,
         _principal: Principal = Depends(current_principal),
         _workflow: None = Depends(require_native_workflow),
-    ) -> FileResponse:
-        route = "/figures" if request.query_params.get("tab") == "redraw" else "/figure-review"
-        return dashboard_response(route)
+    ) -> Response:
+        if react_spa_available:
+            return portal_response()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The React frontend build is required for the image and SVG workspace.",
+        )
 
     @app.get("/matrix", include_in_schema=False)
     def matrix_redirect(

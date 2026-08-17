@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Mapping
 
-from fastapi import APIRouter, Depends, Header, status
+from fastapi import APIRouter, Depends, Header, Response, status
 
 from review_writer_api.domain_services.drafts import DraftsService
 from review_writer_api.job_service import JobService
@@ -14,6 +14,7 @@ from review_writer_api.security import Principal, Role
 from review_writer_api.workflow_schemas import (
     DraftApprovalRequest,
     DraftEvaluationRequest,
+    DraftOptimizationRequest,
     DraftParagraphSaveRequest,
     DraftRestoreRequest,
     DraftRewriteDecisionRequest,
@@ -35,11 +36,15 @@ def build_drafts_router(
     if evaluate_builder is not None:
         def evaluate_handler(context, payload):
             principal = Principal(context.user_id, frozenset({Role.USER}))
+            context.report_progress(1, 3)
             built = evaluate_builder(context, payload)
             context.checkpoint()
-            return drafts_service.publish_evaluation(
+            context.report_progress(2, 3)
+            result = drafts_service.publish_evaluation(
                 principal, str(context.project_id), payload, built
             )
+            context.report_progress(3, 3)
+            return result
 
         job_service.register_handler("draft.evaluate", evaluate_handler)
 
@@ -47,13 +52,53 @@ def build_drafts_router(
     if rewrite_builder is not None:
         def rewrite_handler(context, payload):
             principal = Principal(context.user_id, frozenset({Role.USER}))
+            context.report_progress(1, 4)
             built = rewrite_builder(context, payload)
             context.checkpoint()
-            return drafts_service.publish_rewrite_candidate(
+            result = drafts_service.publish_rewrite_candidate(
                 principal, str(context.project_id), payload, built
             )
+            context.report_progress(4, 4)
+            return result
 
         job_service.register_handler("draft.rewrite", rewrite_handler)
+
+    accept_rewrite_builder = available.get("draft.accept-rewrite")
+    if accept_rewrite_builder is not None:
+        def accept_rewrite_handler(context, payload):
+            principal = Principal(context.user_id, frozenset({Role.USER}))
+            context.report_progress(1, 2)
+            stored_evaluation = payload.get("candidate_evaluation")
+            built = (
+                dict(stored_evaluation)
+                if isinstance(stored_evaluation, dict)
+                and stored_evaluation.get("evaluation_scope") == "single_paragraph"
+                else accept_rewrite_builder(context, payload)
+            )
+            context.checkpoint()
+            result = drafts_service.publish_accepted_rewrite(
+                principal, str(context.project_id), payload, built
+            )
+            context.report_progress(2, 2)
+            return result
+
+        job_service.register_handler("draft.accept-rewrite", accept_rewrite_handler)
+
+    optimize_builder = available.get("draft.optimize")
+    if optimize_builder is not None:
+        def optimize_handler(context, payload):
+            principal = Principal(context.user_id, frozenset({Role.USER}))
+            context.report_progress(1, 5)
+            built = optimize_builder(context, payload)
+            context.checkpoint()
+            context.report_progress(4, 5)
+            result = drafts_service.publish_optimization(
+                principal, str(context.project_id), payload, built
+            )
+            context.report_progress(5, 5)
+            return result
+
+        job_service.register_handler("draft.optimize", optimize_handler)
 
     @router.get("")
     def get_draft(
@@ -118,7 +163,13 @@ def build_drafts_router(
         principal: Principal = Depends(principal_dependency),
     ):
         job_payload = drafts_service.evaluation_payload(
-            principal, project_id, goal=payload.goal
+            principal,
+            project_id,
+            goal=payload.goal,
+            paragraph_goal=payload.paragraph_goal,
+            max_iterations=payload.max_iterations,
+            min_case_words=payload.min_case_words,
+            max_case_words=payload.max_case_words,
         )
         return _job_response(
             job_service.submit(
@@ -126,6 +177,33 @@ def build_drafts_router(
                 scope="project",
                 project_id=project_id,
                 job_type="draft.evaluate",
+                idempotency_key=idempotency_key.strip() or str(uuid.uuid4()),
+                payload=job_payload,
+            )
+        )
+
+    @router.post("/optimization-jobs", status_code=status.HTTP_202_ACCEPTED)
+    def start_optimization(
+        project_id: str,
+        payload: DraftOptimizationRequest,
+        idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+        principal: Principal = Depends(principal_dependency),
+    ):
+        job_payload = drafts_service.evaluation_payload(
+            principal,
+            project_id,
+            goal=payload.goal,
+            paragraph_goal=payload.paragraph_goal,
+            max_iterations=payload.max_iterations,
+            min_case_words=payload.min_case_words,
+            max_case_words=payload.max_case_words,
+        )
+        return _job_response(
+            job_service.submit(
+                principal,
+                scope="project",
+                project_id=project_id,
+                job_type="draft.optimize",
                 idempotency_key=idempotency_key.strip() or str(uuid.uuid4()),
                 payload=job_payload,
             )
@@ -154,14 +232,79 @@ def build_drafts_router(
             )
         )
 
+    @router.post("/optimization-proposals/{proposal_id}/{decision}")
+    def decide_optimization_proposal(
+        project_id: str,
+        proposal_id: str,
+        decision: str,
+        payload: DraftRewriteDecisionRequest,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict:
+        return drafts_service.decide_optimization_proposal(
+            principal,
+            project_id,
+            proposal_id,
+            decision=decision,
+            revision=payload.revision,
+            selected_paragraph_ids=payload.selected_paragraph_ids,
+        )
+
+    @router.post(
+        "/rewrite-candidates/{candidate_id}/accept-jobs",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def start_accept_rewrite(
+        project_id: str,
+        candidate_id: str,
+        payload: DraftRewriteDecisionRequest,
+        idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+        principal: Principal = Depends(principal_dependency),
+    ):
+        job_payload = drafts_service.accept_rewrite_payload(
+            principal,
+            project_id,
+            candidate_id,
+            revision=payload.revision,
+        )
+        return _job_response(
+            job_service.submit(
+                principal,
+                scope="project",
+                project_id=project_id,
+                job_type="draft.accept-rewrite",
+                idempotency_key=idempotency_key.strip() or str(uuid.uuid4()),
+                payload=job_payload,
+            )
+        )
+
     @router.post("/rewrite-candidates/{candidate_id}/{decision}")
     def decide_rewrite(
         project_id: str,
         candidate_id: str,
         decision: str,
         payload: DraftRewriteDecisionRequest,
+        response: Response,
+        idempotency_key: str = Header(default="", alias="Idempotency-Key"),
         principal: Principal = Depends(principal_dependency),
     ) -> dict:
+        if decision == "accept":
+            job_payload = drafts_service.accept_rewrite_payload(
+                principal,
+                project_id,
+                candidate_id,
+                revision=payload.revision,
+            )
+            response.status_code = status.HTTP_202_ACCEPTED
+            return _job_response(
+                job_service.submit(
+                    principal,
+                    scope="project",
+                    project_id=project_id,
+                    job_type="draft.accept-rewrite",
+                    idempotency_key=idempotency_key.strip() or str(uuid.uuid4()),
+                    payload=job_payload,
+                )
+            )
         return drafts_service.decide_rewrite(
             principal,
             project_id,

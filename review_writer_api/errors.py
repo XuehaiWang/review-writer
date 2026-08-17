@@ -67,3 +67,9 @@ class ProjectArchiveFailed(WorkflowError):
     code = "PROJECT_ARCHIVE_FAILED"
     status_code = 500
     retryable = True
+
+
+class LiteratureSearchFailed(WorkflowError):
+    code = "LITERATURE_SEARCH_FAILED"
+    status_code = 502
+    retryable = True

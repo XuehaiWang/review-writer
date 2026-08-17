@@ -96,6 +96,10 @@ class NativeFigureApiTestCase(unittest.TestCase):
         self.block_redraw = False
         self.block_figure_id = ""
         self.redraw_started = threading.Event()
+        self.redraw_both_started = threading.Event()
+        self.redraw_release = threading.Event()
+        self.redraw_started_figure_ids: set[str] = set()
+        self.redraw_state_lock = threading.Lock()
 
         def redraw(_context, payload):
             self.redraw_calls += 1
@@ -103,10 +107,13 @@ class NativeFigureApiTestCase(unittest.TestCase):
             if self.block_redraw or self.block_figure_id == str(
                 figure.get("figure_id") or ""
             ):
+                with self.redraw_state_lock:
+                    self.redraw_started_figure_ids.add(str(figure.get("figure_id") or ""))
+                    if len(self.redraw_started_figure_ids) >= 2:
+                        self.redraw_both_started.set()
                 self.redraw_started.set()
-                while True:
+                while not self.redraw_release.wait(0.01):
                     _context.checkpoint()
-                    time.sleep(0.01)
             error = self.redraw_errors_by_figure.get(
                 str(figure.get("figure_id") or ""), self.redraw_error
             )
@@ -326,7 +333,27 @@ class NativeFigureApiTestCase(unittest.TestCase):
                 }
             ],
         }
+        matrix = {
+            "project_id": self.project_id,
+            "rows": [
+                {
+                    "paper_id": "P001",
+                    "title": "Copper paper",
+                    "authors": ["Author One"],
+                    "journal": "Test Journal",
+                    "year": "2026",
+                },
+                {
+                    "paper_id": "P002",
+                    "title": "Paper without a usable source figure",
+                    "authors": ["Author Two"],
+                    "journal": "Test Journal",
+                    "year": "2026",
+                },
+            ],
+        }
         files = {
+            "matrix/literature_matrix.json": (matrix, "matrix.json"),
             "sections/section_drafts.json": (section_index, "index.json"),
             "sections/figure_candidates.json": (candidates, "figure-candidates.json"),
             "sections/paper_figure_candidates.json": (

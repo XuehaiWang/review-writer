@@ -341,18 +341,57 @@ def main() -> int:
     selected_outline = selected_outline_path.read_text(encoding="utf-8", errors="ignore")[:12000] if selected_outline_path.exists() else ""
     rules = load_blueprint_rule_pack(root, blueprint)
     section_specs = {str(item.get("section_id")): item for item in blueprint.get("sections", []) if isinstance(item, dict)}
-    paper_order = [str(pid) for task in tasks for pid in task.get("allowed_papers", []) if str(pid) in rows]
+    selected_papers = {
+        str(pid)
+        for task in tasks
+        for pid in task.get("allowed_papers", [])
+        if str(pid) in rows
+    }
+    paper_order = [
+        str(row.get("paper_id"))
+        for row in rows_list or []
+        if isinstance(row, dict) and str(row.get("paper_id")) in selected_papers
+    ]
     citation_map = {paper_id: index for index, paper_id in enumerate(dict.fromkeys(paper_order), start=1)}
     sections_dir = stage / "sections"
     sections_dir.mkdir(parents=True, exist_ok=True)
     output_sections = []
     for task in tasks:
         section_id = str(task.get("section_id"))
-        allowed = [str(pid) for pid in task.get("allowed_papers", []) if str(pid) in rows]
+        role = str(task.get("section_role") or "body").strip().casefold()
+        primary = list(
+            dict.fromkeys(
+                str(pid)
+                for pid in task.get("primary_papers", [])
+                if str(pid) in rows
+            )
+        )
+        supporting = list(
+            dict.fromkeys(
+                str(pid)
+                for pid in task.get("supporting_papers", [])
+                if str(pid) in rows and str(pid) not in primary
+            )
+        )
+        allowed = list(
+            dict.fromkeys(
+                str(pid)
+                for pid in task.get("allowed_papers", [*primary, *supporting])
+                if str(pid) in rows
+            )
+        )
         evidence = [paper_evidence(root, rows, paper_id) for paper_id in allowed]
         if not evidence or not any(item["evidence"] for item in evidence):
             raise SystemExit(f"No usable MinerU Markdown or matrix evidence for {section_id}.")
         spec = section_specs.get(section_id, {})
+        if role == "introduction":
+            paragraph_instruction = """Write 2-4 claim-centered framing paragraphs. Define the problem, scope, terminology, organizing logic, and evidence landscape. Use the supporting papers only as brief representative anchors. Do not give any paper a standalone summary, and do not repeat detailed methods, conditions, datasets, results, yields, or limitations that belong in a body section."""
+        elif role == "conclusion":
+            paragraph_instruction = """Write 2-4 claim-centered synthesis paragraphs. Compare conclusions across the body sections, identify shared limitations and defensible future directions, and cite prior evidence concisely. Do not replay the body as a paper-by-paper list and do not repeat full methods, conditions, datasets, or results."""
+        elif primary:
+            paragraph_instruction = f"""Write claim-centered review paragraphs, not one paragraph per paper. Every primary paper must support at least one paragraph, but related studies should be compared or synthesized together when they address the same claim. A paragraph may cite one or several allowed papers. Discuss detailed study evidence only here, in the paper's primary section. Supporting papers may be used briefly for comparison, without repeating their full descriptions. Cover all {len(primary)} primary papers."""
+        else:
+            paragraph_instruction = """Write 2-4 cross-cutting synthesis paragraphs using only the supporting evidence. Compare previously introduced findings from a new analytical angle, but do not repeat complete paper descriptions, methods, conditions, datasets, or results."""
         prompt = f"""Write one body section of a source-grounded scientific review.
 
 Topic: {blueprint.get('review_topic') or project.name}
@@ -360,14 +399,19 @@ Selected review outline (preserve its ordering and heading intent):
 {selected_outline}
 
 Section title: {task.get('heading')}
+Section role: {role}
 Section thesis: {task.get('core_argument')}
 Required claims: {json.dumps(task.get('must_cover_points') or [], ensure_ascii=False)}
 Comparison axes and constraints: {json.dumps(spec.get('review_claims') or [], ensure_ascii=False)[:10000]}
+Primary paper IDs (detailed discussion belongs only in this section): {', '.join(primary) or 'none'}
+Supporting paper IDs (brief comparison or synthesis only): {', '.join(supporting) or 'none'}
 Allowed paper IDs only: {', '.join(allowed)}
 
-Return a 90-150 word `overview`, followed by exactly one complete review paragraph for every allowed paper, in the same order as the allowed-paper list. The overview introduces the comparison axis for this section and must contain no citations or paper IDs.
+Return a 90-150 word `overview`, followed by complete review paragraphs. The overview introduces the comparison axis for this section and must contain no citations or paper IDs.
 
-Each paper paragraph must explain why that paper matters, its main transformation, the relevant substrate/product/catalyst/selectivity or mechanism evidence, and a review-level limitation or judgment where supported. Do not group papers and do not use paper titles as prose. Set `paper_ids` to a one-item list containing only the paper discussed in that paragraph. Do not put citations or paper IDs in `text`; the workflow adds numeric citations after validation. Preserve limitations and use conditional language for proposed mechanisms. Do not invent conditions, yields, selectivities, structures, or mechanistic evidence.
+{paragraph_instruction}
+
+For every paragraph, set `paper_ids` to all and only the allowed sources that support that paragraph. Do not put citations, source IDs, or paper titles as headings in `text`; the workflow adds numeric citations after validation. Preserve limitations and use conditional language for proposed mechanisms. Do not invent conditions, yields, selectivities, structures, or mechanistic evidence.
 
 Writing rules:\n{rules}
 
@@ -396,38 +440,67 @@ Source evidence (only use claims supported here):\n{json.dumps(evidence, ensure_
         overview = re.sub(r"\s+", " ", str(generated.get("overview") or "")).strip()
         if not overview:
             raise SystemExit(f"The writing model did not produce a section overview for {section_id}.")
-        by_paper: dict[str, str] = {}
+        generated_paragraphs: list[dict[str, Any]] = []
+        covered_primary: set[str] = set()
         for item in generated["paragraphs"]:
-            paper_ids = [str(pid) for pid in item.get("paper_ids", []) if str(pid) in citation_map]
+            paper_ids = list(
+                dict.fromkeys(
+                    str(pid)
+                    for pid in item.get("paper_ids", [])
+                    if str(pid) in allowed and str(pid) in citation_map
+                )
+            )
             text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
-            if len(paper_ids) != 1 or not text or paper_ids[0] in by_paper:
+            if not paper_ids or not text:
                 continue
-            by_paper[paper_ids[0]] = text
-        missing_papers = [paper_id for paper_id in allowed if paper_id not in by_paper]
+            generated_paragraphs.append({"paper_ids": paper_ids, "text": text})
+            covered_primary.update(set(paper_ids) & set(primary))
+        if not generated_paragraphs:
+            raise SystemExit(
+                f"The writing model did not produce any usable review paragraph for {section_id}."
+            )
+        missing_papers = [paper_id for paper_id in primary if paper_id not in covered_primary]
         if missing_papers:
             raise SystemExit(
-                f"The writing model did not produce one usable paragraph for every paper in {section_id}: "
+                f"The writing model did not cover every primary paper in {section_id}: "
                 + ", ".join(missing_papers)
             )
         paragraphs = []
         markdown = [f"## {task.get('heading')}", "", overview, ""]
-        for index, paper_id in enumerate(allowed, start=1):
+        for index, item in enumerate(generated_paragraphs, start=1):
             paragraph_id = f"{section_id}-p{index}"
-            callout = f"[{citation_map[paper_id]}]"
-            text = by_paper[paper_id] + " " + callout
-            paper_title = str(rows[paper_id].get("title") or paper_id).strip()
+            paper_ids = item["paper_ids"]
+            callout = f"[{', '.join(str(citation_map[paper_id]) for paper_id in paper_ids)}]"
+            text = item["text"] + " " + callout
             markdown.extend([
-                f"### {paper_id}. {paper_title}",
-                "",
                 text,
                 "",
                 f"<!-- paragraph_id: {paragraph_id} -->",
                 "",
             ])
-            paragraphs.append({"paragraph_id": paragraph_id, "paper_id": paper_id, "cited_paper_ids": [paper_id], "text": text})
+            paragraphs.append(
+                {
+                    "paragraph_id": paragraph_id,
+                    "paper_id": paper_ids[0],
+                    "cited_paper_ids": paper_ids,
+                    "text": text,
+                }
+            )
         section_text = make_xml_compatible("\n".join(markdown).strip() + "\n")[0]
         (sections_dir / f"{section_id}.md").write_text(section_text, encoding="utf-8")
-        output_sections.append({"section_id": section_id, "heading": task.get("heading"), "overview": overview, "paragraphs": paragraphs, "draft_md": section_text})
+        output_sections.append(
+            {
+                "section_id": section_id,
+                "heading": task.get("heading"),
+                "section_role": role,
+                "writing_mode": task.get("writing_mode"),
+                "primary_papers": primary,
+                "supporting_papers": supporting,
+                "overview": overview,
+                "paragraphs": paragraphs,
+                "draft_md": section_text,
+            }
+        )
     write_json(stage / "section_drafts.json", {"project_id": args.project_id, "sections": output_sections})
     (stage / "section_drafts.md").write_text("\n\n".join(section["draft_md"] for section in output_sections), encoding="utf-8")
     (stage / "section_drafting_report.md").write_text(

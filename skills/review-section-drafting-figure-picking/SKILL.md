@@ -32,8 +32,14 @@ PDF when checking figures/schemes/tables
 Write by section.
 Each section outputs one independent Markdown file.
 Use one subagent per section when parallel execution is available.
-Each paragraph normally corresponds to one paper's work.
-Each paragraph must have one figure/scheme/table tied to that paper.
+Write claim-centered synthesis rather than one-paper-one-paragraph summaries.
+A paragraph may compare several papers and must list all of them in
+`cited_paper_ids`.
+Each paper receives detailed treatment only in its primary body section.
+Introduction and conclusion use representative sources briefly and must not
+repeat full methods, conditions, results, or limitations from the body.
+Figures remain tied to stable paragraph anchors; a synthesis paragraph may
+anchor a representative figure from any cited paper.
 If no useful figure exists, write an explicit no_figure_reason.
 Use the literature matrix main_content as the starting evidence, but verify against Markdown/PDF.
 Do not write short examples; write complete review prose.
@@ -42,10 +48,10 @@ Do not write short examples; write complete review prose.
 Follow the template review paragraph mode:
 
 ```text
-1. introduce why this paper/method matters in the section
-2. describe the paper's main transformation or principle
-3. attach the corresponding scheme/figure/table
-4. explain what the scheme shows: substrate, product, catalyst, selectivity, mechanism, or limitation
+1. lead with the scientific claim or comparison
+2. synthesize the relevant evidence, grouping compatible studies where useful
+3. identify meaningful differences, evidence limits, or exceptions
+4. attach a representative scheme/figure/table when it materially supports the claim
 5. close with a review-level judgment or transition
 ```
 
@@ -136,13 +142,18 @@ section_drafting_report.md
 section_id
 heading
 core_argument
+section_role
+primary_papers
+supporting_papers
 allowed_papers
 must_cover_points
 avoid_points
 figure_need
 ```
 
-Use `section_blueprint.json.sections[].major_papers` as the source for `allowed_papers`.
+Build `allowed_papers` from primary plus supporting papers. Detailed study
+coverage is required only for `primary_papers`; supporting papers are for
+brief comparison, framing, or cross-section synthesis.
 
 `sections/<section_id>.md` is mandatory for every section. `section_drafts.md` concatenates the section files for preview only.
 

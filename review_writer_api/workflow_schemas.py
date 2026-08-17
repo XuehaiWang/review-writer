@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 
 class WorkflowRequest(BaseModel):
@@ -144,6 +153,20 @@ class DraftRestoreRequest(BaseModel):
 
 class DraftEvaluationRequest(BaseModel):
     goal: float = Field(default=90.0, ge=90, le=100)
+    paragraph_goal: float = Field(default=85.0, ge=0, le=100)
+    max_iterations: StrictInt = Field(default=3, ge=1, le=10)
+    min_case_words: StrictInt = Field(default=140, ge=1, le=10_000)
+    max_case_words: StrictInt = Field(default=280, ge=1, le=10_000)
+
+    @model_validator(mode="after")
+    def validate_case_word_range(self):
+        if self.max_case_words < self.min_case_words:
+            raise ValueError("max_case_words must be greater than or equal to min_case_words")
+        return self
+
+
+class DraftOptimizationRequest(DraftEvaluationRequest):
+    pass
 
 
 class DraftRewriteRequest(BaseModel):
@@ -152,6 +175,9 @@ class DraftRewriteRequest(BaseModel):
 
 class DraftRewriteDecisionRequest(BaseModel):
     revision: StrictInt = Field(ge=0)
+    selected_paragraph_ids: list[StrictStr] = Field(
+        default_factory=list, max_length=10_000
+    )
 
 
 class DraftApprovalRequest(BaseModel):

@@ -108,7 +108,7 @@ def mark_provider_call_completed() -> None:
 def _error_category(status: int) -> str:
     if status == 429:
         return "transient_rate_limited"
-    if status in {502, 503, 504}:
+    if status in {502, 503, 504, 524}:
         return "transient_service_unavailable"
     if status in {401, 403}:
         return "permission"
@@ -139,6 +139,8 @@ def install_urllib_protocol() -> None:
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, (TimeoutError, socket.timeout)):
                 emit_error("transient_timeout")
+            elif "private destination is blocked" in str(exc.reason).casefold():
+                emit_error("network_policy")
             raise
         if method == "POST":
             mark_provider_call_completed()

@@ -46,6 +46,8 @@ REFERENCES_HEADING = re.compile(
 )
 CITATION_CALLOUT = re.compile(r"\[([0-9][0-9,;\s-]*)\]")
 REFERENCE_ITEM = re.compile(r"(?m)^\s*\[(\d+)\]\s*\.?\s+(.+?)\s*$")
+MARKDOWN_HEADING = re.compile(r"(?m)^\s*(#{1,6})\s+(.+?)\s*$")
+INTRODUCTION_TITLES = ("introduction", "background", "引言", "绪论", "研究背景")
 
 
 class FinalNotReady(WorkflowConflict):
@@ -116,7 +118,6 @@ class FinalService:
         status: str = "review",
         expected_current_artifacts: dict[str, str] | None = None,
         expected_stage_states: dict[str, dict[str, Any]] | None = None,
-        expected_library_sources: list[str] | None = None,
     ) -> tuple[dict[str, ArtifactRecord], Any]:
         run = self.repository.create_stage_run(
             principal.user_id,
@@ -154,7 +155,6 @@ class FinalService:
             status=status,
             expected_current_artifacts=expected_current_artifacts,
             expected_stage_states=expected_stage_states,
-            expected_library_sources=expected_library_sources,
         )
         return published, state
 
@@ -174,6 +174,40 @@ class FinalService:
             raise FinalNotReady("Draft approval is stale.")
         return text, artifact, approval
 
+    @staticmethod
+    def _insert_before_introduction(markdown: str, block: str) -> str:
+        """Place a front-of-article artifact immediately before Introduction."""
+
+        normalized_block = str(block or "").strip()
+        body = str(markdown or "").rstrip()
+        if not normalized_block:
+            return body
+        headings = list(MARKDOWN_HEADING.finditer(body))
+        insertion: int | None = None
+        for match in headings:
+            title = re.sub(
+                r"^\s*\d+(?:\.\d+)*[.)]?\s*", "", match.group(2)
+            ).strip().casefold()
+            if any(
+                title == candidate
+                or any(
+                    title.startswith(f"{candidate}{separator}")
+                    for separator in (" ", ":", "：", "与", "和")
+                )
+                for candidate in INTRODUCTION_TITLES
+            ):
+                insertion = match.start()
+                break
+        if insertion is None and headings and len(headings[0].group(1)) == 1:
+            insertion = headings[0].end()
+        if insertion is None:
+            insertion = 0
+        before = body[:insertion].rstrip()
+        after = body[insertion:].lstrip()
+        return "\n\n".join(
+            value for value in (before, normalized_block, after) if value
+        )
+
     def _revision(self, principal: Principal, project_id: str) -> int:
         state = self.repository.get_stage_state(principal.user_id, project_id, "final")
         return state.revision if state else 0
@@ -186,6 +220,13 @@ class FinalService:
             "draft_text": text,
             "source_draft_artifact_id": draft.id,
             "expected_revision": self._revision(principal, project_id),
+        }
+
+    def build_payload(self, principal: Principal, project_id: str) -> dict[str, Any]:
+        _text, draft, _approval = self._approved_draft(principal, project_id)
+        return {
+            "project_id": project_id,
+            "source_draft_artifact_id": draft.id,
         }
 
     def publish_conclusion(
@@ -355,6 +396,7 @@ class FinalService:
         markdown: str,
         *,
         source_paper_ids: list[str],
+        source_reference_numbers: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         missing: list[str] = []
         wrong_project: list[str] = []
@@ -392,27 +434,27 @@ class FinalService:
                 if str(value).strip()
             )
         )
+        reference_numbers = {
+            paper_id: int(number)
+            for paper_id, number in (source_reference_numbers or {}).items()
+            if paper_id in normalized_sources and int(number) > 0
+        }
+        for index, paper_id in enumerate(normalized_sources, start=1):
+            reference_numbers.setdefault(paper_id, index)
         missing_sources = [
             paper_id
             for paper_id in normalized_sources
-            if not re.search(
-                rf"(?<![A-Za-z0-9]){re.escape(paper_id)}(?![A-Za-z0-9])",
-                "\n".join(text for _number, text in listed_rows),
-            )
+            if reference_numbers[paper_id] not in listed
         ]
         listed_source_ids: list[str] = []
         unmapped_reference_numbers: list[int] = []
-        for number, text in listed_rows:
-            matched = [
-                paper_id
-                for paper_id in normalized_sources
-                if re.search(
-                    rf"(?<![A-Za-z0-9]){re.escape(paper_id)}(?![A-Za-z0-9])",
-                    text,
-                )
-            ]
-            if len(matched) == 1:
-                listed_source_ids.append(matched[0])
+        sources_by_number = {
+            number: paper_id for paper_id, number in reference_numbers.items()
+        }
+        for number, _text in listed_rows:
+            matched_paper_id = sources_by_number.get(int(number))
+            if matched_paper_id:
+                listed_source_ids.append(matched_paper_id)
             else:
                 unmapped_reference_numbers.append(int(number))
         active_sources, immutable_sources = self._library_source_sets(
@@ -427,22 +469,23 @@ class FinalService:
             blocking_issues.append("missing_artifact_references")
         if wrong_project:
             blocking_issues.append("cross_project_artifact_references")
+        warning_issues: list[str] = []
         if not reference_match:
-            blocking_issues.append("missing_references_section")
+            warning_issues.append("missing_references_section")
         elif not listed:
-            blocking_issues.append("empty_references_section")
+            warning_issues.append("empty_references_section")
         if normalized_sources and not callouts:
-            blocking_issues.append("draft_has_no_citation_callouts")
+            warning_issues.append("draft_has_no_citation_callouts")
         if callouts != listed:
-            blocking_issues.append("citation_reference_map_mismatch")
+            warning_issues.append("citation_reference_map_mismatch")
         if missing_sources:
-            blocking_issues.append("citation_sources_missing_from_references")
+            warning_issues.append("citation_sources_missing_from_references")
         if unmapped_reference_numbers:
-            blocking_issues.append("references_include_unmapped_sources")
+            warning_issues.append("references_include_unmapped_sources")
         if unavailable_sources:
-            blocking_issues.append("library_sources_unavailable")
+            warning_issues.append("library_sources_unavailable")
         if missing_source_artifacts:
-            blocking_issues.append("library_source_artifacts_missing")
+            warning_issues.append("library_source_artifacts_missing")
         return {
             "valid": not blocking_issues,
             "referenced_artifact_ids": referenced,
@@ -458,6 +501,7 @@ class FinalService:
             "missing_source_artifact_paper_ids": missing_source_artifacts,
             "references_section_present": bool(reference_match),
             "blocking_issues": blocking_issues,
+            "warning_issues": warning_issues,
             "validated_at": utc_now().isoformat(),
         }
 
@@ -545,10 +589,9 @@ class FinalService:
         draft_references = (
             draft_text[reference_match.start() :].strip() if reference_match else ""
         )
-        parts = [draft_body]
+        overview_block = ""
         if overview is not None:
             overview_lines = [
-                "## Review Overview",
                 f"![Overview figure](/api/v1/artifacts/{overview.id}/content)",
             ]
             caption = ". ".join(
@@ -567,8 +610,12 @@ class FinalService:
             if labels:
                 caption = (caption + " — " if caption else "") + ", ".join(labels)
             if caption:
-                overview_lines.append(f"*{caption}*")
-            parts.append("\n".join(overview_lines))
+                overview_lines.append(f"*Review overview. {caption}*")
+            else:
+                overview_lines.append("*Review overview.*")
+            overview_block = "\n".join(overview_lines)
+        assembled_body = self._insert_before_introduction(draft_body, overview_block)
+        parts = [assembled_body]
         if conclusion:
             parts.append(conclusion.strip())
         if draft_references:
@@ -587,21 +634,30 @@ class FinalService:
             )
             if str(paper_id).strip()
         ]
+        matrix_reference_numbers = {
+            str(row.get("paper_id") or ""): index
+            for index, row in enumerate(
+                compatibility.get("matrix", {}).get("rows") or [], start=1
+            )
+            if isinstance(row, dict) and str(row.get("paper_id") or "").strip()
+        }
         validation = self._validate_markdown(
             principal,
             project_id,
             markdown,
             source_paper_ids=source_paper_ids,
+            source_reference_numbers=matrix_reference_numbers,
         )
         if not validation["valid"]:
             raise FinalNotReady(
-                "Final manuscript audit has blocking citation, source, or artifact issues."
+                "Final manuscript contains a missing or cross-project artifact reference."
             )
         release = {
             "status": "released",
             "source_draft_artifact_id": draft.id,
             "source_paper_ids": validation["source_paper_ids"],
             "validation_blocking_issues": [],
+            "validation_warning_issues": validation["warning_issues"],
             "released_at": utc_now().isoformat(),
         }
         source_ids = {
@@ -652,7 +708,6 @@ class FinalService:
                         "status": "approved",
                     }
                 },
-                expected_library_sources=validation["source_paper_ids"],
             )
         return {
             "final_artifact_id": published[FINAL_DRAFT].id,
@@ -740,7 +795,6 @@ class FinalService:
                     FINAL_DRAFT: final.id,
                     FINAL_RELEASE: job_payload["source_release_artifact_id"],
                 },
-                expected_library_sources=list(job_payload.get("source_paper_ids") or []),
             )
         return {
             "docx_artifact_id": published[FINAL_DOCX].id,
@@ -768,19 +822,6 @@ class FinalService:
         )
         release, release_artifact = self._read_json(
             principal, project_id, FINAL_RELEASE
-        )
-        release_source_ids = [
-            str(value).strip()
-            for value in release.get("source_paper_ids") or []
-            if str(value).strip()
-        ]
-        active_release_sources, available_release_sources = self._library_source_sets(
-            principal, release_source_ids
-        )
-        release_sources_current = bool(
-            release_source_ids
-            and set(release_source_ids) == active_release_sources
-            and set(release_source_ids) == available_release_sources
         )
         docx = self._artifact(principal, project_id, FINAL_DOCX)
         state = self.repository.get_stage_state(principal.user_id, project_id, "final")
@@ -827,7 +868,6 @@ class FinalService:
             == current_draft_id
             and release_artifact.metadata.get("source_draft_artifact_id")
             == current_draft_id
-            and release_sources_current
         )
         docx_current = bool(
             docx
@@ -841,6 +881,27 @@ class FinalService:
         )
         overview_url = f"/api/v1/artifacts/{overview.id}/content" if overview else ""
         docx_url = f"/api/v1/artifacts/{docx.id}/content" if docx else ""
+        final_jobs = [
+            job
+            for job in self.repository.list_project_jobs(
+                principal.user_id, project_id, limit=50
+            )
+            if job.job_type in {
+                "final.conclusion",
+                "final.overview",
+                "final.build",
+                "final.export",
+            }
+        ]
+        latest_final_job = final_jobs[0] if final_jobs else None
+        active_final_job = next(
+            (
+                job
+                for job in final_jobs
+                if job.status in {"queued", "running", "cancel_requested"}
+            ),
+            None,
+        )
         validation_report = ""
         if validation:
             validation_report = "\n".join(
@@ -853,6 +914,7 @@ class FinalService:
                     f"- Listed references: {', '.join(map(str, validation.get('listed_references') or [])) or 'none'}",
                     f"- Sources: {', '.join(validation.get('source_paper_ids') or []) or 'none'}",
                     f"- Blocking issues: {', '.join(validation.get('blocking_issues') or []) or 'none'}",
+                    f"- Warnings: {', '.join(validation.get('warning_issues') or []) or 'none'}",
                     "",
                 )
             )
@@ -865,6 +927,7 @@ class FinalService:
                     f"- Status: {release.get('status', 'unknown')}",
                     f"- Draft artifact: {release.get('source_draft_artifact_id', '')}",
                     f"- Source papers: {', '.join(release.get('source_paper_ids') or []) or 'none'}",
+                    f"- Warnings: {', '.join(release.get('validation_warning_issues') or []) or 'none'}",
                     f"- Released at: {release.get('released_at', '')}",
                     "",
                 )
@@ -902,12 +965,26 @@ class FinalService:
             "release": release,
             "release_artifact_id": release_artifact.id if release_artifact else "",
             "release_current": release_current,
-            "release_sources_current": release_sources_current,
             "docx_artifact_id": docx.id if docx else "",
             "docx_url": docx_url,
             "final_draft_docx_path": docx_url,
             "final_draft_docx_exists": docx_current,
             "final_draft_docx_stale": bool(docx and not docx_current),
+            "active_final_job_id": (
+                active_final_job.id if active_final_job else ""
+            ),
+            "active_final_job_type": (
+                active_final_job.job_type if active_final_job else ""
+            ),
+            "latest_final_job_id": (
+                latest_final_job.id if latest_final_job else ""
+            ),
+            "latest_final_job_type": (
+                latest_final_job.job_type if latest_final_job else ""
+            ),
+            "latest_final_job_status": (
+                latest_final_job.status if latest_final_job else ""
+            ),
             "final_audit_report_md": validation_report,
             "release_report_md": release_report,
             "freshness": {

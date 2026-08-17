@@ -19,9 +19,13 @@ The host review-writer integration is intentionally additive. It must not make c
 4. Score all rubric dimensions and every paragraph using retrieved original passages, citation metadata, and evidence boundaries.
 5. Write evaluation, original-source check, findings, gate status, rewrite queue, and polish queue artifacts.
 6. If the goal is unmet, rewrite `section_rewrite` paragraphs and source-recheck paragraphs that have readable original text plus explicit unsupported claims. For the latter, only remove or qualify the listed unsupported claims.
-7. Reject rewrites that add or replace citation callouts, numeric facts, stereochemical terms, chemical identities, or required labels. An explicitly unsupported value may be deleted, never substituted.
-8. Record accepted changes in `feedback_loop_rewrites.json` and the current first draft.
-9. Repeat until the goal is met or a bounded stop condition is reached. If a later iteration scores lower, restore the highest fully evaluated draft and its matching evaluation artifacts.
+7. Apply tiered integrity checks. Reject changes to citation callouts, numeric facts, explicit chemical identities/formulas, stereochemical values, explicit intermediate/compound labels, images, or figure metadata. Normalize generic chemical-class singular/plural forms and treat ordinary terminology changes as non-blocking warnings. An explicitly unsupported hard-protected value may be deleted, never substituted.
+8. Treat loop rewrites as working candidates. Require every candidate to remain one prose block, preserve its paragraph marker boundary, pass protected-fact validation, and improve its own paragraph score over the exact pre-loop source paragraph.
+9. After every evaluated iteration, retain the best safe candidate independently for each paragraph in `batch_review_candidates.json`. Build the review draft from the unchanged source plus those paragraph candidates; never discard all local gains merely because the whole-draft score did not exceed a previous best.
+10. Repeat until the goal is met or a bounded stop condition is reached. Restore the highest fully evaluated working draft and matching evaluation artifacts for the loop's internal result, while keeping the independent paragraph candidates available for explicit human review.
+11. In an interactive host, show every retained batch candidate as a source-versus-candidate comparison with source score, candidate score, and a checkbox. Do not change the current manuscript until the user saves selected candidates or saves all; allow the entire batch to be discarded.
+12. When selected candidates are saved, reuse their immutable paragraph evaluations, replace only those paragraph bodies, update the full-draft score by their equal-weight paragraph deltas, and leave every unselected paragraph unchanged. Do not call the model again or claim that unchanged global rubric dimensions were rescored.
+13. For an interactive one-paragraph rewrite, use the same generate → integrity-check → paragraph-score → compare → human-decision sequence. When the stored route is `human_confirmation` or an evidence-poor `local_source_recheck`, permit only an explicitly labeled style-only candidate: preserve all scientific propositions and source/figure relationships, do not claim the conflict is resolved, and keep the manual-confirmation requirement visible after saving. Do not enable this fallback in unattended batch rewriting.
 
 Read [artifact_contract.md](references/artifact_contract.md) for inputs and outputs and [unified_rubric.json](references/unified_rubric.json) for the scoring model.
 
@@ -63,7 +67,11 @@ python scripts/apply_feedback_overlays.py --review-root <review-root> --project-
 - Replay an overlay only when both paragraph ID and original paragraph hash still match.
 - Never overwrite a newer upstream paragraph when an overlay conflicts; report the conflict instead.
 - Bind scores, rewrite candidates, and human approval to exact draft hashes. Any later paragraph or full-text edit makes the previous result visibly out of date.
-- Generate one-paragraph AI candidates without applying them; accept them only after a human decision and record the accepted edit in paragraph history.
+- Generate one-paragraph AI candidates without applying them, score each candidate before presenting it, and show the source-versus-candidate paragraph scores with the text comparison.
+- Let an explicit user request generate a style-only candidate for `human_confirmation` or unresolved source-recheck items, but label it as still requiring manual confirmation. Never let the candidate hide, clear, or claim to resolve the underlying evidence or figure-identity issue.
+- Accept a candidate only after a human decision, reuse its precomputed immutable evaluation when publishing, and record the accepted edit in paragraph history. Keep the previous manuscript current if candidate evaluation or integrity validation fails.
+- For batch optimization, publish only independently improved paragraph candidates to the review interface. Keep them pending across refreshes, support per-paragraph selection, and leave the saved manuscript untouched until the user confirms.
+- Mark incremental quality explicitly and retain the last full evaluation as its baseline; require a full evaluation after arbitrary manual or full-text edits.
 
 ## Release and Safety
 

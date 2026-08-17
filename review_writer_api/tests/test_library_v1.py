@@ -21,6 +21,7 @@ from review_writer_api.app import create_app
 from review_writer_api.config import ApiSettings, database_url_from_env
 from review_writer_api.database import (
     Base,
+    Project,
     User,
     create_session_factory,
     database_session,
@@ -628,6 +629,43 @@ class LibraryV1Tests(unittest.TestCase):
 
             self.current = self.second
             self.assertEqual(404, client.get(f"/api/v1/jobs/{search_job['id']}").status_code)
+
+    def test_literature_acquisition_candidates_are_scoped_per_project(self) -> None:
+        with self.sessions.begin() as session:
+            first_project = Project(
+                user_id=uuid.UUID(self.first.user_id),
+                slug="first-acquisition-project",
+                topic="First review topic",
+            )
+            second_project = Project(
+                user_id=uuid.UUID(self.first.user_id),
+                slug="second-acquisition-project",
+                topic="A different review topic",
+            )
+            session.add_all([first_project, second_project])
+            session.flush()
+            first_project_id = str(first_project.id)
+            second_project_id = str(second_project.id)
+
+        with TestClient(self.app) as client:
+            first = client.post(
+                f"/api/v1/library/search-jobs?project_id={first_project_id}",
+                json={"topic": "allenation", "limit": 10},
+                headers={"Origin": "http://testserver", "Idempotency-Key": "project-search-1"},
+            )
+            self.assertEqual(202, first.status_code, first.text)
+            first_job = self.wait_job(client, first.json()["id"])
+            self.assertEqual("succeeded", first_job["status"])
+
+            first_current = client.get(
+                f"/api/v1/library/search-jobs/current?project_id={first_project_id}"
+            ).json()
+            second_current = client.get(
+                f"/api/v1/library/search-jobs/current?project_id={second_project_id}"
+            ).json()
+
+        self.assertEqual(first_job["id"], first_current["job"]["id"])
+        self.assertIsNone(second_current["job"])
 
     def test_library_job_payloads_reject_wrong_json_types(self) -> None:
         with TestClient(self.app) as client:

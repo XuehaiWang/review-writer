@@ -15,6 +15,7 @@ from sqlalchemy import select
 from review_writer_api.database import database_session
 from review_writer_api.errors import (
     ArtifactFileMissing,
+    WorkflowConflict,
     WorkflowNotFound,
     WorkflowValidationError,
 )
@@ -196,22 +197,49 @@ class ArtifactService:
         stat = source.stat()
         source.replace(destination)
         relative_path = destination.relative_to(project_root).as_posix()
-        return self.repository.publish_artifact(
-            user_id=user_id,
-            project_id=project_id,
-            artifact_id=artifact_id,
-            logical_name=logical.as_posix(),
-            artifact_type=str(artifact_type or destination.suffix.lstrip(".") or "file"),
-            relative_path=relative_path,
-            content_sha256=digest,
-            lineage_sha256=lineage_sha256,
-            size_bytes=stat.st_size,
-            mtime_ns=stat.st_mtime_ns,
-            producer_stage=producer_stage,
-            producer_run_id=run_id,
-            metadata=artifact_metadata,
-            make_current=make_current,
-        )
+        try:
+            return self.repository.publish_artifact(
+                user_id=user_id,
+                project_id=project_id,
+                artifact_id=artifact_id,
+                logical_name=logical.as_posix(),
+                artifact_type=str(
+                    artifact_type or destination.suffix.lstrip(".") or "file"
+                ),
+                relative_path=relative_path,
+                content_sha256=digest,
+                lineage_sha256=lineage_sha256,
+                size_bytes=stat.st_size,
+                mtime_ns=stat.st_mtime_ns,
+                producer_stage=producer_stage,
+                producer_run_id=run_id,
+                metadata=artifact_metadata,
+                make_current=make_current,
+            )
+        except WorkflowConflict:
+            # Two first-open requests can finish the same immutable artifact at
+            # the same time (for example React StrictMode mounting an editor).
+            # Treat the unique-content winner as the idempotent result and
+            # remove only this request's unpublished destination.
+            existing = self.repository.get_artifact_by_content(
+                user_id,
+                project_id,
+                logical.as_posix(),
+                digest,
+                lineage_sha256,
+            )
+            if existing is None:
+                raise
+            destination.unlink(missing_ok=True)
+            try:
+                destination.parent.rmdir()
+            except OSError:
+                pass
+            if make_current:
+                return self.repository.set_current_artifact(
+                    user_id, project_id, logical.as_posix(), existing.id
+                )
+            return existing
 
     def resolve_owned_artifact(self, user_id: str, artifact_id: str) -> ResolvedArtifact:
         owned = self.repository.get_artifact(user_id, artifact_id)

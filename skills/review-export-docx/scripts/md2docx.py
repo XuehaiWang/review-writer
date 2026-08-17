@@ -35,10 +35,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image as PILImage
 from docx import Document
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement, parse_xml  # noqa: F401
 from docx.oxml.ns import qn
-from docx.shared import Inches, Pt
+from docx.shared import Inches, Pt, RGBColor
 
 try:
     from latex2word import LatexToWordElement
@@ -116,7 +117,7 @@ _SECTION_CONTEXT: Dict[str, str] = {
     "reference":              "references",
 }
 
-_INTRODUCTION_HEADINGS = {"introduction", "background"}
+_INTRODUCTION_HEADINGS = {"introduction", "background", "引言", "绪论", "研究背景"}
 
 _CAPTION_PATTERNS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"^(figure|fig\.)\s*\d+", re.I), "figure"),
@@ -929,14 +930,20 @@ def _section_ctx(text: str) -> Optional[str]:
 def is_introduction_heading(text: str) -> bool:
     """Recognize the manuscript introduction that anchors the full-review chart."""
     title = re.sub(r"^\s*\d+(?:\.\d+)*[.)]?\s*", "", text).strip()
-    return title.casefold() in _INTRODUCTION_HEADINGS
+    normalized = title.casefold()
+    return any(
+        normalized == candidate
+        or any(
+            normalized.startswith(f"{candidate}{separator}")
+            for separator in (" ", ":", "：", "与", "和")
+        )
+        for candidate in _INTRODUCTION_HEADINGS
+    )
 
 
-def should_insert_full_chart_before_heading(
-    introduction_level: int | None, next_heading_level: int
-) -> bool:
-    """Place the chart after Introduction and before the next peer-level section."""
-    return introduction_level is not None and next_heading_level <= introduction_level
+def should_insert_full_chart_before_heading(heading_text: str) -> bool:
+    """The full-review visual is a front-of-article bridge before Introduction."""
+    return is_introduction_heading(heading_text)
 
 
 def _caption_style(raw_text: str) -> Optional[str]:
@@ -979,13 +986,90 @@ def _collect_static_toc_entries(blocks: List[Block]) -> List[Tuple[int, str]]:
 
 
 def _insert_static_toc(doc: Document, entries: List[Tuple[int, str]]) -> None:
-    for level, text in entries:
-        p = doc.add_paragraph(style=_S["body"])
-        if level == 3:
-            p.paragraph_format.left_indent = Inches(0.32)
-        elif level >= 4:
-            p.paragraph_format.left_indent = Inches(0.58)
-        apply_runs(p, parse_inline(text), spec_key="body")
+    """Render a compact, hierarchical contents panel instead of a flat list."""
+
+    if not entries:
+        return
+
+    numbered_prefix = re.compile(r"^\s*(\d+(?:\.\d+)*)[.)]?\s+")
+    groups: List[Tuple[str, str, List[Tuple[int, str]]]] = []
+    for level, raw_text in entries:
+        text = raw_text.strip()
+        if level == 2 or not groups:
+            match = numbered_prefix.match(text)
+            number = match.group(1) if match else str(len(groups) + 1)
+            title = text[match.end():].strip() if match else text
+            groups.append((number, title, []))
+            continue
+        groups[-1][2].append((level, text))
+
+    def set_shading(cell, fill: str) -> None:
+        tc_pr = cell._tc.get_or_add_tcPr()
+        shading = tc_pr.find(qn("w:shd"))
+        if shading is None:
+            shading = OxmlElement("w:shd")
+            tc_pr.append(shading)
+        shading.set(qn("w:fill"), fill)
+        shading.set(qn("w:val"), "clear")
+
+    def set_margins(cell, *, top: int, start: int, bottom: int, end: int) -> None:
+        tc_pr = cell._tc.get_or_add_tcPr()
+        margins = tc_pr.find(qn("w:tcMar"))
+        if margins is None:
+            margins = OxmlElement("w:tcMar")
+            tc_pr.append(margins)
+        for edge, value in (("top", top), ("start", start), ("bottom", bottom), ("end", end)):
+            node = margins.find(qn(f"w:{edge}"))
+            if node is None:
+                node = OxmlElement(f"w:{edge}")
+                margins.append(node)
+            node.set(qn("w:w"), str(value))
+            node.set(qn("w:type"), "dxa")
+
+    table = doc.add_table(rows=0, cols=2)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    table.columns[0].width = Inches(0.72)
+    for row_index, (number, title, children) in enumerate(groups):
+        cells = table.add_row().cells
+        badge, content = cells
+        badge.width = Inches(0.72)
+        badge.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        content.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        set_shading(badge, "1F6B54")
+        set_shading(content, "F2F7F4" if row_index % 2 == 0 else "FAFCFB")
+        set_margins(badge, top=130, start=80, bottom=130, end=80)
+        set_margins(content, top=120, start=210, bottom=120, end=160)
+
+        badge_p = badge.paragraphs[0]
+        badge_p.style = doc.styles[_S["body"]]
+        badge_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        badge_p.paragraph_format.space_after = Pt(0)
+        badge_text = number.zfill(2) if number.isdigit() else number
+        badge_run = badge_p.add_run(badge_text)
+        badge_run.bold = True
+        badge_run.font.name = "Times New Roman"
+        badge_run.font.size = Pt(11)
+        badge_run.font.color.rgb = RGBColor(255, 255, 255)
+
+        title_p = content.paragraphs[0]
+        title_p.style = doc.styles[_S["body"]]
+        title_p.paragraph_format.space_after = Pt(2 if children else 0)
+        apply_runs(title_p, parse_inline(title), spec_key="body", force_bold=True)
+        for run in title_p.runs:
+            run.font.color.rgb = RGBColor(31, 74, 59)
+        for child_level, child_text in children:
+            child_p = content.add_paragraph(style=_S["body"])
+            child_p.paragraph_format.space_before = Pt(0)
+            child_p.paragraph_format.space_after = Pt(1)
+            child_p.paragraph_format.left_indent = Inches(0.18 if child_level == 3 else 0.36)
+            prefix = "• " if child_level == 3 else "– "
+            apply_runs(child_p, parse_inline(prefix + child_text), spec_key="table_body")
+            for run in child_p.runs:
+                run.font.color.rgb = RGBColor(82, 101, 93)
+
+    spacer = doc.add_paragraph(style=_S["body"])
+    spacer.paragraph_format.space_after = Pt(2)
 
 
 # ---------------------------------------------------------------------------
@@ -1153,7 +1237,6 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
     saw_toc_heading = False
     skipping_source_toc = False
     full_chart_inserted = False
-    introduction_level: int | None = None
     inserted_section_charts: set[str] = set()
     chart_number = 0
 
@@ -1194,11 +1277,10 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
             if (
                 chart_bundle is not None
                 and not full_chart_inserted
-                and should_insert_full_chart_before_heading(introduction_level, effective_level)
+                and should_insert_full_chart_before_heading(block.text)
             ):
                 insert_chart(chart_bundle.full, "Full-review structure summary.")
                 full_chart_inserted = True
-                introduction_level = None
             style_key, spec_key = _HEADING_FORMAT.get(effective_level, ("body", "body"))
             new_ctx = _section_ctx(block.text)
             ctx = new_ctx if new_ctx else "body"
@@ -1211,8 +1293,6 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
                 manifest_heading, image_path = chart_bundle.sections[chart_heading_key]
                 insert_chart(image_path, f"Section structure summary: {manifest_heading}.")
                 inserted_section_charts.add(chart_heading_key)
-            if is_introduction_heading(block.text):
-                introduction_level = effective_level
 
         elif block.kind == "paragraph":
             text  = block.text.strip()
@@ -1327,7 +1407,7 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
 
     if chart_bundle is not None:
         if not full_chart_inserted:
-            raise ValueError("full-review summary chart could not be placed after Introduction")
+            raise ValueError("full-review summary chart could not be placed before Introduction")
         missing_sections = set(chart_bundle.sections) - inserted_section_charts
         if missing_sections:
             missing = ", ".join(

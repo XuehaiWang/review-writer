@@ -32,14 +32,17 @@ def build_discovery_router(
     if builder is not None:
 
         def discovery_handler(context, payload):
-            context.report_progress(0, 1)
+            # Discovery exposes stable milestones so the UI can show useful
+            # progress even though provider and local-search runtimes vary.
+            context.report_progress(0, 4)
             built = builder(context, payload)
+            context.report_progress(3, 4)
             context.checkpoint()
             principal = Principal(context.user_id, frozenset({Role.USER}))
             result = discovery_service.replace_from_job(
                 principal, str(context.project_id), payload, built
             )
-            context.report_progress(1, 1)
+            context.report_progress(4, 4)
             return result
 
         job_service.register_handler("discovery.search", discovery_handler)

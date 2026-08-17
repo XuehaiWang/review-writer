@@ -159,6 +159,36 @@ class FinalV1Tests(NativeFigureApiTestCase):
         self.assertEqual(200, ready.status_code, ready.text)
         self.assertTrue(ready.json()["draft_approval_current"])
 
+    def test_final_build_job_reports_progress_and_is_recoverable(self) -> None:
+        with TestClient(self.app) as client:
+            self.prepare_approved_draft(client)
+            started = client.post(
+                f"/api/v1/projects/{self.project_id}/final/build-jobs",
+                json={},
+                headers=self.headers("final-build-job"),
+            )
+            self.assertEqual(202, started.status_code, started.text)
+            completed = self.wait_job(client, started.json()["id"])
+            payload = client.get(
+                f"/api/v1/projects/{self.project_id}/final"
+            ).json()
+        self.assertEqual("succeeded", completed["status"])
+        self.assertEqual(4, completed["progress_current"])
+        self.assertEqual(4, completed["progress_total"])
+        self.assertEqual(started.json()["id"], payload["latest_final_job_id"])
+        self.assertEqual("final.build", payload["latest_final_job_type"])
+        self.assertEqual("succeeded", payload["latest_final_job_status"])
+        self.assertTrue(payload["final_current"])
+
+    def test_overview_block_is_inserted_immediately_before_introduction(self) -> None:
+        source = "# Review title\n\nAbstract text.\n\n## 1. Introduction\n\nOpening."
+        marker = "![Review overview](/api/v1/artifacts/overview/content)"
+        assembled = self.app.state.final_service._insert_before_introduction(
+            source, marker
+        )
+        self.assertLess(assembled.index(marker), assembled.index("## 1. Introduction"))
+        self.assertGreater(assembled.index(marker), assembled.index("Abstract text."))
+
     def test_re_evaluation_invalidates_old_draft_approval_and_blocks_final(self) -> None:
         with TestClient(self.app) as client:
             self.prepare_approved_draft(client)
@@ -229,7 +259,7 @@ class FinalV1Tests(NativeFigureApiTestCase):
         self.assertFalse(final["final_artifact_id"])
         self.assertFalse(final["release_artifact_id"])
 
-    def test_concurrent_library_source_removal_blocks_in_flight_final_release(self) -> None:
+    def test_concurrent_library_source_removal_does_not_block_final_release(self) -> None:
         publish_started = threading.Event()
         release_publish = threading.Event()
         service = self.app.state.final_service
@@ -279,10 +309,11 @@ class FinalV1Tests(NativeFigureApiTestCase):
             release_publish.set()
             service._publish_files = original_publish
         self.assertFalse(worker.is_alive())
-        self.assertIn("error", build_result)
-        self.assertFalse(final["release_artifact_id"])
+        self.assertIn("payload", build_result)
+        self.assertTrue(final["release_artifact_id"])
+        self.assertTrue(final["release_current"])
 
-    def test_released_final_becomes_stale_when_a_library_source_is_removed(self) -> None:
+    def test_released_final_remains_exportable_when_a_library_source_is_removed(self) -> None:
         with TestClient(self.app) as client:
             self.prepare_approved_draft(client)
             built = client.post(
@@ -312,8 +343,8 @@ class FinalV1Tests(NativeFigureApiTestCase):
                 f"/api/v1/projects/{self.project_id}/final/export-jobs",
                 json={}, headers=self.headers("export-after-source-removal"),
             )
-        self.assertFalse(final["release_current"])
-        self.assertEqual(409, exported.status_code, exported.text)
+        self.assertTrue(final["release_current"])
+        self.assertEqual(202, exported.status_code, exported.text)
 
     def test_cancel_after_builder_before_publish_admits_no_conclusion(self) -> None:
         self.block_conclusion_return = True
@@ -348,10 +379,13 @@ class FinalV1Tests(NativeFigureApiTestCase):
             release_completion.wait(3)
             return original(job_id, result)
 
-        repository.mark_job_succeeded = delayed_completion
         try:
             with TestClient(self.app) as client:
                 self.prepare_approved_draft(client)
+                # Install the commit-point delay only after prerequisite jobs
+                # have finished; otherwise their success callbacks can set the
+                # event before the conclusion job reaches publication.
+                repository.mark_job_succeeded = delayed_completion
                 started = client.post(
                     f"/api/v1/projects/{self.project_id}/final/conclusion-jobs",
                     json={},
@@ -441,7 +475,7 @@ class FinalV1Tests(NativeFigureApiTestCase):
         self.assertIn("citation_callouts", audit.json())
         self.assertNotEqual(audit.json(), release.json())
 
-    def test_final_audit_rejects_missing_sources_and_cross_project_artifacts(self) -> None:
+    def test_final_audit_warns_for_citation_issues_but_blocks_cross_project_artifacts(self) -> None:
         with self.sessions.begin() as session:
             other = Project(
                 user_id=uuid.UUID(self.first.user_id),
@@ -488,18 +522,26 @@ class FinalV1Tests(NativeFigureApiTestCase):
             ),
             source_paper_ids=["P001"],
         )
-        self.assertFalse(missing_sources["valid"])
-        self.assertIn("missing_references_section", missing_sources["blocking_issues"])
+        self.assertTrue(missing_sources["valid"])
+        self.assertIn("missing_references_section", missing_sources["warning_issues"])
+        self.assertEqual([], missing_sources["blocking_issues"])
         self.assertFalse(cross_project["valid"])
         self.assertEqual([foreign.id], cross_project["cross_project_artifact_ids"])
 
-    def test_final_audit_rejects_fabricated_deleted_and_artifactless_sources(self) -> None:
+    def test_final_audit_warns_for_fabricated_deleted_and_artifactless_sources(self) -> None:
         service = self.app.state.final_service
         fabricated = service._validate_markdown(
             self.first,
             self.project_id,
             "# Draft [1] [2]\n\n## References\n[1] P001\n[2] FABRICATED\n",
             source_paper_ids=["P001"],
+        )
+        bibliographic = service._validate_markdown(
+            self.first,
+            self.project_id,
+            "# Draft [4]\n\n## References\n[4] Author. Article title. Journal. 2024\n",
+            source_paper_ids=["P001"],
+            source_reference_numbers={"P001": 4},
         )
         with self.sessions.begin() as session:
             paper = session.query(LibraryPaper).filter_by(
@@ -526,11 +568,19 @@ class FinalV1Tests(NativeFigureApiTestCase):
             "# Draft [1]\n\n## References\n[1] P001\n",
             source_paper_ids=["P001"],
         )
-        self.assertIn("references_include_unmapped_sources", fabricated["blocking_issues"])
+        self.assertTrue(fabricated["valid"])
+        self.assertIn("references_include_unmapped_sources", fabricated["warning_issues"])
         self.assertEqual([2], fabricated["unmapped_reference_numbers"])
-        self.assertIn("library_sources_unavailable", deleted["blocking_issues"])
+        self.assertNotIn(
+            "citation_sources_missing_from_references",
+            bibliographic["warning_issues"],
+        )
+        self.assertEqual(["P001"], bibliographic["listed_source_paper_ids"])
+        self.assertTrue(deleted["valid"])
+        self.assertIn("library_sources_unavailable", deleted["warning_issues"])
+        self.assertTrue(artifactless["valid"])
         self.assertIn(
-            "library_source_artifacts_missing", artifactless["blocking_issues"]
+            "library_source_artifacts_missing", artifactless["warning_issues"]
         )
 
     def test_docx_export_is_registered_and_downloadable(self) -> None:

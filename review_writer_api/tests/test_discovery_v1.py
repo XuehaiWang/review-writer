@@ -64,6 +64,12 @@ class DiscoveryV1Tests(unittest.TestCase):
                         "year": {"value": 2024},
                         "journal": {"value": "Catalog Journal"},
                         "doi": {"value": f"10.9/{paper_id.lower()}"},
+                        "structured_tags": {
+                            "value": {
+                                "catalyst_or_method": "copper catalysis",
+                                "reaction_type": "allenation",
+                            }
+                        },
                     },
                     pdf_relative_path=f"review-library/uploads/{paper_id}.pdf",
                     markdown_relative_path=f"review-library/markdown/{paper_id}.md",
@@ -105,6 +111,20 @@ class DiscoveryV1Tests(unittest.TestCase):
                                 "score": 99,
                                 "role": "core_candidate",
                                 "selected_for_matrix": False,
+                                "base_tags": {
+                                    "catalyst_or_method": "copper catalysis",
+                                    "reaction_type": "allenation",
+                                },
+                                "project_tag_assessment": {
+                                    "topic_fingerprint": "topic-hash",
+                                    "suggested_tags": {
+                                        "catalyst_or_method": ["copper catalysis"],
+                                        "reaction_type": ["allenation"],
+                                    },
+                                    "evidence": [],
+                                },
+                                "confirmed_project_tags": {},
+                                "tag_review_status": "pending",
                             },
                             {
                                 "paper_id": "P002",
@@ -135,6 +155,20 @@ class DiscoveryV1Tests(unittest.TestCase):
                                 "score": 90,
                                 "role": "core_candidate",
                                 "selected_for_matrix": False,
+                                "base_tags": {
+                                    "catalyst_or_method": "copper catalysis",
+                                    "reaction_type": "allenation",
+                                },
+                                "project_tag_assessment": {
+                                    "topic_fingerprint": "topic-hash",
+                                    "suggested_tags": {
+                                        "catalyst_or_method": ["copper catalysis"],
+                                        "reaction_type": ["allenation"],
+                                    },
+                                    "evidence": [],
+                                },
+                                "confirmed_project_tags": {},
+                                "tag_review_status": "pending",
                             },
                             {
                                 "paper_id": "P003",
@@ -189,6 +223,8 @@ class DiscoveryV1Tests(unittest.TestCase):
             review = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
             project = client.get("/api/v1/projects").json()["items"][0]
         self.assertEqual("succeeded", job["status"])
+        self.assertEqual(4, job["progress_current"])
+        self.assertEqual(4, job["progress_total"])
         self.assertEqual(3, review["statistics"]["candidate_count"])
         self.assertEqual(4, review["statistics"]["keyword_hit_count"])
         self.assertEqual(0, review["statistics"]["selected_count"])
@@ -423,6 +459,95 @@ class DiscoveryV1Tests(unittest.TestCase):
             reloaded["results"][1]["local_results"][1]["role"],
         )
 
+    def test_confirmed_project_tags_are_project_scoped_and_enter_matrix(self) -> None:
+        with TestClient(self.app) as client:
+            self.discover(client)
+            current = client.get(
+                f"/api/v1/projects/{self.project_id}/discovery"
+            ).json()
+            for group in current["results"]:
+                for row in group["local_results"]:
+                    if row["paper_id"] != "P001":
+                        continue
+                    row["selected_for_matrix"] = True
+                    row["confirmed_project_tags"] = {
+                        "catalyst_or_method": ["project copper catalyst"],
+                        "reaction_type": ["project-specific allenation"],
+                    }
+                    row["tag_review_status"] = "confirmed"
+                    # These fields are immutable evidence and must not be
+                    # replaceable through the review endpoint.
+                    row["base_tags"] = {"reaction_type": "tampered"}
+                    row["project_tag_assessment"]["suggested_tags"] = {
+                        "reaction_type": ["tampered suggestion"]
+                    }
+            saved_response = client.put(
+                f"/api/v1/projects/{self.project_id}/discovery",
+                json={
+                    "revision": current["revision"],
+                    "results": current["results"],
+                },
+                headers=self.headers(),
+            )
+            self.assertEqual(200, saved_response.status_code, saved_response.text)
+            saved = saved_response.json()
+            confirmed_response = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/confirm",
+                json={"revision": saved["revision"]},
+                headers=self.headers(),
+            )
+            self.assertEqual(200, confirmed_response.status_code, confirmed_response.text)
+            confirmed = confirmed_response.json()
+
+        p001_hits = [
+            row
+            for group in saved["results"]
+            for row in group["local_results"]
+            if row["paper_id"] == "P001"
+        ]
+        self.assertEqual(1, saved["statistics"]["tag_reviewed_candidate_count"])
+        self.assertTrue(all(row["tag_review_status"] == "confirmed" for row in p001_hits))
+        self.assertTrue(
+            all(row["base_tags"]["reaction_type"] == "allenation" for row in p001_hits)
+        )
+        self.assertTrue(
+            all(
+                row["project_tag_assessment"]["suggested_tags"]["reaction_type"]
+                == ["allenation"]
+                for row in p001_hits
+            )
+        )
+        matrix_row = confirmed["matrix"]["rows"][0]
+        self.assertEqual("confirmed", matrix_row["project_tag_review_status"])
+        self.assertEqual(
+            ["project-specific allenation"],
+            matrix_row["project_tags"]["reaction_type"],
+        )
+        self.assertEqual("allenation", matrix_row["base_tags"]["reaction_type"])
+
+    def test_project_tag_suggestions_enter_matrix_without_manual_confirmation(self) -> None:
+        with TestClient(self.app) as client:
+            self.discover(client)
+            selected = client.put(
+                f"/api/v1/projects/{self.project_id}/discovery/selection/P001",
+                json={"selected": True},
+                headers=self.headers(),
+            ).json()
+            confirmed = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/confirm",
+                json={"revision": selected["revision"]},
+                headers=self.headers(),
+            ).json()
+        matrix_row = confirmed["matrix"]["rows"][0]
+        self.assertEqual("automatic", matrix_row["project_tag_review_status"])
+        self.assertEqual(
+            {
+                "catalyst_or_method": ["copper catalysis"],
+                "reaction_type": ["allenation"],
+            },
+            matrix_row["project_tags"],
+        )
+
     def test_failed_atomic_save_keeps_previous_discovery_pointer_and_revision(self) -> None:
         repository = self.app.state.workflow_repository
         with TestClient(self.app) as client:
@@ -469,6 +594,8 @@ class DiscoveryV1Tests(unittest.TestCase):
             ).json()
         self.assertEqual(2, confirmed["matrix_sync"]["selected_paper_count"])
         self.assertEqual(2, confirmed["matrix_sync"]["synchronized_paper_count"])
+        self.assertEqual(["P001", "P002"], confirmed["matrix_sync"]["selected_paper_ids"])
+        self.assertNotIn("selection_fingerprint", confirmed["matrix_sync"])
         self.assertTrue(confirmed["matrix_sync"]["selection_current"])
         self.assertEqual(["P001", "P002"], [row["paper_id"] for row in confirmed["matrix"]["rows"]])
         self.assertEqual("Catalog P001", confirmed["matrix"]["rows"][0]["title"])

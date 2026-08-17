@@ -1,15 +1,21 @@
 interface:
   display_name: "Topic Paper Discovery"
-  short_description: "Discover papers by topic keywords."
+  short_description: "Plan multi-theme searches and review de-duplicated paper candidates."
   default_prompt: >-
     Create a review topic discovery project. Before running discover.py,
     resolve Topic concepts and abbreviations into the query-plan schema, with
     confidence and reasons for resolved concepts, ambiguous items in
-    unresolved_concepts, search-useful categorized keywords, inclusive
+    unresolved_concepts, separate search-useful categorized theme keywords, inclusive
     filters.year_from and filters.year_to values for relative-year requests,
     and group_by intent. Write
     review-projects/<project-id>/00_discovery/query_plan.draft.json and pass it
-    through --query-plan. Stop for clarification before invoking discover.py if
+    through --query-plan, or use --auto-query-plan in the dashboard boundary.
+    Use the Discovery-only unclassified route rather than forcing an unknown
+    phrase into reaction_type; keep metadata limited to the eight standard
+    fields. Preserve Library base Tags, generate a separate topic-scoped Tag
+    assessment for each candidate, and automatically pass those project Tags
+    to the Matrix when the human selects the paper. Never overwrite Library
+    metadata with project Tags or require per-paper Tag confirmation. Stop for clarification before invoking discover.py if
     the plan is unresolved-only or has no meaningful keyword; otherwise review
     unresolved concepts before searching local and optional web sources. Use
     FastAPI `/library` or `/discovery` pages only when the

@@ -69,7 +69,7 @@ class RepositoryHygieneChecks(unittest.TestCase):
             r"bindSvgEditorInteractions|saveSvgEditor|svgEditorDocument|"
             r"renderSvgEditorOperations|loadSvgEditorAudit)\s*=\s*(?:async\s+)?function"
         )
-        for name in ("figures.html", "final.html"):
+        for name in ("final.html",):
             text = (ROOT / "view" / "assets" / "dashboard" / name).read_text(encoding="utf-8")
             self.assertIsNone(assignments.search(text), name)
 
