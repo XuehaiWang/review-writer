@@ -310,10 +310,23 @@ class ScientificRunner:
                         f"{attempt} attempts. Please retry the task."
                     )
                 elif category == "transient_service_unavailable":
-                    reason = (
-                        "Scientific provider remained unavailable after "
-                        f"{attempt} attempts. Please retry the task."
-                    )
+                    diagnostic = self._diagnostic_summary(last_stderr, last_stdout)
+                    if provider_call_completed:
+                        reason = (
+                            "Scientific provider became unavailable during task "
+                            f"attempt {attempt} after the failed model call exhausted "
+                            "its internal request retries. Earlier model calls in this "
+                            "batch had already completed, so the whole paid batch was "
+                            "not replayed automatically."
+                        )
+                    else:
+                        reason = (
+                            "Scientific provider remained unavailable after "
+                            f"{attempt} task attempt{'s' if attempt != 1 else ''}."
+                        )
+                    if diagnostic:
+                        reason += f" Last provider error: {diagnostic}"
+                    reason += " Please retry the task."
                 else:
                     diagnostic = self._diagnostic_summary(last_stderr, last_stdout)
                     reason = (

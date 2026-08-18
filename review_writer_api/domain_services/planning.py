@@ -555,6 +555,24 @@ class PlanningService:
             for candidate in all_reference_candidates
             if self._reference_candidate_is_isolated(candidate)
         ]
+        outline_current = bool(
+            outline is not None
+            and outline_artifact is not None
+            and str(outline.get("source_matrix_artifact_id") or "")
+            == matrix_artifact.id
+        )
+        blueprint_current = bool(
+            blueprint is not None
+            and blueprint_artifact is not None
+            and outline_artifact is not None
+            and outline_current
+            and str(blueprint.get("source_matrix_artifact_id") or "")
+            == matrix_artifact.id
+            and str(blueprint.get("source_outline_artifact_id") or "")
+            == outline_artifact.id
+            and blueprint_state is not None
+            and blueprint_state.status != "stale"
+        )
         return {
             "project_id": project_id,
             "topic": str(matrix.get("review_topic") or (discovery or {}).get("topic") or ""),
@@ -573,6 +591,7 @@ class PlanningService:
                 if outline is not None and outline_artifact is not None
                 else None
             ),
+            "outline_current": outline_current,
             "outline_candidates": generated + reference_candidates,
             "reference_outline_candidates": reference_candidates,
             "legacy_reference_outline_count": len(all_reference_candidates)
@@ -580,6 +599,7 @@ class PlanningService:
             "section_blueprint": blueprint,
             "blueprint_artifact_id": blueprint_artifact.id if blueprint_artifact else None,
             "blueprint_revision": blueprint_state.revision if blueprint_state else 0,
+            "blueprint_current": blueprint_current,
             "section_writing_plan_md": str(
                 (blueprint or {}).get("section_writing_plan_md") or ""
             ),

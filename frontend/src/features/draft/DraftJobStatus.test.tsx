@@ -105,6 +105,28 @@ describe("DraftJobStatus", () => {
     expect(screen.getByRole("progressbar", { name: "批量优化进度" })).toHaveAttribute("aria-valuenow", "60");
   });
 
+  it("reports deferred paragraphs without presenting the whole batch as failed", () => {
+    render(<DraftJobStatus job={job({
+      status: "succeeded",
+      job_type: "draft.optimize",
+      progress_current: 5,
+      progress_total: 5,
+      result: {
+        draft_changed: false,
+        rewrite_deferred: 2,
+        feedback_status: {
+          phase: "provider_deferred",
+          rewrite_deferred: 2,
+          deferred_paragraph_ids: ["S02-p5", "S03-p1"],
+        },
+      },
+    })} />);
+
+    expect(screen.getByText("优化完成，正文未改变")).toBeInTheDocument();
+    expect(screen.getByText(/2 个段落因服务商暂时不可用而待重试/)).toBeInTheDocument();
+    expect(screen.getByText(/S02-p5、S03-p1/)).toBeInTheDocument();
+  });
+
   it("shows live scoring batch and paragraph progress", () => {
     usePreferences.getState().setLanguage("en");
     render(<DraftJobStatus job={job({

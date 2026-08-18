@@ -248,6 +248,13 @@ class PlanningV1Tests(unittest.TestCase):
                     headers=self.headers(),
                 )
                 self.assertEqual(200, response.status_code, response.text)
+            previous_blueprint = (
+                self.app.state.workflow_repository.get_current_artifact(
+                    self.first.user_id,
+                    self.project_id,
+                    "blueprint/section_blueprint.json",
+                )
+            )
             review = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
             for row in review["results"][0]["local_results"]:
                 row["selected_for_matrix"] = row["paper_id"] in {"P001", "P035"}
@@ -264,10 +271,19 @@ class PlanningV1Tests(unittest.TestCase):
             self.assertEqual(200, confirmed.status_code, confirmed.text)
             planning = self.planning(client)
         self.assertEqual(["P001", "P035"], [row["paper_id"] for row in planning["literature_matrix"]["rows"]])
-        self.assertIsNone(
+        self.assertEqual(
+            previous_blueprint.id,
             self.app.state.workflow_repository.get_current_artifact(
                 self.first.user_id, self.project_id, "blueprint/section_blueprint.json"
-            )
+            ).id,
+        )
+        self.assertFalse(planning["outline_current"])
+        self.assertFalse(planning["blueprint_current"])
+        self.assertEqual(
+            "stale",
+            self.app.state.workflow_repository.get_stage_state(
+                self.first.user_id, self.project_id, "blueprint"
+            ).status,
         )
 
     def test_matrix_row_edit_uses_revision(self) -> None:

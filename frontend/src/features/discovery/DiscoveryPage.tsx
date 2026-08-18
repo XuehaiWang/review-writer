@@ -62,6 +62,8 @@ type DiscoveryPayload = {
   project_id: string;
   artifact_id: string;
   revision: number;
+  status?: string;
+  has_published_matrix?: boolean;
   topic: string;
   keywords?: string;
   results: DiscoveryGroup[];
@@ -331,6 +333,7 @@ export function DiscoveryPage() {
             <label className="check-label"><input type="checkbox" checked={webSearch} onChange={(event) => setWebSearch(event.target.checked)} />{text("同时使用联网补充检索", "Also search online sources")}</label>
             <button className="button button-primary" type="button" disabled={topic.trim().length < 3 || run.isPending || jobIsActive(job.data?.status)} onClick={() => run.mutate()}>{discovery.data ? text("重新检索", "Run search again") : text("开始检索", "Start search")}</button>
           </div>
+          {discovery.data?.has_published_matrix ? <p className="message message-info">{text("重新检索只生成新的待确认结果，不会删除或隐藏阶段 3–7 的现有内容。确认采用后，只有论文集合或主题确实变化时，依赖阶段才会标记为过期。", "A new search creates reviewable results without deleting or hiding existing Stage 3–7 work. After confirmation, dependent stages are marked stale only when the paper set or topic actually changes.")}</p> : null}
           {(run.isPending || jobId) ? <DiscoveryJobProgress job={job.data} submitting={run.isPending && !jobId} /> : null}
           {run.error ? <p className="message message-error">{run.error.message}</p> : null}
         </section>
@@ -340,6 +343,7 @@ export function DiscoveryPage() {
       {noArtifact ? <div className="empty-state">{text("当前项目还没有检索结果，请填写主题并开始检索。", "This project has no discovery results yet. Enter a topic and start searching.")}</div> : null}
       {discovery.data ? (
         <>
+          {discovery.data.status === "review" && discovery.data.has_published_matrix ? <p className="message message-warning discovery-candidate-notice">{text("当前显示的是尚未采用的新检索结果；旧 Matrix、章节、图像、初稿和终稿仍被完整保留。请审核论文选择后再确认采用。", "These search results have not been adopted yet. The previous matrix, sections, figures, draft, and final output remain intact. Review the selection before adopting it.")}</p> : null}
           <div className="discovery-stats"><span>{text("主题/关键词组", "Theme / keyword groups")} {groups.length}</span><span>{text("去重候选论文", "Unique candidate papers")} {uniqueCandidateCount}</span><span>{text("关键词命中次数", "Keyword hits")} {keywordHitCount}</span><span className="selected">{text("进入Matrix", "Selected for matrix")} {selectedCount}</span></div>
           <div className="discovery-grid">
             <section className="pane keyword-pane">
@@ -357,7 +361,7 @@ export function DiscoveryPage() {
             </section>
             <section className="pane discovery-detail-pane"><PaperDetail row={selectedPaper?.row || null} kind={selectedPaper?.kind || "local"} displayLabel={selectedPaper?.kind === "local" ? paperLabels.get(String(selectedPaper.row.paper_id || "")) : undefined} /></section>
           </div>
-          <div className="stage-action-bar"><div><strong>{text("论文选择", "Paper selection")}</strong><p>{text("选择需要进入 Matrix 的论文；项目 Tag 评估会自动同步，无需逐篇确认。", "Choose the papers for the matrix. Project Tag assessments are synchronized automatically; no per-paper confirmation is required.")}</p></div><button className="button button-secondary" type="button" disabled={save.isPending} onClick={() => save.mutate()}>{save.isPending ? text("保存中…", "Saving…") : text("保存选择", "Save selection")}</button><button className="button button-primary" type="button" disabled={!selectedCount || confirm.isPending} onClick={() => confirm.mutate()}>{confirm.isPending ? text("同步中…", "Syncing…") : text(`进入Matrix（${selectedCount}篇）`, `Enter matrix (${selectedCount})`)}</button>{(save.error || confirm.error) ? <span className="message message-error">{(save.error || confirm.error)?.message}</span> : null}</div>
+          <div className="stage-action-bar"><div><strong>{text("论文选择", "Paper selection")}</strong><p>{text("选择需要进入 Matrix 的论文；项目 Tag 评估会自动同步。确认采用后，系统会先比较新旧输入，再决定是否让后续阶段过期。", "Choose the papers for the matrix; project Tag assessments synchronize automatically. On adoption, the system compares old and new inputs before deciding whether later stages are stale.")}</p></div><button className="button button-secondary" type="button" disabled={save.isPending} onClick={() => save.mutate()}>{save.isPending ? text("保存中…", "Saving…") : text("保存选择", "Save selection")}</button><button className="button button-primary" type="button" disabled={!selectedCount || confirm.isPending} onClick={() => confirm.mutate()}>{confirm.isPending ? text("同步中…", "Syncing…") : text(`确认采用并进入 Matrix（${selectedCount}篇）`, `Adopt and enter matrix (${selectedCount})`)}</button>{(save.error || confirm.error) ? <span className="message message-error">{(save.error || confirm.error)?.message}</span> : null}</div>
         </>
       ) : null}
     </main>

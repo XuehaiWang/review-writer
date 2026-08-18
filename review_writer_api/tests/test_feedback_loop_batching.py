@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 import urllib.error
@@ -149,6 +150,301 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
                 feedback_loop.call_json_model("score this batch", label="batch")
 
         self.assertEqual(urlopen.call_count, 1)
+
+    def test_http_503_retries_the_failed_provider_call_with_bounded_backoff(self) -> None:
+        failures = [
+            urllib.error.HTTPError(
+                "https://provider.example/v1/chat/completions",
+                503,
+                "Service Unavailable",
+                {},
+                io.BytesIO(b'{"error":{"code":"model_not_found"}}'),
+            )
+            for _ in range(5)
+        ]
+        environment = {
+            "OPENAI_API_KEY": "test-key",
+            "OPENAI_BASE_URL": "https://provider.example/v1",
+            "REVIEW_WRITING_WIRE_API": "chat-completions",
+        }
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            feedback_loop.urllib.request,
+            "urlopen",
+            side_effect=failures,
+        ) as urlopen, mock.patch.object(feedback_loop.time, "sleep") as sleep:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "HTTP 503 after 5 provider attempts.*model_not_found",
+            ):
+                feedback_loop.call_json_model("score this batch", label="batch")
+
+        self.assertEqual(urlopen.call_count, 5)
+        self.assertEqual(sleep.call_count, 4)
+
+    def test_request_body_budget_failure_does_not_repeat_the_same_payload(self) -> None:
+        failure = urllib.error.HTTPError(
+            "https://provider.example/v1/chat/completions",
+            503,
+            "Service Unavailable",
+            {},
+            io.BytesIO(
+                b'{"error":{"code":"request_body_budget_exhausted",'
+                b'"message":"relay request body budget is exhausted"}}'
+            ),
+        )
+        environment = {
+            "OPENAI_API_KEY": "test-key",
+            "OPENAI_BASE_URL": "https://provider.example/v1",
+            "REVIEW_WRITING_WIRE_API": "chat-completions",
+        }
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            feedback_loop.urllib.request,
+            "urlopen",
+            side_effect=failure,
+        ) as urlopen, mock.patch.object(feedback_loop.time, "sleep") as sleep:
+            with self.assertRaises(feedback_loop.ProviderRequestBodyBudgetExceeded):
+                feedback_loop.call_json_model("oversized prompt", label="rewrite")
+
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_concurrency_saturation_uses_extended_retry_window(self) -> None:
+        failures = [
+            urllib.error.HTTPError(
+                "https://provider.example/v1/chat/completions",
+                503,
+                "Service Unavailable",
+                {},
+                io.BytesIO(
+                    b'{"error":{"code":"too_many_concurrent_requests",'
+                    b'"message":"relay is handling too many concurrent requests"}}'
+                ),
+            )
+            for _ in range(8)
+        ]
+        environment = {
+            "OPENAI_API_KEY": "test-key",
+            "OPENAI_BASE_URL": "https://provider.example/v1",
+            "REVIEW_WRITING_WIRE_API": "chat-completions",
+        }
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            feedback_loop.urllib.request,
+            "urlopen",
+            side_effect=failures,
+        ) as urlopen, mock.patch.object(feedback_loop.time, "sleep") as sleep:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "HTTP 503 after 8 provider attempts.*too_many_concurrent_requests",
+            ):
+                feedback_loop.call_json_model("score this batch", label="batch")
+
+        self.assertEqual(urlopen.call_count, 8)
+        self.assertEqual(sleep.call_count, 7)
+        self.assertEqual(
+            [call.args[0] for call in sleep.call_args_list],
+            [5.0, 10.0, 20.0, 30.0, 30.0, 30.0, 30.0],
+        )
+
+    def test_only_transient_paragraph_provider_failures_are_deferred(self) -> None:
+        self.assertTrue(
+            feedback_loop.recoverable_paragraph_provider_failure(
+                RuntimeError(
+                    "Paragraph rewrite S02-p5 failed with HTTP 503: "
+                    "too_many_concurrent_requests"
+                )
+            )
+        )
+        self.assertTrue(
+            feedback_loop.recoverable_paragraph_provider_failure(
+                feedback_loop.ProviderDeadlineExceeded("HTTP 524")
+            )
+        )
+        self.assertFalse(
+            feedback_loop.recoverable_paragraph_provider_failure(
+                RuntimeError("Paragraph rewrite failed with HTTP 401: Unauthorized")
+            )
+        )
+
+    def test_rewrite_queue_checkpoint_counts_terminal_paragraph_states(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "rewrite_checkpoint.json"
+            payload = feedback_loop.write_rewrite_queue_checkpoint(
+                path,
+                project_id="project-1",
+                run_id="run-1",
+                iteration=2,
+                source_draft_sha256="source",
+                current_draft_sha256="current",
+                rewrite_items=[
+                    {"paragraph_id": "p1", "status": "completed"},
+                    {"paragraph_id": "p2", "status": "deferred"},
+                    {"paragraph_id": "p3", "status": "rewriting"},
+                ],
+                accepted=1,
+                rejected=0,
+                deferred=1,
+            )
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(2, payload["rewrite_completed"])
+        self.assertEqual(1, payload["rewrite_deferred"])
+        self.assertEqual(payload, persisted)
+
+    def test_batch_continues_after_one_paragraph_provider_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = root / "review-projects" / "project-1" / "04_first_draft"
+            first.mkdir(parents=True)
+            source_markdown = (
+                "# Review\n\n"
+                "Original first paragraph [1].\n\n"
+                "<!-- paragraph_id: p1 -->\n\n"
+                "Original second paragraph [2].\n\n"
+                "<!-- paragraph_id: p2 -->\n"
+            )
+            (first / "first_draft.md").write_text(source_markdown, encoding="utf-8")
+            preflight = {
+                "hard_regressions": [],
+                "paragraph_checks": [
+                    {"paragraph_id": "p1", "word_range_applicable": False},
+                    {"paragraph_id": "p2", "word_range_applicable": False},
+                ],
+            }
+            source_evaluation = {
+                "total_score": 70,
+                "pass_threshold": 90,
+                "decision": "FAIL",
+                "hard_gate_failures": [],
+                "paragraph_scores": [
+                    {"paragraph_id": "p1", "score": 60},
+                    {"paragraph_id": "p2", "score": 60},
+                ],
+                "paragraph_failures": [
+                    {
+                        "paragraph_id": "p1",
+                        "score": 60,
+                        "route": "section_rewrite",
+                        "diagnosis": "Improve p1.",
+                    },
+                    {
+                        "paragraph_id": "p2",
+                        "score": 60,
+                        "route": "section_rewrite",
+                        "diagnosis": "Improve p2.",
+                    },
+                ],
+            }
+            final_evaluation = {
+                **source_evaluation,
+                "total_score": 80,
+                "paragraph_scores": [
+                    {"paragraph_id": "p1", "score": 60},
+                    {"paragraph_id": "p2", "score": 90},
+                ],
+            }
+            paragraphs = feedback_loop.parse_marked_paragraphs(source_markdown)
+            evaluations = [
+                (preflight, source_evaluation, {}, paragraphs, {"p1": {}, "p2": {}}),
+                (preflight, final_evaluation, {}, paragraphs, {"p1": {}, "p2": {}}),
+            ]
+            args = SimpleNamespace(
+                review_root=str(root),
+                project_id="project-1",
+                goal=90.0,
+                paragraph_goal=85.0,
+                max_iterations=1,
+                min_improvement=1.0,
+                min_case_words=1,
+                max_case_words=100,
+                evaluate_only=False,
+            )
+
+            def rewrite_response(_prompt: str, *, label: str):
+                if "p1" in label:
+                    raise RuntimeError(
+                        "Paragraph rewrite p1 failed with HTTP 503 after 8 provider "
+                        "attempts: too_many_concurrent_requests"
+                    )
+                return {"text": "Improved second paragraph [2]."}
+
+            with mock.patch.object(
+                feedback_loop,
+                "ensure_prose_paragraph_markers",
+                return_value=(
+                    source_markdown,
+                    {"prose_paragraph_count": 2, "changed": False},
+                ),
+            ), mock.patch.object(
+                feedback_loop,
+                "evaluate_current_draft",
+                side_effect=evaluations,
+            ), mock.patch.object(
+                feedback_loop,
+                "call_json_model",
+                side_effect=rewrite_response,
+            ), mock.patch.object(feedback_loop, "record_paragraph_history"):
+                result = feedback_loop.run_feedback_loop(args)
+
+            checkpoint = json.loads(
+                (first / "feedback_loop_rewrite_checkpoint.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            status = json.loads(
+                (first / "feedback_loop_status.json").read_text(encoding="utf-8")
+            )
+            review = json.loads(
+                (first / "batch_review_candidates.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual("needs_human_review", result["status"])
+        self.assertEqual(1, checkpoint["rewrite_deferred"])
+        self.assertEqual("deferred", checkpoint["items"][0]["status"])
+        self.assertEqual("completed", checkpoint["items"][1]["status"])
+        self.assertEqual(1, status["rewrite_deferred"])
+        self.assertEqual(["p1"], status["deferred_paragraph_ids"])
+        self.assertEqual(["p2"], [item["paragraph_id"] for item in review["changes"]])
+
+    def test_rewrite_prompt_compacts_many_papers_to_a_bounded_payload(self) -> None:
+        evidence = {
+            "paragraph_id": "S02-p1",
+            "paper_ids": [f"P{index:03d}" for index in range(30)],
+            "local_source_available": True,
+            "original_source_ready": True,
+            "evidence_scope": "retrieved_original_full_text",
+            "evidence": [
+                {
+                    "paper_id": f"P{index:03d}",
+                    "title": "Title " + ("T" * 300),
+                    "abstract": "UNBOUNDED_ABSTRACT " + ("A" * 2_000),
+                    "main_content": "M" * 2_000,
+                    "local_source_available": True,
+                    "original_text_available": True,
+                    "original_passages": [
+                        {
+                            "ref": f"P{index:03d}:p1:b1",
+                            "page": 1,
+                            "text": "E" * 700,
+                        }
+                    ],
+                }
+                for index in range(30)
+            ],
+        }
+
+        prompt = feedback_loop.rewrite_prompt(
+            {"paragraph_id": "S02-p1", "text": "Synthesis paragraph [1-30]."},
+            {"route": "section_rewrite", "diagnosis": "Improve readability."},
+            evidence,
+            1,
+            280,
+            word_range_applicable=False,
+        )
+
+        self.assertLess(len(prompt.encode("utf-8")), 30_000)
+        self.assertNotIn("UNBOUNDED_ABSTRACT", prompt)
+        for paper_id in evidence["paper_ids"]:
+            self.assertIn(paper_id, prompt)
 
     def test_batch_review_keeps_only_paragraphs_that_improved(self) -> None:
         source = (

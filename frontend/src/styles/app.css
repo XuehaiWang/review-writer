@@ -675,6 +675,31 @@ textarea { resize: vertical; }
 .approval-card.good { border-color: #8db7a4; background: var(--green-soft); }
 .approval-card h2 { margin-top: 0; }
 .approval-card .button + .button { margin-left: 8px; }
+.hard-gate-detail-list { margin: 14px 0 18px; display: grid; gap: 11px; }
+.quality-issue-react.quality-focus {
+  border-color: color-mix(in srgb, var(--green) 72%, white);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--green) 15%, transparent), var(--shadow-soft);
+  animation: quality-focus-pulse 900ms ease-out;
+}
+@keyframes quality-focus-pulse {
+  from { transform: translateY(2px); }
+  to { transform: translateY(0); }
+}
+.hard-gate-detail { overflow: hidden; border: 1px solid #dca68e; border-radius: 12px; background: #fff; }
+.hard-gate-detail > header { padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #efd3c6; background: #fff1e9; }
+.hard-gate-detail > header strong { color: #7f3826; }
+.hard-gate-detail > header span { color: var(--muted); font-size: 11px; font-weight: 750; }
+.hard-gate-detail > .muted { margin: 0; padding: 14px; }
+.hard-gate-paragraphs { display: grid; gap: 0; }
+.hard-gate-paragraphs > section { padding: 13px 14px; }
+.hard-gate-paragraphs > section + section { border-top: 1px solid #f0ddd4; }
+.hard-gate-paragraphs > section > div { display: flex; align-items: center; gap: 8px; }
+.hard-gate-paragraphs > section > div > strong { color: var(--green-dark); }
+.hard-gate-paragraphs > section > div > span { padding: 3px 7px; border-radius: 999px; color: #85442e; background: #f8e5dc; font-size: 10px; font-weight: 750; }
+.hard-gate-paragraphs p { margin: 8px 0; line-height: 1.55; }
+.hard-gate-paragraphs footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.hard-gate-paragraphs footer small { color: var(--muted); }
+.hard-gate-paragraphs footer .button { flex: 0 0 auto; }
 .version-list-react { display: grid; gap: 10px; }
 .version-list-react article { padding: 14px; display: grid; grid-template-columns: 1fr auto; gap: 7px; border: 1px solid var(--line); border-radius: 11px; background: #fff; }
 .version-list-react article.current { border-color: var(--green); background: var(--green-soft); }

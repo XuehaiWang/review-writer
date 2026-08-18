@@ -258,15 +258,45 @@ class DiscoveryService:
             raise WorkflowConflict("The current Discovery artifact is invalid.")
         return payload, artifact
 
+    def _read_optional_current_json(
+        self, principal: Principal, project_id: str, logical_name: str
+    ) -> tuple[dict[str, Any] | None, Any | None]:
+        """Read an optional published JSON artifact without changing its pointer."""
+
+        artifact = self.repository.get_current_artifact(
+            principal.user_id, project_id, logical_name
+        )
+        if artifact is None:
+            return None, None
+        resolved = self.artifacts.resolve_owned_artifact(
+            principal.user_id, artifact.id
+        )
+        try:
+            payload = json.loads(resolved.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise WorkflowConflict(
+                f"The current {logical_name} artifact is unreadable."
+            ) from exc
+        if not isinstance(payload, dict):
+            raise WorkflowConflict(
+                f"The current {logical_name} artifact is invalid."
+            )
+        return payload, artifact
+
     def get(self, principal: Principal, project_id: str) -> dict[str, Any]:
         payload, artifact = self._read_current(principal, project_id, DISCOVERY_LOGICAL_NAME)
         state = self.repository.get_stage_state(principal.user_id, project_id, "discovery")
+        matrix_artifact = self.repository.get_current_artifact(
+            principal.user_id, project_id, MATRIX_LOGICAL_NAME
+        )
         review = normalize_review(payload)
         return {
             **review,
             "project_id": project_id,
             "artifact_id": artifact.id,
             "revision": state.revision if state else 0,
+            "status": state.status if state else "pending",
+            "has_published_matrix": matrix_artifact is not None,
             "statistics": statistics(review),
             "selected_paper_ids": self.selected_paper_ids(review),
         }
@@ -512,6 +542,62 @@ class DiscoveryService:
                 details={"paper_ids": missing},
             )
 
+        existing_matrix, existing_matrix_artifact = self._read_optional_current_json(
+            principal, project_id, MATRIX_LOGICAL_NAME
+        )
+        existing_rows = (
+            existing_matrix.get("rows")
+            if isinstance(existing_matrix, dict)
+            and isinstance(existing_matrix.get("rows"), list)
+            else []
+        )
+        existing_ids = [
+            str(row.get("paper_id") or "").strip()
+            for row in existing_rows
+            if isinstance(row, dict) and str(row.get("paper_id") or "").strip()
+        ]
+        current_topic = " ".join(str(current.get("topic") or "").split())
+        matrix_topic = " ".join(
+            str((existing_matrix or {}).get("review_topic") or "").split()
+        )
+        existing_matrix_state = self.repository.get_stage_state(
+            principal.user_id, project_id, "matrix"
+        )
+        matrix_input_unchanged = bool(
+            existing_matrix_artifact
+            and existing_matrix_state
+            and existing_matrix_state.status != "stale"
+            and len(existing_ids) == len(selected_ids)
+            and set(existing_ids) == set(selected_ids)
+            and matrix_topic.casefold() == current_topic.casefold()
+        )
+
+        if matrix_input_unchanged:
+            with self._write_lock:
+                discovery_state = (
+                    self.repository.approve_discovery_without_matrix_change_atomically(
+                        principal.user_id,
+                        project_id,
+                        expected_discovery_revision=current["revision"],
+                        expected_matrix_artifact_id=existing_matrix_artifact.id,
+                        topic=current_topic,
+                    )
+                )
+            return {
+                "discovery_revision": discovery_state.revision,
+                "matrix_artifact_id": existing_matrix_artifact.id,
+                "matrix_revision": existing_matrix_state.revision,
+                "matrix": existing_matrix,
+                "matrix_sync": {
+                    "selected_paper_ids": sorted(selected_ids),
+                    "selected_paper_count": len(selected_ids),
+                    "synchronized_paper_count": len(existing_ids),
+                    "selection_current": True,
+                },
+                "matrix_reused": True,
+                "downstream_stale": False,
+            }
+
         def metadata_value(row: LibraryPaper, key: str, default: Any) -> Any:
             value = row.metadata_json.get(key)
             return _field_value(value) if value is not None else default
@@ -550,8 +636,15 @@ class DiscoveryService:
                     ),
                 }
 
-        rows = [
-            {
+        existing_by_id = {
+            str(row.get("paper_id") or "").strip(): deepcopy(row)
+            for row in existing_rows
+            if isinstance(row, dict) and str(row.get("paper_id") or "").strip()
+        }
+        rows: list[dict[str, Any]] = []
+        for paper_id in selected_ids:
+            row = {
+                **existing_by_id.get(paper_id, {}),
                 "paper_id": paper_id,
                 "title": metadata_value(
                     catalog_by_id[paper_id],
@@ -577,7 +670,9 @@ class DiscoveryService:
                     "abstract unavailable or unreliable",
                 )
                 or "abstract unavailable or unreliable",
-                "main_content": "",
+                "main_content": str(
+                    existing_by_id.get(paper_id, {}).get("main_content") or ""
+                ),
                 "year": metadata_value(catalog_by_id[paper_id], "year", None),
                 "journal": metadata_value(catalog_by_id[paper_id], "journal", "") or "",
                 "doi": metadata_value(catalog_by_id[paper_id], "doi", "") or "",
@@ -594,10 +689,12 @@ class DiscoveryService:
                 "project_tag_topic_fingerprint": str(
                     project_tag_reviews.get(paper_id, {}).get("topic_fingerprint") or ""
                 ),
-                "matrix_status": "needs_full_reading",
+                "matrix_status": str(
+                    existing_by_id.get(paper_id, {}).get("matrix_status")
+                    or "needs_full_reading"
+                ),
             }
-            for paper_id in selected_ids
-        ]
+            rows.append(row)
         matrix = {
             "project_id": project_id,
             "review_topic": str(current.get("topic") or ""),
@@ -628,6 +725,7 @@ class DiscoveryService:
                 run_id=matrix_run.id,
                 expected_discovery_revision=current["revision"],
                 expected_matrix_revision=matrix_state.revision if matrix_state else 0,
+                topic=current_topic,
             )
         return {
             "discovery_revision": discovery_state.revision,
@@ -638,4 +736,6 @@ class DiscoveryService:
                 **matrix["sync"],
                 "selection_current": len(selected_ids) == len(rows),
             },
+            "matrix_reused": False,
+            "downstream_stale": bool(existing_matrix_artifact),
         }

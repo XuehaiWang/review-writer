@@ -262,9 +262,10 @@ class DiscoveryV1Tests(unittest.TestCase):
             ).status,
         )
 
-    def test_successful_restart_invalidates_downstream_current_artifacts_and_states(self) -> None:
+    def test_successful_restart_preserves_downstream_current_artifacts_and_states(self) -> None:
         service = self.app.state.discovery_service
         repository = self.app.state.workflow_repository
+        published: dict[str, str] = {}
         with TestClient(self.app) as client:
             self.discover(client)
             for stage, logical_name in (
@@ -290,19 +291,171 @@ class DiscoveryV1Tests(unittest.TestCase):
                     artifact.id,
                     repository.get_current_artifact(self.first.user_id, self.project_id, logical_name).id,
                 )
+                published[logical_name] = artifact.id
             self.discover(client, "Replacement topic")
+
+        self.assertEqual(
+            "Copper",
+            repository.get_owned_project(
+                self.first.user_id, self.project_id
+            ).topic,
+        )
 
         for stage, logical_name in (
             ("matrix", "matrix/literature_matrix.json"),
             ("blueprint", "blueprint/outline.json"),
         ):
-            self.assertIsNone(
-                repository.get_current_artifact(self.first.user_id, self.project_id, logical_name)
+            self.assertEqual(
+                published[logical_name],
+                repository.get_current_artifact(
+                    self.first.user_id, self.project_id, logical_name
+                ).id,
             )
             self.assertEqual(
-                "pending",
+                "approved",
                 repository.get_stage_state(self.first.user_id, self.project_id, stage).status,
             )
+
+    def test_confirming_unchanged_inputs_reuses_matrix_and_keeps_downstream_current(self) -> None:
+        service = self.app.state.discovery_service
+        repository = self.app.state.workflow_repository
+        with TestClient(self.app) as client:
+            self.discover(client)
+            selected = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/selection/top",
+                json={"count": 1},
+                headers=self.headers("initial-selection"),
+            ).json()
+            initial = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/confirm",
+                json={"revision": selected["revision"]},
+                headers=self.headers("initial-confirm"),
+            ).json()
+            blueprint, blueprint_run = service._write_json_artifact(
+                self.first,
+                self.project_id,
+                stage_id="blueprint",
+                logical_name="blueprint/outline.json",
+                payload={"source_matrix_artifact_id": initial["matrix_artifact_id"]},
+            )
+            repository.compare_and_set_stage(
+                self.first.user_id,
+                self.project_id,
+                "blueprint",
+                0,
+                status="approved",
+                current_run_id=blueprint_run.id,
+            )
+            current_payload, _artifact = service._read_current(
+                self.first, self.project_id, "discovery/review.json"
+            )
+            restarted = service.replace_from_job(
+                self.first,
+                self.project_id,
+                {"topic": "Copper allenation"},
+                current_payload,
+            )
+            confirmed = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/confirm",
+                json={"revision": restarted["revision"]},
+                headers=self.headers("unchanged-confirm"),
+            ).json()
+
+        self.assertTrue(confirmed["matrix_reused"])
+        self.assertFalse(confirmed["downstream_stale"])
+        self.assertEqual(initial["matrix_artifact_id"], confirmed["matrix_artifact_id"])
+        self.assertEqual(
+            blueprint.id,
+            repository.get_current_artifact(
+                self.first.user_id, self.project_id, "blueprint/outline.json"
+            ).id,
+        )
+        self.assertEqual(
+            "approved",
+            repository.get_stage_state(
+                self.first.user_id, self.project_id, "blueprint"
+            ).status,
+        )
+
+    def test_confirming_changed_inputs_marks_downstream_stale_without_hiding_it(self) -> None:
+        service = self.app.state.discovery_service
+        repository = self.app.state.workflow_repository
+        with TestClient(self.app) as client:
+            self.discover(client)
+            selected = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/selection/top",
+                json={"count": 1},
+                headers=self.headers("changed-initial-selection"),
+            ).json()
+            initial = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/confirm",
+                json={"revision": selected["revision"]},
+                headers=self.headers("changed-initial-confirm"),
+            ).json()
+            retained_note = "Retained full-reading evidence. " * 14
+            edited_matrix = client.put(
+                f"/api/v1/projects/{self.project_id}/planning/matrix/P001",
+                json={
+                    "revision": initial["matrix_revision"],
+                    "main_content": retained_note,
+                    "most_relevant_figure": None,
+                    "mark_complete": True,
+                },
+                headers=self.headers("changed-matrix-note"),
+            )
+            self.assertEqual(200, edited_matrix.status_code, edited_matrix.text)
+            blueprint, blueprint_run = service._write_json_artifact(
+                self.first,
+                self.project_id,
+                stage_id="blueprint",
+                logical_name="blueprint/outline.json",
+                payload={"source_matrix_artifact_id": initial["matrix_artifact_id"]},
+            )
+            repository.compare_and_set_stage(
+                self.first.user_id,
+                self.project_id,
+                "blueprint",
+                0,
+                status="approved",
+                current_run_id=blueprint_run.id,
+            )
+            self.discover(client, "Replacement topic")
+            changed_selection = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/selection/top",
+                json={"count": 2},
+                headers=self.headers("changed-selection"),
+            ).json()
+            confirmed = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/confirm",
+                json={"revision": changed_selection["revision"]},
+                headers=self.headers("changed-confirm"),
+            ).json()
+
+        self.assertFalse(confirmed["matrix_reused"])
+        self.assertTrue(confirmed["downstream_stale"])
+        self.assertNotEqual(initial["matrix_artifact_id"], confirmed["matrix_artifact_id"])
+        retained_row = next(
+            row for row in confirmed["matrix"]["rows"] if row["paper_id"] == "P001"
+        )
+        self.assertEqual(retained_note.strip(), retained_row["main_content"])
+        self.assertEqual("full_reading_complete", retained_row["matrix_status"])
+        self.assertEqual(
+            blueprint.id,
+            repository.get_current_artifact(
+                self.first.user_id, self.project_id, "blueprint/outline.json"
+            ).id,
+        )
+        blueprint_state = repository.get_stage_state(
+            self.first.user_id, self.project_id, "blueprint"
+        )
+        self.assertEqual("stale", blueprint_state.status)
+        self.assertEqual(blueprint_run.id, blueprint_state.current_run_id)
+        self.assertEqual(
+            "Replacement topic",
+            repository.get_owned_project(
+                self.first.user_id, self.project_id
+            ).topic,
+        )
 
     def test_failed_atomic_restart_keeps_previous_discovery_and_downstream_current(self) -> None:
         service = self.app.state.discovery_service

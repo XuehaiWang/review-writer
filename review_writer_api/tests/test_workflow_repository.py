@@ -798,22 +798,23 @@ class PostgreSQLWorkflowRepositoryTests(unittest.TestCase):
             self.user_id, self.project_id, "discovery/review.json"
         )
         self.assertEqual(promoted[0][1], current.id)
-        self.assertIsNone(
+        self.assertEqual(
+            matrix.id,
             self.repository.get_current_artifact(
                 self.user_id, self.project_id, "matrix/literature_matrix.json"
-            )
+            ).id,
         )
         self.assertEqual(
-            "pending",
+            "approved",
             self.repository.get_stage_state(
                 self.user_id, self.project_id, "matrix"
             ).status,
         )
         with database_session(self.sessions) as session:
             project = session.get(Project, uuid.UUID(self.project_id))
-            self.assertEqual(promoted[0][2], project.topic)
+            self.assertEqual("test", project.topic)
             self.assertEqual(2, project.stage_states["discovery"]["revision"])
-            self.assertEqual("pending", project.stage_states["matrix"]["status"])
+            self.assertEqual("approved", project.stage_states["matrix"]["status"])
 
     def test_concurrent_discovery_save_and_restart_never_split_pointer_and_state(self) -> None:
         def stage(seed: int):
@@ -907,10 +908,7 @@ class PostgreSQLWorkflowRepositoryTests(unittest.TestCase):
         self.assertEqual(2, state.revision)
         with database_session(self.sessions) as session:
             project = session.get(Project, uuid.UUID(self.project_id))
-            self.assertEqual(
-                "Replacement topic" if promoted[0] == "restart" else "test",
-                project.topic,
-            )
+            self.assertEqual("test", project.topic)
 
     def test_concurrent_project_jobs_allow_only_one_active_job_type(self) -> None:
         barrier = threading.Barrier(2)

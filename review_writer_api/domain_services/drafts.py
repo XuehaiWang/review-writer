@@ -1134,6 +1134,7 @@ class DraftsService:
                 "proposal_created": False,
                 "rewrite_accepted": int(feedback_status.get("rewrite_accepted") or 0),
                 "rewrite_rejected": int(feedback_status.get("rewrite_rejected") or 0),
+                "rewrite_deferred": int(feedback_status.get("rewrite_deferred") or 0),
                 "feedback_status": feedback_status,
                 "revision": int(job_payload["expected_revision"]),
             }
@@ -1226,6 +1227,7 @@ class DraftsService:
             "change_count": len(changes),
             "rewrite_accepted": int(feedback_status.get("rewrite_accepted") or 0),
             "rewrite_rejected": int(feedback_status.get("rewrite_rejected") or 0),
+            "rewrite_deferred": int(feedback_status.get("rewrite_deferred") or 0),
             "feedback_status": feedback_status,
             "revision": state.revision,
         }

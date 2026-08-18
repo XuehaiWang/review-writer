@@ -423,6 +423,29 @@ class ScientificRunnerTests(unittest.TestCase):
                 self.assertFalse(failed.exception.retryable)
                 self.assertEqual("1", counter.read_text())
 
+    def test_partial_batch_service_failure_reports_internal_retry_exhaustion(self) -> None:
+        script = (
+            "import json,os,pathlib,sys; "
+            "pathlib.Path(os.environ['REVIEW_WRITER_PROVIDER_CALL_COMPLETED_FILE']).write_text('done'); "
+            "sys.stderr.write('batch failed with HTTP 503 after 5 provider attempts: model_not_found\\n'); "
+            "sys.stderr.write('REVIEW_WRITER_ERROR:'+json.dumps({'category':'transient_service_unavailable','provider_call_completed':True,'http_status':503})+'\\n'); "
+            "sys.exit(1)"
+        )
+        with self.assertRaises(self.RunFailed) as failed:
+            self.runner.run(
+                [sys.executable, "-c", script],
+                cwd=self.root,
+                staging_directory=self.root,
+                expected_outputs=("partial-batch.out",),
+            )
+
+        self.assertEqual(1, failed.exception.attempts)
+        self.assertFalse(failed.exception.retryable)
+        message = str(failed.exception)
+        self.assertIn("exhausted its internal request retries", message)
+        self.assertIn("model_not_found", message)
+        self.assertNotIn("after 1 attempts", message)
+
     def test_missing_output_and_invalid_paths_never_retry(self) -> None:
         counter = self.root / "counter.txt"
         script = (

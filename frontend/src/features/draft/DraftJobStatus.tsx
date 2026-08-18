@@ -33,6 +33,10 @@ export function DraftJobStatus({ job, startingType = "draft.evaluate", publicati
   const changeCount = Number(result.change_count || 0);
   const acceptedRewrites = Number(result.rewrite_accepted || feedback.rewrite_accepted || 0);
   const rejectedRewrites = Number(result.rewrite_rejected || feedback.rewrite_rejected || 0);
+  const deferredRewrites = Number(result.rewrite_deferred || feedback.rewrite_deferred || 0);
+  const deferredParagraphIds = Array.isArray(feedback.deferred_paragraph_ids)
+    ? feedback.deferred_paragraph_ids.map(String).filter(Boolean)
+    : [];
   const bestScore = Number(feedback.best_score || result.score || 0);
   const bestScoreRestored = feedback.best_score_restored === true;
   const active = status === "submitting" || activeStatuses.has(status);
@@ -76,7 +80,10 @@ export function DraftJobStatus({ job, startingType = "draft.evaluate", publicati
         detail = text("正在进行全文和逐段评分。", "Scoring the full draft and every paragraph.");
       }
     } else if (optimizing && phase === "rewriting") {
-      detail = text(`第 ${iteration}/${maxIterations || "—"} 轮：安全重写 ${rewriteCompleted}/${rewriteTotal}${currentParagraph ? `，当前 ${currentParagraph}` : ""}。`, `Iteration ${iteration}/${maxIterations || "—"}: safe rewrites ${rewriteCompleted}/${rewriteTotal}${currentParagraph ? `, current ${currentParagraph}` : ""}.`);
+      detail = text(
+        `第 ${iteration}/${maxIterations || "—"} 轮：安全重写 ${rewriteCompleted}/${rewriteTotal}${currentParagraph ? `，当前 ${currentParagraph}` : ""}${deferredRewrites ? `，暂缓 ${deferredRewrites}` : ""}。`,
+        `Iteration ${iteration}/${maxIterations || "—"}: safe rewrites ${rewriteCompleted}/${rewriteTotal}${currentParagraph ? `, current ${currentParagraph}` : ""}${deferredRewrites ? `, deferred ${deferredRewrites}` : ""}.`,
+      );
     } else if (evaluating && current >= 2) {
       detail = text("评分已经完成，正在校验并保存评估结果。", "Scoring is complete; validating and saving the evaluation result.");
     } else if (evaluating) {
@@ -99,12 +106,17 @@ export function DraftJobStatus({ job, startingType = "draft.evaluate", publicati
       if (optimizing && proposalCreated) {
         title = text("批量优化候选已生成", "Batch optimization proposal ready");
         detail = text(
-          `已生成 ${changeCount} 个段落的优化对比，正文尚未改变。请在“评估与重写”中检查后选择“保存全部优化”或“放弃本批”。`,
-          `${changeCount} paragraph comparisons are ready and the saved draft is unchanged. Review them under Evaluation and rewriting, then save or discard the batch.`,
+          `已生成 ${changeCount} 个段落的优化对比${deferredRewrites ? `；另有 ${deferredRewrites} 段因服务商暂时不可用而待重试` : ""}，正文尚未改变。请在“评估与重写”中检查后选择“保存全部优化”或“放弃本批”。`,
+          `${changeCount} paragraph comparisons are ready${deferredRewrites ? `; ${deferredRewrites} more were deferred because the provider was temporarily unavailable` : ""}. The saved draft is unchanged. Review them under Evaluation and rewriting, then save or discard the batch.`,
         );
       } else if (optimizing && draftChanged === false) {
         title = text("优化完成，正文未改变", "Optimization complete; draft unchanged");
-        detail = bestScoreRestored
+        detail = deferredRewrites > 0
+          ? text(
+            `本次队列已继续处理到末尾，但 ${deferredRewrites} 个段落因服务商暂时不可用而待重试${deferredParagraphIds.length ? `：${deferredParagraphIds.join("、")}` : ""}。其他段落的结果和检查点均已保留。`,
+            `The queue continued to completion, but ${deferredRewrites} paragraph(s) were deferred because the provider was temporarily unavailable${deferredParagraphIds.length ? `: ${deferredParagraphIds.join(", ")}` : ""}. Results and checkpoints for the other paragraphs were preserved.`,
+          )
+          : bestScoreRestored
           ? text(
             `循环中有 ${acceptedRewrites} 次候选通过单次安全校验、${rejectedRewrites} 次被拒绝，但复评没有超过最佳分数 ${bestScore.toFixed(2)}，因此已恢复优化前的最佳正文。最新评分和问题请在“评估与重写”中查看。`,
             `${acceptedRewrites} candidate rewrites passed individual safety checks and ${rejectedRewrites} were rejected, but re-evaluation did not beat the best score of ${bestScore.toFixed(2)}. The best pre-optimization draft was restored. See Evaluation and rewriting for the latest score and issues.`,

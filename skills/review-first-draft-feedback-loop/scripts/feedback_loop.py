@@ -15,8 +15,10 @@ import time
 import urllib.error
 import urllib.request
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+import tempfile
 from typing import Any
 
 
@@ -68,10 +70,155 @@ SCAFFOLD_RE = re.compile(
 TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504, 524}
 MAX_REWRITE_ATTEMPTS = 2
 DEFAULT_EVALUATION_BATCH_SIZE = 8
+DEFAULT_PROVIDER_REQUEST_ATTEMPTS = 5
+MAX_PROVIDER_REQUEST_ATTEMPTS = 8
+REWRITE_EVIDENCE_CHAR_BUDGET = 10_000
+MINIMAL_REWRITE_EVIDENCE_CHAR_BUDGET = 4_000
 
 
 class ProviderDeadlineExceeded(RuntimeError):
     """The upstream proxy deadline was exceeded for a bounded model request."""
+
+
+class ProviderRequestBodyBudgetExceeded(RuntimeError):
+    """The provider relay rejected a request before model execution."""
+
+
+def provider_request_attempts() -> int:
+    """Return a bounded retry count for one provider request.
+
+    A feedback-loop task can make several paid model calls. Retrying the
+    individual failed call is safer than replaying the whole task after some
+    earlier calls have already completed. Keep the value configurable for
+    deployments whose proxy has a different recovery window.
+    """
+
+    raw = str(
+        os.environ.get("REVIEW_WRITING_PROVIDER_ATTEMPTS")
+        or DEFAULT_PROVIDER_REQUEST_ATTEMPTS
+    ).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = DEFAULT_PROVIDER_REQUEST_ATTEMPTS
+    return max(1, min(value, MAX_PROVIDER_REQUEST_ATTEMPTS))
+
+
+def provider_retry_delay(attempt: int, retry_after: str = "") -> float:
+    """Use provider guidance when present, otherwise a bounded backoff."""
+
+    try:
+        requested = float(str(retry_after or "").strip())
+    except ValueError:
+        requested = 0.0
+    if requested > 0:
+        return min(requested, 30.0)
+    return min(2.0 ** max(0, attempt), 20.0)
+
+
+def provider_concurrency_retry_delay(attempt: int, retry_after: str = "") -> float:
+    """Give a saturated relay enough time to release an execution slot."""
+
+    try:
+        requested = float(str(retry_after or "").strip())
+    except ValueError:
+        requested = 0.0
+    if requested > 0:
+        return min(max(requested, 5.0), 60.0)
+    return min(5.0 * (2.0 ** max(0, attempt - 1)), 30.0)
+
+
+def request_body_budget_exhausted(body: str) -> bool:
+    folded = str(body or "").casefold()
+    return (
+        "request_body_budget_exhausted" in folded
+        or "request body budget is exhausted" in folded
+    )
+
+
+def provider_concurrency_exhausted(body: str) -> bool:
+    folded = str(body or "").casefold()
+    return (
+        "too_many_concurrent_requests" in folded
+        or "too many concurrent requests" in folded
+    )
+
+
+def recoverable_paragraph_provider_failure(exc: BaseException) -> bool:
+    """Return whether one paragraph can be deferred without aborting the batch.
+
+    Authentication/configuration failures are intentionally excluded: retrying
+    every paragraph with an invalid global configuration only wastes time.  The
+    failures below are request-local or transient provider conditions, so the
+    remaining paragraph queue can still make useful progress.
+    """
+
+    if isinstance(
+        exc,
+        (ProviderDeadlineExceeded, ProviderRequestBodyBudgetExceeded),
+    ):
+        return True
+    folded = str(exc or "").casefold()
+    transient_markers = (
+        "http 408",
+        "http 409",
+        "http 425",
+        "http 429",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+        "http 524",
+        "too_many_concurrent_requests",
+        "too many concurrent requests",
+        "request_body_budget_exhausted",
+        "request body budget is exhausted",
+        "transport failed",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "connection reset",
+        "connection aborted",
+        "remote end closed",
+        "json failure",
+        "empty response",
+    )
+    return any(marker in folded for marker in transient_markers)
+
+
+@contextmanager
+def provider_request_slot():
+    """Serialize feedback-loop provider calls across worker subprocesses."""
+
+    configured = str(os.environ.get("REVIEW_WRITING_PROVIDER_LOCK_FILE") or "").strip()
+    lock_path = Path(configured) if configured else (
+        Path(tempfile.gettempdir()) / "review-writer-feedback-provider.lock"
+    )
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        handle.seek(0)
+        if handle.read(1) == b"":
+            handle.seek(0)
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def repeated_run_junk_token(value: str) -> bool:
@@ -264,6 +411,47 @@ def write_json(path: Path, value: Any) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+def write_rewrite_queue_checkpoint(
+    path: Path,
+    *,
+    project_id: str,
+    run_id: str,
+    iteration: int,
+    source_draft_sha256: str,
+    current_draft_sha256: str,
+    rewrite_items: list[dict[str, Any]],
+    accepted: int,
+    rejected: int,
+    deferred: int,
+    state: str = "running",
+) -> dict[str, Any]:
+    """Atomically persist paragraph-level progress for refresh and recovery."""
+
+    payload = {
+        "schema_version": 1,
+        "project_id": project_id,
+        "run_id": run_id,
+        "iteration": int(iteration),
+        "state": state,
+        "source_draft_sha256": source_draft_sha256,
+        "current_draft_sha256": current_draft_sha256,
+        "rewrite_total": len(rewrite_items),
+        "rewrite_completed": sum(
+            1
+            for item in rewrite_items
+            if str(item.get("status") or "")
+            in {"completed", "rejected", "deferred", "skipped"}
+        ),
+        "rewrite_accepted": int(accepted),
+        "rewrite_rejected": int(rejected),
+        "rewrite_deferred": int(deferred),
+        "items": rewrite_items,
+        "updated_at": utc_now(),
+    }
+    write_json(path, payload)
+    return payload
 
 
 def clean_text(value: Any) -> str:
@@ -959,10 +1147,14 @@ def call_json_model(prompt: str, *, label: str) -> dict[str, Any]:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36",
         },
     )
-    for attempt in range(3):
+    request_attempts = provider_request_attempts()
+    attempt = 0
+    while attempt < request_attempts:
+        attempt += 1
         try:
-            with urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=300) as response:
-                raw = response.read()
+            with provider_request_slot():
+                with urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=300) as response:
+                    raw = response.read()
             data = json.loads(raw.decode("utf-8"))
             if wire in {"chat", "chat-completion", "chat-completions"}:
                 choices = data.get("choices") if isinstance(data, dict) else []
@@ -985,17 +1177,43 @@ def call_json_model(prompt: str, *, label: str) -> dict[str, Any]:
             return extract_json_object(str(text or ""))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", "replace")[:600].replace("\n", " ")
+            if request_body_budget_exhausted(body):
+                raise ProviderRequestBodyBudgetExceeded(
+                    f"{label} exceeded the provider relay request-body budget"
+                ) from exc
             if exc.code == 524:
                 raise ProviderDeadlineExceeded(
                     f"{label} exceeded the provider proxy deadline (HTTP 524)"
                 ) from exc
-            if exc.code not in TRANSIENT_HTTP_CODES or attempt == 2:
-                raise RuntimeError(f"{label} failed with HTTP {exc.code}: {body or exc.reason}") from exc
+            concurrent = provider_concurrency_exhausted(body)
+            if concurrent:
+                request_attempts = MAX_PROVIDER_REQUEST_ATTEMPTS
+            if exc.code not in TRANSIENT_HTTP_CODES or attempt >= request_attempts:
+                raise RuntimeError(
+                    f"{label} failed with HTTP {exc.code} after "
+                    f"{attempt} provider attempts: {body or exc.reason}"
+                ) from exc
+            time.sleep(
+                (
+                    provider_concurrency_retry_delay
+                    if concurrent
+                    else provider_retry_delay
+                )(
+                    attempt,
+                    str(exc.headers.get("Retry-After") or "") if exc.headers else "",
+                )
+            )
+            continue
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            if attempt == 2:
-                raise RuntimeError(f"{label} transport/JSON failure: {exc}") from exc
-        time.sleep(2**attempt)
-    raise RuntimeError(f"{label} failed after retries")
+            if attempt >= request_attempts:
+                raise RuntimeError(
+                    f"{label} transport/JSON failure after "
+                    f"{attempt} provider attempts: {exc}"
+                ) from exc
+            time.sleep(provider_retry_delay(attempt))
+    raise RuntimeError(
+        f"{label} failed after {request_attempts} provider attempts"
+    )
 
 
 def rubric_dimensions(rubric: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1034,6 +1252,71 @@ def compact_evidence_for_prompt(raw: dict[str, Any]) -> dict[str, Any]:
             compact_paper["metadata_fallback"] = clean_text(
                 paper.get("abstract") or paper.get("main_content")
             )[:700]
+        compact_papers.append(compact_paper)
+    return {
+        "paragraph_id": raw.get("paragraph_id"),
+        "paper_ids": raw.get("paper_ids") or [],
+        "local_source_available": bool(raw.get("local_source_available")),
+        "original_source_ready": bool(raw.get("original_source_ready")),
+        "evidence_scope": raw.get("evidence_scope"),
+        "evidence": compact_papers,
+    }
+
+
+def compact_rewrite_evidence_for_prompt(
+    raw: dict[str, Any],
+    *,
+    minimal: bool = False,
+) -> dict[str, Any]:
+    """Bound one rewrite request while retaining every cited paper identity.
+
+    Introductory and synthesis paragraphs can cite many papers. Sending each
+    paper's abstract, main-content summary, and several full passages can
+    exceed a relay's request-body budget. Rewriting needs the paragraph plus
+    concise evidence excerpts, not duplicate source records.
+    """
+
+    papers = [item for item in raw.get("evidence") or [] if isinstance(item, dict)]
+    total_budget = (
+        MINIMAL_REWRITE_EVIDENCE_CHAR_BUDGET
+        if minimal
+        else REWRITE_EVIDENCE_CHAR_BUDGET
+    )
+    per_paper_budget = max(
+        120 if minimal else 180,
+        min(260 if minimal else 520, total_budget // max(1, len(papers))),
+    )
+    compact_papers: list[dict[str, Any]] = []
+    for paper in papers:
+        remaining = per_paper_budget
+        passages: list[dict[str, Any]] = []
+        passage_limit = 1 if minimal else 2
+        for passage in paper.get("original_passages") or []:
+            if not isinstance(passage, dict) or len(passages) >= passage_limit:
+                continue
+            text = clean_text(passage.get("text"))
+            if not text or remaining <= 0:
+                continue
+            excerpt = text[:remaining]
+            remaining -= len(excerpt)
+            passages.append(
+                {
+                    "ref": passage.get("ref"),
+                    "page": passage.get("page"),
+                    "text": excerpt,
+                }
+            )
+        compact_paper = {
+            "paper_id": paper.get("paper_id"),
+            "title": clean_text(paper.get("title"))[:80 if minimal else 160],
+            "local_source_available": bool(paper.get("local_source_available")),
+            "original_text_available": bool(paper.get("original_text_available")),
+            "original_passages": passages,
+        }
+        if not passages:
+            compact_paper["metadata_fallback"] = clean_text(
+                paper.get("abstract") or paper.get("main_content")
+            )[:per_paper_budget]
         compact_papers.append(compact_paper)
     return {
         "paragraph_id": raw.get("paragraph_id"),
@@ -1522,6 +1805,7 @@ def rewrite_prompt(
     *,
     word_range_applicable: bool = True,
     rewrite_mode: str = "section_rewrite",
+    minimal_evidence: bool = False,
 ) -> str:
     length_instruction = (
         f"Required word range for this case paragraph: {min_words}-{max_words}. Aim at least "
@@ -1568,7 +1852,8 @@ def rewrite_prompt(
         f"Rewrite mode: {rewrite_mode}. {mode_instruction}\n"
         f"Paragraph id: {paragraph['paragraph_id']}\n"
         f"Diagnosis: {json.dumps(score, ensure_ascii=False)}\n"
-        f"Local evidence: {json.dumps(evidence, ensure_ascii=False)}\n"
+        "Local evidence: "
+        f"{json.dumps(compact_rewrite_evidence_for_prompt(evidence, minimal=minimal_evidence), ensure_ascii=False)}\n"
         f"Original paragraph: {paragraph['text']}"
     )
 
@@ -2402,6 +2687,7 @@ def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
     run_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(draft_path, run_dir / "first_draft_before.md")
     source_markdown = draft_path.read_text(encoding="utf-8", errors="replace")
+    source_draft_sha256 = sha256_file(draft_path)
     source_evaluation: dict[str, Any] = {}
     source_preflight: dict[str, Any] = {}
     best_paragraph_candidates: dict[str, dict[str, Any]] = {}
@@ -2419,6 +2705,32 @@ def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
     best_evaluation: dict[str, Any] = {}
     best_preflight: dict[str, Any] = {}
     best_evidence: dict[str, dict[str, Any]] = {}
+    active_rewrite_checkpoint = first / "feedback_loop_rewrite_checkpoint.json"
+
+    def checkpoint_rewrite_queue(
+        iteration: int,
+        rewrite_items: list[dict[str, Any]],
+        *,
+        accepted: int,
+        rejected: int,
+        deferred: int,
+        state: str = "running",
+    ) -> dict[str, Any]:
+        payload = write_rewrite_queue_checkpoint(
+            active_rewrite_checkpoint,
+            project_id=args.project_id,
+            run_id=run_id,
+            iteration=iteration,
+            source_draft_sha256=source_draft_sha256,
+            current_draft_sha256=sha256_file(draft_path),
+            rewrite_items=rewrite_items,
+            accepted=accepted,
+            rejected=rejected,
+            deferred=deferred,
+            state=state,
+        )
+        write_json(run_dir / "rewrite_queue_checkpoint.json", payload)
+        return payload
 
     def restore_last_valid_state() -> None:
         draft_tmp = draft_path.with_suffix(".md.feedback-restore.tmp")
@@ -2491,6 +2803,8 @@ def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
         rewrite_completed=0,
         rewrite_accepted=0,
         rewrite_rejected=0,
+        rewrite_deferred=0,
+        deferred_paragraph_ids=[],
         error="",
     )
     plateau_count = 0
@@ -2643,6 +2957,7 @@ def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
             }
             accepted = 0
             rejected = 0
+            deferred = 0
             rewrite_items = [
                 {
                     "paragraph_id": str(item.get("paragraph_id") or ""),
@@ -2662,7 +2977,16 @@ def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
                 rewrite_completed=0,
                 rewrite_accepted=0,
                 rewrite_rejected=0,
+                rewrite_deferred=0,
+                deferred_paragraph_ids=[],
                 rewrite_items=rewrite_items,
+            )
+            checkpoint_rewrite_queue(
+                iteration,
+                rewrite_items,
+                accepted=accepted,
+                rejected=rejected,
+                deferred=deferred,
             )
             for index, failure in enumerate(failures, 1):
                 if stopper.exists():
@@ -2693,6 +3017,13 @@ def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
                         rewrite_completed=index,
                         rewrite_items=rewrite_items,
                     )
+                    checkpoint_rewrite_queue(
+                        iteration,
+                        rewrite_items,
+                        accepted=accepted,
+                        rejected=rejected,
+                        deferred=deferred,
+                    )
                     continue
                 rewrite_items[index - 1]["status"] = "rewriting"
                 update_status(
@@ -2718,6 +3049,7 @@ def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
                 candidate = ""
                 validation_errors: list[str] = []
                 validation_warnings: list[str] = []
+                provider_error: BaseException | None = None
                 for rewrite_attempt in range(1, MAX_REWRITE_ATTEMPTS + 1):
                     if stopper.exists():
                         break
@@ -2748,14 +3080,43 @@ def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
                             allowed_unsupported_claims=allowed_unsupported_claims,
                         )
                     )
-                    response = call_json_model(
-                        prompt,
-                        label=(
-                            f"Paragraph rewrite {paragraph_id}"
-                            if rewrite_attempt == 1
-                            else f"Paragraph rewrite repair {paragraph_id}"
-                        ),
+                    request_label = (
+                        f"Paragraph rewrite {paragraph_id}"
+                        if rewrite_attempt == 1
+                        else f"Paragraph rewrite repair {paragraph_id}"
                     )
+                    try:
+                        try:
+                            response = call_json_model(prompt, label=request_label)
+                        except ProviderRequestBodyBudgetExceeded:
+                            if rewrite_attempt != 1:
+                                raise
+                            rewrite_items[index - 1]["request_compacted"] = True
+                            update_status(project, rewrite_items=rewrite_items)
+                            response = call_json_model(
+                                rewrite_prompt(
+                                    current_paragraph,
+                                    failure,
+                                    evidence.get(paragraph_id, {}),
+                                    effective_min_words,
+                                    args.max_case_words,
+                                    word_range_applicable=word_range_applicable,
+                                    rewrite_mode=rewrite_mode,
+                                    minimal_evidence=True,
+                                ),
+                                label=f"{request_label} compact retry",
+                            )
+                    except Exception as exc:
+                        if not recoverable_paragraph_provider_failure(exc):
+                            raise
+                        provider_error = exc
+                        attempts.append(
+                            {
+                                "attempt": rewrite_attempt,
+                                "provider_error": f"{type(exc).__name__}: {exc}",
+                            }
+                        )
+                        break
                     candidate = str(response.get("text") or "").strip()
                     validation_errors, validation_warnings = validate_rewrite_report(
                         str(current_paragraph["text"]),
@@ -2774,6 +3135,67 @@ def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
                     )
                     if not validation_errors:
                         break
+                if stopper.exists():
+                    restore_last_valid_state()
+                    shutil.copy2(draft_path, run_dir / "first_draft_after.md")
+                    checkpoint_rewrite_queue(
+                        iteration,
+                        rewrite_items,
+                        accepted=accepted,
+                        rejected=rejected,
+                        deferred=deferred,
+                        state="stopped",
+                    )
+                    update_status(
+                        project,
+                        status="stopped",
+                        phase="stopped",
+                        current_paragraph_id="",
+                        finished_at=utc_now(),
+                        output_draft_sha256=sha256_file(draft_path),
+                    )
+                    return {"status": "stopped", "iteration": iteration}
+                if provider_error is not None:
+                    deferred += 1
+                    provider_message = f"{type(provider_error).__name__}: {provider_error}"
+                    rewrite_items[index - 1]["status"] = "deferred"
+                    rewrite_items[index - 1]["provider_error"] = provider_message
+                    rewrite_items[index - 1]["retryable"] = True
+                    write_json(
+                        iteration_dir / f"{paragraph_id}_provider_deferred.json",
+                        {
+                            "paragraph_id": paragraph_id,
+                            "status": "deferred",
+                            "provider_error": provider_message,
+                            "attempts": attempts,
+                            "automatic_rewrite_mode": rewrite_mode,
+                            "retryable": True,
+                            "deferred_at": utc_now(),
+                        },
+                    )
+                    deferred_ids = [
+                        str(item.get("paragraph_id") or "")
+                        for item in rewrite_items
+                        if str(item.get("status") or "") == "deferred"
+                    ]
+                    update_status(
+                        project,
+                        rewrite_completed=index,
+                        rewrite_accepted=accepted,
+                        rewrite_rejected=rejected,
+                        rewrite_deferred=deferred,
+                        deferred_paragraph_ids=deferred_ids,
+                        current_paragraph_id=paragraph_id,
+                        rewrite_items=rewrite_items,
+                    )
+                    checkpoint_rewrite_queue(
+                        iteration,
+                        rewrite_items,
+                        accepted=accepted,
+                        rejected=rejected,
+                        deferred=deferred,
+                    )
+                    continue
                 if validation_errors:
                     rejected += 1
                     rewrite_items[index - 1]["status"] = "rejected"
@@ -2792,7 +3214,15 @@ def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
                         project,
                         rewrite_completed=index,
                         rewrite_rejected=rejected,
+                        rewrite_deferred=deferred,
                         rewrite_items=rewrite_items,
+                    )
+                    checkpoint_rewrite_queue(
+                        iteration,
+                        rewrite_items,
+                        accepted=accepted,
+                        rejected=rejected,
+                        deferred=deferred,
                     )
                     continue
                 snapshot = run_dir / f"before_{iteration:03d}_{paragraph_id}.md"
@@ -2826,21 +3256,61 @@ def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
                 rewrite_items[index - 1]["status"] = "completed"
                 rewrite_items[index - 1]["attempt"] = rewrite_attempt
                 rewrite_items[index - 1]["warnings"] = list(validation_warnings)
+                rewrite_items[index - 1]["candidate_sha256"] = hashlib.sha256(
+                    clean_text(candidate).encode("utf-8")
+                ).hexdigest()
+                write_json(
+                    iteration_dir / f"{paragraph_id}_accepted.json",
+                    {
+                        "paragraph_id": paragraph_id,
+                        "status": "completed",
+                        "original_text": str(current_paragraph["text"]),
+                        "candidate_text": candidate,
+                        "candidate_sha256": rewrite_items[index - 1]["candidate_sha256"],
+                        "warnings": validation_warnings,
+                        "attempts": attempts,
+                        "automatic_rewrite_mode": rewrite_mode,
+                        "accepted_at": utc_now(),
+                    },
+                )
                 update_status(
                     project,
                     rewrite_completed=index,
                     rewrite_accepted=accepted,
                     rewrite_rejected=rejected,
+                    rewrite_deferred=deferred,
                     current_paragraph_id=paragraph_id,
                     rewrite_items=rewrite_items,
                 )
+                checkpoint_rewrite_queue(
+                    iteration,
+                    rewrite_items,
+                    accepted=accepted,
+                    rejected=rejected,
+                    deferred=deferred,
+                )
+            deferred_ids = [
+                str(item.get("paragraph_id") or "")
+                for item in rewrite_items
+                if str(item.get("status") or "") == "deferred"
+            ]
             update_status(
                 project,
                 current_paragraph_id="",
                 rewrite_attempt=0,
                 rewrite_accepted=accepted,
                 rewrite_rejected=rejected,
+                rewrite_deferred=deferred,
+                deferred_paragraph_ids=deferred_ids,
                 rewrite_items=rewrite_items,
+            )
+            checkpoint_rewrite_queue(
+                iteration,
+                rewrite_items,
+                accepted=accepted,
+                rejected=rejected,
+                deferred=deferred,
+                state="iteration_completed",
             )
             if not accepted:
                 restored_best = restore_best_scored_state()
@@ -2848,10 +3318,17 @@ def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
                 update_status(
                     project,
                     status="needs_human_review",
-                    phase="rewrite_blocked",
+                    phase="provider_deferred" if deferred else "rewrite_blocked",
                     error=(
-                        "No proposed rewrite passed the protected-fact and citation checks after "
-                        f"up to {MAX_REWRITE_ATTEMPTS} attempts per paragraph."
+                        (
+                            f"{deferred} paragraph rewrite(s) were deferred after transient provider failures. "
+                            "Other paragraphs were processed; retry the deferred paragraphs when the provider recovers."
+                        )
+                        if deferred
+                        else (
+                            "No proposed rewrite passed the protected-fact and citation checks after "
+                            f"up to {MAX_REWRITE_ATTEMPTS} attempts per paragraph."
+                        )
                     ),
                     score=best_score if restored_best else score_value,
                     best_score=best_score,
@@ -2862,9 +3339,11 @@ def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 return {
                     "status": "needs_human_review",
-                    "reason": "no_safe_rewrite",
+                    "reason": "provider_deferred" if deferred else "no_safe_rewrite",
                     "score": best_score if restored_best else score_value,
                     "best_iteration": best_iteration,
+                    "rewrite_deferred": deferred,
+                    "deferred_paragraph_ids": deferred_ids,
                 }
         # The final configured rewrite round changes the draft after its normal
         # evaluation. Score those exact output bytes once more before reporting

@@ -330,7 +330,7 @@ class WorkflowRepository:
             return self._stage_record(state) if state else None
 
     def invalidate_downstream_after_discovery(self, user_id: str, project_id: str) -> None:
-        """Clear derived outputs when a newly published Discovery review replaces its input."""
+        """Mark Discovery descendants stale while preserving their published artifacts."""
         user_uuid = self._uuid(user_id, not_found_message="Project not found.")
         project_uuid = self._uuid(project_id, not_found_message="Project not found.")
         downstream = tuple(stage for stage in INTERNAL_STAGES if stage != "discovery")
@@ -338,16 +338,6 @@ class WorkflowRepository:
             project = session.scalar(select(Project).where(Project.id == project_uuid, Project.user_id == user_uuid, Project.deleted_at.is_(None)).with_for_update())
             if project is None:
                 raise WorkflowNotFound("Project not found.")
-            downstream_artifacts = select(WorkflowArtifact.id).where(
-                WorkflowArtifact.project_id == project_uuid,
-                WorkflowArtifact.producer_stage.in_(downstream),
-            )
-            session.execute(
-                delete(WorkflowCurrentArtifact).where(
-                    WorkflowCurrentArtifact.project_id == project_uuid,
-                    WorkflowCurrentArtifact.artifact_id.in_(downstream_artifacts),
-                )
-            )
             states = session.scalars(
                 select(WorkflowStageState).where(
                     WorkflowStageState.project_id == project_uuid,
@@ -357,13 +347,15 @@ class WorkflowRepository:
             now = utc_now()
             stored_states = dict(project.stage_states or {})
             for state in states:
-                state.status = "pending"
-                state.current_run_id = None
+                state.status = "stale"
                 state.error_code = ""
                 state.error_message = ""
                 state.revision += 1
                 state.updated_at = now
-                stored_states[state.stage_id] = {"status": "pending", "revision": state.revision}
+                stored_states[state.stage_id] = {
+                    "status": "stale",
+                    "revision": state.revision,
+                }
             project.stage_states = stored_states
             project.current_stage = current_user_stage(
                 {
@@ -385,12 +377,16 @@ class WorkflowRepository:
         expected_revision: int,
         topic: str,
     ) -> StageStateRecord:
-        """Promote a staged Discovery artifact and invalidate derived state in one commit."""
+        """Promote a staged Discovery candidate without hiding published downstream work.
+
+        A restarted search is a review candidate, not an accepted workflow input.  The
+        current Matrix and every later artifact therefore remain visible until the user
+        explicitly confirms the new selection.
+        """
         user_uuid = self._uuid(user_id, not_found_message="Project not found.")
         project_uuid = self._uuid(project_id, not_found_message="Project not found.")
         artifact_uuid = self._uuid(artifact_id, not_found_message="Artifact not found.")
         run_uuid = self._uuid(run_id, not_found_message="Stage run not found.")
-        downstream = tuple(stage for stage in INTERNAL_STAGES if stage != "discovery")
         with database_session(self.session_factory) as session:
             project = session.scalar(
                 select(Project)
@@ -462,36 +458,8 @@ class WorkflowRepository:
                 state.error_code = ""
                 state.error_message = ""
                 state.updated_at = now
-            downstream_artifacts = select(WorkflowArtifact.id).where(
-                WorkflowArtifact.project_id == project_uuid,
-                WorkflowArtifact.producer_stage.in_(downstream),
-            )
-            session.execute(
-                delete(WorkflowCurrentArtifact).where(
-                    WorkflowCurrentArtifact.project_id == project_uuid,
-                    WorkflowCurrentArtifact.artifact_id.in_(downstream_artifacts),
-                )
-            )
             stored = dict(project.stage_states or {})
             stored["discovery"] = {"status": state.status, "revision": state.revision}
-            derived_states = session.scalars(
-                select(WorkflowStageState).where(
-                    WorkflowStageState.project_id == project_uuid,
-                    WorkflowStageState.stage_id.in_(downstream),
-                )
-            ).all()
-            for derived in derived_states:
-                derived.status = "pending"
-                derived.current_run_id = None
-                derived.error_code = ""
-                derived.error_message = ""
-                derived.revision += 1
-                derived.updated_at = now
-                stored[derived.stage_id] = {
-                    "status": "pending",
-                    "revision": derived.revision,
-                }
-            project.topic = str(topic)
             project.stage_states = stored
             project.current_stage = current_user_stage(
                 {
@@ -506,6 +474,89 @@ class WorkflowRepository:
             project.updated_at = now
             session.flush()
             return self._stage_record(state)
+
+    def approve_discovery_without_matrix_change_atomically(
+        self,
+        user_id: str,
+        project_id: str,
+        *,
+        expected_discovery_revision: int,
+        expected_matrix_artifact_id: str,
+        topic: str,
+    ) -> StageStateRecord:
+        """Approve Discovery while retaining the exact current Matrix and descendants."""
+
+        user_uuid = self._uuid(user_id, not_found_message="Project not found.")
+        project_uuid = self._uuid(project_id, not_found_message="Project not found.")
+        matrix_artifact_uuid = self._uuid(
+            expected_matrix_artifact_id, not_found_message="Matrix artifact not found."
+        )
+        with database_session(self.session_factory) as session:
+            project = session.scalar(
+                select(Project)
+                .where(
+                    Project.id == project_uuid,
+                    Project.user_id == user_uuid,
+                    Project.deleted_at.is_(None),
+                )
+                .with_for_update()
+            )
+            if project is None:
+                raise WorkflowNotFound("Project not found.")
+            discovery = session.scalar(
+                select(WorkflowStageState)
+                .where(
+                    WorkflowStageState.project_id == project_uuid,
+                    WorkflowStageState.stage_id == "discovery",
+                )
+                .with_for_update()
+            )
+            actual = discovery.revision if discovery else 0
+            if discovery is None or actual != expected_discovery_revision:
+                raise WorkflowConflict(
+                    "Discovery changed since confirmation was opened.",
+                    details={
+                        "expected_revision": expected_discovery_revision,
+                        "actual_revision": actual,
+                    },
+                )
+            current_matrix_id = session.scalar(
+                select(WorkflowCurrentArtifact.artifact_id).where(
+                    WorkflowCurrentArtifact.project_id == project_uuid,
+                    WorkflowCurrentArtifact.logical_name
+                    == "matrix/literature_matrix.json",
+                )
+            )
+            if current_matrix_id != matrix_artifact_uuid:
+                raise WorkflowConflict(
+                    "Matrix changed while Discovery confirmation was open."
+                )
+            now = utc_now()
+            discovery.status = "approved"
+            discovery.revision = actual + 1
+            discovery.error_code = ""
+            discovery.error_message = ""
+            discovery.updated_at = now
+            stored = dict(project.stage_states or {})
+            stored["discovery"] = {
+                "status": discovery.status,
+                "revision": discovery.revision,
+            }
+            project.topic = str(topic)
+            project.stage_states = stored
+            project.current_stage = current_user_stage(
+                {
+                    key: (
+                        value.get("status", "pending")
+                        if isinstance(value, dict)
+                        else str(value)
+                    )
+                    for key, value in stored.items()
+                }
+            )
+            project.updated_at = now
+            session.flush()
+            return self._stage_record(discovery)
 
     def save_discovery_atomically(
         self,
@@ -625,8 +676,14 @@ class WorkflowRepository:
         run_id: str,
         expected_discovery_revision: int,
         expected_matrix_revision: int,
+        topic: str,
     ) -> tuple[StageStateRecord, StageStateRecord]:
-        """Promote a staged Matrix artifact and approve its exact Discovery revision atomically."""
+        """Promote a changed Matrix and mark its retained descendants as stale.
+
+        Downstream current pointers are deliberately preserved so users can still inspect
+        their previous work.  Their stage states become ``stale`` and lineage checks stop
+        those artifacts from being treated as outputs of the newly confirmed Matrix.
+        """
         user_uuid = self._uuid(user_id, not_found_message="Project not found.")
         project_uuid = self._uuid(project_id, not_found_message="Project not found.")
         artifact_uuid = self._uuid(
@@ -698,19 +755,7 @@ class WorkflowRepository:
             downstream = tuple(
                 stage
                 for stage in INTERNAL_STAGES
-                if INTERNAL_STAGES.index(stage) >= INTERNAL_STAGES.index("matrix")
-            )
-            derived_artifacts = select(WorkflowArtifact.id).where(
-                WorkflowArtifact.project_id == project_uuid,
-                WorkflowArtifact.producer_stage.in_(downstream),
-            )
-            session.execute(
-                delete(WorkflowCurrentArtifact).where(
-                    WorkflowCurrentArtifact.project_id == project_uuid,
-                    WorkflowCurrentArtifact.logical_name
-                    != "matrix/literature_matrix.json",
-                    WorkflowCurrentArtifact.artifact_id.in_(derived_artifacts),
-                )
+                if INTERNAL_STAGES.index(stage) > INTERNAL_STAGES.index("matrix")
             )
             if matrix is None:
                 matrix = WorkflowStageState(
@@ -742,6 +787,7 @@ class WorkflowRepository:
                 "status": discovery.status,
                 "revision": discovery.revision,
             }
+            project.topic = str(topic)
             stale_states = session.scalars(
                 select(WorkflowStageState).where(
                     WorkflowStageState.project_id == project_uuid,
@@ -749,20 +795,18 @@ class WorkflowRepository:
                         tuple(
                             stage
                             for stage in downstream
-                            if stage not in {"matrix"}
                         )
                     ),
                 )
             ).all()
             for stale in stale_states:
-                stale.status = "pending"
-                stale.current_run_id = None
+                stale.status = "stale"
                 stale.error_code = ""
                 stale.error_message = ""
                 stale.revision += 1
                 stale.updated_at = now
                 stored[stale.stage_id] = {
-                    "status": "pending",
+                    "status": "stale",
                     "revision": stale.revision,
                 }
             project.stage_states = stored
