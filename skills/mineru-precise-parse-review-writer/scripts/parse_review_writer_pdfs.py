@@ -529,6 +529,19 @@ def summarize_batch_states(results: Dict[str, Dict[str, Any]]) -> Dict[str, int]
     return counts
 
 
+def provider_error_message(result: Dict[str, Any]) -> str:
+    for key in ("err_msg", "error_message", "message", "msg", "reason"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return re.sub(r"\s+", " ", value).strip()
+    nested = result.get("error")
+    if isinstance(nested, dict):
+        return provider_error_message(nested)
+    if isinstance(nested, str) and nested.strip():
+        return re.sub(r"\s+", " ", nested).strip()
+    return ""
+
+
 def emit_failed_job_diagnostics(manifest: Dict[str, Any]) -> None:
     for record in manifest.get("failed") or []:
         if not isinstance(record, dict):
@@ -588,7 +601,7 @@ def run_batch(
             "slug": job.slug,
             "data_id": job.data_id,
             "state": state,
-            "err_msg": result.get("err_msg") or "",
+            "err_msg": provider_error_message(result),
         }
         if state in SUCCESS_STATES:
             zip_url = str(result.get("full_zip_url") or "").strip()

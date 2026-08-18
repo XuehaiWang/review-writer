@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from review_writer_api.credentials import ProviderSettingsService
+from review_writer_api.model_gateway import ModelGatewayService
 from review_writer_api.errors import LiteratureSearchFailed, WorkflowValidationError
 from review_writer_api.scientific_runner import ScientificRunFailed, ScientificRunner
 from review_writer_api.security import Principal, Role
@@ -20,6 +20,24 @@ from review_writer_core.providers import DEFAULT_IMAGE_MODEL
 
 
 SENSITIVE_KEY = re.compile(r"(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)", re.I)
+DIRECT_PROVIDER_ENV_KEYS = (
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "REVIEW_WRITING_API_KEY",
+    "REVIEW_WRITING_BASE_URL",
+    "REVIEW_WRITING_MODEL",
+    "REVIEW_WRITING_WIRE_API",
+    "REVIEW_CONCLUSION_API_KEY",
+    "REVIEW_CONCLUSION_BASE_URL",
+    "REVIEW_CONCLUSION_MODEL",
+    "REVIEW_CONCLUSION_WIRE_API",
+    "IMAGE_OPENAI_API_KEY",
+    "IMAGE_OPENAI_BASE_URL",
+    "IMAGE_OPENAI_MODEL",
+    "IMAGE_FALLBACK_MODEL",
+    "IMAGE_OPENAI_WIRE_API",
+    "MINERU_API_TOKEN",
+)
 ARTIFACT_URL = re.compile(r"/api/v1/artifacts/([0-9a-fA-F-]{36})/content")
 SAFE_PROJECT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}")
 EVALUATE_DRAFT_TIMEOUT_SECONDS = 30 * 60
@@ -57,11 +75,13 @@ class NativeWorkflowHandlers:
         self,
         runner: ScientificRunner,
         workspaces: HostedWorkspaceManager,
-        provider_settings: ProviderSettingsService | None,
+        provider_settings: Any | None,
+        model_gateway: ModelGatewayService | None = None,
     ):
         self.runner = runner
         self.workspaces = workspaces
         self.provider_settings = provider_settings
+        self.model_gateway = model_gateway
         self.root = Path(__file__).resolve().parents[1]
 
     def mapping(self) -> dict[str, Any]:
@@ -87,6 +107,30 @@ class NativeWorkflowHandlers:
         values = self.provider_settings.runtime_environment(principal)
         secrets = {key: value for key, value in values.items() if SENSITIVE_KEY.search(key)}
         normal = {key: value for key, value in values.items() if key not in secrets}
+        return normal, secrets
+
+    def _text_gateway_environment(self, context) -> tuple[dict[str, str], dict[str, str]]:
+        normal, secrets = self._environment(context.user_id)
+        if self.model_gateway is None:
+            return normal, secrets
+        for key in DIRECT_PROVIDER_ENV_KEYS:
+            normal.pop(key, None)
+            secrets.pop(key, None)
+        gateway_normal, gateway_secrets = self.model_gateway.environment_for_job(context)
+        normal.update(gateway_normal)
+        secrets.update(gateway_secrets)
+        return normal, secrets
+
+    def _image_gateway_environment(self, context) -> tuple[dict[str, str], dict[str, str]]:
+        normal, secrets = self._environment(context.user_id)
+        if self.model_gateway is None:
+            return normal, secrets
+        for key in DIRECT_PROVIDER_ENV_KEYS:
+            normal.pop(key, None)
+            secrets.pop(key, None)
+        gateway_normal, gateway_secrets = self.model_gateway.environment_for_job(context)
+        normal.update(gateway_normal)
+        secrets.update(gateway_secrets)
         return normal, secrets
 
     def _staging(self, user_id: str, job_id: str) -> Path:
@@ -326,7 +370,7 @@ class NativeWorkflowHandlers:
 
     def discovery_search(self, context, payload):
         staging = self._staging(context.user_id, context.job_id)
-        normal, secrets = self._environment(context.user_id)
+        normal, secrets = self._text_gateway_environment(context)
         report_progress = getattr(context, "report_progress", None)
         if callable(report_progress):
             report_progress(1, 4)
@@ -372,6 +416,39 @@ class NativeWorkflowHandlers:
         if callable(report_progress):
             report_progress(3, 4)
         return self._result(staging, "00_discovery/combined_results_by_keyword.json")
+
+    @staticmethod
+    def _section_progress_callback(context, status_file: Path):
+        """Publish each completed chapter without exposing mutable artifacts."""
+
+        previous = ""
+
+        def callback() -> None:
+            nonlocal previous
+            try:
+                if not status_file.is_file():
+                    return
+                status = json.loads(status_file.read_text(encoding="utf-8"))
+                if not isinstance(status, dict):
+                    return
+                current = max(0, int(status.get("current") or 0))
+                total = max(0, int(status.get("total") or 0))
+                if total:
+                    current = min(current, total)
+                fingerprint = json.dumps(status, ensure_ascii=False, sort_keys=True)
+                if fingerprint == previous:
+                    return
+                previous = fingerprint
+                if hasattr(context, "report_progress"):
+                    context.report_progress(current, total)
+                if hasattr(context, "report_partial_result"):
+                    context.report_partial_result({"section_progress": status})
+            except Exception:
+                # Progress reporting is observational and must never invalidate
+                # a scientifically valid result that is ready to publish.
+                return
+
+        return callback
 
     def sections_generate(self, context, payload):
         """Run the established section writer in an isolated compatibility workspace."""
@@ -430,8 +507,10 @@ class NativeWorkflowHandlers:
             + "\n",
             encoding="utf-8",
         )
-        normal, secrets = self._environment(context.user_id)
+        normal, secrets = self._text_gateway_environment(context)
         relative_stage = Path("section-workspace") / "review-projects" / project_id / "02_section_drafting"
+        progress_file = section_stage / "generation_progress.json"
+        progress_file.unlink(missing_ok=True)
         self.runner.run(
             [
                 sys.executable,
@@ -457,6 +536,7 @@ class NativeWorkflowHandlers:
             env=normal,
             secret_env=secrets,
             cancel_requested=context.cancellation_requested,
+            progress_callback=self._section_progress_callback(context, progress_file),
             timeout_seconds=15 * 60,
         )
         drafts = json.loads(
@@ -559,7 +639,7 @@ class NativeWorkflowHandlers:
             json.dumps([figure], ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        normal, secrets = self._environment(context.user_id)
+        normal, secrets = self._image_gateway_environment(context)
         requested_figure_type = str(payload.get("figure_type") or "auto")
         image_model = str(
             normal.get("IMAGE_OPENAI_MODEL") or DEFAULT_IMAGE_MODEL
@@ -695,7 +775,8 @@ class NativeWorkflowHandlers:
             / project_id
             / "04_first_draft"
         )
-        normal, secrets = self._environment(context.user_id)
+        # Stage 6 children receive only a scoped task token and gateway URL.
+        normal, secrets = self._text_gateway_environment(context)
         command = [
                 sys.executable,
                 str(
@@ -935,7 +1016,7 @@ class NativeWorkflowHandlers:
             if isinstance(item, dict)
             and str(item.get("paragraph_id") or "") == paragraph_id
         ]
-        normal, secrets = self._environment(context.user_id)
+        normal, secrets = self._text_gateway_environment(context)
         paragraph_evaluation_output = (
             Path("draft-workspace")
             / "review-projects"
@@ -1207,7 +1288,7 @@ class NativeWorkflowHandlers:
                 ),
             },
         )
-        normal, secrets = self._environment(context.user_id)
+        normal, secrets = self._text_gateway_environment(context)
         relative_output = (
             Path("draft-workspace")
             / "review-projects"
@@ -1259,7 +1340,7 @@ class NativeWorkflowHandlers:
             context, payload, name="final-conclusion-workspace"
         )
         project_id = str(payload["project_id"])
-        normal, secrets = self._environment(context.user_id)
+        normal, secrets = self._text_gateway_environment(context)
         relative_first = (
             Path("final-conclusion-workspace")
             / "review-projects"
@@ -1316,7 +1397,7 @@ class NativeWorkflowHandlers:
             / project_id
             / "03_figure_redraw"
         )
-        normal, secrets = self._environment(context.user_id)
+        normal, secrets = self._image_gateway_environment(context)
         self.runner.run(
             [
                 sys.executable,
@@ -1399,7 +1480,6 @@ class NativeWorkflowHandlers:
             / "05_final_audit"
             / "final_draft.docx"
         )
-        normal, secrets = self._environment(context.user_id)
         self.runner.run(
             [
                 sys.executable,
@@ -1418,8 +1498,8 @@ class NativeWorkflowHandlers:
             cwd=self.root,
             staging_directory=staging,
             expected_outputs=(relative_output.as_posix(),),
-            env=normal,
-            secret_env=secrets,
+            env={},
+            secret_env={},
             cancel_requested=context.cancellation_requested,
             timeout_seconds=5 * 60,
         )

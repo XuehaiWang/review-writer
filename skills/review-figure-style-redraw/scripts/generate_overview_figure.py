@@ -54,6 +54,10 @@ from review_writer_core.providers import (  # noqa: E402
     openai_endpoint as _shared_openai_endpoint,
     resolve_api_key as _shared_resolve_api_key,
 )
+from review_writer_core.model_gateway_client import (  # noqa: E402
+    call_image_model as call_gateway_image,
+    image_gateway_configured,
+)
 
 
 TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -2475,6 +2479,34 @@ def call_image_edit_api(
     extra_images: list[Path] | None = None,
 ) -> bytes:
     """Call image generation API. Supports both OpenAI-compatible and DashScope native format."""
+    if image_gateway_configured():
+        image_inputs = [
+            (_gateway_image_mime(reference_image), reference_image.read_bytes()),
+            *[
+                (_gateway_image_mime(path), path.read_bytes())
+                for path in (extra_images or [])
+            ],
+        ]
+        image_bytes, gateway_metadata = call_gateway_image(
+            condense_overview_prompt(prompt),
+            label="final-overview-image",
+            images=image_inputs,
+            operation="edit",
+            quality="high",
+            background="opaque",
+            output_format="png",
+            size=preferred_size,
+        )
+        if request_metadata is not None:
+            request_metadata.update(
+                {
+                    "endpoint": "internal-image-gateway",
+                    "wire_api": "internal",
+                    "image_size": preferred_size or "provider-controlled",
+                    "gateway_request_id": str(gateway_metadata.get("request_id") or ""),
+                }
+            )
+        return image_bytes
     # Detect if this is an Alibaba Cloud / DashScope endpoint
     if "maas.aliyuncs.com" in base_url or "dashscope" in base_url:
         if request_metadata is not None:
@@ -2539,6 +2571,15 @@ def call_image_edit_api(
 
     summary = "; ".join(errors[-4:])
     raise RuntimeError(f"All overview image generation routes failed: {summary}")
+
+
+def _gateway_image_mime(path: Path) -> str:
+    return {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+    }.get(path.suffix.casefold(), "image/png")
 
 
 def _data_uri_image_item(path: Path, detail: str | None = None) -> dict[str, Any]:
@@ -3088,7 +3129,7 @@ def main():
         return
 
     # Call API
-    if not api_key:
+    if not api_key and not image_gateway_configured():
         print("\nERROR: No API key available.", file=sys.stderr)
         print("  Set IMAGE_OPENAI_API_KEY or OPENAI_API_KEY environment variable,", file=sys.stderr)
         print("  create a .env file, or pass --api-key.", file=sys.stderr)

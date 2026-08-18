@@ -89,6 +89,37 @@ def build_library_router(
 
         job_service.register_handler("library.download", reconcile_download)
 
+    def upload_handler(context, payload):
+        principal = Principal(context.user_id, frozenset({Role.USER}))
+        staged = library_service.staged_upload_path(
+            principal, str(payload.get("staging_id") or "")
+        )
+        filename = str(payload.get("filename") or "")
+        context.report_progress(1, 3)
+        record, outcome = library_service.admit_staged(
+            principal,
+            filename,
+            staged,
+            cancel_requested=context.cancellation_requested,
+            job_id=context.job_id,
+        )
+        staged.unlink(missing_ok=True)
+        context.repository.update_job_progress(context.job_id, 3, 3)
+        return {
+            **_paper_payload(record),
+            "status": outcome,
+            "mineru_ready": True,
+            "library_count": library_service.count(principal),
+        }
+
+    job_service.register_handler("library.upload", upload_handler)
+
+    def upload_job_payload(job) -> dict[str, Any]:
+        payload = _job_response(job).model_dump()
+        payload["filename"] = str((job.payload or {}).get("filename") or "")
+        payload["batch_id"] = str((job.payload or {}).get("batch_id") or "")
+        return payload
+
     @router.get("/papers")
     def papers(
         q: str = "",
@@ -159,6 +190,64 @@ def build_library_router(
                 with suppress(asyncio.CancelledError):
                     await disconnect_watcher
             staged.unlink(missing_ok=True)
+
+    @router.post("/upload-jobs", status_code=status.HTTP_202_ACCEPTED)
+    async def create_upload_job(
+        request: Request,
+        filename: str,
+        batch_id: str = "",
+        idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        content_type = request.headers.get("Content-Type", "").split(";", 1)[0].casefold()
+        if content_type not in {"application/pdf", "application/octet-stream"}:
+            raise WorkflowValidationError("Only PDF uploads are accepted.")
+        try:
+            normalized_batch_id = str(uuid.UUID(batch_id)) if batch_id else str(uuid.uuid4())
+        except ValueError as exc:
+            raise WorkflowValidationError("The upload batch identifier is invalid.") from exc
+        staged, safe_name = library_service.begin_upload(principal, filename)
+        staging_id = staged.name.removesuffix(".pdf.part")
+        size = 0
+        submitted = False
+        try:
+            with staged.open("xb") as handle:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > library_service.MAX_PDF_BYTES:
+                        raise WorkflowValidationError("Each PDF must be 80 MB or smaller.")
+                    handle.write(chunk)
+            library_service.validate_staged_upload(staged, size)
+            job = job_service.submit(
+                principal,
+                scope="library",
+                project_id=None,
+                job_type="library.upload",
+                idempotency_key=idempotency_key.strip() or str(uuid.uuid4()),
+                payload={
+                    "filename": safe_name,
+                    "staging_id": staging_id,
+                    "batch_id": normalized_batch_id,
+                },
+                operation_key=f"upload:{staging_id}",
+            )
+            submitted = True
+            return upload_job_payload(job)
+        finally:
+            if not submitted:
+                staged.unlink(missing_ok=True)
+
+    @router.get("/upload-jobs/recent")
+    def recent_upload_jobs(
+        limit: int = 30,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        rows = job_service.repository.list_library_jobs(
+            principal.user_id,
+            job_type="library.upload",
+            limit=max(1, min(limit, 100)),
+        )
+        return {"items": [upload_job_payload(row) for row in rows], "count": len(rows)}
 
     @router.get("/papers/{paper_id}/metadata")
     def metadata(

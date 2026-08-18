@@ -39,6 +39,10 @@ from review_writer_core.providers import (  # noqa: E402
     openai_endpoint as _shared_openai_endpoint,
     resolve_api_key as _shared_resolve_api_key,
 )
+from review_writer_core.model_gateway_client import (  # noqa: E402
+    call_image_model as call_gateway_image,
+    image_gateway_configured,
+)
 from review_writer_core.figure_redraw_routing import (  # noqa: E402
     FIGURE_TYPE_AUTO,
     FIGURE_TYPE_COLORED,
@@ -1530,6 +1534,20 @@ def call_images_edit(
     transport: str = "urllib",
     mask_path: Path | None = None,
 ) -> dict[str, Any]:
+    if image_gateway_configured():
+        inputs = [(guess_mime(image_path), image_path.read_bytes())]
+        if mask_path:
+            inputs.append((guess_mime(mask_path), mask_path.read_bytes()))
+        image_bytes, _metadata = call_gateway_image(
+            prompt,
+            label="figure-redraw-image",
+            images=inputs,
+            operation="edit",
+            quality=quality,
+            background=background,
+            output_format=output_format,
+        )
+        return {"data": [{"b64_json": base64.b64encode(image_bytes).decode("ascii")}]}
     if transport == "curl":
         return call_images_edit_curl(
             api_key,
@@ -1619,6 +1637,24 @@ def call_responses_image_edit(
     background: str,
     output_format: str,
 ) -> dict[str, Any]:
+    if image_gateway_configured():
+        image_bytes, _metadata = call_gateway_image(
+            prompt,
+            label="figure-redraw-image",
+            images=[(guess_mime(image_path), image_path.read_bytes())],
+            operation="edit",
+            quality=quality,
+            background=background,
+            output_format=output_format,
+        )
+        return {
+            "output": [
+                {
+                    "type": "image_generation_call",
+                    "result": base64.b64encode(image_bytes).decode("ascii"),
+                }
+            ]
+        }
     payload = {
         "model": model,
         "input": prompt,
@@ -1654,6 +1690,32 @@ def call_chat_completions_image_edit(
     Stage 6 source image is embedded directly in the request as a data URI, so
     the fallback cannot accidentally reuse a stale remote image.
     """
+    if image_gateway_configured():
+        image_bytes, _metadata = call_gateway_image(
+            prompt,
+            label="figure-redraw-image",
+            images=[(guess_mime(image_path), image_path.read_bytes())],
+            operation="edit",
+            output_format="png",
+        )
+        encoded_output = base64.b64encode(image_bytes).decode("ascii")
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{encoded_output}"
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
     encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
     payload = {
         "model": model,
@@ -2525,7 +2587,11 @@ def run(args: argparse.Namespace) -> int:
             redraw_row["notes"] = "API call skipped by --dry-run."
             redraw_rows.append(redraw_row)
             continue
-        if effective_render_mode in {"ai-edit", "ocr-hollow-ai"} and not api_key:
+        if (
+            effective_render_mode in {"ai-edit", "ocr-hollow-ai"}
+            and not api_key
+            and not image_gateway_configured()
+        ):
             redraw_row["status"] = "missing_api_key"
             redraw_row["notes"] = "API key is not set. Pass --api-key or set OPENAI_API_KEY."
             redraw_rows.append(redraw_row)

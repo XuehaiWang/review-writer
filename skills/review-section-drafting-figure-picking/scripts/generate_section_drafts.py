@@ -35,6 +35,44 @@ from review_writer_core.providers import (  # noqa: E402
     resolve_api_key as _shared_resolve_api_key,
 )
 from review_writer_core.text_safety import make_xml_compatible  # noqa: E402
+from review_writer_core.model_gateway_client import (  # noqa: E402
+    call_json_model as call_gateway_json,
+    gateway_configured,
+)
+
+
+def write_generation_progress(
+    stage: Path,
+    *,
+    current: int,
+    total: int,
+    phase: str,
+    current_section_id: str = "",
+    current_heading: str = "",
+    completed_sections: list[dict[str, str]] | None = None,
+) -> None:
+    """Atomically expose chapter-level progress to the parent JobService."""
+
+    destination = stage / "generation_progress.json"
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    payload = {
+        "schema_version": 1,
+        "phase": str(phase),
+        "current": max(0, int(current)),
+        "total": max(0, int(total)),
+        "current_section_id": str(current_section_id or ""),
+        "current_heading": str(current_heading or ""),
+        "completed_sections": list(completed_sections or []),
+        "updated_at_epoch": time.time(),
+    }
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def openai_endpoint(base_url: str, endpoint: str) -> str:
@@ -243,13 +281,15 @@ def call_llm(
             },
         },
     }
+    schema_prompt = (
+        f"{prompt}\n\nReturn only one JSON object matching this JSON Schema exactly:\n"
+        f"{json.dumps(schema, ensure_ascii=False)}"
+    )
+    if gateway_configured():
+        return call_gateway_json(schema_prompt, label="section-drafting")
     wire = str(wire_api or "responses").strip().lower().replace("_", "-")
     if wire in {"chat", "chat-completion", "chat-completions"}:
         endpoint = openai_endpoint(base_url, "chat/completions")
-        schema_prompt = (
-            f"{prompt}\n\nReturn only one JSON object matching this JSON Schema exactly:\n"
-            f"{json.dumps(schema, ensure_ascii=False)}"
-        )
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": schema_prompt}],
@@ -316,8 +356,8 @@ def main() -> int:
         or DEFAULT_OPENAI_BASE_URL
     )
     api_key = resolve_api_key(args.api_key, base_url, dotenv)
-    if not api_key:
-        raise SystemExit("Missing OPENAI_API_KEY. Configure it in the environment or local .env before generating sections.")
+    if not api_key and not gateway_configured():
+        raise SystemExit("The server text model is not configured for section generation.")
     model = (
         args.model
         or os.environ.get("REVIEW_WRITING_MODEL")
@@ -333,6 +373,15 @@ def main() -> int:
     project = root / "review-projects" / args.project_id
     stage = project / "02_section_drafting"
     tasks = read_json(stage / "section_tasks.json")
+    progress_total = len(tasks)
+    completed_progress: list[dict[str, str]] = []
+    write_generation_progress(
+        stage,
+        current=0,
+        total=progress_total,
+        phase="preparing",
+        completed_sections=completed_progress,
+    )
     matrix = read_json(project / "01_matrix_outline" / "literature_matrix.json")
     rows_list = matrix.get("rows") if isinstance(matrix, dict) else matrix
     rows = {str(row.get("paper_id")): row for row in rows_list or [] if isinstance(row, dict) and row.get("paper_id")}
@@ -358,6 +407,15 @@ def main() -> int:
     output_sections = []
     for task in tasks:
         section_id = str(task.get("section_id"))
+        write_generation_progress(
+            stage,
+            current=len(completed_progress),
+            total=progress_total,
+            phase="generating",
+            current_section_id=section_id,
+            current_heading=str(task.get("heading") or section_id),
+            completed_sections=completed_progress,
+        )
         role = str(task.get("section_role") or "body").strip().casefold()
         primary = list(
             dict.fromkeys(
@@ -501,10 +559,30 @@ Source evidence (only use claims supported here):\n{json.dumps(evidence, ensure_
                 "draft_md": section_text,
             }
         )
+        completed_progress.append(
+            {
+                "section_id": section_id,
+                "heading": str(task.get("heading") or section_id),
+            }
+        )
+        write_generation_progress(
+            stage,
+            current=len(completed_progress),
+            total=progress_total,
+            phase="generating" if len(completed_progress) < progress_total else "finalizing",
+            completed_sections=completed_progress,
+        )
     write_json(stage / "section_drafts.json", {"project_id": args.project_id, "sections": output_sections})
     (stage / "section_drafts.md").write_text("\n\n".join(section["draft_md"] for section in output_sections), encoding="utf-8")
     (stage / "section_drafting_report.md").write_text(
         f"# Section Drafting Report\n\nGenerated {len(output_sections)} source-grounded sections with model `{model}`.\n", encoding="utf-8"
+    )
+    write_generation_progress(
+        stage,
+        current=len(completed_progress),
+        total=progress_total,
+        phase="completed",
+        completed_sections=completed_progress,
     )
     print(f"Generated {len(output_sections)} sections.")
     return 0

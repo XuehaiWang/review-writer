@@ -15,10 +15,8 @@ import time
 import urllib.error
 import urllib.request
 from collections import Counter
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-import tempfile
 from typing import Any
 
 
@@ -184,41 +182,6 @@ def recoverable_paragraph_provider_failure(exc: BaseException) -> bool:
         "empty response",
     )
     return any(marker in folded for marker in transient_markers)
-
-
-@contextmanager
-def provider_request_slot():
-    """Serialize feedback-loop provider calls across worker subprocesses."""
-
-    configured = str(os.environ.get("REVIEW_WRITING_PROVIDER_LOCK_FILE") or "").strip()
-    lock_path = Path(configured) if configured else (
-        Path(tempfile.gettempdir()) / "review-writer-feedback-provider.lock"
-    )
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+b") as handle:
-        handle.seek(0)
-        if handle.read(1) == b"":
-            handle.seek(0)
-            handle.write(b"0")
-            handle.flush()
-        handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def repeated_run_junk_token(value: str) -> bool:
@@ -1123,9 +1086,57 @@ def extract_json_object(text: str) -> dict[str, Any]:
 
 
 def call_json_model(prompt: str, *, label: str) -> dict[str, Any]:
+    gateway_url = str(os.environ.get("REVIEW_WRITER_MODEL_GATEWAY_URL") or "").strip()
+    task_token = str(os.environ.get("REVIEW_WRITER_TASK_TOKEN") or "").strip()
+    if gateway_url or task_token:
+        if not gateway_url or not task_token:
+            raise RuntimeError("Feedback loop received an incomplete internal gateway configuration.")
+        request_key = f"{label[:32]}-{hashlib.sha256(prompt.encode('utf-8')).hexdigest()[:48]}"
+        request = urllib.request.Request(
+            gateway_url,
+            data=json.dumps(
+                {"request_key": request_key, "stage": label, "prompt": prompt},
+                ensure_ascii=False,
+            ).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {task_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        for attempt in range(1, 4):
+            try:
+                with urllib.request.urlopen(
+                    request, context=ssl.create_default_context(), timeout=330
+                ) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                return extract_json_object(str(payload.get("output_text") or ""))
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", "replace")[:800].replace("\n", " ")
+                if request_body_budget_exhausted(body):
+                    raise ProviderRequestBodyBudgetExceeded(
+                        f"{label} exceeded the provider relay request-body budget"
+                    ) from exc
+                if exc.code in {504, 524}:
+                    raise ProviderDeadlineExceeded(
+                        f"{label} exceeded the provider deadline (HTTP {exc.code})"
+                    ) from exc
+                if exc.code not in TRANSIENT_HTTP_CODES or attempt >= 3:
+                    raise RuntimeError(
+                        f"{label} gateway failed with HTTP {exc.code} after {attempt} attempts: {body}"
+                    ) from exc
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+                if attempt >= 3:
+                    raise RuntimeError(
+                        f"{label} gateway transport/JSON failure after {attempt} attempts: {exc}"
+                    ) from exc
+            time.sleep(provider_retry_delay(attempt))
+        raise RuntimeError(f"{label} gateway failed after 3 attempts")
+
     config = provider_config()
     if not config["api_key"]:
-        raise RuntimeError("Feedback loop requires the text API key saved in API Settings.")
+        raise RuntimeError("Feedback loop requires the server text provider to be configured.")
     wire = config["wire_api"]
     if wire in {"chat", "chat-completion", "chat-completions"}:
         endpoint = provider_endpoint(config["base_url"], wire)
@@ -1152,9 +1163,8 @@ def call_json_model(prompt: str, *, label: str) -> dict[str, Any]:
     while attempt < request_attempts:
         attempt += 1
         try:
-            with provider_request_slot():
-                with urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=300) as response:
-                    raw = response.read()
+            with urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=300) as response:
+                raw = response.read()
             data = json.loads(raw.decode("utf-8"))
             if wire in {"chat", "chat-completion", "chat-completions"}:
                 choices = data.get("choices") if isinstance(data, dict) else []

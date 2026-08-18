@@ -8,6 +8,7 @@ import { AppShell } from "../components/AppShell";
 import { ErrorState } from "../components/ErrorState";
 import { LoadingView } from "../components/LoadingView";
 import { AuthPage } from "../features/auth/AuthPage";
+import { AdminPage } from "../features/admin/AdminPage";
 import { safeReturnPath } from "../features/auth/paths";
 import { DiscoveryPage } from "../features/discovery/DiscoveryPage";
 import { DraftPage } from "../features/draft/DraftPage";
@@ -84,6 +85,10 @@ function AppRoutes() {
         <Route path="/draft" element={<DraftPage />} />
         <Route path="/final" element={<FinalPage />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route
+          path="/admin"
+          element={principal?.permissions.includes("provider:manage") ? <AdminPage /> : <Navigate to="/settings" replace />}
+        />
       </Route>
       <Route path="*" element={<Navigate to={principal ? "/workspace" : "/"} replace />} />
     </Routes>

@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -15,6 +16,7 @@ from sqlalchemy import (
     JSON,
     LargeBinary,
     MetaData,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -93,6 +95,7 @@ class Project(Base, TimestampMixin):
     taxonomy_profile: Mapped[str] = mapped_column(
         String(96), default="chemistry_general", nullable=False
     )
+    model_tier: Mapped[str] = mapped_column(String(32), default="terra", nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     current_stage: Mapped[str] = mapped_column(String(64), default="discovery", nullable=False)
     stage_states: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
@@ -117,6 +120,162 @@ class ProviderCredential(Base, TimestampMixin):
     secret_hint: Mapped[str] = mapped_column(String(32), default="", nullable=False)
     encryption_key_version: Mapped[str] = mapped_column(String(64), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class ServerProviderCredential(Base, TimestampMixin):
+    """One server-wide provider configuration, encrypted at rest.
+
+    This table deliberately has no ``user_id``: administrators manage one
+    shared provider for every hosted user.  Per-user credentials remain in the
+    legacy table only for migration compatibility.
+    """
+
+    __tablename__ = "server_provider_credentials"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid)
+    provider_kind: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    base_url: Mapped[str] = mapped_column(String(1024), default="", nullable=False)
+    model_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    wire_api: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    encrypted_secret: Mapped[bytes] = mapped_column(LargeBinary, default=b"", nullable=False)
+    secret_hint: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+    encryption_key_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class ServerProviderAuditEvent(Base):
+    """Security audit trail for server provider changes and connection tests."""
+
+    __tablename__ = "server_provider_audit_events"
+    __table_args__ = (
+        Index("ix_server_provider_audit_created", "created_at"),
+        Index("ix_server_provider_audit_actor_created", "actor_user_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid)
+    actor_user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    provider_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    summary: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class AIModelRequest(Base, TimestampMixin):
+    """One idempotent logical model request and its metered provider result."""
+
+    __tablename__ = "ai_model_requests"
+    __table_args__ = (
+        UniqueConstraint("job_id", "request_key", name="uq_ai_model_request_job_key"),
+        Index("ix_ai_model_requests_user_created", "user_id", "created_at"),
+        Index("ix_ai_model_requests_project_created", "project_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("projects.id", ondelete="SET NULL")
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("workflow_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    request_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    stage: Mapped[str] = mapped_column(String(96), nullable=False)
+    model_tier: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="running", nullable=False)
+    attempt_count: Mapped[int] = mapped_column(default=1, nullable=False)
+    provider_request_id: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    input_tokens: Mapped[int] = mapped_column(default=0, nullable=False)
+    cached_input_tokens: Mapped[int] = mapped_column(default=0, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(default=0, nullable=False)
+    reasoning_tokens: Mapped[int] = mapped_column(default=0, nullable=False)
+    total_tokens: Mapped[int] = mapped_column(default=0, nullable=False)
+    input_price_usd_per_million: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    cached_input_price_usd_per_million: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    output_price_usd_per_million: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    provider_cost_usd: Mapped[Decimal] = mapped_column(Numeric(18, 8), default=0, nullable=False)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AIImageRequest(Base, TimestampMixin):
+    """One idempotent image generation/edit request and its record-only cost."""
+
+    __tablename__ = "ai_image_requests"
+    __table_args__ = (
+        UniqueConstraint("job_id", "request_key", name="uq_ai_image_request_job_key"),
+        Index("ix_ai_image_requests_user_created", "user_id", "created_at"),
+        Index("ix_ai_image_requests_project_created", "project_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("projects.id", ondelete="SET NULL")
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("workflow_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    request_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    stage: Mapped[str] = mapped_column(String(96), nullable=False)
+    operation: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="running", nullable=False)
+    attempt_count: Mapped[int] = mapped_column(default=1, nullable=False)
+    provider_attempt_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    provider_request_id: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    image_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    unit_price_usd: Mapped[Decimal] = mapped_column(Numeric(18, 8), default=0, nullable=False)
+    provider_cost_usd: Mapped[Decimal] = mapped_column(Numeric(18, 8), default=0, nullable=False)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MinerUUsageEvent(Base, TimestampMixin):
+    """Canonical per-user PDF parse event with cache-hit and page metering."""
+
+    __tablename__ = "mineru_usage_events"
+    __table_args__ = (
+        UniqueConstraint("user_id", "file_sha256", name="uq_mineru_usage_user_file"),
+        Index("ix_mineru_usage_user_created", "user_id", "created_at"),
+        Index("ix_mineru_usage_project_created", "project_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("projects.id", ondelete="SET NULL")
+    )
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("workflow_jobs.id", ondelete="SET NULL"), index=True
+    )
+    file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    paper_id: Mapped[str] = mapped_column(String(96), default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="running", nullable=False)
+    attempt_count: Mapped[int] = mapped_column(default=1, nullable=False)
+    cache_hit_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    provider_request_id: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    page_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    billable_pages: Mapped[int] = mapped_column(default=0, nullable=False)
+    unit_price_usd: Mapped[Decimal] = mapped_column(Numeric(18, 8), default=0, nullable=False)
+    provider_cost_usd: Mapped[Decimal] = mapped_column(Numeric(18, 8), default=0, nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 def create_session_factory(database_url: str):

@@ -31,6 +31,10 @@ from review_writer_core.providers import (  # noqa: E402
     DEFAULT_TEXT_WIRE_API,
     openai_endpoint as _shared_openai_endpoint,
 )
+from review_writer_core.model_gateway_client import (  # noqa: E402
+    call_json_model as call_gateway_json,
+    gateway_configured,
+)
 
 
 STYLE_SCHEMA: dict[str, Any] = {
@@ -180,6 +184,8 @@ def configured_value(name: str, dotenv: dict[str, str], default: str = "") -> st
 
 
 def model_configuration(matrix_path: Path, args: argparse.Namespace) -> dict[str, Any]:
+    if gateway_configured():
+        return {"timeout": 300}
     root = find_review_root(matrix_path)
     dotenv = load_dotenv(root / ".env")
     base_url = str(args.base_url or "").strip() or configured_value(
@@ -207,11 +213,11 @@ def model_configuration(matrix_path: Path, args: argparse.Namespace) -> dict[str
         timeout = max(30, min(int(timeout_text), 600))
     except ValueError:
         timeout = 300
-    if not base_url:
+    if not gateway_configured() and not base_url:
         raise ValueError("Configure REVIEW_REFERENCE_OUTLINE_BASE_URL or REVIEW_WRITING_BASE_URL.")
-    if not api_key:
+    if not gateway_configured() and not api_key:
         raise ValueError("Configure REVIEW_REFERENCE_OUTLINE_API_KEY, REVIEW_WRITING_API_KEY, or OPENAI_API_KEY.")
-    if not model:
+    if not gateway_configured() and not model:
         raise ValueError("Configure REVIEW_REFERENCE_OUTLINE_MODEL or REVIEW_WRITING_MODEL.")
     return {
         "base_url": base_url,
@@ -277,6 +283,16 @@ def call_json_model(
     schema_name: str,
     config: dict[str, Any],
 ) -> dict[str, Any]:
+    schema_prompt = (
+        f"{prompt}\n\nReturn one JSON object matching this JSON Schema exactly:\n"
+        f"{json.dumps(schema, ensure_ascii=False)}"
+    )
+    if gateway_configured():
+        return call_gateway_json(
+            schema_prompt,
+            label=f"reference-outline-{schema_name}"[:96],
+            timeout_seconds=int(config.get("timeout") or 300),
+        )
     wire = str(config["wire_api"]).strip().casefold().replace("_", "-")
     if wire in {"chat", "chat-completion", "chat-completions"}:
         endpoint = openai_endpoint(str(config["base_url"]), "chat/completions")

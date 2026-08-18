@@ -16,10 +16,18 @@ class _Context:
     def __init__(self, user_id: str):
         self.user_id = user_id
         self.job_id = str(uuid.uuid4())
+        self.progress_reports: list[tuple[int, int]] = []
+        self.partial_results: list[dict] = []
 
     @staticmethod
     def cancellation_requested() -> bool:
         return False
+
+    def report_progress(self, current: int, total: int):
+        self.progress_reports.append((current, total))
+
+    def report_partial_result(self, result: dict):
+        self.partial_results.append(result)
 
 
 class _RecordingRunner:
@@ -260,6 +268,78 @@ class _FigureRedrawRunner:
 
 
 class NativeWorkflowHandlerTests(unittest.TestCase):
+    def test_text_environment_contains_only_gateway_task_credentials(self) -> None:
+        class ProviderSettings:
+            @staticmethod
+            def runtime_environment(_principal):
+                return {
+                    "OPENAI_API_KEY": "text-secret",
+                    "OPENAI_BASE_URL": "https://provider.example/v1",
+                    "REVIEW_WRITING_MODEL": "provider-model",
+                    "IMAGE_OPENAI_API_KEY": "image-secret",
+                    "MINERU_API_TOKEN": "mineru-secret",
+                }
+
+        class Gateway:
+            @staticmethod
+            def environment_for_job(_context):
+                return (
+                    {"REVIEW_WRITER_MODEL_GATEWAY_URL": "http://127.0.0.1:8770/internal"},
+                    {"REVIEW_WRITER_TASK_TOKEN": "task-token"},
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            handlers = NativeWorkflowHandlers(
+                _WorkflowRunner(),
+                HostedWorkspaceManager(Path(temporary) / "users"),
+                ProviderSettings(),
+                Gateway(),
+            )
+            normal, secrets = handlers._text_gateway_environment(_Context(str(uuid.uuid4())))
+
+        self.assertEqual(
+            {"REVIEW_WRITER_MODEL_GATEWAY_URL": "http://127.0.0.1:8770/internal"},
+            normal,
+        )
+        self.assertEqual({"REVIEW_WRITER_TASK_TOKEN": "task-token"}, secrets)
+
+    def test_image_environment_removes_direct_provider_credentials(self) -> None:
+        class ProviderSettings:
+            @staticmethod
+            def runtime_environment(_principal):
+                return {
+                    "IMAGE_OPENAI_API_KEY": "image-secret",
+                    "IMAGE_OPENAI_BASE_URL": "https://provider.example/v1",
+                    "IMAGE_OPENAI_MODEL": "provider-image-model",
+                }
+
+        class Gateway:
+            @staticmethod
+            def environment_for_job(_context):
+                return (
+                    {
+                        "REVIEW_WRITER_MODEL_GATEWAY_URL": "http://127.0.0.1:8770/text",
+                        "REVIEW_WRITER_IMAGE_GATEWAY_URL": "http://127.0.0.1:8770/image",
+                    },
+                    {"REVIEW_WRITER_TASK_TOKEN": "task-token"},
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            handlers = NativeWorkflowHandlers(
+                _WorkflowRunner(),
+                HostedWorkspaceManager(Path(temporary) / "users"),
+                ProviderSettings(),
+                Gateway(),
+            )
+            normal, secrets = handlers._image_gateway_environment(
+                _Context(str(uuid.uuid4()))
+            )
+
+        self.assertNotIn("IMAGE_OPENAI_API_KEY", secrets)
+        self.assertNotIn("IMAGE_OPENAI_BASE_URL", normal)
+        self.assertEqual("http://127.0.0.1:8770/image", normal["REVIEW_WRITER_IMAGE_GATEWAY_URL"])
+        self.assertEqual({"REVIEW_WRITER_TASK_TOKEN": "task-token"}, secrets)
+
     def test_figure_redraw_always_invokes_the_ai_edit_route(self) -> None:
         class ImageProviderSettings:
             @staticmethod
@@ -662,6 +742,37 @@ class NativeWorkflowHandlerTests(unittest.TestCase):
             copied = Path(metadata["source_paths"]["markdown"])
             self.assertTrue(copied.is_file())
             self.assertTrue(copied.is_relative_to(workspace))
+
+    def test_section_progress_callback_publishes_each_completed_chapter(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            status_file = Path(temporary) / "generation_progress.json"
+            status_file.write_text(
+                json.dumps(
+                    {
+                        "phase": "generating",
+                        "current": 1,
+                        "total": 10,
+                        "current_heading": "Catalyst classes",
+                        "completed_sections": [
+                            {"section_id": "S01", "heading": "Introduction"}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            context = _Context(str(uuid.uuid4()))
+            callback = NativeWorkflowHandlers._section_progress_callback(
+                context, status_file
+            )
+
+            callback()
+            callback()
+
+            self.assertEqual([(1, 10)], context.progress_reports)
+            self.assertEqual(
+                "Introduction",
+                context.partial_results[0]["section_progress"]["completed_sections"][0]["heading"],
+            )
 
     def test_final_handlers_are_registered_and_return_publishable_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

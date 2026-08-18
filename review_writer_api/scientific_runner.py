@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import time
+from urllib.parse import urlparse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -187,6 +188,13 @@ class ScientificRunner:
         child_environment["REVIEW_WRITER_TRUSTED_PROXY_NETWORKS"] = ",".join(
             self.trusted_proxy_networks
         )
+        gateway_url = str(normal_environment.get("REVIEW_WRITER_MODEL_GATEWAY_URL") or "")
+        if gateway_url and secrets.get("REVIEW_WRITER_TASK_TOKEN"):
+            parsed_gateway = urlparse(gateway_url)
+            if parsed_gateway.hostname and parsed_gateway.port:
+                child_environment["REVIEW_WRITER_INTERNAL_GATEWAY_ENDPOINT"] = (
+                    f"{parsed_gateway.hostname.casefold()}:{parsed_gateway.port}"
+                )
         cancellation = cancel_requested or (lambda: False)
         timeout = max(self.poll_interval, float(timeout_seconds))
 

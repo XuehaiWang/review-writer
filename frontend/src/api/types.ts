@@ -18,6 +18,7 @@ export type Project = {
   owner_user_id: string;
   topic: string;
   taxonomy_profile: string;
+  model_tier: "sol" | "terra" | "luna";
   discovery_status: string;
   current_stage: string;
   completed_stages: string[];
@@ -38,10 +39,84 @@ export type ProviderSettings = {
   api_key_configured: boolean;
   api_key_hint: string;
   enabled: boolean;
+  source: "database" | "environment" | "server" | string;
+  updated_at: string | null;
 };
 
 export type ProviderSettingsList = {
   items: ProviderSettings[];
+};
+
+export type AdminProviderAudit = {
+  id: string;
+  actor_email: string;
+  provider_kind: ProviderKind;
+  action: string;
+  summary: string;
+  created_at: string;
+};
+
+export type AdminProviderAuditList = {
+  items: AdminProviderAudit[];
+};
+
+export type AdminProviderTestResult = {
+  provider_kind: ProviderKind;
+  ok: boolean;
+  status_code: number;
+  latency_ms: number;
+  message: string;
+};
+
+export type ModelTier = {
+  id: "sol" | "terra" | "luna";
+  model: string;
+  label_zh: string;
+  label_en: string;
+  description_zh: string;
+  description_en: string;
+  input_usd_per_million: string;
+  cached_input_usd_per_million: string;
+  output_usd_per_million: string;
+};
+
+export type ModelCatalog = {
+  items: ModelTier[];
+  default_tier: ModelTier["id"];
+};
+
+export type UsageSummary = {
+  request_count: number;
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  image_request_count: number;
+  image_count: number;
+  estimated_text_cost_usd: string;
+  estimated_image_cost_usd: string;
+  mineru_request_count: number;
+  mineru_billable_pages: number;
+  mineru_cache_hit_count: number;
+  estimated_mineru_cost_usd: string;
+  estimated_cost_usd: string;
+  billing_mode: "record_only";
+};
+
+export type UsageTimelineItem = {
+  date: string;
+  request_count: number;
+  total_tokens: number;
+  image_count: number;
+  mineru_pages: number;
+  estimated_cost_usd: string;
+};
+
+export type UsageTimeline = {
+  days: number;
+  start_date: string;
+  end_date: string;
+  items: UsageTimelineItem[];
 };
 
 export type LibraryPaper = {
@@ -87,6 +162,16 @@ export type Job = {
   started_at: string | null;
   finished_at: string | null;
   available_actions: string[];
+};
+
+export type UploadJob = Job & {
+  filename: string;
+  batch_id: string;
+};
+
+export type UploadJobList = {
+  items: UploadJob[];
+  count: number;
 };
 
 export type ApiErrorPayload = {

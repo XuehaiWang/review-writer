@@ -11,6 +11,7 @@ import threading
 import uuid
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import select
@@ -32,7 +33,7 @@ from review_writer_api.scientific_runner import (
     SENSITIVE_ENVIRONMENT_KEY,
     ScientificRunner,
 )
-from review_writer_api.workflow_models import LibraryPaper
+from review_writer_api.workflow_models import LibraryPaper, WorkflowJob
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
 from review_writer_core.taxonomy import TaxonomyConfigurationError, load_taxonomy_rules
 from review_writer_core.review_structure import (
@@ -120,13 +121,58 @@ class PlanningService:
         *,
         scientific_runner: ScientificRunner | None = None,
         provider_settings: ProviderSettingsService | None = None,
+        model_gateway: Any | None = None,
     ):
         self.repository = repository
         self.artifacts = artifacts
         self.scientific_runner = scientific_runner
         self.provider_settings = provider_settings
+        self.model_gateway = model_gateway
         self.root = Path(__file__).resolve().parents[2]
         self._write_lock = threading.RLock()
+
+    def _begin_reference_gateway_job(
+        self, principal: Principal, project_id: str, candidate_id: str
+    ) -> SimpleNamespace:
+        if self.model_gateway is None:
+            raise RuntimeError("The internal model gateway is unavailable.")
+        job_id = uuid.uuid4()
+        now = utc_now()
+        with database_session(self.model_gateway.session_factory) as session:
+            session.add(
+                WorkflowJob(
+                    id=job_id,
+                    user_id=uuid.UUID(principal.user_id),
+                    project_id=uuid.UUID(project_id),
+                    scope="project",
+                    job_type="planning.reference-analyze",
+                    status="running",
+                    idempotency_scope_key=f"project:{project_id}",
+                    idempotency_key=candidate_id,
+                    payload_json={"candidate_id": candidate_id},
+                    started_at=now,
+                )
+            )
+        return SimpleNamespace(
+            job_id=str(job_id),
+            user_id=principal.user_id,
+            project_id=project_id,
+            job_type="planning.reference-analyze",
+        )
+
+    def _finish_reference_gateway_job(
+        self, job_id: str, *, succeeded: bool, error_message: str = ""
+    ) -> None:
+        if self.model_gateway is None:
+            return
+        with database_session(self.model_gateway.session_factory) as session:
+            row = session.get(WorkflowJob, uuid.UUID(job_id))
+            if row is None:
+                return
+            row.status = "succeeded" if succeeded else "failed"
+            row.error_code = "" if succeeded else "REFERENCE_ANALYSIS_FAILED"
+            row.error_message = "" if succeeded else error_message[:2000]
+            row.finished_at = utc_now()
 
     def _owned_project(self, principal: Principal, project_id: str):
         principal.require(Permission.PROJECT_READ)
@@ -835,7 +881,16 @@ class PlanningService:
                 "Reference-format analysis is unavailable in this deployment."
             )
         environment: dict[str, str] = {}
-        if self.provider_settings is not None:
+        gateway_context: SimpleNamespace | None = None
+        if self.model_gateway is not None:
+            gateway_context = self._begin_reference_gateway_job(
+                principal, project_id, candidate_id
+            )
+            gateway_normal, gateway_secrets = self.model_gateway.environment_for_job(
+                gateway_context
+            )
+            environment = {**gateway_normal, **gateway_secrets}
+        elif self.provider_settings is not None:
             try:
                 environment = self.provider_settings.runtime_environment(
                     principal,
@@ -857,6 +912,12 @@ class PlanningService:
             / "analyze_reference_review.py"
         )
         if not script.is_file():
+            if gateway_context is not None:
+                self._finish_reference_gateway_job(
+                    gateway_context.job_id,
+                    succeeded=False,
+                    error_message="Reference analysis skill is not installed.",
+                )
             raise WorkflowValidationError(
                 "The reference-format analysis skill is not installed."
             )
@@ -887,41 +948,72 @@ class PlanningService:
                 for key, value in environment.items()
                 if SENSITIVE_ENVIRONMENT_KEY.search(key)
             }
-            self.scientific_runner.run(
-                (
-                    sys.executable,
-                    str(script),
-                    "--input",
-                    str(source),
-                    "--matrix",
-                    str(matrix_path),
-                    "--output",
-                    str(output_path),
-                    "--project-id",
-                    project_id,
-                    "--candidate-id",
-                    candidate_id,
-                ),
-                cwd=self.root,
-                staging_directory=staging,
-                expected_outputs=("candidate.json",),
-                env=normal_environment,
-                secret_env=secret_environment,
-                timeout_seconds=900,
-            )
             try:
+                self.scientific_runner.run(
+                    (
+                        sys.executable,
+                        str(script),
+                        "--input",
+                        str(source),
+                        "--matrix",
+                        str(matrix_path),
+                        "--output",
+                        str(output_path),
+                        "--project-id",
+                        project_id,
+                        "--candidate-id",
+                        candidate_id,
+                    ),
+                    cwd=self.root,
+                    staging_directory=staging,
+                    expected_outputs=("candidate.json",),
+                    env=normal_environment,
+                    secret_env=secret_environment,
+                    timeout_seconds=900,
+                )
                 result = json.loads(output_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
+                if gateway_context is not None:
+                    self._finish_reference_gateway_job(
+                        gateway_context.job_id,
+                        succeeded=False,
+                        error_message=str(exc),
+                    )
                 raise WorkflowConflict(
                     "Reference-format analysis returned an unreadable result."
                 ) from exc
+            except Exception as exc:
+                if gateway_context is not None:
+                    self._finish_reference_gateway_job(
+                        gateway_context.job_id,
+                        succeeded=False,
+                        error_message=str(exc),
+                    )
+                raise
         if not isinstance(result, dict):
+            if gateway_context is not None:
+                self._finish_reference_gateway_job(
+                    gateway_context.job_id,
+                    succeeded=False,
+                    error_message="Reference analysis returned a non-object result.",
+                )
             raise WorkflowConflict(
                 "Reference-format analysis returned an invalid result."
             )
         if not self._reference_candidate_is_isolated(result):
+            if gateway_context is not None:
+                self._finish_reference_gateway_job(
+                    gateway_context.job_id,
+                    succeeded=False,
+                    error_message="Reference analysis failed the content-isolation gate.",
+                )
             raise WorkflowConflict(
                 "Reference analysis failed the content-isolation gate; the uploaded review was not added."
+            )
+        if gateway_context is not None:
+            self._finish_reference_gateway_job(
+                gateway_context.job_id,
+                succeeded=True,
             )
         return result
 

@@ -1,16 +1,24 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
 import { libraryQuery, queryKeys } from "../../api/queries";
-import type { Job, LibraryPaper } from "../../api/types";
+import type { Job, LibraryPaper, UploadJob, UploadJobList } from "../../api/types";
 import { ErrorState } from "../../components/ErrorState";
 import { ProjectSelector, useSelectedProject } from "../../components/ProjectSelector";
 import { useUiText } from "../../i18n/useUiText";
 import { buildPaperDisplayLabels } from "../../utils/paperLabels";
+import { uploadJobsNeedingLibraryRefresh } from "./uploadRefresh";
 
 type DetailTab = "metadata" | "markdown" | "pdf";
-type UploadStatus = { name: string; status: "queued" | "uploading" | "done" | "failed"; message: string; messageEn?: string };
+type UploadStatus = {
+  id: string;
+  name: string;
+  status: "queued" | "uploading" | "done" | "failed";
+  message: string;
+  messageEn?: string;
+  updatedAt?: string;
+};
 type Candidate = Record<string, unknown> & { candidate_id?: string; title?: string; year?: number; journal?: string; doi?: string; score?: number; landing_url?: string };
 type DownloadResult = {
   added_count?: number;
@@ -18,6 +26,13 @@ type DownloadResult = {
   failed_count?: number;
   results?: Array<{ status?: string; error?: string }>;
 };
+
+const UPLOAD_RESULT_VISIBLE_MS = 12_000;
+
+function uploadResultIsVisible(updatedAt: string | undefined, now: number): boolean {
+  const timestamp = Date.parse(updatedAt || "");
+  return Number.isFinite(timestamp) && timestamp + UPLOAD_RESULT_VISIBLE_MS > now;
+}
 
 function UploadBatchProgress({ uploads }: { uploads: UploadStatus[] }) {
   const { language, text } = useUiText();
@@ -72,6 +87,16 @@ function UploadBatchProgress({ uploads }: { uploads: UploadStatus[] }) {
           {failed > 1 ? text(`（另有 ${failed - 1} 个文件失败）`, ` (${failed - 1} more failed)`) : null}
         </p>
       ) : null}
+      <div className="upload-progress-list">
+        {uploads.slice(0, 12).map((row) => (
+          <div className={`upload-progress-row ${row.status}`} key={row.id}>
+            <span className="upload-progress-state" aria-hidden="true" />
+            <strong title={row.name}>{row.name}</strong>
+            <span>{language === "en" ? row.messageEn || row.message : row.message}</span>
+            {row.updatedAt ? <time dateTime={row.updatedAt}>{new Date(row.updatedAt).toLocaleTimeString(language === "en" ? "en-US" : "zh-CN", { hour: "2-digit", minute: "2-digit" })}</time> : null}
+          </div>
+        ))}
+      </div>
     </section>
   );
 }
@@ -284,7 +309,44 @@ export function LibraryPage() {
   const [selectedId, setSelectedId] = useState("");
   const [tab, setTab] = useState<DetailTab>("metadata");
   const [metadataDraft, setMetadataDraft] = useState("");
-  const [uploads, setUploads] = useState<UploadStatus[]>([]);
+  const [localUploads, setLocalUploads] = useState<UploadStatus[]>([]);
+  const [uploadStatusNow, setUploadStatusNow] = useState(() => Date.now());
+  const uploadJobStatuses = useRef(new Map<string, Job["status"]>());
+  const locallySubmittedUploadJobs = useRef(new Set<string>());
+  const refreshedUploadJobs = useRef(new Set<string>());
+  const uploadJobs = useQuery({
+    queryKey: queryKeys.libraryUploadJobs,
+    queryFn: () => apiRequest<UploadJobList>("/api/v1/library/upload-jobs/recent?limit=30"),
+    refetchInterval: (query) => query.state.data?.items.some((job) => ["queued", "running", "cancel_requested"].includes(job.status)) ? 1100 : false,
+  });
+  const persistedUploads = useMemo<UploadStatus[]>(() => (uploadJobs.data?.items || []).filter((job) => {
+    if (["queued", "running", "cancel_requested"].includes(job.status)) return true;
+    return uploadResultIsVisible(job.updated_at, uploadStatusNow);
+  }).map((job) => {
+    if (job.status === "queued") return { id: job.id, name: job.filename, status: "queued", message: "等待服务器处理", messageEn: "Waiting for server processing", updatedAt: job.updated_at };
+    if (job.status === "running" || job.status === "cancel_requested") return { id: job.id, name: job.filename, status: "uploading", message: job.status === "cancel_requested" ? "正在取消解析" : "正在执行 MinerU 解析", messageEn: job.status === "cancel_requested" ? "Cancelling parsing" : "Running MinerU parsing", updatedAt: job.updated_at };
+    if (job.status === "succeeded") return { id: job.id, name: job.filename, status: "done", message: "上传与解析完成", messageEn: "Upload and parsing completed", updatedAt: job.updated_at };
+    return { id: job.id, name: job.filename, status: "failed", message: job.error_message || "上传或解析失败", messageEn: job.error_message || "Upload or parsing failed", updatedAt: job.updated_at };
+  }), [uploadJobs.data?.items, uploadStatusNow]);
+  const visibleLocalUploads = useMemo(() => localUploads.filter((row) => {
+    if (row.status === "queued" || row.status === "uploading") return true;
+    return uploadResultIsVisible(row.updatedAt, uploadStatusNow);
+  }), [localUploads, uploadStatusNow]);
+  const uploads = useMemo(() => [...visibleLocalUploads, ...persistedUploads], [visibleLocalUploads, persistedUploads]);
+  useEffect(() => {
+    const expirations = [
+      ...localUploads
+        .filter((row) => row.status === "done" || row.status === "failed")
+        .map((row) => Date.parse(row.updatedAt || "") + UPLOAD_RESULT_VISIBLE_MS),
+      ...(uploadJobs.data?.items || [])
+        .filter((job) => !["queued", "running", "cancel_requested"].includes(job.status))
+        .map((job) => Date.parse(job.updated_at) + UPLOAD_RESULT_VISIBLE_MS),
+    ].filter((value) => Number.isFinite(value) && value > uploadStatusNow);
+    if (!expirations.length) return;
+    const delay = Math.max(100, Math.min(...expirations) - Date.now() + 25);
+    const timeout = window.setTimeout(() => setUploadStatusNow(Date.now()), delay);
+    return () => window.clearTimeout(timeout);
+  }, [localUploads, uploadJobs.data?.items, uploadStatusNow]);
   const library = useQuery(libraryQuery(query));
   const libraryIndex = useQuery(libraryQuery(""));
   const paperLabels = useMemo(
@@ -292,9 +354,35 @@ export function LibraryPage() {
     [library.data?.items, libraryIndex.data?.items],
   );
   const refreshLibrary = useCallback(
-    () => queryClient.invalidateQueries({ queryKey: ["library"] }),
-    [queryClient],
+    async () => {
+      const refreshes = [queryClient.invalidateQueries({ queryKey: queryKeys.library(""), exact: true })];
+      if (query) refreshes.push(queryClient.invalidateQueries({ queryKey: queryKeys.library(query), exact: true }));
+      await Promise.all(refreshes);
+    },
+    [query, queryClient],
   );
+  useEffect(() => {
+    const jobs = uploadJobs.data?.items;
+    if (!jobs) return;
+    const completed = uploadJobsNeedingLibraryRefresh(
+      jobs,
+      uploadJobStatuses.current,
+      locallySubmittedUploadJobs.current,
+      refreshedUploadJobs.current,
+    );
+    for (const job of jobs) {
+      uploadJobStatuses.current.set(job.id, job.status);
+      if (["failed", "cancelled", "interrupted"].includes(job.status)) {
+        locallySubmittedUploadJobs.current.delete(job.id);
+      }
+    }
+    if (!completed.length) return;
+    for (const jobId of completed) {
+      refreshedUploadJobs.current.add(jobId);
+      locallySubmittedUploadJobs.current.delete(jobId);
+    }
+    void refreshLibrary();
+  }, [refreshLibrary, uploadJobs.data?.items]);
   const selectedPaper = useMemo(
     () => library.data?.items.find((paper) => paper.paper_id === selectedId) || library.data?.items[0],
     [library.data?.items, selectedId],
@@ -357,30 +445,39 @@ export function LibraryPage() {
     if (!files?.length) return;
     const queue = Array.from(files);
     if (queue.length > 30) {
-      setUploads([{ name: text("本批文件", "This batch"), status: "failed", message: "每批最多上传30个PDF文件。", messageEn: "A batch can contain at most 30 PDF files." }]);
+      setLocalUploads([{ id: newIdempotencyKey(), name: text("本批文件", "This batch"), status: "failed", message: "每批最多上传30个PDF文件。", messageEn: "A batch can contain at most 30 PDF files.", updatedAt: new Date().toISOString() }]);
+      setUploadStatusNow(Date.now());
       return;
     }
     const invalid = queue.find((file) => !file.name.toLocaleLowerCase().endsWith(".pdf"));
     if (invalid) {
-      setUploads([{ name: invalid.name, status: "failed", message: "该文件不是PDF，未开始上传。", messageEn: "This file is not a PDF. Upload was not started." }]);
+      setLocalUploads([{ id: newIdempotencyKey(), name: invalid.name, status: "failed", message: "该文件不是PDF，未开始上传。", messageEn: "This file is not a PDF. Upload was not started.", updatedAt: new Date().toISOString() }]);
+      setUploadStatusNow(Date.now());
       return;
     }
-    setUploads(queue.map((file) => ({ name: file.name, status: "queued", message: "等待上传", messageEn: "Waiting to upload" })));
-    for (const file of queue) {
-      setUploads((rows) => rows.map((row) => row.name === file.name ? { ...row, status: "uploading", message: "正在上传并执行MinerU解析", messageEn: "Uploading and running MinerU parsing" } : row));
+    const batchId = newIdempotencyKey();
+    const localRows = queue.map((file, index) => ({ id: `${batchId}:${index}`, name: file.name, status: "queued" as const, message: "等待上传", messageEn: "Waiting to upload" }));
+    setLocalUploads(localRows);
+    for (const [index, file] of queue.entries()) {
+      const localId = `${batchId}:${index}`;
+      setLocalUploads((rows) => rows.map((row) => row.id === localId ? { ...row, status: "uploading", message: "正在上传到服务器", messageEn: "Uploading to server" } : row));
       try {
-        await apiRequest(`/api/v1/library/papers?filename=${encodeURIComponent(file.name)}`, {
+        const submitted = await apiRequest<UploadJob>(`/api/v1/library/upload-jobs?filename=${encodeURIComponent(file.name)}&batch_id=${encodeURIComponent(batchId)}`, {
           method: "POST",
-          headers: { "Content-Type": file.type || "application/pdf" },
+          headers: { "Content-Type": file.type || "application/pdf", "Idempotency-Key": newIdempotencyKey() },
           body: file,
         });
-        setUploads((rows) => rows.map((row) => row.name === file.name ? { ...row, status: "done", message: "上传与解析完成", messageEn: "Upload and parsing completed" } : row));
+        locallySubmittedUploadJobs.current.add(submitted.id);
+        uploadJobStatuses.current.set(submitted.id, submitted.status);
+        setLocalUploads((rows) => rows.filter((row) => row.id !== localId));
+        await uploadJobs.refetch();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        setUploads((rows) => rows.map((row) => row.name === file.name ? { ...row, status: "failed", message } : row));
+        setLocalUploads((rows) => rows.map((row) => row.id === localId ? { ...row, status: "failed", message, updatedAt: new Date().toISOString() } : row));
+        setUploadStatusNow(Date.now());
       }
     }
-    await queryClient.invalidateQueries({ queryKey: ["library"] });
+    await refreshLibrary();
   }
 
   return (
@@ -388,13 +485,13 @@ export function LibraryPage() {
       <div className="workspace-heading">
         <div><p className="eyebrow">{text("阶段 1 · 共享文献集合", "Stage 1 · Shared source collection")}</p><h1>{text("文献库", "Literature library")}</h1><p className="muted">{text("上传PDF后必须完成MinerU解析，Metadata和正文才会供后续检索与写作使用。", "Uploaded PDFs must complete MinerU parsing before metadata and full text are available to later discovery and writing stages.")}</p></div>
         <ProjectSelector />
-        <label className="button button-primary file-button">{text("批量上传PDF", "Upload PDFs in batch")}<input type="file" accept="application/pdf,.pdf" multiple onChange={(event) => void uploadFiles(event.target.files)} /></label>
+        <label className="button button-primary file-button">{text("批量上传PDF", "Upload PDFs in batch")}<input type="file" accept="application/pdf,.pdf" multiple onChange={(event) => { const files = event.target.files; void uploadFiles(files); event.currentTarget.value = ""; }} /></label>
       </div>
       <UploadBatchProgress uploads={uploads} />
       <AcquisitionPanel projectId={project?.project_id || ""} onLibraryChanged={refreshLibrary} />
       <div className="three-pane library-workspace">
         <section className="pane list-pane">
-          <div className="pane-head"><div><span className="step-label">{text("论文", "Papers")}</span><h2>{text("文献", "Papers")} {library.data?.count ?? 0}</h2></div></div>
+          <div className="pane-head"><div><span className="step-label">{text("论文", "Papers")}</span><h2>{text("文献", "Papers")} <span aria-live="polite">{libraryIndex.data?.count ?? library.data?.count ?? 0}</span></h2></div></div>
           <input className="pane-search" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={text("检索标题、作者或关键词", "Search title, author, or keyword")} />
           {library.error ? <ErrorState error={library.error} onRetry={() => library.refetch()} /> : null}
           <div className="paper-list">{library.data?.items.map((paper) => <PaperListItem key={paper.paper_id} paper={paper} displayLabel={paperLabels.get(paper.paper_id) || paper.paper_id} selected={paper.paper_id === selectedPaper?.paper_id} onSelect={() => setSelectedId(paper.paper_id)} />)}</div>

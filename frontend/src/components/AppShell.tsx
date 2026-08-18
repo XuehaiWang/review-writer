@@ -104,6 +104,12 @@ export function AppShell({ authConfig, identity, children }: AppShellProps) {
             <span className="workflow-link-index">⚙</span>
             <span className="workflow-link-copy"><strong>{translate(language, "settings")}</strong><small>{language === "en" ? "Providers" : "模型配置"}</small></span>
           </NavLink>
+          {identity.permissions.includes("provider:manage") ? (
+            <NavLink to="/admin" className={({ isActive }) => (isActive ? "workflow-link workflow-admin active" : "workflow-link workflow-admin")}>
+              <span className="workflow-link-index">◆</span>
+              <span className="workflow-link-copy"><strong>{language === "en" ? "Admin" : "管理后台"}</strong><small>{language === "en" ? "Server" : "服务器"}</small></span>
+            </NavLink>
+          ) : null}
         </div>
       </nav>
 

@@ -115,7 +115,9 @@ class AuthProviderSecurityTests(unittest.TestCase):
                 )
                 session.add(user)
                 session.flush()
-                principal = Principal(str(user.id), frozenset({Role.USER}), user.email)
+                # The legacy service remains available only for controlled
+                # migration/cleanup tooling and now requires an administrator.
+                principal = Principal(str(user.id), frozenset({Role.ADMIN}), user.email)
 
             service = ProviderSettingsService(
                 sessions,

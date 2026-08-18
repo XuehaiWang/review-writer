@@ -59,7 +59,7 @@ class SectionsV1Tests(unittest.TestCase):
                 / "review-library"
                 / ".artifacts"
                 / "P001"
-                / str(mineru_artifact_id)
+                / "a1b"
                 / "extracted"
             )
             mineru_version.mkdir(parents=True)

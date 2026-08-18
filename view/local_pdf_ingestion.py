@@ -11,19 +11,30 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 
 MAX_LOCAL_PDF_BYTES = 80 * 1024 * 1024
 MAX_EXTRACTED_TEXT_CHARS = 2_000_000
 MINERU_UPLOAD_TIMEOUT_SECONDS = 35 * 60
+MINERU_MAX_PAGES_PER_TASK = 200
 _INGEST_LOCK = threading.RLock()
 _METADATA_MODULE: Any | None = None
 _DOI_RE = re.compile(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.I)
 _YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+
+
+class MinerUPdfPart(NamedTuple):
+    pdf_path: Path
+    slug: str
+    page_offset: int
+    start_page: int
+    end_page: int
 
 
 def utc_now() -> str:
@@ -309,7 +320,151 @@ def _remove_mineru_artifacts(review_root: Path, slug: str) -> None:
 def _process_error_detail(completed: subprocess.CompletedProcess[str]) -> str:
     text = "\n".join([completed.stderr or "", completed.stdout or ""])
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return " | ".join(lines[-8:])[:1800]
+    priority = [
+        line
+        for line in lines
+        if "[failed]" in line
+        or "MinerU HTTP" in line
+        or "MinerU API error" in line
+    ]
+    selected = priority[-3:] if priority else lines[-8:]
+    return " | ".join(dict.fromkeys(selected))[:1800]
+
+
+def _split_pdf_for_mineru(
+    pdf_path: Path,
+    chunk_dir: Path,
+    slug: str,
+    *,
+    max_pages: int = MINERU_MAX_PAGES_PER_TASK,
+) -> list[MinerUPdfPart]:
+    """Create provider-sized PDFs while retaining the original page offsets."""
+
+    if max_pages < 1:
+        raise ValueError("MinerU maximum pages per task must be positive.")
+    reader = _pdf_reader(pdf_path)
+    page_count = len(reader.pages)
+    if page_count <= max_pages:
+        return []
+    try:
+        from pypdf import PdfWriter
+    except ImportError as exc:
+        raise RuntimeError("PDF chunking requires pypdf.") from exc
+
+    chunk_dir.mkdir(parents=True, exist_ok=False)
+    parts: list[MinerUPdfPart] = []
+    for part_index, start in enumerate(range(0, page_count, max_pages), start=1):
+        end = min(start + max_pages, page_count)
+        part_slug = f"{slug}-part-{part_index:03d}"
+        part_path = chunk_dir / f"{part_slug}.pdf"
+        writer = PdfWriter()
+        for page_index in range(start, end):
+            writer.add_page(reader.pages[page_index])
+        with part_path.open("xb") as stream:
+            writer.write(stream)
+        parts.append(
+            MinerUPdfPart(
+                pdf_path=part_path,
+                slug=part_slug,
+                page_offset=start,
+                start_page=start + 1,
+                end_page=end,
+            )
+        )
+    return parts
+
+
+def _prefixed_asset_path(raw: Any, prefix: str, part_dir: Path) -> Any:
+    value = str(raw or "").strip()
+    if not value or re.match(r"^(?:[a-z]+:|[/\\])", value, re.I):
+        return raw
+    normalized = value.replace("\\", "/")
+    if not (part_dir / Path(*normalized.split("/"))).is_file():
+        return raw
+    return f"{prefix}/{normalized}"
+
+
+def _merge_mineru_parts(
+    output_dir: Path,
+    slug: str,
+    parts: list[MinerUPdfPart],
+) -> None:
+    """Merge chunk output into the same artifact contract as a single PDF."""
+
+    final_extracted = output_dir / "extracted" / slug
+    final_markdown = output_dir / "markdown" / f"{slug}.md"
+    final_extracted.mkdir(parents=True, exist_ok=False)
+    final_markdown.parent.mkdir(parents=True, exist_ok=True)
+    combined_blocks: list[dict[str, Any]] = []
+    markdown_sections: list[str] = []
+    full_sections: list[str] = []
+
+    for part_index, part in enumerate(parts, start=1):
+        part_extracted = output_dir / "extracted" / part.slug
+        part_markdown = output_dir / "markdown" / f"{part.slug}.md"
+        part_content = _mineru_content_list(part_extracted) if part_extracted.is_dir() else None
+        if not part_markdown.is_file() or not part_content or not part_content.is_file():
+            raise RuntimeError(
+                f"MinerU returned an incomplete result for pages {part.start_page}-{part.end_page}."
+            )
+        try:
+            blocks = json.loads(part_content.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"MinerU content is unreadable for pages {part.start_page}-{part.end_page}."
+            ) from exc
+        if not isinstance(blocks, list):
+            raise RuntimeError(
+                f"MinerU content has an invalid structure for pages {part.start_page}-{part.end_page}."
+            )
+
+        part_folder = f"part-{part_index:03d}"
+        copied_part = final_extracted / "parts" / part_folder
+        copied_part.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(part_extracted, copied_part)
+        asset_prefix = f"parts/{part_folder}"
+        for raw_block in blocks:
+            if not isinstance(raw_block, dict):
+                continue
+            block = deepcopy(raw_block)
+            for page_key in ("page_idx", "page_id"):
+                if isinstance(block.get(page_key), int):
+                    block[page_key] += part.page_offset
+            for path_key in ("img_path", "image_path", "path"):
+                if path_key in block:
+                    block[path_key] = _prefixed_asset_path(
+                        block[path_key], asset_prefix, part_extracted
+                    )
+            combined_blocks.append(block)
+
+        page_marker = (
+            f"<!-- mineru_source_pages: {part.start_page}-{part.end_page} -->"
+        )
+        markdown_text = part_markdown.read_text(encoding="utf-8", errors="replace")
+        markdown_text = markdown_text.replace(
+            f"../extracted/{part.slug}/",
+            f"../extracted/{slug}/{asset_prefix}/",
+        )
+        markdown_sections.extend([page_marker, markdown_text.strip()])
+
+        part_full = part_extracted / "full.md"
+        if not part_full.is_file():
+            candidates = sorted(part_extracted.rglob("*.md"))
+            part_full = candidates[0] if candidates else part_markdown
+        full_text = part_full.read_text(encoding="utf-8", errors="replace")
+        full_text = full_text.replace("(images/", f"({asset_prefix}/images/")
+        full_text = full_text.replace('src="images/', f'src="{asset_prefix}/images/')
+        full_text = full_text.replace("src='images/", f"src='{asset_prefix}/images/")
+        full_sections.extend([page_marker, full_text.strip()])
+
+    final_markdown.write_text("\n\n".join(markdown_sections).rstrip() + "\n", encoding="utf-8")
+    (final_extracted / "full.md").write_text(
+        "\n\n".join(full_sections).rstrip() + "\n", encoding="utf-8"
+    )
+    (final_extracted / f"{slug}_content_list.json").write_text(
+        json.dumps(combined_blocks, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _run_mineru_parser(review_root: Path, pdf_path: Path, slug: str) -> dict[str, Any]:
@@ -326,19 +481,26 @@ def _run_mineru_parser(review_root: Path, pdf_path: Path, slug: str) -> dict[str
         raise RuntimeError(f"MinerU parser script is missing: {script}")
     artifacts = _mineru_artifact_paths(root, slug)
     artifacts["manifest"].parent.mkdir(parents=True, exist_ok=True)
+    page_count = len(_pdf_reader(pdf_path).pages)
+    chunk_dir: Path | None = None
+    parts: list[MinerUPdfPart] = []
+    if page_count > MINERU_MAX_PAGES_PER_TASK:
+        chunk_dir = Path(tempfile.mkdtemp(prefix=f".{slug}-mineru-chunks-", dir=root))
+        chunk_dir.rmdir()
+        parts = _split_pdf_for_mineru(pdf_path, chunk_dir, slug)
     command = [
         sys.executable,
         str(script),
         "--input-dir",
-        str(pdf_path.parent),
-        "--pdf",
-        str(pdf_path),
+        str(chunk_dir or pdf_path.parent),
         "--output-dir",
         str(artifacts["output_dir"]),
         "--manifest-path",
         str(artifacts["manifest"]),
         "--force",
     ]
+    if not parts:
+        command[4:4] = ["--pdf", str(pdf_path)]
     try:
         completed = subprocess.run(
             command,
@@ -355,12 +517,17 @@ def _run_mineru_parser(review_root: Path, pdf_path: Path, slug: str) -> dict[str
         raise RuntimeError(
             "MinerU precise parsing timed out after 35 minutes; the PDF was not admitted to Library."
         ) from exc
+    finally:
+        if chunk_dir is not None:
+            shutil.rmtree(chunk_dir, ignore_errors=True)
     if completed.returncode != 0:
         detail = _process_error_detail(completed)
         raise RuntimeError(
             "MinerU precise parsing failed; the PDF was not admitted to Library."
             + (f" {detail}" if detail else "")
         )
+    if parts:
+        _merge_mineru_parts(artifacts["output_dir"], slug, parts)
 
     markdown_path = artifacts["markdown"]
     extracted_dir = artifacts["extracted_dir"]
@@ -382,6 +549,14 @@ def _run_mineru_parser(review_root: Path, pdf_path: Path, slug: str) -> dict[str
         raise RuntimeError("MinerU content_list.json is unreadable; the PDF was not admitted to Library.") from exc
     if not isinstance(blocks, list):
         raise RuntimeError("MinerU content_list.json has an invalid structure; the PDF was not admitted to Library.")
+    provider_request_id = ""
+    try:
+        manifest_data = json.loads(artifacts["manifest"].read_text(encoding="utf-8"))
+        batches = manifest_data.get("batches") if isinstance(manifest_data, dict) else []
+        if isinstance(batches, list) and batches and isinstance(batches[0], dict):
+            provider_request_id = str(batches[0].get("batch_id") or "")
+    except (OSError, json.JSONDecodeError):
+        provider_request_id = ""
     full_md = extracted_dir / "full.md"
     if not full_md.is_file():
         full_candidates = sorted(extracted_dir.rglob("*.md"))
@@ -394,6 +569,8 @@ def _run_mineru_parser(review_root: Path, pdf_path: Path, slug: str) -> dict[str
         "full_md": full_md,
         "manifest_path": artifacts["manifest"],
         "content_block_count": len(blocks),
+        "provider_request_id": provider_request_id,
+        "mineru_part_count": max(1, len(parts)),
     }
 
 
@@ -502,11 +679,19 @@ def ingest_local_pdf(review_root: Path, original_filename: object, staged_pdf: P
                     "extracted_text_chars": len(extracted_text),
                     "original_upload_name": filename,
                     "content_blocks": int(mineru["content_block_count"]),
+                    "mineru_part_count": int(mineru.get("mineru_part_count") or 1),
                     "content_list": str(content_path),
                     "extracted_dir": str(mineru["extracted_dir"]),
                     "manifest": str(mineru["manifest_path"]),
                 },
-                "notes": ["mineru_precise_parse_completed_before_library_admission"],
+                "notes": [
+                    "mineru_precise_parse_completed_before_library_admission",
+                    *(
+                        ["mineru_precise_parse_auto_chunked"]
+                        if int(mineru.get("mineru_part_count") or 1) > 1
+                        else []
+                    ),
+                ],
             }
             prep.apply_structured_tags_to_compat_fields(metadata)
             prep.update_quality(metadata)
@@ -529,6 +714,7 @@ def ingest_local_pdf(review_root: Path, original_filename: object, staged_pdf: P
         "filename": filename,
         "title": title,
         "page_count": len(reader.pages),
+        "provider_request_id": str(mineru.get("provider_request_id") or ""),
         "extracted_text_chars": len(extracted_text),
         "mineru_ready": True,
         "content_block_count": int(mineru["content_block_count"]),

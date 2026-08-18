@@ -28,7 +28,6 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
             Permission.PROJECT_READ,
             Permission.PROJECT_WRITE,
             Permission.PROJECT_DELETE,
-            Permission.PROVIDER_MANAGE,
         }
     ),
 }

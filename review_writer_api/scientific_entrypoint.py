@@ -25,6 +25,7 @@ ERROR_ENVELOPE_PREFIX = "REVIEW_WRITER_ERROR:"
 COMPLETION_FILE_ENV = "REVIEW_WRITER_PROVIDER_CALL_COMPLETED_FILE"
 PRIVATE_EGRESS_ENV = "REVIEW_WRITER_ALLOW_PRIVATE_EGRESS"
 TRUSTED_PROXY_NETWORKS_ENV = "REVIEW_WRITER_TRUSTED_PROXY_NETWORKS"
+INTERNAL_GATEWAY_ENDPOINT_ENV = "REVIEW_WRITER_INTERNAL_GATEWAY_ENDPOINT"
 
 
 def guarded_getaddrinfo(
@@ -32,6 +33,7 @@ def guarded_getaddrinfo(
     *,
     allow_private_networks: bool,
     trusted_proxy_networks=(),
+    allowed_private_endpoint: tuple[str, int] | None = None,
 ):
     """Validate the exact addresses returned to the connection attempt.
 
@@ -49,6 +51,9 @@ def guarded_getaddrinfo(
     def resolve(host, port, *args, **kwargs):
         answers = original(host, port, *args, **kwargs)
         if allow_private_networks:
+            return answers
+        normalized_endpoint = (str(host).casefold().rstrip("."), int(port))
+        if allowed_private_endpoint == normalized_endpoint:
             return answers
         for answer in answers:
             try:
@@ -73,10 +78,17 @@ def install_network_guard() -> None:
         for item in os.environ.get(TRUSTED_PROXY_NETWORKS_ENV, "").split(",")
         if item.strip()
     )
+    endpoint_value = os.environ.get(INTERNAL_GATEWAY_ENDPOINT_ENV, "").strip()
+    allowed_private_endpoint = None
+    if endpoint_value:
+        host, separator, raw_port = endpoint_value.rpartition(":")
+        if separator and host and raw_port.isdigit():
+            allowed_private_endpoint = (host.casefold().rstrip("."), int(raw_port))
     socket.getaddrinfo = guarded_getaddrinfo(
         socket.getaddrinfo,
         allow_private_networks=allow_private,
         trusted_proxy_networks=trusted_proxy_networks,
+        allowed_private_endpoint=allowed_private_endpoint,
     )
 
 

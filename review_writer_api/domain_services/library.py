@@ -8,8 +8,10 @@ import shutil
 import uuid
 import re
 import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from threading import BoundedSemaphore
 from typing import Any
@@ -17,8 +19,9 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
-from review_writer_api.database import database_session, utc_now
+from review_writer_api.database import MinerUUsageEvent, database_session, utc_now
 from review_writer_api.errors import WorkflowError, WorkflowNotFound, WorkflowValidationError
+from review_writer_api.mineru_artifacts import mineru_storage_paths
 from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
 from review_writer_api.workspaces import HostedWorkspaceManager
@@ -82,13 +85,147 @@ class LibraryService:
         precise_ingest: Callable[[Path, str, Path], dict[str, Any]] | None = None,
         runtime_environment: Callable[[Principal], dict[str, str]] | None = None,
         scientific_runner: ScientificRunner | None = None,
+        mineru_price_usd_per_page: Decimal = Decimal("0"),
+        mineru_max_concurrency: int = 2,
     ):
         self.session_factory = session_factory
         self.workspace_manager = workspace_manager
         self.precise_ingest = precise_ingest
         self.runtime_environment = runtime_environment
         self.scientific_runner = scientific_runner or ScientificRunner()
-        self._parse_slots = BoundedSemaphore(2)
+        self.mineru_price_usd_per_page = Decimal(mineru_price_usd_per_page).quantize(
+            Decimal("0.00000001")
+        )
+        self._parse_slots = BoundedSemaphore(max(1, int(mineru_max_concurrency)))
+
+    @staticmethod
+    def _pdf_page_count(path: Path) -> int:
+        try:
+            from pypdf import PdfReader
+
+            return max(0, len(PdfReader(str(path), strict=False).pages))
+        except Exception:
+            return 0
+
+    def _record_mineru_cache_hit(
+        self,
+        principal: Principal,
+        *,
+        filename: str,
+        digest: str,
+        paper_id: str,
+    ) -> None:
+        user_id = uuid.UUID(principal.user_id)
+        with database_session(self.session_factory) as session:
+            row = session.scalar(
+                select(MinerUUsageEvent)
+                .where(
+                    MinerUUsageEvent.user_id == user_id,
+                    MinerUUsageEvent.file_sha256 == digest,
+                )
+                .with_for_update()
+            )
+            if row is None:
+                session.add(
+                    MinerUUsageEvent(
+                        user_id=user_id,
+                        file_sha256=digest,
+                        original_filename=filename,
+                        paper_id=paper_id,
+                        status="cache_hit",
+                        attempt_count=0,
+                        cache_hit_count=1,
+                        unit_price_usd=self.mineru_price_usd_per_page,
+                        finished_at=utc_now(),
+                    )
+                )
+                return
+            row.cache_hit_count += 1
+            row.paper_id = paper_id or row.paper_id
+            row.updated_at = utc_now()
+
+    def _begin_mineru_usage(
+        self,
+        principal: Principal,
+        *,
+        filename: str,
+        digest: str,
+        page_count: int,
+        job_id: str | None = None,
+    ) -> str:
+        user_id = uuid.UUID(principal.user_id)
+        event = MinerUUsageEvent(
+            user_id=user_id,
+            job_id=uuid.UUID(job_id) if job_id else None,
+            file_sha256=digest,
+            original_filename=filename,
+            page_count=max(0, int(page_count)),
+            status="running",
+            unit_price_usd=self.mineru_price_usd_per_page,
+        )
+        try:
+            with database_session(self.session_factory) as session:
+                session.add(event)
+                session.flush()
+                return str(event.id)
+        except IntegrityError:
+            pass
+        with database_session(self.session_factory) as session:
+            row = session.scalar(
+                select(MinerUUsageEvent)
+                .where(
+                    MinerUUsageEvent.user_id == user_id,
+                    MinerUUsageEvent.file_sha256 == digest,
+                )
+                .with_for_update()
+            )
+            if row is None:
+                raise MinerUPreciseParseFailed(
+                    "MinerU usage state could not be created; retry the upload."
+                )
+            if row.status == "running":
+                raise MinerUPreciseParseFailed(
+                    "The same PDF is already being parsed for this user."
+                )
+            row.status = "running"
+            row.attempt_count += 1
+            row.job_id = uuid.UUID(job_id) if job_id else None
+            row.original_filename = filename
+            row.page_count = max(0, int(page_count))
+            row.billable_pages = 0
+            row.provider_request_id = ""
+            row.provider_cost_usd = Decimal("0")
+            row.error_message = ""
+            row.finished_at = None
+            row.updated_at = utc_now()
+            return str(row.id)
+
+    def _finish_mineru_usage(
+        self,
+        event_id: str,
+        *,
+        status: str,
+        page_count: int,
+        provider_request_id: str = "",
+        paper_id: str = "",
+        error_message: str = "",
+    ) -> None:
+        billed = max(0, int(page_count)) if status in {"succeeded", "reconciliation_required"} else 0
+        cost = (Decimal(billed) * self.mineru_price_usd_per_page).quantize(
+            Decimal("0.00000001")
+        )
+        with database_session(self.session_factory) as session:
+            row = session.get(MinerUUsageEvent, uuid.UUID(event_id))
+            if row is None:
+                return
+            row.status = status
+            row.page_count = max(0, int(page_count))
+            row.billable_pages = billed
+            row.provider_request_id = provider_request_id[:255]
+            row.paper_id = paper_id[:96]
+            row.provider_cost_usd = cost
+            row.error_message = error_message[:2000]
+            row.finished_at = utc_now()
 
     def _native_precise_ingest(
         self,
@@ -99,10 +236,13 @@ class LibraryService:
         cancel_requested: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         output = staged_pdf.parent / f"{staged_pdf.stem}.parse-result.json"
-        parse_root = staged_pdf.parent / f"{staged_pdf.stem}.parse-workspace"
-        if parse_root.is_symlink():
+        parse_parent = self.workspace_manager.trusted_user_directory(
+            principal.user_id, ".parse"
+        )
+        parse_root = Path(tempfile.mkdtemp(prefix="p-", dir=parse_parent))
+        if parse_root.is_symlink() or parse_root.resolve().parent != parse_parent:
+            shutil.rmtree(parse_root, ignore_errors=True)
             raise MinerUPreciseParseFailed("MinerU staging workspace is not trusted.")
-        parse_root.mkdir(exist_ok=False)
         environment = (
             self.runtime_environment(principal) if self.runtime_environment else {}
         )
@@ -229,9 +369,23 @@ class LibraryService:
 
     @staticmethod
     def _new_paper_id() -> str:
-        """Generate a collision-resistant numeric P identifier without shared counters."""
+        """Generate a compact numeric ID that also fits Windows artifact paths."""
 
-        return f"P{uuid.uuid4().int}"
+        random_62_bits = uuid.uuid4().int & ((1 << 62) - 1)
+        return f"P{random_62_bits | (1 << 62)}"
+
+    @staticmethod
+    def _new_artifact_version_root(paper_root: Path) -> Path:
+        """Reserve a compact immutable directory without shortening database UUIDs."""
+
+        for _ in range(32):
+            candidate = paper_root / uuid.uuid4().hex[:3]
+            try:
+                candidate.mkdir(exist_ok=False)
+            except FileExistsError:
+                continue
+            return candidate
+        raise OSError("Could not reserve an immutable Library artifact directory.")
 
     @staticmethod
     def _is_isolated_output(root: Path, source: Path) -> bool:
@@ -240,7 +394,9 @@ class LibraryService:
         except ValueError:
             return False
         parts = set(relative.parts)
-        return ".upload-staging" in parts or "job-staging" in parts
+        return any(
+            marker in parts for marker in (".upload-staging", "job-staging", ".parse")
+        )
 
     def _write_compatibility_metadata(
         self, principal: Principal, paper_id: str, metadata: dict[str, Any]
@@ -286,8 +442,7 @@ class LibraryService:
         }
 
         def publish_file(kind: str, source: Path, suffix: str) -> Path:
-            version = paper_root / artifact_ids[kind]
-            version.mkdir(exist_ok=False)
+            version = self._new_artifact_version_root(paper_root)
             destination = version / f"{paper_id}{suffix}"
             temporary = version / f".{destination.name}.part"
             try:
@@ -335,7 +490,7 @@ class LibraryService:
                         "MinerU extracted output escaped its directory."
                     ) from exc
             artifact_ids["mineru"] = str(uuid.uuid4())
-            mineru_version = paper_root / artifact_ids["mineru"]
+            mineru_version = self._new_artifact_version_root(paper_root)
             mineru_destination = mineru_version / "extracted"
             shutil.copytree(extracted_source, mineru_destination)
             mineru_content_destination = mineru_destination / content_relative
@@ -366,8 +521,7 @@ class LibraryService:
                 root
             ).as_posix()
         stored_metadata["_artifact_ids"] = dict(artifact_ids)
-        metadata_version = paper_root / artifact_ids["metadata"]
-        metadata_version.mkdir(exist_ok=False)
+        metadata_version = self._new_artifact_version_root(paper_root)
         metadata_destination = metadata_version / f"{paper_id}.metadata.json"
         artifact_paths["metadata"] = metadata_destination.relative_to(root).as_posix()
         stored_metadata["_artifact_paths"] = artifact_paths
@@ -420,8 +574,7 @@ class LibraryService:
             raise WorkflowValidationError("Library artifact directory is not trusted.")
         paper_root.mkdir(exist_ok=True)
         metadata_artifact_id = str(uuid.uuid4())
-        version = paper_root / metadata_artifact_id
-        version.mkdir(exist_ok=False)
+        version = self._new_artifact_version_root(paper_root)
         destination = version / f"{paper_id}.metadata.json"
         stored = dict(metadata)
         stored["paper_id"] = paper_id
@@ -510,6 +663,25 @@ class LibraryService:
         if not head.startswith(b"%PDF-"):
             raise WorkflowValidationError("The uploaded file does not contain a PDF signature.")
 
+    def staged_upload_path(self, principal: Principal, staging_id: str) -> Path:
+        """Resolve one server-staged upload without trusting a job payload path."""
+
+        principal.require(Permission.PROJECT_WRITE)
+        try:
+            normalized = str(uuid.UUID(str(staging_id or "")))
+        except ValueError as exc:
+            raise WorkflowValidationError("The staged upload identifier is invalid.") from exc
+        staging = self.workspace_manager.trusted_user_directory(
+            principal.user_id, "review-library", ".upload-staging"
+        )
+        lexical = staging / f"{normalized}.pdf.part"
+        if lexical.is_symlink():
+            raise WorkflowValidationError("The staged upload is not trusted.")
+        resolved = lexical.resolve()
+        if resolved.parent != staging or not resolved.is_file():
+            raise WorkflowNotFound("The staged PDF is no longer available; upload it again.")
+        return resolved
+
     def admit_staged(
         self,
         principal: Principal,
@@ -517,11 +689,13 @@ class LibraryService:
         staged_pdf: Path,
         *,
         cancel_requested: Callable[[], bool] | None = None,
+        job_id: str | None = None,
     ) -> tuple[LibraryPaperRecord, str]:
         principal.require(Permission.PROJECT_WRITE)
         root = self.workspace_manager.user_root(principal.user_id)
         digest = self._digest(staged_pdf)
         user_uuid = uuid.UUID(principal.user_id)
+        duplicate_record: LibraryPaperRecord | None = None
         with database_session(self.session_factory) as session:
             duplicate = session.scalar(
                 select(LibraryPaper)
@@ -533,7 +707,24 @@ class LibraryService:
                 .with_for_update()
             )
             if duplicate is not None:
-                return self._record(duplicate), "duplicate_file"
+                duplicate_record = self._record(duplicate)
+        if duplicate_record is not None:
+            self._record_mineru_cache_hit(
+                principal,
+                filename=filename,
+                digest=digest,
+                paper_id=duplicate_record.paper_id,
+            )
+            return duplicate_record, "duplicate_file"
+        page_count = self._pdf_page_count(staged_pdf)
+        usage_event_id = self._begin_mineru_usage(
+            principal,
+            filename=filename,
+            digest=digest,
+            page_count=page_count,
+            job_id=job_id,
+        )
+        result: dict[str, Any] = {}
         try:
             if self.precise_ingest:
                 result = self.precise_ingest(root, filename, staged_pdf)
@@ -553,25 +744,92 @@ class LibraryService:
                     )
                 finally:
                     self._parse_slots.release()
-        except MinerUPreciseParseFailed:
+        except MinerUPreciseParseFailed as exc:
+            provider_completed = bool(
+                (getattr(exc, "details", None) or {}).get("provider_call_completed")
+            )
+            self._finish_mineru_usage(
+                usage_event_id,
+                status="reconciliation_required" if provider_completed else "failed",
+                page_count=page_count,
+                error_message=str(exc),
+            )
             raise
         except RuntimeError as exc:
+            self._finish_mineru_usage(
+                usage_event_id,
+                status="failed",
+                page_count=page_count,
+                error_message=str(exc),
+            )
             raise MinerUPreciseParseFailed(str(exc)) from exc
+        except Exception as exc:
+            self._finish_mineru_usage(
+                usage_event_id,
+                status="failed",
+                page_count=page_count,
+                error_message=str(exc),
+            )
+            raise
+        if not isinstance(result, dict):
+            self._finish_mineru_usage(
+                usage_event_id,
+                status="reconciliation_required",
+                page_count=page_count,
+                error_message="MinerU returned an invalid result object.",
+            )
+            raise MinerUPreciseParseFailed("MinerU returned an invalid result object.")
+        page_count = max(0, int(result.get("page_count") or page_count))
+        provider_request_id = str(
+            result.get("provider_request_id") or result.get("batch_id") or ""
+        )
         if not result.get("mineru_ready"):
+            self._finish_mineru_usage(
+                usage_event_id,
+                status="reconciliation_required",
+                page_count=page_count,
+                provider_request_id=provider_request_id,
+                error_message="MinerU returned an incomplete parse.",
+            )
             raise MinerUPreciseParseFailed(
                 "MinerU precise parsing was incomplete; the PDF was not admitted to Library."
             )
         cleanup_root = Path(str(result.get("_staging_root") or ""))
         try:
-            return self._record_parsed_result(principal, filename, digest, result)
+            try:
+                record, outcome = self._record_parsed_result(
+                    principal, filename, digest, result
+                )
+            except Exception as exc:
+                self._finish_mineru_usage(
+                    usage_event_id,
+                    status="reconciliation_required",
+                    page_count=page_count,
+                    provider_request_id=provider_request_id,
+                    error_message=str(exc),
+                )
+                raise
+            self._finish_mineru_usage(
+                usage_event_id,
+                status="succeeded",
+                page_count=page_count,
+                provider_request_id=provider_request_id,
+                paper_id=record.paper_id,
+            )
+            return record, outcome
         finally:
-            if cleanup_root.name.endswith(".parse-workspace"):
-                try:
-                    cleanup_root.resolve().relative_to(staged_pdf.parent.resolve())
-                except ValueError:
-                    pass
-                else:
-                    shutil.rmtree(cleanup_root, ignore_errors=True)
+            parse_parent = self.workspace_manager.trusted_user_directory(
+                principal.user_id, ".parse"
+            )
+            try:
+                cleanup_resolved = cleanup_root.resolve()
+            except OSError:
+                cleanup_resolved = Path()
+            if (
+                cleanup_root.name.startswith("p-")
+                and cleanup_resolved.parent == parse_parent
+            ):
+                shutil.rmtree(cleanup_resolved, ignore_errors=True)
 
     def _record_parsed_result(
         self,
@@ -713,6 +971,21 @@ class LibraryService:
                 if duplicate is None:
                     raise
                 return self._record(duplicate), "duplicate_file"
+        except (OSError, shutil.Error) as exc:
+            raw_error = re.sub(r"\s+", " ", str(exc)).strip()
+            if (
+                "WinError 3" in raw_error
+                or "No such file or directory" in raw_error
+            ):
+                diagnostic = (
+                    "The server filesystem rejected a generated artifact path."
+                )
+            else:
+                diagnostic = f"Storage error type: {type(exc).__name__}."
+            raise MinerUPreciseParseFailed(
+                "MinerU parsing completed, but its files could not be stored. "
+                f"{diagnostic} Retry the PDF upload."
+            ) from exc
         return record, outcome
 
     def reconcile_download_result(
@@ -1056,6 +1329,18 @@ class LibraryService:
             raise WorkflowNotFound("Library file not found.")
         return path
 
+    @staticmethod
+    def _mineru_storage_roots(
+        root: Path, paper_id: str, relative_path: str
+    ) -> tuple[Path, Path]:
+        try:
+            _content_path, version_root, extracted_root = mineru_storage_paths(
+                root, paper_id, relative_path
+            )
+        except ValueError as exc:
+            raise WorkflowNotFound("Library file not found.") from exc
+        return version_root, extracted_root
+
     def file(self, principal: Principal, paper_id: str, kind: str) -> Path:
         record = self.get(principal, paper_id)
         relative = (
@@ -1088,8 +1373,9 @@ class LibraryService:
             raise WorkflowNotFound("Library file not found.")
         root = self.workspace_manager.user_root(principal.user_id)
         artifacts_root = root / "review-library" / ".artifacts"
-        raw_version_root = artifacts_root / record.paper_id / artifact_id
-        raw_extracted_root = raw_version_root / "extracted"
+        raw_version_root, raw_extracted_root = self._mineru_storage_roots(
+            root, record.paper_id, artifact.relative_path
+        )
         for boundary in (
             root / "review-library",
             artifacts_root,
@@ -1191,17 +1477,13 @@ class LibraryService:
             )
             if mineru_artifact_id and mineru_relative:
                 content_path = self._safe_stored_path(root, mineru_relative)
-                version_root = (
-                    root
-                    / "review-library"
-                    / ".artifacts"
-                    / paper_id
-                    / str(uuid.UUID(mineru_artifact_id))
+                raw_version_root, raw_extracted_root = self._mineru_storage_roots(
+                    root, paper_id, mineru_relative
                 )
-                raw_version_root = version_root
-                version_root = version_root.resolve()
+                version_root = raw_version_root.resolve()
+                extracted_root = raw_extracted_root.resolve()
                 try:
-                    content_path.relative_to(version_root)
+                    content_path.relative_to(extracted_root)
                     relative_version = version_root.relative_to(root)
                 except ValueError as exc:
                     raise WorkflowValidationError(

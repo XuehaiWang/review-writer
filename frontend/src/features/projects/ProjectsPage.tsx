@@ -4,7 +4,7 @@ import { useForm } from "react-hook-form";
 import { Link, useNavigate } from "react-router-dom";
 
 import { apiRequest, jsonBody } from "../../api/client";
-import { projectsQuery, queryKeys } from "../../api/queries";
+import { modelCatalogQuery, projectsQuery, queryKeys } from "../../api/queries";
 import type { Project } from "../../api/types";
 import { DeleteProjectDialog } from "../../components/DeleteProjectDialog";
 import { ErrorState } from "../../components/ErrorState";
@@ -14,9 +14,10 @@ type ProjectFields = {
   slug: string;
   topic: string;
   taxonomy_profile: string;
+  model_tier: "sol" | "terra" | "luna";
 };
 
-function ProjectCard({ project, deleting, onDelete }: { project: Project; deleting: boolean; onDelete: (project: Project) => void }) {
+function ProjectCard({ project, deleting, modelUpdating, onModelChange, onDelete }: { project: Project; deleting: boolean; modelUpdating: boolean; onModelChange: (project: Project, modelTier: Project["model_tier"]) => void; onDelete: (project: Project) => void }) {
   const { text } = useUiText();
   return (
     <article className="project-card">
@@ -31,6 +32,7 @@ function ProjectCard({ project, deleting, onDelete }: { project: Project; deleti
       <div className="project-meta">
         <span>{project.completed_stages.length ? text(`已完成 ${project.completed_stages.length} 个阶段`, `${project.completed_stages.length} stages completed`) : text("尚未完成阶段", "No stages completed")}</span>
         <span>{project.taxonomy_profile}</span>
+        <label>{text("模型", "Model")}<select value={project.model_tier} disabled={modelUpdating} onChange={(event) => onModelChange(project, event.target.value as Project["model_tier"])}><option value="sol">Sol</option><option value="terra">Terra</option><option value="luna">Luna</option></select></label>
         <Link className="button button-secondary" to={`/library?project=${encodeURIComponent(project.project_id)}`}>{text("进入工作流", "Open workflow")}</Link>
         <button className="button button-danger" type="button" disabled={deleting} onClick={() => onDelete(project)}>
           {deleting ? text("删除中…", "Deleting…") : text("删除项目", "Delete project")}
@@ -46,8 +48,9 @@ export function ProjectsPage() {
   const queryClient = useQueryClient();
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
   const projects = useQuery(projectsQuery);
+  const modelCatalog = useQuery(modelCatalogQuery);
   const { register, handleSubmit, reset, formState } = useForm<ProjectFields>({
-    defaultValues: { slug: "", topic: "", taxonomy_profile: "chemistry_general" },
+    defaultValues: { slug: "", topic: "", taxonomy_profile: "chemistry_general", model_tier: "terra" },
   });
   const createProject = useMutation({
     mutationFn: (values: ProjectFields) =>
@@ -57,6 +60,7 @@ export function ProjectsPage() {
           slug: values.slug.trim(),
           topic: values.topic.trim(),
           taxonomy_profile: values.taxonomy_profile,
+          model_tier: values.model_tier,
         }),
       }),
     onSuccess: async (created) => {
@@ -69,6 +73,16 @@ export function ProjectsPage() {
     mutationFn: (project: Project) => apiRequest<void>(`/api/v1/projects/${encodeURIComponent(project.project_id)}`, { method: "DELETE" }),
     onSuccess: async () => {
       setDeleteTarget(null);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projects });
+    },
+  });
+  const updateModelTier = useMutation({
+    mutationFn: ({ project, modelTier }: { project: Project; modelTier: Project["model_tier"] }) =>
+      apiRequest<Project>(`/api/v1/projects/${encodeURIComponent(project.project_id)}/model-tier`, {
+        method: "PATCH",
+        ...jsonBody({ model_tier: modelTier }),
+      }),
+    onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.projects });
     },
   });
@@ -98,7 +112,7 @@ export function ProjectsPage() {
           {projects.error ? <ErrorState error={projects.error} onRetry={() => projects.refetch()} /> : null}
           {projects.data && projects.data.items.length === 0 ? <div className="empty-state">{text("还没有项目。请在右侧创建第一个项目。", "No projects yet. Create the first project on the right.")}</div> : null}
           <div className="project-list">
-            {projects.data?.items.map((project) => <ProjectCard key={project.project_id} project={project} deleting={deleteProject.isPending && deleteProject.variables?.project_id === project.project_id} onDelete={confirmDelete} />)}
+            {projects.data?.items.map((project) => <ProjectCard key={project.project_id} project={project} deleting={deleteProject.isPending && deleteProject.variables?.project_id === project.project_id} modelUpdating={updateModelTier.isPending && updateModelTier.variables?.project.project_id === project.project_id} onModelChange={(item, modelTier) => updateModelTier.mutate({ project: item, modelTier })} onDelete={confirmDelete} />)}
           </div>
           {deleteProject.error ? <p className="message message-error" role="alert">{deleteProject.error.message}</p> : null}
         </section>
@@ -124,6 +138,14 @@ export function ProjectsPage() {
               <select {...register("taxonomy_profile")}>
                 <option value="chemistry_general">{text("通用化学", "General chemistry")}</option>
               </select>
+            </label>
+            <label>
+              {text("文本模型", "Text model")}
+              <select {...register("model_tier")}>
+                {(modelCatalog.data?.items || []).map((tier) => <option key={tier.id} value={tier.id}>{text(tier.label_zh, tier.label_en)}</option>)}
+                {!modelCatalog.data ? <option value="terra">Terra</option> : null}
+              </select>
+              <small>{text("当前用于评估与重写；任务启动时锁定档位，进行中的任务不受后续切换影响。", "Currently used for evaluation and rewriting. The tier is fixed when a job starts, so later changes do not affect a running job.")}</small>
             </label>
             <button className="button button-primary button-block" type="submit" disabled={createProject.isPending || formState.isSubmitting}>
               {createProject.isPending ? text("正在创建…", "Creating…") : text("创建项目", "Create project")}

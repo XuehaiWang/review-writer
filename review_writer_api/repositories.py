@@ -15,6 +15,7 @@ from review_writer_core.project_config import save_project_config
 from review_writer_core.workspace import WorkspaceConfigurationError, WorkspacePaths, validate_project_id
 
 from .database import Project, database_session, utc_now
+from .model_catalog import DEFAULT_MODEL_TIER, resolve_model_tier
 
 
 class ProjectOperationError(ValueError):
@@ -54,6 +55,7 @@ class ProjectRecord:
     discovery_status: str
     completed_stages: tuple[str, ...]
     taxonomy_profile: str = "chemistry_general"
+    model_tier: str = DEFAULT_MODEL_TIER
     current_stage: str = "discovery"
     stage_states: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
 
@@ -64,7 +66,12 @@ class ProjectRepository(Protocol):
     def get_for_user(self, user_id: str, project_id: str) -> ProjectRecord | None: ...
 
     def create_for_user(
-        self, user_id: str, *, slug: str, topic: str, taxonomy_profile: str
+        self, user_id: str, *, slug: str, topic: str, taxonomy_profile: str,
+        model_tier: str = DEFAULT_MODEL_TIER,
+    ) -> ProjectRecord: ...
+
+    def update_model_tier_for_user(
+        self, user_id: str, project_id: str, *, model_tier: str
     ) -> ProjectRecord: ...
 
     def update_topic_for_user(
@@ -121,6 +128,7 @@ class LocalProjectRepository:
                 if stage_id in stage_states
             ),
             taxonomy_profile=str(payload.get("taxonomy_profile") or "chemistry_general"),
+            model_tier=DEFAULT_MODEL_TIER,
             current_stage=current_stage_from_states(stage_states),
             stage_states=stage_states,
         )
@@ -141,7 +149,8 @@ class LocalProjectRepository:
         return self._record(payload) if payload else None
 
     def create_for_user(
-        self, user_id: str, *, slug: str, topic: str, taxonomy_profile: str
+        self, user_id: str, *, slug: str, topic: str, taxonomy_profile: str,
+        model_tier: str = DEFAULT_MODEL_TIER,
     ) -> ProjectRecord:
         if user_id != self.user_id:
             raise ProjectOperationError("Project owner does not match the local workspace user.")
@@ -164,6 +173,15 @@ class LocalProjectRepository:
         if payload is None:
             raise ProjectOperationError("The local project could not be created.")
         return self._record(payload)
+
+    def update_model_tier_for_user(
+        self, user_id: str, project_id: str, *, model_tier: str
+    ) -> ProjectRecord:
+        selected_tier = resolve_model_tier(model_tier).id
+        record = self.get_for_user(user_id, project_id)
+        if record is None:
+            raise ProjectOperationError("Project not found.")
+        return ProjectRecord(**{**record.__dict__, "model_tier": selected_tier})
 
     def delete_for_user(self, user_id: str, project_id: str) -> bool:
         raise ProjectOperationError("Delete the local project from the workflow dashboard.")
@@ -230,6 +248,7 @@ class HostedProjectRepository:
             discovery_status=discovery_status,
             completed_stages=completed,
             taxonomy_profile=project.taxonomy_profile,
+            model_tier=project.model_tier or DEFAULT_MODEL_TIER,
             current_stage=(
                 current_stage_from_states(states)
                 if states
@@ -261,19 +280,25 @@ class HostedProjectRepository:
             return self._record(project) if project else None
 
     def create_for_user(
-        self, user_id: str, *, slug: str, topic: str, taxonomy_profile: str
+        self, user_id: str, *, slug: str, topic: str, taxonomy_profile: str,
+        model_tier: str = DEFAULT_MODEL_TIER,
     ) -> ProjectRecord:
         try:
             safe_slug = validate_project_id(slug)
         except WorkspaceConfigurationError as exc:
             raise ProjectOperationError(str(exc)) from exc
         user_uuid = uuid.UUID(user_id)
+        try:
+            selected_tier = resolve_model_tier(model_tier).id
+        except ValueError as exc:
+            raise ProjectOperationError(str(exc)) from exc
         with database_session(self.session_factory) as session:
             project = Project(
                 user_id=user_uuid,
                 slug=safe_slug,
                 topic=str(topic or "").strip(),
                 taxonomy_profile=str(taxonomy_profile or "chemistry_general").strip(),
+                model_tier=selected_tier,
                 status="active",
                 current_stage="discovery",
                 stage_states={},
@@ -283,6 +308,22 @@ class HostedProjectRepository:
                 session.flush()
             except IntegrityError as exc:
                 raise ProjectOperationError("A project with this ID already exists.") from exc
+            return self._record(project)
+
+    def update_model_tier_for_user(
+        self, user_id: str, project_id: str, *, model_tier: str
+    ) -> ProjectRecord:
+        try:
+            selected_tier = resolve_model_tier(model_tier).id
+        except ValueError as exc:
+            raise ProjectOperationError(str(exc)) from exc
+        with database_session(self.session_factory) as session:
+            project = self._owned_project(session, user_id, project_id)
+            if project is None:
+                raise ProjectOperationError("Project not found.")
+            project.model_tier = selected_tier
+            project.updated_at = utc_now()
+            session.flush()
             return self._record(project)
 
     def _owned_project(self, session, user_id: str, project_id: str) -> Project | None:

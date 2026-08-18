@@ -51,6 +51,10 @@ from review_writer_core.providers import (  # noqa: E402
     resolve_api_key as _shared_resolve_api_key,
 )
 from review_writer_core.text_safety import make_xml_compatible  # noqa: E402
+from review_writer_core.model_gateway_client import (  # noqa: E402
+    call_model as call_gateway_model,
+    gateway_configured,
+)
 
 
 _NUMERIC_CITATION_RE = re.compile(r"\[\d+(?:\s*[-,]\s*\d+)*\]")
@@ -587,6 +591,12 @@ Return the conclusion as a JSON object with this structure:
 
 def call_llm(prompt: str, api_key: str, base_url: str, model: str, prefer_chat: bool = False) -> str:
     """Call the LLM API and return the generated text."""
+    if gateway_configured():
+        return call_gateway_model(
+            prompt,
+            label="final-conclusion",
+            response_format="json",
+        )
     payload = {
         "model": model,
         "input": [
@@ -965,7 +975,7 @@ def run(args: argparse.Namespace) -> int:
         "chat_completions",
     }
 
-    if not api_key:
+    if not api_key and not gateway_configured():
         out_dir = project / "04_first_draft"
         print("WARN: No API key found. Writing context bundle and prompt for manual use.")
         print("Set OPENAI_API_KEY or pass --api-key to generate conclusion via LLM.")

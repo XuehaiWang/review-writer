@@ -5,22 +5,26 @@ import concurrent.futures
 import json
 import os
 import socket
+from dataclasses import replace
 import tempfile
 import time
 import unittest
 import uuid
+from decimal import Decimal
 from pathlib import Path
 from threading import Event
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from review_writer_api.app import create_app
 from review_writer_api.config import ApiSettings, database_url_from_env
 from review_writer_api.database import (
     Base,
+    MinerUUsageEvent,
     Project,
     User,
     create_session_factory,
@@ -97,17 +101,30 @@ class LibraryV1Tests(unittest.TestCase):
             source_image = extracted_dir / "images" / "scheme.png"
             source_image.parent.mkdir(parents=True, exist_ok=True)
             source_image.write_bytes(b"image-bytes")
+            long_image_relative = "parts/part-001/images/" + "a" * 64 + ".jpg"
+            blocks = [
+                {
+                    "type": "image",
+                    "img_path": "images/scheme.png",
+                    "image_caption": ["Scheme 1"],
+                }
+            ]
+            if filename == "asset.pdf":
+                long_source_image = extracted_dir / Path(
+                    *long_image_relative.split("/")
+                )
+                long_source_image.parent.mkdir(parents=True, exist_ok=True)
+                long_source_image.write_bytes(b"long-image-bytes")
+                blocks.append(
+                    {
+                        "type": "image",
+                        "img_path": long_image_relative,
+                        "image_caption": ["Scheme 2"],
+                    }
+                )
             content_list = extracted_dir / f"{paper_id}_content_list.json"
             content_list.write_text(
-                json.dumps(
-                    [
-                        {
-                            "type": "image",
-                            "img_path": "images/scheme.png",
-                            "image_caption": ["Scheme 1"],
-                        }
-                    ]
-                ),
+                json.dumps(blocks),
                 encoding="utf-8",
             )
             metadata = {
@@ -133,6 +150,8 @@ class LibraryV1Tests(unittest.TestCase):
                 "pdf_path": str(pdf_path),
                 "markdown_path": str(md_path),
                 "mineru_ready": True,
+                "page_count": 3,
+                "provider_request_id": f"batch-{paper_id}",
             }
 
         def search_provider(_context, payload):
@@ -237,6 +256,42 @@ class LibraryV1Tests(unittest.TestCase):
         self.assertEqual("MINERU_PRECISE_PARSE_FAILED", rejected.json()["error"]["code"])
         self.assertEqual(1, admitted.json()["library_count"])
 
+    def test_upload_job_persists_status_and_links_mineru_usage(self) -> None:
+        batch_id = str(uuid.uuid4())
+        with TestClient(self.app) as client:
+            submitted = client.post(
+                "/api/v1/library/upload-jobs",
+                params={"filename": "persistent.pdf", "batch_id": batch_id},
+                content=fake_pdf(b"P"),
+                headers={
+                    "Content-Type": "application/pdf",
+                    "Origin": "http://testserver",
+                    "Idempotency-Key": str(uuid.uuid4()),
+                },
+            )
+            self.assertEqual(202, submitted.status_code, submitted.text)
+            submitted_job = submitted.json()
+            self.assertEqual("persistent.pdf", submitted_job["filename"])
+            self.assertEqual(batch_id, submitted_job["batch_id"])
+            completed = self.wait_job(client, submitted_job["id"])
+            self.assertEqual("succeeded", completed["status"])
+            recent = client.get("/api/v1/library/upload-jobs/recent?limit=10")
+
+        self.assertEqual(200, recent.status_code)
+        self.assertEqual(submitted_job["id"], recent.json()["items"][0]["id"])
+        self.assertEqual("persistent.pdf", recent.json()["items"][0]["filename"])
+        with self.sessions() as session:
+            usage = session.scalar(select(MinerUUsageEvent))
+        self.assertIsNotNone(usage)
+        self.assertEqual(uuid.UUID(submitted_job["id"]), usage.job_id)
+        staging = (
+            self.settings.hosted_workspace_root
+            / self.first.user_id
+            / "review-library"
+            / ".upload-staging"
+        )
+        self.assertEqual([], list(staging.glob("*.pdf.part")))
+
     def test_upload_persists_mineru_content_and_images_before_staging_cleanup(self) -> None:
         with TestClient(self.app) as client:
             admitted = self.upload(client, "figures.pdf", fake_pdf(b"F"))
@@ -263,6 +318,22 @@ class LibraryV1Tests(unittest.TestCase):
         self.assertEqual("duplicate_file", duplicate.json()["status"])
         self.assertEqual(first.json()["paper_id"], duplicate.json()["paper_id"])
         self.assertEqual(1, self.parse_calls)
+
+    def test_generated_paper_id_is_compact_for_windows_artifact_paths(self) -> None:
+        paper_id = self.app.state.library_service._new_paper_id()
+
+        self.assertRegex(paper_id, r"^P[0-9]{19}$")
+        user_root = self.settings.hosted_workspace_root / self.first.user_id
+        representative = (
+            user_root
+            / "review-library"
+            / ".artifacts"
+            / paper_id
+            / str(uuid.uuid4())
+            / "extracted"
+            / f"{uuid.uuid4()}_content_list_v2.json"
+        )
+        self.assertLess(len(str(representative)), 260)
 
     def test_native_upload_runner_receives_secrets_only_in_task_environment(self) -> None:
         captured: dict = {}
@@ -340,67 +411,26 @@ class LibraryV1Tests(unittest.TestCase):
             "https://mineru.example.test", captured["env"]["MINERU_BASE_URL"]
         )
         self.assertTrue(callable(captured["cancel_requested"]))
+        parse_root = Path(
+            captured["command"][captured["command"].index("--review-root") + 1]
+        )
+        expected_parent = (
+            self.settings.hosted_workspace_root / self.first.user_id / ".parse"
+        )
+        self.assertEqual(expected_parent.resolve(), parse_root.parent.resolve())
+        self.assertTrue(parse_root.name.startswith("p-"))
+        self.assertLess(len(str(parse_root)), len(str(expected_parent)) + 16)
+        self.assertFalse(parse_root.exists())
 
-    def test_library_mineru_environment_ignores_unrelated_provider_dns_failure(self) -> None:
+    def test_library_uses_only_server_mineru_credential(self) -> None:
         provider_service = self.app.state.provider_settings_service
-        provider_service.allowed_hosts = ("mineru.net", "blocked.example")
-
-        def public_resolver(host, port, *_args, **_kwargs):
-            return [
-                (
-                    socket.AF_INET,
-                    socket.SOCK_STREAM,
-                    socket.IPPROTO_TCP,
-                    "",
-                    ("93.184.216.34", port),
-                )
-            ]
-
-        with patch(
-            "review_writer_api.credentials.socket.getaddrinfo",
-            side_effect=public_resolver,
-        ):
-            provider_service.save_settings(
-                self.first,
-                "mineru",
-                base_url="",
-                model_name="",
-                wire_api="",
-                api_key="mineru-secret",
-                enabled=True,
-            )
-            provider_service.save_settings(
-                self.first,
-                "text",
-                base_url="https://blocked.example/v1",
-                model_name="text-model",
-                wire_api="responses",
-                api_key="text-secret",
-                enabled=True,
-            )
-
-        def task_resolver(host, port, *_args, **_kwargs):
-            address = "93.184.216.34" if str(host).casefold() == "mineru.net" else "127.0.0.1"
-            return [
-                (
-                    socket.AF_INET,
-                    socket.SOCK_STREAM,
-                    socket.IPPROTO_TCP,
-                    "",
-                    (address, port),
-                )
-            ]
-
-        with patch(
-            "review_writer_api.credentials.socket.getaddrinfo",
-            side_effect=task_resolver,
-        ):
-            try:
-                environment = self.app.state.library_service.runtime_environment(
-                    self.first
-                )
-            except Exception as exc:
-                self.fail(f"An unrelated provider blocked MinerU: {exc}")
+        provider_service.settings = replace(
+            provider_service.settings,
+            mineru_api_token="mineru-secret",
+            text_provider_base_url="https://blocked.example/v1",
+            text_provider_api_key="text-secret",
+        )
+        environment = self.app.state.library_service.runtime_environment(self.first)
 
         self.assertEqual({"MINERU_API_TOKEN": "mineru-secret"}, environment)
 
@@ -450,6 +480,25 @@ class LibraryV1Tests(unittest.TestCase):
         outcomes = [response.json()["status"] for response in responses]
         self.assertEqual(["uploaded", "duplicate_file", "failed"], outcomes)
 
+    def test_mineru_pages_and_duplicate_cache_hit_are_metered_once(self) -> None:
+        self.app.state.library_service.mineru_price_usd_per_page = Decimal("0.01000000")
+        with TestClient(self.app) as client:
+            first = self.upload(client, "metered.pdf", fake_pdf(b"M"))
+            duplicate = self.upload(client, "metered-copy.pdf", fake_pdf(b"M"))
+
+        self.assertEqual(201, first.status_code, first.text)
+        self.assertEqual("duplicate_file", duplicate.json()["status"])
+        self.assertEqual(1, self.parse_calls)
+        with self.sessions() as session:
+            rows = session.scalars(select(MinerUUsageEvent)).all()
+        self.assertEqual(1, len(rows))
+        self.assertEqual("succeeded", rows[0].status)
+        self.assertEqual(3, rows[0].page_count)
+        self.assertEqual(3, rows[0].billable_pages)
+        self.assertEqual(1, rows[0].cache_hit_count)
+        self.assertEqual("batch-P001", rows[0].provider_request_id)
+        self.assertEqual("0.03000000", format(rows[0].provider_cost_usd, "f"))
+
     def test_search_covers_title_author_keyword_and_tag(self) -> None:
         with TestClient(self.app) as client:
             self.upload(client, "copper.pdf", fake_pdf())
@@ -487,6 +536,7 @@ class LibraryV1Tests(unittest.TestCase):
             )
 
     def test_mineru_assets_are_served_by_versioned_user_scoped_route(self) -> None:
+        long_image_relative = "parts/part-001/images/" + "a" * 64 + ".jpg"
         with TestClient(self.app) as client:
             paper = self.upload(client, "asset.pdf", fake_pdf()).json()
             paper_id = paper["paper_id"]
@@ -502,6 +552,10 @@ class LibraryV1Tests(unittest.TestCase):
                 f"/api/v1/library/papers/{paper_id}/asset",
                 params={"path": f"{paper_id}_content_list.json"},
             )
+            long_image = client.get(
+                f"/api/v1/library/papers/{paper_id}/asset",
+                params={"path": long_image_relative},
+            )
             self.current = self.second
             isolated = client.get(
                 f"/api/v1/library/papers/{paper_id}/asset",
@@ -511,6 +565,8 @@ class LibraryV1Tests(unittest.TestCase):
         self.assertEqual(b"image-bytes", asset.content)
         self.assertEqual(404, traversal.status_code, traversal.text)
         self.assertEqual(404, non_image.status_code, non_image.text)
+        self.assertEqual(200, long_image.status_code, long_image.text)
+        self.assertEqual(b"long-image-bytes", long_image.content)
         self.assertEqual(404, isolated.status_code, isolated.text)
 
     def test_mineru_asset_rejects_lexical_extracted_directory_symlink(self) -> None:
@@ -518,14 +574,7 @@ class LibraryV1Tests(unittest.TestCase):
             paper = self.upload(client, "symlink-asset.pdf", fake_pdf()).json()
             paper_id = paper["paper_id"]
             record = self.app.state.library_service.get(self.first, paper_id)
-            extracted = (
-                self.app.state.hosted_workspace_manager.user_root(self.first.user_id)
-                / "review-library"
-                / ".artifacts"
-                / paper_id
-                / record.artifact_ids["mineru"]
-                / "extracted"
-            )
+            extracted = Path(record.metadata["source_paths"]["extracted_dir"])
             original_is_symlink = Path.is_symlink
 
             def reports_extracted_symlink(path: Path) -> bool:

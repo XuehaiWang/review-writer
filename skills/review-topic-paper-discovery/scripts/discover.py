@@ -52,6 +52,10 @@ from review_writer_core.providers import (  # noqa: E402
     normalize_wire_api,
     openai_endpoint,
 )
+from review_writer_core.model_gateway_client import (  # noqa: E402
+    call_json_model as call_gateway_json,
+    gateway_configured,
+)
 
 
 def utc_now() -> str:
@@ -888,7 +892,7 @@ def llm_query_plan(topic: str, user_keywords: list[str]) -> dict[str, Any]:
         or os.environ.get("OPENAI_API_KEY")
         or ""
     ).strip()
-    if not base_url or not api_key:
+    if not gateway_configured() and (not base_url or not api_key):
         raise QueryPlanError("the active text provider is not configured")
     model = str(
         os.environ.get("REVIEW_DISCOVERY_MODEL")
@@ -912,6 +916,8 @@ def llm_query_plan(topic: str, user_keywords: list[str]) -> dict[str, Any]:
         f"TOPIC: {json.dumps(topic, ensure_ascii=False)}\n"
         f"USER KEYWORDS: {json.dumps(user_keywords, ensure_ascii=False)}"
     )
+    if gateway_configured():
+        return call_gateway_json(prompt, label="discovery-query-plan", timeout_seconds=180)
     if wire_api == "chat-completions":
         endpoint = openai_endpoint(base_url, "chat/completions")
         payload = {

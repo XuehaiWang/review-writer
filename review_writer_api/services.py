@@ -25,6 +25,7 @@ class ProjectService:
         slug: str,
         topic: str,
         taxonomy_profile: str,
+        model_tier: str = "terra",
     ) -> ProjectRecord:
         principal.require(Permission.PROJECT_WRITE)
         return self.repository.create_for_user(
@@ -32,6 +33,15 @@ class ProjectService:
             slug=slug,
             topic=topic,
             taxonomy_profile=taxonomy_profile,
+            model_tier=model_tier,
+        )
+
+    def update_project_model_tier(
+        self, principal: Principal, project_id: str, *, model_tier: str
+    ) -> ProjectRecord:
+        principal.require(Permission.PROJECT_WRITE)
+        return self.repository.update_model_tier_for_user(
+            principal.user_id, project_id, model_tier=model_tier
         )
 
     def delete_project(self, principal: Principal, project_id: str) -> bool:

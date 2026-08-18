@@ -153,9 +153,20 @@ def _aware(value: datetime) -> datetime:
 
 
 class AuthService:
-    def __init__(self, session_factory, *, session_days: int = 7):
+    def __init__(
+        self,
+        session_factory,
+        *,
+        session_days: int = 7,
+        admin_emails=(),
+    ):
         self.session_factory = session_factory
         self.session_days = max(1, min(int(session_days), 30))
+        self.admin_emails = frozenset(
+            str(item or "").strip().casefold()
+            for item in admin_emails
+            if str(item or "").strip()
+        )
         self.passwords = PasswordHasher()
         self._dummy_hash = self.passwords.hash("not-a-real-user-password")
 
@@ -203,7 +214,11 @@ class AuthService:
                 email=normalized_email,
                 display_name=normalized_name,
                 password_hash=password_hash,
-                role=Role.USER.value,
+                role=(
+                    Role.ADMIN.value
+                    if normalized_email in self.admin_emails
+                    else Role.USER.value
+                ),
                 status="active",
                 last_login_at=utc_now(),
             )
@@ -223,6 +238,11 @@ class AuthService:
             )
             if user is None or not valid_password or user.status != "active":
                 raise AuthError("邮箱或密码不正确。")
+            # Bootstrap existing administrators from server configuration on
+            # their next successful login. Removing an email never silently
+            # demotes a database administrator.
+            if normalized_email in self.admin_emails and user.role != Role.ADMIN.value:
+                user.role = Role.ADMIN.value
             user.last_login_at = utc_now()
             return self._new_session(database, user)
 

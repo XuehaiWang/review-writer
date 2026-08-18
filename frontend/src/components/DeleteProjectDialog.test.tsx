@@ -11,6 +11,7 @@ const project: Project = {
   owner_user_id: "user-1",
   topic: "Copper-catalyzed reactions",
   taxonomy_profile: "chemistry_general",
+  model_tier: "terra",
   discovery_status: "complete",
   current_stage: "final",
   completed_stages: ["library"],

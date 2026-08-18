@@ -88,6 +88,19 @@ class ScientificRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(OSError, "private"):
             guarded("internal.example", 443)
 
+    def test_connection_resolver_allows_only_the_bound_internal_gateway_port(self) -> None:
+        from review_writer_api.scientific_entrypoint import guarded_getaddrinfo
+
+        loopback_answer = [(2, 1, 6, "", ("127.0.0.1", 8770))]
+        guarded = guarded_getaddrinfo(
+            lambda *_args, **_kwargs: loopback_answer,
+            allow_private_networks=False,
+            allowed_private_endpoint=("127.0.0.1", 8770),
+        )
+        self.assertEqual(loopback_answer, guarded("127.0.0.1", 8770))
+        with self.assertRaisesRegex(OSError, "private"):
+            guarded("127.0.0.1", 9000)
+
     def test_runner_enables_connection_time_network_guard_by_default(self) -> None:
         _output, _cancelled, _failed, runner = runner_api()
         guarded_runner = runner(max_attempts=1, retry_delay_seconds=0)
@@ -123,6 +136,30 @@ class ScientificRunnerTests(unittest.TestCase):
         self.assertEqual(
             "198.18.0.0/15,fdfe:dcba:9876::/64",
             child_environment["REVIEW_WRITER_TRUSTED_PROXY_NETWORKS"],
+        )
+
+    def test_runner_binds_private_gateway_exception_to_scoped_token_endpoint(self) -> None:
+        _output, _cancelled, _failed, runner = runner_api()
+        guarded_runner = runner(max_attempts=1, retry_delay_seconds=0)
+        with patch("review_writer_api.scientific_runner.subprocess.Popen") as popen:
+            popen.side_effect = OSError("stop after environment capture")
+            with self.assertRaises(WorkflowValidationError):
+                guarded_runner.run(
+                    [sys.executable, "-c", "pass"],
+                    cwd=self.root,
+                    staging_directory=self.root,
+                    expected_outputs=("done.txt",),
+                    env={
+                        "REVIEW_WRITER_MODEL_GATEWAY_URL": (
+                            "http://127.0.0.1:8770/api/internal/v1/model-responses"
+                        )
+                    },
+                    secret_env={"REVIEW_WRITER_TASK_TOKEN": "scoped-token"},
+                )
+        child_environment = popen.call_args.kwargs["env"]
+        self.assertEqual(
+            "127.0.0.1:8770",
+            child_environment["REVIEW_WRITER_INTERNAL_GATEWAY_ENDPOINT"],
         )
 
     def test_runner_can_import_application_modules_outside_repository_cwd(self) -> None:

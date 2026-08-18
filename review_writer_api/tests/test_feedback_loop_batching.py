@@ -51,6 +51,36 @@ def batch_result(ids: list[str], d1: float, d2: float) -> dict[str, object]:
 
 
 class FeedbackLoopBatchingTests(unittest.TestCase):
+    def test_internal_gateway_uses_task_token_without_provider_key(self) -> None:
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def read() -> bytes:
+                return json.dumps({"output_text": '{"score": 95}'}).encode("utf-8")
+
+        environment = {
+            "REVIEW_WRITER_MODEL_GATEWAY_URL": "http://127.0.0.1:8770/api/internal/v1/model-responses",
+            "REVIEW_WRITER_TASK_TOKEN": "scoped-task-token",
+            "OPENAI_API_KEY": "",
+            "REVIEW_WRITING_API_KEY": "",
+        }
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            feedback_loop.urllib.request, "urlopen", return_value=Response()
+        ) as urlopen:
+            result = feedback_loop.call_json_model("score this", label="evaluation")
+
+        self.assertEqual(95, result["score"])
+        request = urlopen.call_args.args[0]
+        self.assertEqual("Bearer scoped-task-token", request.get_header("Authorization"))
+        sent = json.loads(request.data.decode("utf-8"))
+        self.assertEqual("evaluation", sent["stage"])
+        self.assertTrue(sent["request_key"].startswith("evaluation-"))
+
     def test_paragraph_batches_bound_each_provider_request(self) -> None:
         paragraphs = [paragraph(f"p{index}") for index in range(17)]
 

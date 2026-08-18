@@ -1473,6 +1473,31 @@ class WorkflowRepository:
             ).all()
             return [self._job_record(row) for row in rows]
 
+    def list_library_jobs(
+        self,
+        user_id: str,
+        *,
+        job_type: str | None = None,
+        limit: int = 100,
+    ) -> list[JobRecord]:
+        """Return recent persisted Library jobs for one authenticated user."""
+
+        user_uuid = self._uuid(user_id, not_found_message="Job not found.")
+        with database_session(self.session_factory) as session:
+            statement = select(WorkflowJob).where(
+                WorkflowJob.user_id == user_uuid,
+                WorkflowJob.project_id.is_(None),
+                WorkflowJob.scope == "library",
+            )
+            if job_type:
+                statement = statement.where(WorkflowJob.job_type == str(job_type))
+            rows = session.scalars(
+                statement.order_by(WorkflowJob.created_at.desc()).limit(
+                    max(1, min(int(limit), 500))
+                )
+            ).all()
+            return [self._job_record(row) for row in rows]
+
     def get_current_job(
         self,
         user_id: str,

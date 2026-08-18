@@ -24,10 +24,12 @@ from .auth import (
 from .artifact_service import ArtifactService
 from .config import ApiSettings
 from .container import ApplicationContainer
-from .credentials import CredentialCipher, ProviderSettingsError, ProviderSettingsService
+from .credentials import ProviderSettingsError
 from .database import create_session_factory, utc_now
 from .errors import ProjectArchiveFailed, WorkflowError
 from .job_service import JobService
+from .model_catalog import DEFAULT_MODEL_TIER, MODEL_TIERS
+from .model_gateway import ModelGatewayError, ModelGatewayService
 from .native_handlers import NativeWorkflowHandlers
 from .domain_services.library import LibraryService
 from .domain_services.discovery import DiscoveryService
@@ -43,19 +45,32 @@ from .repositories import (
     ProjectRepository,
 )
 from .schemas import (
+    AdminProviderAuditListResponse,
+    AdminProviderAuditResponse,
+    AdminProviderSettingsUpdateRequest,
+    AdminProviderTestResponse,
     BrowserAuthConfigResponse,
     HealthResponse,
     LoginRequest,
+    ModelCatalogResponse,
+    ModelGatewayRequest,
+    ModelGatewayResponse,
+    ImageGatewayRequest,
+    ImageGatewayResponse,
+    ModelTierResponse,
     PrincipalResponse,
     ProviderSettingsListResponse,
     ProviderSettingsResponse,
-    ProviderSettingsUpdateRequest,
     ProjectCreateRequest,
     ProjectListResponse,
+    ProjectModelTierUpdateRequest,
     ProjectResponse,
     RegisterRequest,
+    UsageSummaryResponse,
+    UsageTimelineResponse,
 )
-from .security import AuthorizationError, Principal, local_owner_principal
+from .server_providers import ServerProviderSettingsService
+from .security import AuthorizationError, Permission, Principal, local_owner_principal
 from .services import ProjectService
 from .routers.files import build_file_router
 from .routers.jobs import build_job_router
@@ -99,18 +114,16 @@ def create_app(
         )
     project_service = ProjectService(repository)
     provider_settings_service = (
-        ProviderSettingsService(
-            session_factory,
-            CredentialCipher(resolved.credential_encryption_key),
-            allow_private_urls=resolved.allow_private_provider_urls,
-            allowed_hosts=resolved.allowed_provider_hosts,
-            trusted_proxy_networks=resolved.trusted_proxy_networks,
-        )
+        ServerProviderSettingsService(resolved, session_factory)
         if resolved.deployment_mode == "hosted"
         else None
     )
     auth_service = (
-        AuthService(session_factory, session_days=resolved.session_days)
+        AuthService(
+            session_factory,
+            session_days=resolved.session_days,
+            admin_emails=resolved.admin_emails,
+        )
         if resolved.deployment_mode == "hosted"
         else None
     )
@@ -166,6 +179,8 @@ def create_app(
                 else None
             ),
             scientific_runner=scientific_runner,
+            mineru_price_usd_per_page=resolved.mineru_price_usd_per_page,
+            mineru_max_concurrency=resolved.mineru_max_concurrency,
         )
         if session_factory is not None and hosted_workspace_manager is not None
         else None
@@ -175,12 +190,22 @@ def create_app(
         if workflow_repository is not None and artifact_service is not None
         else None
     )
+    model_gateway = (
+        ModelGatewayService(
+            session_factory,
+            resolved,
+            provider_settings=provider_settings_service,
+        )
+        if session_factory is not None and resolved.deployment_mode == "hosted"
+        else None
+    )
     planning_service = (
         PlanningService(
             workflow_repository,
             artifact_service,
             scientific_runner=scientific_runner,
             provider_settings=provider_settings_service,
+            model_gateway=model_gateway,
         )
         if workflow_repository is not None and artifact_service is not None
         else None
@@ -212,6 +237,7 @@ def create_app(
             scientific_runner,
             hosted_workspace_manager,
             provider_settings_service,
+            model_gateway,
         ).mapping()
         if scientific_runner is not None and hosted_workspace_manager is not None
         else {}
@@ -271,6 +297,8 @@ def create_app(
                     "application_heartbeat",
                     {"status": "stopped", "observed_at": utc_now().isoformat()},
                 )
+            if model_gateway is not None:
+                await model_gateway.close()
             if engine is not None:
                 engine.dispose()
 
@@ -286,6 +314,7 @@ def create_app(
     app.state.settings = resolved
     app.state.project_service = project_service
     app.state.provider_settings_service = provider_settings_service
+    app.state.model_gateway = model_gateway
     app.state.auth_service = auth_service
     app.state.auth_throttle = auth_throttle
     app.state.auth_ip_throttle = auth_ip_throttle
@@ -364,6 +393,7 @@ def create_app(
         response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
         if react_spa_available and request.url.path in {
             "/",
+            "/admin",
             "/settings",
             "/library",
             "/discovery",
@@ -398,7 +428,12 @@ def create_app(
         if not path.startswith("/api/"):
             return False
         allowed_exact = {"/api/v1/health", "/api/v1/me", "/api/openapi.json"}
-        allowed_prefixes = ("/api/v1/auth", "/api/v1/provider-settings", "/api/docs")
+        allowed_prefixes = (
+            "/api/v1/auth",
+            "/api/v1/provider-settings",
+            "/api/v1/admin",
+            "/api/docs",
+        )
         return path not in allowed_exact and not any(
             path == prefix or path.startswith(f"{prefix}/") for prefix in allowed_prefixes
         )
@@ -454,6 +489,28 @@ def create_app(
             status="ok",
             api_version=API_VERSION,
             deployment_mode=resolved.deployment_mode,
+        )
+
+    @app.get("/api/v1/model-catalog", response_model=ModelCatalogResponse, tags=["models"])
+    def model_catalog(_principal: Principal = Depends(current_principal)) -> ModelCatalogResponse:
+        return ModelCatalogResponse(
+            default_tier=DEFAULT_MODEL_TIER,
+            items=[
+                ModelTierResponse(
+                    id=tier.id,
+                    model=tier.model,
+                    label_zh=tier.label_zh,
+                    label_en=tier.label_en,
+                    description_zh=tier.description_zh,
+                    description_en=tier.description_en,
+                    input_usd_per_million=format(tier.input_usd_per_million, "f"),
+                    cached_input_usd_per_million=format(
+                        tier.cached_input_usd_per_million, "f"
+                    ),
+                    output_usd_per_million=format(tier.output_usd_per_million, "f"),
+                )
+                for tier in MODEL_TIERS
+            ],
         )
 
     @app.get(
@@ -590,6 +647,22 @@ def create_app(
             slug=payload.slug,
             topic=payload.topic,
             taxonomy_profile=payload.taxonomy_profile,
+            model_tier=payload.model_tier,
+        )
+        return ProjectResponse.model_validate(record)
+
+    @app.patch(
+        "/api/v1/projects/{project_id}/model-tier",
+        response_model=ProjectResponse,
+        tags=["projects"],
+    )
+    def update_project_model_tier(
+        project_id: str,
+        payload: ProjectModelTierUpdateRequest,
+        principal: Principal = Depends(current_principal),
+    ) -> ProjectResponse:
+        record = project_service.update_project_model_tier(
+            principal, project_id, model_tier=payload.model_tier
         )
         return ProjectResponse.model_validate(record)
 
@@ -639,14 +712,31 @@ def create_app(
                 items=[ProviderSettingsResponse.model_validate(record, from_attributes=True) for record in records]
             )
 
-        @app.put(
-            "/api/v1/provider-settings/{provider_kind}",
-            response_model=ProviderSettingsResponse,
-            tags=["provider-settings"],
+        @app.get(
+            "/api/v1/admin/provider-settings",
+            response_model=ProviderSettingsListResponse,
+            tags=["admin"],
         )
-        def save_provider_settings(
+        def admin_provider_settings(
+            principal: Principal = Depends(current_principal),
+        ) -> ProviderSettingsListResponse:
+            principal.require(Permission.PROVIDER_MANAGE)
+            records = provider_settings_service.list_settings(principal)
+            return ProviderSettingsListResponse(
+                items=[
+                    ProviderSettingsResponse.model_validate(record, from_attributes=True)
+                    for record in records
+                ]
+            )
+
+        @app.put(
+            "/api/v1/admin/provider-settings/{provider_kind}",
+            response_model=ProviderSettingsResponse,
+            tags=["admin"],
+        )
+        def update_admin_provider_settings(
             provider_kind: str,
-            payload: ProviderSettingsUpdateRequest,
+            payload: AdminProviderSettingsUpdateRequest,
             principal: Principal = Depends(current_principal),
         ) -> ProviderSettingsResponse:
             record = provider_settings_service.save_settings(
@@ -661,15 +751,149 @@ def create_app(
             return ProviderSettingsResponse.model_validate(record, from_attributes=True)
 
         @app.delete(
-            "/api/v1/provider-settings/{provider_kind}",
-            status_code=status.HTTP_204_NO_CONTENT,
-            tags=["provider-settings"],
+            "/api/v1/admin/provider-settings/{provider_kind}",
+            response_model=ProviderSettingsResponse,
+            tags=["admin"],
         )
-        def delete_provider_settings(
+        def reset_admin_provider_settings(
             provider_kind: str,
             principal: Principal = Depends(current_principal),
-        ) -> None:
-            provider_settings_service.delete_settings(principal, provider_kind)
+        ) -> ProviderSettingsResponse:
+            record = provider_settings_service.reset_settings(principal, provider_kind)
+            return ProviderSettingsResponse.model_validate(record, from_attributes=True)
+
+        @app.post(
+            "/api/v1/admin/provider-settings/{provider_kind}/test",
+            response_model=AdminProviderTestResponse,
+            tags=["admin"],
+        )
+        async def test_admin_provider_settings(
+            provider_kind: str,
+            principal: Principal = Depends(current_principal),
+        ) -> AdminProviderTestResponse:
+            result = await provider_settings_service.test_connection(principal, provider_kind)
+            return AdminProviderTestResponse.model_validate(result, from_attributes=True)
+
+        @app.get(
+            "/api/v1/admin/provider-audit",
+            response_model=AdminProviderAuditListResponse,
+            tags=["admin"],
+        )
+        def admin_provider_audit(
+            limit: int = 50,
+            principal: Principal = Depends(current_principal),
+        ) -> AdminProviderAuditListResponse:
+            records = provider_settings_service.audit_log(principal, limit=limit)
+            return AdminProviderAuditListResponse(
+                items=[
+                    AdminProviderAuditResponse.model_validate(record, from_attributes=True)
+                    for record in records
+                ]
+            )
+
+    if model_gateway is not None:
+
+        @app.post(
+            "/api/internal/v1/model-responses",
+            response_model=ModelGatewayResponse,
+            include_in_schema=False,
+        )
+        async def internal_model_response(
+            payload: ModelGatewayRequest,
+            request: Request,
+        ) -> ModelGatewayResponse:
+            authorization = str(request.headers.get("Authorization") or "")
+            token = (
+                authorization[7:].strip()
+                if authorization.casefold().startswith("bearer ")
+                else ""
+            )
+            try:
+                result = await model_gateway.complete(
+                    token,
+                    request_key=payload.request_key,
+                    stage=payload.stage,
+                    prompt=payload.prompt,
+                    response_format=payload.response_format,
+                )
+            except ModelGatewayError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+            return ModelGatewayResponse.model_validate(result)
+
+        @app.post(
+            "/api/internal/v1/image-generations",
+            response_model=ImageGatewayResponse,
+            include_in_schema=False,
+        )
+        async def internal_image_generation(
+            payload: ImageGatewayRequest,
+            request: Request,
+        ) -> ImageGatewayResponse:
+            authorization = str(request.headers.get("Authorization") or "")
+            token = (
+                authorization[7:].strip()
+                if authorization.casefold().startswith("bearer ")
+                else ""
+            )
+            try:
+                result = await model_gateway.complete_image(
+                    token,
+                    request_key=payload.request_key,
+                    stage=payload.stage,
+                    operation=payload.operation,
+                    prompt=payload.prompt,
+                    images=[item.model_dump() for item in payload.images],
+                    quality=payload.quality,
+                    background=payload.background,
+                    output_format=payload.output_format,
+                    size=payload.size,
+                )
+            except ModelGatewayError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+            return ImageGatewayResponse.model_validate(result)
+
+        @app.get(
+            "/api/v1/usage/summary",
+            response_model=UsageSummaryResponse,
+            tags=["usage"],
+        )
+        def usage_summary(
+            project_id: str = "",
+            principal: Principal = Depends(current_principal),
+        ) -> UsageSummaryResponse:
+            resolved_project_id = ""
+            if project_id:
+                project_record = project_service.get_project(principal, project_id)
+                if project_record is None:
+                    raise HTTPException(status_code=404, detail="Project not found.")
+                resolved_project_id = project_record.project_id
+            return UsageSummaryResponse.model_validate(
+                model_gateway.usage_summary(principal.user_id, resolved_project_id or None)
+            )
+
+        @app.get(
+            "/api/v1/usage/timeline",
+            response_model=UsageTimelineResponse,
+            tags=["usage"],
+        )
+        def usage_timeline(
+            project_id: str = "",
+            days: int = 30,
+            principal: Principal = Depends(current_principal),
+        ) -> UsageTimelineResponse:
+            resolved_project_id = ""
+            if project_id:
+                project_record = project_service.get_project(principal, project_id)
+                if project_record is None:
+                    raise HTTPException(status_code=404, detail="Project not found.")
+                resolved_project_id = project_record.project_id
+            return UsageTimelineResponse.model_validate(
+                model_gateway.usage_timeline(
+                    principal.user_id,
+                    resolved_project_id or None,
+                    days=days,
+                )
+            )
 
     def portal_response() -> FileResponse:
         path = react_spa_index if react_spa_available else web_root / "index.html"
@@ -714,6 +938,15 @@ def create_app(
         if react_spa_available:
             return portal_response()
         return RedirectResponse(url="/#settings", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+    @app.get("/admin", include_in_schema=False)
+    def admin_page(
+        principal: Principal = Depends(current_principal),
+    ) -> Response:
+        principal.require(Permission.PROVIDER_MANAGE)
+        if react_spa_available:
+            return portal_response()
+        return RedirectResponse(url="/settings", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
     @app.get("/library", include_in_schema=False)
     @app.get("/discovery", include_in_schema=False)

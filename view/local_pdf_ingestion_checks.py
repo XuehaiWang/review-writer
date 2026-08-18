@@ -80,7 +80,12 @@ def check_mineru_inherits_task_scoped_environment() -> None:
     with tempfile.TemporaryDirectory() as raw:
         review_root = Path(raw)
         pdf_path = review_root / "paper.pdf"
-        pdf_path.write_bytes(b"%PDF-1.7\n%%EOF")
+        from pypdf import PdfWriter
+
+        writer = PdfWriter()
+        writer.add_blank_page(width=612, height=792)
+        with pdf_path.open("wb") as stream:
+            writer.write(stream)
         (review_root / ".env").write_text(
             "MINERU_API_TOKEN=workspace-file-token\n",
             encoding="utf-8",

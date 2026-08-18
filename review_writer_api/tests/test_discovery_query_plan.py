@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -133,6 +134,35 @@ class DiscoveryQueryPlanTests(unittest.TestCase):
             )
         self.assertEqual("dashboard_deterministic", plan["planner"])
         self.assertIn("TimeoutError", plan["planner_notice"])
+
+    def test_llm_query_plan_uses_internal_gateway_without_provider_key(self) -> None:
+        gateway_plan = {
+            "schema_version": 1,
+            "topic": "ignored",
+            "resolved_concepts": [],
+            "unresolved_concepts": [],
+            "keywords": [],
+            "filters": {},
+            "group_by": [],
+        }
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "REVIEW_WRITER_MODEL_GATEWAY_URL": "http://127.0.0.1/gateway",
+                    "REVIEW_WRITER_TASK_TOKEN": "task-token",
+                    "REVIEW_WRITING_API_KEY": "",
+                    "OPENAI_API_KEY": "",
+                },
+                clear=False,
+            ),
+            patch.object(discover, "call_gateway_json", return_value=gateway_plan) as gateway,
+        ):
+            result = discover.llm_query_plan("electrochemical catalysis", [])
+
+        self.assertEqual(gateway_plan, result)
+        self.assertEqual("discovery-query-plan", gateway.call_args.kwargs["label"])
+        self.assertIn("electrochemical catalysis", gateway.call_args.args[0])
 
     def test_unclassified_keyword_searches_across_structured_fields(self) -> None:
         rules = {

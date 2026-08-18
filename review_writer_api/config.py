@@ -7,6 +7,7 @@ import ipaddress
 import os
 import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
@@ -38,6 +39,23 @@ class ApiSettings:
     allow_private_provider_urls: bool = False
     allowed_provider_hosts: tuple[str, ...] = ()
     trusted_proxy_networks: tuple[str, ...] = ()
+    admin_emails: tuple[str, ...] = ()
+    text_provider_api_key: str = ""
+    text_provider_base_url: str = "https://api.openai.com/v1"
+    text_provider_wire_api: str = "responses"
+    image_provider_api_key: str = ""
+    image_provider_base_url: str = "https://api.openai.com/v1"
+    image_provider_model: str = ""
+    image_provider_wire_api: str = "images"
+    image_provider_price_usd_per_image: Decimal = Decimal("0")
+    mineru_api_token: str = ""
+    mineru_price_usd_per_page: Decimal = Decimal("0")
+    mineru_max_concurrency: int = 2
+    internal_gateway_url: str = ""
+    model_gateway_max_concurrency: int = 2
+    model_gateway_user_concurrency: int = 1
+    image_gateway_max_concurrency: int = 1
+    image_gateway_user_concurrency: int = 1
 
     @classmethod
     def from_env(cls, review_root: str | Path | None = None) -> "ApiSettings":
@@ -81,6 +99,75 @@ class ApiSettings:
         allowed_provider_hosts = _environment_hosts("REVIEW_WRITER_ALLOWED_PROVIDER_HOSTS")
         trusted_proxy_networks = _environment_networks(
             "REVIEW_WRITER_TRUSTED_PROXY_NETWORKS"
+        )
+        admin_emails = _environment_emails("REVIEW_WRITER_ADMIN_EMAILS")
+        text_provider_api_key = str(
+            os.environ.get("REVIEW_WRITER_OPENAI_API_KEY")
+            or os.environ.get("REVIEW_WRITING_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or ""
+        ).strip()
+        text_provider_base_url = str(
+            os.environ.get("REVIEW_WRITER_OPENAI_BASE_URL")
+            or os.environ.get("REVIEW_WRITING_BASE_URL")
+            or os.environ.get("OPENAI_BASE_URL")
+            or "https://api.openai.com/v1"
+        ).strip().rstrip("/")
+        text_provider_wire_api = str(
+            os.environ.get("REVIEW_WRITER_OPENAI_WIRE_API")
+            or os.environ.get("REVIEW_WRITING_WIRE_API")
+            or "responses"
+        ).strip().casefold().replace("_", "-")
+        image_provider_api_key = str(
+            os.environ.get("REVIEW_WRITER_IMAGE_API_KEY")
+            or os.environ.get("IMAGE_OPENAI_API_KEY")
+            or text_provider_api_key
+            or ""
+        ).strip()
+        image_provider_base_url = str(
+            os.environ.get("REVIEW_WRITER_IMAGE_BASE_URL")
+            or os.environ.get("IMAGE_OPENAI_BASE_URL")
+            or text_provider_base_url
+        ).strip().rstrip("/")
+        image_provider_model = str(
+            os.environ.get("REVIEW_WRITER_IMAGE_MODEL")
+            or os.environ.get("IMAGE_OPENAI_MODEL")
+            or ""
+        ).strip()
+        image_provider_wire_api = str(
+            os.environ.get("REVIEW_WRITER_IMAGE_WIRE_API")
+            or os.environ.get("IMAGE_OPENAI_WIRE_API")
+            or "images"
+        ).strip().casefold().replace("_", "-")
+        image_provider_price_usd_per_image = _environment_decimal(
+            "REVIEW_WRITER_IMAGE_USD_PER_IMAGE", "0"
+        )
+        mineru_api_token = str(
+            os.environ.get("REVIEW_WRITER_MINERU_API_TOKEN")
+            or os.environ.get("MINERU_API_TOKEN")
+            or ""
+        ).strip()
+        mineru_price_usd_per_page = _environment_decimal(
+            "REVIEW_WRITER_MINERU_USD_PER_PAGE", "0"
+        )
+        mineru_max_concurrency = _environment_integer(
+            "REVIEW_WRITER_MINERU_CONCURRENCY", 2, minimum=1, maximum=8
+        )
+        internal_gateway_url = str(
+            os.environ.get("REVIEW_WRITER_INTERNAL_GATEWAY_URL")
+            or f"{public_origin}/api/internal/v1/model-responses"
+        ).strip()
+        model_gateway_max_concurrency = _environment_integer(
+            "REVIEW_WRITER_MODEL_GATEWAY_CONCURRENCY", 2, minimum=1, maximum=32
+        )
+        model_gateway_user_concurrency = _environment_integer(
+            "REVIEW_WRITER_MODEL_GATEWAY_USER_CONCURRENCY", 1, minimum=1, maximum=8
+        )
+        image_gateway_max_concurrency = _environment_integer(
+            "REVIEW_WRITER_IMAGE_GATEWAY_CONCURRENCY", 1, minimum=1, maximum=8
+        )
+        image_gateway_user_concurrency = _environment_integer(
+            "REVIEW_WRITER_IMAGE_GATEWAY_USER_CONCURRENCY", 1, minimum=1, maximum=4
         )
         raw_workspace_root = str(
             os.environ.get("REVIEW_WRITER_HOSTED_WORKSPACE_ROOT") or ""
@@ -135,7 +222,35 @@ class ApiSettings:
             allow_private_provider_urls=allow_private_provider_urls,
             allowed_provider_hosts=allowed_provider_hosts,
             trusted_proxy_networks=trusted_proxy_networks,
+            admin_emails=admin_emails,
+            text_provider_api_key=text_provider_api_key,
+            text_provider_base_url=text_provider_base_url,
+            text_provider_wire_api=text_provider_wire_api,
+            image_provider_api_key=image_provider_api_key,
+            image_provider_base_url=image_provider_base_url,
+            image_provider_model=image_provider_model,
+            image_provider_wire_api=image_provider_wire_api,
+            image_provider_price_usd_per_image=image_provider_price_usd_per_image,
+            mineru_api_token=mineru_api_token,
+            mineru_price_usd_per_page=mineru_price_usd_per_page,
+            mineru_max_concurrency=mineru_max_concurrency,
+            internal_gateway_url=internal_gateway_url,
+            model_gateway_max_concurrency=model_gateway_max_concurrency,
+            model_gateway_user_concurrency=model_gateway_user_concurrency,
+            image_gateway_max_concurrency=image_gateway_max_concurrency,
+            image_gateway_user_concurrency=image_gateway_user_concurrency,
         )
+
+
+def _environment_decimal(name: str, default: str) -> Decimal:
+    raw = str(os.environ.get(name) or default).strip()
+    try:
+        value = Decimal(raw)
+    except InvalidOperation as exc:
+        raise ValueError(f"{name} must be a decimal number.") from exc
+    if value < 0:
+        raise ValueError(f"{name} must not be negative.")
+    return value.quantize(Decimal("0.00000001"))
 
 
 def database_url_from_env() -> str:
@@ -210,6 +325,23 @@ def _environment_hosts(name: str) -> tuple[str, ...]:
         if not re.fullmatch(r"[a-z0-9.-]+", host) or ".." in host:
             raise ValueError(f"{name} must contain comma-separated DNS hostnames.")
         values.append(host)
+    return tuple(dict.fromkeys(values))
+
+
+def _environment_emails(name: str) -> tuple[str, ...]:
+    values: list[str] = []
+    for raw in str(os.environ.get(name) or "").split(","):
+        value = raw.strip().casefold()
+        if not value:
+            continue
+        if (
+            len(value) > 320
+            or value.count("@") != 1
+            or value.startswith("@")
+            or value.endswith("@")
+        ):
+            raise ValueError(f"{name} must contain comma-separated email addresses.")
+        values.append(value)
     return tuple(dict.fromkeys(values))
 
 

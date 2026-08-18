@@ -8,7 +8,7 @@ import shutil
 import threading
 import uuid
 from copy import deepcopy
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from PIL import UnidentifiedImageError
@@ -28,6 +28,7 @@ from review_writer_api.errors import (
     WorkflowValidationError,
 )
 from review_writer_api.figure_rules import image_size
+from review_writer_api.mineru_artifacts import mineru_storage_paths
 from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
 from review_writer_api.workflow_repository import ArtifactRecord, JobRecord, WorkflowRepository
@@ -462,22 +463,16 @@ class SectionsService:
                     artifact = registered_mineru.get(artifact_id) if artifact_id else None
                     if artifact is None or artifact.paper_id != paper_id:
                         return None
-                    relative = PurePosixPath(str(artifact.relative_path or ""))
-                    if relative.is_absolute() or any(
-                        part in {"", ".", ".."} for part in relative.parts
-                    ):
+                    try:
+                        lexical_content, version_root, lexical_root = (
+                            mineru_storage_paths(
+                                user_root, paper_id, artifact.relative_path
+                            )
+                        )
+                    except ValueError as exc:
                         raise WorkflowValidationError(
                             "A paper's registered MinerU artifact path is not trusted."
-                        )
-                    lexical_content = user_root.joinpath(*relative.parts)
-                    version_root = (
-                        user_root
-                        / "review-library"
-                        / ".artifacts"
-                        / paper_id
-                        / str(artifact.id)
-                    )
-                    lexical_root = version_root / "extracted"
+                        ) from exc
                     try:
                         lexical_content.relative_to(lexical_root)
                     except ValueError as exc:
