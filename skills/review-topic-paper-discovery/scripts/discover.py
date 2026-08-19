@@ -56,6 +56,16 @@ from review_writer_core.model_gateway_client import (  # noqa: E402
     call_json_model as call_gateway_json,
     gateway_configured,
 )
+from review_writer_core.metadata_tags import (  # noqa: E402
+    structured_tags_are_verified,
+    verified_structured_tags,
+)
+from review_writer_core.paper_sources import (  # noqa: E402
+    DEFAULT_SEARCH_LIMITS,
+    PaperSearchRequest,
+    parse_source_names,
+    search_paper_sources,
+)
 
 
 def utc_now() -> str:
@@ -176,6 +186,9 @@ GENERIC_INSTRUCTION_KEYWORDS = {
     "please",
     "review",
     "generate",
+    "categorized",
+    "classified",
+    "grouped",
     "organized",
     "developed",
     "etc",
@@ -184,6 +197,8 @@ GENERIC_INSTRUCTION_KEYWORDS = {
     "reactions",
     "catalyst",
     "catalysts",
+    "method",
+    "methods",
     "the",
     "to",
     "topic",
@@ -246,10 +261,19 @@ def validate_query_plan(plan: dict[str, Any], topic: str) -> dict[str, Any]:
         if not isinstance(concept, dict):
             raise QueryPlanError(f"resolved_concepts[{index}] must be an object")
         normalized_concept = dict(concept)
-        for field in ("surface", "expanded_name", "reason"):
+        # Some providers use the semantically equivalent ``normalized`` key.
+        # Accept it at this boundary, then persist only the canonical schema.
+        expanded_name = concept.get("expanded_name")
+        if expanded_name is None:
+            expanded_name = concept.get("normalized")
+        for field in ("surface", "reason"):
             normalized_concept[field] = _normalize_plan_text(
                 concept.get(field), f"resolved_concepts[{index}].{field}"
             )
+        normalized_concept["expanded_name"] = _normalize_plan_text(
+            expanded_name, f"resolved_concepts[{index}].expanded_name"
+        )
+        normalized_concept.pop("normalized", None)
         confidence = concept.get("confidence")
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
             raise QueryPlanError(
@@ -339,7 +363,18 @@ def validate_query_plan(plan: dict[str, Any], topic: str) -> dict[str, Any]:
         raise QueryPlanError("filters must be an object")
     normalized_filters = dict(filters)
     for field in ("year_from", "year_to"):
-        if field in normalized_filters and type(normalized_filters[field]) is not int:
+        if field not in normalized_filters:
+            continue
+        value = normalized_filters[field]
+        # LLMs commonly represent an optional JSON field as null (or, less
+        # often, an empty string). Both mean that no year bound was requested,
+        # so normalize them to the same shape as an omitted field. Keep the
+        # boundary strict for every non-empty value; in particular, do not
+        # silently accept arbitrary strings as years.
+        if value is None or (isinstance(value, str) and not value.strip()):
+            normalized_filters.pop(field)
+            continue
+        if type(value) is not int:
             raise QueryPlanError(f"filters.{field} must be an integer")
     year_from = normalized_filters.get("year_from")
     year_to = normalized_filters.get("year_to")
@@ -363,6 +398,9 @@ def validate_query_plan(plan: dict[str, Any], topic: str) -> dict[str, Any]:
             raise QueryPlanError(f"group_by[{index}] {group!r} is not supported")
         if group not in normalized_groups:
             normalized_groups.append(group)
+    for explicit_group in parse_topic_intent(requested_topic)["group_by"]:
+        if explicit_group not in normalized_groups:
+            normalized_groups.append(explicit_group)
 
     if not normalized_keywords:
         if normalized_unresolved:
@@ -508,21 +546,58 @@ def parse_topic_intent(topic: str, current_year: int | None = None) -> dict[str,
     if chinese:
         count = int(chinese.group(1))
         filters = {"year_from": current_year - count + 1, "year_to": current_year}
-    catalyst_grouping = bool(
-        re.search(
-            r"(?<![A-Za-z0-9])(?:organized|grouped)\s+by\s+"
-            r"(?:types?\s+of\s+)?catalysts?(?![A-Za-z0-9])",
-            topic,
-            re.I,
-        )
-        or re.search(r"(?:按照|按)\s*催化剂(?:种类|类型)", topic)
+    group_by: list[str] = []
+    english_group_labels = {
+        "substrate": "substrate",
+        "substrates": "substrate",
+        "product": "product",
+        "products": "product",
+        "catalyst": "catalyst_or_method",
+        "catalysts": "catalyst_or_method",
+        "method": "catalyst_or_method",
+        "methods": "catalyst_or_method",
+        "reaction type": "reaction_type",
+        "reaction types": "reaction_type",
+        "ligand": "ligand_or_chiral_source",
+        "ligands": "ligand_or_chiral_source",
+        "chiral source": "ligand_or_chiral_source",
+        "chiral sources": "ligand_or_chiral_source",
+        "leaving group": "leaving_group",
+        "leaving groups": "leaving_group",
+        "document type": "document_scope",
+        "document types": "document_scope",
+        "document scope": "document_scope",
+    }
+    for match in re.finditer(
+        r"(?<![A-Za-z0-9])(?:categorized|classified|grouped|organized)\s+by\s+"
+        r"(?:the\s+)?(?:types?\s+of\s+)?"
+        r"(substrates?|products?|catalysts?|methods?|reaction\s+types?|"
+        r"ligands?|chiral\s+sources?|leaving\s+groups?|document\s+types?|"
+        r"document\s+scope)(?![A-Za-z0-9])",
+        topic,
+        re.I,
+    ):
+        category = english_group_labels.get(re.sub(r"\s+", " ", match.group(1).casefold()))
+        if category and category not in group_by:
+            group_by.append(category)
+    chinese_group_patterns = (
+        (r"(?:按照|按)\s*底物(?:种类|类型)?", "substrate"),
+        (r"(?:按照|按)\s*产物(?:种类|类型)?", "product"),
+        (r"(?:按照|按)\s*(?:催化剂|方法)(?:种类|类型)?", "catalyst_or_method"),
+        (r"(?:按照|按)\s*反应(?:种类|类型)", "reaction_type"),
+        (r"(?:按照|按)\s*(?:配体|手性来源)(?:种类|类型)?", "ligand_or_chiral_source"),
+        (r"(?:按照|按)\s*离去基团(?:种类|类型)?", "leaving_group"),
+        (r"(?:按照|按)\s*文献(?:范围|类型)", "document_scope"),
     )
+    for pattern, category in chinese_group_patterns:
+        if re.search(pattern, topic) and category not in group_by:
+            group_by.append(category)
     acronyms = dedupe(
         re.findall(r"(?<![A-Za-z0-9])([A-Z]{2,8})(?![A-Za-z0-9])", topic)
     )
     return {
         "filters": filters,
-        "group_by": ["catalyst_or_method"] if catalyst_grouping else [],
+        "group_by": group_by,
         "unresolved_concepts": acronyms,
     }
 
@@ -693,7 +768,7 @@ def build_keyword_set(
         "user_keywords": user_keywords,
         "ignored_user_keywords": ignored_user_keywords,
         "agent_keywords": agent,
-        "merged_keywords": list(merged.values()),
+        "merged_keywords": collapse_redundant_product_keywords(list(merged.values())),
         "created_at": utc_now(),
     }
     if query_context is not None:
@@ -739,20 +814,61 @@ def classify_keyword(
 def topic_phrase_candidates(topic: str) -> list[str]:
     """Split a multi-theme topic without turning ordinary prose into tokens."""
 
+    raw_topic = str(topic or "")
+    phrases: list[str] = []
+
+    # Quoted text normally carries the scientific subject, while the outer
+    # prose describes how to write or group the review.
+    for quoted in re.findall(r'["“]([^"”]+)["”]', raw_topic):
+        phrase = topic_keyword_fallback(quoted, [])
+        if phrase and not instruction_like_keyword(phrase):
+            phrases.append(phrase)
+
+    # Lists after an explicit grouping request are useful facet terms. Resolve
+    # simple anaphora such as "propargylic alcohols, their derivatives" without
+    # teaching the fallback any chemistry-specific vocabulary.
+    grouping_lists = re.findall(
+        r"(?:categorized|classified|grouped|organized)\s+by\s+[^()]*(?:\(([^()]*)\))",
+        raw_topic,
+        flags=re.I,
+    )
+    for grouping_list in grouping_lists:
+        previous = ""
+        for raw_part in re.split(r"[,;，；、]+", grouping_list):
+            part = re.sub(r"\s+", " ", raw_part.strip())
+            if re.fullmatch(r"(?:etc\.?|and\s+so\s+on)", part, re.I):
+                continue
+            if re.fullmatch(r"(?:their|its)\s+derivatives?", part, re.I) and previous:
+                stem = re.sub(r"s$", "", previous, flags=re.I)
+                part = f"{stem} derivatives"
+            phrase = topic_keyword_fallback(part, [])
+            if not phrase or instruction_like_keyword(phrase):
+                continue
+            phrases.append(phrase)
+            previous = phrase
+
     cleaned = re.sub(
         r"\b(?:past|last)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+years?\b",
         " ",
-        str(topic or ""),
+        raw_topic,
         flags=re.I,
     )
+    cleaned = re.sub(r'["“][^"”]+["”]', " ", cleaned)
+    cleaned = re.sub(r"\([^()]*\)", " ", cleaned)
     cleaned = re.sub(
-        r"^\s*(?:a\s+)?(?:systematic\s+)?(?:review|survey|overview)\s+(?:of|on|about)\s+",
+        r"^\s*(?:please\s+)?(?:write|prepare|create|generate)?\s*(?:a\s+)?"
+        r"(?:systematic\s+)?(?:review|survey|overview)\s+(?:of|on|about)\s+",
         "",
         cleaned,
         flags=re.I,
     )
+    cleaned = re.sub(
+        r"\b(?:categorized|classified|grouped|organized)\s+by\b.*$",
+        " ",
+        cleaned,
+        flags=re.I,
+    )
     parts = re.split(r"(?:\r?\n|[,;|/]|[，；、])|\s+(?:and|or)\s+", cleaned, flags=re.I)
-    phrases: list[str] = []
     for part in parts:
         phrase = topic_keyword_fallback(part, [])
         if not phrase:
@@ -761,6 +877,79 @@ def topic_phrase_candidates(topic: str) -> list[str]:
             continue
         phrases.append(phrase)
     return dedupe(phrases)
+
+
+def topic_explicitly_requests_review_sources(topic: str) -> bool:
+    """Distinguish source-type filters from an instruction to write a review."""
+
+    return bool(
+        re.search(
+            r"\b(?:review\s+articles?|systematic\s+reviews?|meta[- ]analyses|"
+            r"reviews?\s+as\s+(?:the\s+)?sources?)\b",
+            str(topic or ""),
+            re.I,
+        )
+    )
+
+
+def prioritize_query_plan_keywords(
+    plan: dict[str, Any],
+    topic: str,
+    explicit_user_keywords: list[str] | None = None,
+    *,
+    max_keywords: int = 16,
+) -> dict[str, Any]:
+    """Keep a compact, facet-aware plan without losing explicit user terms."""
+
+    items = [dict(item) for item in plan.get("keywords") or [] if isinstance(item, dict)]
+    if not topic_explicitly_requests_review_sources(topic):
+        items = [
+            item
+            for item in items
+            if not (
+                str(item.get("category") or "") == "document_scope"
+                and re.search(r"\breview(?:\s+article)?s?\b", str(item.get("keyword") or ""), re.I)
+            )
+        ]
+
+    explicit_keys = {
+        re.sub(r"\s+", " ", keyword.strip()).casefold()
+        for keyword in explicit_user_keywords or []
+        if keyword.strip()
+    }
+    group_categories = [
+        str(category)
+        for category in plan.get("group_by") or []
+        if str(category) in STRUCTURED_TAG_KEYS
+    ]
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_candidates(candidates: list[dict[str, Any]], limit: int | None = None) -> None:
+        added = 0
+        for item in candidates:
+            key = str(item.get("keyword") or "").strip().casefold()
+            if not key or key in seen:
+                continue
+            selected.append(item)
+            seen.add(key)
+            added += 1
+            if len(selected) >= max_keywords or (limit is not None and added >= limit):
+                return
+
+    add_candidates(
+        [item for item in items if str(item.get("keyword") or "").strip().casefold() in explicit_keys]
+    )
+    add_candidates([item for item in items if item.get("category") == "product"], limit=4)
+    for category in group_categories:
+        add_candidates([item for item in items if item.get("category") == category], limit=8)
+    add_candidates([item for item in items if item.get("category") == "reaction_type"], limit=3)
+    add_candidates([item for item in items if item.get("source") == "user"])
+    add_candidates(items)
+
+    compact = dict(plan)
+    compact["keywords"] = selected[:max_keywords]
+    return compact
 
 
 def deterministic_query_plan(
@@ -839,6 +1028,7 @@ def deterministic_query_plan(
     }
     if notice:
         plan["planner_notice"] = notice[:500]
+    plan = prioritize_query_plan_keywords(plan, topic, user_keywords)
     return validate_query_plan(plan, topic)
 
 
@@ -978,7 +1168,9 @@ def build_auto_query_plan(
                         "reason": "User-provided Discovery keyword.",
                     }
                 )
-        return validate_query_plan(plan, topic)
+        validated = validate_query_plan(plan, topic)
+        compact = prioritize_query_plan_keywords(validated, topic, user_keywords)
+        return validate_query_plan(compact, topic)
     except Exception as exc:
         return deterministic_query_plan(
             topic,
@@ -1001,9 +1193,7 @@ STRUCTURED_TAG_WEIGHTS = {
 
 
 def structured_tag_text(meta: dict[str, Any], tag_key: str, classification_rules: dict[str, dict[str, list[str]]]) -> str:
-    structured = field_value(meta.get("structured_tags"), {})
-    if not isinstance(structured, dict):
-        return ""
+    structured = verified_structured_tags(meta)
     value = str(structured.get(tag_key) or "")
     if value.strip().lower() == "not specified":
         return ""
@@ -1011,16 +1201,39 @@ def structured_tag_text(meta: dict[str, Any], tag_key: str, classification_rules
     return " ".join([value] + aliases)
 
 
+def _normalize_scientific_match_text(text: str) -> str:
+    normalized = str(text or "")
+    # Positional enyne nomenclature such as but-1-en-3-yne denotes a
+    # conjugated enyne even when the prose does not spell out the class name.
+    normalized = re.sub(
+        r"(?<![A-Za-z0-9])(?:[A-Za-z]+-)?\d+-en-\d+-ynes?(?![A-Za-z0-9])",
+        " conjugated enyne ",
+        normalized,
+        flags=re.I,
+    )
+    normalized = re.sub(r"\benynes\b", "enyne", normalized, flags=re.I)
+    normalized = re.sub(
+        r"\bpropargylic\s+(?:mesylates?|tosylates?|carbonates?|acetates?|esters?|"
+        r"halides?|bromides?|chlorides?|phosphates?|sulfides?)\b",
+        lambda match: f"{match.group(0)} propargylic alcohol derivative",
+        normalized,
+        flags=re.I,
+    )
+    normalized = re.sub(r"\bderivatives\b", "derivative", normalized, flags=re.I)
+    return normalized
+
+
 def match_score(term: str, text: str) -> float:
     if not term or not text:
         return 0.0
-    t = term.lower()
-    if contains_phrase(t, text):
+    t = _normalize_scientific_match_text(term).lower()
+    normalized_text = _normalize_scientific_match_text(text)
+    if contains_phrase(t, normalized_text):
         return 1.0
     tokens = tokenize(t)
     if not tokens:
         return 0.0
-    hits = sum(1 for token in tokens if contains_phrase(token, text))
+    hits = sum(1 for token in tokens if contains_phrase(token, normalized_text))
     ratio = hits / len(tokens)
     if len(tokens) == 1:
         return 0.65 if hits else 0.0
@@ -1031,12 +1244,242 @@ def match_score(term: str, text: str) -> float:
     return 0.0
 
 
+FAMILY_TOKEN_STOPWORDS = {
+    "active",
+    "asymmetric",
+    "axial",
+    "axially",
+    "catalytic",
+    "chiral",
+    "enantioselective",
+    "method",
+    "methods",
+    "optically",
+    "reaction",
+    "reactions",
+    "synthesis",
+    "syntheses",
+}
+
+CHIRALITY_PATTERN = re.compile(
+    r"\b(?:axial(?:ly)?|chiral(?:ity)?|asymmetric|enantioselective|"
+    r"optically\s+active|optical\s+activit(?:y|ies)|racemic|kinetic\s+resolution|"
+    r"stereogenic|atropisomer(?:ic|ism)?)\b",
+    re.I,
+)
+
+PRODUCT_FORMATION_PATTERN = re.compile(
+    r"\b(?:synthes(?:is|es|ize|ized|izing)|prepar(?:e|ed|ation)|construct(?:ion|ed)?|"
+    r"obtain(?:ed)?|afford(?:ed|s)?|resolution)\b|(?:合成|制备|构建|拆分)",
+    re.I,
+)
+
+
+def _normalize_family_token(token: str) -> str:
+    token = token.casefold().strip("-")
+    # Common allene derivative names retain the same product skeleton.
+    if token.startswith(("allenoat", "allenol", "allenyl")):
+        return "allene"
+    if token.endswith("ies") and len(token) > 5:
+        return token[:-3] + "y"
+    if token.endswith("s") and len(token) > 5:
+        return token[:-1]
+    return token
+
+
+def _family_tokens(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for token in tokenize(text):
+        token = _normalize_family_token(token)
+        if (
+            token in FAMILY_TOKEN_STOPWORDS
+            or CHIRALITY_PATTERN.search(token)
+            or len(token) < 5
+        ):
+            continue
+        tokens.add(token)
+    return tokens
+
+
+def scientific_family_signal(term: str, text: str) -> float:
+    """Return a conservative noun-family match for product/topic anchors."""
+
+    anchors = _family_tokens(term)
+    if not anchors:
+        return 0.0
+    if not CHIRALITY_PATTERN.search(term):
+        return 0.65 if anchors & _family_tokens(text) else 0.0
+    # Chirality and the product-family noun must occur in the same local
+    # context. This avoids treating a generic allene paper as an axial-chiral
+    # allene paper merely because its introduction mentions chirality elsewhere.
+    for match in re.finditer(r"[A-Za-z0-9][A-Za-z0-9'′\-]*", text or ""):
+        token = _normalize_family_token(match.group(0))
+        if token not in anchors:
+            continue
+        start = max(0, match.start() - 140)
+        end = min(len(text), match.end() + 140)
+        if CHIRALITY_PATTERN.search(text[start:end]):
+            return 0.65
+    return 0.0
+
+
+def product_formation_signal(meta: dict[str, Any], anchor_keywords: list[str] | None) -> float:
+    """Require evidence that the anchored product is made, not merely consumed."""
+
+    if not anchor_keywords:
+        return 0.0
+    text = primary_evidence_text(meta)
+    anchor_tokens = set().union(*(_family_tokens(anchor) for anchor in anchor_keywords))
+    if not anchor_tokens:
+        return 0.0
+    for match in re.finditer(r"[A-Za-z0-9][A-Za-z0-9'′\-]*", text or ""):
+        if _normalize_family_token(match.group(0)) not in anchor_tokens:
+            continue
+        start = max(0, match.start() - 120)
+        end = min(len(text), match.end() + 120)
+        if PRODUCT_FORMATION_PATTERN.search(text[start:end]):
+            return 1.0
+    return 0.0
+
+
+def topic_requests_product_formation(topic: str) -> bool:
+    return bool(PRODUCT_FORMATION_PATTERN.search(str(topic or "")))
+
+
+def _searchable_field_text(value: Any) -> str:
+    value = field_value(value, "")
+    if isinstance(value, list):
+        return " ".join(str(item) for item in value if str(item).strip())
+    if isinstance(value, dict):
+        return " ".join(str(item) for item in value.values() if str(item).strip())
+    return str(value or "")
+
+
+def primary_evidence_text(meta: dict[str, Any], abstract_max_chars: int = 2400) -> str:
+    """Title, bounded abstract and author keywords used for hard admission."""
+
+    title = _searchable_field_text(meta.get("title"))
+    abstract = _searchable_field_text(meta.get("abstract"))[:abstract_max_chars]
+    keywords = _searchable_field_text(meta.get("keywords"))
+    return " ".join(part for part in (title, abstract, keywords) if part.strip())
+
+
+def discovery_anchor_keywords(keywords: list[dict[str, Any]]) -> list[str]:
+    """Select compact topic anchors used to constrain facet retrieval."""
+
+    product = [
+        str(item.get("keyword") or "").strip()
+        for item in keywords
+        if item.get("keep", True) and item.get("category") == "product"
+    ]
+    if product:
+        # Two product anchors are sufficient for a hard topic gate. Additional
+        # semantic expansions remain searchable groups but cannot broaden every
+        # facet query (for example an over-broad third synonym).
+        return dedupe(product)[:2]
+    unclassified = [
+        str(item.get("keyword") or "").strip()
+        for item in keywords
+        if item.get("keep", True) and item.get("category") == "unclassified"
+    ]
+    if unclassified:
+        return dedupe(unclassified)[:2]
+    fallback = [
+        str(item.get("keyword") or "").strip()
+        for item in keywords
+        if item.get("keep", True)
+    ]
+    return dedupe(fallback)[:1]
+
+
+def collapse_redundant_product_keywords(
+    keywords: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Collapse lexical synonyms that represent one chiral product family."""
+
+    output: list[dict[str, Any]] = []
+    by_semantic_key: dict[str, dict[str, Any]] = {}
+    for raw_item in keywords:
+        item = dict(raw_item)
+        keyword = str(item.get("keyword") or "").strip()
+        family = sorted(_family_tokens(keyword))
+        if (
+            item.get("category") == "product"
+            and family
+            and CHIRALITY_PATTERN.search(keyword)
+        ):
+            semantic_key = "product:chiral:" + "|".join(family)
+        else:
+            semantic_key = f"literal:{item.get('category')}:{keyword.casefold()}"
+        existing = by_semantic_key.get(semantic_key)
+        if existing is None:
+            item["query_aliases"] = dedupe(
+                [keyword, *[str(value) for value in item.get("query_aliases") or []]]
+            )
+            by_semantic_key[semantic_key] = item
+            output.append(item)
+            continue
+        existing["query_aliases"] = dedupe(
+            [
+                *[str(value) for value in existing.get("query_aliases") or []],
+                keyword,
+                *[str(value) for value in item.get("query_aliases") or []],
+            ]
+        )
+        existing["source"] = dedupe(
+            [
+                *[str(value) for value in existing.get("source") or []],
+                *[str(value) for value in item.get("source") or []],
+            ]
+        )
+    return output
+
+
+def compact_external_query(keyword: str, anchor_keywords: list[str] | None) -> str:
+    """Build a scientific query without sending writing instructions online."""
+
+    parts = dedupe([*(anchor_keywords or [])[:2], str(keyword or "").strip()])
+    return " ".join(parts)[:500].strip()
+
+
+def paper_anchor_score(
+    meta: dict[str, Any],
+    anchor_keywords: list[str] | None,
+    classification_rules: dict[str, dict[str, list[str]]],
+) -> float:
+    if not anchor_keywords:
+        return 0.0
+    title_text = str(field_value(meta.get("title"), ""))
+    source_text = primary_evidence_text(meta)
+    product_text = structured_tag_text(meta, "product", classification_rules)
+    best = 0.0
+    for anchor in anchor_keywords:
+        canonical, category = canonical_taxonomy_keyword(
+            anchor, "product", classification_rules
+        )
+        source_signal = 1.0 if contains_phrase(anchor, source_text) else 0.0
+        if category == "product" and canonical in classification_rules.get("product", {}):
+            if taxonomy_label_supported(
+                canonical, "product", source_text, classification_rules
+            ):
+                source_signal = max(source_signal, 1.0)
+        source_signal = max(source_signal, scientific_family_signal(anchor, source_text))
+        tag_signal = match_score(anchor, product_text)
+        # A product Tag can strengthen source evidence, but cannot establish a
+        # core-topic anchor on its own because historical Tags may be stale.
+        supported_tag_signal = tag_signal if source_signal > 0 else 0.0
+        best = max(best, source_signal, supported_tag_signal)
+    return best
+
+
 def score_local_paper(
     meta: dict[str, Any],
     keyword: str,
     keyword_category: str,
     topic_terms: list[str],
     classification_rules: dict[str, dict[str, list[str]]],
+    anchor_keywords: list[str] | None = None,
+    require_product_formation: bool = False,
 ) -> dict[str, Any]:
     if keyword_category not in DISCOVERY_KEYWORD_CATEGORIES:
         raise ValueError(f"unsupported keyword category: {keyword_category!r}")
@@ -1045,8 +1488,10 @@ def score_local_paper(
     reasons: list[str] = []
     raw = 0.0
     direct_raw = 0.0
+    primary_raw = 0.0
     title_text = str(field_value(meta.get("title"), ""))
-    source_text = " ".join([title_text, markdown_signal(meta)])
+    parsed_text = markdown_signal(meta)
+    primary_text = primary_evidence_text(meta)
     canonical_keyword, canonical_category = canonical_taxonomy_keyword(
         keyword, keyword_category, classification_rules
     )
@@ -1056,25 +1501,40 @@ def score_local_paper(
         and canonical_keyword in classification_rules.get(keyword_category, {})
         else ""
     )
-    source_supports_canonical = bool(
-        keyword_category == "catalyst_or_method"
-        and canonical_label
+    primary_signal = match_score(keyword, primary_text)
+    parsed_signal = match_score(keyword, parsed_text)
+    primary_supports_canonical = bool(
+        canonical_label
         and taxonomy_label_supported(
             canonical_label,
             keyword_category,
-            source_text,
+            primary_text,
             classification_rules,
         )
     )
+    if primary_supports_canonical:
+        primary_signal = max(primary_signal, 1.0)
+    if keyword_category == "product":
+        primary_signal = max(
+            1.0 if contains_phrase(keyword, primary_text) else 0.0,
+            scientific_family_signal(keyword, primary_text),
+        )
+
     if keyword_category == "unclassified":
         field_matches = []
-        for tag_key in STRUCTURED_TAG_KEYS:
-            tag_text = structured_tag_text(meta, tag_key, classification_rules)
-            tag_score = match_score(keyword, tag_text)
-            if tag_score > 0:
-                field_matches.append(
-                    (tag_score * STRUCTURED_TAG_WEIGHTS[tag_key], tag_key, tag_text)
-                )
+        domain_rules_enabled = any(
+            labels for labels in classification_rules.values()
+        )
+        if domain_rules_enabled:
+            for tag_key in STRUCTURED_TAG_KEYS:
+                tag_text = structured_tag_text(meta, tag_key, classification_rules)
+                tag_score = match_score(keyword, tag_text)
+                if tag_score > 0:
+                    if primary_signal <= 0:
+                        tag_score *= 0.2 if parsed_signal > 0 else 0.15
+                    field_matches.append(
+                        (tag_score * STRUCTURED_TAG_WEIGHTS[tag_key], tag_key, tag_text)
+                    )
         field_matches.sort(reverse=True)
         if field_matches:
             contribution, matched_key, text = field_matches[0]
@@ -1090,17 +1550,16 @@ def score_local_paper(
     else:
         text = structured_tag_text(meta, keyword_category, classification_rules)
         s = match_score(keyword, text)
-        if (
-            keyword_category == "catalyst_or_method"
-            and canonical_label
-            and s > 0
-            and not source_supports_canonical
-        ):
-            # Older metadata may contain labels produced by the historical
-            # substring matcher (for example ``Cu`` inside ``molecular``).
-            # Do not let that stale base Tag create a catalyst hit unless the
-            # title or parsed paper text independently supports it.
-            s = 0.0
+        if s > 0 and primary_signal <= 0 and not primary_supports_canonical:
+            # Base Tags generated by older extractors can be stale or plainly
+            # wrong. Canonical labels require title/abstract/keyword support.
+            # A body mention remains weak because it may be related-work prose.
+            if canonical_label:
+                s = 0.0
+            elif parsed_signal > 0:
+                s *= 0.2
+            else:
+                s *= 0.15
     if s > 0 and keyword_category != "unclassified":
         contribution = s * STRUCTURED_TAG_WEIGHTS[keyword_category]
         raw += contribution
@@ -1108,36 +1567,66 @@ def score_local_paper(
         matched_fields.append(keyword_category)
         matched_terms.append(keyword)
         reasons.append(f"structured_tags.{keyword_category} matched keyword")
-    topic_hits = sum(1 for term in topic_terms if match_score(term, text) > 0)
+    topic_hits = sum(1 for term in topic_terms if match_score(term, primary_text) > 0)
     if topic_hits and s > 0:
         raw += min(topic_hits * 0.15, 0.9)
-    source_signal = match_score(keyword, source_text)
-    if source_supports_canonical:
-        source_signal = max(source_signal, 1.0)
-    if keyword_category == "unclassified" and source_signal > 0 and direct_raw == 0:
-        contribution = source_signal * 4.0
-        raw += contribution
-        direct_raw += contribution
-        matched_fields.append("source_text")
-        matched_terms.append(keyword)
-        reasons.append("title or parsed paper text matched unclassified keyword")
-    elif (
-        keyword_category == "catalyst_or_method"
-        and canonical_label
-        and source_signal > 0
-        and direct_raw == 0
-    ):
-        contribution = source_signal * STRUCTURED_TAG_WEIGHTS[keyword_category]
-        raw += contribution
-        direct_raw += contribution
-        matched_fields.append("source_text")
-        matched_terms.append(canonical_label)
-        reasons.append(
-            "title or parsed paper text explicitly matched the catalyst taxonomy"
+    if primary_signal > 0:
+        source_contribution = primary_signal * (
+            4.0
+            if keyword_category == "unclassified"
+            else STRUCTURED_TAG_WEIGHTS[keyword_category]
         )
-    elif source_signal > 0 and direct_raw > 0:
-        raw += min(source_signal * 0.8, 0.8)
-        reasons.append("source text confirms keyword")
+        if source_contribution > direct_raw:
+            raw += source_contribution - direct_raw
+            direct_raw = source_contribution
+        elif direct_raw > 0:
+            raw += min(primary_signal * 0.8, 0.8)
+        primary_raw = max(primary_raw, source_contribution)
+        matched_fields.append("primary_evidence")
+        matched_terms.append(canonical_label or keyword)
+        reasons.append("title, abstract, or author keywords matched keyword")
+    elif parsed_signal > 0:
+        body_contribution = parsed_signal * (
+            4.0
+            if keyword_category == "unclassified"
+            else STRUCTURED_TAG_WEIGHTS[keyword_category]
+        ) * 0.25
+        if body_contribution > direct_raw:
+            raw += body_contribution - direct_raw
+            direct_raw = body_contribution
+        matched_fields.append("parsed_body_support")
+        matched_terms.append(keyword)
+        reasons.append("parsed body mentioned keyword as supporting evidence only")
+
+    anchor_signal = paper_anchor_score(meta, anchor_keywords, classification_rules)
+    anchor_required = bool(anchor_keywords) and keyword_category != "product"
+    if anchor_required and anchor_signal <= 0:
+        raw = 0.0
+        direct_raw = 0.0
+        primary_raw = 0.0
+        matched_fields = []
+        matched_terms = []
+        reasons = ["facet matched, but the paper did not match the core topic anchor"]
+    elif anchor_signal > 0:
+        raw += 1.2 * anchor_signal
+        reasons.append("core topic anchor matched")
+    formation_signal = (
+        product_formation_signal(meta, anchor_keywords)
+        if require_product_formation
+        else 0.0
+    )
+    if require_product_formation and formation_signal <= 0:
+        raw = 0.0
+        direct_raw = 0.0
+        primary_raw = 0.0
+        matched_fields = []
+        matched_terms = []
+        reasons = [
+            "paper matched the product family but lacked primary evidence that the product was formed"
+        ]
+    elif formation_signal > 0:
+        raw += 0.6 * formation_signal
+        reasons.append("primary evidence described formation of the anchored product")
     raw_year = field_value(meta.get("year"))
     year = raw_year if type(raw_year) is int else None
     source_paths = meta.get("source_paths") or {}
@@ -1160,6 +1649,9 @@ def score_local_paper(
         "score": normalized,
         "raw_score": round(raw, 3),
         "direct_raw_score": round(direct_raw, 3),
+        "primary_raw_score": round(primary_raw, 3),
+        "anchor_score": round(anchor_signal, 3),
+        "product_formation_score": round(formation_signal, 3),
         "matched_fields": dedupe(matched_fields),
         "matched_terms": dedupe(matched_terms),
         "reason": "; ".join(reasons) if reasons else "weak or no direct local metadata match",
@@ -1177,6 +1669,7 @@ def local_search_by_keyword(
     classification_rules: dict[str, dict[str, list[str]]],
     year_from: int | None = None,
     year_to: int | None = None,
+    anchor_keywords: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     filter_stats = {
         "before_filter": len(papers),
@@ -1202,6 +1695,7 @@ def local_search_by_keyword(
     filter_stats["after_filter"] = len(filtered_papers)
 
     topic_terms = tokenize(topic)
+    require_product_formation = topic_requests_product_formation(topic)
     grouped: list[dict[str, Any]] = []
     for kw in keywords:
         if not kw.get("keep", True):
@@ -1215,19 +1709,25 @@ def local_search_by_keyword(
                 keyword_category,
                 topic_terms,
                 classification_rules,
+                anchor_keywords,
+                require_product_formation,
             )
             for meta in filtered_papers
         ]
-        results = [r for r in results if r["direct_raw_score"] >= 1.4 and r["score"] >= 0.12]
+        results = [
+            r
+            for r in results
+            if r["primary_raw_score"] >= 1.4
+            and r["direct_raw_score"] >= 1.4
+            and r["score"] >= 0.12
+        ]
         results.sort(key=lambda r: (r["score"], r["raw_score"], r.get("year") or 0), reverse=True)
         grouped.append({"keyword": keyword, "category": keyword_category, "keep": True, "local_results": results})
     return grouped, filter_stats
 
 
 def base_tags_snapshot(meta: dict[str, Any]) -> dict[str, str]:
-    structured = field_value(meta.get("structured_tags"), {})
-    if not isinstance(structured, dict):
-        structured = {}
+    structured = verified_structured_tags(meta)
     return {
         key: str(structured.get(key) or "not specified").strip() or "not specified"
         for key in STRUCTURED_TAG_KEYS
@@ -1300,6 +1800,7 @@ def attach_project_tag_assessments(
     ).hexdigest()
     for paper_id, aggregate in aggregates.items():
         base_tags = base_tags_snapshot(papers.get(paper_id, {}))
+        base_tags_verified = structured_tags_are_verified(papers.get(paper_id, {}))
         suggested_tags = {
             category: dedupe([str(value) for value in values if str(value).strip()])
             for category, values in aggregate["suggested_tags"].items()
@@ -1317,6 +1818,7 @@ def attach_project_tag_assessments(
             "base_tags_fingerprint": hashlib.sha256(
                 json.dumps(base_tags, ensure_ascii=False, sort_keys=True).encode("utf-8")
             ).hexdigest(),
+            "base_tags_verified": base_tags_verified,
             "taxonomy": taxonomy,
             "generated_by": query_plan_source,
             "suggested_tags": suggested_tags,
@@ -1331,6 +1833,7 @@ def attach_project_tag_assessments(
                 if str(row.get("paper_id") or "") != paper_id:
                     continue
                 row["base_tags"] = dict(base_tags)
+                row["base_tags_verified"] = base_tags_verified
                 row["project_tag_assessment"] = json.loads(
                     json.dumps(assessment, ensure_ascii=False)
                 )
@@ -1506,17 +2009,42 @@ def merge_external_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not key:
             continue
         if key not in merged:
-            merged[key] = {**row, "sources": [row.get("source", "external")]}
+            merged[key] = {**row}
+            if not merged[key].get("sources"):
+                merged[key]["sources"] = [row.get("source", "external")]
             order.append(key)
             continue
         existing = merged[key]
         src = row.get("source", "external")
-        if src not in existing.get("sources", []):
-            existing.setdefault("sources", []).append(src)
+        source_names = [
+            str(item.get("name") or "") if isinstance(item, dict) else str(item)
+            for item in existing.get("sources", [])
+        ]
+        combined_sources = list(existing.get("sources", []))
+        existing_source_keys = {
+            (
+                str(item.get("name") or ""),
+                str(item.get("provider_id") or ""),
+            )
+            if isinstance(item, dict)
+            else (str(item), "")
+            for item in combined_sources
+        }
+        incoming_sources = row.get("sources") or [src]
+        for item in incoming_sources:
+            identity = (
+                str(item.get("name") or ""),
+                str(item.get("provider_id") or ""),
+            ) if isinstance(item, dict) else (str(item), "")
+            if identity not in existing_source_keys:
+                combined_sources.append(item)
+                existing_source_keys.add(identity)
         if (row.get("score") or 0) > (existing.get("score") or 0):
             # Promote the higher-scoring record while keeping merged source list.
-            sources = existing.get("sources", [])
-            merged[key] = {**row, "sources": sources}
+            merged[key] = {**row, "sources": combined_sources}
+            existing = merged[key]
+        else:
+            existing["sources"] = combined_sources
         if not existing.get("doi") and row.get("doi"):
             existing["doi"] = row.get("doi")
         if not existing.get("url") and row.get("url"):
@@ -1527,8 +2055,13 @@ def merge_external_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for key in order:
         row = merged[key]
         sources = row.get("sources") or [row.get("source", "external")]
+        source_names = [
+            str(item.get("name") or "") if isinstance(item, dict) else str(item)
+            for item in sources
+        ]
+        source_names = [item for item in source_names if item]
         # Keep `source` as the primary (highest-scoring) one for backward compat.
-        row["source"] = sources[0] if len(sources) == 1 else "+".join(sources)
+        row["source"] = source_names[0] if len(source_names) == 1 else "+".join(source_names)
         row["sources"] = sources
         out.append(row)
     out.sort(key=lambda r: (r.get("score") or 0, r.get("year") or 0), reverse=True)
@@ -1613,12 +2146,8 @@ def group_selected_papers(
         buckets: dict[str, set[str]] = {}
         for paper_id in selected_ids:
             meta = papers.get(paper_id, {})
-            structured_tags = field_value(meta.get("structured_tags"), {})
-            raw_value = (
-                structured_tags.get(field)
-                if isinstance(structured_tags, dict)
-                else None
-            )
+            structured_tags = verified_structured_tags(meta)
+            raw_value = structured_tags.get(field)
             value = str(raw_value).strip() if raw_value is not None else ""
             value = value or "not specified"
             buckets.setdefault(value, set()).add(paper_id)
@@ -1828,6 +2357,7 @@ def run(args: argparse.Namespace) -> int:
         query_context=query_context,
         classification_rules=classification_rules,
     )
+    anchor_keywords = discovery_anchor_keywords(keyword_set["merged_keywords"])
     (out_dir / "topic_input.md").write_text(
         f"# {args.topic}\n\nUser keywords:\n\n" + "\n".join(f"- {kw}" for kw in user_keywords) + "\n",
         encoding="utf-8",
@@ -1840,6 +2370,7 @@ def run(args: argparse.Namespace) -> int:
         classification_rules,
         year_from=filters.get("year_from"),
         year_to=filters.get("year_to"),
+        anchor_keywords=anchor_keywords,
     )
     attach_project_tag_assessments(
         local_grouped,
@@ -1874,15 +2405,80 @@ def run(args: argparse.Namespace) -> int:
                 sciatlas_status = f"health_failed: {exc}"
                 sciatlas_client = None
 
+    requested_source_names = parse_source_names(
+        str(getattr(args, "sources", "") or os.environ.get("REVIEW_DISCOVERY_SOURCES", ""))
+        or None
+    )
+    source_status_path_text = str(getattr(args, "source_status_file", "") or "").strip()
+    source_status_path = Path(source_status_path_text).resolve() if source_status_path_text else None
+    source_diagnostics: dict[str, dict[str, Any]] = {
+        name: {
+            "status": "queued" if crossref_requested else "disabled",
+            "count": 0,
+            "completed_queries": 0,
+            "failed_queries": 0,
+            "errors": [],
+        }
+        for name in requested_source_names
+    }
+
+    def persist_source_status() -> None:
+        if source_status_path is None:
+            return
+        write_json(
+            source_status_path,
+            {
+                "stage": "source_search",
+                "sources": source_diagnostics,
+                "updated_at": utc_now(),
+            },
+        )
+
+    def source_status_callback(source: str, status: str, count: int, error: str) -> None:
+        current = source_diagnostics.setdefault(
+            source,
+            {"status": "queued", "count": 0, "completed_queries": 0, "failed_queries": 0, "errors": []},
+        )
+        if status == "running":
+            current["status"] = "running"
+        elif status == "completed":
+            current["completed_queries"] = int(current.get("completed_queries") or 0) + 1
+            current["count"] = int(current.get("count") or 0) + int(count or 0)
+            current["status"] = "partial" if current.get("failed_queries") else "completed"
+        else:
+            current["failed_queries"] = int(current.get("failed_queries") or 0) + 1
+            if error:
+                current.setdefault("errors", []).append(error)
+            current["status"] = "partial" if current.get("completed_queries") else "failed"
+        persist_source_status()
+
+    persist_source_status()
     external_grouped: list[dict[str, Any]] = []
     sources_used: list[str] = []
-    for group in local_grouped:
+    source_count = max(1, len(requested_source_names))
+    max_search_groups = min(
+        DEFAULT_SEARCH_LIMITS.max_subtopics,
+        max(1, DEFAULT_SEARCH_LIMITS.max_external_requests // source_count),
+    )
+    external_search_started = time.monotonic()
+    external_candidate_count = 0
+    budget_exhausted = False
+    multi_source_results: list[dict[str, Any]] = []
+    for group in local_grouped[:max_search_groups]:
+        if (
+            time.monotonic() - external_search_started
+            >= DEFAULT_SEARCH_LIMITS.max_wall_seconds
+            or external_candidate_count >= DEFAULT_SEARCH_LIMITS.max_total_candidates
+        ):
+            budget_exhausted = True
+            break
         rows: list[dict[str, Any]] = []
+        external_query = compact_external_query(group["keyword"], anchor_keywords)
         if sciatlas_client is not None:
             sciatlas_rows = sciatlas_search(
                 sciatlas_client,
                 group["keyword"],
-                args.topic,
+                external_query,
                 args.sciatlas_limit,
                 args.sciatlas_time_range or None,
                 args.sciatlas_domain or None,
@@ -1893,16 +2489,39 @@ def run(args: argparse.Namespace) -> int:
             if args.web_delay:
                 time.sleep(args.web_delay)
         if crossref_requested:
-            crossref_rows = web_search(group["keyword"], args.topic, args.web_limit)
-            rows.extend(crossref_rows)
-            if crossref_rows and "crossref" not in sources_used:
-                sources_used.append("crossref")
+            multi_source = search_paper_sources(
+                PaperSearchRequest(
+                    query=external_query,
+                    topic=" ".join(anchor_keywords) or group["keyword"],
+                    limit=args.web_limit,
+                    year_from=filters.get("year_from"),
+                    year_to=filters.get("year_to"),
+                ),
+                source_names=requested_source_names,
+                max_total_candidates=max(
+                    1,
+                    DEFAULT_SEARCH_LIMITS.max_total_candidates - external_candidate_count,
+                ),
+                status_callback=source_status_callback,
+            )
+            multi_source_results.append(multi_source)
+            rows.extend(multi_source["candidates"])
+            external_candidate_count += len(multi_source["candidates"])
+            for source, state in multi_source["source_statuses"].items():
+                if int(state.get("count") or 0) and source not in sources_used:
+                    sources_used.append(source)
             if args.web_delay:
                 time.sleep(args.web_delay)
         merged = merge_external_results(rows)
         if merged:
             external_grouped.append({"keyword": group["keyword"], "web_results": merged})
 
+    multi_source_completed = any(
+        result.get("completion_state") in {"complete", "partial"}
+        for result in multi_source_results
+    )
+    multi_source_failed = bool(multi_source_results) and not multi_source_completed
+    multi_source_partial = any(result.get("degraded") for result in multi_source_results)
     if sciatlas_requested and sciatlas_client is None and not crossref_requested:
         external_status = sciatlas_status
     elif sciatlas_requested and crossref_requested and sciatlas_client is None:
@@ -1912,7 +2531,9 @@ def run(args: argparse.Namespace) -> int:
     elif sciatlas_client is not None:
         external_status = "sciatlas"
     elif crossref_requested:
-        external_status = "crossref"
+        external_status = (
+            "failed" if multi_source_failed else ("partial" if multi_source_partial else "complete")
+        )
     else:
         external_status = "disabled"
 
@@ -1923,12 +2544,38 @@ def run(args: argparse.Namespace) -> int:
     else:
         external_source = "+".join(sources_used)
 
+    if crossref_requested:
+        external_completion_state = (
+            "failed" if multi_source_failed else ("partial" if multi_source_partial else "complete")
+        )
+    elif sciatlas_requested:
+        external_completion_state = "complete" if sciatlas_client is not None else "failed"
+    else:
+        external_completion_state = "disabled"
+    if sciatlas_requested and crossref_requested:
+        if sciatlas_client is None and external_completion_state == "complete":
+            external_completion_state = "partial"
+        elif sciatlas_client is not None and external_completion_state == "failed":
+            external_completion_state = "partial"
+    if budget_exhausted and external_completion_state == "complete":
+        external_completion_state = "partial"
+
     write_json(out_dir / "web_results_by_keyword.json", {
         "project_id": project_id,
         "enabled": bool(external_grouped),
         "source": external_source,
         "status": external_status,
         "sources": sources_used,
+        "requested_sources": list(requested_source_names),
+        "source_statuses": source_diagnostics,
+        "source_errors": {
+            source: list(state.get("errors") or [])
+            for source, state in source_diagnostics.items()
+            if state.get("errors")
+        },
+        "completion_state": external_completion_state,
+        "degraded": external_completion_state in {"partial", "failed"},
+        "budget_exhausted": budget_exhausted,
         "results": external_grouped,
     })
     web_grouped = external_grouped
@@ -1937,6 +2584,7 @@ def run(args: argparse.Namespace) -> int:
     groups = group_selected_papers(selected, papers, group_by)
     output_context = {
         **query_context,
+        "anchor_keywords": anchor_keywords,
         "filter_stats": filter_stats,
         "groups": groups,
     }
@@ -1952,6 +2600,19 @@ def run(args: argparse.Namespace) -> int:
             "project_id": project_id,
             "topic": args.topic,
             "selection_mode": "explicit",
+            "external_search": {
+                "requested_sources": list(requested_source_names),
+                "sources_used": sources_used,
+                "source_statuses": source_diagnostics,
+                "source_errors": {
+                    source: list(state.get("errors") or [])
+                    for source, state in source_diagnostics.items()
+                    if state.get("errors")
+                },
+                "completion_state": external_completion_state,
+                "degraded": external_completion_state in {"partial", "failed"},
+                "budget_exhausted": budget_exhausted,
+            },
             **output_context,
             "results": combined,
         },
@@ -1977,6 +2638,15 @@ def run(args: argparse.Namespace) -> int:
         combined,
         selected_count=len(selected["local_papers"]),
     )
+    if crossref_requested and multi_source_failed and sciatlas_client is None:
+        errors = [
+            f"{source}: {'; '.join(state.get('errors') or ['failed'])}"
+            for source, state in source_diagnostics.items()
+            if state.get("failed_queries")
+        ]
+        raise RuntimeError(
+            "All configured online paper sources failed. " + " | ".join(errors)
+        )
     print(f"Discovery project: {project}")
     print(f"Keyword set: {out_dir / 'keyword_set.draft.json'}")
     print(f"Human dashboard data: {out_dir / 'combined_results_by_keyword.json'}")
@@ -2006,6 +2676,16 @@ def parse_args() -> argparse.Namespace:
         help="Use an explicitly selected taxonomy profile for a staged discovery run.",
     )
     parser.add_argument("--web-search", action="store_true", help="Fallback: query Crossref when SciAtlas is unavailable.")
+    parser.add_argument(
+        "--sources",
+        default="",
+        help="Comma-separated online sources; defaults to REVIEW_DISCOVERY_SOURCES or all built-ins.",
+    )
+    parser.add_argument(
+        "--source-status-file",
+        default="",
+        help="Optional persisted source-progress JSON for the parent Job.",
+    )
     parser.add_argument("--web-limit", type=int, default=8)
     parser.add_argument("--web-delay", type=float, default=0.2)
     parser.add_argument("--sciatlas-search", action="store_true", help="Query the hosted SciAtlas KG /v1/search per keyword.")

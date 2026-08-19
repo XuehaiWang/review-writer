@@ -7,6 +7,29 @@ type DiscoveryJobProgressProps = {
 };
 
 const activeStatuses = new Set(["queued", "running", "cancel_requested"]);
+const sourceOrder = ["crossref", "openalex", "semantic_scholar", "arxiv"];
+
+type SourceState = { status?: string; count?: number; error?: string; errors?: string[] };
+
+function sourceStates(result: Record<string, unknown> | undefined): Record<string, SourceState> {
+  const progress = result?.source_progress;
+  const external = result?.external_search;
+  const value = progress && typeof progress === "object"
+    ? (progress as Record<string, unknown>).sources
+    : external && typeof external === "object"
+      ? (external as Record<string, unknown>).source_statuses
+      : undefined;
+  return value && typeof value === "object" ? value as Record<string, SourceState> : {};
+}
+
+function sourceStatusLabel(status: string, text: (zh: string, en: string) => string): string {
+  if (status === "disabled") return text("未启用", "Disabled");
+  if (status === "completed") return text("已完成", "Completed");
+  if (status === "partial") return text("部分完成", "Partial");
+  if (status === "failed") return text("失败", "Failed");
+  if (status === "running") return text("检索中", "Searching");
+  return text("等待中", "Queued");
+}
 
 export function DiscoveryJobProgress({ job, submitting = false }: DiscoveryJobProgressProps) {
   const { text } = useUiText();
@@ -56,6 +79,7 @@ export function DiscoveryJobProgress({ job, submitting = false }: DiscoveryJobPr
     ? text(`步骤 ${current}/${total}`, `Step ${current}/${total}`)
     : active ? text("处理中", "In progress") : text("已结束", "Finished");
   const stateClass = status === "submitting" ? "queued" : status;
+  const sources = sourceStates(job?.result);
 
   return (
     <section className={`discovery-job-progress ${stateClass} ${active && !determinate ? "indeterminate" : ""}`} role="status" aria-live="polite" aria-atomic="true">
@@ -75,6 +99,7 @@ export function DiscoveryJobProgress({ job, submitting = false }: DiscoveryJobPr
         <span style={percentage === undefined ? undefined : { width: `${percentage}%` }} />
       </div>
       <p>{detail}</p>
+      {Object.keys(sources).length ? <div className="discovery-source-statuses" aria-label={text("联网来源状态", "Online source status")}>{sourceOrder.filter((source) => sources[source]).map((source) => { const state = sources[source]; const sourceStatus = String(state.status || "queued"); const count = Number(state.count || 0); return <span key={source} className={sourceStatus}><strong>{source === "semantic_scholar" ? "Semantic Scholar" : source === "arxiv" ? "arXiv" : source[0].toUpperCase() + source.slice(1)}</strong><em>{sourceStatusLabel(sourceStatus, text)}{count ? ` · ${count}` : ""}</em></span>; })}</div> : null}
     </section>
   );
 }

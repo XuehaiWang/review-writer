@@ -8,11 +8,60 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable
+from dataclasses import asdict, dataclass
+from typing import Any, Iterable
 
 
-DEFAULT_TAXONOMY_PROFILE = "chemistry_general"
+DEFAULT_TAXONOMY_PROFILE = "general_academic"
 PROFILE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+
+
+@dataclass(frozen=True)
+class TaxonomyProfileDefinition:
+    id: str
+    label_zh: str
+    label_en: str
+    description_zh: str
+    description_en: str
+    domain_rules_enabled: bool
+
+
+TAXONOMY_PROFILES: tuple[TaxonomyProfileDefinition, ...] = (
+    TaxonomyProfileDefinition(
+        id="general_academic",
+        label_zh="通用学术",
+        label_en="General Academic",
+        description_zh="使用通用查询与全文召回，不启用化学领域扩展或标签加权。",
+        description_en=(
+            "Uses general query planning and full-text recall without chemistry "
+            "expansion or tag weighting."
+        ),
+        domain_rules_enabled=False,
+    ),
+    TaxonomyProfileDefinition(
+        id="chemistry_general",
+        label_zh="通用化学",
+        label_en="General Chemistry",
+        description_zh="在通用召回基础上增加化学别名扩展和结构化标签加权。",
+        description_en=(
+            "Adds chemistry alias expansion and structured-tag weighting on top "
+            "of general recall."
+        ),
+        domain_rules_enabled=True,
+    ),
+    TaxonomyProfileDefinition(
+        id="allene",
+        label_zh="联烯化学",
+        label_en="Allene Chemistry",
+        description_zh="为联烯、轴手性和相关合成主题启用专用化学规则。",
+        description_en=(
+            "Enables specialized chemistry rules for allenes, axial chirality, "
+            "and related synthesis topics."
+        ),
+        domain_rules_enabled=True,
+    ),
+)
+TAXONOMY_PROFILE_BY_ID = {item.id: item for item in TAXONOMY_PROFILES}
 
 PROFILE_TOPIC_SIGNALS: dict[str, tuple[str, ...]] = {
     "allene": (
@@ -41,7 +90,8 @@ def resolve_taxonomy_path(
 
     ``REVIEW_CLASSIFICATION_RULES`` may point to an absolute file or to a path
     relative to the workspace root. ``REVIEW_TAXONOMY_PROFILE`` selects a
-    built-in profile and defaults to the broad ``chemistry_general`` profile.
+    built-in profile and defaults to the no-domain-rules ``general_academic``
+    profile.
     """
     root = Path(review_root).resolve()
     configured_path = str(rules_path or os.environ.get("REVIEW_CLASSIFICATION_RULES", "")).strip()
@@ -166,6 +216,26 @@ def suggest_taxonomy_profile(topic: str) -> str:
     return DEFAULT_TAXONOMY_PROFILE
 
 
+def taxonomy_profile_catalog() -> list[dict[str, Any]]:
+    """Return stable public metadata for project-selectable profiles."""
+
+    return [asdict(item) for item in TAXONOMY_PROFILES]
+
+
+def validate_taxonomy_profile(profile: str) -> str:
+    """Validate a project-selected built-in profile and return its stable ID."""
+
+    normalized = str(profile or "").strip().lower()
+    if normalized not in TAXONOMY_PROFILE_BY_ID:
+        raise TaxonomyConfigurationError(f"Unknown taxonomy profile: {normalized or '<empty>'}")
+    return normalized
+
+
+def taxonomy_profile_uses_domain_rules(profile: str) -> bool:
+    normalized = validate_taxonomy_profile(profile)
+    return TAXONOMY_PROFILE_BY_ID[normalized].domain_rules_enabled
+
+
 def labels_by_category(
     rules: Iterable[tuple[str, str, list[str]]],
     categories: Iterable[str],
@@ -193,7 +263,7 @@ def taxonomy_identity(
     *,
     profile: str = "",
     rules_path: str | Path = "",
-) -> dict[str, str]:
+) -> dict[str, Any]:
     path = resolve_taxonomy_path(review_root, profile=profile, rules_path=rules_path)
     raw = path.read_bytes()
     configured_path = os.environ.get("REVIEW_CLASSIFICATION_RULES", "").strip()
@@ -201,13 +271,26 @@ def taxonomy_identity(
         relative_path = str(path.relative_to(Path(review_root).resolve()))
     except ValueError:
         relative_path = str(path)
-    return {
-        "profile": "custom"
+    identity_profile = (
+        "custom"
         if configured_path
         else (
-            str(profile or os.environ.get("REVIEW_TAXONOMY_PROFILE", DEFAULT_TAXONOMY_PROFILE)).strip()
+            str(
+                profile
+                or os.environ.get(
+                    "REVIEW_TAXONOMY_PROFILE", DEFAULT_TAXONOMY_PROFILE
+                )
+            ).strip()
             or DEFAULT_TAXONOMY_PROFILE
-        ),
+        )
+    )
+    return {
+        "profile": identity_profile,
         "rules_path": relative_path,
         "sha256": hashlib.sha256(raw).hexdigest(),
+        "domain_rules_enabled": (
+            bool(load_rules_from_path(path))
+            if identity_profile == "custom"
+            else taxonomy_profile_uses_domain_rules(identity_profile)
+        ),
     }

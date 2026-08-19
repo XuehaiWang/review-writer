@@ -57,4 +57,19 @@ describe("DiscoveryJobProgress", () => {
     expect(screen.getByText("检索完成")).toBeInTheDocument();
     expect(screen.getByRole("progressbar", { name: "文献检索进度" })).toHaveAttribute("aria-valuenow", "100");
   });
+
+  it("shows persisted per-source progress after polling", () => {
+    render(<DiscoveryJobProgress job={job({ result: { source_progress: { sources: { crossref: { status: "completed", count: 12 }, openalex: { status: "running", count: 0 }, semantic_scholar: { status: "failed", count: 0 }, arxiv: { status: "completed", count: 5 } } } } })} />);
+
+    expect(screen.getByLabelText("联网来源状态")).toBeInTheDocument();
+    expect(screen.getByText("Crossref")).toBeInTheDocument();
+    expect(screen.getByText("Semantic Scholar")).toBeInTheDocument();
+    expect(screen.getByText("失败")).toBeInTheDocument();
+  });
+
+  it("labels online sources as disabled when online search was not requested", () => {
+    render(<DiscoveryJobProgress job={job({ result: { source_progress: { sources: { crossref: { status: "disabled", count: 0 } } } } })} />);
+
+    expect(screen.getByText("未启用")).toBeInTheDocument();
+  });
 });

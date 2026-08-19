@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from review_writer_api.errors import LiteratureSearchFailed, WorkflowValidationError
 from review_writer_api.native_handlers import NativeWorkflowHandlers
@@ -268,6 +269,27 @@ class _FigureRedrawRunner:
 
 
 class NativeWorkflowHandlerTests(unittest.TestCase):
+    def test_paper_source_environment_is_forwarded_without_exposing_keys(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "CROSSREF_MAILTO": "researcher@example.test",
+                "REVIEW_DISCOVERY_SOURCES": "crossref,openalex",
+                "REVIEW_DISCOVERY_MULTI_SOURCE_ENABLED": "true",
+                "OPENALEX_API_KEY": "openalex-secret",
+                "SEMANTIC_SCHOLAR_API_KEY": "semantic-secret",
+            },
+            clear=True,
+        ):
+            normal, secrets = NativeWorkflowHandlers._paper_source_environment()
+
+        self.assertEqual("researcher@example.test", normal["CROSSREF_MAILTO"])
+        self.assertEqual("crossref,openalex", normal["REVIEW_DISCOVERY_SOURCES"])
+        self.assertEqual("true", normal["REVIEW_DISCOVERY_MULTI_SOURCE_ENABLED"])
+        self.assertNotIn("OPENALEX_API_KEY", normal)
+        self.assertEqual("openalex-secret", secrets["OPENALEX_API_KEY"])
+        self.assertEqual("semantic-secret", secrets["SEMANTIC_SCHOLAR_API_KEY"])
+
     def test_text_environment_contains_only_gateway_task_credentials(self) -> None:
         class ProviderSettings:
             @staticmethod

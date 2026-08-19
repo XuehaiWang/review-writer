@@ -32,6 +32,7 @@ from .model_catalog import DEFAULT_MODEL_TIER, MODEL_TIERS
 from .model_gateway import ModelGatewayError, ModelGatewayService
 from .native_handlers import NativeWorkflowHandlers
 from .domain_services.library import LibraryService
+from .domain_services.library_index import LibraryIndexService
 from .domain_services.discovery import DiscoveryService
 from .domain_services.drafts import DraftsService
 from .domain_services.final import FinalService
@@ -65,9 +66,16 @@ from .schemas import (
     ProjectListResponse,
     ProjectModelTierUpdateRequest,
     ProjectResponse,
+    ProjectTaxonomyProfileUpdateRequest,
+    ProjectTaxonomyProfileUpdateResponse,
+    TaxonomyProfileCatalogResponse,
     RegisterRequest,
     UsageSummaryResponse,
     UsageTimelineResponse,
+)
+from review_writer_core.taxonomy import (
+    DEFAULT_TAXONOMY_PROFILE,
+    taxonomy_profile_catalog,
 )
 from .server_providers import ServerProviderSettingsService
 from .security import AuthorizationError, Permission, Principal, local_owner_principal
@@ -190,6 +198,16 @@ def create_app(
         if workflow_repository is not None and artifact_service is not None
         else None
     )
+    library_index_service = (
+        LibraryIndexService(
+            session_factory,
+            hosted_workspace_manager,
+            enabled=resolved.document_retrieval_enabled,
+            tuning=resolved.retrieval_tuning,
+        )
+        if session_factory is not None and hosted_workspace_manager is not None
+        else None
+    )
     model_gateway = (
         ModelGatewayService(
             session_factory,
@@ -211,7 +229,7 @@ def create_app(
         else None
     )
     sections_service = (
-        SectionsService(workflow_repository, artifact_service)
+        SectionsService(workflow_repository, artifact_service, library_index_service)
         if workflow_repository is not None and artifact_service is not None
         else None
     )
@@ -250,6 +268,7 @@ def create_app(
             job_service=job_service,
             scientific_runner=scientific_runner,
             library_service=library_service,
+            library_index_service=library_index_service,
             discovery_service=discovery_service,
             planning_service=planning_service,
             sections_service=sections_service,
@@ -325,6 +344,7 @@ def create_app(
     app.state.job_service = job_service
     app.state.scientific_runner = scientific_runner
     app.state.library_service = library_service
+    app.state.library_index_service = library_index_service
     app.state.discovery_service = discovery_service
     app.state.planning_service = planning_service
     app.state.sections_service = sections_service
@@ -632,6 +652,19 @@ def create_app(
         items = project_service.list_projects(principal)
         return ProjectListResponse(items=items, count=len(items))
 
+    @app.get(
+        "/api/v1/taxonomy-profiles",
+        response_model=TaxonomyProfileCatalogResponse,
+        tags=["projects"],
+    )
+    def taxonomy_profiles(
+        _principal: Principal = Depends(current_principal),
+    ) -> TaxonomyProfileCatalogResponse:
+        return TaxonomyProfileCatalogResponse(
+            items=taxonomy_profile_catalog(),
+            default_profile=DEFAULT_TAXONOMY_PROFILE,
+        )
+
     @app.post(
         "/api/v1/projects",
         response_model=ProjectResponse,
@@ -665,6 +698,29 @@ def create_app(
             principal, project_id, model_tier=payload.model_tier
         )
         return ProjectResponse.model_validate(record)
+
+    @app.patch(
+        "/api/v1/projects/{project_id}/taxonomy-profile",
+        response_model=ProjectTaxonomyProfileUpdateResponse,
+        tags=["projects"],
+    )
+    def update_project_taxonomy_profile(
+        project_id: str,
+        payload: ProjectTaxonomyProfileUpdateRequest,
+        principal: Principal = Depends(current_principal),
+    ) -> ProjectTaxonomyProfileUpdateResponse:
+        result = project_service.update_project_taxonomy_profile(
+            principal,
+            project_id,
+            taxonomy_profile=payload.taxonomy_profile,
+            confirm_downstream_invalidation=payload.confirm_downstream_invalidation,
+        )
+        return ProjectTaxonomyProfileUpdateResponse(
+            project=ProjectResponse.model_validate(result.project),
+            changed=result.changed,
+            matrix_entered=result.matrix_entered,
+            downstream_stale=result.downstream_stale,
+        )
 
     @app.get("/api/v1/projects/{project_id}", response_model=ProjectResponse, tags=["projects"])
     def project(project_id: str, principal: Principal = Depends(current_principal)) -> ProjectResponse:
@@ -1022,11 +1078,16 @@ def create_app(
         app.include_router(build_file_router(current_principal, artifact_service))
     if job_service is not None:
         app.include_router(build_job_router(current_principal, job_service))
-    if library_service is not None and job_service is not None:
+    if (
+        library_service is not None
+        and library_index_service is not None
+        and job_service is not None
+    ):
         app.include_router(
             build_library_router(
                 current_principal,
                 library_service,
+                library_index_service,
                 job_service,
                 native_handlers,
             )

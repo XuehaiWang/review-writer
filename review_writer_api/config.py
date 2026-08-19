@@ -6,7 +6,7 @@ import base64
 import ipaddress
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal
@@ -19,6 +19,18 @@ from review_writer_core.workspace import discover_review_root
 
 DeploymentMode = Literal["local", "hosted"]
 COOKIE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+@dataclass(frozen=True)
+class RetrievalTuning:
+    """Central conservative retrieval limits; intentionally not env-per-knob."""
+
+    chunk_min_tokens: int = 70
+    chunk_max_tokens: int = 360
+    oversized_overlap_tokens: int = 100
+    subsection_top_k: int = 12
+    subsection_per_paper_limit: int = 4
+    rrf_constant: int = 60
 
 
 @dataclass(frozen=True)
@@ -56,6 +68,9 @@ class ApiSettings:
     model_gateway_user_concurrency: int = 1
     image_gateway_max_concurrency: int = 1
     image_gateway_user_concurrency: int = 1
+    document_retrieval_enabled: bool = True
+    vector_retrieval_enabled: bool = False
+    retrieval_tuning: RetrievalTuning = field(default_factory=RetrievalTuning)
 
     @classmethod
     def from_env(cls, review_root: str | Path | None = None) -> "ApiSettings":
@@ -169,6 +184,12 @@ class ApiSettings:
         image_gateway_user_concurrency = _environment_integer(
             "REVIEW_WRITER_IMAGE_GATEWAY_USER_CONCURRENCY", 1, minimum=1, maximum=4
         )
+        document_retrieval_enabled = _environment_flag(
+            "REVIEW_DOCUMENT_RETRIEVAL_ENABLED", True
+        )
+        vector_retrieval_enabled = _environment_flag(
+            "REVIEW_VECTOR_RETRIEVAL_ENABLED", False
+        )
         raw_workspace_root = str(
             os.environ.get("REVIEW_WRITER_HOSTED_WORKSPACE_ROOT") or ""
         ).strip()
@@ -239,6 +260,8 @@ class ApiSettings:
             model_gateway_user_concurrency=model_gateway_user_concurrency,
             image_gateway_max_concurrency=image_gateway_max_concurrency,
             image_gateway_user_concurrency=image_gateway_user_concurrency,
+            document_retrieval_enabled=document_retrieval_enabled,
+            vector_retrieval_enabled=vector_retrieval_enabled,
         )
 
 

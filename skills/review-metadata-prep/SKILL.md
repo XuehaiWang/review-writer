@@ -49,9 +49,14 @@ Open:
 
 ## LLM Mode
 
-By default, `prepare_metadata.py` uses deterministic fallback rules so the pipeline can run without API credentials.
+By default, `prepare_metadata.py` extracts project-neutral bibliographic
+metadata and writes all reusable structured Tags as `not specified`. Domain
+rules are reserved for query expansion and do not classify uploaded papers.
 
 For useful classification tags, use LLM mode. The LLM extracts required bibliographic fields and exactly eight structured tags:
+
+LLM-produced reusable Tags remain unverified audit suggestions until the
+complete `structured_tags` field is explicitly marked `human_checked=true`.
 
 ```text
 product
@@ -188,7 +193,11 @@ confidence
 human_checked
 ```
 
-Use `human_review` for audit status and notes. Local paper retrieval uses only the eight values inside `structured_tags`; do not generate or rely on legacy `keywords`, `llm_tags`, `human_tags`, or category compatibility fields.
+Use `human_review` for audit status and notes. Local paper retrieval may use the
+eight values inside `structured_tags` only when the complete field has
+`human_checked=true`; unverified rule or LLM values remain audit data only. Do
+not generate or rely on legacy `keywords`, `llm_tags`, `human_tags`, or category
+compatibility fields.
 
 ## Human Audit Dashboard
 

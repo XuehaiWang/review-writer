@@ -21,7 +21,13 @@ from review_writer_api.domain_services.library import (
     LibraryService,
     MinerUPreciseParseFailed,
 )
-from review_writer_api.errors import ArtifactRangeNotSatisfiable, WorkflowNotFound, WorkflowValidationError
+from review_writer_api.domain_services.library_index import LibraryIndexService
+from review_writer_api.errors import (
+    ArtifactRangeNotSatisfiable,
+    WorkflowConflict,
+    WorkflowNotFound,
+    WorkflowValidationError,
+)
 from review_writer_api.job_service import JobService
 from review_writer_api.routers.files import _byte_range, _read_range
 from review_writer_api.routers.jobs import _job_response
@@ -30,10 +36,21 @@ from review_writer_api.workflow_schemas import (
     LiteratureDownloadRequest,
     LiteratureSearchRequest,
 )
+from review_writer_core.metadata_tags import structured_tags_are_verified
 
 
-def _paper_payload(record: LibraryPaperRecord) -> dict[str, Any]:
+def _paper_payload(
+    record: LibraryPaperRecord,
+    index_status: dict[str, Any] | None = None,
+    search_match: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     metadata = record.metadata
+    resolved_index_status = index_status or {
+        "mineru": "ready" if record.artifact_ids.get("mineru") else "unavailable",
+        "fulltext": "not_indexed",
+        "semantic": "disabled",
+        "chunk_count": 0,
+    }
     value = lambda key, default=None: (
         metadata.get(key, {}).get("value", default)
         if isinstance(metadata.get(key), dict)
@@ -53,15 +70,22 @@ def _paper_payload(record: LibraryPaperRecord) -> dict[str, Any]:
         "year": value("year"),
         "journal": value("journal", ""),
         "doi": value("doi", ""),
-        "structured_tags": value("structured_tags", record.tags),
+        "structured_tags": record.tags,
+        "structured_tags_verified": structured_tags_are_verified(metadata),
         "human_review_status": (metadata.get("human_review") or {}).get("status"),
         "needs_human_check": (metadata.get("quality") or {}).get("needs_human_check"),
+        "mineru_parse_status": resolved_index_status["mineru"],
+        "document_index_status": resolved_index_status["fulltext"],
+        "embedding_status": resolved_index_status["semantic"],
+        "index_status": resolved_index_status,
+        "search_match": search_match,
     }
 
 
 def build_library_router(
     principal_dependency: Callable[..., Principal],
     library_service: LibraryService,
+    library_index_service: LibraryIndexService,
     job_service: JobService,
     handlers: Mapping[str, Callable] | None = None,
 ) -> APIRouter:
@@ -75,6 +99,54 @@ def build_library_router(
             raise WorkflowNotFound("Project not found.")
         return f"project:{normalized}"
     configured = dict(handlers or {})
+
+    def index_handler(context, payload):
+        principal = Principal(context.user_id, frozenset({Role.USER}))
+        context.report_progress(1, 2)
+        result = library_index_service.build(
+            principal,
+            str(payload.get("paper_id") or ""),
+            expected_lineage_hash=str(payload.get("source_lineage_hash") or ""),
+        )
+        context.repository.update_job_progress(context.job_id, 2, 2)
+        return result
+
+    job_service.register_handler("library.index", index_handler)
+
+    def enqueue_index(
+        principal: Principal,
+        paper_id: str,
+        *,
+        force: bool = False,
+        suppress_active_conflict: bool = False,
+    ):
+        if not library_index_service.enabled:
+            return None
+        prepared = library_index_service.prepare(principal, paper_id, force=force)
+        if not prepared.needs_job:
+            return None
+        try:
+            return job_service.submit(
+                principal,
+                scope="library",
+                project_id=None,
+                job_type="library.index",
+                idempotency_key=(
+                    f"manual:{uuid.uuid4()}"
+                    if force
+                    else f"auto:{prepared.source_lineage_hash}"
+                ),
+                payload={
+                    "paper_id": prepared.paper_id,
+                    "source_lineage_hash": prepared.source_lineage_hash,
+                },
+                operation_key=f"index:{prepared.paper_id}",
+            )
+        except WorkflowConflict:
+            if suppress_active_conflict:
+                return None
+            raise
+
     search_handler = configured.get("library.search")
     if search_handler is not None:
         job_service.register_handler("library.search", search_handler)
@@ -84,7 +156,13 @@ def build_library_router(
         def reconcile_download(context, payload):
             result = dict(download_handler(context, payload) or {})
             principal = Principal(context.user_id, frozenset({Role.USER}))
-            library_service.reconcile_download_result(principal, result)
+            records = library_service.reconcile_download_result(principal, result)
+            for record in records:
+                enqueue_index(
+                    principal,
+                    record.paper_id,
+                    suppress_active_conflict=True,
+                )
             return result
 
         job_service.register_handler("library.download", reconcile_download)
@@ -104,12 +182,16 @@ def build_library_router(
             job_id=context.job_id,
         )
         staged.unlink(missing_ok=True)
+        index_job = enqueue_index(
+            principal, record.paper_id, suppress_active_conflict=True
+        )
         context.repository.update_job_progress(context.job_id, 3, 3)
         return {
             **_paper_payload(record),
             "status": outcome,
             "mineru_ready": True,
             "library_count": library_service.count(principal),
+            "index_job_id": index_job.id if index_job is not None else None,
         }
 
     job_service.register_handler("library.upload", upload_handler)
@@ -123,10 +205,85 @@ def build_library_router(
     @router.get("/papers")
     def papers(
         q: str = "",
+        mode: str = "metadata",
         principal: Principal = Depends(principal_dependency),
     ) -> dict[str, Any]:
-        rows = library_service.list(principal, q)
-        return {"items": [_paper_payload(row) for row in rows], "count": len(rows), "query": q}
+        normalized_mode = str(mode or "metadata").strip().casefold()
+        if normalized_mode not in {"metadata", "fulltext", "hybrid"}:
+            raise WorkflowValidationError(
+                "Library search mode must be metadata, fulltext, or hybrid."
+            )
+        if not str(q or "").strip():
+            rows = library_service.list(principal)
+            search_matches: dict[str, dict[str, Any]] = {}
+            retrieval_mode = (
+                "metadata"
+                if normalized_mode == "metadata" or not library_index_service.enabled
+                else "lexical"
+            )
+        elif normalized_mode == "metadata" or not library_index_service.enabled:
+            rows = library_service.list(principal, q)
+            search_matches = {}
+            retrieval_mode = "metadata"
+        else:
+            all_rows = library_service.list(principal)
+            by_id = {row.paper_id: row for row in all_rows}
+            lexical = library_index_service.lexical_scores(principal, q)
+            metadata_rows = library_service.list(principal, q)
+            combined: dict[str, float] = {}
+            if normalized_mode == "hybrid":
+                for rank, record in enumerate(metadata_rows, start=1):
+                    combined[record.paper_id] = combined.get(record.paper_id, 0.0) + 1 / (library_index_service.tuning.rrf_constant + rank)
+            for rank, (paper_id, _score) in enumerate(
+                sorted(lexical.items(), key=lambda item: (-item[1], item[0])),
+                start=1,
+            ):
+                combined[paper_id] = combined.get(paper_id, 0.0) + 1 / (library_index_service.tuning.rrf_constant + rank)
+            rows = [
+                by_id[paper_id]
+                for paper_id, _score in sorted(
+                    combined.items(), key=lambda item: (-item[1], item[0])
+                )
+                if paper_id in by_id
+            ]
+            hits = library_index_service.retrieve(
+                principal,
+                q,
+                allowed_papers=list(by_id),
+                top_k=50,
+                include_neighbors=False,
+            ) if by_id else []
+            search_matches = {}
+            for hit in hits:
+                search_matches.setdefault(
+                    hit.paper_id,
+                    {
+                        "chunk_id": hit.chunk_id,
+                        "page_start": hit.page_start,
+                        "page_end": hit.page_end,
+                        "section_path": list(hit.section_path),
+                        "content": hit.content,
+                        "match_reason": hit.match_reason,
+                    },
+                )
+            retrieval_mode = "lexical_only" if normalized_mode == "hybrid" else "lexical"
+        summaries = library_index_service.summaries(
+            principal, [row.paper_id for row in rows]
+        )
+        return {
+            "items": [
+                _paper_payload(
+                    row,
+                    summaries.get(row.paper_id),
+                    search_matches.get(row.paper_id),
+                )
+                for row in rows
+            ],
+            "count": len(rows),
+            "query": q,
+            "requested_mode": normalized_mode,
+            "retrieval_mode": retrieval_mode,
+        }
 
     @router.post("/papers")
     async def upload_pdf(
@@ -168,11 +325,15 @@ def build_library_router(
             record, outcome = await anyio.to_thread.run_sync(
                 admission, abandon_on_cancel=True
             )
+            index_job = enqueue_index(
+                principal, record.paper_id, suppress_active_conflict=True
+            )
             payload = {
                 **_paper_payload(record),
                 "status": outcome,
                 "mineru_ready": True,
                 "library_count": library_service.count(principal),
+                "index_job_id": index_job.id if index_job is not None else None,
             }
             return JSONResponse(
                 status_code=(status.HTTP_200_OK if outcome == "duplicate_file" else status.HTTP_201_CREATED),
@@ -248,6 +409,73 @@ def build_library_router(
             limit=max(1, min(limit, 100)),
         )
         return {"items": [upload_job_payload(row) for row in rows], "count": len(rows)}
+
+    @router.get("/papers/{paper_id}/index-status")
+    def document_index_status(
+        paper_id: str,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        return library_index_service.status(principal, paper_id)
+
+    @router.post(
+        "/papers/{paper_id}/reindex", status_code=status.HTTP_202_ACCEPTED
+    )
+    def reindex_paper(
+        paper_id: str,
+        idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        prepared = library_index_service.prepare(principal, paper_id, force=True)
+        job = job_service.submit(
+            principal,
+            scope="library",
+            project_id=None,
+            job_type="library.index",
+            idempotency_key=idempotency_key.strip() or f"manual:{uuid.uuid4()}",
+            payload={
+                "paper_id": prepared.paper_id,
+                "source_lineage_hash": prepared.source_lineage_hash,
+            },
+            operation_key=f"index:{prepared.paper_id}",
+        )
+        return _job_response(job).model_dump()
+
+    @router.post("/reindex-jobs", status_code=status.HTTP_202_ACCEPTED)
+    def create_reindex_jobs(
+        payload: dict[str, Any] | None = None,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        requested = payload.get("paper_ids") if isinstance(payload, dict) else None
+        force = bool(payload.get("force")) if isinstance(payload, dict) else False
+        paper_ids = (
+            [str(item) for item in requested if str(item).strip()]
+            if isinstance(requested, list)
+            else [record.paper_id for record in library_service.list(principal)]
+        )
+        jobs = []
+        for paper_id in dict.fromkeys(paper_ids):
+            job = enqueue_index(principal, paper_id, force=force)
+            if job is not None:
+                jobs.append(_job_response(job).model_dump())
+        return {"items": jobs, "count": len(jobs)}
+
+    @router.get("/reindex-jobs/current")
+    def current_reindex_jobs(
+        paper_id: str = "",
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        if paper_id:
+            job = job_service.repository.get_current_job(
+                principal.user_id,
+                scope="library",
+                job_type="library.index",
+                operation_key=f"index:{paper_id}",
+            )
+            return {"job": _job_response(job).model_dump() if job is not None else None}
+        rows = job_service.repository.list_library_jobs(
+            principal.user_id, job_type="library.index", limit=100
+        )
+        return {"items": [_job_response(row).model_dump() for row in rows], "count": len(rows)}
 
     @router.get("/papers/{paper_id}/metadata")
     def metadata(

@@ -13,9 +13,19 @@ Rules:
   expansion. Every resolved abbreviation must include a calibrated
   `confidence` from `0` to `1` and a short reason. Put ambiguous concepts in
   `unresolved_concepts` instead of guessing.
-- Add synonyms, substrate classes, catalyst or method classes, reaction types, product classes, organometallic partners, ligands/chiral sources, leaving groups, and document-scope terms.
+- Add search-useful synonyms and only the categories supported by the topic. Do
+  not add a document-scope term merely because the user asks the system to
+  write a review; add `review article` only when review articles are explicitly
+  requested as source documents.
 - Do not create too many broad generic keywords.
 - Prefer search-useful terms over prose phrases.
+- Resolve anaphoric list items such as "their derivatives" to the immediately
+  preceding scientific class. When that derivative class is important to the
+  requested grouping, add a small number of representative named subclasses
+  supported by the domain context instead of retaining the vague pronoun.
+- Include common nomenclature variants for explicitly requested grouping
+  classes (for example positional names versus class names), while respecting
+  the keyword limit.
 - Classify each keyword as one of:
   - `product`
   - `substrate`
@@ -33,9 +43,16 @@ Rules:
 - Convert relative-year requests against the current calendar year and use an
   inclusive range. For example, in 2026, "past five years" means
   `filters.year_from` is `2022` and `filters.year_to` is `2026`.
-- Represent a request to organize by catalyst type as
-  `group_by: ["catalyst_or_method"]`. Do not add generic words such as
-  `catalysts`, `organized`, or `review` as retrieval keywords.
+- When the topic has no publication-year restriction, return `"filters": {}`.
+  Do not emit `null`, an empty string, or an invented year bound.
+- Preserve every explicit organization request in `group_by`: substrate,
+  product, catalyst/method, reaction type, ligand/chiral source, leaving group,
+  and document scope map to their corresponding metadata category. For
+  example, "categorized by the substrates" becomes
+  `group_by: ["substrate"]`. Do not add generic words such as `substrates`,
+  `methods`, `organized`, or `review` as standalone retrieval keywords.
+- In every `resolved_concepts` item, the canonical expanded field name is
+  exactly `expanded_name` (not `normalized`).
 - Review `unresolved_concepts` before running discovery. A plan may proceed
   when other resolved concepts or validated keywords provide a meaningful
   search, but an unresolved-only plan must stop before invoking `discover.py`

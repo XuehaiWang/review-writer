@@ -11,12 +11,14 @@ import type {
   ProviderSettingsList,
   UsageSummary,
   UsageTimeline,
+  TaxonomyProfileCatalog,
 } from "./types";
 
 export const queryKeys = {
   authConfig: ["auth-config"] as const,
   me: ["me"] as const,
   projects: ["projects"] as const,
+  taxonomyProfiles: ["taxonomy-profiles"] as const,
   providerSettings: ["provider-settings"] as const,
   adminProviderSettings: ["admin", "provider-settings"] as const,
   adminProviderAudit: ["admin", "provider-audit"] as const,
@@ -45,6 +47,12 @@ export const meQuery = queryOptions({
 export const projectsQuery = queryOptions({
   queryKey: queryKeys.projects,
   queryFn: () => apiRequest<ProjectList>("/api/v1/projects"),
+});
+
+export const taxonomyProfilesQuery = queryOptions({
+  queryKey: queryKeys.taxonomyProfiles,
+  queryFn: () => apiRequest<TaxonomyProfileCatalog>("/api/v1/taxonomy-profiles"),
+  staleTime: 30 * 60 * 1000,
 });
 
 export const providerSettingsQuery = queryOptions({
@@ -83,6 +91,9 @@ export function usageTimelineQuery(days = 30) {
 export function libraryQuery(query: string) {
   return queryOptions({
     queryKey: queryKeys.library(query),
-    queryFn: () => apiRequest<LibraryList>(`/api/v1/library/papers?q=${encodeURIComponent(query)}`),
+    queryFn: () => apiRequest<LibraryList>(`/api/v1/library/papers?q=${encodeURIComponent(query)}&mode=hybrid`),
+    refetchInterval: (state) => state.state.data?.items.some((paper) =>
+      ["queued", "building"].includes(paper.index_status?.fulltext || "")
+    ) ? 1200 : false,
   });
 }

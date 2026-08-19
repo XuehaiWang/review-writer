@@ -367,12 +367,17 @@ class ScientificRunner:
     def _diagnostic_summary(stderr: str, stdout: str = "") -> str:
         """Return one redacted, bounded, user-actionable failure line."""
 
-        lines = [
-            line.strip()
-            for line in f"{stderr}\n{stdout}".splitlines()
-            if line.strip()
-            and not line.lstrip().startswith(ERROR_ENVELOPE_PREFIX)
-        ]
+        def useful_lines(value: str) -> list[str]:
+            return [
+                line.strip()
+                for line in value.splitlines()
+                if line.strip()
+                and not line.lstrip().startswith(ERROR_ENVELOPE_PREFIX)
+            ]
+
+        # Scientific scripts write failures to stderr and progress to stdout.
+        # Prefer stderr so a trailing progress line cannot mask the real error.
+        lines = useful_lines(stderr) or useful_lines(stdout)
         if not lines:
             return ""
         diagnostic = lines[-1]

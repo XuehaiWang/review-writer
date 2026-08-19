@@ -37,6 +37,33 @@ type SectionPaper = {
   keywords?: string[];
 };
 
+type EvidenceSection = {
+  section_id?: string;
+  heading?: string;
+  query?: string;
+  retrieval_mode?: string;
+  status?: string;
+  hit_count?: number;
+  paper_count?: number;
+  hits?: Array<{
+    paper_id?: string;
+    paper_title?: string;
+    chunk_id?: string;
+    content?: string;
+    page_start?: number | null;
+    page_end?: number | null;
+    section_path?: string[];
+    match_reason?: string;
+    is_neighbor?: boolean;
+  }>;
+};
+
+type DraftParagraph = {
+  paragraph_id?: string;
+  text?: string;
+  evidence?: Array<{ paper_id?: string; chunk_ids?: string[]; claim?: string }>;
+};
+
 type SectionsPayload = {
   project_id: string;
   section_tasks: SectionTask[];
@@ -48,9 +75,15 @@ type SectionsPayload = {
   revision: number;
   handoff: { drafts_stale: boolean; has_existing_drafts: boolean; current: boolean };
   report: { current_task_count: number; current_output_count: number; jobs: Job[] };
+  evidence_package?: {
+    sections?: EvidenceSection[];
+  } | null;
+  section_drafts?: {
+    sections?: Array<{ section_id?: string; paragraphs?: DraftParagraph[] }>;
+  } | null;
 };
 
-type WorkspaceTab = "section" | "merged" | "tasks" | "report";
+type WorkspaceTab = "section" | "merged" | "evidence" | "tasks" | "report";
 
 function wordCount(value?: string) {
   return String(value || "").trim().split(/\s+/).filter(Boolean).length;
@@ -74,6 +107,22 @@ function TaskRequirements({ task, paperLabels }: { task?: SectionTask; paperLabe
         <section className="wide"><h3>{text("写作边界", "Writing boundaries")}</h3>{task.avoid_points?.length ? <ul>{task.avoid_points.map((item) => <li key={item}>{item}</li>)}</ul> : <p>{text("未指定。", "Not specified.")}</p>}</section>
       </div>
     </article>
+  );
+}
+
+function EvidenceView({ section, paragraphs, paperLabels }: { section?: EvidenceSection; paragraphs?: DraftParagraph[]; paperLabels: Map<string, string> }) {
+  const { text } = useUiText();
+  if (!section) return <div className="empty-state">{text("当前章节没有已发布的证据包。", "This section has no published evidence package.")}</div>;
+  const hits = section.hits || [];
+  return (
+    <div className="section-evidence-view">
+      <header><span className="step-label">{text("检索证据", "Retrieved evidence")}</span><h2>{section.heading || section.section_id}</h2><p>{section.query}</p><div className="chip-list"><span>{section.retrieval_mode === "lexical" ? text("词法全文检索", "Lexical full-text retrieval") : text("旧版前缀回退", "Legacy prefix fallback")}</span><span>{text(`${section.hit_count || 0} 个段落`, `${section.hit_count || 0} passages`)}</span><span>{text(`${section.paper_count || 0} 篇论文`, `${section.paper_count || 0} papers`)}</span></div></header>
+      {hits.length ? <div className="section-evidence-list">{hits.map((hit, index) => {
+        const page = hit.page_start ? (hit.page_end && hit.page_end !== hit.page_start ? `${hit.page_start}–${hit.page_end}` : String(hit.page_start)) : text("未知", "Unknown");
+        const supported = (paragraphs || []).filter((paragraph) => paragraph.evidence?.some((item) => item.chunk_ids?.includes(String(hit.chunk_id || ""))));
+        return <article key={hit.chunk_id || index}><div><strong>{paperLabels.get(String(hit.paper_id || "")) || hit.paper_title || hit.paper_id}</strong><span>{text("页", "Page")} {page} · {(hit.section_path || []).join(" › ") || text("未标注章节", "Unlabelled section")}</span></div><p>{hit.content}</p><footer><code>{hit.chunk_id}</code><em>{hit.is_neighbor ? text("相邻上下文", "Adjacent context") : hit.match_reason}</em></footer>{supported.length ? <details><summary>{text(`支持 ${supported.length} 个正文段落`, `Supports ${supported.length} draft paragraphs`)}</summary>{supported.map((paragraph) => <p key={paragraph.paragraph_id} className="supported-paragraph"><b>{paragraph.paragraph_id}</b> {paragraph.text}</p>)}</details> : null}</article>;
+      })}</div> : <div className="empty-state">{text("证据不足，当前版本使用兼容回退；请在文献库建立全文索引后重新生成。", "Evidence was insufficient and this version used the compatibility fallback. Build full-text indexes in Library and regenerate.")}</div>}
+    </div>
   );
 }
 
@@ -128,6 +177,8 @@ export function SectionsPage() {
     return tasks.find((task) => taskId(task) === id || task.heading === id) || tasks[0];
   }, [files, selectedId, taskOnly, tasks]);
   const activeFile = files.find((file) => file.name === selectedId) || files[0];
+  const activeEvidence = payload?.evidence_package?.sections?.find((item) => item.section_id === taskId(activeTask));
+  const activeDraftParagraphs = payload?.section_drafts?.sections?.find((item) => item.section_id === taskId(activeTask))?.paragraphs;
   const displayedActiveContent = replacePaperIdsForDisplay(activeFile?.content, paperLabels);
   const displayedMergedContent = replacePaperIdsForDisplay(payload?.section_drafts_md, paperLabels);
 
@@ -152,7 +203,7 @@ export function SectionsPage() {
 
   const availableTabs: Array<[WorkspaceTab, string]> = taskOnly
     ? [["tasks", text("写作要求", "Writing requirements")], ["report", text("生成报告", "Generation report")]]
-    : [["section", text("章节草稿", "Section draft")], ["merged", text("合并预览", "Merged preview")], ["tasks", text("写作要求", "Writing requirements")], ["report", text("生成报告", "Generation report")]];
+    : [["section", text("章节草稿", "Section draft")], ["merged", text("合并预览", "Merged preview")], ["evidence", text("查看证据", "View evidence")], ["tasks", text("写作要求", "Writing requirements")], ["report", text("生成报告", "Generation report")]];
   const error = generate.error || confirm.error || (currentJob?.status === "failed" ? new Error(currentJob.error_message || text("章节生成失败。", "Section generation failed.")) : null);
 
   return (
@@ -172,6 +223,7 @@ export function SectionsPage() {
           <section className="pane section-preview-react"><nav className="detail-tabs">{availableTabs.map(([value, label]) => <button key={value} type="button" className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{label}</button>)}</nav><div className="section-preview-content">
             {tab === "section" ? <MarkdownView content={displayedActiveContent} empty={text("当前章节尚未生成。", "This section has not been generated.")} /> : null}
             {tab === "merged" ? <MarkdownView content={displayedMergedContent} empty={text("当前没有合并预览。", "No merged preview is available.")} /> : null}
+            {tab === "evidence" ? <EvidenceView section={activeEvidence} paragraphs={activeDraftParagraphs} paperLabels={paperLabels} /> : null}
             {tab === "tasks" ? <TaskRequirements task={activeTask} paperLabels={paperLabels} /> : null}
             {tab === "report" ? <div className="job-report"><h2>{text("章节生成报告", "Section generation report")}</h2><p>{liveOutputCount}/{liveTaskCount} {currentJob && jobIsActive(currentJob.status) ? text("章已实时完成", "sections completed live") : text("个当前章节产物", "current section artifacts")}</p>{currentJob ? <SectionJobProgress job={currentJob} /> : <div className="empty-state">{text("尚未启动章节生成。", "Section generation has not started.")}</div>}{payload.report.jobs.map((job) => <details key={job.id}><summary>{job.status} · {job.id}</summary><p>{job.progress_current}/{job.progress_total} · {job.error_message || text("无错误", "No errors")}</p></details>)}</div> : null}
           </div></section>

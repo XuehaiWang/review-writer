@@ -165,7 +165,7 @@ async function createProject(event) {
       body: JSON.stringify({
         slug: String(values.get("slug") || "").trim(),
         topic: String(values.get("topic") || "").trim(),
-        taxonomy_profile: String(values.get("taxonomy_profile") || "chemistry_general"),
+        taxonomy_profile: String(values.get("taxonomy_profile") || "general_academic"),
       }),
     }));
     form.reset();

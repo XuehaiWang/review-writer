@@ -45,6 +45,7 @@ type DiscoveryRow = Record<string, unknown> & {
   source?: string;
   landing_url?: string;
   base_tags?: Record<string, string>;
+  base_tags_verified?: boolean;
   project_tag_assessment?: ProjectTagAssessment;
   confirmed_project_tags?: ProjectTagMap;
   tag_review_status?: "pending" | "confirmed";
@@ -66,6 +67,12 @@ type DiscoveryPayload = {
   has_published_matrix?: boolean;
   topic: string;
   keywords?: string;
+  query_plan_source?: string;
+  query_plan?: {
+    planner?: string;
+    planner_notice?: string;
+    group_by?: string[];
+  };
   results: DiscoveryGroup[];
   statistics?: {
     candidate_count?: number;
@@ -156,9 +163,11 @@ function PaperDetail({ row, kind, displayLabel }: { row: DiscoveryRow | null; ki
       <div className="detail-summary"><span className="step-label" title={paperId}>{displayLabel || paperId}</span><h2>{row.title}</h2><p>{row.authors?.join(", ")}</p></div>
       <section className="project-tag-review">
         <div className="project-tag-review-head">
-          <div><span className="step-label">{text("项目 Tag 自动评估", "Automatic project Tag assessment")}</span><h3>{text("基础 Tag 与当前项目建议", "Base Tags and project suggestions")}</h3></div>
+          <div><span className="step-label">{text("项目 Tag 自动评估", "Automatic project Tag assessment")}</span><h3>{text("已验证基础 Tag 与当前项目建议", "Verified base Tags and project suggestions")}</h3></div>
         </div>
-        <p className="muted">{text("系统根据当前检索主题自动生成项目 Tag，并在论文进入 Matrix 时自动应用；Library 基础 Tag 保持不变。", "Project Tags are generated from the current search topic and applied automatically when the paper enters the matrix. Library base Tags remain unchanged.")}</p>
+        <p className="muted">{row.base_tags_verified
+          ? text("系统仅使用经过人工确认的 Library 基础 Tag；当前项目建议在论文进入 Matrix 时自动应用。", "Only human-verified Library base Tags are used. Current project suggestions are applied automatically when the paper enters the matrix.")
+          : text("这篇论文的历史 Library Tag 未经人工确认，已从召回和 Matrix 中忽略；当前项目只使用带匹配证据的建议 Tag。", "Unverified historical Library Tags are ignored for retrieval and Matrix. This project uses only suggested Tags backed by matching evidence.")}</p>
         <div className="project-tag-grid">
           {CATEGORY_ORDER.filter((category) => category !== "unclassified").map((category) => {
             const baseValue = String(row.base_tags?.[category] || "").trim();
@@ -197,6 +206,7 @@ export function DiscoveryPage() {
   useEffect(() => {
     setTopic(project?.topic || "");
     setKeywords("");
+    setWebSearch(false);
     setJobId("");
     setGroups([]);
     setSelectedKeyword("");
@@ -335,6 +345,8 @@ export function DiscoveryPage() {
           </div>
           {discovery.data?.has_published_matrix ? <p className="message message-info">{text("重新检索只生成新的待确认结果，不会删除或隐藏阶段 3–7 的现有内容。确认采用后，只有论文集合或主题确实变化时，依赖阶段才会标记为过期。", "A new search creates reviewable results without deleting or hiding existing Stage 3–7 work. After confirmation, dependent stages are marked stale only when the paper set or topic actually changes.")}</p> : null}
           {(run.isPending || jobId) ? <DiscoveryJobProgress job={job.data} submitting={run.isPending && !jobId} /> : null}
+          {discovery.data?.query_plan?.planner_notice ? <p className="message message-warning">{text("本次检索使用了确定性查询规划：", "This search used the deterministic query planner: ")}{discovery.data.query_plan.planner_notice}</p> : null}
+          {discovery.data?.query_plan_source === "dashboard_llm" && !discovery.data?.query_plan?.planner_notice ? <p className="message message-info">{text("已使用当前所选文本模型完成查询规划。", "The current selected text model produced the query plan.")}</p> : null}
           {run.error ? <p className="message message-error">{run.error.message}</p> : null}
         </section>
       ) : null}

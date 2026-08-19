@@ -31,9 +31,15 @@ from review_writer_api.database import (
     database_session,
 )
 from review_writer_api.domain_services.library import LibraryService
+from review_writer_api.errors import WorkflowValidationError
 from review_writer_api.scientific_runner import ScientificRunFailed
 from review_writer_api.security import Principal, Role
-from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
+from review_writer_api.workflow_models import (
+    LibraryArtifact,
+    LibraryDocumentChunk,
+    LibraryDocumentIndex,
+    LibraryPaper,
+)
 from review_writer_api.workspaces import HostedWorkspaceManager
 
 
@@ -249,12 +255,15 @@ class LibraryV1Tests(unittest.TestCase):
         with TestClient(self.app) as client:
             admitted = self.upload(client, "copper.pdf", fake_pdf())
             rejected = self.upload(client, "fails.pdf", fake_pdf(b"B"))
+            papers = client.get("/api/v1/library/papers").json()
 
         self.assertEqual(201, admitted.status_code)
         self.assertTrue(admitted.json()["mineru_ready"])
         self.assertEqual(502, rejected.status_code)
         self.assertEqual("MINERU_PRECISE_PARSE_FAILED", rejected.json()["error"]["code"])
         self.assertEqual(1, admitted.json()["library_count"])
+        self.assertEqual({}, papers["items"][0]["structured_tags"])
+        self.assertFalse(papers["items"][0]["structured_tags_verified"])
 
     def test_upload_job_persists_status_and_links_mineru_usage(self) -> None:
         batch_id = str(uuid.uuid4())
@@ -291,6 +300,86 @@ class LibraryV1Tests(unittest.TestCase):
             / ".upload-staging"
         )
         self.assertEqual([], list(staging.glob("*.pdf.part")))
+
+    def test_upload_builds_rebuildable_fulltext_index_and_hybrid_search_uses_it(self) -> None:
+        with TestClient(self.app) as client:
+            admitted = self.upload(client, "indexed.pdf", fake_pdf(b"I"))
+            self.assertEqual(201, admitted.status_code, admitted.text)
+            index_job_id = admitted.json()["index_job_id"]
+            self.assertTrue(index_job_id)
+            completed = self.wait_job(client, index_job_id)
+            self.assertEqual("succeeded", completed["status"], completed)
+
+            detail = client.get(
+                f"/api/v1/library/papers/{admitted.json()['paper_id']}/index-status"
+            )
+            fulltext = client.get(
+                "/api/v1/library/papers",
+                params={"q": "allene keyword", "mode": "fulltext"},
+            )
+            hybrid = client.get(
+                "/api/v1/library/papers",
+                params={"q": "allene keyword", "mode": "hybrid"},
+            )
+
+        self.assertEqual(200, detail.status_code)
+        self.assertEqual("ready", detail.json()["fulltext"])
+        self.assertGreater(detail.json()["chunk_count"], 0)
+        self.assertEqual(1, fulltext.json()["count"])
+        self.assertEqual("lexical", fulltext.json()["retrieval_mode"])
+        self.assertEqual(1, hybrid.json()["count"])
+        self.assertEqual("lexical_only", hybrid.json()["retrieval_mode"])
+        self.assertEqual("ready", hybrid.json()["items"][0]["index_status"]["fulltext"])
+        self.assertIn("allene keyword", hybrid.json()["items"][0]["search_match"]["content"])
+        with self.sessions() as session:
+            self.assertEqual(1, session.query(LibraryDocumentIndex).count())
+            self.assertGreater(session.query(LibraryDocumentChunk).count(), 0)
+
+    def test_metadata_update_does_not_rebuild_document_chunks(self) -> None:
+        with TestClient(self.app) as client:
+            admitted = self.upload(client, "metadata-only.pdf", fake_pdf(b"M"))
+            self.wait_job(client, admitted.json()["index_job_id"])
+            paper_id = admitted.json()["paper_id"]
+            before = client.get(
+                f"/api/v1/library/papers/{paper_id}/index-status"
+            ).json()
+            metadata = client.get(
+                f"/api/v1/library/papers/{paper_id}/metadata"
+            ).json()
+            metadata["title"] = {"value": "Edited catalog title"}
+            saved = client.put(
+                f"/api/v1/library/papers/{paper_id}/metadata", json=metadata
+            )
+            after = client.get(
+                f"/api/v1/library/papers/{paper_id}/index-status"
+            ).json()
+
+        self.assertEqual(200, saved.status_code, saved.text)
+        self.assertEqual(before["index_id"], after["index_id"])
+        self.assertEqual(before["source_lineage_hash"], after["source_lineage_hash"])
+        self.assertEqual("ready", after["fulltext"])
+
+    def test_index_status_detects_chunker_upgrade_and_retrieval_rejects_other_user_scope(self) -> None:
+        with TestClient(self.app) as client:
+            admitted = self.upload(client, "lineage.pdf", fake_pdf(b"L"))
+            self.wait_job(client, admitted.json()["index_job_id"])
+            paper_id = admitted.json()["paper_id"]
+            with self.sessions.begin() as session:
+                index = session.query(LibraryDocumentIndex).filter_by(
+                    user_id=uuid.UUID(self.first.user_id), paper_id=paper_id
+                ).one()
+                index.chunker_version = "obsolete-chunker"
+            status_payload = client.get(
+                f"/api/v1/library/papers/{paper_id}/index-status"
+            ).json()
+
+        self.assertEqual("rebuild_required", status_payload["fulltext"])
+        with self.assertRaises(WorkflowValidationError):
+            self.app.state.library_index_service.retrieve(
+                self.second,
+                "allene keyword",
+                allowed_papers=[paper_id],
+            )
 
     def test_upload_persists_mineru_content_and_images_before_staging_cleanup(self) -> None:
         with TestClient(self.app) as client:
@@ -499,12 +588,28 @@ class LibraryV1Tests(unittest.TestCase):
         self.assertEqual("batch-P001", rows[0].provider_request_id)
         self.assertEqual("0.03000000", format(rows[0].provider_cost_usd, "f"))
 
-    def test_search_covers_title_author_keyword_and_tag(self) -> None:
+    def test_search_uses_bibliographic_fields_and_only_verified_tags(self) -> None:
         with TestClient(self.app) as client:
-            self.upload(client, "copper.pdf", fake_pdf())
-            for query in ("Copper", "Lovelace", "allene", "allenation"):
+            uploaded = self.upload(client, "copper.pdf", fake_pdf()).json()
+            for query in ("Copper", "Lovelace", "allene"):
                 response = client.get("/api/v1/library/papers", params={"q": query})
                 self.assertEqual(1, response.json()["count"], query)
+            ignored = client.get("/api/v1/library/papers", params={"q": "allenation"})
+            metadata = client.get(
+                f"/api/v1/library/papers/{uploaded['paper_id']}/metadata"
+            ).json()
+            metadata["structured_tags"]["human_checked"] = True
+            saved = client.put(
+                f"/api/v1/library/papers/{uploaded['paper_id']}/metadata",
+                json=metadata,
+            )
+            verified = client.get(
+                "/api/v1/library/papers", params={"q": "allenation"}
+            )
+
+        self.assertEqual(0, ignored.json()["count"])
+        self.assertEqual(200, saved.status_code, saved.text)
+        self.assertEqual(1, verified.json()["count"])
 
     def test_metadata_markdown_and_pdf_are_user_isolated(self) -> None:
         with TestClient(self.app) as client:

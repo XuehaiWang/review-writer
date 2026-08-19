@@ -5,7 +5,6 @@ import { resolveProxyRequestOrigin } from "./src/dev/proxyOrigin";
 
 const developmentApiTarget = process.env.VITE_DEV_API_TARGET || "http://127.0.0.1:8770";
 const developmentPublicOrigin = process.env.VITE_DEV_PUBLIC_ORIGIN || "";
-const applicationBase = process.env.VITE_APP_BASE || "/assets/react/";
 
 function developmentProxy() {
   return {
@@ -34,26 +33,30 @@ function canonicalDevelopmentOrigin(): Plugin {
   };
 }
 
-export default defineConfig({
-  plugins: [canonicalDevelopmentOrigin(), react()],
-  base: applicationBase,
-  build: {
-    outDir: "dist",
-    emptyOutDir: true,
-    sourcemap: true,
-  },
-  server: {
-    host: "127.0.0.1",
-    port: 5173,
-    proxy: {
-      "/api": developmentProxy(),
-      "/assets/ketcher": developmentProxy(),
-      "/assets/dashboard": developmentProxy(),
+export default defineConfig(({ command }) => {
+  const applicationBase = process.env.VITE_APP_BASE || (command === "serve" ? "/" : "/assets/react/");
+
+  return {
+    plugins: [canonicalDevelopmentOrigin(), react()],
+    base: applicationBase,
+    build: {
+      outDir: "dist",
+      emptyOutDir: true,
+      sourcemap: true,
     },
-  },
-  test: {
-    environment: "jsdom",
-    setupFiles: "./src/test/setup.ts",
-    css: true,
-  },
+    server: {
+      host: "127.0.0.1",
+      port: 5173,
+      proxy: {
+        "/api": developmentProxy(),
+        "/assets/ketcher": developmentProxy(),
+        "/assets/dashboard": developmentProxy(),
+      },
+    },
+    test: {
+      environment: "jsdom",
+      setupFiles: "./src/test/setup.ts",
+      css: true,
+    },
+  };
 });

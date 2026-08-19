@@ -93,7 +93,7 @@ class Project(Base, TimestampMixin):
     slug: Mapped[str] = mapped_column(String(96), nullable=False)
     topic: Mapped[str] = mapped_column(Text, default="", nullable=False)
     taxonomy_profile: Mapped[str] = mapped_column(
-        String(96), default="chemistry_general", nullable=False
+        String(96), default="general_academic", nullable=False
     )
     model_tier: Mapped[str] = mapped_column(String(32), default="terra", nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)

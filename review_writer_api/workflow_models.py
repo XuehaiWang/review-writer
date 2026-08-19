@@ -92,6 +92,87 @@ class LibraryArtifact(Base):
     )
 
 
+class LibraryDocumentIndex(Base, TimestampMixin):
+    """Rebuildable full-text index version for one immutable Library document."""
+
+    __tablename__ = "library_document_indexes"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "paper_id",
+            "source_lineage_hash",
+            "chunker_version",
+            name="uq_library_document_index_lineage",
+        ),
+        Index(
+            "ix_library_document_indexes_user_paper_current",
+            "user_id",
+            "paper_id",
+            "is_current",
+        ),
+        Index("ix_library_document_indexes_status", "status", "updated_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid)
+    library_paper_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("library_papers.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    paper_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    source_lineage_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    source_lineage_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    chunker_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_code: Mapped[str] = mapped_column(String(96), default="", nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LibraryDocumentChunk(Base):
+    """One layout-aware lexical retrieval unit derived from MinerU output."""
+
+    __tablename__ = "library_document_chunks"
+    __table_args__ = (
+        UniqueConstraint("index_id", "chunk_id", name="uq_library_document_chunk_id"),
+        UniqueConstraint("index_id", "ordinal", name="uq_library_document_chunk_ordinal"),
+        Index("ix_library_document_chunks_user_paper", "user_id", "paper_id"),
+        Index("ix_library_document_chunks_index_ordinal", "index_id", "ordinal"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid)
+    index_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("library_document_indexes.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    paper_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    chunk_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_type: Mapped[str] = mapped_column(String(64), default="text", nullable=False)
+    section_path_json: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    page_start: Mapped[int | None] = mapped_column(Integer)
+    page_end: Mapped[int | None] = mapped_column(Integer)
+    block_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    block_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    asset_refs_json: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    is_reference: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    previous_chunk_id: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    next_chunk_id: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
 class WorkflowStageRun(Base):
     __tablename__ = "workflow_stage_runs"
     __table_args__ = (

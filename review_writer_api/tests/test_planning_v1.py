@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 from docx import Document
 
@@ -86,7 +86,10 @@ class PlanningV1Tests(unittest.TestCase):
                             "keywords": {"value": ["allenation", "copper"]},
                             "abstract": {"value": f"Evidence for {paper_id}."},
                             "year": {"value": 2024},
-                            "structured_tags": {"value": structured_tags},
+                            "structured_tags": {
+                                "value": structured_tags,
+                                "human_checked": True,
+                            },
                         },
                         pdf_relative_path=f"review-library/uploads/{paper_id}.pdf",
                         markdown_relative_path=f"review-library/markdown/{paper_id}.md",
@@ -353,6 +356,30 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertNotEqual(substrate, catalyst)
         self.assertNotEqual(catalyst, reaction)
 
+    def test_chemistry_substrate_outline_can_group_common_allene_precursors(self) -> None:
+        service = self.app.state.planning_service
+        rows = [{"paper_id": f"P{index:03d}"} for index in range(1, 8)]
+        text_by_paper = {
+            "P001": "enantioselective conversion of a propargylic alcohol substrate",
+            "P002": "scope of substituted propargyl alcohol starting materials",
+            "P003": "catalytic synthesis from a terminal alkyne",
+            "P004": "three-component reaction using 1-alkynes",
+            "P005": "cyclization of a conjugated enyne",
+            "P006": "asymmetric transformation of substituted 1,3-enynes",
+            "P007": "terminal alkynes as allene precursors; the abstract later compares propargylic alcohol chemistry",
+        }
+
+        groups = service._semantic_outline_groups(
+            rows,
+            text_by_paper,
+            tag_key="substrate",
+            taxonomy_profile="chemistry_general",
+        )
+
+        self.assertEqual(["P001", "P002"], groups["propargylic alcohols"])
+        self.assertEqual(["P003", "P004", "P007"], groups["terminal alkynes"])
+        self.assertEqual(["P005", "P006"], groups["conjugated enynes"])
+
     def test_outline_sources_prefer_confirmed_or_automatic_project_tags(self) -> None:
         service = self.app.state.planning_service
         confirmed_tags, _ = service._outline_sources(
@@ -398,6 +425,24 @@ class PlanningV1Tests(unittest.TestCase):
             ["automatically assessed transformation"],
             automatic_tags["P001"]["reaction_type"],
         )
+
+    def test_outline_sources_ignore_unverified_library_tags(self) -> None:
+        with self.sessions.begin() as session:
+            paper = session.scalar(
+                select(LibraryPaper).where(LibraryPaper.paper_id == "P001")
+            )
+            metadata = dict(paper.metadata_json)
+            structured = dict(metadata["structured_tags"])
+            structured["human_checked"] = False
+            metadata["structured_tags"] = structured
+            paper.metadata_json = metadata
+
+        tags, _ = self.app.state.planning_service._outline_sources(
+            self.first,
+            [{"paper_id": "P001", "project_tag_review_status": "pending"}],
+        )
+
+        self.assertEqual({}, tags["P001"])
 
     def test_custom_outline_starts_blank(self) -> None:
         with TestClient(self.app) as client:

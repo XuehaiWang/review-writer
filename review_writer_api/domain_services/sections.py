@@ -36,9 +36,11 @@ from review_writer_core.review_structure import (
     assign_primary_paper_sections,
     infer_section_role,
 )
+from review_writer_api.domain_services.library_index import LibraryIndexService
 
 
 SECTION_INDEX_LOGICAL_NAME = "sections/section_drafts.json"
+EVIDENCE_PACKAGE_LOGICAL_NAME = "sections/evidence_package.json"
 
 
 class BlueprintPapersMissing(WorkflowConflict):
@@ -71,9 +73,15 @@ def _job_payload(job: JobRecord) -> dict[str, Any]:
 
 
 class SectionsService:
-    def __init__(self, repository: WorkflowRepository, artifacts: ArtifactService):
+    def __init__(
+        self,
+        repository: WorkflowRepository,
+        artifacts: ArtifactService,
+        library_index: LibraryIndexService | None = None,
+    ):
         self.repository = repository
         self.artifacts = artifacts
+        self.library_index = library_index
         self._write_lock = threading.RLock()
 
     def _owned_project(self, principal: Principal, project_id: str):
@@ -238,6 +246,135 @@ class SectionsService:
             ).all()
         return {paper.paper_id: paper for paper in papers}
 
+    @staticmethod
+    def _evidence_query(task: dict[str, Any], *, broad: bool = False) -> str:
+        parts = [
+            str(task.get("heading") or ""),
+            str(task.get("core_argument") or ""),
+        ]
+        if not broad:
+            parts.extend(str(item) for item in task.get("must_cover_points") or [])
+        return " ".join(part.strip() for part in parts if part.strip())[:4000]
+
+    def _evidence_package(
+        self,
+        principal: Principal,
+        project_id: str,
+        tasks: list[dict[str, Any]],
+        catalog: dict[str, LibraryPaper],
+    ) -> dict[str, Any]:
+        sections: list[dict[str, Any]] = []
+        for task in tasks:
+            allowed = [str(item) for item in task.get("allowed_papers") or []]
+            primary = list(
+                dict.fromkeys(
+                    str(item)
+                    for item in task.get("primary_papers") or []
+                    if str(item).strip() and str(item) in allowed
+                )
+            )
+            query = self._evidence_query(task)
+            hits = []
+            if (
+                self.library_index is not None
+                and self.library_index.enabled
+                and query
+                and allowed
+            ):
+                hits = self.library_index.retrieve(
+                    principal,
+                    query,
+                    allowed_papers=allowed,
+                    top_k=self.library_index.tuning.subsection_top_k,
+                    include_neighbors=True,
+                )
+                if len([hit for hit in hits if not hit.is_neighbor]) < 2:
+                    broad_query = self._evidence_query(task, broad=True)
+                    if broad_query and broad_query != query:
+                        broadened = self.library_index.retrieve(
+                            principal,
+                            broad_query,
+                            allowed_papers=allowed,
+                            top_k=self.library_index.tuning.subsection_top_k,
+                            include_neighbors=True,
+                        )
+                        by_chunk = {hit.chunk_id: hit for hit in hits}
+                        for hit in broadened:
+                            by_chunk.setdefault(hit.chunk_id, hit)
+                        hits = list(by_chunk.values())
+                covered_primary = {
+                    hit.paper_id for hit in hits if not hit.is_neighbor
+                }
+                missing_primary = [
+                    paper_id
+                    for paper_id in primary
+                    if paper_id not in covered_primary
+                ]
+                if missing_primary:
+                    coverage_hits = self.library_index.primary_coverage_hits(
+                        principal,
+                        allowed_papers=missing_primary,
+                        per_paper_limit=1,
+                    )
+                    by_chunk = {hit.chunk_id: hit for hit in hits}
+                    for hit in coverage_hits:
+                        by_chunk.setdefault(hit.chunk_id, hit)
+                    hits = list(by_chunk.values())
+            hit_rows = [
+                {
+                    "paper_id": hit.paper_id,
+                    "paper_title": catalog[hit.paper_id].title
+                    if hit.paper_id in catalog
+                    else hit.paper_id,
+                    "chunk_id": hit.chunk_id,
+                    "content": hit.content,
+                    "page_start": hit.page_start,
+                    "page_end": hit.page_end,
+                    "section_path": list(hit.section_path),
+                    "content_type": hit.content_type,
+                    "asset_refs": list(hit.asset_refs),
+                    "score": hit.score,
+                    "match_reason": hit.match_reason,
+                    "is_neighbor": hit.is_neighbor,
+                    "index_id": hit.index_id,
+                    "source_lineage_hash": hit.source_lineage_hash,
+                }
+                for hit in hits
+            ]
+            evidence_papers = sorted({row["paper_id"] for row in hit_rows})
+            missing_primary = [
+                paper_id for paper_id in primary if paper_id not in evidence_papers
+            ]
+            sections.append(
+                {
+                    "section_id": str(task.get("section_id") or ""),
+                    "heading": str(task.get("heading") or ""),
+                    "query": query,
+                    "allowed_papers": allowed,
+                    "retrieval_mode": (
+                        "lexical" if hit_rows else "fixed_prefix_fallback"
+                    ),
+                    "status": (
+                        "ready"
+                        if hit_rows and not missing_primary
+                        else "insufficient_evidence"
+                    ),
+                    "hit_count": len(hit_rows),
+                    "paper_count": len(evidence_papers),
+                    "primary_paper_count": len(primary),
+                    "covered_primary_paper_count": len(primary)
+                    - len(missing_primary),
+                    "missing_primary_papers": missing_primary,
+                    "hits": hit_rows,
+                }
+            )
+        return {
+            "schema_version": 1,
+            "project_id": project_id,
+            "retrieval_engine": "normalized_exact_phrase+postgresql_fulltext",
+            "sections": sections,
+        }
+
     def generation_payload(
         self, principal: Principal, project_id: str
     ) -> dict[str, Any]:
@@ -283,6 +420,28 @@ class SectionsService:
                 "Blueprint contains papers that are missing from the current Matrix or active Library.",
                 details={"paper_ids": missing},
             )
+        evidence_package = self._evidence_package(
+            principal, project_id, tasks, catalog
+        )
+        evidence_by_section = {
+            str(item.get("section_id") or ""): item
+            for item in evidence_package["sections"]
+        }
+        tasks = [
+            {
+                **task,
+                "evidence_status": {
+                    key: evidence_by_section.get(task["section_id"], {}).get(key)
+                    for key in (
+                        "retrieval_mode",
+                        "status",
+                        "hit_count",
+                        "paper_count",
+                    )
+                },
+            }
+            for task in tasks
+        ]
         state = self.repository.get_stage_state(
             principal.user_id, project_id, "sections"
         )
@@ -296,6 +455,12 @@ class SectionsService:
             "matrix": matrix,
             "outline_md": str(outline.get("outline_md") or ""),
             "tasks": tasks,
+            "evidence_package": {
+                **evidence_package,
+                "source_blueprint_artifact_id": blueprint_artifact.id,
+                "source_matrix_artifact_id": matrix_artifact.id,
+                "source_outline_artifact_id": outline_artifact.id,
+            },
             "library_metadata": {
                 paper_id: dict(catalog[paper_id].metadata_json or {})
                 for paper_id in assigned
@@ -348,6 +513,14 @@ class SectionsService:
                     "actual": sorted(by_id),
                 },
             )
+        evidence_package = payload.get("evidence_package")
+        if not isinstance(evidence_package, dict):
+            evidence_package = {"schema_version": 1, "sections": []}
+        evidence_sections = {
+            str(item.get("section_id") or ""): item
+            for item in evidence_package.get("sections") or []
+            if isinstance(item, dict)
+        }
         index_sections: list[dict[str, Any]] = []
         files: dict[str, tuple[bytes, str]] = {}
         for section_id, task in expected_tasks.items():
@@ -358,20 +531,96 @@ class SectionsService:
                     "A generated section is missing Markdown content.",
                     details={"section_id": section_id},
                 )
-            cited = {
-                str(paper_id)
-                for paragraph in section.get("paragraphs") or []
-                if isinstance(paragraph, dict)
-                for paper_id in (
-                    paragraph.get("cited_paper_ids")
-                    or ([paragraph.get("paper_id")] if paragraph.get("paper_id") else [])
-                )
+            package_section = evidence_sections.get(section_id, {})
+            package_hits = [
+                hit
+                for hit in package_section.get("hits") or []
+                if isinstance(hit, dict)
+            ]
+            valid_chunks = {
+                (str(hit.get("paper_id") or ""), str(hit.get("chunk_id") or ""))
+                for hit in package_hits
+                if hit.get("paper_id") and hit.get("chunk_id")
             }
+            lexical_contract = (
+                str(package_section.get("retrieval_mode") or "") == "lexical"
+            )
+            cited: set[str] = set()
+            for paragraph in section.get("paragraphs") or []:
+                if not isinstance(paragraph, dict):
+                    continue
+                paragraph_evidence = paragraph.get("evidence")
+                if lexical_contract and not isinstance(paragraph_evidence, list):
+                    raise WorkflowValidationError(
+                        "A generated paragraph is missing chunk-level evidence.",
+                        details={
+                            "section_id": section_id,
+                            "paragraph_id": paragraph.get("paragraph_id"),
+                        },
+                    )
+                evidence_papers: list[str] = []
+                for evidence in paragraph_evidence or []:
+                    if not isinstance(evidence, dict):
+                        raise WorkflowValidationError(
+                            "A generated paragraph has invalid evidence metadata."
+                        )
+                    evidence_paper = str(evidence.get("paper_id") or "")
+                    chunk_ids = [
+                        str(chunk_id)
+                        for chunk_id in evidence.get("chunk_ids") or []
+                        if str(chunk_id)
+                    ]
+                    if (
+                        evidence_paper not in task["allowed_papers"]
+                        or not chunk_ids
+                        or any(
+                            (evidence_paper, chunk_id) not in valid_chunks
+                            for chunk_id in chunk_ids
+                        )
+                    ):
+                        raise WorkflowValidationError(
+                            "A generated paragraph cites evidence outside its allowed retrieval package.",
+                            details={
+                                "section_id": section_id,
+                                "paragraph_id": paragraph.get("paragraph_id"),
+                                "paper_id": evidence_paper,
+                                "chunk_ids": chunk_ids,
+                            },
+                        )
+                    if not str(evidence.get("claim") or "").strip():
+                        raise WorkflowValidationError(
+                            "A generated paragraph evidence item is missing its supported claim."
+                        )
+                    evidence_papers.append(evidence_paper)
+                declared = [
+                    str(paper_id)
+                    for paper_id in (
+                        paragraph.get("cited_paper_ids")
+                        or ([paragraph.get("paper_id")] if paragraph.get("paper_id") else [])
+                    )
+                    if str(paper_id)
+                ]
+                paragraph_papers = list(dict.fromkeys([*evidence_papers, *declared]))
+                cited.update(paragraph_papers)
+                if evidence_papers:
+                    paragraph["cited_paper_ids"] = list(
+                        dict.fromkeys(evidence_papers)
+                    )
+                    paragraph["paper_id"] = evidence_papers[0]
             unknown = sorted(cited - set(task["allowed_papers"]))
             if unknown:
                 raise WorkflowValidationError(
                     "A generated section cited papers outside its Blueprint task.",
                     details={"section_id": section_id, "paper_ids": unknown},
+                )
+            missing_primary = sorted(set(task.get("primary_papers") or []) - cited)
+            if missing_primary:
+                raise WorkflowValidationError(
+                    "A generated section does not cover every primary paper with validated evidence.",
+                    details={
+                        "section_id": section_id,
+                        "paper_ids": missing_primary,
+                    },
                 )
             logical = f"sections/{section_id}.md"
             files[logical] = ((markdown + "\n").encode("utf-8"), "markdown")
@@ -395,7 +644,19 @@ class SectionsService:
             "sections": index_sections,
             "section_drafts_md": merged + "\n",
             "report_md": report_md + "\n" if report_md else "",
+            "evidence_package_logical_name": EVIDENCE_PACKAGE_LOGICAL_NAME,
         }
+        stored_evidence_package = {
+            **evidence_package,
+            "published_at": utc_now().isoformat(),
+        }
+        files[EVIDENCE_PACKAGE_LOGICAL_NAME] = (
+            (
+                json.dumps(stored_evidence_package, ensure_ascii=False, indent=2)
+                + "\n"
+            ).encode("utf-8"),
+            "json",
+        )
         files[SECTION_INDEX_LOGICAL_NAME] = (
             (json.dumps(index, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
             "json",
@@ -757,6 +1018,9 @@ class SectionsService:
             "section_count": len(index_sections),
             "section_ids": list(expected_tasks),
             "section_index_artifact_id": published[SECTION_INDEX_LOGICAL_NAME].id,
+            "evidence_package_artifact_id": published[
+                EVIDENCE_PACKAGE_LOGICAL_NAME
+            ].id,
             "revision": state.revision,
             "attempts": max(1, int(attempts)),
         }
@@ -813,6 +1077,7 @@ class SectionsService:
             == outline_artifact.id
         )
         section_files: list[dict[str, Any]] = []
+        evidence_package: dict[str, Any] | None = None
         if current:
             for section in index.get("sections") or []:
                 if not isinstance(section, dict):
@@ -837,6 +1102,22 @@ class SectionsService:
                         "content": resolved.path.read_text(encoding="utf-8"),
                     }
                 )
+            if current:
+                evidence_artifact = self.repository.get_current_artifact(
+                    principal.user_id, project_id, EVIDENCE_PACKAGE_LOGICAL_NAME
+                )
+                if evidence_artifact is not None:
+                    resolved_evidence = self.artifacts.resolve_owned_artifact(
+                        principal.user_id, evidence_artifact.id
+                    )
+                    try:
+                        parsed_evidence = json.loads(
+                            resolved_evidence.path.read_text(encoding="utf-8")
+                        )
+                    except (OSError, json.JSONDecodeError):
+                        parsed_evidence = None
+                    if isinstance(parsed_evidence, dict):
+                        evidence_package = parsed_evidence
         jobs = self.repository.list_project_jobs(
             principal.user_id, project_id, job_type="sections.generate"
         )
@@ -855,6 +1136,7 @@ class SectionsService:
             if current
             else "",
             "section_files": section_files,
+            "evidence_package": evidence_package if current else None,
             "section_drafting_report_md": str((index or {}).get("report_md") or "")
             if current
             else "",

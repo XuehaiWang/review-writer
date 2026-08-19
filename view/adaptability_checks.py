@@ -76,7 +76,7 @@ class AdaptabilityChecks(unittest.TestCase):
         ):
             self.assertEqual(
                 taxonomy.suggest_taxonomy_profile("Graph neural networks for drug discovery"),
-                "chemistry_general",
+                "general_academic",
             )
             keywords = DISCOVER.infer_keywords(
                 "Graph neural networks for drug discovery",

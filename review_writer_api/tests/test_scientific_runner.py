@@ -230,6 +230,24 @@ class ScientificRunnerTests(unittest.TestCase):
         )
         self.assertNotIn(secret, str(failed.exception))
 
+    def test_failure_prefers_stderr_error_over_trailing_stdout_progress(self) -> None:
+        script = (
+            "import sys; "
+            "print('Adapted prompt length: 5765 chars'); "
+            "print('ERROR: No API key available.', file=sys.stderr); "
+            "sys.exit(1)"
+        )
+        with self.assertRaises(self.RunFailed) as failed:
+            self.runner.run(
+                [sys.executable, "-c", script],
+                cwd=self.root,
+                staging_directory=self.root,
+                expected_outputs=("never-created.txt",),
+            )
+
+        self.assertIn("No API key available", str(failed.exception))
+        self.assertNotIn("Adapted prompt length", str(failed.exception))
+
     def test_transient_503_retries_twice_then_succeeds(self) -> None:
         script = (
             "import json,pathlib,sys; p=pathlib.Path('attempt.txt'); "

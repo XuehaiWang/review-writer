@@ -58,6 +58,9 @@ from review_writer_core.model_gateway_client import (  # noqa: E402
     call_image_model as call_gateway_image,
     image_gateway_configured,
 )
+from review_writer_core.taxonomy import (  # noqa: E402
+    suggest_taxonomy_profile as _suggest_taxonomy_profile,
+)
 
 
 TRANSIENT_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -130,22 +133,34 @@ def overview_image_size_candidates(base_url: str, preferred_size: str = "") -> l
     return list(dict.fromkeys(size for size in candidates if size))
 
 
+# Appended by prompt_for_overview_size when the provider only supports a square
+# canvas; its length is reserved in the condensation budget (_PROMPT_MAX_CHARS).
+_SQUARE_CANVAS_NOTE = (
+    " The image service uses a square canvas. Preserve the template's landscape reading order "
+    "inside the square: keep every panel fully visible, use balanced white margins, do not crop, "
+    "stretch, stack, or omit any title, category, reaction, label, legend, or conclusion block."
+)
+
+
 def prompt_for_overview_size(prompt: str, size: str) -> str:
     """Keep a landscape reading order when a provider only emits a square."""
     if size != SQUARE_COMPATIBLE_IMAGE_SIZE:
         return prompt
-    return (
-        prompt
-        + " The image service uses a square canvas. Preserve the template's landscape reading order "
-        "inside the square: keep every panel fully visible, use balanced white margins, do not crop, "
-        "stretch, stack, or omit any title, category, reaction, label, legend, or conclusion block."
-    )
+    return prompt + _SQUARE_CANVAS_NOTE
 
 
-def condense_overview_prompt(prompt: str, max_chars: int = 3900) -> str:
+# Condensation target leaves headroom for the square-canvas note appended by
+# prompt_for_overview_size so the final prompt (note included) stays under
+# the ~4000-char limit that some compatible image providers enforce.
+_PROMPT_MAX_CHARS = 3900 - len(_SQUARE_CANVAS_NOTE)
+
+
+def condense_overview_prompt(prompt: str, max_chars: int = _PROMPT_MAX_CHARS) -> str:
     """Trim the prompt to provider limits without losing the adaptation data.
 
     Some compatible image providers reject prompts over roughly 4000 chars.
+    The default ``max_chars`` already reserves space for the square-canvas
+    note that ``prompt_for_overview_size`` may append afterwards.
     Removal order (least to most important): FORBIDDEN BEHAVIOR,
     APPROVED TERMINOLOGY, BALL-AND-STICK rendering detail, then the
     reference template preamble before DOMAIN OVERRIDE.
@@ -1473,54 +1488,40 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
             }
             features["classification_rule"] = rule_map.get(gb[0], f"By {gb[0]}")
         features["skeleton_smiles"] = str(qp.get("skeleton_smiles", "") or qp.get("smiles", "") or "")
+
+    # Fallback: recover the review topic from PostgreSQL artifacts that the
+    # native final-overview compatibility workspace actually materializes,
+    # because the discovery query plan is not available there.
+    if not features.get("review_title"):
+        _recover_review_title(project_dir, features)
+
     # Read selected outline for section structure
     outline_path = project_dir / "01_matrix_outline" / "selected_outline.md"
     if outline_path.exists():
-        text = outline_path.read_text(encoding="utf-8")
-        features["_outline_text"] = text  # Store for later use by _build_metal_rows_text
-        import re
-        sections = re.findall(r"^## \d+\.", text, re.MULTILINE)
-        features["num_sections"] = len(sections)
-        if "catalyst" in text.lower() and "metal" in text.lower():
-            features["has_metal_classification"] = True
-        if "organocatal" in text.lower():
-            features["has_organocatalysis"] = True
-        metal_map = {
-            "palladium": "Pd", "copper": "Cu", "nickel": "Ni",
-            "cobalt": "Co", "gold": "Au", "rhodium": "Rh",
-            "iridium": "Ir", "iron": "Fe",
-        }
-        for key, sym in metal_map.items():
-            if key in text.lower():
-                features["metal_categories"].append(sym)
-        if features["has_organocatalysis"]:
-            features["metal_categories"].append("Organocatalysis")
+        _apply_outline_signals(outline_path.read_text(encoding="utf-8"), features)
 
-        # Theme-level signals used for template scoring
-        outline_lower = text.lower()
-        features["has_chirality"] = bool(
-            re.search(r"chiral|enantio|asymmetric|atropisomer|stereoselect", outline_lower)
-        )
-        features["has_reaction_focus"] = bool(
-            re.search(
-                r"reaction|synthesis|synthetic|catalytic|cataly[sz]ed|coupling|functionalization",
-                outline_lower,
+    # Fallback: the native final-overview compatibility workspace does not
+    # materialize the selected outline, so reuse the section-draft markdown
+    # and the first draft, which carry the same heading structure and theme
+    # signals.
+    if not features.get("_outline_text"):
+        drafts_md_path = project_dir / "02_section_drafting" / "section_drafts.md"
+        if drafts_md_path.exists():
+            _apply_outline_signals(
+                drafts_md_path.read_text(encoding="utf-8"), features
             )
-        )
+    if not features.get("_outline_text"):
+        first_draft_path = project_dir / "04_first_draft" / "first_draft.md"
+        if first_draft_path.exists():
+            _apply_outline_signals(
+                first_draft_path.read_text(encoding="utf-8", errors="ignore"), features
+            )
 
-        # Generic category extraction from section headings (for non-metal reviews)
-        section_titles = re.findall(r"^## \d+\.\s*(.+)$", text, re.MULTILINE)
-        generic_cats = []
-        for title in section_titles:
-            label = _heading_to_category(title)
-            if label and label not in generic_cats:
-                generic_cats.append(label)
-
-        # If metal_categories is mostly empty or only has Organocatalysis,
-        # use the generic categories from outline sections
-        real_metals = [m for m in features["metal_categories"] if m != "Organocatalysis"]
-        if len(real_metals) < 3 and generic_cats:
-            features["metal_categories"] = generic_cats
+    # Infer the classification dimension when the query plan is unavailable
+    # but the recovered outline/draft clearly organizes by catalyst metals.
+    if not features.get("group_by") and features.get("has_metal_classification"):
+        features["group_by"] = ["catalyst_or_method"]
+        features["classification_rule"] = "By catalyst center metal"
 
     # Backfill categories from first_draft.md section headings when the
     # outline is too sparse to fill the figure (avoids empty panels)
@@ -1535,6 +1536,10 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
     if sel_path.exists():
         sel = read_json(sel_path)
         features["group_by"] = sel.get("group_by", features["group_by"])
+
+    # Resolve the taxonomy profile for cross-domain prompt adaptation.
+    # Without this, non-chemistry reviews inherit allene-centric prompts.
+    _resolve_taxonomy_profile(project_dir, features)
 
     # Store project dir for multi-pass extraction in _build_metal_rows_text
     features["_project_dir"] = project_dir
@@ -1588,6 +1593,119 @@ def _categories_from_draft(project_dir: Path) -> list[str]:
         if label and label not in cats:
             cats.append(label)
     return cats
+
+
+def _recover_review_title(project_dir: Path, features: dict[str, Any]) -> None:
+    """Recover the review topic from materialized PostgreSQL artifacts.
+
+    The native final-overview compatibility workspace does not carry the
+    discovery query plan, but it always materializes the section blueprint
+    and literature matrix, both of which store ``review_topic``.
+    """
+    for relative in (
+        "01_matrix_outline/section_blueprint.json",
+        "01_matrix_outline/literature_matrix.json",
+    ):
+        path = project_dir / relative
+        if not path.exists():
+            continue
+        try:
+            data = read_json(path)
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            topic = str(data.get("review_topic") or "").strip()
+            if topic:
+                features["review_title"] = topic
+                return
+
+
+def _apply_outline_signals(text: str, features: dict[str, Any]) -> None:
+    """Populate section-level features from markdown outline or draft text.
+
+    The selected outline is the preferred source, but the section-draft
+    markdown and the first draft are equally usable when the native
+    compatibility workspace does not materialize the discovery/outline
+    files.  Signals are merged with OR/max semantics so multiple sources
+    only strengthen the result.
+    """
+    text = str(text or "")
+    if not text.strip():
+        return
+    if not features.get("_outline_text"):
+        features["_outline_text"] = text
+    low = text.lower()
+    headings = re.findall(r"^##\s+(?:\d+[.:]\s*)?(.+)$", text, re.MULTILINE)
+    features["num_sections"] = max(
+        int(features.get("num_sections") or 0), len(headings)
+    )
+    if "catalyst" in low and "metal" in low:
+        features["has_metal_classification"] = True
+    if "organocatal" in low:
+        features["has_organocatalysis"] = True
+    metal_map = {
+        "palladium": "Pd", "copper": "Cu", "nickel": "Ni",
+        "cobalt": "Co", "gold": "Au", "rhodium": "Rh",
+        "iridium": "Ir", "iron": "Fe",
+    }
+    for key, sym in metal_map.items():
+        if key in low and sym not in features["metal_categories"]:
+            features["metal_categories"].append(sym)
+    if (
+        features.get("has_organocatalysis")
+        and "Organocatalysis" not in features["metal_categories"]
+    ):
+        features["metal_categories"].append("Organocatalysis")
+    if not features.get("has_chirality"):
+        features["has_chirality"] = bool(
+            re.search(r"chiral|enantio|asymmetric|atropisomer|stereoselect", low)
+        )
+    if not features.get("has_reaction_focus"):
+        features["has_reaction_focus"] = bool(
+            re.search(
+                r"reaction|synthesis|synthetic|catalytic|cataly[sz]ed|coupling|functionalization",
+                low,
+            )
+        )
+    generic_cats: list[str] = []
+    for title in headings:
+        label = _heading_to_category(title)
+        if label and label not in generic_cats:
+            generic_cats.append(label)
+    real_metals = [m for m in features["metal_categories"] if m != "Organocatalysis"]
+    if len(real_metals) < 3 and len(generic_cats) > len(real_metals):
+        features["metal_categories"] = generic_cats
+
+
+def _resolve_taxonomy_profile(project_dir: Path, features: dict[str, Any]) -> None:
+    """Set the taxonomy profile for cross-domain prompt adaptation.
+
+    Resolution order: explicit ``REVIEW_TAXONOMY_PROFILE`` override →
+    persisted ``project_config.json`` → topic-signal inference from the
+    review title.  Without this, the generic-project adaptation path in
+    ``build_adapted_prompt`` is dead code and non-chemistry reviews inherit
+    allene-centric template prompts and skeleton geometry.
+    """
+    if features.get("taxonomy_profile"):
+        return
+    env_profile = os.environ.get("REVIEW_TAXONOMY_PROFILE", "").strip()
+    if env_profile:
+        features["taxonomy_profile"] = env_profile
+        return
+    config_path = project_dir / "project_config.json"
+    if config_path.exists():
+        try:
+            config = read_json(config_path)
+        except (OSError, ValueError):
+            config = {}
+        if isinstance(config, dict):
+            configured = str(config.get("taxonomy_profile") or "").strip()
+            if configured:
+                features["taxonomy_profile"] = configured
+                return
+    features["taxonomy_profile"] = _suggest_taxonomy_profile(
+        features.get("review_title") or ""
+    )
 
 
 def score_template(template: dict[str, Any], features: dict[str, Any]) -> float:
@@ -2519,7 +2637,8 @@ def call_image_edit_api(
     # access controls and can never reach the model assigned to the chat route.
     resolved_wire_api = normalize_image_wire_api(wire_api)
     # Some compatible providers reject prompts over roughly 4000 chars;
-    # condense before any route so the square-canvas note added below survives.
+    # condense once here.  The default max_chars already reserves headroom
+    # for the square-canvas note that prompt_for_overview_size appends below.
     prompt = condense_overview_prompt(prompt)
     if resolved_wire_api == "chat-completions":
         size = overview_image_size_candidates(base_url, preferred_size)[0]

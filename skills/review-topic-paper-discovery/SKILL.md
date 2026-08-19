@@ -38,15 +38,15 @@ Use the shared taxonomy loader as the tag vocabulary and synonym source. The def
 Match short taxonomy aliases such as `Cu`, `Pd`, `Au`, and `Ni` only as whole
 tokens, never as substrings inside ordinary words. Canonicalize exact aliases
 to their taxonomy label and de-duplicate them before retrieval. For
-`catalyst_or_method`, require independent support from the paper title or
-parsed source text before trusting an existing base Tag; this lets Discovery
-safely correct metadata created by older substring-matching versions without
-mutating the Library record.
+Never use a Library base Tag unless its complete `structured_tags` field has
+`human_checked=true`. Keep older automatic values stored for audit and backward
+compatibility, but exclude them from retrieval scoring and Matrix planning.
 
 Treat Library Metadata Tags and project Tags as separate layers:
 
 ```text
-base_tags                    immutable snapshot from Library metadata
+base_tags                    human-verified snapshot from Library metadata
+base_tags_verified           whether the reusable snapshot passed the trust policy
 project_tag_assessment       topic-scoped automatic Tags plus matching evidence
 confirmed_project_tags       legacy human override retained for compatibility
 tag_review_status            legacy pending | confirmed state
@@ -203,13 +203,12 @@ the human reviewer; there is no fixed paper-count cap. External (SciAtlas/Crossr
 the local `paper_id` registry and the matrix stage may cite them only as
 references without assigning a `paper_id`.
 
-Each local result carries the immutable `base_tags` and the generated
+Each local result carries verified-only `base_tags`, `base_tags_verified`, and the generated
 `project_tag_assessment`. Legacy `confirmed_project_tags` and
 `tag_review_status` fields may remain in serialized artifacts for backward
-compatibility, but the current workflow does not ask the human to edit or
-confirm them. The Matrix handoff retains base Tags separately and automatically
-adds the current project suggestions, so downstream outline grouping can use
-the topic-specific interpretation without changing reusable metadata.
+compatibility. The Matrix handoff automatically adds current project
+suggestions. Unverified reusable Tags never enter retrieval or downstream
+outline grouping.
 
 ## Human Check
 

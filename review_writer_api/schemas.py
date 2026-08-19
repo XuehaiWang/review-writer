@@ -61,12 +61,38 @@ class ProjectListResponse(BaseModel):
 class ProjectCreateRequest(BaseModel):
     slug: str = Field(min_length=1, max_length=96)
     topic: str = Field(default="", max_length=10_000)
-    taxonomy_profile: str = Field(default="chemistry_general", min_length=1, max_length=96)
+    taxonomy_profile: str = Field(default="general_academic", min_length=1, max_length=96)
     model_tier: str = Field(default="terra", min_length=1, max_length=32)
 
 
 class ProjectModelTierUpdateRequest(BaseModel):
     model_tier: str = Field(min_length=1, max_length=32)
+
+
+class ProjectTaxonomyProfileUpdateRequest(BaseModel):
+    taxonomy_profile: str = Field(min_length=1, max_length=96)
+    confirm_downstream_invalidation: bool = False
+
+
+class ProjectTaxonomyProfileUpdateResponse(BaseModel):
+    project: ProjectResponse
+    changed: bool
+    matrix_entered: bool
+    downstream_stale: bool
+
+
+class TaxonomyProfileResponse(BaseModel):
+    id: str
+    label_zh: str
+    label_en: str
+    description_zh: str
+    description_en: str
+    domain_rules_enabled: bool
+
+
+class TaxonomyProfileCatalogResponse(BaseModel):
+    items: list[TaxonomyProfileResponse]
+    default_profile: str
 
 
 class ModelTierResponse(BaseModel):

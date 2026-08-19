@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .taxonomy import DEFAULT_TAXONOMY_PROFILE, suggest_taxonomy_profile
+from .taxonomy import DEFAULT_TAXONOMY_PROFILE, validate_taxonomy_profile
 from .workspace import WorkspacePaths
 
 
@@ -49,9 +49,9 @@ def save_project_config(
     resolved_profile = str(
         taxonomy_profile
         or current.get("taxonomy_profile")
-        or suggest_taxonomy_profile(resolved_topic)
         or DEFAULT_TAXONOMY_PROFILE
     ).strip()
+    resolved_profile = validate_taxonomy_profile(resolved_profile)
     current.update(
         {
             "schema_version": PROJECT_CONFIG_SCHEMA_VERSION,
@@ -80,5 +80,4 @@ def project_taxonomy_profile(
     configured = str(config.get("taxonomy_profile") or "").strip()
     if configured:
         return configured
-    effective_topic = str(topic or config.get("topic") or "").strip()
-    return suggest_taxonomy_profile(effective_topic)
+    return DEFAULT_TAXONOMY_PROFILE

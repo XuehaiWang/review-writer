@@ -11,6 +11,8 @@ type SectionProgressResult = {
   current_section_id?: string;
   current_heading?: string;
   completed_sections?: CompletedSection[];
+  evidence_hit_count?: number;
+  evidence_paper_count?: number;
 };
 
 function progressResult(job?: Job): SectionProgressResult {
@@ -36,8 +38,15 @@ export function SectionJobProgress({ job }: { job: Job }) {
       title = text("章节正文已全部生成", "All section prose generated");
       detail = text("正在整理章节报告和图像候选。", "Finalizing the report and figure candidates.");
     } else if (live.current_heading) {
-      title = text(`正在生成：${live.current_heading}`, `Generating: ${live.current_heading}`);
-      detail = text(`已完成 ${current}/${total} 章，完成一章后会立即更新。`, `${current}/${total} sections complete; each completion appears immediately.`);
+      if (live.phase === "validating") {
+        title = text(`正在校验证据：${live.current_heading}`, `Validating evidence: ${live.current_heading}`);
+      } else {
+        title = text(`正在生成：${live.current_heading}`, `Generating: ${live.current_heading}`);
+      }
+      const evidenceDetail = Number(live.evidence_hit_count || 0) > 0
+        ? text(`已找到 ${Number(live.evidence_hit_count)} 个证据段，来自 ${Number(live.evidence_paper_count || 0)} 篇论文。`, `${Number(live.evidence_hit_count)} evidence passages found across ${Number(live.evidence_paper_count || 0)} papers.`)
+        : "";
+      detail = `${evidenceDetail}${evidenceDetail ? " " : ""}${text(`已完成 ${current}/${total} 章，完成一章后会立即更新。`, `${current}/${total} sections complete; each completion appears immediately.`)}`;
     } else {
       title = text("正在准备章节证据", "Preparing section evidence");
       detail = text("正在读取 Blueprint、MinerU 证据和章节写作规则。", "Reading the Blueprint, MinerU evidence, and writing rules.");

@@ -12,10 +12,12 @@ from sqlalchemy.exc import IntegrityError
 
 from review_writer_core.project_catalog import list_review_projects, project_summary
 from review_writer_core.project_config import save_project_config
+from review_writer_core.taxonomy import DEFAULT_TAXONOMY_PROFILE, validate_taxonomy_profile
 from review_writer_core.workspace import WorkspaceConfigurationError, WorkspacePaths, validate_project_id
 
 from .database import Project, database_session, utc_now
 from .model_catalog import DEFAULT_MODEL_TIER, resolve_model_tier
+from .workflow_models import WorkflowStageState
 
 
 class ProjectOperationError(ValueError):
@@ -54,10 +56,18 @@ class ProjectRecord:
     topic: str
     discovery_status: str
     completed_stages: tuple[str, ...]
-    taxonomy_profile: str = "chemistry_general"
+    taxonomy_profile: str = DEFAULT_TAXONOMY_PROFILE
     model_tier: str = DEFAULT_MODEL_TIER
     current_stage: str = "discovery"
     stage_states: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class ProjectTaxonomyUpdateResult:
+    project: ProjectRecord
+    changed: bool
+    matrix_entered: bool
+    downstream_stale: bool
 
 
 class ProjectRepository(Protocol):
@@ -73,6 +83,15 @@ class ProjectRepository(Protocol):
     def update_model_tier_for_user(
         self, user_id: str, project_id: str, *, model_tier: str
     ) -> ProjectRecord: ...
+
+    def update_taxonomy_profile_for_user(
+        self,
+        user_id: str,
+        project_id: str,
+        *,
+        taxonomy_profile: str,
+        confirm_downstream_invalidation: bool = False,
+    ) -> ProjectTaxonomyUpdateResult: ...
 
     def update_topic_for_user(
         self, user_id: str, project_id: str, *, topic: str, taxonomy_profile: str
@@ -167,7 +186,9 @@ class LocalProjectRepository:
             self.review_root,
             safe_slug,
             topic=str(topic or "").strip(),
-            taxonomy_profile=str(taxonomy_profile or "chemistry_general").strip(),
+            taxonomy_profile=validate_taxonomy_profile(
+                taxonomy_profile or DEFAULT_TAXONOMY_PROFILE
+            ),
         )
         payload = project_summary(self.review_root, safe_slug)
         if payload is None:
@@ -182,6 +203,43 @@ class LocalProjectRepository:
         if record is None:
             raise ProjectOperationError("Project not found.")
         return ProjectRecord(**{**record.__dict__, "model_tier": selected_tier})
+
+    def update_taxonomy_profile_for_user(
+        self,
+        user_id: str,
+        project_id: str,
+        *,
+        taxonomy_profile: str,
+        confirm_downstream_invalidation: bool = False,
+    ) -> ProjectTaxonomyUpdateResult:
+        selected_profile = validate_taxonomy_profile(taxonomy_profile)
+        record = self.get_for_user(user_id, project_id)
+        if record is None:
+            raise ProjectOperationError("Project not found.")
+        matrix_entered = "matrix" in record.stage_states
+        changed = record.taxonomy_profile != selected_profile
+        if changed and matrix_entered and not confirm_downstream_invalidation:
+            raise ProjectOperationError(
+                "Changing the taxonomy profile after Matrix entry requires "
+                "confirm_downstream_invalidation=true."
+            )
+        if changed:
+            save_project_config(
+                self.review_root,
+                record.project_id,
+                topic=record.topic,
+                taxonomy_profile=selected_profile,
+                updates={"retrieval_configuration_status": "stale"},
+            )
+            record = self.get_for_user(user_id, project_id)
+            if record is None:
+                raise ProjectOperationError("Project not found.")
+        return ProjectTaxonomyUpdateResult(
+            project=record,
+            changed=changed,
+            matrix_entered=matrix_entered,
+            downstream_stale=bool(changed and matrix_entered),
+        )
 
     def delete_for_user(self, user_id: str, project_id: str) -> bool:
         raise ProjectOperationError("Delete the local project from the workflow dashboard.")
@@ -204,7 +262,9 @@ class LocalProjectRepository:
             self.review_root,
             safe_project_id,
             topic=str(topic or "").strip(),
-            taxonomy_profile=str(taxonomy_profile or "chemistry_general").strip(),
+            taxonomy_profile=validate_taxonomy_profile(
+                taxonomy_profile or DEFAULT_TAXONOMY_PROFILE
+            ),
         )
         payload = project_summary(self.review_root, safe_project_id)
         if payload is None:
@@ -297,7 +357,9 @@ class HostedProjectRepository:
                 user_id=user_uuid,
                 slug=safe_slug,
                 topic=str(topic or "").strip(),
-                taxonomy_profile=str(taxonomy_profile or "chemistry_general").strip(),
+                taxonomy_profile=validate_taxonomy_profile(
+                    taxonomy_profile or DEFAULT_TAXONOMY_PROFILE
+                ),
                 model_tier=selected_tier,
                 status="active",
                 current_stage="discovery",
@@ -326,7 +388,80 @@ class HostedProjectRepository:
             session.flush()
             return self._record(project)
 
-    def _owned_project(self, session, user_id: str, project_id: str) -> Project | None:
+    def update_taxonomy_profile_for_user(
+        self,
+        user_id: str,
+        project_id: str,
+        *,
+        taxonomy_profile: str,
+        confirm_downstream_invalidation: bool = False,
+    ) -> ProjectTaxonomyUpdateResult:
+        selected_profile = validate_taxonomy_profile(taxonomy_profile)
+        with database_session(self.session_factory) as session:
+            project = self._owned_project(session, user_id, project_id, for_update=True)
+            if project is None:
+                raise ProjectOperationError("Project not found.")
+            changed = project.taxonomy_profile != selected_profile
+            stored_states = dict(project.stage_states or {})
+            states = session.scalars(
+                select(WorkflowStageState)
+                .where(WorkflowStageState.project_id == project.id)
+                .with_for_update()
+            ).all()
+            states_by_stage = {state.stage_id: state for state in states}
+            matrix_entered = "matrix" in stored_states or "matrix" in states_by_stage
+            if changed and matrix_entered and not confirm_downstream_invalidation:
+                raise ProjectOperationError(
+                    "Changing the taxonomy profile after Matrix entry requires "
+                    "confirm_downstream_invalidation=true."
+                )
+            if not changed:
+                return ProjectTaxonomyUpdateResult(
+                    project=self._record(project),
+                    changed=False,
+                    matrix_entered=matrix_entered,
+                    downstream_stale=False,
+                )
+
+            now = utc_now()
+            stale_stages = {"discovery"}
+            if matrix_entered:
+                stale_stages.update(PRIMARY_WORKFLOW_STAGES[1:])
+            for stage_id in stale_stages:
+                state = states_by_stage.get(stage_id)
+                stored = stored_states.get(stage_id)
+                if state is not None:
+                    state.status = "stale"
+                    state.error_code = ""
+                    state.error_message = ""
+                    state.revision += 1
+                    state.updated_at = now
+                    stored_states[stage_id] = {
+                        "status": "stale",
+                        "revision": state.revision,
+                    }
+                elif stored is not None:
+                    revision = int(stored.get("revision") or 0) if isinstance(stored, dict) else 0
+                    stored_states[stage_id] = {
+                        "status": "stale",
+                        "revision": revision + 1,
+                    }
+
+            project.taxonomy_profile = selected_profile
+            project.stage_states = stored_states
+            project.current_stage = "discovery"
+            project.updated_at = now
+            session.flush()
+            return ProjectTaxonomyUpdateResult(
+                project=self._record(project),
+                changed=True,
+                matrix_entered=matrix_entered,
+                downstream_stale=matrix_entered,
+            )
+
+    def _owned_project(
+        self, session, user_id: str, project_id: str, *, for_update: bool = False
+    ) -> Project | None:
         user_uuid = uuid.UUID(user_id)
         try:
             parsed_id = uuid.UUID(project_id)
@@ -334,7 +469,7 @@ class HostedProjectRepository:
             parsed_id = None
         query = select(Project).where(Project.user_id == user_uuid, Project.deleted_at.is_(None))
         query = query.where(Project.id == parsed_id) if parsed_id else query.where(Project.slug == project_id)
-        return session.scalar(query)
+        return session.scalar(query.with_for_update() if for_update else query)
 
     def delete_for_user(self, user_id: str, project_id: str) -> bool:
         with database_session(self.session_factory) as session:
@@ -374,7 +509,9 @@ class HostedProjectRepository:
             if project is None:
                 raise ProjectOperationError("Project not found.")
             project.topic = str(topic or "").strip()
-            project.taxonomy_profile = str(taxonomy_profile or "chemistry_general").strip()
+            project.taxonomy_profile = validate_taxonomy_profile(
+                taxonomy_profile or project.taxonomy_profile or DEFAULT_TAXONOMY_PROFILE
+            )
             project.current_stage = "discovery"
             project.stage_states = {}
             project.updated_at = utc_now()

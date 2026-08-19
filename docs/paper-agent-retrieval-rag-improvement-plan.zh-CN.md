@@ -1,6 +1,6 @@
 # 论文联网检索与文档混合检索完整改进方案
 
-> 文档状态：已完成技术审查与精简，待确认后实施
+> 文档状态：已完成二次技术审查，并纳入用户确认的模型选择与分类配置失效规则，待实施
 > 编写日期：2026-08-18
 > 适用分支：`dy-launch`
 > 参考项目：Paper-Agent `main` 分支提交 `c68778fdb96b15025b86d45cbcd7fc9f20e52a43`
@@ -39,8 +39,9 @@
 | 结构化数据库 | 继续使用 PostgreSQL |
 | 首期全文检索 | PostgreSQL `tsvector` + 规范化精确短语检索，不部署新搜索服务 |
 | 后续向量存储 | 评测确认有收益后，在现有 PostgreSQL 中启用 pgvector，不独立部署 ChromaDB |
+| 首期交付边界 | 先完成阶段 A、B、C，再按阶段 E 以词法模式灰度；阶段 D 向量能力不是首期上线前置条件 |
 | 工作流编排 | 继续使用现有 FastAPI、JobService 和科学子进程；不新建 Prefect 流程 |
-| 模型调用 | 继续统一经过服务端网关；新增 embedding 能力和独立并发槽 |
+| 模型调用 | 文本任务使用项目当前选择的模型；阶段 D 才新增 embedding 能力和独立并发槽 |
 | 文档事实源 | PDF、MinerU Markdown、content list、图片和 metadata Artifact |
 | 全文索引定位 | 可删除、可重建的派生数据，不作为论文原文件的事实源 |
 
@@ -230,7 +231,7 @@ metadata 准备阶段已经会读取这些块，用于标题、作者、关键�
 8. 只对确认后的论文执行下载和 MinerU 解析；LLM 摘要筛选作为评测后的可选增强，不阻塞首期上线。
 9. 对所有有效 MinerU Artifact 建立稳定的段落级全文索引，优先复用 `content_list.json` 中已有的结构块。
 10. 全文索引必须保留论文、章节、页码、原始块、前后相邻块和资产引用。
-11. 首期使用 PostgreSQL 精确短语、词法全文检索和当前领域标签召回；评测后再按需加入 pgvector 语义检索。
+11. 首期使用 PostgreSQL 精确短语、词法全文检索和当前领域标签召回，并预留统一检索接口；pgvector 只在阶段 D 单独评测确认后启用。
 12. Section Draft 只检索当前小节真正需要的证据，不再固定发送每篇论文的开头片段。
 13. 生成正文时保留 `paper_id + chunk_id + page` 证据链，最终仍输出当前项目兼容的数字引用格式。
 14. 用户刷新页面后，搜索、解析、索引和重建状态必须从数据库恢复。
@@ -340,7 +341,7 @@ async def search(request: PaperSearchRequest) -> SourceSearchResult:
 继续使用当前查询计划流程：
 
 1. 用户 Topic 和显式关键词作为不可信数据传入规划器。
-2. Luna 默认生成结构化查询计划。
+2. 使用项目当前选择的文本模型（Luna、Terra 或 Sol）生成结构化查询计划；任务开始时保存实际模型档位快照。
 3. 强制合并用户显式关键词。
 4. 输出年份、排除词、分组维度、已解析概念和未解析概念。
 5. `general_academic` 项目只生成通用关键词、主题短语和过滤条件，不加载任何化学规则。
@@ -402,13 +403,17 @@ async def search(request: PaperSearchRequest) -> SourceSearchResult:
 - Library 中即使存在化学 base tags，`general_academic` 项目也必须忽略这些标签；只有 profile 身份兼容的标签才能进入领域召回通道。
 - 领域规则没有命中的论文仍可通过常规召回进入候选集，不能因 taxonomy 未覆盖新术语而提前删除。
 - 领域标签只参与查询扩展、分组和排序，不能替代正文切片成为引用证据。
-- 修改项目 profile 后，使查询计划、Discovery 结果和项目级标签评估变为 stale 并重新生成；PDF、MinerU Artifact、Library 基础 metadata 和全文切片不重新解析。
+- 修改项目 profile 后始终重新生成查询计划、Discovery 结果和项目级标签评估，但不重新解析 PDF，也不重建 Library 基础 metadata 和通用全文切片。
+- 是否使后续阶段失效，以服务端是否已经完成 Discovery 确认并进入 Matrix 为边界，而不是以浏览器是否打开过某个页面为准。
+- 尚未确认进入 Matrix：只刷新当前检索相关数据，不修改 Matrix 及后续阶段状态。
+- 已经确认进入 Matrix：保存前明确提示用户，并将 Matrix、Blueprint、Section、Image、Draft 和 Final 等下游状态标记为 stale，保留原 Artifact 供查看或回滚。
 
 ### 6.3 并发与降级
 
 - 不同来源并发搜索。
 - 不同子主题可并发，但受全局和用户级来源信号量限制。
 - 同一来源必须执行独立速率限制，不能使用一个全局锁串行所有来源。
+- 每个 Discovery Job 设置最大子主题数、总外部请求数、总候选数和总运行时间；达到预算后停止创建新请求，并保留已经完成的来源结果。
 - 每个来源配置连接超时、总超时、最大重试和退避时间。
 - 429、502、503、504 和网络超时执行有限重试。
 - 400、401、403 等配置或请求错误不盲目重试。
@@ -454,6 +459,7 @@ async def search(request: PaperSearchRequest) -> SourceSearchResult:
     "total": 0.0,
     "title_abstract": 0.0,
     "source_rank_rrf": 0.0,
+    "source_rank_normalized": 0.0,
     "citation": 0.0,
     "recency": 0.0,
     "metadata_quality": 0.0,
@@ -462,7 +468,7 @@ async def search(request: PaperSearchRequest) -> SourceSearchResult:
   "abstract_decision": {
     "status": "not_run",
     "reason": "",
-    "model_tier": "luna"
+    "model_tier_snapshot": "terra"
   },
   "selected_for_download": false
 }
@@ -497,12 +503,20 @@ async def search(request: PaperSearchRequest) -> SourceSearchResult:
 source_rank_rrf(candidate) = Σ 1 / (60 + provider_rank)
 ```
 
+在同一个 Discovery Job 内再计算：
+
+```text
+source_rank_normalized = source_rank_rrf / max(source_rank_rrf)
+```
+
+没有有效来源排名时该项为 0。后续 15% 权重使用 `source_rank_normalized`，原始 RRF 只用于诊断，避免与其他 0～1 分数组件量级不一致。
+
 粗排参考权重：
 
 ```text
 总分 =
   标题/摘要主题匹配 65%
-  来源排名融合      15%
+  归一化来源排名    15%
   引用量归一化      10%
   年份与新近度       5%
   元数据完整度       5%
@@ -521,7 +535,7 @@ source_rank_rrf(candidate) = Σ 1 / (60 + provider_rank)
 
 首期不依赖 LLM 摘要筛选，先以人工标注集验证多源召回、去重和确定性粗排。只有当粗排精度不足且收益可量化时，才启用摘要筛选；默认关闭，并只对粗排前 N 条执行，避免成本和延迟失控。
 
-建议使用 Luna 批量判断：
+启用后使用项目当前选择的文本模型批量判断，并按任务开始时的模型档位和价格快照计量：
 
 - 研究问题：匹配、部分匹配、不匹配；
 - 研究对象/场景：匹配、部分匹配、不匹配；
@@ -531,6 +545,8 @@ source_rank_rrf(candidate) = Σ 1 / (60 + provider_rank)
 - 不允许模型直接给最终总分。
 
 程序根据固定表计算分数。核心研究问题不匹配时默认降低排序或排除，但用户仍可在“已排除”区域查看和手动恢复。
+
+该结果是基础粗排之后的可选筛选信号，不修改 6.6 节的 100% 确定性权重公式；未启用时 `abstract_relevance` 保持空值，候选排名完全由确定性分数产生。
 
 ### 6.8 下载与合法性
 
@@ -567,7 +583,7 @@ source_rank_rrf(candidate) = Σ 1 / (60 + provider_rank)
 
 1. MinerU content list：获取页码、块类型、原始块顺序和资产关联。
 2. MinerU Markdown：获取章节结构、公式、表格文本、标题和上下文。
-3. metadata：补充论文标题、作者、年份、DOI 和结构化标签。
+3. 当前 Library metadata：在检索时补充论文标题、作者、年份、DOI 和结构化标签，不复制进切片事实源，也不参与内容 lineage 哈希。
 
 实现时必须直接复用已经发布到 Library Artifact 的 MinerU 结果：
 
@@ -605,8 +621,8 @@ MinerU content_list block
 ### 7.4 检索切片规则
 
 - 优先沿 Markdown 标题和 MinerU 页面边界切分。
-- 单块目标 500～800 tokens，硬上限由 embedding 模型确定。
-- 相邻块重叠 80～120 tokens。
+- 500～800 tokens 只作为合并短块或拆分超长文本时的目标范围，普通且完整的 MinerU 块不为凑长度而重复切分。
+- 只有拆分同一个超长文本块时才保留 80～120 tokens 重叠；普通相邻块不复制内容，通过 `previous_chunk_id/next_chunk_id` 在召回后按需扩展上下文。
 - 短小相邻段落可在同一章节中合并。
 - 超长表格、公式区或实验段落按原始块继续拆分。
 - 每个切片携带章节路径，例如 `Results > Catalyst scope`。
@@ -638,13 +654,13 @@ chunk_id = paper_id + 文档版本 + 页码/块范围 + 内容哈希短值
 
 阶段 B 先使用 PostgreSQL 自带 `tsvector`、GIN 索引和规范化精确短语匹配，不依赖数据库扩展。科学术语、化学名称和编号可使用 `simple` 配置，但必须同时保留规范化原文匹配路径，因为 `simple` 对中文连续文本、特殊符号和部分化学表达式的分词能力有限。
 
-阶段 C 再由数据库管理员启用 `pgvector`：
+阶段 D 再由数据库管理员单独启用 `pgvector`：
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 ```
 
-应用迁移必须先检测扩展是否可用。缺少扩展权限或安装失败时不得阻止应用启动，也不得影响 Library 和词法检索；系统进入 `lexical_only`，由管理员完成扩展后再启用向量功能。
+阶段 B 的主迁移链不包含任何依赖 `vector` 类型的表。阶段 D 先执行管理员预检和扩展安装，成功后才应用独立的向量表迁移并开启功能开关；安装失败时不执行该迁移，应用继续以 `lexical_only` 运行。禁止在同一个必需迁移中先创建 vector 表、失败后再尝试忽略错误。
 
 ### 8.2 文档索引版本表
 
@@ -655,8 +671,8 @@ CREATE EXTENSION IF NOT EXISTS vector;
 | `id` | UUID 主键 |
 | `user_id` | 用户隔离键 |
 | `paper_id` | Library 论文 ID |
-| `source_artifact_id` | 对应 MinerU/Markdown 事实源版本 |
-| `source_sha256` | 源内容哈希 |
+| `source_lineage_json` | 本次索引使用的 MinerU 与 Markdown Artifact ID、内容哈希和版本 |
+| `source_lineage_hash` | 对 lineage JSON 规范化计算的稳定哈希 |
 | `chunker_version` | 切分器版本 |
 | `status` | pending/running/ready/failed/stale |
 | `chunk_count` | 切片数量 |
@@ -667,7 +683,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 唯一约束建议：
 
 ```text
-(user_id, paper_id, source_sha256, chunker_version)
+(user_id, paper_id, source_lineage_hash, chunker_version)
 ```
 
 ### 8.3 文档切片表
@@ -705,7 +721,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 ### 8.4 可选的切片向量表
 
-阶段 C 新增 `library_chunk_embeddings`，不要因为 embedding 模型变化而复制文档切片和全文索引：
+阶段 D 新增 `library_chunk_embeddings`，不要因为 embedding 模型变化而复制文档切片和全文索引：
 
 | 字段 | 说明 |
 |---|---|
@@ -721,11 +737,11 @@ CREATE EXTENSION IF NOT EXISTS vector;
 | `status` | pending/ready/failed/stale |
 | `created_at/updated_at` | 时间 |
 
-唯一约束为 `(chunk_row_id, embedding_model_snapshot)`，并为 `(user_id, paper_id)` 建立 B-tree。阶段 C 先使用限定 `user_id` 和 `allowed_papers` 范围的精确余弦查询；只有实际数据量和基准测试证明延迟不可接受时，才增加 HNSW，避免首期引入无依据的索引参数与维护成本。
+唯一约束为 `(chunk_row_id, embedding_model_snapshot)`，并为 `(user_id, paper_id)` 建立 B-tree。阶段 D 先使用限定 `user_id` 和 `allowed_papers` 范围的精确余弦查询；只有实际数据量和基准测试证明延迟不可接受时，才增加 HNSW，避免首期引入无依据的索引参数与维护成本。
 
 ### 8.5 embedding 模型约束
 
-阶段 C 由管理员配置一个固定 `retrieval_embedding` 档位，普通用户不选择实际 embedding 模型。
+阶段 D 由管理员配置一个固定 `retrieval_embedding` 档位，普通用户不选择实际 embedding 模型。
 
 - embedding 模型变更时创建新的向量记录，不重建或复制文档切片；
 - 向量维度变更时通过数据库迁移建立兼容的新向量列/表，完成回填后切换活动快照；
@@ -778,9 +794,9 @@ LibraryPaper.status = active
 ### 9.3 分阶段召回
 
 1. **元数据与可选领域标签召回**：标题和关键词始终参与；结构化领域标签和项目标签只在当前 profile 显式启用且身份兼容时参与。
-2. **规范化精确短语召回**：对原始文本和规范化文本执行短语/子串匹配，保障中文连续文本、化学名称、缩写、公式和编号条件。
+2. **规范化精确短语召回**：对原始文本和规范化文本执行短语/子串匹配，保障中文连续文本、化学名称、缩写、公式和编号条件。首期只在当前 `user_id` 和当前 `allowed_papers` 的有限切片范围内扫描，不引入 `pg_trgm` 或新搜索服务；达到实测性能瓶颈后再评估索引优化。
 3. **词法全文召回**：使用 `ts_rank_cd` 检索切片，提供通用词法排序。
-4. **可选向量语义召回**：阶段 C 使用 pgvector 余弦距离，补充同义表达、问题改写和跨学科概念。
+4. **可选向量语义召回**：阶段 D 使用 pgvector 余弦距离，补充同义表达、问题改写和跨学科概念。
 5. **相邻证据扩展**：对高分块按需加入前后相邻块，补足被切分的句子、表格和上下文。
 
 第一期不声称 PostgreSQL 原生全文排序就是 BM25。若后续评测证明 `ts_rank_cd` 不足，再单独评估 BM25 扩展，不在本次引入新的搜索服务。
@@ -804,7 +820,7 @@ RRF(chunk) = Σ 1 / (60 + rank_i)
 
 ### 9.5 可选 LLM 重排（评测后）
 
-首期不调用 LLM 重排。若人工标注集证明确定性融合不足，才允许对融合后的前 20～30 个切片使用 Luna 重排，输出：
+首期不调用 LLM 重排。若人工标注集证明确定性融合不足，才允许对融合后的前 20～30 个切片使用项目当前选择的文本模型重排，输出：
 
 - relevant；
 - partially relevant；
@@ -936,7 +952,7 @@ allowed_papers 中每篇论文的固定开头片段
 通用化学          chemistry_general
 ```
 
-选择项旁显示简短说明：通用学术不使用化学领域规则；通用化学在常规召回基础上增加化学扩展和标签加权。创建后在项目设置中允许修改，但保存前提示“将重新生成查询计划、Discovery 和项目标签，不会重新解析 PDF”。
+选择项旁显示简短说明：通用学术不使用化学领域规则；通用化学在常规召回基础上增加化学扩展和标签加权。创建后允许在项目设置中修改：尚未确认进入 Matrix 时只刷新检索；已经进入 Matrix 时提示下游阶段将变为 stale。两种情况都不重新解析 PDF。
 
 后端返回可用 profile 列表、中文/英文名称和能力说明，前端不硬编码未来所有领域选项。旧项目继续显示其已保存的 profile。
 
@@ -951,7 +967,7 @@ allowed_papers 中每篇论文的固定开头片段
 正在搜索 Semantic Scholar
 正在搜索 arXiv
 正在合并和去重
-正在评估摘要
+正在评估摘要（仅在可选摘要筛选启用时显示）
 已完成 / 部分完成 / 失败
 ```
 
@@ -963,7 +979,7 @@ allowed_papers 中每篇论文的固定开头片段
 - 年份、引用量和开放获取状态；
 - 总分；
 - 主要命中原因；
-- 摘要判断状态；
+- 摘要判断状态（仅在该功能启用或曾执行时显示）；
 - 下载和 Library 状态；
 - 来源失败或字段冲突提示。
 
@@ -973,7 +989,8 @@ allowed_papers 中每篇论文的固定开头片段
 
 ```text
 MinerU 解析：等待 / 运行中 / 已完成 / 失败 / 重复文件复用
-全文索引：未建立 / 等待 / 建立中 / 已就绪 / 仅词法 / 失败 / 需重建
+全文索引：未建立 / 等待 / 建立中 / 已就绪 / 失败 / 需重建
+语义索引：未启用 / 等待 / 建立中 / 已就绪 / 失败 / 需重建
 ```
 
 功能：
@@ -984,6 +1001,8 @@ MinerU 解析：等待 / 运行中 / 已完成 / 失败 / 重复文件复用
 - 重复 PDF 明确显示“已存在并复用解析和索引”，不能假装重新处理；
 - Library 搜索支持“元数据”和“全文”模式，默认综合排序；
 - 搜索结果可跳转到 Markdown 对应页码或证据片段。
+
+Library 列表接口直接返回 `document_index_status`、`embedding_status` 和派生的 `retrieval_mode`，避免为列表中的每篇论文逐个请求状态。单篇 `index-status` 接口只提供错误、版本和 lineage 等诊断详情。
 
 ### 11.5 Section Draft 阶段
 
@@ -1041,6 +1060,14 @@ GET  /api/v1/projects/{project_id}/sections/{section_id}/evidence
 
 `GET /api/v1/taxonomy-profiles` 返回可用 profile 的稳定 ID、中英文名称、是否启用领域规则和简短能力说明。项目创建和设置保存稳定 ID，不提交规则文件路径。
 
+项目分类修改使用：
+
+```text
+PATCH /api/v1/projects/{project_id}/taxonomy-profile
+```
+
+请求包含目标 profile；已经进入 Matrix 时再携带 `confirm_downstream_invalidation=true`。服务端在同一数据库事务中锁定项目、重新检查 Discovery/Matrix 状态并决定失效范围，不新增项目版本字段。
+
 混合检索执行接口默认只供服务端领域服务调用，不直接暴露任意跨论文查询给浏览器。证据查看接口只能读取当前项目已经生成并授权的证据 Artifact。
 
 当 `mode=hybrid` 但向量能力未启用或暂时不可用时，接口返回词法/精确短语结果并标记 `retrieval_mode="lexical_only"`，不返回 500。
@@ -1051,7 +1078,7 @@ GET  /api/v1/projects/{project_id}/sections/{section_id}/evidence
 |---|---|
 | `discovery.search` | 多来源联网检索和本地候选召回 |
 | `library.upload` | 现有上传和 MinerU 解析 |
-| `library.index` | 单篇论文切分、词法索引和向量化 |
+| `library.index` | 单篇论文切分和词法索引；阶段 D 启用后可在同一任务尾部补充 embedding |
 | `library.reindex` | 批量重建缺失或过期索引 |
 | `sections.generate` | 在同一任务内检索证据、保存 `section_evidence.json`、生成并校验小节 |
 
@@ -1080,6 +1107,8 @@ GET  /api/v1/projects/{project_id}/sections/{section_id}/evidence
 状态写入 Job 数据库，前端刷新后继续轮询当前任务。
 
 ## 13. 模型网关、并发和计量
+
+查询规划、可选摘要筛选和可选重排都属于文本模型调用，统一使用项目当前保存的模型档位。Job 创建时将 Luna/Terra/Sol 档位写入任务令牌和用量快照，运行中的任务不因用户随后修改模型选择而切换模型；新任务使用最新选择。任何检索脚本都不得硬编码 Luna。
 
 ### 13.1 embedding 网关
 
@@ -1170,7 +1199,7 @@ REVIEW_DOCUMENT_RETRIEVAL_ENABLED
 REVIEW_VECTOR_RETRIEVAL_ENABLED
 ```
 
-来源并发、单源条数、切片大小、Top K、RRF 常数、embedding 批量大小等调优参数放在一个服务端集中配置对象中并提供保守默认值，不为每个参数新增环境变量。旧固定前缀回退由 `REVIEW_DOCUMENT_RETRIEVAL_ENABLED=false` 统一控制，不再增加独立开关。
+来源并发、单源条数、最大子主题数、Job 总请求/候选/时间预算、切片大小、Top K、RRF 常数、embedding 批量大小等调优参数放在一个服务端集中配置对象中并提供保守默认值，不为每个参数新增环境变量。旧固定前缀回退由 `REVIEW_DOCUMENT_RETRIEVAL_ENABLED=false` 统一控制，不再增加独立开关。
 
 taxonomy profile 是项目级业务配置，存储在项目记录中，不使用新增环境变量控制。Hosted 模式下，服务器全局 `REVIEW_TAXONOMY_PROFILE` 不能覆盖项目已经明确保存的 profile。
 
@@ -1205,17 +1234,30 @@ taxonomy profile 是项目级业务配置，存储在项目记录中，不使用
 - 使用现有 MinerU Artifact 构建章节/页码切片；
 - 建立规范化精确短语检索、PostgreSQL `tsvector` 和 GIN 索引；
 - Library 全文搜索；
-- 为现有论文批量回填切片；
-- Section Draft 先接入词法证据召回；
+- 实现可恢复的批量回填工具，并只在测试用户 Library 试跑；
+- 提供供阶段 C 调用的小节范围词法检索领域服务；
 - 保留旧固定前缀逻辑作为短期回退。
 
 完成标准：可以从长论文后半部分召回与小节问题相关的原文，并显示页码。
 
-### 阶段 C：pgvector 与混合召回
+### 阶段 C：证据约束写作与引用追踪
 
 工作内容：
 
-- 部署 pgvector 扩展；
+- 小节查询构造；
+- 使用阶段 B 的词法结果建立证据包 Artifact；
+- 段落级 `paper_id/chunk_id` 输出契约；
+- 引用所有权和证据完整性校验；
+- 前端证据查看；
+- 评估与回归数据集。
+
+完成标准：每个事实性段落都能定位到允许论文中的具体页码和切片，不依赖向量能力也能形成完整写作闭环。
+
+### 阶段 D：可选 pgvector 与混合召回
+
+工作内容：
+
+- 词法证据评测确认需要语义补充后，再部署 pgvector 扩展；
 - 模型网关增加 embedding 能力；
 - 批量 embedding、缓存和用量计量；
 - 独立 `library_chunk_embeddings` 表；
@@ -1223,20 +1265,7 @@ taxonomy profile 是项目级业务配置，存储在项目记录中，不使用
 - 词法、向量、标签 RRF 融合；
 - 失败时自动回退到词法模式。
 
-完成标准：跨同义词和不同表达能够召回正确证据，且不影响文本、图像和 MinerU 并发。
-
-### 阶段 D：证据约束写作与引用追踪
-
-工作内容：
-
-- 小节查询构造；
-- 证据包 Artifact；
-- 段落级 `paper_id/chunk_id` 输出契约；
-- 引用所有权和证据完整性校验；
-- 前端证据查看；
-- 评估与回归数据集。
-
-完成标准：每个事实性段落都能定位到允许论文中的具体页码和切片。
+完成标准：跨同义词和不同表达能够补充召回正确证据，且不影响文本、图像和 MinerU 并发。
 
 ### 阶段 E：灰度、评测和按需增强
 
@@ -1246,10 +1275,10 @@ taxonomy profile 是项目级业务配置，存储在项目记录中，不使用
 - 旧、新检索双跑对比；
 - 质量、延迟、Token 和错误率监控；
 - 小范围用户启用；
-- 默认切换到混合检索；
+- 默认切换到新的证据检索链路；向量能力只有在阶段 D 已验证并启用时才参与；
 - 保留一个版本周期的旧回退开关。
 
-达到基线后再分别评估 LLM 摘要筛选、Luna 重排和 HNSW。只有质量或性能数据证明有收益时才启用，不把这些能力作为首期上线依赖。
+达到基线后再分别评估 LLM 摘要筛选、项目所选模型重排和 HNSW。只有质量或性能数据证明有收益时才启用，不把这些能力作为首期上线依赖。
 
 ## 17. 迁移方案
 
@@ -1257,9 +1286,9 @@ taxonomy profile 是项目级业务配置，存储在项目记录中，不使用
 
 1. 备份 PostgreSQL。
 2. 创建索引版本和切片表，阶段 B 不要求 pgvector。
-3. 阶段 C 由数据库管理员安装并验证 pgvector；迁移先检测权限，失败时保持 `lexical_only`，不得阻止应用启动。
+3. 阶段 D 由数据库管理员安装并验证 pgvector；成功后才执行独立向量表迁移并开启功能开关，失败时不执行该可选迁移并保持 `lexical_only`。
 4. 不修改现有 `library_papers` 的唯一约束和 Artifact 路径。
-5. 将所有现有有效论文标记为 `index_status=pending`。
+5. 为所有现有有效论文创建或补齐 `library_document_indexes(status=pending)` 记录，不在 `library_papers` 上增加重复的 `index_status` 字段。
 6. 后台按用户和论文分批重建，限制并发。
 7. 单篇失败记录错误，不中断整个批次。
 8. 重建可从已有 PDF、Markdown、content list 和 extracted 目录恢复，不重新调用 MinerU。
@@ -1300,6 +1329,8 @@ taxonomy profile 是项目级业务配置，存储在项目记录中，不使用
 - 来源字段冲突合并；
 - 年份、排除词和文档类型过滤；
 - 查询计划模型失败回退；
+- 查询规划、可选摘要筛选和可选重排使用项目选择的模型档位，不存在硬编码 Luna；
+- Job 开始后模型档位保持快照稳定，项目改选模型只影响后续新 Job；
 - `general_academic` 查询计划不产生化学 taxonomy 扩展；
 - `chemistry_general` 查询计划正确生成化学规范词和别名；
 - 明确保存的项目 profile 优先于主题自动建议和服务器默认值；
@@ -1309,6 +1340,8 @@ taxonomy profile 是项目级业务配置，存储在项目记录中，不使用
 - `tsvector` 查询；
 - pgvector 查询；
 - RRF 融合和每篇论文上限；
+- 来源 RRF 在进入加权总分前正确归一化；
+- Discovery Job 达到子主题、外部请求、候选或时间预算后停止新增请求；
 - `allowed_papers` 和用户隔离；
 - 引用与 chunk 所有权校验；
 - embedding 缓存和幂等计量。
@@ -1322,7 +1355,9 @@ taxonomy profile 是项目级业务配置，存储在项目记录中，不使用
 - 同一论文在三个来源返回不同 ID；
 - 非化学项目选择 `general_academic` 时，不读取 Library 中的化学标签作为召回或加权信号；
 - 化学项目选择 `chemistry_general` 时，常规召回与化学标签召回并行执行；
-- 修改 profile 后只使查询计划、Discovery 和项目标签评估失效，不重新运行 MinerU 或重建通用全文切片；
+- 查询规划和其他可选检索 LLM 调用实际使用项目选择的模型，并生成对应模型与价格快照用量；
+- 尚未确认进入 Matrix 时修改 profile，只刷新查询计划、Discovery 和项目标签评估，不改变任何下游状态；
+- 已经确认进入 Matrix 后修改 profile，使 Matrix 及其全部下游阶段变为 stale，但不重新运行 MinerU 或重建通用全文切片；
 - PDF 上传后 MinerU 成功、索引失败，Library 仍可用；
 - 单 worker 下上传任务结束后再异步执行索引，不发生父子任务等待；
 - 索引重试成功；
@@ -1348,8 +1383,8 @@ taxonomy profile 是项目级业务配置，存储在项目记录中，不使用
 验证完整链路：
 
 ```text
-Topic → 多源搜索 → 人工选择 → 下载/上传 → MinerU
-→ 索引 → Discovery 确认 → Blueprint → Section Draft
+项目 profile → Topic → 多源搜索 → 人工选择 → 下载/上传 → MinerU
+→ 索引 → Discovery 确认并进入 Matrix → Blueprint → Section Draft
 → 引用校验 → Draft 编辑 → Final Draft
 ```
 
@@ -1377,6 +1412,8 @@ Topic → 多源搜索 → 人工选择 → 下载/上传 → MinerU
 - `general_academic` 项目不生成化学扩展词，也不使用化学标签加权。
 - `chemistry_general` 项目保留常规召回，并额外启用化学别名和标签通道。
 - taxonomy 未命中的候选仍可通过常规召回进入结果，不被领域规则提前过滤。
+- 检索辅助 LLM 使用项目当前选择的 Luna、Terra 或 Sol；运行中 Job 使用创建时快照，新选择只影响新 Job。
+- 尚未进入 Matrix 时修改 profile 不改变下游状态；已经进入 Matrix 后修改会明确提示并使 Matrix 及其下游变为 stale。
 - Dashboard 实际请求并展示四个来源状态。
 - Crossref 失败时 OpenAlex、Semantic Scholar 和 arXiv 结果仍可保存。
 - 同 DOI 论文只显示一条，来源徽标完整。
@@ -1427,7 +1464,7 @@ Topic → 多源搜索 → 人工选择 → 下载/上传 → MinerU
 | embedding 成本增长 | 内容哈希缓存、批量调用、后台限速、用量计量 |
 | 向量模型变更 | 独立向量记录和模型快照，不复制词法切片、不原地混用维度 |
 | 中文或化学名称被普通分词破坏 | `simple` 词法索引之外保留规范化精确短语匹配和领域标签 |
-| 数据库无 pgvector 安装权限 | 启动时能力检测，保持 `lexical_only`，由管理员在阶段 C 单独安装 |
+| 数据库无 pgvector 安装权限 | 启动时能力检测，保持 `lexical_only`，由管理员在阶段 D 单独安装 |
 | 长表格或公式切分失真 | content list 块边界、内容类型和资产引用 |
 | 跨用户数据泄露 | `user_id` 冗余隔离键、服务端所有权复核、隔离测试 |
 | 新检索证据不足 | 词法/向量/标签融合、相邻扩展、旧逻辑回退 |
@@ -1475,9 +1512,11 @@ review_writer_core/retrieval/
   chunker.py
   indexer.py
   lexical.py
+  evidence.py
+
+# 仅阶段 D 评测通过后增加
   vector.py
   hybrid.py
-  evidence.py
 ```
 
 ### 21.2 科学脚本
@@ -1507,9 +1546,9 @@ review_writer_core/retrieval/
 
 1. 先增加 `general_academic`、修正新项目默认 profile，并完成多来源联网检索和来源状态持久化。
 2. 再完成 MinerU 文档切分和 PostgreSQL 词法全文检索。
-3. 先用词法检索替换固定开头证据，验证写作证据闭环。
-4. 然后接入 embedding 网关和 pgvector。
-5. 最后完成证据查看和全量回填，再依据评测决定是否增加摘要筛选、Luna 重排或 HNSW。
+3. 用词法检索替换固定开头证据，完成证据包、引用校验和前端证据查看，建立质量基线。
+4. 只有词法基线证明同义表达召回不足时，再接入 embedding 网关和 pgvector。
+5. 最后完成全量回填和灰度切换，再依据评测决定是否增加摘要筛选、项目所选模型重排或 HNSW。
 
 这样每一步都能独立产生价值，并且在 pgvector 或 embedding 尚未准备好时，项目仍可依靠词法全文检索正常运行。
 

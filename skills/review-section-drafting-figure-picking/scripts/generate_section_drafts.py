@@ -50,6 +50,8 @@ def write_generation_progress(
     current_section_id: str = "",
     current_heading: str = "",
     completed_sections: list[dict[str, str]] | None = None,
+    evidence_hit_count: int = 0,
+    evidence_paper_count: int = 0,
 ) -> None:
     """Atomically expose chapter-level progress to the parent JobService."""
 
@@ -63,6 +65,8 @@ def write_generation_progress(
         "current_section_id": str(current_section_id or ""),
         "current_heading": str(current_heading or ""),
         "completed_sections": list(completed_sections or []),
+        "evidence_hit_count": max(0, int(evidence_hit_count)),
+        "evidence_paper_count": max(0, int(evidence_paper_count)),
         "updated_at_epoch": time.time(),
     }
     try:
@@ -272,10 +276,27 @@ def call_llm(
                 "type": "array", "minItems": 1,
                 "items": {
                     "type": "object", "additionalProperties": False,
-                    "required": ["text", "paper_ids"],
+                    "required": ["text"],
                     "properties": {
                         "text": {"type": "string"},
                         "paper_ids": {"type": "array", "items": {"type": "string"}},
+                        "evidence": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["paper_id", "chunk_ids", "claim"],
+                                "properties": {
+                                    "paper_id": {"type": "string"},
+                                    "chunk_ids": {
+                                        "type": "array",
+                                        "minItems": 1,
+                                        "items": {"type": "string"},
+                                    },
+                                    "claim": {"type": "string"},
+                                },
+                            },
+                        },
                     },
                 },
             },
@@ -373,6 +394,17 @@ def main() -> int:
     project = root / "review-projects" / args.project_id
     stage = project / "02_section_drafting"
     tasks = read_json(stage / "section_tasks.json")
+    evidence_package_path = stage / "section_evidence.json"
+    evidence_package = (
+        read_json(evidence_package_path)
+        if evidence_package_path.exists()
+        else {"sections": []}
+    )
+    evidence_sections = {
+        str(item.get("section_id") or ""): item
+        for item in (evidence_package.get("sections") or [])
+        if isinstance(item, dict)
+    }
     progress_total = len(tasks)
     completed_progress: list[dict[str, str]] = []
     write_generation_progress(
@@ -438,9 +470,52 @@ def main() -> int:
                 if str(pid) in rows
             )
         )
-        evidence = [paper_evidence(root, rows, paper_id) for paper_id in allowed]
-        if not evidence or not any(item["evidence"] for item in evidence):
+        section_evidence = evidence_sections.get(section_id, {})
+        retrieval_mode = str(
+            section_evidence.get("retrieval_mode") or "fixed_prefix_fallback"
+        )
+        if retrieval_mode == "lexical":
+            evidence = [
+                item
+                for item in section_evidence.get("hits") or []
+                if isinstance(item, dict)
+                and str(item.get("paper_id") or "") in allowed
+                and str(item.get("chunk_id") or "")
+            ]
+        else:
+            evidence = [paper_evidence(root, rows, paper_id) for paper_id in allowed]
+        has_evidence_text = any(
+            str(
+                item.get("content")
+                if retrieval_mode == "lexical"
+                else item.get("evidence")
+                or ""
+            ).strip()
+            for item in evidence
+            if isinstance(item, dict)
+        )
+        if not evidence or not has_evidence_text:
+            if retrieval_mode == "lexical":
+                raise SystemExit(f"No usable indexed evidence for {section_id}.")
             raise SystemExit(f"No usable MinerU Markdown or matrix evidence for {section_id}.")
+        evidence_paper_count = len(
+            {
+                str(item.get("paper_id") or "")
+                for item in evidence
+                if str(item.get("paper_id") or "")
+            }
+        )
+        write_generation_progress(
+            stage,
+            current=len(completed_progress),
+            total=progress_total,
+            phase="generating",
+            current_section_id=section_id,
+            current_heading=str(task.get("heading") or section_id),
+            completed_sections=completed_progress,
+            evidence_hit_count=len(evidence),
+            evidence_paper_count=evidence_paper_count,
+        )
         spec = section_specs.get(section_id, {})
         if role == "introduction":
             paragraph_instruction = """Write 2-4 claim-centered framing paragraphs. Define the problem, scope, terminology, organizing logic, and evidence landscape. Use the supporting papers only as brief representative anchors. Do not give any paper a standalone summary, and do not repeat detailed methods, conditions, datasets, results, yields, or limitations that belong in a body section."""
@@ -450,6 +525,15 @@ def main() -> int:
             paragraph_instruction = f"""Write claim-centered review paragraphs, not one paragraph per paper. Every primary paper must support at least one paragraph, but related studies should be compared or synthesized together when they address the same claim. A paragraph may cite one or several allowed papers. Discuss detailed study evidence only here, in the paper's primary section. Supporting papers may be used briefly for comparison, without repeating their full descriptions. Cover all {len(primary)} primary papers."""
         else:
             paragraph_instruction = """Write 2-4 cross-cutting synthesis paragraphs using only the supporting evidence. Compare previously introduced findings from a new analytical angle, but do not repeat complete paper descriptions, methods, conditions, datasets, or results."""
+        evidence_instruction = (
+            "For every paragraph, return `evidence` entries with `paper_id`, one or more "
+            "`chunk_ids` copied exactly from the indexed evidence below, and the specific "
+            "claim those chunks support. Do not return a paper or chunk that is absent from "
+            "the evidence package."
+            if retrieval_mode == "lexical"
+            else "For every paragraph, set `paper_ids` to all and only the allowed sources "
+            "that support that paragraph."
+        )
         prompt = f"""Write one body section of a source-grounded scientific review.
 
 Topic: {blueprint.get('review_topic') or project.name}
@@ -469,7 +553,8 @@ Return a 90-150 word `overview`, followed by complete review paragraphs. The ove
 
 {paragraph_instruction}
 
-For every paragraph, set `paper_ids` to all and only the allowed sources that support that paragraph. Do not put citations, source IDs, or paper titles as headings in `text`; the workflow adds numeric citations after validation. Preserve limitations and use conditional language for proposed mechanisms. Do not invent conditions, yields, selectivities, structures, or mechanistic evidence.
+Evidence contract: {evidence_instruction}
+Do not put citations, source IDs, chunk IDs, or paper titles as headings in `text`; the workflow adds numeric citations after validation. Preserve limitations and use conditional language for proposed mechanisms. Do not invent conditions, yields, selectivities, structures, or mechanistic evidence.
 
 Writing rules:\n{rules}
 
@@ -500,18 +585,79 @@ Source evidence (only use claims supported here):\n{json.dumps(evidence, ensure_
             raise SystemExit(f"The writing model did not produce a section overview for {section_id}.")
         generated_paragraphs: list[dict[str, Any]] = []
         covered_primary: set[str] = set()
+        valid_evidence_chunks = {
+            (str(item.get("paper_id") or ""), str(item.get("chunk_id") or ""))
+            for item in evidence
+            if isinstance(item, dict)
+            and item.get("paper_id")
+            and item.get("chunk_id")
+        }
+        write_generation_progress(
+            stage,
+            current=len(completed_progress),
+            total=progress_total,
+            phase="validating",
+            current_section_id=section_id,
+            current_heading=str(task.get("heading") or section_id),
+            completed_sections=completed_progress,
+            evidence_hit_count=len(evidence),
+            evidence_paper_count=evidence_paper_count,
+        )
         for item in generated["paragraphs"]:
-            paper_ids = list(
-                dict.fromkeys(
-                    str(pid)
-                    for pid in item.get("paper_ids", [])
-                    if str(pid) in allowed and str(pid) in citation_map
+            paragraph_evidence: list[dict[str, Any]] = []
+            if retrieval_mode == "lexical":
+                for raw_evidence in item.get("evidence") or []:
+                    if not isinstance(raw_evidence, dict):
+                        continue
+                    evidence_paper = str(raw_evidence.get("paper_id") or "")
+                    chunk_ids = list(
+                        dict.fromkeys(
+                            str(chunk_id)
+                            for chunk_id in raw_evidence.get("chunk_ids") or []
+                            if (
+                                evidence_paper,
+                                str(chunk_id),
+                            )
+                            in valid_evidence_chunks
+                        )
+                    )
+                    claim = re.sub(
+                        r"\s+", " ", str(raw_evidence.get("claim") or "")
+                    ).strip()
+                    if (
+                        evidence_paper in allowed
+                        and evidence_paper in citation_map
+                        and chunk_ids
+                        and claim
+                    ):
+                        paragraph_evidence.append(
+                            {
+                                "paper_id": evidence_paper,
+                                "chunk_ids": chunk_ids,
+                                "claim": claim,
+                            }
+                        )
+                paper_ids = list(
+                    dict.fromkeys(item["paper_id"] for item in paragraph_evidence)
                 )
-            )
+            else:
+                paper_ids = list(
+                    dict.fromkeys(
+                        str(pid)
+                        for pid in item.get("paper_ids", [])
+                        if str(pid) in allowed and str(pid) in citation_map
+                    )
+                )
             text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
             if not paper_ids or not text:
                 continue
-            generated_paragraphs.append({"paper_ids": paper_ids, "text": text})
+            generated_paragraphs.append(
+                {
+                    "paper_ids": paper_ids,
+                    "text": text,
+                    "evidence": paragraph_evidence,
+                }
+            )
             covered_primary.update(set(paper_ids) & set(primary))
         if not generated_paragraphs:
             raise SystemExit(
@@ -542,6 +688,7 @@ Source evidence (only use claims supported here):\n{json.dumps(evidence, ensure_
                     "paper_id": paper_ids[0],
                     "cited_paper_ids": paper_ids,
                     "text": text,
+                    "evidence": item.get("evidence") or [],
                 }
             )
         section_text = make_xml_compatible("\n".join(markdown).strip() + "\n")[0]

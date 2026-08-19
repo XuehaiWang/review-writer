@@ -30,6 +30,7 @@ from review_writer_api.scientific_runner import (
     ScientificRunError,
     ScientificRunner,
 )
+from review_writer_core.metadata_tags import verified_structured_tags
 
 
 class MinerUPreciseParseFailed(WorkflowError):
@@ -611,16 +612,17 @@ class LibraryService:
 
     @staticmethod
     def _record(row: LibraryPaper) -> LibraryPaperRecord:
+        metadata = dict(row.metadata_json or {})
         return LibraryPaperRecord(
             id=str(row.id),
             paper_id=row.paper_id,
             title=row.title,
             authors=list(row.authors_json or []),
             keywords=list(row.keywords_json or []),
-            tags=row.tags_json,
+            tags=verified_structured_tags(metadata),
             original_filename=row.original_filename,
             content_sha256=row.content_sha256,
-            metadata=dict(row.metadata_json or {}),
+            metadata=metadata,
             pdf_relative_path=row.pdf_relative_path,
             markdown_relative_path=row.markdown_relative_path,
             artifact_ids=dict((row.metadata_json or {}).get("_artifact_ids") or {}),
@@ -907,7 +909,7 @@ class LibraryService:
                 )
                 authors = _field_value(metadata.get("authors")) or []
                 keywords = _field_value(metadata.get("keywords")) or []
-                tags = _field_value(metadata.get("structured_tags")) or {}
+                tags = verified_structured_tags(metadata)
                 session.add_all(artifact_rows)
                 if reusable is None:
                     row = LibraryPaper(
@@ -1060,7 +1062,7 @@ class LibraryService:
                     "keywords": (
                         keywords if isinstance(keywords, list) else [keywords]
                     ),
-                    "tags": _field_value(metadata.get("structured_tags")) or {},
+                    "tags": verified_structured_tags(metadata),
                     "metadata": metadata,
                     "pdf_source": pdf_source,
                     "markdown_source": markdown_source,
@@ -1299,7 +1301,7 @@ class LibraryService:
             row.title = str(title)
             row.authors_json = authors if isinstance(authors, list) else [authors]
             row.keywords_json = keywords if isinstance(keywords, list) else [keywords]
-            row.tags_json = _field_value(stored_metadata.get("structured_tags")) or {}
+            row.tags_json = verified_structured_tags(stored_metadata)
             row.metadata_json = stored_metadata
             row.updated_at = utc_now()
             session.flush()

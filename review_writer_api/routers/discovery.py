@@ -54,7 +54,7 @@ def build_discovery_router(
         idempotency_key: str = Header(default="", alias="Idempotency-Key"),
         principal: Principal = Depends(principal_dependency),
     ):
-        discovery_service._owned_project(principal, project_id)
+        project = discovery_service._owned_project(principal, project_id)
         payload_data = payload.model_dump()
         job = job_service.submit(
             principal,
@@ -65,6 +65,7 @@ def build_discovery_router(
             payload={
                 **payload_data,
                 "project_id": project_id,
+                "taxonomy_profile": project.taxonomy_profile,
             },
         )
         return _job_response(job)

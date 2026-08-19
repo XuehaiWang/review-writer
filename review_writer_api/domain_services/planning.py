@@ -36,6 +36,7 @@ from review_writer_api.scientific_runner import (
 from review_writer_api.workflow_models import LibraryPaper, WorkflowJob
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
 from review_writer_core.taxonomy import TaxonomyConfigurationError, load_taxonomy_rules
+from review_writer_core.metadata_tags import verified_structured_tags
 from review_writer_core.review_structure import (
     assign_primary_paper_sections,
     infer_section_role,
@@ -314,12 +315,7 @@ class PlanningService:
             metadata = (
                 record.metadata_json if isinstance(record.metadata_json, dict) else {}
             )
-            structured = metadata.get("structured_tags")
-            if isinstance(structured, dict) and "value" in structured:
-                structured = structured.get("value")
-            tags = dict(structured) if isinstance(structured, dict) else {}
-            if isinstance(record.tags_json, dict):
-                tags.update(record.tags_json)
+            tags = verified_structured_tags(metadata)
             row = rows_by_id.get(record.paper_id) or {}
             # Project Tags are scoped to the active project. Explicit legacy
             # confirmations and the current automatic Discovery assessment
@@ -334,11 +330,11 @@ class PlanningService:
             tags_by_paper[record.paper_id] = tags
             parts = [
                 row.get("title"),
-                row.get("abstract"),
-                row.get("main_content"),
                 " ".join(str(item) for item in (row.get("keywords") or [])),
                 record.title,
                 " ".join(str(item) for item in (record.keywords_json or [])),
+                row.get("abstract"),
+                row.get("main_content"),
             ]
             text_by_paper[record.paper_id] = " ".join(
                 str(part) for part in parts if str(part or "").strip()
@@ -378,10 +374,17 @@ class PlanningService:
                     if not normalized:
                         continue
                     pattern = rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])"
-                    if re.search(pattern, text):
+                    match = re.search(pattern, text)
+                    if match:
+                        # _outline_sources puts title/keywords before the
+                        # abstract.  Prefer those direct signals over a longer
+                        # phrase mentioned later as related-work context.
                         score = max(
                             score,
-                            len(normalized.split()) * 10 + len(normalized),
+                            100_000
+                            - min(match.start(), 99_999)
+                            + len(normalized.split()) * 10
+                            + len(normalized),
                         )
                 ranked.append((score, -index, label))
             best = max(ranked, default=(0, 0, ""))

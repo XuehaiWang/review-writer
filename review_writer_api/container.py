@@ -10,6 +10,7 @@ from review_writer_api.domain_services.drafts import DraftsService
 from review_writer_api.domain_services.figures import FiguresService
 from review_writer_api.domain_services.final import FinalService
 from review_writer_api.domain_services.library import LibraryService
+from review_writer_api.domain_services.library_index import LibraryIndexService
 from review_writer_api.domain_services.planning import PlanningService
 from review_writer_api.domain_services.sections import SectionsService
 from review_writer_api.job_service import JobService
@@ -24,6 +25,7 @@ class ApplicationContainer:
     job_service: JobService
     scientific_runner: ScientificRunner
     library_service: LibraryService
+    library_index_service: LibraryIndexService
     discovery_service: DiscoveryService
     planning_service: PlanningService
     sections_service: SectionsService

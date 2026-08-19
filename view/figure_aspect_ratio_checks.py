@@ -79,6 +79,42 @@ class FigureAspectRatioChecks(unittest.TestCase):
             self.assertEqual(metadata["endpoint"], "/chat/completions")
             self.assertEqual(metadata["wire_api"], "chat-completions")
 
+    def test_overview_uses_internal_image_gateway_without_direct_api_key(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            reference = Path(raw) / "template.png"
+            extra = Path(raw) / "skeleton.png"
+            Image.new("RGB", (40, 24), "white").save(reference)
+            Image.new("RGB", (20, 20), "black").save(extra)
+            expected = reference.read_bytes()
+            metadata = {}
+            with (
+                mock.patch.object(OVERVIEW, "image_gateway_configured", return_value=True),
+                mock.patch.object(
+                    OVERVIEW,
+                    "call_gateway_image",
+                    return_value=(expected, {"request_id": "gateway-request-1"}),
+                ) as gateway,
+                mock.patch.object(
+                    OVERVIEW,
+                    "_try_images_edits",
+                    side_effect=AssertionError("direct provider route must not be used"),
+                ),
+            ):
+                result = OVERVIEW.call_image_edit_api(
+                    "",
+                    "https://api.openai.com/v1",
+                    reference,
+                    "create overview",
+                    "gpt-image-2",
+                    request_metadata=metadata,
+                    extra_images=[extra],
+                )
+            self.assertEqual(result, expected)
+            gateway.assert_called_once()
+            self.assertEqual(len(gateway.call_args.kwargs["images"]), 2)
+            self.assertEqual(metadata["endpoint"], "internal-image-gateway")
+            self.assertEqual(metadata["gateway_request_id"], "gateway-request-1")
+
     def test_overview_chat_request_embeds_the_selected_template(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             reference = Path(raw) / "template.png"

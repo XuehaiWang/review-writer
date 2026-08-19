@@ -196,10 +196,34 @@ function PaperListItem({ paper, displayLabel, selected, onSelect }: { paper: Lib
     <button type="button" className={selected ? "paper-row active" : "paper-row"} onClick={onSelect}>
       <span className="paper-row-main">
         <strong><span className="paper-display-id" title={paper.paper_id}>{displayLabel}</span> · {paper.title || displayLabel}</strong>
-        <small>{[paper.year, paper.journal, paper.doi].filter(Boolean).join(" · ") || paper.original_filename}</small>
+        <small>{paper.search_match ? `${text("正文页", "Full text p.")} ${paper.search_match.page_start || "?"} · ${paper.search_match.content.slice(0, 90)}` : [paper.year, paper.journal, paper.doi].filter(Boolean).join(" · ") || paper.original_filename}</small>
       </span>
       <span className={status.className} title={status.label} />
     </button>
+  );
+}
+
+function DocumentIndexStatus({ paper }: { paper: LibraryPaper }) {
+  const { text } = useUiText();
+  const index = paper.index_status;
+  const fulltextLabels: Record<string, string> = {
+    not_indexed: text("未建立", "Not indexed"),
+    queued: text("等待中", "Queued"),
+    building: text("建立中", "Building"),
+    ready: text("已就绪", "Ready"),
+    failed: text("失败", "Failed"),
+    rebuild_required: text("需要重建", "Rebuild required"),
+  };
+  return (
+    <div className="document-index-status" aria-live="polite">
+      <span className={index?.mineru === "ready" ? "ready" : "disabled"}>
+        <b>MinerU</b>{index?.mineru === "ready" ? text("解析完成", "Parsed") : text("产物不可用", "Unavailable")}
+      </span>
+      <span className={index?.fulltext === "ready" ? "ready" : ["failed", "rebuild_required"].includes(index?.fulltext || "") ? "failed" : "pending"} title={index?.error_message || ""}>
+        <b>{text("全文索引", "Full-text index")}</b>{fulltextLabels[index?.fulltext || "not_indexed"]}{index?.fulltext === "ready" ? ` · ${index.chunk_count} chunks` : ""}
+      </span>
+      <span className="disabled"><b>{text("语义索引", "Semantic index")}</b>{text("未启用", "Disabled")}</span>
+    </div>
   );
 }
 
@@ -325,7 +349,10 @@ export function LibraryPage() {
   }).map((job) => {
     if (job.status === "queued") return { id: job.id, name: job.filename, status: "queued", message: "等待服务器处理", messageEn: "Waiting for server processing", updatedAt: job.updated_at };
     if (job.status === "running" || job.status === "cancel_requested") return { id: job.id, name: job.filename, status: "uploading", message: job.status === "cancel_requested" ? "正在取消解析" : "正在执行 MinerU 解析", messageEn: job.status === "cancel_requested" ? "Cancelling parsing" : "Running MinerU parsing", updatedAt: job.updated_at };
-    if (job.status === "succeeded") return { id: job.id, name: job.filename, status: "done", message: "上传与解析完成", messageEn: "Upload and parsing completed", updatedAt: job.updated_at };
+    if (job.status === "succeeded") {
+      const duplicate = job.result?.status === "duplicate_file";
+      return { id: job.id, name: job.filename, status: "done", message: duplicate ? "文件已存在，已复用解析结果和全文索引" : "上传与解析完成，全文索引已进入后台队列", messageEn: duplicate ? "Already exists; parsing and full-text index reused" : "Upload and parsing completed; full-text indexing was queued", updatedAt: job.updated_at };
+    }
     return { id: job.id, name: job.filename, status: "failed", message: job.error_message || "上传或解析失败", messageEn: job.error_message || "Upload or parsing failed", updatedAt: job.updated_at };
   }), [uploadJobs.data?.items, uploadStatusNow]);
   const visibleLocalUploads = useMemo(() => localUploads.filter((row) => {
@@ -420,6 +447,24 @@ export function LibraryPage() {
       await queryClient.invalidateQueries({ queryKey: ["library"] });
     },
   });
+  const reindexPaper = useMutation({
+    mutationFn: () => apiRequest<Job>(`/api/v1/library/papers/${encodeURIComponent(selectedPaper!.paper_id)}/reindex`, {
+      method: "POST",
+      headers: { "Idempotency-Key": newIdempotencyKey() },
+    }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["library"] });
+    },
+  });
+  const reindexMissing = useMutation({
+    mutationFn: () => apiRequest<{ count: number }>("/api/v1/library/reindex-jobs", {
+      method: "POST",
+      ...jsonBody({ force: false }),
+    }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["library"] });
+    },
+  });
   const markReviewed = useMutation({
     mutationFn: async () => {
       const parsed = JSON.parse(metadataDraft) as Record<string, unknown>;
@@ -484,22 +529,25 @@ export function LibraryPage() {
     <main className="workspace page-container workspace-page">
       <div className="workspace-heading">
         <div><p className="eyebrow">{text("阶段 1 · 共享文献集合", "Stage 1 · Shared source collection")}</p><h1>{text("文献库", "Literature library")}</h1><p className="muted">{text("上传PDF后必须完成MinerU解析，Metadata和正文才会供后续检索与写作使用。", "Uploaded PDFs must complete MinerU parsing before metadata and full text are available to later discovery and writing stages.")}</p></div>
-        <ProjectSelector />
-        <label className="button button-primary file-button">{text("批量上传PDF", "Upload PDFs in batch")}<input type="file" accept="application/pdf,.pdf" multiple onChange={(event) => { const files = event.target.files; void uploadFiles(files); event.currentTarget.value = ""; }} /></label>
+        <div className="library-heading-actions"><ProjectSelector /><button className="button button-secondary" type="button" disabled={reindexMissing.isPending} onClick={() => reindexMissing.mutate()}>{reindexMissing.isPending ? text("提交中…", "Submitting…") : text("补建缺失索引", "Build missing indexes")}</button><label className="button button-primary file-button">{text("批量上传PDF", "Upload PDFs in batch")}<input type="file" accept="application/pdf,.pdf" multiple onChange={(event) => { const files = event.target.files; void uploadFiles(files); event.currentTarget.value = ""; }} /></label></div>
       </div>
+      {reindexMissing.error ? <p className="message message-error">{reindexMissing.error.message}</p> : null}
       <UploadBatchProgress uploads={uploads} />
       <AcquisitionPanel projectId={project?.project_id || ""} onLibraryChanged={refreshLibrary} />
       <div className="three-pane library-workspace">
         <section className="pane list-pane">
           <div className="pane-head"><div><span className="step-label">{text("论文", "Papers")}</span><h2>{text("文献", "Papers")} <span aria-live="polite">{libraryIndex.data?.count ?? library.data?.count ?? 0}</span></h2></div></div>
-          <input className="pane-search" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={text("检索标题、作者或关键词", "Search title, author, or keyword")} />
+          <input className="pane-search" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={text("检索标题、作者、关键词或正文", "Search title, author, keyword, or full text")} />
           {library.error ? <ErrorState error={library.error} onRetry={() => library.refetch()} /> : null}
           <div className="paper-list">{library.data?.items.map((paper) => <PaperListItem key={paper.paper_id} paper={paper} displayLabel={paperLabels.get(paper.paper_id) || paper.paper_id} selected={paper.paper_id === selectedPaper?.paper_id} onSelect={() => setSelectedId(paper.paper_id)} />)}</div>
         </section>
         <section className="pane detail-pane">
           {selectedPaper ? (
             <>
-              <div className="pane-head paper-title"><div><span className="step-label" title={selectedPaper.paper_id}>{paperLabels.get(selectedPaper.paper_id) || selectedPaper.paper_id}</span><h2>{selectedPaper.title}</h2><p>{selectedPaper.authors?.join(", ")}</p></div><button className="button button-quiet danger" type="button" disabled={deletePaper.isPending} onClick={() => { if (window.confirm(text(`确认删除 ${paperLabels.get(selectedPaper.paper_id) || selectedPaper.paper_id}？`, `Delete ${paperLabels.get(selectedPaper.paper_id) || selectedPaper.paper_id}?`))) deletePaper.mutate(); }}>{text("删除", "Delete")}</button></div>
+              <div className="pane-head paper-title"><div><span className="step-label" title={selectedPaper.paper_id}>{paperLabels.get(selectedPaper.paper_id) || selectedPaper.paper_id}</span><h2>{selectedPaper.title}</h2><p>{selectedPaper.authors?.join(", ")}</p></div><div className="paper-title-actions"><button className="button button-secondary" type="button" disabled={reindexPaper.isPending || ["queued", "building"].includes(selectedPaper.index_status?.fulltext || "")} onClick={() => reindexPaper.mutate()}>{reindexPaper.isPending ? text("提交中…", "Submitting…") : text("重建全文索引", "Rebuild full-text index")}</button><button className="button button-quiet danger" type="button" disabled={deletePaper.isPending} onClick={() => { if (window.confirm(text(`确认删除 ${paperLabels.get(selectedPaper.paper_id) || selectedPaper.paper_id}？`, `Delete ${paperLabels.get(selectedPaper.paper_id) || selectedPaper.paper_id}?`))) deletePaper.mutate(); }}>{text("删除", "Delete")}</button></div></div>
+              <DocumentIndexStatus paper={selectedPaper} />
+              {selectedPaper.search_match ? <button type="button" className="library-search-match" onClick={() => setTab("markdown")}><span>{text(`正文命中 · 第 ${selectedPaper.search_match.page_start || "?"} 页`, `Full-text match · Page ${selectedPaper.search_match.page_start || "?"}`)}</span><p>{selectedPaper.search_match.content}</p><code>{selectedPaper.search_match.chunk_id}</code></button> : null}
+              {reindexPaper.error ? <p className="message message-error index-error">{reindexPaper.error.message}</p> : null}
               <nav className="detail-tabs">{(["metadata", "markdown", "pdf"] as const).map((value) => <button key={value} className={tab === value ? "active" : ""} type="button" onClick={() => setTab(value)}>{value === "metadata" ? "Metadata" : value === "markdown" ? "Markdown" : "PDF"}</button>)}</nav>
               {tab === "metadata" ? <div className="editor-panel"><textarea className="code-editor" value={metadataDraft} onChange={(event) => setMetadataDraft(event.target.value)} spellCheck={false} /><div className="editor-actions"><button className="button button-primary" type="button" disabled={saveMetadata.isPending || markReviewed.isPending} onClick={() => { try { JSON.parse(metadataDraft); saveMetadata.mutate(); } catch { window.alert(text("Metadata不是有效JSON。", "Metadata is not valid JSON.")); } }}>{saveMetadata.isPending ? text("保存中…", "Saving…") : text("保存Metadata", "Save metadata")}</button><button className="button button-secondary" type="button" disabled={saveMetadata.isPending || markReviewed.isPending} onClick={() => { try { JSON.parse(metadataDraft); markReviewed.mutate(); } catch { window.alert(text("Metadata不是有效JSON。", "Metadata is not valid JSON.")); } }}>{markReviewed.isPending ? text("标记中…", "Marking…") : text("标记为已审核", "Mark as reviewed")}</button>{saveMetadata.error || markReviewed.error ? <span className="message message-error">{(saveMetadata.error || markReviewed.error)?.message}</span> : null}</div></div> : null}
               {tab === "markdown" ? <pre className="markdown-preview">{markdown.isPending ? text("正在加载…", "Loading…") : markdown.data}</pre> : null}

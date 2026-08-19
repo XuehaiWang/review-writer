@@ -38,6 +38,9 @@ from review_writer_core.taxonomy import (  # noqa: E402
     suggest_taxonomy_profile,
     taxonomy_identity,
 )
+from review_writer_core.metadata_tags import (  # noqa: E402
+    neutral_structured_tag_values,
+)
 from review_writer_core.workspace import discover_review_root  # noqa: E402
 from review_writer_core.providers import (  # noqa: E402
     DEFAULT_OPENAI_BASE_URL,
@@ -956,23 +959,12 @@ def build_metadata(
     year = extract_year(md, job.get("pdf_name") or slug)
     doi = extract_doi(md)
     journal = extract_journal(md, job.get("pdf_name") or slug)
-    text_for_tags = " ".join(
-        [
-            str(title.get("value") or ""),
-            str(abstract.get("value") or ""),
-            " ".join(keywords.get("value") or []),
-            md[:6000],
-        ]
-    )
-    taxonomy_profile = taxonomy_profile_for_text(text_for_tags)
-    structured_tags = structured_tags_from_classification_rules(
-        review_root,
-        text_for_tags,
-        taxonomy_profile,
-    )
-    matched_tag_count = sum(
-        1 for value in structured_tags.values() if value != "not specified"
-    )
+    # Reusable Library metadata must remain project-neutral. Previous versions
+    # scanned title/abstract/body text and persisted one rule-selected label per
+    # category. Background mentions and references made those labels unstable
+    # across parses of the same paper. Domain rules now belong to query
+    # expansion; reusable Tags are populated only by an explicit audit flow.
+    structured_tags = neutral_structured_tag_values()
     pdf_hash = sha256_file(pdf_path)
     meta: dict[str, Any] = {
         "paper_id": paper_id,
@@ -985,8 +977,8 @@ def build_metadata(
         "abstract": abstract,
         "structured_tags": scored(
             structured_tags,
-            "active_taxonomy_keyword_inference",
-            min(0.75, 0.35 + matched_tag_count * 0.08) if matched_tag_count else 0.0,
+            "project_neutral_unverified",
+            0.0,
         ),
         "source_paths": {
             "pdf": str(pdf_path) if pdf_path else None,
@@ -1000,14 +992,14 @@ def build_metadata(
             "sha256": pdf_hash,
         },
         "extraction": {
-            "mode": "rules",
+            "mode": "bibliographic_rules",
             "model": None,
             "created_at": utc_now(),
             "inputs": {
                 "manifest": str(review_root / "mineru-outputs" / "manifest.json"),
                 "content_blocks": len(blocks),
                 "markdown_chars_used": min(len(md), 14000),
-                "taxonomy": taxonomy_identity(review_root, profile=taxonomy_profile),
+                "tag_policy": "project_neutral_until_human_verified",
             },
             "notes": [],
         },

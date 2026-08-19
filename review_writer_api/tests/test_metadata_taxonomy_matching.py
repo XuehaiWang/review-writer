@@ -14,6 +14,22 @@ SPEC.loader.exec_module(prepare_metadata)
 
 
 class MetadataTaxonomyMatchingTests(unittest.TestCase):
+    def test_default_metadata_build_keeps_reusable_tags_project_neutral(self) -> None:
+        metadata, _blocks, _markdown, _registry = prepare_metadata.build_metadata(
+            "P001",
+            {"slug": "paper", "pdf_name": "paper.pdf"},
+            None,
+            None,
+            None,
+            None,
+            ROOT,
+        )
+
+        tag_field = metadata["structured_tags"]
+        self.assertEqual("project_neutral_unverified", tag_field["source"])
+        self.assertFalse(tag_field["human_checked"])
+        self.assertEqual({"not specified"}, set(tag_field["value"].values()))
+
     def test_short_metal_alias_does_not_match_inside_an_ordinary_word(self) -> None:
         tags = prepare_metadata.structured_tags_from_classification_rules(
             ROOT,

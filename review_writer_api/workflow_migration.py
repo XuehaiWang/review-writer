@@ -30,6 +30,7 @@ from review_writer_api.workflow_models import (
     WorkflowStageState,
     WorkflowSystemState,
 )
+from review_writer_core.metadata_tags import verified_structured_tags
 
 
 LEGACY_TABLES = (
@@ -893,7 +894,7 @@ def _import_library_catalog(
             "title": str(_metadata_value(metadata, "title", paper_id) or paper_id),
             "authors_json": _metadata_value(metadata, "authors", []) or [],
             "keywords_json": _metadata_value(metadata, "keywords", []) or [],
-            "tags_json": _metadata_value(metadata, "structured_tags", {}) or {},
+            "tags_json": verified_structured_tags(metadata),
             "metadata_json": metadata,
             "pdf_relative_path": artifact_paths["pdf"],
             "markdown_relative_path": artifact_paths["markdown"],

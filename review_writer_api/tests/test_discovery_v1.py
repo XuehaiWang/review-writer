@@ -68,7 +68,8 @@ class DiscoveryV1Tests(unittest.TestCase):
                             "value": {
                                 "catalyst_or_method": "copper catalysis",
                                 "reaction_type": "allenation",
-                            }
+                            },
+                            "human_checked": True,
                         },
                     },
                     pdf_relative_path=f"review-library/uploads/{paper_id}.pdf",
@@ -83,6 +84,7 @@ class DiscoveryV1Tests(unittest.TestCase):
             self.first = Principal(str(first.id), frozenset({Role.USER}), first.email)
             self.second = Principal(str(second.id), frozenset({Role.USER}), second.email)
         self.current = self.first
+        self.discovery_payloads: list[dict] = []
         settings = ApiSettings(
             review_root=root,
             deployment_mode="hosted",
@@ -93,6 +95,7 @@ class DiscoveryV1Tests(unittest.TestCase):
         )
 
         def discovery_builder(_context, payload):
+            self.discovery_payloads.append(dict(payload))
             if payload["topic"] == "forced failure":
                 raise RuntimeError("provider unavailable")
             return {
@@ -115,6 +118,7 @@ class DiscoveryV1Tests(unittest.TestCase):
                                     "catalyst_or_method": "copper catalysis",
                                     "reaction_type": "allenation",
                                 },
+                                "base_tags_verified": True,
                                 "project_tag_assessment": {
                                     "topic_fingerprint": "topic-hash",
                                     "suggested_tags": {
@@ -159,6 +163,7 @@ class DiscoveryV1Tests(unittest.TestCase):
                                     "catalyst_or_method": "copper catalysis",
                                     "reaction_type": "allenation",
                                 },
+                                "base_tags_verified": True,
                                 "project_tag_assessment": {
                                     "topic_fingerprint": "topic-hash",
                                     "suggested_tags": {
@@ -229,6 +234,12 @@ class DiscoveryV1Tests(unittest.TestCase):
         self.assertEqual(4, review["statistics"]["keyword_hit_count"])
         self.assertEqual(0, review["statistics"]["selected_count"])
         self.assertEqual("review", project["discovery_status"])
+
+    def test_discovery_job_snapshots_the_project_taxonomy_profile(self) -> None:
+        with TestClient(self.app) as client:
+            job = self.discover(client)
+            self.assertEqual("succeeded", job["status"])
+        self.assertEqual("general_academic", self.discovery_payloads[-1]["taxonomy_profile"])
 
     def test_failed_restart_preserves_current_project(self) -> None:
         with TestClient(self.app) as client:
@@ -700,6 +711,35 @@ class DiscoveryV1Tests(unittest.TestCase):
             },
             matrix_row["project_tags"],
         )
+
+    def test_unverified_library_tags_do_not_enter_matrix(self) -> None:
+        with self.sessions.begin() as session:
+            paper = session.scalar(
+                select(LibraryPaper).where(LibraryPaper.paper_id == "P001")
+            )
+            metadata = dict(paper.metadata_json)
+            structured = dict(metadata["structured_tags"])
+            structured["human_checked"] = False
+            metadata["structured_tags"] = structured
+            paper.metadata_json = metadata
+
+        with TestClient(self.app) as client:
+            self.discover(client)
+            selected = client.put(
+                f"/api/v1/projects/{self.project_id}/discovery/selection/P001",
+                json={"selected": True},
+                headers=self.headers(),
+            ).json()
+            confirmed = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/confirm",
+                json={"revision": selected["revision"]},
+                headers=self.headers(),
+            ).json()
+
+        matrix_row = confirmed["matrix"]["rows"][0]
+        self.assertFalse(matrix_row["base_tags_verified"])
+        self.assertEqual({}, matrix_row["base_tags"])
+        self.assertEqual("automatic", matrix_row["project_tag_review_status"])
 
     def test_failed_atomic_save_keeps_previous_discovery_pointer_and_revision(self) -> None:
         repository = self.app.state.workflow_repository

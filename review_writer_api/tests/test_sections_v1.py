@@ -19,7 +19,12 @@ from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User
 from review_writer_api.errors import WorkflowConflict
 from review_writer_api.security import Principal, Role
-from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
+from review_writer_api.workflow_models import (
+    LibraryArtifact,
+    LibraryDocumentChunk,
+    LibraryDocumentIndex,
+    LibraryPaper,
+)
 from review_writer_api.domain_services.planning import BLUEPRINT_LOGICAL_NAME
 
 
@@ -121,6 +126,8 @@ class SectionsV1Tests(unittest.TestCase):
         self.transient_failures = 0
         self.include_figures = False
         self.figure_source_outside_recorded_extraction = False
+        self.use_chunk_evidence = False
+        self.use_unknown_chunk = False
 
         def writer(context, payload):
             self.writer_calls += 1
@@ -128,13 +135,40 @@ class SectionsV1Tests(unittest.TestCase):
                 self.transient_failures -= 1
                 raise RuntimeError("Section-writing model request failed with HTTP 503")
             sections = []
+            package_sections = {
+                str(item.get("section_id") or ""): item
+                for item in (payload.get("evidence_package") or {}).get("sections") or []
+                if isinstance(item, dict)
+            }
             for task in payload["tasks"]:
+                evidence_by_paper = {
+                    str(hit.get("paper_id") or ""): hit
+                    for hit in package_sections.get(task["section_id"], {}).get("hits") or []
+                    if isinstance(hit, dict) and not hit.get("is_neighbor")
+                }
                 paragraphs = [
                     {
                         "paragraph_id": f"{task['section_id']}-p{index}",
                         "paper_id": paper_id,
                         "cited_paper_ids": [paper_id],
                         "text": f"Grounded synthesis for {paper_id} [{index}].",
+                        **(
+                            {
+                                "evidence": [
+                                    {
+                                        "paper_id": paper_id,
+                                        "chunk_ids": [
+                                            "unknown-chunk"
+                                            if self.use_unknown_chunk
+                                            else evidence_by_paper[paper_id]["chunk_id"]
+                                        ],
+                                        "claim": f"Grounded claim for {paper_id}",
+                                    }
+                                ]
+                            }
+                            if self.use_chunk_evidence and paper_id in evidence_by_paper
+                            else {}
+                        ),
                     }
                     for index, paper_id in enumerate(task["allowed_papers"], start=1)
                 ]
@@ -232,6 +266,51 @@ class SectionsV1Tests(unittest.TestCase):
             native_workflow_overrides={"sections.generate": writer},
         )
         self._seed_planning()
+
+    def _seed_document_indexes(self) -> None:
+        with self.sessions.begin() as session:
+            papers = session.query(LibraryPaper).filter_by(
+                user_id=uuid.UUID(self.first.user_id)
+            ).all()
+            for ordinal, paper in enumerate(papers):
+                index = LibraryDocumentIndex(
+                    library_paper_id=paper.id,
+                    user_id=paper.user_id,
+                    paper_id=paper.paper_id,
+                    source_lineage_json={"paper_id": paper.paper_id},
+                    source_lineage_hash=f"{ordinal + 10:064x}",
+                    chunker_version="mineru-layout-v1",
+                    status="ready",
+                    is_current=True,
+                    chunk_count=1,
+                )
+                session.add(index)
+                session.flush()
+                session.add(
+                    LibraryDocumentChunk(
+                        index_id=index.id,
+                        user_id=paper.user_id,
+                        paper_id=paper.paper_id,
+                        chunk_id=f"chunk-{paper.paper_id}",
+                        ordinal=0,
+                        content=(
+                            "Copper allenation catalyst evidence, comparison, scope, "
+                            f"mechanism, and conclusion for {paper.paper_id}."
+                        ),
+                        normalized_content=(
+                            "copper allenation catalyst evidence, comparison, scope, "
+                            f"mechanism, and conclusion for {paper.paper_id}."
+                        ).casefold(),
+                        content_type="text",
+                        section_path_json=["Results"],
+                        page_start=80 + ordinal,
+                        page_end=80 + ordinal,
+                        block_start=ordinal,
+                        block_end=ordinal,
+                        asset_refs_json=[],
+                        is_reference=False,
+                    )
+                )
 
     def tearDown(self) -> None:
         Base.metadata.drop_all(self.engine)
@@ -456,6 +535,93 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertEqual("succeeded", job["status"])
         self.assertEqual(len(payload["section_tasks"]), job["progress_total"])
         self.assertEqual(job["progress_total"], job["progress_current"])
+
+    def test_generation_publishes_page_addressable_evidence_package(self) -> None:
+        self._seed_document_indexes()
+        self.use_chunk_evidence = True
+        with TestClient(self.app) as client:
+            job = self.start(client, "chunk-evidence")
+            payload = client.get(
+                f"/api/v1/projects/{self.project_id}/sections"
+            ).json()
+
+        self.assertEqual("succeeded", job["status"], job)
+        self.assertTrue(job["result"]["evidence_package_artifact_id"])
+        package = payload["evidence_package"]
+        self.assertTrue(package["sections"])
+        self.assertTrue(
+            all(section["retrieval_mode"] == "lexical" for section in package["sections"])
+        )
+        self.assertTrue(
+            any(
+                hit["page_start"] >= 80
+                for section in package["sections"]
+                for hit in section["hits"]
+            )
+        )
+
+    def test_evidence_package_guarantees_primary_paper_coverage(self) -> None:
+        self._seed_document_indexes()
+        with self.sessions.begin() as session:
+            chunks = {
+                chunk.paper_id: chunk
+                for chunk in session.query(LibraryDocumentChunk).all()
+            }
+            chunks["P001"].content = "Selective allene anchor evidence."
+            chunks["P001"].normalized_content = chunks["P001"].content.casefold()
+            for paper_id in ("P002", "P003"):
+                chunks[paper_id].content = f"Independent source passage for {paper_id}."
+                chunks[paper_id].normalized_content = chunks[
+                    paper_id
+                ].content.casefold()
+
+        service = self.app.state.sections_service
+        paper_ids = ["P001", "P002", "P003"]
+        catalog = service._catalog(self.first, paper_ids)
+        package = service._evidence_package(
+            self.first,
+            self.project_id,
+            [
+                {
+                    "section_id": "S02",
+                    "heading": "Selective allene anchor",
+                    "core_argument": "Compare the primary evidence.",
+                    "must_cover_points": [],
+                    "primary_papers": paper_ids,
+                    "supporting_papers": [],
+                    "allowed_papers": paper_ids,
+                }
+            ],
+            catalog,
+        )
+
+        section = package["sections"][0]
+        self.assertEqual("ready", section["status"])
+        self.assertEqual(3, section["primary_paper_count"])
+        self.assertEqual(3, section["covered_primary_paper_count"])
+        self.assertEqual([], section["missing_primary_papers"])
+        self.assertEqual(
+            set(paper_ids),
+            {hit["paper_id"] for hit in section["hits"]},
+        )
+        self.assertEqual(
+            {"P002", "P003"},
+            {
+                hit["paper_id"]
+                for hit in section["hits"]
+                if hit["match_reason"] == "primary_paper_coverage_fallback"
+            },
+        )
+
+    def test_unknown_chunk_citation_is_rejected_before_publish(self) -> None:
+        self._seed_document_indexes()
+        self.use_chunk_evidence = True
+        self.use_unknown_chunk = True
+        with TestClient(self.app) as client:
+            job = self.start(client, "unknown-chunk")
+
+        self.assertEqual("failed", job["status"])
+        self.assertEqual("WORKFLOW_VALIDATION_FAILED", job["error_code"])
 
     def test_transient_provider_failure_retries_three_times(self) -> None:
         self.transient_failures = 2

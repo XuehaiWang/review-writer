@@ -29,6 +29,27 @@ export type ProjectList = {
   count: number;
 };
 
+export type TaxonomyProfile = {
+  id: string;
+  label_zh: string;
+  label_en: string;
+  description_zh: string;
+  description_en: string;
+  domain_rules_enabled: boolean;
+};
+
+export type TaxonomyProfileCatalog = {
+  items: TaxonomyProfile[];
+  default_profile: string;
+};
+
+export type ProjectTaxonomyProfileUpdate = {
+  project: Project;
+  changed: boolean;
+  matrix_entered: boolean;
+  downstream_stale: boolean;
+};
+
 export type ProviderKind = "text" | "image" | "mineru";
 
 export type ProviderSettings = {
@@ -134,14 +155,37 @@ export type LibraryPaper = {
   journal?: string;
   doi?: string;
   structured_tags?: Record<string, unknown> | string[];
+  structured_tags_verified?: boolean;
   human_review_status?: string | null;
   needs_human_check?: boolean | null;
+  index_status?: {
+    mineru: "ready" | "unavailable";
+    fulltext: "not_indexed" | "queued" | "building" | "ready" | "failed" | "rebuild_required";
+    semantic: "disabled" | "ready";
+    index_id?: string | null;
+    chunk_count: number;
+    chunker_version?: string;
+    source_lineage_hash?: string;
+    error_code?: string;
+    error_message?: string;
+    updated_at?: string | null;
+  };
+  search_match?: {
+    chunk_id: string;
+    page_start?: number | null;
+    page_end?: number | null;
+    section_path?: string[];
+    content: string;
+    match_reason?: string;
+  } | null;
 };
 
 export type LibraryList = {
   items: LibraryPaper[];
   count: number;
   query: string;
+  requested_mode?: "metadata" | "fulltext" | "hybrid";
+  retrieval_mode?: "metadata" | "lexical" | "lexical_only";
 };
 
 export type Job = {

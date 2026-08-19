@@ -17,6 +17,10 @@ from review_writer_api.errors import WorkflowConflict, WorkflowNotFound, Workflo
 from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_repository import WorkflowRepository
 from review_writer_api.workflow_models import LibraryPaper
+from review_writer_core.metadata_tags import (
+    structured_tags_are_verified,
+    verified_structured_tags,
+)
 
 
 DISCOVERY_LOGICAL_NAME = "discovery/review.json"
@@ -39,6 +43,7 @@ PROJECT_TAG_KEYS = {
     "document_scope",
 }
 TAG_REVIEW_STATUSES = {"pending", "confirmed"}
+MATRIX_TAG_POLICY_VERSION = 2
 
 
 class DiscoverySelectionNotInLibrary(WorkflowValidationError):
@@ -130,6 +135,7 @@ def normalize_review(payload: dict[str, Any]) -> dict[str, Any]:
             chosen = bool(row.get("selected_for_matrix")) and row["role"] != "excluded"
             local_selected[paper_id] = local_selected.get(paper_id, False) or chosen
             row["base_tags"] = dict(row.get("base_tags") or {}) if isinstance(row.get("base_tags") or {}, dict) else {}
+            row["base_tags_verified"] = bool(row.get("base_tags_verified"))
             row["project_tag_assessment"] = _normalize_tag_assessment(
                 row.get("project_tag_assessment")
             )
@@ -433,10 +439,15 @@ class DiscoveryService:
             expected_revision=state.revision if state else 0,
             topic=str(payload["topic"]),
         )
+        external_search = deepcopy(review.get("external_search") or {})
         return {
             "artifact_id": artifact.id,
             "revision": next_state.revision,
             "statistics": statistics(review),
+            "external_search": external_search,
+            "completion_state": str(external_search.get("completion_state") or "complete"),
+            "degraded": bool(external_search.get("degraded")),
+            "source_errors": deepcopy(external_search.get("source_errors") or {}),
         }
 
     def save(
@@ -570,6 +581,8 @@ class DiscoveryService:
             and len(existing_ids) == len(selected_ids)
             and set(existing_ids) == set(selected_ids)
             and matrix_topic.casefold() == current_topic.casefold()
+            and int((existing_matrix or {}).get("tag_policy_version") or 0)
+            == MATRIX_TAG_POLICY_VERSION
         )
 
         if matrix_input_unchanged:
@@ -602,6 +615,10 @@ class DiscoveryService:
             value = row.metadata_json.get(key)
             return _field_value(value) if value is not None else default
 
+        def reusable_base_tags(row: LibraryPaper) -> dict[str, str]:
+            metadata = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+            return verified_structured_tags(metadata)
+
         project_tag_reviews: dict[str, dict[str, Any]] = {}
         for group in current.get("results") or []:
             if group.get("keep") is False:
@@ -625,7 +642,9 @@ class DiscoveryService:
                     applied_status = "automatic"
                 else:
                     applied_tags = {}
-                    applied_status = "base_only"
+                    applied_status = "verified_base_only" if reusable_base_tags(
+                        catalog_by_id[paper_id]
+                    ) else "untagged"
                 project_tag_reviews[paper_id] = {
                     "status": applied_status,
                     "tags": applied_tags,
@@ -676,10 +695,12 @@ class DiscoveryService:
                 "year": metadata_value(catalog_by_id[paper_id], "year", None),
                 "journal": metadata_value(catalog_by_id[paper_id], "journal", "") or "",
                 "doi": metadata_value(catalog_by_id[paper_id], "doi", "") or "",
-                "base_tags": metadata_value(
-                    catalog_by_id[paper_id], "structured_tags", {}
-                )
-                or {},
+                "base_tags": reusable_base_tags(catalog_by_id[paper_id]),
+                "base_tags_verified": structured_tags_are_verified(
+                    catalog_by_id[paper_id].metadata_json
+                    if isinstance(catalog_by_id[paper_id].metadata_json, dict)
+                    else {}
+                ),
                 "project_tags": deepcopy(
                     project_tag_reviews.get(paper_id, {}).get("tags") or {}
                 ),
@@ -698,6 +719,7 @@ class DiscoveryService:
         matrix = {
             "project_id": project_id,
             "review_topic": str(current.get("topic") or ""),
+            "tag_policy_version": MATRIX_TAG_POLICY_VERSION,
             "rows": rows,
             "sync": {
                 "selected_paper_ids": sorted(selected_ids),
