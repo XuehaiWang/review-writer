@@ -31,12 +31,14 @@ def upgrade() -> None:
         ),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.CheckConstraint("reserved_usd >= 0", name="ck_user_credit_accounts_reserved_nonnegative"),
         sa.CheckConstraint(
-            "lifetime_credited_usd >= 0", name="ck_user_credit_accounts_credited_nonnegative"
+            "reserved_usd >= 0", name="reserved_nonnegative"
         ),
         sa.CheckConstraint(
-            "lifetime_debited_usd >= 0", name="ck_user_credit_accounts_debited_nonnegative"
+            "lifetime_credited_usd >= 0", name="credited_nonnegative"
+        ),
+        sa.CheckConstraint(
+            "lifetime_debited_usd >= 0", name="debited_nonnegative"
         ),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("user_id"),
@@ -70,9 +72,9 @@ def upgrade() -> None:
         sa.Column("settled_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.CheckConstraint("amount_usd >= 0", name="ck_credit_reservations_amount_nonnegative"),
+        sa.CheckConstraint("amount_usd >= 0", name="amount_nonnegative"),
         sa.CheckConstraint(
-            "settled_amount_usd >= 0", name="ck_credit_reservations_settled_nonnegative"
+            "settled_amount_usd >= 0", name="settled_nonnegative"
         ),
         sa.ForeignKeyConstraint(["job_id"], ["workflow_jobs.id"], ondelete="SET NULL"),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
