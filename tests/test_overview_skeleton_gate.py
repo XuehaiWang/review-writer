@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 import sys
 import tempfile
 import unittest
@@ -77,6 +78,69 @@ class OverviewSkeletonGateTests(unittest.TestCase):
                     original_pixels,
                     result.crop((0, 0, 320, 240)).convert("RGB").tobytes(),
                 )
+
+    def test_composite_prefers_detected_panel_over_stale_calibration(self) -> None:
+        from PIL import Image, ImageDraw
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            figure_path = root / "overview.png"
+            skeleton_path = root / "skeleton.png"
+
+            # Reproduce the drifted vertical layout: its real structure panel is
+            # wider and higher than the old calibrated (10, 99)-(126, 493) box.
+            figure = Image.new("RGB", (639, 621), (220, 226, 232))
+            draw = ImageDraw.Draw(figure)
+            real_panel = (27, 57, 202, 376)
+            draw.rectangle(real_panel, fill="white", outline=(35, 62, 95), width=2)
+            # Other pale cards make whiteness alone insufficient to distinguish
+            # a stale calibrated rectangle from the intentionally blank panel.
+            for y in (100, 183, 266, 349):
+                draw.rectangle((250, y, 610, y + 65), fill=(242, 244, 246),
+                               outline=(80, 110, 135), width=2)
+                draw.line((270, y + 18, 585, y + 18), fill=(50, 70, 90), width=5)
+            figure.save(figure_path)
+
+            skeleton = Image.new("RGB", (160, 260), "white")
+            sk_draw = ImageDraw.Draw(skeleton)
+            sk_draw.ellipse((55, 15, 105, 65), fill=(30, 30, 30))
+            sk_draw.line((80, 65, 80, 205), fill=(30, 30, 30), width=10)
+            sk_draw.ellipse((55, 195, 105, 245), fill=(180, 35, 35))
+            skeleton.save(skeleton_path)
+
+            ok, reason, panel_source = overview.composite_skeleton_into_figure(
+                figure_path, skeleton_path, "module-cards-crosscut-sidebar"
+            )
+
+            self.assertTrue(ok, reason)
+            self.assertEqual("auto-detected", panel_source)
+            with Image.open(figure_path) as result:
+                detected = overview.detect_blank_panel(figure)
+                self.assertIsNotNone(detected)
+                assert detected is not None
+                # Exclude the panel border and measure only the pasted molecule;
+                # card strokes elsewhere cannot affect this content box.
+                inner_panel = (
+                    real_panel[0] + 3,
+                    real_panel[1] + 3,
+                    real_panel[2] - 3,
+                    real_panel[3] - 3,
+                )
+                panel_ink = result.crop(inner_panel).convert("L").point(
+                    lambda p: 255 if p < 220 else 0
+                )
+                content = overview._skeleton_content_bbox(panel_ink)
+                self.assertIsNotNone(content)
+                assert content is not None
+                molecule_center = (
+                    inner_panel[0] + (content[0] + content[2]) / 2,
+                    inner_panel[1] + (content[1] + content[3]) / 2,
+                )
+                target_center = (
+                    (detected[0] + detected[2]) / 2,
+                    (detected[1] + detected[3]) / 2,
+                )
+                self.assertLess(math.dist(molecule_center, target_center), 12)
 
 
 if __name__ == "__main__":

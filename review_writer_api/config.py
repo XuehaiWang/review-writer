@@ -52,6 +52,13 @@ class ApiSettings:
     worker_heartbeat_seconds: float = 30.0
     auth_rate_limit_attempts: int = 12
     auth_rate_limit_window_seconds: int = 60
+    password_reset_minutes: int = 30
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_security: Literal["starttls", "tls", "none"] = "starttls"
     allow_private_provider_urls: bool = False
     allowed_provider_hosts: tuple[str, ...] = ()
     trusted_proxy_networks: tuple[str, ...] = ()
@@ -129,6 +136,27 @@ class ApiSettings:
             minimum=10,
             maximum=3600,
         )
+        password_reset_minutes = _environment_integer(
+            "REVIEW_WRITER_PASSWORD_RESET_MINUTES", 30, minimum=5, maximum=120
+        )
+        smtp_host = str(os.environ.get("REVIEW_WRITER_SMTP_HOST") or "").strip()
+        smtp_port = _environment_integer(
+            "REVIEW_WRITER_SMTP_PORT", 587, minimum=1, maximum=65535
+        )
+        smtp_username = str(
+            os.environ.get("REVIEW_WRITER_SMTP_USERNAME") or ""
+        ).strip()
+        smtp_password = str(os.environ.get("REVIEW_WRITER_SMTP_PASSWORD") or "")
+        smtp_from_email = str(
+            os.environ.get("REVIEW_WRITER_SMTP_FROM_EMAIL") or smtp_username
+        ).strip()
+        smtp_security = str(
+            os.environ.get("REVIEW_WRITER_SMTP_SECURITY") or "starttls"
+        ).strip().casefold()
+        if smtp_security not in {"starttls", "tls", "none"}:
+            raise ValueError(
+                "REVIEW_WRITER_SMTP_SECURITY must be 'starttls', 'tls', or 'none'."
+            )
         allow_private_provider_urls = _environment_flag(
             "REVIEW_WRITER_ALLOW_PRIVATE_PROVIDER_URLS", False
         )
@@ -228,6 +256,11 @@ class ApiSettings:
 
         if not COOKIE_NAME_PATTERN.fullmatch(cookie_name):
             raise ValueError("REVIEW_WRITER_SESSION_COOKIE_NAME contains unsupported characters.")
+        if bool(smtp_host) != bool(smtp_from_email):
+            raise ValueError(
+                "Password reset email requires both REVIEW_WRITER_SMTP_HOST and "
+                "REVIEW_WRITER_SMTP_FROM_EMAIL (or SMTP username)."
+            )
         if raw_mode == "hosted":
             if not database_url or not public_origin:
                 raise ValueError(
@@ -271,6 +304,13 @@ class ApiSettings:
             worker_heartbeat_seconds=worker_heartbeat_seconds,
             auth_rate_limit_attempts=auth_rate_limit_attempts,
             auth_rate_limit_window_seconds=auth_rate_limit_window_seconds,
+            password_reset_minutes=password_reset_minutes,
+            smtp_host=smtp_host,
+            smtp_port=smtp_port,
+            smtp_username=smtp_username,
+            smtp_password=smtp_password,
+            smtp_from_email=smtp_from_email,
+            smtp_security=smtp_security,  # type: ignore[arg-type]
             allow_private_provider_urls=allow_private_provider_urls,
             allowed_provider_hosts=allowed_provider_hosts,
             trusted_proxy_networks=trusted_proxy_networks,

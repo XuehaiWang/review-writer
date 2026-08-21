@@ -19,6 +19,8 @@ class HealthResponse(BaseModel):
 class BrowserAuthConfigResponse(BaseModel):
     enabled: bool
     registration_enabled: bool
+    password_reset_enabled: bool
+    password_reset_expiry_minutes: int
     password_min_length: int
 
 
@@ -31,6 +33,19 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=1, max_length=256)
+
+
+class PasswordResetRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+class PasswordResetCompleteRequest(BaseModel):
+    token: str = Field(min_length=32, max_length=256)
+    new_password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=256)
+
+
+class AuthMessageResponse(BaseModel):
+    message: str
 
 
 class PrincipalResponse(BaseModel):

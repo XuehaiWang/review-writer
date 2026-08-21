@@ -100,6 +100,53 @@ describe("public and authenticated routing", () => {
     expect(await screen.findByRole("heading", { name: "科学综述项目" })).toBeInTheDocument();
   });
 
+  it("requests a password reset without revealing whether the email exists", async () => {
+    let requestBody: Record<string, unknown> = {};
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/v1/auth/config") return jsonResponse({ enabled: true, registration_enabled: true, password_reset_enabled: true, password_min_length: 10 });
+      if (path === "/api/v1/me") return jsonResponse({ detail: "Not authenticated" }, 401);
+      if (path === "/api/v1/auth/password-reset/request" && init?.method === "POST") {
+        requestBody = JSON.parse(String(init.body || "{}"));
+        return jsonResponse({ message: "如果该邮箱对应有效账户，密码重置邮件将很快送达。" }, 202);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    renderApp("/login");
+    fireEvent.click(await screen.findByRole("button", { name: "忘记密码？" }));
+    fireEvent.change(screen.getByLabelText("注册邮箱"), { target: { value: "researcher@example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送密码重置邮件" }));
+
+    expect(await screen.findByText("如果该邮箱对应有效账户，密码重置邮件将很快送达。")).toBeInTheDocument();
+    expect(requestBody).toEqual({ email: "researcher@example.com" });
+  });
+
+  it("uses a one-time reset link to set a new password", async () => {
+    const token = "reset-token-that-is-long-enough-1234567890";
+    let requestBody: Record<string, unknown> = {};
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/v1/auth/config") return jsonResponse({ enabled: true, registration_enabled: true, password_reset_enabled: true, password_min_length: 10 });
+      if (path === "/api/v1/me") return jsonResponse({ detail: "Not authenticated" }, 401);
+      if (path === "/api/v1/auth/password-reset/complete" && init?.method === "POST") {
+        requestBody = JSON.parse(String(init.body || "{}"));
+        return jsonResponse({ message: "密码已经修改，请使用新密码登录。" });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    renderApp(`/login?reset_token=${token}`);
+    expect(await screen.findByRole("heading", { name: "设置新密码" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("新密码"), { target: { value: "new-password-456" } });
+    fireEvent.change(screen.getByLabelText("确认新密码"), { target: { value: "new-password-456" } });
+    fireEvent.click(screen.getByRole("button", { name: "确认修改密码" }));
+
+    expect(await screen.findByRole("heading", { name: "登录 Review Writer" })).toBeInTheDocument();
+    expect(screen.getByText("密码已经修改，请使用新密码登录。")).toBeInTheDocument();
+    expect(requestBody).toEqual({ token, new_password: "new-password-456" });
+  });
+
   it("clears the session view and returns to login after logout", async () => {
     let signedIn = true;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {

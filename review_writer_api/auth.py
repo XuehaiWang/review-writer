@@ -13,10 +13,17 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
-from .database import User, UserCreditAccount, UserSession, database_session, utc_now
+from .database import (
+    PasswordResetToken,
+    User,
+    UserCreditAccount,
+    UserSession,
+    database_session,
+    utc_now,
+)
 from .security import Principal, Role
 
 
@@ -77,6 +84,13 @@ class AuthAttemptThrottle:
 @dataclass(frozen=True)
 class AuthenticatedSession:
     principal: Principal
+    token: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class PasswordResetCredential:
+    recipient: str
     token: str
     expires_at: datetime
 
@@ -158,10 +172,12 @@ class AuthService:
         session_factory,
         *,
         session_days: int = 7,
+        password_reset_minutes: int = 30,
         admin_emails=(),
     ):
         self.session_factory = session_factory
         self.session_days = max(1, min(int(session_days), 30))
+        self.password_reset_minutes = max(5, min(int(password_reset_minutes), 120))
         self.admin_emails = frozenset(
             str(item or "").strip().casefold()
             for item in admin_emails
@@ -246,6 +262,91 @@ class AuthService:
                 user.role = Role.ADMIN.value
             user.last_login_at = utc_now()
             return self._new_session(database, user)
+
+    def issue_password_reset(self, *, email: str) -> PasswordResetCredential | None:
+        """Create a reset credential without revealing whether the account exists."""
+
+        normalized_email = normalize_email(email)
+        raw_token = secrets.token_urlsafe(32)
+        token_hash = _session_token_hash(raw_token)
+        now = utc_now()
+        expires_at = now + timedelta(minutes=self.password_reset_minutes)
+        with database_session(self.session_factory) as database:
+            user = database.scalar(select(User).where(User.email == normalized_email))
+            if user is None or user.status != "active":
+                return None
+            database.execute(
+                update(PasswordResetToken)
+                .where(
+                    PasswordResetToken.user_id == user.id,
+                    PasswordResetToken.used_at.is_(None),
+                )
+                .values(used_at=now)
+            )
+            database.add(
+                PasswordResetToken(
+                    user_id=user.id,
+                    token_hash=token_hash,
+                    expires_at=expires_at,
+                )
+            )
+        return PasswordResetCredential(
+            recipient=normalized_email,
+            token=raw_token,
+            expires_at=expires_at,
+        )
+
+    def invalidate_password_reset(self, raw_token: str) -> None:
+        token_hash = _session_token_hash(raw_token)
+        with database_session(self.session_factory) as database:
+            reset_token = database.scalar(
+                select(PasswordResetToken).where(
+                    PasswordResetToken.token_hash == token_hash,
+                    PasswordResetToken.used_at.is_(None),
+                )
+            )
+            if reset_token is not None:
+                reset_token.used_at = utc_now()
+
+    def reset_password(self, *, token: str, new_password: str) -> None:
+        raw_token = str(token or "").strip()
+        if len(raw_token) < 32 or len(raw_token) > 256:
+            raise AuthError("密码重置链接无效或已经过期。")
+        password_hash = self.passwords.hash(new_password)
+        token_hash = _session_token_hash(raw_token)
+        now = utc_now()
+        with database_session(self.session_factory) as database:
+            reset_token = database.scalar(
+                select(PasswordResetToken)
+                .where(PasswordResetToken.token_hash == token_hash)
+                .with_for_update()
+            )
+            if (
+                reset_token is None
+                or reset_token.used_at is not None
+                or _aware(reset_token.expires_at) <= datetime.now(timezone.utc)
+            ):
+                raise AuthError("密码重置链接无效或已经过期。")
+            user = database.get(User, reset_token.user_id)
+            if user is None or user.status != "active":
+                raise AuthError("密码重置链接无效或已经过期。")
+            user.password_hash = password_hash
+            database.execute(
+                update(PasswordResetToken)
+                .where(
+                    PasswordResetToken.user_id == user.id,
+                    PasswordResetToken.used_at.is_(None),
+                )
+                .values(used_at=now)
+            )
+            database.execute(
+                update(UserSession)
+                .where(
+                    UserSession.user_id == user.id,
+                    UserSession.revoked_at.is_(None),
+                )
+                .values(revoked_at=now)
+            )
 
     def resolve(self, raw_token: str) -> Principal | None:
         token_hash = _session_token_hash(raw_token)

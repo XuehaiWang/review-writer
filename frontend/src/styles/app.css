@@ -159,6 +159,10 @@ a { color: inherit; }
 .auth-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin: 20px 0; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--soft); }
 .auth-tab { padding: 8px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; font-weight: 700; }
 .auth-tab.active { color: white; background: var(--green); }
+.auth-form-assist { display: flex; justify-content: flex-end; margin: -4px 0 6px; }
+.auth-form-assist button { padding: 2px 0; border: 0; color: var(--green); background: transparent; cursor: pointer; font-size: 12px; font-weight: 750; }
+.auth-form-assist button:hover { color: var(--green-dark); text-decoration: underline; }
+.auth-back { margin-top: 12px; }
 .step-label, .project-kicker { color: var(--gold); font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
 .fine-print { margin: 18px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 

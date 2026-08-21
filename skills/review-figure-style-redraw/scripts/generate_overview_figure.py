@@ -1074,13 +1074,12 @@ def render_smiles_ball_and_stick(smiles: str, output_path: Path,
 # category cards, so they were removed.
 # The model is not fully deterministic: it alternates between a wide horizontal
 # structure panel at the top-left and a tall vertical panel on the left.  Each
-# layout therefore lists candidate regions; compositing pastes into the FIRST
-# candidate that passes the whiteness guard, so a drifted variant simply uses
-# its own blank panel instead of being overwritten or left empty.
-# Layouts without calibrated entries fall back to automatic blank-panel
-# detection (detect_blank_panel): in composite mode the prompt tells the model
-# to leave the structure panel blank, so the largest blank rectangle is the
-# paste target, guarded by the same whiteness check.
+# layout therefore retains known regions as safe fallbacks after live panel
+# detection has failed.
+# Automatic blank-panel detection is always attempted first because the image
+# provider can move or resize a panel while keeping the same named layout.
+# These calibrated regions are deliberately only fallbacks for outputs whose
+# borders/backgrounds prevent automatic detection.
 _COMPOSITE_REGIONS: dict[str, list[tuple[float, float, float, float]]] = {
     "module-cards-crosscut-sidebar": [
         # Variant A: wide horizontal structure panel at the top-left
@@ -1208,6 +1207,22 @@ def _refine_panel_box(
     )
 
 
+def _looks_like_page_margin(box: tuple[int, int, int, int], width: int, height: int) -> bool:
+    """True for page-background strips that are never a structure panel.
+
+    The maximal-rectangle search also sees the white spine between two pages
+    and the outer margin bands: strips that span (almost) the full canvas in
+    one axis while staying narrow in the other.  Pasting the molecule there
+    covers the canvas centre, so such strips are rejected as paste targets.
+    """
+    x0, y0, x1, y1 = box
+    w = x1 - x0
+    h = y1 - y0
+    if h >= 0.8 * height and w <= 0.22 * width:
+        return True
+    return w >= 0.8 * width and h <= 0.15 * height
+
+
 def detect_blank_panel(fig: Any, min_area_fraction: float = 0.03,
                        max_area_fraction: float = 0.55,
                        whiteness_threshold: float = 0.85,
@@ -1218,9 +1233,12 @@ def detect_blank_panel(fig: Any, min_area_fraction: float = 0.03,
     In composite mode the prompt instructs the model to leave exactly one
     large panel blank white and to fill every other region, so the largest
     all-blank rectangle is the paste target.  A coarse grid plus the classic
-    histogram-stack maximal-rectangle search finds it; the result is then
-    re-validated at sampled resolution with the same whiteness guard used for
-    calibrated candidates.  Returns the box or None when no region qualifies.
+    histogram-stack maximal-rectangle search ranks every blank rectangle;
+    candidates are validated largest-first so a full-height page spine or
+    margin band (``_looks_like_page_margin``) never wins over the reserved
+    panel.  Each survivor is re-validated at sampled resolution with the same
+    whiteness guard used for calibrated candidates.  Returns the box or None
+    when no region qualifies.
     """
     W, H = fig.size
     small = fig.convert("RGB").resize(
@@ -1243,7 +1261,7 @@ def detect_blank_panel(fig: Any, min_area_fraction: float = 0.03,
             row.append(1 if total and white / total >= _DETECT_CELL_WHITENESS else 0)
         grid.append(row)
 
-    best = (0, 0, 0, 0, 0)  # (area, top, left, bottom, right)
+    candidates: list[tuple[int, int, int, int, int]] = []
     heights = [0] * _DETECT_GRID_COLS
     for gy in range(_DETECT_GRID_ROWS):
         for gx in range(_DETECT_GRID_COLS):
@@ -1254,34 +1272,53 @@ def detect_blank_panel(fig: Any, min_area_fraction: float = 0.03,
             while stack and heights[stack[-1]] > h:
                 top_h = heights[stack.pop()]
                 left = stack[-1] + 1 if stack else 0
-                area = top_h * (gx - left)
-                if area > best[0]:
-                    best = (area, gy - top_h + 1, left, gy, gx - 1)
+                candidates.append(
+                    (top_h * (gx - left), gy - top_h + 1, left, gy, gx - 1)
+                )
             stack.append(gx)
 
-    area, top, left, bottom, right = best
-    fraction = area / (_DETECT_GRID_ROWS * _DETECT_GRID_COLS)
-    if area == 0 or fraction < min_area_fraction or fraction > max_area_fraction:
-        return None
-    box = (
-        int(W * left / _DETECT_GRID_COLS),
-        int(H * top / _DETECT_GRID_ROWS),
-        int(W * (right + 1) / _DETECT_GRID_COLS),
-        int(H * (bottom + 1) / _DETECT_GRID_ROWS),
-    )
-    box = _refine_panel_box(
-        fig,
-        box,
-        max_dx=max(1, W // _DETECT_GRID_COLS),
-        max_dy=max(1, H // _DETECT_GRID_ROWS),
-        whiteness_threshold=whiteness_threshold,
-    )
-    refined_fraction = ((box[2] - box[0]) * (box[3] - box[1])) / max(1, W * H)
-    if refined_fraction < min_area_fraction or refined_fraction > max_area_fraction:
-        return None
-    if _panel_whiteness(fig, box) < whiteness_threshold:
-        return None
-    return box
+    # Largest first so the reserved (biggest) blank panel wins, while smaller
+    # candidates remain available when the larger ones are page margins.
+    rejected_margins: list[tuple[int, int, int, int]] = []
+    for area, top, left, bottom, right in sorted(set(candidates), reverse=True):
+        fraction = area / (_DETECT_GRID_ROWS * _DETECT_GRID_COLS)
+        if fraction < min_area_fraction:
+            break
+        if fraction > max_area_fraction:
+            continue
+        box = (
+            int(W * left / _DETECT_GRID_COLS),
+            int(H * top / _DETECT_GRID_ROWS),
+            int(W * (right + 1) / _DETECT_GRID_COLS),
+            int(H * (bottom + 1) / _DETECT_GRID_ROWS),
+        )
+        # Sub-rectangles of a rejected margin strip are the same strip;
+        # skipping them stops a shortened gutter from dodging the shape guard.
+        if any(
+            m[0] <= box[0] and m[1] <= box[1] and box[2] <= m[2] and box[3] <= m[3]
+            for m in rejected_margins
+        ):
+            continue
+        if _looks_like_page_margin(box, W, H):
+            rejected_margins.append(box)
+            continue
+        box = _refine_panel_box(
+            fig,
+            box,
+            max_dx=max(1, W // _DETECT_GRID_COLS),
+            max_dy=max(1, H // _DETECT_GRID_ROWS),
+            whiteness_threshold=whiteness_threshold,
+        )
+        refined_fraction = ((box[2] - box[0]) * (box[3] - box[1])) / max(1, W * H)
+        if refined_fraction < min_area_fraction or refined_fraction > max_area_fraction:
+            continue
+        if _looks_like_page_margin(box, W, H):
+            rejected_margins.append(box)
+            continue
+        if _panel_whiteness(fig, box) < whiteness_threshold:
+            continue
+        return box
+    return None
 
 
 def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layout: str,
@@ -1289,14 +1326,14 @@ def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layou
     """Paste the exact ball-and-stick model into the layout's structure panel.
 
     Guarantees pixel-exact molecular geometry: the panel is cleared to white
-    and the programmatically rendered model is centered into it.  Calibrated
-    layouts try their candidate regions in order; the first mostly-blank one
-    wins.  Uncalibrated layouts fall back to ``detect_blank_panel`` so every
-    chemistry overview receives the exact molecule instead of a model-drawn
-    approximation.
+    and the programmatically rendered model is centered into it.  The actual
+    blank panel is detected from every generated image first so layout drift
+    cannot reuse stale hand-measured coordinates.  Calibrated regions are only
+    fallbacks when automatic detection cannot identify a safe target.
 
     Returns ``(ok, reason, panel_source)`` where ``panel_source`` is
-    ``"calibrated"``, ``"auto-detected"``, ``"appended-dock"``, or ``""``.
+    ``"calibrated-fallback"``, ``"auto-detected"``, ``"appended-dock"``,
+    or ``""``.
     If the image model ignored the reserved-blank-panel instruction, the
     generated overview is preserved pixel-for-pixel and a white structure
     dock is appended to its right.  This is deliberately safer than clearing
@@ -1311,21 +1348,22 @@ def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layou
     with Image.open(figure_path) as fig:
         fig = fig.convert("RGB")
         W, H = fig.size
-        target = None
-        panel_source = ""
-        for box in _COMPOSITE_REGIONS.get(layout, []):
-            x0, y0, x1, y1 = (int(W * box[0]), int(H * box[1]), int(W * box[2]), int(H * box[3]))
-            # Guard: only paste into a mostly-blank panel.  If the layout drifted
-            # and the region contains cards/text/colors, keep the model's drawing.
-            if _panel_whiteness(fig, (x0, y0, x1, y1)) >= 0.85:
-                target = (x0, y0, x1, y1)
-                panel_source = "calibrated"
-                break
+        target = detect_blank_panel(fig)
+        panel_source = "auto-detected" if target is not None else ""
         if target is None:
-            detected = detect_blank_panel(fig)
-            if detected is not None:
-                target = detected
-                panel_source = "auto-detected"
+            for box in _COMPOSITE_REGIONS.get(layout, []):
+                x0, y0, x1, y1 = (
+                    int(W * box[0]),
+                    int(H * box[1]),
+                    int(W * box[2]),
+                    int(H * box[3]),
+                )
+                # Guard: only paste into a mostly-blank panel.  If the layout
+                # drifted and the region contains cards/text/colors, preserve it.
+                if _panel_whiteness(fig, (x0, y0, x1, y1)) >= 0.85:
+                    target = (x0, y0, x1, y1)
+                    panel_source = "calibrated-fallback"
+                    break
         if target is None:
             # The provider occasionally fills the explicitly reserved panel
             # with its own approximate molecule.  Never overwrite a populated
@@ -2516,7 +2554,13 @@ GENERAL RENDERING RULES:
         skeleton = f"A 3D ball-and-stick model representing '{prod_label}'. Use black spheres for carbon, red for oxygen, blue for nitrogen, white for hydrogen, and colored spheres for R groups."
         label = prod_label
 
-    if features.get("_composite_layout") in _COMPOSITE_REGIONS:
+    # Composite mode pastes the exact skeleton for EVERY layout (calibrated
+    # regions first, auto-detected blank panel otherwise), so the model must
+    # leave the reserved structure panel blank white regardless of whether
+    # the layout carries calibrated coordinates.  Telling uncalibrated
+    # layouts to reproduce the molecule here made the reserved panel
+    # non-blank and sent the blank-panel detector to page-background strips.
+    if features.get("_composite_layout"):
         return f"""LEFT-PAGE STRUCTURE AREA (center of left page):
 Draw an EMPTY white rounded panel here — NO molecule, NO atoms, NO bonds.
 A chemically accurate ball-and-stick model will be inserted into this panel afterwards.

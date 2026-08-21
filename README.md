@@ -91,6 +91,20 @@ REVIEW_WRITER_ADMIN_EMAILS=owner@example.com
 
 如果文本和图像使用同一个服务商密钥，`REVIEW_WRITER_IMAGE_API_KEY` 可以留空。
 
+登录页的“忘记密码”通过一次性邮件链接完成。需要自行配置 SMTP；未配置时按钮仍会提示用户联系管理员，但不会允许仅凭邮箱直接修改密码：
+
+```dotenv
+REVIEW_WRITER_PASSWORD_RESET_MINUTES=30
+REVIEW_WRITER_SMTP_HOST=smtp.example.com
+REVIEW_WRITER_SMTP_PORT=587
+REVIEW_WRITER_SMTP_SECURITY=starttls
+REVIEW_WRITER_SMTP_USERNAME=mailer@example.com
+REVIEW_WRITER_SMTP_PASSWORD=邮件服务授权码
+REVIEW_WRITER_SMTP_FROM_EMAIL=mailer@example.com
+```
+
+`REVIEW_WRITER_SMTP_SECURITY` 可选 `starttls`、`tls`（通常用于 465 端口）或 `none`；`none` 只适用于无需认证的可信内网邮件中继。
+
 可以用下面的命令分别生成加密密钥和内部令牌：
 
 ```powershell

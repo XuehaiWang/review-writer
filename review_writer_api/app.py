@@ -4,13 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import uuid
 from contextlib import asynccontextmanager, suppress
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -20,6 +30,7 @@ from .auth import (
     AuthError,
     AuthRateLimited,
     AuthService,
+    PasswordResetCredential,
 )
 from .artifact_service import ArtifactService
 from .billing import BillingService
@@ -59,8 +70,11 @@ from .schemas import (
     AdminUserUpdateRequest,
     BalanceResponse,
     BrowserAuthConfigResponse,
+    AuthMessageResponse,
     HealthResponse,
     LoginRequest,
+    PasswordResetCompleteRequest,
+    PasswordResetRequest,
     ModelCatalogResponse,
     ModelGatewayRequest,
     ModelGatewayResponse,
@@ -88,6 +102,7 @@ from review_writer_core.taxonomy import (
     taxonomy_profile_catalog,
 )
 from .server_providers import ServerProviderSettingsService
+from .password_reset_mailer import SmtpPasswordResetMailer
 from .security import AuthorizationError, Permission, Principal, local_owner_principal
 from .services import ProjectService
 from .routers.files import build_file_router
@@ -103,6 +118,7 @@ from .scientific_runner import ScientificRunner
 from .workflow_repository import WorkflowRepository
 from .workspaces import HostedWorkspaceManager
 API_VERSION = "v1"
+LOGGER = logging.getLogger(__name__)
 
 
 def create_app(
@@ -115,6 +131,7 @@ def create_app(
     job_service_override: JobService | None = None,
     model_gateway_override: Any | None = None,
     native_workflow_overrides: Mapping[str, Callable] | None = None,
+    password_reset_mailer_override: Any | None = None,
 ) -> FastAPI:
     resolved = settings or ApiSettings.from_env()
     engine = None
@@ -138,11 +155,26 @@ def create_app(
         AuthService(
             session_factory,
             session_days=resolved.session_days,
+            password_reset_minutes=resolved.password_reset_minutes,
             admin_emails=resolved.admin_emails,
         )
         if resolved.deployment_mode == "hosted"
         else None
     )
+    password_reset_mailer = password_reset_mailer_override
+    if (
+        password_reset_mailer is None
+        and resolved.smtp_host
+        and resolved.smtp_from_email
+    ):
+        password_reset_mailer = SmtpPasswordResetMailer(
+            host=resolved.smtp_host,
+            port=resolved.smtp_port,
+            username=resolved.smtp_username,
+            password=resolved.smtp_password,
+            from_email=resolved.smtp_from_email,
+            security=resolved.smtp_security,
+        )
     billing_service = (
         BillingService(session_factory)
         if resolved.deployment_mode == "hosted" and session_factory is not None
@@ -578,6 +610,8 @@ def create_app(
         return BrowserAuthConfigResponse(
             enabled=hosted,
             registration_enabled=hosted,
+            password_reset_enabled=hosted and password_reset_mailer is not None,
+            password_reset_expiry_minutes=resolved.password_reset_minutes,
             password_min_length=PASSWORD_MIN_LENGTH,
         )
 
@@ -602,6 +636,35 @@ def create_app(
         )
 
     if auth_service is not None:
+
+        password_reset_throttle = AuthAttemptThrottle(
+            max_attempts=max(2, resolved.auth_rate_limit_attempts // 2),
+            window_seconds=resolved.auth_rate_limit_window_seconds,
+        )
+        password_reset_ip_throttle = AuthAttemptThrottle(
+            max_attempts=resolved.auth_rate_limit_attempts * 5,
+            window_seconds=resolved.auth_rate_limit_window_seconds,
+        )
+
+        def deliver_password_reset(credential: PasswordResetCredential) -> None:
+            reset_url = (
+                f"{resolved.public_origin}/login?reset_token={credential.token}"
+            )
+            try:
+                password_reset_mailer.send(
+                    credential.recipient,
+                    reset_url,
+                    resolved.password_reset_minutes,
+                )
+            except Exception:
+                auth_service.invalidate_password_reset(credential.token)
+                recipient_hash = hashlib.sha256(
+                    credential.recipient.encode("utf-8")
+                ).hexdigest()[:12]
+                LOGGER.exception(
+                    "Password reset email delivery failed (recipient_hash=%s)",
+                    recipient_hash,
+                )
 
         @app.post(
             "/api/v1/auth/register",
@@ -660,6 +723,79 @@ def create_app(
             auth_throttle.clear(throttle_key)
             set_session_cookie(response, authenticated.token)
             return principal_response(authenticated.principal)
+
+        @app.post(
+            "/api/v1/auth/password-reset/request",
+            response_model=AuthMessageResponse,
+            status_code=status.HTTP_202_ACCEPTED,
+            tags=["identity"],
+        )
+        def request_password_reset(
+            payload: PasswordResetRequest,
+            request: Request,
+            background_tasks: BackgroundTasks,
+        ) -> AuthMessageResponse:
+            if password_reset_mailer is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="服务器尚未配置密码重置邮件，请联系管理员。",
+                )
+            client_host = request.client.host if request.client else "unknown"
+            identity_hash = hashlib.sha256(
+                str(payload.email or "").strip().casefold().encode("utf-8")
+            ).hexdigest()
+            try:
+                password_reset_ip_throttle.consume(f"reset-request-ip:{client_host}")
+                password_reset_throttle.consume(
+                    f"reset-request:{client_host}:{identity_hash}"
+                )
+                credential = auth_service.issue_password_reset(email=payload.email)
+            except AuthRateLimited as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=str(exc),
+                    headers={"Retry-After": str(resolved.auth_rate_limit_window_seconds)},
+                ) from exc
+            except AuthError:
+                credential = None
+            if credential is not None:
+                background_tasks.add_task(deliver_password_reset, credential)
+            return AuthMessageResponse(
+                message="如果该邮箱对应有效账户，密码重置邮件将很快送达。"
+            )
+
+        @app.post(
+            "/api/v1/auth/password-reset/complete",
+            response_model=AuthMessageResponse,
+            tags=["identity"],
+        )
+        def complete_password_reset(
+            payload: PasswordResetCompleteRequest,
+            request: Request,
+        ) -> AuthMessageResponse:
+            client_host = request.client.host if request.client else "unknown"
+            token_identity = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
+            try:
+                password_reset_ip_throttle.consume(f"reset-complete-ip:{client_host}")
+                password_reset_throttle.consume(
+                    f"reset-complete:{client_host}:{token_identity}"
+                )
+                auth_service.reset_password(
+                    token=payload.token,
+                    new_password=payload.new_password,
+                )
+            except AuthRateLimited as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=str(exc),
+                    headers={"Retry-After": str(resolved.auth_rate_limit_window_seconds)},
+                ) from exc
+            except AuthError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=str(exc),
+                ) from exc
+            return AuthMessageResponse(message="密码已经修改，请使用新密码登录。")
 
         @app.post("/api/v1/auth/logout", status_code=status.HTTP_204_NO_CONTENT, tags=["identity"])
         def logout(

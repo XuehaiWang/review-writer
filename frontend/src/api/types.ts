@@ -1,6 +1,8 @@
 export type AuthConfig = {
   enabled: boolean;
   registration_enabled: boolean;
+  password_reset_enabled: boolean;
+  password_reset_expiry_minutes: number;
   password_min_length: number;
 };
 
