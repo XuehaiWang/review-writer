@@ -40,6 +40,7 @@ from review_writer_core.paragraph_markers import (  # noqa: E402
     split_body_and_references as shared_split_body_and_references,
 )
 from review_writer_core.text_safety import make_xml_compatible  # noqa: E402
+from review_writer_core.publication_voice import publication_voice_issues  # noqa: E402
 
 
 PARAGRAPH_MARKER_RE = re.compile(r"<!--\s*paragraph_id:\s*([A-Za-z0-9_.:-]+)\s*-->")
@@ -1314,6 +1315,23 @@ def compact_rewrite_evidence_for_prompt(
                     "ref": passage.get("ref"),
                     "page": passage.get("page"),
                     "text": excerpt,
+                }
+            )
+        voice_issues = publication_voice_issues(text)
+        if voice_issues:
+            issues.append("M05")
+            findings.append(
+                {
+                    "paragraph_id": paragraph_id,
+                    "rule": "M05",
+                    "severity": "minor",
+                    "diagnosis": (
+                        "Internal workflow language remains in publication prose: "
+                        + ", ".join(
+                            dict.fromkeys(str(item.get("phrase") or "") for item in voice_issues)
+                        )[:300]
+                    ),
+                    "route": "final_polish",
                 }
             )
         compact_paper = {

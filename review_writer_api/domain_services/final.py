@@ -7,6 +7,8 @@ import re
 import shutil
 import threading
 import uuid
+import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +32,9 @@ from review_writer_api.figure_rules import image_size
 from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
+from review_writer_core.latex_renderer import SUPPORTED_PROFILES, TEMPLATE_VERSION
+from review_writer_core.manuscript_state import build_manuscript_state
+from review_writer_core.publication_voice import publication_voice_issues
 
 
 FINAL_CONCLUSION = "final/conclusion.md"
@@ -40,6 +45,13 @@ FINAL_DRAFT = "final/manuscript.md"
 FINAL_VALIDATION = "final/validation.json"
 FINAL_RELEASE = "final/release.json"
 FINAL_DOCX = "final/manuscript.docx"
+FINAL_DOCX_QA = "final/docx-qa.json"
+FINAL_MANUSCRIPT_STATE = "final/manuscript_state.json"
+FINAL_RENDER_MANIFEST = "final/render_manifest.json"
+FINAL_TEX = "final/manuscript.tex"
+FINAL_PDF = "final/manuscript.pdf"
+FINAL_PDF_QA = "final/pdf-qa.json"
+FINAL_PDF_COMPILE_LOG = "final/pdf-compile.log"
 ARTIFACT_URL = re.compile(r"/api/v1/artifacts/([0-9a-fA-F-]{36})/content")
 REFERENCES_HEADING = re.compile(
     r"(?im)^\s*#{1,6}\s*(?:references|reference list|bibliography|cited literature|参考文献)\s*$"
@@ -48,6 +60,78 @@ CITATION_CALLOUT = re.compile(r"\[([0-9][0-9,;\s-]*)\]")
 REFERENCE_ITEM = re.compile(r"(?m)^\s*\[(\d+)\]\s*\.?\s+(.+?)\s*$")
 MARKDOWN_HEADING = re.compile(r"(?m)^\s*(#{1,6})\s+(.+?)\s*$")
 INTRODUCTION_TITLES = ("introduction", "background", "引言", "绪论", "研究背景")
+REFERENCE_AFFILIATION_SUP = re.compile(
+    r"<sup\b[^>]*>[\s,;:.·•*†‡#\[\](){}\-]*</sup>",
+    re.IGNORECASE,
+)
+INSERTED_FIGURE_METADATA = re.compile(
+    r"<!--\s*inserted_figure:\s*(\{.*?\})\s*-->", re.DOTALL
+)
+
+
+def _clean_reference_affiliation_markup(markdown: str) -> str:
+    """Remove empty author-affiliation superscripts without touching scientific markup."""
+
+    reference_match = REFERENCES_HEADING.search(markdown or "")
+    if reference_match is None:
+        return markdown
+    reference_text = markdown[reference_match.start() :]
+    cleaned = REFERENCE_AFFILIATION_SUP.sub("", reference_text)
+    cleaned = "\n".join(
+        re.sub(r"[ \t]{2,}", " ", line) for line in cleaned.split("\n")
+    )
+    return markdown[: reference_match.start()] + cleaned
+
+
+def _figure_argument_findings(markdown: str) -> list[dict[str, Any]]:
+    """Check reader-visible figure closure without treating hidden metadata as a callout."""
+
+    findings: list[dict[str, Any]] = []
+    for match in INSERTED_FIGURE_METADATA.finditer(markdown or ""):
+        try:
+            metadata = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            findings.append({"figure_id": "", "issues": ["invalid_inserted_figure_metadata"]})
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        figure_id = str(metadata.get("figure_id") or "")
+        published_label = str(metadata.get("published_label") or "").strip()
+        output_artifact_id = str(metadata.get("output_artifact_id") or "")
+        issues: list[str] = []
+        if not published_label:
+            issues.append("published_label_missing")
+        escaped_label = re.escape(published_label)
+        if output_artifact_id and not re.search(
+            rf"!\[[^\]]*\]\(/api/v1/artifacts/{re.escape(output_artifact_id)}/content\)",
+            markdown,
+        ):
+            issues.append("image_missing")
+        if published_label and not re.search(rf"\*{escaped_label}\.", markdown):
+            issues.append("caption_missing")
+        visible_prose = INSERTED_FIGURE_METADATA.sub("", markdown)
+        visible_prose = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", visible_prose)
+        visible_prose = re.sub(r"(?m)^\s*\*Figure\s+\d+\..*?\*\s*$", "", visible_prose)
+        if published_label and not re.search(
+            rf"\b{escaped_label}\b[^\n]{{0,500}}\b(?:presents?|shows?|summarizes?|illustrates?|compares?|depicts?)\b",
+            visible_prose,
+            re.IGNORECASE,
+        ):
+            issues.append("visible_callout_or_interpretation_missing")
+        if not str(metadata.get("paper_id") or "").strip():
+            issues.append("source_paper_identity_missing")
+        if str(metadata.get("interpretation_basis") or "") != "source_caption":
+            issues.append("paper_level_interpretation_missing")
+        if issues:
+            findings.append(
+                {
+                    "figure_id": figure_id,
+                    "published_label": published_label,
+                    "paper_id": str(metadata.get("paper_id") or ""),
+                    "issues": issues,
+                }
+            )
+    return findings
 
 
 class FinalNotReady(WorkflowConflict):
@@ -486,6 +570,12 @@ class FinalService:
             warning_issues.append("library_sources_unavailable")
         if missing_source_artifacts:
             warning_issues.append("library_source_artifacts_missing")
+        voice_issues = publication_voice_issues(body)
+        if voice_issues:
+            warning_issues.append("publication_voice_leakage")
+        figure_argument_findings = _figure_argument_findings(body)
+        if figure_argument_findings:
+            warning_issues.append("figure_argument_closure_incomplete")
         return {
             "valid": not blocking_issues,
             "referenced_artifact_ids": referenced,
@@ -499,6 +589,8 @@ class FinalService:
             "unmapped_reference_numbers": sorted(unmapped_reference_numbers),
             "unavailable_source_paper_ids": unavailable_sources,
             "missing_source_artifact_paper_ids": missing_source_artifacts,
+            "publication_voice_issues": voice_issues,
+            "figure_argument_findings": figure_argument_findings,
             "references_section_present": bool(reference_match),
             "blocking_issues": blocking_issues,
             "warning_issues": warning_issues,
@@ -621,6 +713,7 @@ class FinalService:
         if draft_references:
             parts.append(draft_references)
         markdown = "\n\n".join(parts).rstrip() + "\n"
+        markdown = _clean_reference_affiliation_markup(markdown)
         compatibility = self.drafts.compatibility_payload(principal, project_id)
         source_paper_ids = [
             str(paper_id)
@@ -776,11 +869,51 @@ class FinalService:
             raise WorkflowValidationError("DOCX output escaped its user workspace.") from exc
         if output.is_symlink() or not output.is_file() or output.suffix.casefold() != ".docx":
             raise WorkflowValidationError("DOCX export produced no document.")
+        try:
+            with zipfile.ZipFile(output) as archive:
+                corrupt = archive.testzip()
+                names = set(archive.namelist())
+                required = {"[Content_Types].xml", "word/document.xml"}
+                missing_parts = sorted(required - names)
+                document = ET.fromstring(archive.read("word/document.xml"))
+                namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+                paragraph_count = len(document.findall(".//w:p", namespace))
+                table_count = len(document.findall(".//w:tbl", namespace))
+                image_count = sum(name.startswith("word/media/") for name in names)
+        except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError) as exc:
+            raise WorkflowValidationError(
+                f"DOCX structural QA could not read the generated package: {type(exc).__name__}."
+            ) from exc
+        blockers = []
+        if corrupt:
+            blockers.append({"type": "corrupt_zip_member", "member": corrupt})
+        if missing_parts:
+            blockers.append({"type": "missing_docx_parts", "parts": missing_parts})
+        if paragraph_count <= 0:
+            blockers.append({"type": "empty_document_body"})
+        docx_qa = {
+            "schema_version": 1,
+            "status": "blocked" if blockers else "pass",
+            "paragraph_count": paragraph_count,
+            "table_count": table_count,
+            "image_count": image_count,
+            "blocking_issues": blockers,
+            "warning_issues": [],
+            "checked_at": utc_now().isoformat(),
+        }
+        if blockers:
+            raise WorkflowValidationError("DOCX failed structural package QA.")
         with self._write_lock:
             published, state = self._publish_files(
                 principal,
                 project_id,
-                {FINAL_DOCX: (output.read_bytes(), "docx")},
+                {
+                    FINAL_DOCX: (output.read_bytes(), "docx"),
+                    FINAL_DOCX_QA: (
+                        (json.dumps(docx_qa, ensure_ascii=False, indent=2) + "\n").encode(),
+                        "json",
+                    ),
+                },
                 expected_revision=int(job_payload["expected_revision"]),
                 metadata={
                     "operation": "docx-export",
@@ -798,8 +931,215 @@ class FinalService:
             )
         return {
             "docx_artifact_id": published[FINAL_DOCX].id,
+            "docx_qa_artifact_id": published[FINAL_DOCX_QA].id,
+            "docx_qa": docx_qa,
             "download_name": str(built.get("download_name") or "review.docx"),
             "revision": state.revision,
+        }
+
+    def pdf_payload(
+        self,
+        principal: Principal,
+        project_id: str,
+        *,
+        language_profile: str,
+    ) -> dict[str, Any]:
+        profile = str(language_profile or "").strip()
+        if profile not in SUPPORTED_PROFILES:
+            raise WorkflowValidationError(
+                "PDF language profile must be `en` or `zh-CN`."
+            )
+        current_payload = self.get(principal, project_id)
+        if (
+            not current_payload.get("final_current")
+            or not current_payload.get("release_current")
+        ):
+            raise FinalNotReady("Build the current Final manuscript before PDF export.")
+        _draft_text, draft, _approval = self._approved_draft(principal, project_id)
+        final_text, final_artifact = self._read_text(
+            principal, project_id, FINAL_DRAFT, required=True
+        )
+        compatibility = self.drafts.compatibility_payload(principal, project_id)
+        # The PDF worker receives only assets that the released manuscript
+        # actually references. This keeps the isolated request bounded without
+        # changing the upstream Images approval/redraw workflow.
+        artifact_paths: dict[str, str] = {}
+        for artifact_id in dict.fromkeys(ARTIFACT_URL.findall(final_text)):
+            artifact_paths[artifact_id] = str(
+                self.artifacts.resolve_owned_artifact(
+                    principal.user_id, artifact_id
+                ).path
+            )
+        return {
+            **compatibility,
+            "project_id": project_id,
+            "source_draft_artifact_id": draft.id,
+            "source_final_artifact_id": final_artifact.id,
+            "source_release_artifact_id": current_payload["release_artifact_id"],
+            "final_markdown": final_text,
+            "figure_artifact_paths": artifact_paths,
+            "language_profile": profile,
+            "template": "modern-survey",
+            "expected_revision": self._revision(principal, project_id),
+        }
+
+    @staticmethod
+    def _trusted_generated_file(
+        raw: Any,
+        *,
+        user_root: Path,
+        suffix: str,
+        label: str,
+    ) -> Path:
+        value = str(raw or "").strip()
+        path = Path(value).resolve() if value else None
+        try:
+            if path is None:
+                raise ValueError
+            path.relative_to(user_root)
+        except ValueError as exc:
+            raise WorkflowValidationError(
+                f"{label} output escaped its user workspace."
+            ) from exc
+        if path.is_symlink() or not path.is_file() or path.suffix.casefold() != suffix:
+            raise WorkflowValidationError(f"{label} export produced no valid output.")
+        return path
+
+    def publish_pdf(
+        self,
+        principal: Principal,
+        project_id: str,
+        job_payload: dict[str, Any],
+        built: dict[str, Any],
+    ) -> dict[str, Any]:
+        final = self._artifact(principal, project_id, FINAL_DRAFT)
+        current_payload = self.get(principal, project_id)
+        if (
+            final is None
+            or final.id != job_payload["source_final_artifact_id"]
+            or current_payload.get("release_artifact_id")
+            != job_payload["source_release_artifact_id"]
+            or not current_payload.get("final_current")
+            or not current_payload.get("release_current")
+        ):
+            raise WorkflowConflict("Final manuscript changed while PDF was generated.")
+        profile = str(job_payload.get("language_profile") or "")
+        if profile not in SUPPORTED_PROFILES:
+            raise WorkflowValidationError("PDF language profile is invalid.")
+        user_root = self.artifacts.workspace_manager.user_root(principal.user_id)
+        pdf_path = self._trusted_generated_file(
+            built.get("output_path"),
+            user_root=user_root,
+            suffix=".pdf",
+            label="PDF",
+        )
+        tex_path = self._trusted_generated_file(
+            built.get("tex_path"),
+            user_root=user_root,
+            suffix=".tex",
+            label="LaTeX",
+        )
+        log_path = self._trusted_generated_file(
+            built.get("compile_log_path"),
+            user_root=user_root,
+            suffix=".log",
+            label="PDF compile log",
+        )
+        state_payload = built.get("manuscript_state")
+        manifest = built.get("render_manifest")
+        qa = built.get("pdf_qa")
+        if not all(isinstance(item, dict) for item in (state_payload, manifest, qa)):
+            raise WorkflowValidationError("PDF renderer returned an incomplete state bundle.")
+        if (
+            manifest.get("language_profile") != profile
+            or manifest.get("template") != "modern-survey"
+            or manifest.get("template_version") != TEMPLATE_VERSION
+            or manifest.get("source_final_artifact_id") != final.id
+            or manifest.get("source_release_artifact_id")
+            != job_payload["source_release_artifact_id"]
+            or manifest.get("shell_escape") is not False
+        ):
+            raise WorkflowValidationError("PDF render manifest does not match the current job.")
+        if (
+            not state_payload.get("validation", {}).get("valid")
+            or qa.get("status") not in {"pass", "pass_with_warnings"}
+            or qa.get("blocking_issues")
+            or not qa.get("all_fonts_embedded")
+        ):
+            raise WorkflowValidationError(
+                "PDF failed deterministic content or visual publication gates."
+            )
+        expected_state = build_manuscript_state(
+            str(job_payload.get("final_markdown") or ""),
+            artifact_paths=dict(job_payload.get("figure_artifact_paths") or {}),
+        )
+        if (
+            state_payload.get("source_markdown_sha256")
+            != expected_state.get("source_markdown_sha256")
+            or state_payload.get("semantic_sha256")
+            != expected_state.get("semantic_sha256")
+            or state_payload.get("counts") != expected_state.get("counts")
+        ):
+            raise WorkflowValidationError(
+                "PDF Final Manuscript State diverged from the released Markdown."
+            )
+        if (
+            manifest.get("source_markdown_sha256")
+            != state_payload.get("source_markdown_sha256")
+            or manifest.get("semantic_sha256")
+            != state_payload.get("semantic_sha256")
+            or set(dict(manifest.get("asset_sha256") or {}))
+            != set(dict(job_payload.get("figure_artifact_paths") or {}))
+        ):
+            raise WorkflowValidationError(
+                "PDF render manifest diverged from its manuscript or approved assets."
+            )
+        metadata = {
+            "operation": "pdf-export",
+            "source_final_artifact_id": final.id,
+            "source_release_artifact_id": job_payload["source_release_artifact_id"],
+            "language_profile": profile,
+            "template": "modern-survey",
+            "download_name": str(
+                built.get("download_name") or f"review.{profile}.pdf"
+            ),
+        }
+        with self._write_lock:
+            published, stage = self._publish_files(
+                principal,
+                project_id,
+                {
+                    FINAL_MANUSCRIPT_STATE: (
+                        (json.dumps(state_payload, ensure_ascii=False, indent=2) + "\n").encode(),
+                        "json",
+                    ),
+                    FINAL_RENDER_MANIFEST: (
+                        (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode(),
+                        "json",
+                    ),
+                    FINAL_TEX: (tex_path.read_bytes(), "tex"),
+                    FINAL_PDF: (pdf_path.read_bytes(), "pdf"),
+                    FINAL_PDF_QA: (
+                        (json.dumps(qa, ensure_ascii=False, indent=2) + "\n").encode(),
+                        "json",
+                    ),
+                    FINAL_PDF_COMPILE_LOG: (log_path.read_bytes(), "log"),
+                },
+                expected_revision=int(job_payload["expected_revision"]),
+                metadata=metadata,
+                status="completed",
+                expected_current_artifacts={
+                    FINAL_DRAFT: final.id,
+                    FINAL_RELEASE: job_payload["source_release_artifact_id"],
+                },
+            )
+        return {
+            "pdf_artifact_id": published[FINAL_PDF].id,
+            "tex_artifact_id": published[FINAL_TEX].id,
+            "pdf_qa_artifact_id": published[FINAL_PDF_QA].id,
+            "language_profile": profile,
+            "download_name": metadata["download_name"],
+            "revision": stage.revision,
         }
 
     def get(self, principal: Principal, project_id: str) -> dict[str, Any]:
@@ -824,6 +1164,23 @@ class FinalService:
             principal, project_id, FINAL_RELEASE
         )
         docx = self._artifact(principal, project_id, FINAL_DOCX)
+        docx_qa, docx_qa_artifact = self._read_json(
+            principal, project_id, FINAL_DOCX_QA
+        )
+        manuscript_state, manuscript_state_artifact = self._read_json(
+            principal, project_id, FINAL_MANUSCRIPT_STATE
+        )
+        render_manifest, render_manifest_artifact = self._read_json(
+            principal, project_id, FINAL_RENDER_MANIFEST
+        )
+        pdf_qa, pdf_qa_artifact = self._read_json(
+            principal, project_id, FINAL_PDF_QA
+        )
+        tex_artifact = self._artifact(principal, project_id, FINAL_TEX)
+        pdf_artifact = self._artifact(principal, project_id, FINAL_PDF)
+        compile_log_artifact = self._artifact(
+            principal, project_id, FINAL_PDF_COMPILE_LOG
+        )
         state = self.repository.get_stage_state(principal.user_id, project_id, "final")
         current_draft_id = str(draft_payload.get("draft_artifact_id") or "")
         approved = bool(draft_payload.get("draft_approval_current"))
@@ -878,9 +1235,44 @@ class FinalService:
             and release_artifact
             and docx.metadata.get("source_release_artifact_id")
             == release_artifact.id
+            and (not docx_qa_artifact or docx_qa.get("status") == "pass")
+        )
+        pdf_bundle = (
+            manuscript_state_artifact,
+            render_manifest_artifact,
+            pdf_qa_artifact,
+            tex_artifact,
+            pdf_artifact,
+            compile_log_artifact,
+        )
+        pdf_current = bool(
+            all(pdf_bundle)
+            and final_artifact
+            and final_current
+            and release_current
+            and all(
+                artifact.metadata.get("source_final_artifact_id") == final_artifact.id
+                and artifact.metadata.get("source_release_artifact_id")
+                == release_artifact.id
+                for artifact in pdf_bundle
+                if artifact is not None
+            )
+            and manuscript_state.get("validation", {}).get("valid")
+            and render_manifest.get("template") == "modern-survey"
+            and render_manifest.get("language_profile") in SUPPORTED_PROFILES
+            and render_manifest.get("shell_escape") is False
+            and pdf_qa.get("status") in {"pass", "pass_with_warnings"}
+            and not pdf_qa.get("blocking_issues")
+            and pdf_qa.get("all_fonts_embedded") is True
         )
         overview_url = f"/api/v1/artifacts/{overview.id}/content" if overview else ""
         docx_url = f"/api/v1/artifacts/{docx.id}/content" if docx else ""
+        pdf_url = (
+            f"/api/v1/artifacts/{pdf_artifact.id}/content" if pdf_artifact else ""
+        )
+        tex_url = (
+            f"/api/v1/artifacts/{tex_artifact.id}/content" if tex_artifact else ""
+        )
         final_jobs = [
             job
             for job in self.repository.list_project_jobs(
@@ -891,6 +1283,7 @@ class FinalService:
                 "final.overview",
                 "final.build",
                 "final.export",
+                "final.pdf",
             }
         ]
         latest_final_job = final_jobs[0] if final_jobs else None
@@ -970,6 +1363,20 @@ class FinalService:
             "final_draft_docx_path": docx_url,
             "final_draft_docx_exists": docx_current,
             "final_draft_docx_stale": bool(docx and not docx_current),
+            "docx_qa": docx_qa,
+            "docx_qa_artifact_id": docx_qa_artifact.id if docx_qa_artifact else "",
+            "manuscript_state": manuscript_state,
+            "render_manifest": render_manifest,
+            "pdf_qa": pdf_qa,
+            "pdf_artifact_id": pdf_artifact.id if pdf_artifact else "",
+            "pdf_url": pdf_url,
+            "tex_artifact_id": tex_artifact.id if tex_artifact else "",
+            "tex_url": tex_url,
+            "pdf_language_profile": str(
+                render_manifest.get("language_profile") or ""
+            ),
+            "final_pdf_exists": pdf_current,
+            "final_pdf_stale": bool(pdf_artifact and not pdf_current),
             "active_final_job_id": (
                 active_final_job.id if active_final_job else ""
             ),
@@ -991,8 +1398,10 @@ class FinalService:
                 "draft_stale": not approved,
                 "final_stale": bool(final_artifact and not final_current),
                 "release_stale": bool(release_artifact and not release_current),
+                "pdf_stale": bool(pdf_artifact and not pdf_current),
                 "stale": not approved
                 or bool(final_artifact and not final_current)
-                or bool(release_artifact and not release_current),
+                or bool(release_artifact and not release_current)
+                or bool(pdf_artifact and not pdf_current),
             },
         }

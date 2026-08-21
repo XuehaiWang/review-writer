@@ -37,6 +37,16 @@ from review_writer_api.workflow_models import LibraryPaper, WorkflowJob
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
 from review_writer_core.taxonomy import TaxonomyConfigurationError, load_taxonomy_rules
 from review_writer_core.metadata_tags import verified_structured_tags
+from review_writer_core.academic_contracts import (
+    ACADEMIC_SCHEMA_VERSION,
+    classification_basis,
+    coverage_diagnostics,
+    derive_scope_contract,
+    section_academic_contract,
+    scope_diagnostics,
+    synthesis_requirements,
+    taxonomy_diagnostics,
+)
 from review_writer_core.review_structure import (
     assign_primary_paper_sections,
     infer_section_role,
@@ -48,6 +58,8 @@ OUTLINE_LOGICAL_NAME = "planning/selected_outline.json"
 REFERENCE_INDEX_LOGICAL_NAME = "planning/reference_outlines.json"
 BLUEPRINT_LOGICAL_NAME = "blueprint/section_blueprint.json"
 DISCOVERY_LOGICAL_NAME = "discovery/review.json"
+ROUTING_REQUIRED_LABEL = "Routing required — reassign these papers"
+CROSS_CATEGORY_BOUNDARY_LABEL = "Cross-category evidence and boundary cases"
 
 OUTLINE_STYLES: dict[str, dict[str, str]] = {
     "substrate": {
@@ -93,7 +105,10 @@ def _outline_sections(markdown: str) -> list[dict[str, Any]]:
             current = {
                 "title": title,
                 "paper_ids": [],
+                "context_paper_ids": [],
                 "section_role": infer_section_role(title),
+                "purpose": "",
+                "notes": "",
             }
             sections.append(current)
             continue
@@ -111,7 +126,78 @@ def _outline_sections(markdown: str) -> list[dict[str, Any]]:
                     if paper_id.strip()
                 )
             )
+            continue
+        if current is not None and re.match(
+            r"^(?:context|contextual) papers:", line, re.I
+        ):
+            assigned = line.split(":", 1)[1].strip().rstrip(".。")
+            current["context_paper_ids"] = list(
+                dict.fromkeys(
+                    paper_id.strip()
+                    for paper_id in re.split(r"[,，;；]", assigned)
+                    if paper_id.strip()
+                )
+            )
+            continue
+        if current is not None and line.casefold().startswith("purpose:"):
+            current["purpose"] = line.split(":", 1)[1].strip()
+            continue
+        if current is not None and line.casefold().startswith("notes:"):
+            current["notes"] = line.split(":", 1)[1].strip()
     return sections
+
+
+def _outline_markdown_from_sections(
+    sections: list[dict[str, Any]],
+    *,
+    outline_style: str,
+    automatically_adjusted: bool = False,
+) -> str:
+    """Render parsed sections back to beginner-readable outline Markdown.
+
+    This renderer is used only for an automatically repaired system outline.
+    It preserves the section roles, paper assignments, purposes, and notes
+    understood by ``_outline_sections`` while removing temporary routing
+    placeholders from the Blueprint-facing outline snapshot.
+    """
+
+    definition = OUTLINE_STYLES.get(str(outline_style or "").casefold())
+    lines = ["# Selected Outline", ""]
+    if definition:
+        lines.extend([f"Primary structure: {definition['en']}.", ""])
+    if automatically_adjusted:
+        lines.extend(
+            [
+                "The system automatically routed previously unclassified papers using the current taxonomy and paper evidence.",
+                "",
+            ]
+        )
+    body_number = 0
+    for section in sections:
+        role = str(section.get("section_role") or "body").casefold()
+        title = str(section.get("title") or "").strip()
+        if not title:
+            continue
+        if role == "body":
+            body_number += 1
+            heading = f"## {body_number}. {title}"
+        else:
+            heading = f"## {title}"
+        lines.extend([heading, f"Section role: {role}"])
+        paper_ids = list(dict.fromkeys(section.get("paper_ids") or []))
+        if paper_ids:
+            lines.append(f"Assigned papers: {', '.join(paper_ids)}.")
+        context_ids = list(dict.fromkeys(section.get("context_paper_ids") or []))
+        if context_ids:
+            lines.append(f"Context papers: {', '.join(context_ids)}.")
+        purpose = str(section.get("purpose") or "").strip()
+        if purpose:
+            lines.append(f"Purpose: {purpose}")
+        notes = str(section.get("notes") or "").strip()
+        if notes:
+            lines.append(f"Notes: {notes}")
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
 
 
 class PlanningService:
@@ -342,6 +428,20 @@ class PlanningService:
         return tags_by_paper, text_by_paper
 
     @staticmethod
+    def _taxonomy_match_text(value: Any) -> str:
+        """Normalize harmless typesetting punctuation before phrase matching.
+
+        Chemical titles often wrap a substituent name in parentheses, as in
+        ``(allenylmethyl)silanes``.  Removing grouping brackets from both the
+        evidence text and taxonomy terms keeps those typography variants from
+        becoming artificial routing failures while preserving other chemical
+        punctuation used by the rules.
+        """
+
+        normalized = str(value or "").strip().casefold()
+        return re.sub(r"[()\[\]{}]", "", normalized)
+
+    @staticmethod
     def _semantic_outline_groups(
         rows: list[dict[str, Any]],
         text_by_paper: dict[str, str],
@@ -350,10 +450,15 @@ class PlanningService:
         taxonomy_profile: str,
     ) -> dict[str, list[str]]:
         try:
+            topic_text = " ".join(
+                text for text in text_by_paper.values() if str(text or "").strip()
+            )
             rules = [
                 (label, aliases)
                 for label, category, aliases in load_taxonomy_rules(
-                    Path.cwd(), profile=taxonomy_profile
+                    Path.cwd(),
+                    profile=taxonomy_profile,
+                    topic_text=topic_text,
                 )
                 if category == tag_key
             ]
@@ -365,12 +470,14 @@ class PlanningService:
             paper_id = str(row.get("paper_id") or "").strip()
             if not paper_id:
                 continue
-            text = text_by_paper.get(paper_id, "")
+            text = PlanningService._taxonomy_match_text(
+                text_by_paper.get(paper_id, "")
+            )
             ranked: list[tuple[int, int, str]] = []
             for index, (label, aliases) in enumerate(rules):
                 score = 0
                 for term in (label, *aliases):
-                    normalized = str(term or "").strip().casefold()
+                    normalized = PlanningService._taxonomy_match_text(term)
                     if not normalized:
                         continue
                     pattern = rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])"
@@ -393,7 +500,7 @@ class PlanningService:
             else:
                 other.append(paper_id)
         if other:
-            groups["Other or unspecified"] = other
+            groups[ROUTING_REQUIRED_LABEL] = other
         return groups
 
     def _outline_groups(
@@ -419,29 +526,199 @@ class PlanningService:
             else:
                 other.append(paper_id)
         if other:
-            groups["Other or unspecified"] = other
-        meaningful = {
-            label: paper_ids
-            for label, paper_ids in groups.items()
-            if label != "Other or unspecified" and paper_ids
-        }
-        largest_share = max(
-            (len(paper_ids) for paper_ids in meaningful.values()), default=0
-        ) / max(1, len(rows))
-        if len(rows) < 6 or (len(meaningful) >= 2 and largest_share < 0.85):
+            groups[ROUTING_REQUIRED_LABEL] = other
+        if not other:
             return groups
+
+        unresolved_set = set(other)
+        unresolved_rows = [
+            row
+            for row in rows
+            if str(row.get("paper_id") or "").strip() in unresolved_set
+        ]
         semantic = self._semantic_outline_groups(
-            rows,
+            unresolved_rows,
             text_by_paper,
             tag_key=tag_key,
             taxonomy_profile=taxonomy_profile,
         )
-        semantic_meaningful = [
-            paper_ids
-            for label, paper_ids in semantic.items()
-            if label != "Other or unspecified" and paper_ids
+        repaired = {
+            label: list(paper_ids)
+            for label, paper_ids in groups.items()
+            if label != ROUTING_REQUIRED_LABEL and paper_ids
+        }
+        for label, paper_ids in semantic.items():
+            if label == ROUTING_REQUIRED_LABEL or not paper_ids:
+                continue
+            bucket = repaired.setdefault(label, [])
+            bucket.extend(paper_id for paper_id in paper_ids if paper_id not in bucket)
+        still_unresolved = list(semantic.get(ROUTING_REQUIRED_LABEL) or [])
+        if still_unresolved:
+            # A built-in outline must remain actionable.  When the configured
+            # taxonomy cannot confidently name a narrower category, keep the
+            # papers in an explicit analytical boundary section instead of a
+            # workflow-only placeholder that blocks Blueprint confirmation.
+            repaired[CROSS_CATEGORY_BOUNDARY_LABEL] = still_unresolved
+        return repaired or groups
+
+    def _auto_repair_generated_routing_sections(
+        self,
+        sections: list[dict[str, Any]],
+        rows: list[dict[str, Any]],
+        text_by_paper: dict[str, str],
+        *,
+        outline_style: str,
+        taxonomy_profile: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Resolve system-created routing placeholders before Blueprint build.
+
+        User-authored catch-all sections remain subject to the normal academic
+        gate.  Only the exact placeholder emitted by older built-in outline
+        versions is repaired automatically.  Taxonomy matches are merged into
+        an existing same-title section when possible; otherwise a defensible
+        category is inserted before the conclusion.  Truly unresolved sources
+        enter a named cross-category boundary analysis rather than ``Other``.
+        """
+
+        style = str(outline_style or "").casefold()
+        definition = OUTLINE_STYLES.get(style)
+        if definition is None:
+            return sections, []
+
+        repaired = deepcopy(sections)
+        placeholder_indexes = [
+            index
+            for index, section in enumerate(repaired)
+            if str(section.get("section_role") or "body").casefold() == "body"
+            and str(section.get("title") or "").strip().casefold()
+            == ROUTING_REQUIRED_LABEL.casefold()
         ]
-        return semantic if len(semantic_meaningful) >= 2 else groups
+        if not placeholder_indexes:
+            return repaired, []
+
+        unresolved_ids = list(
+            dict.fromkeys(
+                paper_id
+                for index in placeholder_indexes
+                for paper_id in (repaired[index].get("paper_ids") or [])
+            )
+        )
+        unresolved_set = set(unresolved_ids)
+        unresolved_rows = [
+            row
+            for row in rows
+            if str(row.get("paper_id") or "").strip() in unresolved_set
+        ]
+        semantic = self._semantic_outline_groups(
+            unresolved_rows,
+            text_by_paper,
+            tag_key=definition["tag_key"],
+            taxonomy_profile=taxonomy_profile,
+        )
+        grouped: dict[str, list[str]] = {
+            label: list(dict.fromkeys(paper_ids))
+            for label, paper_ids in semantic.items()
+            if label != ROUTING_REQUIRED_LABEL and paper_ids
+        }
+        routed = {paper_id for paper_ids in grouped.values() for paper_id in paper_ids}
+        still_unresolved = [paper_id for paper_id in unresolved_ids if paper_id not in routed]
+        if still_unresolved:
+            grouped[CROSS_CATEGORY_BOUNDARY_LABEL] = still_unresolved
+
+        repaired = [
+            section
+            for index, section in enumerate(repaired)
+            if index not in placeholder_indexes
+        ]
+        existing_by_title = {
+            str(section.get("title") or "").strip().casefold(): section
+            for section in repaired
+            if str(section.get("section_role") or "body").casefold() == "body"
+        }
+        insert_at = next(
+            (
+                index
+                for index, section in enumerate(repaired)
+                if str(section.get("section_role") or "").casefold() == "conclusion"
+            ),
+            len(repaired),
+        )
+        adjustments: list[dict[str, Any]] = []
+        for label, paper_ids in grouped.items():
+            target = existing_by_title.get(label.casefold())
+            created = target is None
+            if target is None:
+                target = {
+                    "title": label,
+                    "paper_ids": [],
+                    "context_paper_ids": [],
+                    "section_role": "body",
+                    "purpose": (
+                        f"compare the selected papers within this {definition['axis']} "
+                        "category and state its evidence boundaries."
+                    ),
+                    "notes": "Automatically routed from a system-generated placeholder.",
+                }
+                repaired.insert(insert_at, target)
+                insert_at += 1
+                existing_by_title[label.casefold()] = target
+            bucket = target.setdefault("paper_ids", [])
+            bucket.extend(paper_id for paper_id in paper_ids if paper_id not in bucket)
+            adjustments.append(
+                {
+                    "source_section": ROUTING_REQUIRED_LABEL,
+                    "target_section": label,
+                    "paper_ids": list(paper_ids),
+                    "method": (
+                        "taxonomy_evidence_match"
+                        if label != CROSS_CATEGORY_BOUNDARY_LABEL
+                        else "cross_category_boundary_fallback"
+                    ),
+                    "created_section": created,
+                }
+            )
+        return repaired, adjustments
+
+    @classmethod
+    def _contextual_outline_paper_ids(
+        cls,
+        rows: list[dict[str, Any]],
+        tags_by_paper: dict[str, dict[str, Any]],
+        text_by_paper: dict[str, str],
+    ) -> list[str]:
+        """Identify sources that frame the field but are not primary studies.
+
+        These papers remain available to the introduction as contextual
+        evidence.  They are not forced into a body taxonomy where a review or
+        perspective would create an artificial catch-all category.
+        """
+
+        contextual: list[str] = []
+        scope_terms = (
+            "review",
+            "comprehensive review",
+            "account",
+            "perspective",
+            "book",
+            "book chapter",
+        )
+        context_pattern = re.compile(
+            r"\b(?:this|the present) review\b|\bwe review\b|"
+            r"\breview (?:will|article|paper)\b|\bcomprehensive review\b|"
+            r"\bperspective (?:on|article)\b",
+            re.I,
+        )
+        for row in rows:
+            paper_id = str(row.get("paper_id") or "").strip()
+            if not paper_id:
+                continue
+            document_scope = cls._tag_value(
+                (tags_by_paper.get(paper_id) or {}).get("document_scope")
+            ).casefold()
+            text = text_by_paper.get(paper_id, "")
+            if any(term in document_scope for term in scope_terms) or context_pattern.search(text):
+                contextual.append(paper_id)
+        return contextual
 
     def _outline_document(
         self,
@@ -453,8 +730,19 @@ class PlanningService:
         taxonomy_profile: str,
     ) -> str:
         definition = OUTLINE_STYLES[style]
-        groups = self._outline_groups(
+        contextual_paper_ids = self._contextual_outline_paper_ids(
             rows,
+            tags_by_paper,
+            text_by_paper,
+        )
+        contextual_set = set(contextual_paper_ids)
+        analytical_rows = [
+            row
+            for row in rows
+            if str(row.get("paper_id") or "").strip() not in contextual_set
+        ]
+        groups = self._outline_groups(
+            analytical_rows,
             tags_by_paper,
             text_by_paper,
             tag_key=definition["tag_key"],
@@ -469,8 +757,15 @@ class PlanningService:
             "## Introduction",
             "Section role: introduction",
             f"Purpose: {definition['introduction']}.",
-            "",
         ]
+        if contextual_paper_ids:
+            lines.extend(
+                [
+                    f"Context papers: {', '.join(contextual_paper_ids)}.",
+                    "Notes: Use these field-level sources for scope and historical framing; do not treat them as primary body evidence.",
+                ]
+            )
+        lines.append("")
         for index, (label, paper_ids) in enumerate(groups.items(), start=1):
             lines.extend(
                 [
@@ -519,7 +814,10 @@ class PlanningService:
             {
                 paper_id
                 for section in sections
-                for paper_id in section["paper_ids"]
+                for paper_id in [
+                    *section["paper_ids"],
+                    *section.get("context_paper_ids", []),
+                ]
                 if paper_id not in matrix_ids
             }
         )
@@ -622,6 +920,11 @@ class PlanningService:
             and blueprint_state is not None
             and blueprint_state.status != "stale"
         )
+        scope_contract = dict((outline or {}).get("scope_contract") or {})
+        scope_report = dict((outline or {}).get("scope_diagnostics") or {})
+        coverage_report = dict((outline or {}).get("coverage_diagnostics") or {})
+        basis = dict((outline or {}).get("classification_basis") or {})
+        outline_diagnostics = dict((outline or {}).get("taxonomy_diagnostics") or {})
         return {
             "project_id": project_id,
             "topic": str(matrix.get("review_topic") or (discovery or {}).get("topic") or ""),
@@ -641,6 +944,20 @@ class PlanningService:
                 else None
             ),
             "outline_current": outline_current,
+            "scope_contract": scope_contract,
+            "scope_diagnostics": dict(
+                (blueprint or {}).get("scope_diagnostics")
+                or scope_report
+            ),
+            "coverage_diagnostics": dict(
+                (blueprint or {}).get("coverage_diagnostics")
+                or coverage_report
+            ),
+            "classification_basis": basis,
+            "taxonomy_diagnostics": dict(
+                (blueprint or {}).get("taxonomy_diagnostics")
+                or outline_diagnostics
+            ),
             "outline_candidates": generated + reference_candidates,
             "reference_outline_candidates": reference_candidates,
             "legacy_reference_outline_count": len(all_reference_candidates)
@@ -745,11 +1062,12 @@ class PlanningService:
         outline_style: str,
         outline_md: str | None,
         manual: bool,
+        scope_contract: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         principal.require(Permission.PROJECT_WRITE)
         matrix, matrix_artifact = self._matrix(principal, project_id)
-        rows = matrix["rows"]
         project = self._owned_project(principal, project_id)
+        rows = matrix["rows"]
         matrix_ids = set(_paper_ids(rows))
         style = str(outline_style or "").strip().casefold()
         if style == "custom" and not manual:
@@ -795,21 +1113,53 @@ class PlanningService:
                 taxonomy_profile=project.taxonomy_profile,
             )
             complete = True
-        payload = {
-            "outline_style": style,
-            "outline_md": markdown,
-            "outline_complete": complete,
-            "selection_source": "manual" if manual else "custom_draft" if not complete else "template",
-            "manually_edited": bool(manual),
-            "source_matrix_artifact_id": matrix_artifact.id,
-            "saved_at": utc_now().isoformat(),
-        }
         current_outline, current_outline_artifact = self._read_json(
             principal,
             project_id,
             OUTLINE_LOGICAL_NAME,
             required=False,
         )
+        parsed_sections = _outline_sections(markdown) if complete else []
+        diagnostics = taxonomy_diagnostics(parsed_sections, _paper_ids(rows))
+        previous_scope = (
+            (current_outline or {}).get("scope_contract")
+            if isinstance(current_outline, dict)
+            else None
+        )
+        previous_style = str((current_outline or {}).get("outline_style") or "")
+        scope_input: dict[str, Any] | None = None
+        if isinstance(scope_contract, dict):
+            scope_input = {**scope_contract, "source": "user_edited"}
+        elif (
+            isinstance(previous_scope, dict)
+            and previous_scope.get("source") == "user_edited"
+            and previous_style == style
+        ):
+            scope_input = previous_scope
+        scope = derive_scope_contract(
+            matrix.get("review_topic"),
+            style,
+            rows,
+            current=scope_input,
+        )
+        scope_report = scope_diagnostics(scope)
+        coverage_report = coverage_diagnostics(scope, rows)
+        basis = classification_basis(style)
+        payload = {
+            "schema_version": ACADEMIC_SCHEMA_VERSION,
+            "outline_style": style,
+            "outline_md": markdown,
+            "outline_complete": complete,
+            "selection_source": "manual" if manual else "custom_draft" if not complete else "template",
+            "manually_edited": bool(manual),
+            "source_matrix_artifact_id": matrix_artifact.id,
+            "scope_contract": scope,
+            "scope_diagnostics": scope_report,
+            "coverage_diagnostics": coverage_report,
+            "classification_basis": basis,
+            "taxonomy_diagnostics": diagnostics,
+            "saved_at": utc_now().isoformat(),
+        }
         current_state = self.repository.get_stage_state(
             principal.user_id, project_id, "matrix"
         )
@@ -823,6 +1173,11 @@ class PlanningService:
             and bool(current_outline.get("outline_complete")) == complete
             and str(current_outline.get("source_matrix_artifact_id") or "")
             == matrix_artifact.id
+            and current_outline.get("scope_contract") == scope
+            and current_outline.get("scope_diagnostics") == scope_report
+            and current_outline.get("coverage_diagnostics") == coverage_report
+            and current_outline.get("classification_basis") == basis
+            and current_outline.get("taxonomy_diagnostics") == diagnostics
         ):
             return {
                 "project_id": project_id,
@@ -830,6 +1185,11 @@ class PlanningService:
                 "selected_outline_md": markdown,
                 "outline_complete": complete,
                 "blueprint_pending": complete,
+                "scope_contract": scope,
+                "scope_diagnostics": scope_report,
+                "coverage_diagnostics": coverage_report,
+                "classification_basis": basis,
+                "taxonomy_diagnostics": diagnostics,
                 "outline_artifact_id": current_outline_artifact.id,
                 "matrix_revision": current_state.revision,
                 "unchanged": True,
@@ -865,6 +1225,11 @@ class PlanningService:
             "selected_outline_md": markdown,
             "outline_complete": complete,
             "blueprint_pending": complete,
+            "scope_contract": scope,
+            "scope_diagnostics": scope_report,
+            "coverage_diagnostics": coverage_report,
+            "classification_basis": basis,
+            "taxonomy_diagnostics": diagnostics,
             "outline_artifact_id": published[OUTLINE_LOGICAL_NAME].id,
             "matrix_revision": state.revision,
         }
@@ -1129,6 +1494,7 @@ class PlanningService:
     ) -> dict[str, Any]:
         principal.require(Permission.PROJECT_WRITE)
         matrix, matrix_artifact = self._matrix(principal, project_id)
+        project = self._owned_project(principal, project_id)
         discovery, _discovery_artifact = self._read_json(
             principal, project_id, DISCOVERY_LOGICAL_NAME, required=False
         )
@@ -1142,6 +1508,27 @@ class PlanningService:
         matrix_ids = set(_paper_ids(matrix["rows"]))
         parsed = _outline_sections(str(outline["outline_md"]))
         matrix_order = _paper_ids(matrix["rows"])
+        auto_routing_adjustments: list[dict[str, Any]] = []
+        resolved_outline_md = str(outline["outline_md"])
+        if not bool(outline.get("manually_edited")):
+            _tags_by_paper, text_by_paper = self._outline_sources(
+                principal, matrix["rows"]
+            )
+            parsed, auto_routing_adjustments = (
+                self._auto_repair_generated_routing_sections(
+                    parsed,
+                    matrix["rows"],
+                    text_by_paper,
+                    outline_style=str(outline.get("outline_style") or ""),
+                    taxonomy_profile=project.taxonomy_profile,
+                )
+            )
+            if auto_routing_adjustments:
+                resolved_outline_md = _outline_markdown_from_sections(
+                    parsed,
+                    outline_style=str(outline.get("outline_style") or ""),
+                    automatically_adjusted=True,
+                )
         prepared = []
         for index, section in enumerate(parsed, start=1):
             role = infer_section_role(
@@ -1162,6 +1549,9 @@ class PlanningService:
                     "section_id": f"S{len(prepared) + 1:02d}",
                     "section_role": role,
                     "paper_ids": assigned,
+                    "context_paper_ids": list(
+                        dict.fromkeys(section.get("context_paper_ids") or [])
+                    ),
                 }
             )
 
@@ -1173,10 +1563,12 @@ class PlanningService:
             role = section["section_role"]
             primary = list(section["primary_papers"])
             supporting = list(section["supporting_papers"])
+            context_papers = list(section.get("context_paper_ids") or [])
             evidence_papers = list(dict.fromkeys([*primary, *supporting]))
             if role == "introduction":
                 thesis = (
-                    "Define the review scope, organizing question, and evidence landscape "
+                    str(section.get("purpose") or "").strip()
+                    or "Define the review scope, organizing question, and evidence landscape "
                     "without repeating paper-level results from the body sections."
                 )
                 problem = "What problem, scope, and organizing logic does this review establish?"
@@ -1188,7 +1580,8 @@ class PlanningService:
                 target_words = 900
             elif role == "conclusion":
                 thesis = (
-                    "Synthesize cross-section findings, limitations, and future directions "
+                    str(section.get("purpose") or "").strip()
+                    or "Synthesize cross-section findings, limitations, and future directions "
                     "without replaying individual paper summaries."
                 )
                 problem = "What conclusions hold across sections, and where do important limits remain?"
@@ -1199,7 +1592,7 @@ class PlanningService:
                 figure_need = "None unless a cross-section synthesis figure adds new comparative value."
                 target_words = 900
             else:
-                thesis = f"Synthesize evidence for {section['title']}."
+                thesis = str(section.get("purpose") or "").strip() or f"Synthesize evidence for {section['title']}."
                 problem = f"What does the current evidence establish about {section['title']}?"
                 if primary:
                     claim = (
@@ -1223,6 +1616,7 @@ class PlanningService:
                     "major_papers": primary,
                     "primary_papers": primary,
                     "supporting_papers": supporting,
+                    "context_papers": context_papers,
                     "review_claims": [{"claim": claim}],
                     "figure_or_table_needs": [
                         {
@@ -1240,21 +1634,53 @@ class PlanningService:
                     "target_words": target_words,
                 }
             )
+            sections[-1]["academic_contract"] = section_academic_contract(sections[-1])
+            sections[-1]["synthesis_requirements"] = synthesis_requirements(
+                sections[-1], taxonomy_profile=project.taxonomy_profile
+            )
         if not sections:
             raise WorkflowValidationError("The selected outline contains no usable sections.")
+        diagnostics = taxonomy_diagnostics(sections, matrix_order)
+        contextual_paper_ids = list(
+            dict.fromkeys(
+                paper_id
+                for section in sections
+                for paper_id in section.get("context_papers") or []
+            )
+        )
+        scope = derive_scope_contract(
+            matrix.get("review_topic") or (discovery or {}).get("topic"),
+            outline.get("outline_style"),
+            matrix["rows"],
+            current=outline.get("scope_contract")
+            if isinstance(outline.get("scope_contract"), dict)
+            else None,
+        )
+        scope_report = scope_diagnostics(scope)
+        coverage_report = coverage_diagnostics(scope, matrix["rows"])
+        basis = dict(outline.get("classification_basis") or classification_basis(outline.get("outline_style")))
         matrix_state = self.repository.get_stage_state(
             principal.user_id, project_id, "matrix"
         )
         if matrix_state is None:
             raise WorkflowConflict("The current Matrix stage state is missing.")
         blueprint = {
+            "schema_version": ACADEMIC_SCHEMA_VERSION,
             "project_id": project_id,
             "review_topic": str(
                 matrix.get("review_topic") or (discovery or {}).get("topic") or ""
             ),
             "outline_style": outline.get("outline_style"),
+            "scope_contract": scope,
+            "scope_diagnostics": scope_report,
+            "coverage_diagnostics": coverage_report,
+            "classification_basis": basis,
+            "taxonomy_profile": project.taxonomy_profile,
+            "taxonomy_diagnostics": diagnostics,
             "source_matrix_artifact_id": matrix_artifact.id,
             "source_outline_artifact_id": outline_artifact.id,
+            "resolved_outline_md": resolved_outline_md,
+            "auto_routing_adjustments": auto_routing_adjustments,
             "rule_pack": "general",
             "rule_pack_path": "references/rule_packs/general",
             "generated_at": utc_now().isoformat(),
@@ -1262,8 +1688,20 @@ class PlanningService:
                 "mode": "single_primary_section_with_supporting_cross_references",
                 "primary_section_by_paper": primary_owner,
                 "introduction_and_conclusion_are_synthesis_only": True,
+                "contextual_papers": contextual_paper_ids,
+                "contextual_paper_policy": (
+                    "Field-level reviews and perspectives may frame scope and history, "
+                    "but do not substitute for primary body evidence."
+                ),
             },
             "sections": sections,
+            "synthesis_requirements": [
+                {
+                    "section_id": section["section_id"],
+                    "components": section["synthesis_requirements"],
+                }
+                for section in sections
+            ],
             "section_writing_plan_md": "# Section Writing Plan\n\n"
             + "\n".join(
                 f"- {section['section_id']} {section['title']}: "
@@ -1330,6 +1768,18 @@ class PlanningService:
         ):
             raise WorkflowConflict(
                 "Blueprint is out of date. Regenerate it from the current Matrix and outline."
+            )
+        diagnostics = blueprint.get("taxonomy_diagnostics")
+        scope_report = blueprint.get("scope_diagnostics")
+        blocking_issues = []
+        if isinstance(scope_report, dict) and not scope_report.get("can_confirm", False):
+            blocking_issues.extend(scope_report.get("issues") or [])
+        if isinstance(diagnostics, dict) and not diagnostics.get("can_confirm", False):
+            blocking_issues.extend(diagnostics.get("issues") or [])
+        if blocking_issues:
+            raise WorkflowConflict(
+                "Blueprint cannot be confirmed until Scope and taxonomy blockers are resolved in the existing planning page.",
+                details={"issues": blocking_issues},
             )
         state = self.repository.compare_and_set_stage(
             principal.user_id,

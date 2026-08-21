@@ -11,7 +11,7 @@ describe("visual outline format", () => {
     });
     expect(markdown).toContain("## 1. Catalyst families");
     expect(markdown).toContain("Assigned papers: P001, P002.");
-    expect(parseOutlineMarkdown(markdown).sections[0]).toEqual({ title: "Catalyst families", purpose: "Compare catalyst systems.", paperIds: ["P001", "P002"], notes: "Figure plan: overview." });
+    expect(parseOutlineMarkdown(markdown).sections[0]).toEqual({ title: "Catalyst families", purpose: "Compare catalyst systems.", paperIds: ["P001", "P002"], contextPaperIds: [], notes: "Figure plan: overview." });
   });
 
   it("preserves format-only introduction roles without requiring uploaded content", () => {

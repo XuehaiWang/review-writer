@@ -6,11 +6,14 @@ type CompletedSection = {
   heading?: string;
 };
 
+type FailedSection = CompletedSection & { error?: string };
+
 type SectionProgressResult = {
   phase?: string;
   current_section_id?: string;
   current_heading?: string;
   completed_sections?: CompletedSection[];
+  failed_sections?: FailedSection[];
   evidence_hit_count?: number;
   evidence_paper_count?: number;
 };
@@ -29,6 +32,7 @@ export function SectionJobProgress({ job }: { job: Job }) {
   const percentage = total > 0 ? Math.round((current / total) * 100) : undefined;
   const live = progressResult(job);
   const completed = Array.isArray(live.completed_sections) ? live.completed_sections : [];
+  const failed = Array.isArray(live.failed_sections) ? live.failed_sections : [];
   const active = ["queued", "running", "cancel_requested"].includes(job.status);
 
   let title = text("章节任务正在排队", "Section job queued");
@@ -38,11 +42,14 @@ export function SectionJobProgress({ job }: { job: Job }) {
       title = text("章节正文已全部生成", "All section prose generated");
       detail = text("正在整理章节报告和图像候选。", "Finalizing the report and figure candidates.");
     } else if (live.current_heading) {
-      if (live.phase === "validating") {
-        title = text(`正在校验证据：${live.current_heading}`, `Validating evidence: ${live.current_heading}`);
-      } else {
-        title = text(`正在生成：${live.current_heading}`, `Generating: ${live.current_heading}`);
-      }
+      const phaseTitle: Record<string, string> = {
+        planning_claims: text(`正在规划论证：${live.current_heading}`, `Planning claims: ${live.current_heading}`),
+        drafting: text(`正在按计划成文：${live.current_heading}`, `Realizing plan: ${live.current_heading}`),
+        reviewing: text(`正在自动审校：${live.current_heading}`, `Reviewing: ${live.current_heading}`),
+        validating: text(`正在校验证据：${live.current_heading}`, `Validating evidence: ${live.current_heading}`),
+        continuing_after_failure: text(`该章失败，继续后续章节：${live.current_heading}`, `Section failed; continuing after: ${live.current_heading}`),
+      };
+      title = phaseTitle[String(live.phase || "")] || text(`正在生成：${live.current_heading}`, `Generating: ${live.current_heading}`);
       const evidenceDetail = Number(live.evidence_hit_count || 0) > 0
         ? text(`已找到 ${Number(live.evidence_hit_count)} 个证据段，来自 ${Number(live.evidence_paper_count || 0)} 篇论文。`, `${Number(live.evidence_hit_count)} evidence passages found across ${Number(live.evidence_paper_count || 0)} papers.`)
         : "";
@@ -84,6 +91,7 @@ export function SectionJobProgress({ job }: { job: Job }) {
       ><span style={percentage === undefined ? undefined : { width: `${percentage}%` }} /></div>
       <p>{detail}</p>
       {completed.length ? <ol className="section-progress-completed">{completed.map((section, index) => <li key={`${section.section_id || "section"}-${index}`}><span>{section.heading || section.section_id || text(`章节 ${index + 1}`, `Section ${index + 1}`)}</span><small>{text("已完成", "Complete")}</small></li>)}</ol> : null}
+      {failed.length ? <ol className="section-progress-completed failed">{failed.map((section, index) => <li key={`failed-${section.section_id || "section"}-${index}`}><span>{section.heading || section.section_id || text(`章节 ${index + 1}`, `Section ${index + 1}`)}</span><small title={section.error || ""}>{text("失败，重试时仅恢复此章", "Failed; retry resumes this section")}</small></li>)}</ol> : null}
     </section>
   );
 }

@@ -1533,10 +1533,11 @@ Move reusable retrieval logic into `review_writer_core`. Scripts should retain o
 
 Primary changes:
 
-- `view/assets/dashboard/review-ui.js`
-- `view/assets/dashboard/review-i18n.js`
+- `frontend/src/features/library/LibraryPage.tsx`
+- `frontend/src/features/discovery/DiscoveryPage.tsx`
+- `frontend/src/i18n/messages.ts`
 - `frontend/src/features/projects/ProjectsPage.tsx`
-- corresponding Dashboard style files.
+- `frontend/src/styles/app.css`.
 
 Add only project taxonomy options, status, sources, index, and evidence displays. Do not redesign the nine-stage layout.
 

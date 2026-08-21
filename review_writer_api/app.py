@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -22,6 +22,7 @@ from .auth import (
     AuthService,
 )
 from .artifact_service import ArtifactService
+from .billing import BillingService
 from .config import ApiSettings
 from .container import ApplicationContainer
 from .credentials import ProviderSettingsError
@@ -50,6 +51,12 @@ from .schemas import (
     AdminProviderAuditResponse,
     AdminProviderSettingsUpdateRequest,
     AdminProviderTestResponse,
+    AdminCreditAdjustmentRequest,
+    AdminUsageSummaryResponse,
+    AdminUserListResponse,
+    AdminUserResponse,
+    AdminUserUpdateRequest,
+    BalanceResponse,
     BrowserAuthConfigResponse,
     HealthResponse,
     LoginRequest,
@@ -70,6 +77,8 @@ from .schemas import (
     ProjectTaxonomyProfileUpdateResponse,
     TaxonomyProfileCatalogResponse,
     RegisterRequest,
+    CreditTransactionListResponse,
+    CreditTransactionResponse,
     UsageSummaryResponse,
     UsageTimelineResponse,
 )
@@ -92,9 +101,6 @@ from .routers.figures import build_figures_router
 from .scientific_runner import ScientificRunner
 from .workflow_repository import WorkflowRepository
 from .workspaces import HostedWorkspaceManager
-from review_writer_core.dashboard_assets import dashboard_page_paths
-
-
 API_VERSION = "v1"
 
 
@@ -133,6 +139,11 @@ def create_app(
             admin_emails=resolved.admin_emails,
         )
         if resolved.deployment_mode == "hosted"
+        else None
+    )
+    billing_service = (
+        BillingService(session_factory)
+        if resolved.deployment_mode == "hosted" and session_factory is not None
         else None
     )
     auth_throttle = AuthAttemptThrottle(
@@ -189,6 +200,7 @@ def create_app(
             scientific_runner=scientific_runner,
             mineru_price_usd_per_page=resolved.mineru_price_usd_per_page,
             mineru_max_concurrency=resolved.mineru_max_concurrency,
+            billing_service=billing_service,
         )
         if session_factory is not None and hosted_workspace_manager is not None
         else None
@@ -213,6 +225,7 @@ def create_app(
             session_factory,
             resolved,
             provider_settings=provider_settings_service,
+            billing_service=billing_service,
         )
         if session_factory is not None and resolved.deployment_mode == "hosted"
         else None
@@ -335,6 +348,7 @@ def create_app(
     app.state.provider_settings_service = provider_settings_service
     app.state.model_gateway = model_gateway
     app.state.auth_service = auth_service
+    app.state.billing_service = billing_service
     app.state.auth_throttle = auth_throttle
     app.state.auth_ip_throttle = auth_ip_throttle
     app.state.session_factory = session_factory
@@ -352,12 +366,10 @@ def create_app(
     app.state.drafts_service = drafts_service
     app.state.final_service = final_service
     app.state.container = container
-    web_root = Path(__file__).resolve().parent / "web"
     view_root = Path(__file__).resolve().parents[1] / "view"
     react_spa_root = Path(__file__).resolve().parents[1] / "frontend" / "dist"
     react_spa_index = react_spa_root / "index.html"
     react_spa_available = react_spa_index.is_file()
-    dashboard_pages = dashboard_page_paths(view_root)
 
     def portal_csp() -> str:
         return "; ".join(
@@ -393,7 +405,7 @@ def create_app(
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         # Library previews and the bundled Ketcher editor are intentionally
-        # rendered by the authenticated dashboard in same-origin iframes.
+        # rendered by the authenticated React workspace in same-origin iframes.
         # Keep every other route non-embeddable and never allow cross-origin
         # framing of these two narrowly scoped surfaces.
         same_origin_frame = (
@@ -411,7 +423,7 @@ def create_app(
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
-        if react_spa_available and request.url.path in {
+        if request.url.path in {
             "/",
             "/admin",
             "/settings",
@@ -646,6 +658,102 @@ def create_app(
     @app.get("/api/v1/me", response_model=PrincipalResponse, tags=["identity"])
     def me(principal: Principal = Depends(current_principal)) -> PrincipalResponse:
         return principal_response(principal)
+
+    if billing_service is not None:
+
+        @app.get("/api/v1/balance", response_model=BalanceResponse, tags=["billing"])
+        def balance(
+            principal: Principal = Depends(current_principal),
+        ) -> BalanceResponse:
+            return BalanceResponse.model_validate(
+                billing_service.account_summary(principal.user_id)
+            )
+
+        @app.get(
+            "/api/v1/balance/transactions",
+            response_model=CreditTransactionListResponse,
+            tags=["billing"],
+        )
+        def balance_transactions(
+            limit: int = 100,
+            principal: Principal = Depends(current_principal),
+        ) -> CreditTransactionListResponse:
+            items = billing_service.transactions(principal.user_id, limit=limit)
+            return CreditTransactionListResponse(
+                items=[CreditTransactionResponse.model_validate(item) for item in items],
+                count=len(items),
+            )
+
+        @app.get(
+            "/api/v1/admin/users",
+            response_model=AdminUserListResponse,
+            tags=["admin"],
+        )
+        def admin_users(
+            q: str = "",
+            limit: int = 200,
+            principal: Principal = Depends(current_principal),
+        ) -> AdminUserListResponse:
+            principal.require(Permission.PROVIDER_MANAGE)
+            items = billing_service.admin_users(query=q, limit=limit)
+            return AdminUserListResponse(
+                items=[AdminUserResponse.model_validate(item) for item in items],
+                count=len(items),
+            )
+
+        @app.patch(
+            "/api/v1/admin/users/{user_id}",
+            response_model=AdminUserResponse,
+            tags=["admin"],
+        )
+        def update_admin_user(
+            user_id: str,
+            payload: AdminUserUpdateRequest,
+            principal: Principal = Depends(current_principal),
+        ) -> AdminUserResponse:
+            principal.require(Permission.PROVIDER_MANAGE)
+            result = billing_service.update_user(
+                actor_user_id=principal.user_id,
+                target_user_id=user_id,
+                role=payload.role,
+                status=payload.status,
+            )
+            return AdminUserResponse.model_validate(result)
+
+        @app.post(
+            "/api/v1/admin/credits/adjustments",
+            response_model=CreditTransactionResponse,
+            tags=["admin"],
+        )
+        def create_admin_credit_adjustment(
+            payload: AdminCreditAdjustmentRequest,
+            idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+            principal: Principal = Depends(current_principal),
+        ) -> CreditTransactionResponse:
+            principal.require(Permission.PROVIDER_MANAGE)
+            transaction = billing_service.adjust(
+                actor_user_id=principal.user_id,
+                target_user_id=payload.target_user_id,
+                amount_usd=payload.amount_usd,
+                reason=payload.reason,
+                idempotency_key=idempotency_key,
+            )
+            return CreditTransactionResponse.model_validate(
+                billing_service._transaction_dict(transaction)
+            )
+
+        @app.get(
+            "/api/v1/admin/usage",
+            response_model=AdminUsageSummaryResponse,
+            tags=["admin"],
+        )
+        def admin_usage(
+            principal: Principal = Depends(current_principal),
+        ) -> AdminUsageSummaryResponse:
+            principal.require(Permission.PROVIDER_MANAGE)
+            return AdminUsageSummaryResponse.model_validate(
+                billing_service.admin_usage_summary()
+            )
 
     @app.get("/api/v1/projects", response_model=ProjectListResponse, tags=["projects"])
     def projects(principal: Principal = Depends(current_principal)) -> ProjectListResponse:
@@ -951,10 +1059,19 @@ def create_app(
                 )
             )
 
-    def portal_response() -> FileResponse:
-        path = react_spa_index if react_spa_available else web_root / "index.html"
+    def portal_response() -> Response:
+        if not react_spa_available:
+            return Response(
+                content=(
+                    "The React frontend build is unavailable. "
+                    "Run the frontend build or use the production container."
+                ),
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                media_type="text/plain",
+                headers={"Cache-Control": "no-store"},
+            )
         return FileResponse(
-            path,
+            react_spa_index,
             media_type="text/html",
             headers={"Cache-Control": "no-store, max-age=0, must-revalidate"},
         )
@@ -963,7 +1080,6 @@ def create_app(
     def hosted_portal() -> FileResponse:
         return portal_response()
 
-    app.mount("/assets/app", StaticFiles(directory=web_root), name="hosted-portal-assets")
     if react_spa_available:
         app.mount(
             "/assets/react",
@@ -971,76 +1087,34 @@ def create_app(
             name="react-spa-assets",
         )
     app.mount(
-        "/assets",
-        StaticFiles(directory=view_root / "assets"),
-        name="workflow-assets",
+        "/assets/ketcher",
+        StaticFiles(directory=view_root / "assets" / "ketcher"),
+        name="ketcher-assets",
     )
-
-    def dashboard_response(route: str) -> FileResponse:
-        return FileResponse(
-            dashboard_pages[route],
-            media_type="text/html",
-            headers={"Cache-Control": "no-store, max-age=0, must-revalidate"},
-        )
 
     def require_native_workflow() -> None:
         if workflow_repository is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
 
+    @app.get("/login", include_in_schema=False)
+    @app.get("/workspace", include_in_schema=False)
     @app.get("/settings", include_in_schema=False)
-    def workflow_settings_page(
-        _principal: Principal = Depends(current_principal),
-    ) -> Response:
-        if react_spa_available:
-            return portal_response()
-        return RedirectResponse(url="/#settings", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
-
     @app.get("/admin", include_in_schema=False)
-    def admin_page(
-        principal: Principal = Depends(current_principal),
-    ) -> Response:
-        principal.require(Permission.PROVIDER_MANAGE)
-        if react_spa_available:
-            return portal_response()
-        return RedirectResponse(url="/settings", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
-
     @app.get("/library", include_in_schema=False)
     @app.get("/discovery", include_in_schema=False)
+    @app.get("/planning", include_in_schema=False)
     @app.get("/sections", include_in_schema=False)
+    @app.get("/images", include_in_schema=False)
     @app.get("/draft", include_in_schema=False)
     @app.get("/final", include_in_schema=False)
     def workflow_page(
-        request: Request,
-        _principal: Principal = Depends(current_principal),
         _workflow: None = Depends(require_native_workflow),
     ) -> Response:
-        if react_spa_available:
-            return portal_response()
-        return dashboard_response(request.url.path)
-
-    @app.get("/planning", include_in_schema=False)
-    def planning_page(
-        request: Request,
-        _principal: Principal = Depends(current_principal),
-        _workflow: None = Depends(require_native_workflow),
-    ) -> Response:
-        if react_spa_available:
-            return portal_response()
-        route = "/blueprint" if request.query_params.get("tab") == "blueprint" else "/matrix"
-        return dashboard_response(route)
-
-    @app.get("/images", include_in_schema=False)
-    def image_page(
-        request: Request,
-        _principal: Principal = Depends(current_principal),
-        _workflow: None = Depends(require_native_workflow),
-    ) -> Response:
-        if react_spa_available:
-            return portal_response()
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="The React frontend build is required for the image and SVG workspace.",
-        )
+        # BrowserRouter owns these paths.  Always return the SPA shell on a
+        # top-level page refresh; React obtains the current identity from the
+        # authenticated API and redirects signed-out/unauthorised users.  The
+        # HTML shell contains no protected project data.
+        return portal_response()
 
     @app.get("/matrix", include_in_schema=False)
     def matrix_redirect(

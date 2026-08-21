@@ -41,9 +41,39 @@ services:
       REVIEW_WRITER_MIGRATION_ACCEPT_FILE_DRIFT: ${REVIEW_WRITER_MIGRATION_ACCEPT_FILE_DRIFT:-false}
     volumes:
       - review_state:/app/.review-writer
-      - "${REVIEW_WRITER_MIGRATION_REPORTS_DIR:-./migration-reports}:/app/migration-reports"
-      - "${REVIEW_WRITER_MIGRATION_BACKUPS_DIR:-./migration-backups}:/app/migration-backups"
+      - "${REVIEW_WRITER_MIGRATION_REPORTS_DIR:-./.review-writer/migration-reports}:/app/migration-reports"
+      - "${REVIEW_WRITER_MIGRATION_BACKUPS_DIR:-./.review-writer/migration-backups}:/app/migration-backups"
     restart: "no"
+
+  pdf-renderer:
+    image: review-writer-pdf-renderer:${REVIEW_WRITER_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.pdf-renderer
+    environment:
+      REVIEW_WRITER_PDF_RENDERER_TOKEN: "${REVIEW_WRITER_PDF_RENDERER_TOKEN:-review-writer-local-pdf-renderer}"
+    expose:
+      - "8781"
+    networks:
+      - pdf_internal
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+      - /home/pdfrenderer:size=64m,mode=700,uid=10002,gid=10002
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2.0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8781/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
 
   api:
     image: review-writer-api:${REVIEW_WRITER_IMAGE_TAG:-latest}
@@ -53,6 +83,8 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      pdf-renderer:
+        condition: service_healthy
     environment:
       REVIEW_WRITER_DEPLOYMENT_MODE: hosted
       REVIEW_WRITER_POSTGRES_HOST: postgres
@@ -112,6 +144,8 @@ services:
       # destinations remain blocked by the scientific-task egress guard.
       REVIEW_WRITER_TRUSTED_PROXY_NETWORKS: ${REVIEW_WRITER_TRUSTED_PROXY_NETWORKS:-198.18.0.0/15,fdfe:dcba:9876::/48}
       REVIEW_WRITER_HOSTED_WORKSPACE_ROOT: /app/.review-writer/hosted-workspaces
+      REVIEW_WRITER_PDF_RENDERER_URL: http://pdf-renderer:8781/render
+      REVIEW_WRITER_PDF_RENDERER_TOKEN: "${REVIEW_WRITER_PDF_RENDERER_TOKEN:-review-writer-local-pdf-renderer}"
       SCIATLAS_API_BASE_URL: ${SCIATLAS_API_BASE_URL:-}
       SCIATLAS_API_KEY: ${SCIATLAS_API_KEY:-}
       SCIATLAS_TIMEOUT: ${SCIATLAS_TIMEOUT:-240}
@@ -120,9 +154,16 @@ services:
       - "${REVIEW_WRITER_BIND_ADDRESS:-127.0.0.1}:${REVIEW_WRITER_HTTP_PORT:-8770}:8770"
     volumes:
       - review_state:/app/.review-writer
-      - "${REVIEW_WRITER_MIGRATION_REPORTS_DIR:-./migration-reports}:/app/migration-reports:ro"
+    networks:
+      - default
+      - pdf_internal
     restart: unless-stopped
 
 volumes:
   postgres_data:
   review_state:
+
+networks:
+  default: {}
+  pdf_internal:
+    internal: true

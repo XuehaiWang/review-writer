@@ -118,6 +118,8 @@ def mark_provider_call_completed() -> None:
 
 
 def _error_category(status: int) -> str:
+    if status == 402:
+        return "insufficient_credit"
     if status == 429:
         return "transient_rate_limited"
     if status in {502, 503, 504, 524}:

@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiRequest, jsonBody } from "../../api/client";
-import { modelCatalogQuery, providerSettingsQuery, queryKeys, usageSummaryQuery, usageTimelineQuery } from "../../api/queries";
-import type { ModelTier, Project, UsageTimelineItem } from "../../api/types";
+import { balanceQuery, balanceTransactionsQuery, modelCatalogQuery, providerSettingsQuery, queryKeys, usageSummaryQuery, usageTimelineQuery } from "../../api/queries";
+import type { CreditTransaction, ModelTier, Project, UsageTimelineItem } from "../../api/types";
 import { ErrorState } from "../../components/ErrorState";
 import { useSelectedProject } from "../../components/ProjectSelector";
 import { useUiText } from "../../i18n/useUiText";
@@ -56,14 +56,24 @@ function UsageChart({ items }: { items: UsageTimelineItem[] }) {
   );
 }
 
+function transactionLabel(item: CreditTransaction, text: (zh: string, en: string) => string) {
+  if (item.transaction_type === "admin_adjustment") return text("管理员额度调整", "Administrative adjustment");
+  if (item.transaction_type === "reservation") return text("任务费用冻结", "Job cost reserved");
+  if (item.transaction_type === "settlement") return text("任务实际结算", "Job cost settled");
+  if (item.transaction_type === "release") return text("冻结额度释放", "Reservation released");
+  return item.transaction_type;
+}
+
 export function SettingsPage() {
   const { text } = useUiText();
   const queryClient = useQueryClient();
   const { projects, selected: project, selectProject } = useSelectedProject();
   const providers = useQuery(providerSettingsQuery);
   const catalog = useQuery(modelCatalogQuery);
-  const usage = useQuery(usageSummaryQuery);
-  const timeline = useQuery(usageTimelineQuery(30));
+  const usage = useQuery(usageSummaryQuery(project?.project_id || ""));
+  const timeline = useQuery(usageTimelineQuery(30, project?.project_id || ""));
+  const balance = useQuery(balanceQuery);
+  const transactions = useQuery(balanceTransactionsQuery);
   const [pendingTier, setPendingTier] = useState<Project["model_tier"]>("terra");
   const [saved, setSaved] = useState(false);
   const records = new Map(providers.data?.items.map((item) => [item.provider_kind, item]));
@@ -96,8 +106,10 @@ export function SettingsPage() {
     void catalog.refetch();
     void usage.refetch();
     void timeline.refetch();
+    void balance.refetch();
+    void transactions.refetch();
   };
-  const isRefreshing = providers.isFetching || catalog.isFetching || usage.isFetching || timeline.isFetching;
+  const isRefreshing = providers.isFetching || catalog.isFetching || usage.isFetching || timeline.isFetching || balance.isFetching || transactions.isFetching;
 
   return (
     <main className="workspace page-container settings-page">
@@ -163,10 +175,53 @@ export function SettingsPage() {
         </section>
       </div>
 
+      <section className="surface balance-dashboard">
+        <div className="section-heading">
+          <div>
+            <span className="step-label">BILLING</span>
+            <h2>{text("我的余额与消费明细", "My balance and transactions")}</h2>
+            <p>{text("外部模型和 PDF 解析调用前会临时冻结预计费用；成功后按实际用量扣除，失败会自动释放。", "Estimated cost is reserved before external model and PDF parsing calls, then settled to actual usage or released on failure.")}</p>
+          </div>
+          {balance.data ? <span className="billing-mode-badge billing-mode-live">{text("按实际用量结算", "Usage-based billing")}</span> : null}
+        </div>
+        {balance.error ? <ErrorState error={balance.error} onRetry={() => balance.refetch()} /> : null}
+        <div className="balance-summary-grid">
+          <article className="balance-primary-card">
+            <span>{text("可用余额", "Available balance")}</span>
+            <strong>{balance.data ? `$${Number(balance.data.available_usd).toFixed(4)}` : "—"}</strong>
+            <small>USD</small>
+          </article>
+          <article><span>{text("账户余额", "Account balance")}</span><strong>{balance.data ? `$${Number(balance.data.balance_usd).toFixed(4)}` : "—"}</strong><small>{text("含当前冻结额度", "includes current holds")}</small></article>
+          <article><span>{text("任务冻结中", "Reserved for jobs")}</span><strong>{balance.data ? `$${Number(balance.data.reserved_usd).toFixed(4)}` : "—"}</strong><small>{text("任务结束后结算或释放", "settled or released after use")}</small></article>
+          <article><span>{text("累计实际扣除", "Lifetime debits")}</span><strong>{balance.data ? `$${Number(balance.data.lifetime_debited_usd).toFixed(4)}` : "—"}</strong><small>{text("包含管理员人工扣减", "includes administrative debits")}</small></article>
+        </div>
+        {transactions.error ? <ErrorState error={transactions.error} onRetry={() => transactions.refetch()} /> : null}
+        <div className="balance-ledger">
+          <div className="balance-ledger-head"><strong>{text("最近资金流水", "Recent ledger activity")}</strong><small>{text("只追加审计记录，不会覆盖历史", "Append-only audit history")}</small></div>
+          {transactions.data?.items.length ? transactions.data.items.map((item) => {
+            const balanceDelta = Number(item.balance_delta_usd);
+            const reservedDelta = Number(item.reserved_delta_usd);
+            const displayDelta = balanceDelta !== 0 ? balanceDelta : reservedDelta;
+            return (
+              <article key={item.id}>
+                <div>
+                  <strong>{transactionLabel(item, text)}</strong>
+                  <small>{item.reason || text("系统自动记录", "Recorded automatically")}{item.job_id ? ` · Job ${item.job_id.slice(0, 8)}` : ""}</small>
+                </div>
+                <div className="balance-ledger-amount">
+                  <strong className={displayDelta < 0 ? "negative" : displayDelta > 0 ? "positive" : ""}>{displayDelta > 0 ? "+" : ""}${displayDelta.toFixed(4)}</strong>
+                  <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time>
+                </div>
+              </article>
+            );
+          }) : <div className="empty-state compact-empty">{text("还没有资金流水。管理员添加额度或任务产生费用后会显示在这里。", "No ledger activity yet. Adjustments and task costs will appear here.")}</div>}
+        </div>
+      </section>
+
       <section className="surface usage-dashboard">
         <div className="section-heading">
-          <div><span className="step-label">{text("累计统计", "Cumulative statistics")}</span><h2>{text("我的用量", "My usage")}</h2><p>{text("统计已经由服务器内部网关完成的请求；当前仅记录费用，不自动扣费。", "Counts completed internal-gateway requests. Costs are recorded only and are not automatically charged.")}</p></div>
-          {usage.data ? <span className="billing-mode-badge">{text("仅记录，不扣费", "Record only")}</span> : null}
+          <div><span className="step-label">{text("累计统计", "Cumulative statistics")}</span><h2>{text("我的项目用量", "My project usage")}</h2><p>{text("统计服务器内部网关已经完成的文本、图像和 MinerU 请求，用于核对实际结算成本。", "Counts completed text, image, and MinerU requests from the internal gateway so you can verify settled costs.")}</p></div>
+          {usage.data ? <span className="billing-mode-badge">{usage.data.billing_mode === "credit" ? text("余额结算已启用", "Credit billing active") : text("仅记录", "Record only")}</span> : null}
         </div>
         {usage.error ? <ErrorState error={usage.error} onRetry={() => usage.refetch()} /> : null}
         <div className="usage-summary-grid">

@@ -380,6 +380,99 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertEqual(["P003", "P004", "P007"], groups["terminal alkynes"])
         self.assertEqual(["P005", "P006"], groups["conjugated enynes"])
 
+    def test_chemistry_outline_reroutes_allene_evidence_without_catch_all(self) -> None:
+        service = self.app.state.planning_service
+        rows = [{"paper_id": f"P{index:03d}"} for index in range(1, 7)]
+        text_by_paper = {
+            "P001": "enantioselective isomerization of 3-alkynoates to chiral allenoates",
+            "P002": "this review will highlight allenes in catalytic asymmetric synthesis",
+            "P003": "phase-transfer functionalization of 1-alkylallene-1,3-dicarboxylates",
+            "P004": "palladium synthesis of axially chiral (allenylmethyl)silanes",
+            "P005": "hydroboration of but-1-en-3-ynes to axially chiral allenylboranes",
+            "P006": "resolution of an allene hydrocarbon into optical antipodes",
+        }
+
+        outline = service._outline_document(
+            "substrate",
+            rows,
+            tags_by_paper={paper_id: {} for paper_id in text_by_paper},
+            text_by_paper=text_by_paper,
+            taxonomy_profile="chemistry_general",
+        )
+
+        self.assertNotIn("Routing required", outline)
+        self.assertIn("Context papers: P002.", outline)
+        self.assertIn("## 1. alkynoates", outline)
+        self.assertIn("preformed substituted allenes", outline)
+        self.assertIn("silyl-substituted diene precursors", outline)
+        self.assertIn("enynes", outline)
+
+    def test_chemistry_outline_routes_resolution_and_enynamide_titles(self) -> None:
+        service = self.app.state.planning_service
+        rows = [{"paper_id": "P001"}, {"paper_id": "P002"}]
+        groups = service._semantic_outline_groups(
+            rows,
+            {
+                "P001": "chemoenzymatic dynamic kinetic resolution of axially chiral allenes",
+                "P002": "rhodium-catalyzed 1,6-addition of arylboronic acids to enynamides",
+            },
+            tag_key="substrate",
+            taxonomy_profile="chemistry_general",
+        )
+
+        self.assertEqual(["P001"], groups["preformed substituted allenes"])
+        self.assertEqual(["P002"], groups["enynes"])
+        self.assertNotIn("Routing required — reassign these papers", groups)
+
+    def test_generated_routing_placeholder_is_repaired_before_blueprint(self) -> None:
+        service = self.app.state.planning_service
+        sections = [
+            {
+                "title": "Introduction",
+                "section_role": "introduction",
+                "paper_ids": [],
+            },
+            {
+                "title": "preformed substituted allenes",
+                "section_role": "body",
+                "paper_ids": ["P003"],
+            },
+            {
+                "title": "enynes",
+                "section_role": "body",
+                "paper_ids": ["P004"],
+            },
+            {
+                "title": "Routing required — reassign these papers",
+                "section_role": "body",
+                "paper_ids": ["P001", "P002"],
+            },
+            {
+                "title": "Conclusion",
+                "section_role": "conclusion",
+                "paper_ids": [],
+            },
+        ]
+        repaired, adjustments = service._auto_repair_generated_routing_sections(
+            sections,
+            [{"paper_id": f"P00{index}"} for index in range(1, 5)],
+            {
+                "P001": "chemoenzymatic dynamic kinetic resolution of axially chiral allenes",
+                "P002": "enantioselective 1,6-addition to enynamides",
+            },
+            outline_style="substrate",
+            taxonomy_profile="chemistry_general",
+        )
+
+        by_title = {section["title"]: section for section in repaired}
+        self.assertNotIn("Routing required — reassign these papers", by_title)
+        self.assertEqual(
+            ["P003", "P001"],
+            by_title["preformed substituted allenes"]["paper_ids"],
+        )
+        self.assertEqual(["P004", "P002"], by_title["enynes"]["paper_ids"])
+        self.assertEqual(2, len(adjustments))
+
     def test_outline_sources_prefer_confirmed_or_automatic_project_tags(self) -> None:
         service = self.app.state.planning_service
         confirmed_tags, _ = service._outline_sources(
@@ -604,6 +697,91 @@ class PlanningV1Tests(unittest.TestCase):
             ]
         )
         self.assertEqual(selected["outline_artifact_id"], blueprint["source_outline_artifact_id"])
+
+    def test_planning_bundle_exposes_scope_and_synthesis_requirements(self) -> None:
+        with TestClient(self.app) as client:
+            self.choose_outline(client, "reaction")
+            generated = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/blueprint",
+                json={"revision": 0},
+                headers=self.headers(),
+            )
+        self.assertEqual(200, generated.status_code, generated.text)
+        blueprint = generated.json()["section_blueprint"]
+        self.assertTrue(blueprint["scope_diagnostics"]["can_confirm"])
+        self.assertTrue(blueprint["taxonomy_diagnostics"]["can_confirm"])
+        self.assertEqual(
+            "reaction_strategy",
+            blueprint["scope_contract"]["primary_navigation_axis"],
+        )
+        self.assertTrue(blueprint["synthesis_requirements"])
+        self.assertTrue(
+            all("academic_contract" in section for section in blueprint["sections"])
+        )
+
+    def test_catch_all_taxonomy_cannot_be_confirmed(self) -> None:
+        all_papers = ", ".join(f"P{index:03d}" for index in range(1, 36))
+        outline = (
+            "# Review\n\n"
+            "## Introduction\nSection role: introduction\nPurpose: define scope.\n\n"
+            "## Other or unspecified\nSection role: body\n"
+            f"Assigned papers: {all_papers}.\n\n"
+            "## Conclusion\nSection role: conclusion\nPurpose: synthesize.\n"
+        )
+        with TestClient(self.app) as client:
+            selected = self.choose_outline(client, "custom")
+            saved = client.put(
+                f"/api/v1/projects/{self.project_id}/planning/outline",
+                json={
+                    "revision": selected["matrix_revision"],
+                    "outline_style": "custom",
+                    "outline_md": outline,
+                },
+                headers=self.headers(),
+            )
+            self.assertEqual(200, saved.status_code, saved.text)
+            generated = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/blueprint",
+                json={"revision": 0},
+                headers=self.headers(),
+            )
+            self.assertEqual(200, generated.status_code, generated.text)
+            blueprint = generated.json()["section_blueprint"]
+            confirmed = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/blueprint/confirm",
+                json={"revision": generated.json()["blueprint_revision"]},
+                headers=self.headers(),
+            )
+        self.assertFalse(blueprint["taxonomy_diagnostics"]["can_confirm"])
+        self.assertEqual(409, confirmed.status_code, confirmed.text)
+        self.assertEqual(
+            "taxonomy.catch_all_body_section",
+            confirmed.json()["error"]["details"]["issues"][0]["rule_id"],
+        )
+
+    def test_scope_can_be_edited_with_the_existing_outline_save(self) -> None:
+        with TestClient(self.app) as client:
+            selected = self.choose_outline(client, "reaction")
+            planning = self.planning(client)
+            scope = dict(planning["scope_contract"])
+            scope["target_question"] = "Which stereocontrol strategies are transferable?"
+            saved = client.put(
+                f"/api/v1/projects/{self.project_id}/planning/outline",
+                json={
+                    "revision": selected["matrix_revision"],
+                    "outline_style": "reaction",
+                    "outline_md": planning["selected_outline_md"],
+                    "scope_contract": scope,
+                },
+                headers=self.headers(),
+            )
+            self.assertEqual(200, saved.status_code, saved.text)
+            reloaded = self.planning(client)
+        self.assertEqual(
+            "Which stereocontrol strategies are transferable?",
+            reloaded["scope_contract"]["target_question"],
+        )
+        self.assertEqual("user_edited", reloaded["scope_contract"]["source"])
 
     def test_duplicate_body_assignment_becomes_supporting_cross_reference(self) -> None:
         with TestClient(self.app) as client:

@@ -106,11 +106,22 @@ class TaxonomyProfileApiTests(unittest.TestCase):
             payload = catalog.json()
             self.assertEqual("general_academic", payload["default_profile"])
             profiles = {item["id"]: item for item in payload["items"]}
+            self.assertEqual({"general_academic", "chemistry_general"}, set(profiles))
             self.assertFalse(profiles["general_academic"]["domain_rules_enabled"])
             self.assertTrue(profiles["chemistry_general"]["domain_rules_enabled"])
 
             project = self._create_project(client, "general-default")
             self.assertEqual("general_academic", project["taxonomy_profile"])
+
+            internal_profile = client.post(
+                "/api/v1/projects",
+                json={
+                    "slug": "internal-profile",
+                    "topic": "Axially chiral allene synthesis",
+                    "taxonomy_profile": "allene",
+                },
+            )
+            self.assertEqual(409, internal_profile.status_code, internal_profile.text)
 
     def test_profile_change_before_matrix_leaves_downstream_state_unchanged(self) -> None:
         with TestClient(self.app) as client:

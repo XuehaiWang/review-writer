@@ -33,9 +33,13 @@ class RepositoryHygieneChecks(unittest.TestCase):
                     matches.append(f"{path.relative_to(ROOT)}:{number}: {line.strip()}")
         self.assertEqual(matches, [])
 
-    def test_legacy_library_dashboard_is_absent(self) -> None:
+    def test_only_the_react_frontend_and_ketcher_assets_remain(self) -> None:
         self.assertFalse((ROOT / "review-library" / "dashboard").exists())
-        self.assertTrue((ROOT / "view" / "assets" / "dashboard" / "library.html").is_file())
+        self.assertFalse((ROOT / "view" / "assets" / "dashboard").exists())
+        self.assertFalse((ROOT / "review_writer_api" / "web").exists())
+        self.assertTrue(
+            (ROOT / "view" / "assets" / "ketcher" / "standalone" / "index.html").is_file()
+        )
 
     def test_online_registration_uses_the_canonical_mineru_output(self) -> None:
         script = (
@@ -62,18 +66,7 @@ class RepositoryHygieneChecks(unittest.TestCase):
         self.assertFalse(token_file.exists())
         self.assertNotIn("mineru_api_token.txt", parser)
 
-    def test_dashboard_pages_do_not_patch_core_render_functions_at_runtime(self) -> None:
-        assignments = re.compile(
-            r"(?m)^\s*(?:render|renderMain|renderList|renderSummary|matchRedrawn|"
-            r"outputPath|rejectedPreviewPath|svgEditorMarkup|svgEditorUndo|"
-            r"bindSvgEditorInteractions|saveSvgEditor|svgEditorDocument|"
-            r"renderSvgEditorOperations|loadSvgEditorAudit)\s*=\s*(?:async\s+)?function"
-        )
-        for name in ("final.html",):
-            text = (ROOT / "view" / "assets" / "dashboard" / name).read_text(encoding="utf-8")
-            self.assertIsNone(assignments.search(text), name)
-
-    def test_fastapi_serves_native_dashboard_without_legacy_transport(self) -> None:
+    def test_fastapi_serves_react_without_legacy_transport(self) -> None:
         api = ROOT / "review_writer_api"
         app = (api / "app.py").read_text(encoding="utf-8")
 
@@ -90,8 +83,9 @@ class RepositoryHygieneChecks(unittest.TestCase):
         self.assertNotIn("DashboardHandler", app)
         self.assertNotIn("serve_review_dashboard", app)
         self.assertNotIn("dispatch_legacy", app)
-        self.assertIn("dashboard_page_paths", app)
-        self.assertIn('app.mount(\n        "/assets"', app)
+        self.assertNotIn("dashboard_page_paths", app)
+        self.assertNotIn("dashboard_response", app)
+        self.assertIn('app.mount(\n        "/assets/ketcher"', app)
 
     def test_paragraph_edit_skill_uses_only_native_draft_artifacts(self) -> None:
         skill = (

@@ -16,8 +16,8 @@
 
 持久文件位于宿主机：
 
-- `migration-reports/`：清点、干跑、正式迁移和 `latest.json`；
-- `migration-backups/`：迁移器生成且通过 `PRAGMA integrity_check` 与表计数核验的 SQLite 副本；
+- `.review-writer/migration-reports/`：清点、干跑、正式迁移和 `latest.json`；
+- `.review-writer/migration-backups/`：迁移器生成且通过 `PRAGMA integrity_check` 与表计数核验的 SQLite 副本；
 - 原 `workflow.sqlite3`：不修改、不删除，迁移后保留为只读备份。
 
 这两个目录可在 `.env.hosted` 中用 `REVIEW_WRITER_MIGRATION_REPORTS_DIR` 和 `REVIEW_WRITER_MIGRATION_BACKUPS_DIR` 改到服务器备份盘。
@@ -27,7 +27,7 @@
 ```powershell
 Copy-Item .env.hosted.example .env.hosted
 # 编辑密码、32 字节 Base64URL 加密密钥和访问地址
-New-Item -ItemType Directory -Force migration-reports, migration-backups
+New-Item -ItemType Directory -Force .review-writer\migration-reports, .review-writer\migration-backups
 docker compose --env-file .env.hosted config --quiet
 docker compose --env-file .env.hosted up -d --build
 docker compose --env-file .env.hosted ps
@@ -42,7 +42,7 @@ docker compose --env-file .env.hosted logs migrate
 
 默认 `REVIEW_WRITER_MIGRATION_ACCEPT_MISSING_FILES=false`。此时数据库行可以被导入用于检查，但不会写入就绪标记，API 不会启动。
 
-1. 打开 `migration-reports/latest.json`，逐项核查 `missing_files`；
+1. 打开 `.review-writer/migration-reports/latest.json`，逐项核查 `missing_files`；
 2. 能恢复的文件先恢复到原路径，再重新启动 `migrate`；
 3. 只有人工确认历史文件确实无法恢复且接受影响后，才把变量改为 `true`；
 4. 再次 `docker compose up -d`，确认报告 `ready: true`。
@@ -65,11 +65,11 @@ docker compose --env-file .env.hosted logs migrate
 ```powershell
 .\.venv\Scripts\python.exe -m review_writer_api.migrate_workflow inventory `
   --workspace-root .review-writer\hosted-workspaces `
-  --report migration-reports\manual-inventory.json
+  --report .review-writer\migration-reports\manual-inventory.json
 
 .\.venv\Scripts\python.exe -m review_writer_api.migrate_workflow validate `
   --workspace-root .review-writer\hosted-workspaces `
-  --report migration-reports\latest.json
+  --report .review-writer\migration-reports\latest.json
 ```
 
 容器内的 `latest.json` 是自动入口摘要；正式迁移的时间戳 `*-migration.json` 是完整校验报告。手工 `validate` 应针对完整报告，而不是摘要型 `fresh_install`/`already_migrated` 文件。
@@ -83,9 +83,9 @@ docker compose --env-file .env.hosted exec -T postgres `
   pg_dump -U review_writer -d review_writer -Fc `
   -f /tmp/postgres-before-migration.dump
 docker cp review-writer-postgres-1:/tmp/postgres-before-migration.dump `
-  migration-backups\postgres-before-migration.dump
+  .review-writer\migration-backups\postgres-before-migration.dump
 Get-FileHash -Algorithm SHA256 `
-  migration-backups\postgres-before-migration.dump
+  .review-writer\migration-backups\postgres-before-migration.dump
 ```
 
 这里先让 `pg_dump` 在容器内写二进制文件，再用 `docker cp` 取回，避免 PowerShell 管道改变自定义格式 dump 的字节内容。若修改过 Compose 项目名，请先用 `docker compose ps` 确认 PostgreSQL 容器名并替换上述名称。
@@ -112,5 +112,5 @@ Get-FileHash -Algorithm SHA256 `
 - 两个账号看不到彼此项目、任务、文件和 API 凭据；
 - 局域网设备可打开 PDF、MinerU 图片、Ketcher 和最终 DOCX；
 - 中英文切换覆盖七阶段按钮、状态与稳定错误码；
-- `migration-reports/latest.json` 为 `fresh_install`、`already_migrated` 或 `ready: true`，且缺失/漂移确认与完整报告一致；
+- `.review-writer/migration-reports/latest.json` 为 `fresh_install`、`already_migrated` 或 `ready: true`，且缺失/漂移确认与完整报告一致；
 - API 运行期间没有新建 `workflow.sqlite3`，运行容器中没有 Prefect 服务或进程。

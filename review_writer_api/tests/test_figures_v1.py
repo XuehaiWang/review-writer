@@ -59,17 +59,20 @@ class FiguresV1Tests(NativeFigureApiTestCase):
             second.json()["selected_figures_artifact_id"],
         )
 
-    def test_selection_requires_a_matching_manuscript_paragraph_anchor(self) -> None:
+    def test_selection_allows_paper_level_candidate_and_derives_current_placement(self) -> None:
         with TestClient(self.app) as client:
             response = client.put(
                 f"/api/v1/projects/{self.project_id}/figures/review/P001",
-                json={"revision": 0, "candidate_index": 2, "review_note": "bad"},
+                json={"revision": 0, "candidate_index": 2, "review_note": "paper-level"},
                 headers=self.headers(),
             )
-        self.assertEqual(409, response.status_code, response.text)
-        self.assertEqual(
-            "FIGURE_PARAGRAPH_ANCHOR_MISSING", response.json()["error"]["code"]
-        )
+            figures = client.get(f"/api/v1/projects/{self.project_id}/figures")
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual(200, figures.status_code, figures.text)
+        selected = figures.json()["figure_candidates"][0]
+        self.assertEqual("P001", selected["paper_id"])
+        self.assertEqual("S1-p1", selected["target_paragraph_id"])
+        self.assertEqual("derived_from_current_section_evidence", selected["placement_status"])
 
     def test_selection_immediately_updates_redraw_source_without_confirmation(self) -> None:
         with TestClient(self.app) as client:

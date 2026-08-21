@@ -166,6 +166,7 @@ REVIEW_WRITER_CREDENTIAL_ENCRYPTION_KEY=replace-with-32-random-bytes-as-base64ur
 REVIEW_WRITER_PUBLIC_ORIGIN=http://127.0.0.1:8770
 REVIEW_WRITER_BIND_ADDRESS=127.0.0.1
 REVIEW_WRITER_SESSION_COOKIE_SECURE=false
+REVIEW_WRITER_PDF_RENDERER_TOKEN=replace-with-a-long-random-internal-token
 ```
 
 生成 32 字节 URL-safe Base64 密钥：
@@ -189,6 +190,13 @@ docker compose --env-file .env.hosted ps
 - 健康检查：<http://127.0.0.1:8770/api/v1/health>
 
 首次打开后注册账户、登录，然后进入 **API Settings** 配置个人服务。
+
+Compose 会同时启动一个不暴露主机端口的内部 PDF 渲染器。终稿通过同一份
+Final Manuscript State 输出 Word 和 PDF；PDF 使用固定 `modern-survey/2`
+期刊型模板与 LuaLaTeX，支持 `en`、`zh-CN` 两种语言配置。首页使用紧凑的
+题名/摘要/关键词信息框并直接进入双栏正文，不生成独立封面或目录；核心
+Scheme 和比较表跨双栏。发布前自动检查引用、字体嵌入、页面一致性和渲染
+清单。Word 导出仍保留原有入口与行为。
 
 ### 4. 日志与停止
 
@@ -340,7 +348,7 @@ npm.cmd ci
 npm.cmd run dev
 ```
 
-Vite 默认运行在 <http://127.0.0.1:5173/>，并把 `/api`、Ketcher 和旧静态资源代理到 <http://127.0.0.1:8770/>。
+Vite 默认运行在 <http://127.0.0.1:5173/>，并把 `/api` 和 Ketcher 静态资源代理到 <http://127.0.0.1:8770/>。
 
 如后端地址不同：
 
@@ -383,16 +391,19 @@ git status --short
 frontend/                   React + TypeScript SPA
 review_writer_api/          FastAPI、认证、任务、阶段服务和 PostgreSQL 仓储
 review_writer_core/         Workspace、Provider、Taxonomy 和跨阶段共享逻辑
+review_writer_pdf_renderer/  受控 LuaLaTeX PDF 渲染服务
 skills/                     科学工作流 Skill、脚本、References 与校验器
 view/assets/ketcher/        Ketcher 静态资源
-view/                       科学检查与兼容资源
+view/                       科学工作流回归检查
 migrations/                 Alembic 数据库迁移
-infra/                      部署相关资源
 docs/                       迁移和阶段一致性文档
 examples/reference-reviews/ 参考综述示例
 compose.yaml                PostgreSQL、迁移服务和 API
-Dockerfile.api              前端构建与 Python 运行镜像
+Dockerfile.api              React 构建与 FastAPI 运行镜像
+Dockerfile.pdf-renderer     PDF 渲染隔离镜像
 ```
+
+本地运行时数据、迁移报告和备份统一位于 `.review-writer/`；测试缓存、日志和临时渲染文件不属于源码树。
 
 进一步阅读：
 

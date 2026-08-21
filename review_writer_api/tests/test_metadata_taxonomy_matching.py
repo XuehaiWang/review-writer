@@ -29,6 +29,12 @@ class MetadataTaxonomyMatchingTests(unittest.TestCase):
         self.assertEqual("project_neutral_unverified", tag_field["source"])
         self.assertFalse(tag_field["human_checked"])
         self.assertEqual({"not specified"}, set(tag_field["value"].values()))
+        self.assertFalse(
+            any(
+                warning.startswith("structured_tag_not_specified_")
+                for warning in metadata["quality"]["warnings"]
+            )
+        )
 
     def test_short_metal_alias_does_not_match_inside_an_ordinary_word(self) -> None:
         tags = prepare_metadata.structured_tags_from_classification_rules(

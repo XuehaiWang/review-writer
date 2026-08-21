@@ -19,7 +19,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from review_writer_api.database import Base, TimestampMixin, new_uuid, utc_now
 
@@ -56,6 +56,12 @@ class LibraryPaper(Base):
     keywords_json: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
     tags_json: Mapped[Any] = mapped_column(JSON, default=dict, nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    bibliography_audit_row: Mapped["LibraryBibliographyAudit | None"] = relationship(
+        back_populates="paper",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        uselist=False,
+    )
     pdf_relative_path: Mapped[str] = mapped_column(String(2048), nullable=False)
     markdown_relative_path: Mapped[str] = mapped_column(String(2048), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
@@ -64,6 +70,31 @@ class LibraryPaper(Base):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LibraryBibliographyAudit(Base):
+    """Mutable provider verification state, deliberately separate from canonical metadata."""
+
+    __tablename__ = "library_bibliography_audits"
+    __table_args__ = (
+        UniqueConstraint("library_paper_id", name="uq_library_bibliography_audit_paper"),
+        Index("ix_library_bibliography_audits_user_paper", "user_id", "paper_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    library_paper_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("library_papers.id", ondelete="CASCADE"), nullable=False
+    )
+    paper_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    audit_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+    paper: Mapped[LibraryPaper] = relationship(back_populates="bibliography_audit_row")
 
 
 class LibraryArtifact(Base):

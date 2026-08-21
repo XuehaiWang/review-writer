@@ -53,6 +53,7 @@ from review_writer_core.providers import (  # noqa: E402
     openai_endpoint,
 )
 from review_writer_core.model_gateway_client import (  # noqa: E402
+    GatewayRequestError,
     call_json_model as call_gateway_json,
     gateway_configured,
 )
@@ -958,6 +959,7 @@ def deterministic_query_plan(
     classification_rules: dict[str, dict[str, list[str]]],
     *,
     notice: str = "",
+    notice_code: str = "",
 ) -> dict[str, Any]:
     """Build a portable query plan when the configured text model is unavailable."""
 
@@ -1028,6 +1030,8 @@ def deterministic_query_plan(
     }
     if notice:
         plan["planner_notice"] = notice[:500]
+    if notice_code:
+        plan["planner_notice_code"] = notice_code[:64]
     plan = prioritize_query_plan_keywords(plan, topic, user_keywords)
     return validate_query_plan(plan, topic)
 
@@ -1172,11 +1176,21 @@ def build_auto_query_plan(
         compact = prioritize_query_plan_keywords(validated, topic, user_keywords)
         return validate_query_plan(compact, topic)
     except Exception as exc:
+        insufficient_credit = (
+            isinstance(exc, GatewayRequestError)
+            and (exc.code == "INSUFFICIENT_CREDIT" or exc.status_code == 402)
+        ) or "INSUFFICIENT_CREDIT" in str(exc)
+        if insufficient_credit:
+            # Billing failures are a hard business stop.  Falling back here
+            # would make an unpaid run look successful even though the user
+            # explicitly selected an intelligent discovery workflow.
+            raise
         return deterministic_query_plan(
             topic,
             user_keywords,
             classification_rules,
-            notice=f"LLM query planning was unavailable; deterministic fallback used: {type(exc).__name__}: {exc}",
+            notice="Intelligent query planning was unavailable; deterministic planning was used.",
+            notice_code="planner_unavailable",
         )
 
 

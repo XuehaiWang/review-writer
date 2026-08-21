@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from review_writer_core.taxonomy import TaxonomyConfigurationError, validate_taxonomy_profile
+from review_writer_core.taxonomy import (
+    TaxonomyConfigurationError,
+    validate_selectable_taxonomy_profile,
+)
 
 from .repositories import (
     ProjectRecord,
@@ -35,7 +38,7 @@ class ProjectService:
     ) -> ProjectRecord:
         principal.require(Permission.PROJECT_WRITE)
         try:
-            selected_profile = validate_taxonomy_profile(taxonomy_profile)
+            selected_profile = validate_selectable_taxonomy_profile(taxonomy_profile)
         except TaxonomyConfigurationError as exc:
             from .repositories import ProjectOperationError
 
@@ -66,7 +69,7 @@ class ProjectService:
     ) -> ProjectTaxonomyUpdateResult:
         principal.require(Permission.PROJECT_WRITE)
         try:
-            selected_profile = validate_taxonomy_profile(taxonomy_profile)
+            selected_profile = validate_selectable_taxonomy_profile(taxonomy_profile)
         except TaxonomyConfigurationError as exc:
             from .repositories import ProjectOperationError
 

@@ -42,25 +42,31 @@ def build_sections_router(
     if builder is not None:
 
         def section_handler(context, payload):
+            payload = dict(payload)
+            if context.retry_of_job_id:
+                source_job = context.repository.get_job(
+                    context.user_id, context.retry_of_job_id
+                )
+                checkpoint = (
+                    (source_job.result or {}).get("section_checkpoint")
+                    if source_job is not None
+                    else None
+                )
+                if isinstance(checkpoint, dict):
+                    payload["resume_checkpoint"] = checkpoint
             total = len(payload.get("tasks") or [])
             context.report_progress(0, total)
-            attempts = 0
-            while attempts < 3:
-                attempts += 1
-                try:
-                    built = builder(context, payload)
-                    break
-                except ScientificRunError:
-                    raise
-                except Exception as exc:
-                    if not TRANSIENT_PROVIDER_ERROR.search(str(exc)) or attempts >= 3:
-                        if TRANSIENT_PROVIDER_ERROR.search(str(exc)):
-                            raise SectionProviderUnavailable(
-                                "The section-writing provider remained unavailable after three attempts. Try again later or choose another configured model.",
-                                details={"attempts": attempts},
-                            ) from exc
-                        raise
-                    context.checkpoint()
+            try:
+                built = builder(context, payload)
+            except ScientificRunError:
+                raise
+            except Exception as exc:
+                if TRANSIENT_PROVIDER_ERROR.search(str(exc)):
+                    raise SectionProviderUnavailable(
+                        "The section-writing provider remained unavailable after the gateway exhausted its provider retries. Completed object checkpoints were preserved; retry this job to continue.",
+                        details={"attempts": 1, "resume_supported": True},
+                    ) from exc
+                raise
             principal = Principal(context.user_id, frozenset({Role.USER}))
             context.checkpoint()
             result = sections_service.publish_generation(
@@ -68,7 +74,7 @@ def build_sections_router(
                 str(context.project_id),
                 payload,
                 built,
-                attempts=attempts,
+                attempts=1,
             )
             context.repository.update_job_progress(context.job_id, total, total)
             return result

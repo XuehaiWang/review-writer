@@ -14,7 +14,7 @@
     {"id": "M02", "weight": 3, "rule": "Keep the opening, body sections, and synthesis focused on the review question."},
     {"id": "M03", "weight": 3, "rule": "Maintain a logical progression from scope and terminology through cases to synthesis and outlook."},
     {"id": "M04", "weight": 2, "rule": "Give every major section a stated role and a meaningful synthesis exit."},
-    {"id": "M05", "weight": 1, "rule": "Avoid stitched extraction prose and excessive repeated evidence-boundary boilerplate."},
+    {"id": "M05", "weight": 1, "rule": "Avoid stitched extraction prose, repeated evidence-boundary boilerplate, and internal workflow language such as supplied evidence, evidence package, prompt, model, gate, or artifact labels."},
     {"id": "M06", "weight": 2, "rule": "Keep terminology, catalyst labels, and narrative voice consistent."},
     {"id": "M07", "weight": 2, "rule": "Retain valid figure provenance, placement, and identity boundaries."},
 

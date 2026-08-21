@@ -12,7 +12,7 @@ from zipfile import ZipFile
 ROOT = Path(__file__).resolve().parents[1]
 EXPORTER = ROOT / "skills" / "review-export-docx" / "scripts" / "md2docx.py"
 EXPORT_WRAPPER = ROOT / "skills" / "review-export-docx" / "scripts" / "run_md2docx.py"
-FINAL_DASHBOARD = ROOT / "view" / "assets" / "dashboard" / "final.html"
+FINAL_PAGE = ROOT / "frontend" / "src" / "features" / "final" / "FinalPage.tsx"
 SECTION_GENERATOR = (
     ROOT
     / "skills"
@@ -49,10 +49,10 @@ class DocxUnicodeCompatibilityChecks(unittest.TestCase):
         self.assertIn("skills/review-export-docx/.deps", dockerignore)
 
     def test_docx_download_keeps_filename_extension(self) -> None:
-        dashboard_source = FINAL_DASHBOARD.read_text(encoding="utf-8")
+        final_page_source = FINAL_PAGE.read_text(encoding="utf-8")
 
-        self.assertIn('download="final_draft.docx"', dashboard_source)
-        self.assertIn("link.download=job.result.download_name||'final_draft.docx'", dashboard_source)
+        self.assertIn('download="final_draft.docx"', final_page_source)
+        self.assertIn('action === "pdf" ? "final_draft.pdf" : "final_draft.docx"', final_page_source)
 
     def test_repairs_known_relay_truncation(self) -> None:
         damaged = "C\x13X; \x03b1/\x03b3; SN2\x02; C\x03C; \x00"

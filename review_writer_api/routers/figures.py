@@ -140,6 +140,7 @@ def build_figures_router(
             revision=payload.revision,
             candidate_index=payload.candidate_index,
             review_note=payload.review_note,
+            representative_role=payload.representative_role,
         )
 
     @router.post("/review/confirm")
@@ -256,6 +257,26 @@ def build_figures_router(
         principal: Principal = Depends(principal_dependency),
     ) -> dict[str, Any]:
         return figures_service.approve(principal, project_id, figure_id)
+
+    @router.post("/{figure_id}/exclude")
+    def exclude_one(
+        project_id: str,
+        figure_id: str,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        return figures_service.set_manuscript_inclusion(
+            principal, project_id, figure_id, included=False
+        )
+
+    @router.post("/{figure_id}/include")
+    def include_one(
+        project_id: str,
+        figure_id: str,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        return figures_service.set_manuscript_inclusion(
+            principal, project_id, figure_id, included=True
+        )
 
     @router.post("/approve-successful")
     def approve_successful(

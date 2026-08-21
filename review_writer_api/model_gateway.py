@@ -20,6 +20,7 @@ import httpx2 as httpx
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from .billing import BillingService
 from .config import ApiSettings
 from review_writer_core.providers import DEFAULT_IMAGE_MODEL
 
@@ -116,10 +117,12 @@ class ModelGatewayService:
         settings: ApiSettings,
         *,
         provider_settings: ServerProviderSettingsService | None = None,
+        billing_service: BillingService | None = None,
     ):
         self.session_factory = session_factory
         self.settings = settings
         self.provider_settings = provider_settings
+        self.billing_service = billing_service
         try:
             decoded = _b64decode(settings.credential_encryption_key)
         except Exception:
@@ -304,7 +307,7 @@ class ModelGatewayService:
         stage: str,
         request_sha256: str,
         tier: ModelTier,
-    ) -> tuple[str, dict[str, Any] | None]:
+    ) -> tuple[str, dict[str, Any] | None, bool, int]:
         with database_session(self.session_factory) as session:
             existing = session.scalar(
                 select(AIModelRequest).where(
@@ -318,14 +321,23 @@ class ModelGatewayService:
                         "The request key was reused with different content."
                     )
                 if existing.status == "succeeded":
-                    return str(existing.id), dict(existing.response_json or {})
+                    return (
+                        str(existing.id),
+                        dict(existing.response_json or {}),
+                        False,
+                        int(existing.attempt_count),
+                    )
                 if existing.status == "running":
-                    raise GatewayRequestConflict("The same model request is still running.")
+                    # A synchronous scientific client may time out while the
+                    # provider call continues in this API process.  Join that
+                    # in-flight request instead of turning its bounded retry
+                    # into three immediate HTTP 409 failures.
+                    return str(existing.id), None, True, int(existing.attempt_count)
                 existing.status = "running"
                 existing.attempt_count += 1
                 existing.error_message = ""
                 existing.updated_at = utc_now()
-                return str(existing.id), None
+                return str(existing.id), None, False, int(existing.attempt_count)
 
             row = AIModelRequest(
                 user_id=uuid.UUID(claims.user_id),
@@ -346,7 +358,43 @@ class ModelGatewayService:
                 session.flush()
             except IntegrityError as exc:
                 raise GatewayRequestConflict("The same model request was submitted concurrently.") from exc
-            return str(row.id), None
+            return str(row.id), None, False, int(row.attempt_count)
+
+    def _request_snapshot(
+        self, request_id: str
+    ) -> tuple[str, dict[str, Any], str]:
+        with database_session(self.session_factory) as session:
+            row = session.get(AIModelRequest, uuid.UUID(request_id))
+            if row is None:
+                return "missing", {}, "The model request record no longer exists."
+            return (
+                str(row.status or ""),
+                dict(row.response_json or {}),
+                str(row.error_message or ""),
+            )
+
+    async def _join_running_request(
+        self,
+        request_id: str,
+        *,
+        timeout_seconds: float = 300.0,
+    ) -> dict[str, Any]:
+        """Wait for an idempotent request already executing in this gateway."""
+
+        deadline = asyncio.get_running_loop().time() + max(1.0, timeout_seconds)
+        while True:
+            status, response, error = self._request_snapshot(request_id)
+            if status == "succeeded":
+                return response
+            if status in {"failed", "missing"}:
+                raise GatewayProviderError(
+                    error or "The in-flight model request did not complete successfully."
+                )
+            if asyncio.get_running_loop().time() >= deadline:
+                raise GatewayRequestConflict(
+                    "The same model request is still running."
+                )
+            await asyncio.sleep(1.0)
 
     @staticmethod
     def _usage(data: dict[str, Any]) -> dict[str, int]:
@@ -502,17 +550,63 @@ class ModelGatewayService:
             raise GatewayRequestConflict("The model prompt is empty or too large.")
         tier = resolve_model_tier(claims.model_tier)
         digest = self._request_sha256(normalized_stage, prompt, normalized_format)
-        request_id, cached = self._begin_request(
+        request_id, cached, in_flight, attempt_number = self._begin_request(
             claims,
             request_key=key,
             stage=normalized_stage,
             request_sha256=digest,
             tier=tier,
         )
+        if in_flight:
+            cached = await self._join_running_request(request_id)
         if cached is not None:
+            if self.billing_service is not None:
+                self.billing_service.settle_reference(
+                    reference_type="text_model",
+                    reference_id=request_id,
+                    attempt_number=attempt_number,
+                    actual_usd=Decimal(str(cached.get("cost_usd") or "0")),
+                    details={"reconciled_from_cached_result": True},
+                )
             return {**cached, "cached": True}
         user_slot = await self._user_semaphore(claims.user_id)
+        reservation_id: str | None = None
+        provider_completed = False
         try:
+            if self.billing_service is not None:
+                estimated_input_tokens = max(
+                    1, (len(prompt.encode("utf-8")) + 3) // 4
+                )
+                estimated_output_tokens = min(
+                    32_768, max(2_048, estimated_input_tokens // 2)
+                )
+                estimated_cost = calculate_provider_cost(
+                    tier,
+                    input_tokens=estimated_input_tokens,
+                    cached_input_tokens=0,
+                    output_tokens=estimated_output_tokens,
+                )
+                reserve_amount = (
+                    estimated_cost * Decimal("1.20")
+                ).quantize(Decimal("0.00000001"))
+                if estimated_cost > 0:
+                    reserve_amount = max(Decimal("0.00100000"), reserve_amount)
+                reservation = self.billing_service.reserve(
+                    user_id=claims.user_id,
+                    amount_usd=reserve_amount,
+                    reference_type="text_model",
+                    reference_id=request_id,
+                    attempt_number=attempt_number,
+                    job_id=claims.job_id,
+                    reason=f"文本模型调用冻结：{normalized_stage}",
+                    details={
+                        "model_tier": tier.id,
+                        "model": tier.model,
+                        "estimated_input_tokens": estimated_input_tokens,
+                        "estimated_output_tokens": estimated_output_tokens,
+                    },
+                )
+                reservation_id = str(reservation.id)
             async with self._global_slots, user_slot:
                 provider_data = await self._provider_call(
                     tier=tier,
@@ -541,9 +635,29 @@ class ModelGatewayService:
             if not response["output_text"]:
                 raise GatewayProviderError("Model provider returned an empty response.")
             self._finish_request(request_id, response_payload=response)
+            provider_completed = True
+            if self.billing_service is not None and reservation_id is not None:
+                self.billing_service.settle(
+                    reservation_id,
+                    actual_usd=cost,
+                    details={
+                        "model_tier": tier.id,
+                        "model": tier.model,
+                        "input_tokens": usage["input_tokens"],
+                        "cached_input_tokens": usage["cached_input_tokens"],
+                        "output_tokens": usage["output_tokens"],
+                    },
+                )
             return response
         except Exception as exc:
-            self._finish_request(request_id, error_message=str(exc))
+            if not provider_completed:
+                if self.billing_service is not None and reservation_id is not None:
+                    self.billing_service.release(
+                        reservation_id,
+                        reason="文本模型调用失败，释放冻结额度",
+                        details={"error": str(exc)[:500]},
+                    )
+                self._finish_request(request_id, error_message=str(exc))
             raise
 
     async def complete_json(
@@ -628,7 +742,7 @@ class ModelGatewayService:
         operation: str,
         request_sha256: str,
         model_name: str,
-    ) -> tuple[str, dict[str, Any] | None]:
+    ) -> tuple[str, dict[str, Any] | None, int]:
         with database_session(self.session_factory) as session:
             existing = session.scalar(
                 select(AIImageRequest).where(
@@ -656,14 +770,14 @@ class ModelGatewayService:
                             "cost_usd": format(existing.provider_cost_usd, "f"),
                         }
                     )
-                    return str(existing.id), cached
+                    return str(existing.id), cached, int(existing.attempt_count)
                 if existing.status == "running":
                     raise GatewayRequestConflict("The same image request is still running.")
                 existing.status = "running"
                 existing.attempt_count += 1
                 existing.error_message = ""
                 existing.updated_at = utc_now()
-                return str(existing.id), None
+                return str(existing.id), None, int(existing.attempt_count)
 
             row = AIImageRequest(
                 user_id=uuid.UUID(claims.user_id),
@@ -684,7 +798,7 @@ class ModelGatewayService:
                 raise GatewayRequestConflict(
                     "The same image request was submitted concurrently."
                 ) from exc
-            return str(row.id), None
+            return str(row.id), None, int(row.attempt_count)
 
     @staticmethod
     def _image_reference(value: Any) -> tuple[str, str, str] | None:
@@ -986,7 +1100,7 @@ class ModelGatewayService:
             output_format=output_format,
             size=size,
         )
-        request_id, cached = self._begin_image_request(
+        request_id, cached, attempt_number = self._begin_image_request(
             claims,
             request_key=key,
             stage=normalized_stage,
@@ -995,6 +1109,14 @@ class ModelGatewayService:
             model_name=model,
         )
         if cached is not None:
+            if self.billing_service is not None:
+                self.billing_service.settle_reference(
+                    reference_type="image_model",
+                    reference_id=request_id,
+                    attempt_number=attempt_number,
+                    actual_usd=Decimal(str(cached.get("cost_usd") or "0")),
+                    details={"reconciled_from_cached_result": True},
+                )
             image_bytes = await asyncio.to_thread(self._image_cache_path(request_id).read_bytes)
             return {
                 **cached,
@@ -1002,7 +1124,25 @@ class ModelGatewayService:
                 "cached": True,
             }
         user_slot = await self._image_user_semaphore(claims.user_id)
+        reservation_id: str | None = None
+        provider_completed = False
         try:
+            if self.billing_service is not None:
+                reservation = self.billing_service.reserve(
+                    user_id=claims.user_id,
+                    amount_usd=self.settings.image_provider_price_usd_per_image,
+                    reference_type="image_model",
+                    reference_id=request_id,
+                    attempt_number=attempt_number,
+                    job_id=claims.job_id,
+                    reason=f"图像模型调用冻结：{normalized_stage}",
+                    details={
+                        "model": model,
+                        "operation": normalized_operation,
+                        "image_count": 1,
+                    },
+                )
+                reservation_id = str(reservation.id)
             async with self._image_global_slots, user_slot:
                 image_bytes, mime_type, provider_id, provider_attempts = (
                     await self._provider_image_call(
@@ -1036,6 +1176,18 @@ class ModelGatewayService:
                 mime_type=mime_type,
                 cost_usd=cost,
             )
+            provider_completed = True
+            if self.billing_service is not None and reservation_id is not None:
+                self.billing_service.settle(
+                    reservation_id,
+                    actual_usd=cost,
+                    details={
+                        "model": model,
+                        "operation": normalized_operation,
+                        "image_count": 1,
+                        "provider_attempt_count": provider_attempts,
+                    },
+                )
             return {
                 "request_id": request_id,
                 "provider_request_id": provider_id,
@@ -1048,7 +1200,14 @@ class ModelGatewayService:
                 "cached": False,
             }
         except Exception as exc:
-            self._finish_image_request(request_id, error_message=str(exc))
+            if not provider_completed:
+                if self.billing_service is not None and reservation_id is not None:
+                    self.billing_service.release(
+                        reservation_id,
+                        reason="图像模型调用失败，释放冻结额度",
+                        details={"error": str(exc)[:500]},
+                    )
+                self._finish_image_request(request_id, error_message=str(exc))
             raise
 
     def usage_summary(self, user_id: str, project_id: str | None = None) -> dict[str, Any]:
@@ -1117,7 +1276,7 @@ class ModelGatewayService:
             "mineru_cache_hit_count": int(mineru_row[2]),
             "estimated_mineru_cost_usd": format(mineru_cost, "f"),
             "estimated_cost_usd": format(text_cost + image_cost + mineru_cost, "f"),
-            "billing_mode": "record_only",
+            "billing_mode": "credit" if self.billing_service is not None else "record_only",
         }
 
     def usage_timeline(

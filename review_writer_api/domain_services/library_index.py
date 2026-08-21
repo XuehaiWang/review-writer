@@ -56,6 +56,8 @@ class EvidenceHit:
     is_neighbor: bool
     index_id: str
     source_lineage_hash: str
+    previous_chunk_id: str = ""
+    next_chunk_id: str = ""
 
 
 class LibraryIndexService:
@@ -662,6 +664,8 @@ class LibraryIndexService:
                         is_neighbor=False,
                         index_id=str(chunk.index_id),
                         source_lineage_hash=str(lineage_hash),
+                        previous_chunk_id=chunk.previous_chunk_id,
+                        next_chunk_id=chunk.next_chunk_id,
                     )
                     for chunk, lineage_hash in rows
                 )
@@ -848,6 +852,8 @@ class LibraryIndexService:
                 is_neighbor=reason == "adjacent_context",
                 index_id=str(chunk.index_id),
                 source_lineage_hash=lineage_hash,
+                previous_chunk_id=chunk.previous_chunk_id,
+                next_chunk_id=chunk.next_chunk_id,
             )
             for chunk, lineage_hash, score, reason in scored
         ]

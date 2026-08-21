@@ -14,6 +14,8 @@ class ReactFrontendShellTests(unittest.TestCase):
         )
         for path in (
             "/",
+            "/login",
+            "/workspace",
             "/library",
             "/discovery",
             "/planning",
@@ -26,10 +28,16 @@ class ReactFrontendShellTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIn(f'path="{path}"', source)
 
-    def test_fastapi_serves_spa_without_a_legacy_figure_editor_bridge(self) -> None:
+    def test_fastapi_serves_only_the_react_spa_and_ketcher_assets(self) -> None:
         source = (ROOT / "review_writer_api" / "app.py").read_text(encoding="utf-8")
+        self.assertIn('@app.get("/login", include_in_schema=False)', source)
+        self.assertIn('@app.get("/workspace", include_in_schema=False)', source)
         self.assertIn('app.mount(\n            "/assets/react"', source)
         self.assertIn("if react_spa_available:", source)
+        self.assertIn('app.mount(\n        "/assets/ketcher"', source)
+        self.assertNotIn("dashboard_response", source)
+        self.assertNotIn("dashboard_page_paths", source)
+        self.assertNotIn('"/assets/app"', source)
         retired_route = '@app.get("/legacy/' + 'figures"'
         self.assertNotIn(retired_route, source)
         self.assertNotIn('return dashboard_response("/figures")', source)
@@ -79,13 +87,11 @@ class ReactFrontendShellTests(unittest.TestCase):
         self.assertIn('/api/v1/jobs/${encodeURIComponent(retryJobId)}/retry', figures)
         self.assertIn('retry_of_job_id: retryJobId', figures)
 
-    def test_react_shell_reuses_i18n_without_duplicate_legacy_controls(self) -> None:
+    def test_react_shell_is_the_only_workflow_frontend(self) -> None:
         index = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-        translator = (
-            ROOT / "view" / "assets" / "dashboard" / "review-i18n.js"
-        ).read_text(encoding="utf-8")
         self.assertIn('data-review-writer-react="true"', index)
-        self.assertIn('dataset.reviewWriterReact !== "true"', translator)
+        self.assertFalse((ROOT / "view" / "assets" / "dashboard").exists())
+        self.assertFalse((ROOT / "review_writer_api" / "web").exists())
 
     def test_blueprint_generation_uses_the_blueprint_stage_revision(self) -> None:
         planning = (

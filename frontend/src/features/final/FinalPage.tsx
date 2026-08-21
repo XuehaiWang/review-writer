@@ -33,6 +33,13 @@ type FinalPayload = {
   docx_url: string;
   final_draft_docx_exists: boolean;
   final_draft_docx_stale: boolean;
+  pdf_url: string;
+  tex_url: string;
+  pdf_language_profile: string;
+  final_pdf_exists: boolean;
+  final_pdf_stale: boolean;
+  render_manifest: Record<string, unknown> & { template?: string; template_version?: string; language_profile?: string; compiler?: string; shell_escape?: boolean };
+  pdf_qa: Record<string, unknown> & { status?: string; page_count?: number; all_fonts_embedded?: boolean; blocking_issues?: unknown[]; warning_issues?: unknown[] };
   active_final_job_id: string;
   active_final_job_type: string;
   latest_final_job_id: string;
@@ -40,14 +47,14 @@ type FinalPayload = {
   latest_final_job_status: string;
   final_audit_report_md: string;
   release_report_md: string;
-  freshness: { draft_stale: boolean; final_stale: boolean; release_stale: boolean; stale: boolean };
+  freshness: { draft_stale: boolean; final_stale: boolean; release_stale: boolean; pdf_stale?: boolean; stale: boolean };
 };
 
-type FinalTab = "preparation" | "conclusion" | "overview" | "final" | "audit" | "release";
+type FinalTab = "preparation" | "conclusion" | "overview" | "final" | "audit" | "release" | "pdf";
 
 function actionFromJobType(jobType?: string): FinalAction {
   const action = String(jobType || "").replace(/^final\./, "");
-  return action === "conclusion" || action === "overview" || action === "export" ? action : "build";
+  return action === "conclusion" || action === "overview" || action === "export" || action === "pdf" ? action : "build";
 }
 
 function StatusPill({ exists, current, optional = true }: { exists: boolean; current: boolean; optional?: boolean }) {
@@ -72,6 +79,7 @@ export function FinalPage() {
   const [overviewTitle, setOverviewTitle] = useState("");
   const [overviewSubtitle, setOverviewSubtitle] = useState("");
   const [overviewLabels, setOverviewLabels] = useState("");
+  const [pdfLanguage, setPdfLanguage] = useState<"en" | "zh-CN">("en");
   const downloadedJob = useRef("");
   const pendingDownloadJob = useRef("");
 
@@ -124,15 +132,16 @@ export function FinalPage() {
       if (action === "conclusion") setTab("conclusion");
       if (action === "overview") setTab("overview");
       if (action === "build") setTab("final");
-      if (action === "export" && pendingDownloadJob.current === completed.id && downloadedJob.current !== completed.id) {
+      if (action === "pdf") setTab("pdf");
+      if ((action === "export" || action === "pdf") && pendingDownloadJob.current === completed.id && downloadedJob.current !== completed.id) {
         downloadedJob.current = completed.id;
         pendingDownloadJob.current = "";
-        const artifactId = String(completed.result?.docx_artifact_id || "");
+        const artifactId = String(action === "pdf" ? completed.result?.pdf_artifact_id : completed.result?.docx_artifact_id || "");
         const href = artifactId ? `/api/v1/artifacts/${encodeURIComponent(artifactId)}/content` : "";
         if (href) {
           const link = document.createElement("a");
           link.href = href;
-          link.download = String(completed.result?.download_name || "final_draft.docx");
+          link.download = String(completed.result?.download_name || (action === "pdf" ? "final_draft.pdf" : "final_draft.docx"));
           document.body.append(link);
           link.click();
           link.remove();
@@ -144,11 +153,11 @@ export function FinalPage() {
   const runJob = useMutation({
     mutationFn: (action: FinalAction) => apiRequest<Job>(
       `/api/v1/projects/${encodeURIComponent(project!.project_id)}/final/${action}-jobs`,
-      { method: "POST", headers: { "Idempotency-Key": newIdempotencyKey() }, ...jsonBody({}) },
+      { method: "POST", headers: { "Idempotency-Key": newIdempotencyKey() }, ...jsonBody(action === "pdf" ? { language_profile: pdfLanguage } : {}) },
     ),
     onSuccess: (started, action) => {
       rememberJob(started.id);
-      if (action === "export") pendingDownloadJob.current = started.id;
+      if (action === "export" || action === "pdf") pendingDownloadJob.current = started.id;
       void refresh();
     },
   });
@@ -178,11 +187,12 @@ export function FinalPage() {
     ["final", text("最终稿", "Final draft")],
     ["audit", text("终稿审计", "Final audit")],
     ["release", text("发布报告", "Release report")],
+    ["pdf", text("PDF 与 QA", "PDF and QA")],
   ];
   const approval = payload?.draft_approval.record || payload?.draft_approval || {};
 
   return <main className="workspace page-container workspace-page final-page">
-    <div className="workspace-heading"><div><p className="eyebrow">{text("阶段 7 · 终稿合并与导出", "Stage 7 · Final assembly and export")}</p><h1>{text("终稿生成、审计与Word导出", "Final generation, audit, and Word export")}</h1><p className="muted">{text("结论和总览图是可选中间产物；生成最终稿会使用当前存在且有效的内容。", "The conclusion and overview figure are optional intermediates; final generation uses any current, valid content.")}</p></div><ProjectSelector /></div>
+    <div className="workspace-heading"><div><p className="eyebrow">{text("阶段 7 · 终稿合并与导出", "Stage 7 · Final assembly and export")}</p><h1>{text("终稿生成、审计与 Word/PDF 导出", "Final generation, audit, and Word/PDF export")}</h1><p className="muted">{text("Word 保持原有路径；PDF 使用同一终稿内容状态和受控 LuaLaTeX 模板。", "Word keeps its existing path; PDF uses the same final content state and a controlled LuaLaTeX template.")}</p></div><ProjectSelector /></div>
     {final.isPending ? <div className="empty-state">{text("正在加载终稿产物…", "Loading final artifacts…")}</div> : null}
     {final.error ? <ErrorState error={final.error} onRetry={() => final.refetch()} /> : null}
     {payload ? <><div className="final-grid-react">
@@ -194,6 +204,7 @@ export function FinalPage() {
         {tab === "final" ? <MarkdownView content={payload.final_draft_md} empty={text("尚未生成最终稿。", "Final draft not generated yet.")} /> : null}
         {tab === "audit" ? <MarkdownView content={payload.final_audit_report_md} empty={text("尚未执行终稿审计。", "Final audit has not run.")} /> : null}
         {tab === "release" ? <MarkdownView content={payload.release_report_md} empty={text("尚未生成发布报告。", "Release report not generated yet.")} /> : null}
+        {tab === "pdf" ? <div className="pdf-qa-summary"><h3>{text("期刊型 PDF 渲染状态", "Journal-style PDF render status")}</h3>{payload.final_pdf_exists ? <><p><strong>{text("语言", "Language")}:</strong> {payload.pdf_language_profile}</p><p><strong>{text("编译器", "Compiler")}:</strong> {String(payload.render_manifest?.compiler || "LuaLaTeX")}</p><p><strong>{text("自动 QA", "Automatic QA")}:</strong> {String(payload.pdf_qa?.status || "")}</p><p><strong>{text("页数", "Pages")}:</strong> {String(payload.pdf_qa?.page_count || "")}</p><p><strong>{text("字体全部嵌入", "All fonts embedded")}:</strong> {payload.pdf_qa?.all_fonts_embedded ? text("是", "Yes") : text("否", "No")}</p><div className="final-download-row"><a className="button button-primary" href={payload.pdf_url} download={`final_draft.${payload.pdf_language_profile || "en"}.pdf`}>{text("下载当前 PDF", "Download current PDF")}</a><a className="button button-secondary" href={payload.tex_url} download="manuscript.tex">{text("下载 LaTeX 源文件", "Download LaTeX source")}</a></div></> : <div className="empty-state">{text("尚未生成 PDF。选择语言后一次点击即可后台编译和自动 QA。", "No PDF generated yet. Choose a language and compile with automatic QA in one click.")}</div>}</div> : null}
       </div></section>
       <aside className="pane final-actions-react"><div className="pane-head"><div><span className="step-label">{text("生成操作", "Generation actions")}</span><h2>{text("生成操作", "Generation actions")}</h2></div></div><div className="gate-body">
         <p>{text("所有操作严格绑定当前人工确认的初稿版本。", "Every operation is strictly bound to the currently approved draft version.")}</p>
@@ -201,11 +212,14 @@ export function FinalPage() {
         <button className="button button-secondary" type="button" disabled={!payload.draft_approval_current || active} onClick={() => startJob("overview")}>{text("生成总览图", "Generate overview figure")}</button>
         <button className="button button-primary" type="button" disabled={!payload.draft_approval_current || active} onClick={() => startJob("build")}>{text("生成最终稿", "Generate final draft")}</button>
         <button className="button button-primary" type="button" disabled={!payload.final_current || !payload.release_current || active} onClick={() => startJob("export")}>{text("生成并下载Word", "Generate and download Word")}</button>
+        <label className="pdf-language-field">{text("PDF 语言", "PDF language")}<select value={pdfLanguage} onChange={(event) => setPdfLanguage(event.target.value as "en" | "zh-CN")}><option value="en">English</option><option value="zh-CN">简体中文</option></select></label>
+        <button className="button button-primary" type="button" disabled={!payload.final_current || !payload.release_current || active} onClick={() => startJob("pdf")}>{text("生成并下载 LaTeX PDF", "Generate and download LaTeX PDF")}</button>
         <button className="button button-quiet danger" type="button" disabled={!currentJob || !jobIsActive(currentJob.status) || cancel.isPending} onClick={() => cancel.mutate()}>{text("取消当前任务", "Cancel current task")}</button>
         {runJob.isPending ? <FinalJobStatus startingAction={startingAction} /> : runJob.error ? <FinalJobStatus startingAction={startingAction} submissionError={runJob.error} /> : currentJob ? <FinalJobStatus job={currentJob} startingAction={currentAction} /> : null}
-        <div className="final-status-summary"><div><strong>{text("初稿", "Draft")}</strong><StatusPill exists current={payload.draft_approval_current} optional={false} /></div><div><strong>{text("结论", "Conclusion")}</strong><StatusPill exists={Boolean(payload.conclusion_artifact_id)} current={payload.conclusion_current} /></div><div><strong>{text("总览图", "Overview figure")}</strong><StatusPill exists={payload.overview_figure_exists} current={payload.overview_figure_current} /></div><div><strong>{text("最终稿", "Final draft")}</strong><StatusPill exists={Boolean(payload.final_artifact_id)} current={payload.final_current} optional={false} /></div><div><strong>{text("发布", "Release")}</strong><StatusPill exists={Boolean(payload.release?.status)} current={payload.release_current} optional={false} /></div></div>
+        <div className="final-status-summary"><div><strong>{text("初稿", "Draft")}</strong><StatusPill exists current={payload.draft_approval_current} optional={false} /></div><div><strong>{text("结论", "Conclusion")}</strong><StatusPill exists={Boolean(payload.conclusion_artifact_id)} current={payload.conclusion_current} /></div><div><strong>{text("总览图", "Overview figure")}</strong><StatusPill exists={payload.overview_figure_exists} current={payload.overview_figure_current} /></div><div><strong>{text("最终稿", "Final draft")}</strong><StatusPill exists={Boolean(payload.final_artifact_id)} current={payload.final_current} optional={false} /></div><div><strong>{text("发布", "Release")}</strong><StatusPill exists={Boolean(payload.release?.status)} current={payload.release_current} optional={false} /></div><div><strong>PDF</strong><StatusPill exists={Boolean(payload.pdf_url)} current={payload.final_pdf_exists} /></div></div>
         {payload.final_draft_docx_exists ? <a className="button button-secondary" href={payload.docx_url} download="final_draft.docx">{text("下载当前DOCX", "Download current DOCX")}</a> : null}
         {payload.final_draft_docx_stale ? <p className="message message-warning">{text("现有Word已过期，请重新生成并下载。", "The existing Word file is stale. Regenerate and download it.")}</p> : null}
+        {payload.final_pdf_stale ? <p className="message message-warning">{text("现有 PDF 已过期，请重新生成。", "The existing PDF is stale. Regenerate it.")}</p> : null}
       </div></aside>
     </div>{error ? <p className="message message-error">{error.message}</p> : null}</> : null}
   </main>;

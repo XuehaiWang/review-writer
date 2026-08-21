@@ -229,6 +229,36 @@ class ArtifactFileApiTests(unittest.TestCase):
             )
         self.assertEqual(204, retried.status_code)
 
+    def test_deleted_project_slug_can_be_reused_as_a_clean_project(self) -> None:
+        with TestClient(self.app) as client:
+            deleted = client.delete(
+                f"/api/v1/projects/{self.project_id}",
+                headers={"Origin": "http://testserver"},
+            )
+            recreated = client.post(
+                "/api/v1/projects",
+                json={
+                    "slug": "copper",
+                    "topic": "A new copper review",
+                    "taxonomy_profile": "general_academic",
+                    "model_tier": "terra",
+                },
+                headers={"Origin": "http://testserver"},
+            )
+
+        self.assertEqual(204, deleted.status_code)
+        self.assertEqual(201, recreated.status_code, recreated.text)
+        replacement_id = recreated.json()["project_id"]
+        self.assertNotEqual(self.project_id, replacement_id)
+        self.assertEqual("copper", recreated.json()["slug"])
+
+        with self.sessions() as session:
+            self.assertIsNone(session.get(Project, uuid.UUID(self.project_id)))
+            replacement = session.get(Project, uuid.UUID(replacement_id))
+            self.assertIsNotNone(replacement)
+            self.assertIsNone(replacement.deleted_at)
+            self.assertEqual("active", replacement.status)
+
 
 if __name__ == "__main__":
     unittest.main()

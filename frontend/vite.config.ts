@@ -50,7 +50,6 @@ export default defineConfig(({ command }) => {
       proxy: {
         "/api": developmentProxy(),
         "/assets/ketcher": developmentProxy(),
-        "/assets/dashboard": developmentProxy(),
       },
     },
     test: {

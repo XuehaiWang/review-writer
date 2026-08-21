@@ -37,6 +37,42 @@ type BlueprintSection = Record<string, unknown> & {
   figure_or_table_needs?: unknown[];
 };
 
+type ScopeContract = Record<string, unknown> & {
+  target_question?: string;
+  review_objective?: string;
+  primary_navigation_axis?: string;
+  target_readers?: string[];
+  required_reader_outcomes?: string[];
+  search_cutoff_date?: string;
+};
+
+type CoverageDiagnostics = {
+  selected_paper_count?: number;
+  search_cutoff_date?: string | null;
+  year_distribution?: Record<string, number>;
+  year_unknown_count?: number;
+  recent_paper_ratio?: number | null;
+  source_distribution?: Record<string, number>;
+  topic_clusters?: Array<{ label: string; paper_count: number }>;
+  warnings?: Array<{ rule_id?: string; message?: string }>;
+  limitations?: string[];
+};
+
+type PlanningDiagnostics = {
+  can_confirm?: boolean;
+  blocking_issue_count?: number;
+  warning_count?: number;
+  issues?: Array<{ rule_id?: string; severity?: string; message?: string }>;
+};
+
+type AutoRoutingAdjustment = {
+  source_section?: string;
+  target_section?: string;
+  paper_ids?: string[];
+  method?: string;
+  created_section?: boolean;
+};
+
 type PlanningPayload = {
   topic?: string;
   matrix_revision: number;
@@ -49,10 +85,19 @@ type PlanningPayload = {
   outline_selection?: Record<string, unknown>;
   reference_outline_candidates?: Array<Record<string, unknown> & { candidate_id?: string; source_name?: string }>;
   legacy_reference_outline_count?: number;
-  section_blueprint?: { sections?: BlueprintSection[] };
+  section_blueprint?: {
+    sections?: BlueprintSection[];
+    resolved_outline_md?: string;
+    auto_routing_adjustments?: AutoRoutingAdjustment[];
+  };
   blueprint_current?: boolean;
   section_writing_plan_md?: string;
   matrix_sync?: Record<string, unknown>;
+  scope_contract?: ScopeContract;
+  scope_diagnostics?: PlanningDiagnostics;
+  coverage_diagnostics?: CoverageDiagnostics;
+  classification_basis?: Record<string, unknown>;
+  taxonomy_diagnostics?: PlanningDiagnostics;
 };
 
 const outlineStyles = [
@@ -89,12 +134,14 @@ function MatrixWorkspace({ payload, projectId, refresh }: { payload: PlanningPay
   const [note, setNote] = useState(selected?.main_content || "");
   const [complete, setComplete] = useState(Boolean(selected?.full_reading_complete || selected?.reading_complete));
   const [outlineDraft, setOutlineDraft] = useState(payload.selected_outline_md || "");
+  const [scopeDraft, setScopeDraft] = useState<ScopeContract>(payload.scope_contract || {});
   const paperLabels = useMemo(() => buildPaperDisplayLabels(papers), [papers]);
   useEffect(() => {
     setNote(selected?.main_content || "");
     setComplete(Boolean(selected?.full_reading_complete || selected?.reading_complete));
   }, [selected]);
   useEffect(() => setOutlineDraft(payload.selected_outline_md || ""), [payload.selected_outline_md]);
+  useEffect(() => setScopeDraft(payload.scope_contract || {}), [payload.scope_contract]);
 
   const saveReading = useMutation({
     mutationFn: () => apiRequest(`/api/v1/projects/${encodeURIComponent(projectId)}/planning/matrix/${encodeURIComponent(selected!.paper_id)}`, {
@@ -113,7 +160,7 @@ function MatrixWorkspace({ payload, projectId, refresh }: { payload: PlanningPay
   const saveOutline = useMutation({
     mutationFn: () => apiRequest(`/api/v1/projects/${encodeURIComponent(projectId)}/planning/outline`, {
       method: "PUT",
-      ...jsonBody({ revision: payload.matrix_revision, outline_style: String(payload.outline_selection?.outline_style || "custom"), outline_md: outlineDraft }),
+      ...jsonBody({ revision: payload.matrix_revision, outline_style: String(payload.outline_selection?.outline_style || "custom"), outline_md: outlineDraft, scope_contract: scopeDraft }),
     }),
     onSuccess: refresh,
   });
@@ -150,6 +197,48 @@ function MatrixWorkspace({ payload, projectId, refresh }: { payload: PlanningPay
           {uploadReference.error ? <p className="message message-error">{uploadReference.error.message}</p> : null}
           {payload.legacy_reference_outline_count ? <p className="message message-warning">{text(`已隐藏 ${payload.legacy_reference_outline_count} 个旧版参考大纲，因为它们没有通过“只学格式”的内容隔离校验；如需使用，请重新上传原参考综述。`, `${payload.legacy_reference_outline_count} legacy reference outlines were hidden because they did not pass format-only content isolation. Upload the source review again to use it safely.`)}</p> : null}
           {payload.reference_outline_candidates?.length ? <div className="reference-candidates">{payload.reference_outline_candidates.map((candidate) => { const style = `reference:${candidate.candidate_id}`; return <button key={String(candidate.candidate_id)} className={selectedStyle === style ? "active" : ""} type="button" disabled={chooseOutline.isPending || selectedStyle === style} onClick={() => chooseOutline.mutate(style)}><strong>{String(candidate.source_name || candidate.candidate_id)}</strong><small>{text("仅学习格式 · 内容来自当前Matrix", "Format only · content from current Matrix")}</small></button>; })}</div> : null}
+          <section className="surface scope-contract-editor">
+            <div className="scope-contract-heading">
+              <div>
+                <span className="step-label">{text("写作约束", "Writing contract")}</span>
+                <h2>{text("综述范围与学术目标", "Review scope and academic objective")}</h2>
+                <p>{text("用于统一后续大纲、章节论证与结论的研究方向。系统会根据主题和 Matrix 自动生成，无需单独确认；仅在方向不准确时修改，保存大纲时一并保存。", "Keeps the outline, section arguments, and conclusions aligned to one research direction. It is generated from the topic and Matrix with no separate confirmation; edit only when the direction is inaccurate, then save it with the outline.")}</p>
+              </div>
+              <span className={payload.scope_diagnostics?.can_confirm === false ? "badge pending" : "badge"}>{payload.scope_diagnostics?.can_confirm === false ? text("需要补充", "Needs attention") : text("已自动生成", "Generated")}</span>
+            </div>
+            <div className="scope-contract-grid">
+              <label className="outline-builder-field scope-contract-field">
+                <span>{text("核心研究问题", "Central review question")}</span>
+                <textarea rows={3} value={String(scopeDraft.target_question || "")} onChange={(event) => setScopeDraft((current) => ({ ...current, target_question: event.target.value }))} />
+              </label>
+              <label className="outline-builder-field scope-contract-field">
+                <span>{text("综述目标与学术贡献", "Review objective and contribution")}</span>
+                <textarea rows={3} value={String(scopeDraft.review_objective || "")} onChange={(event) => setScopeDraft((current) => ({ ...current, review_objective: event.target.value }))} />
+              </label>
+              <label className="outline-builder-field scope-contract-field scope-contract-field-compact">
+                <span>{text("主要组织轴", "Primary navigation axis")}</span>
+                <input value={String(scopeDraft.primary_navigation_axis || "").replaceAll("_", " ")} onChange={(event) => setScopeDraft((current) => ({ ...current, primary_navigation_axis: event.target.value }))} />
+              </label>
+              <label className="outline-builder-field scope-contract-field scope-contract-field-compact">
+                <span>{text("目标读者", "Target readers")}</span>
+                <input value={(scopeDraft.target_readers || []).join(", ")} onChange={(event) => setScopeDraft((current) => ({ ...current, target_readers: event.target.value.split(/[,，]/).map((item) => item.trim()).filter(Boolean) }))} />
+                <small>{text("多类读者请用逗号分隔", "Separate multiple reader groups with commas")}</small>
+              </label>
+              <label className="outline-builder-field scope-contract-field scope-contract-field-compact">
+                <span>{text("检索截止日期", "Search cutoff date")}</span>
+                <input type="date" value={String(scopeDraft.search_cutoff_date || "")} onChange={(event) => setScopeDraft((current) => ({ ...current, search_cutoff_date: event.target.value }))} />
+                <small>{text("用于说明本综述实际覆盖到哪个日期，不代表全领域覆盖率。", "Records how current the selected corpus is; it does not imply global coverage.")}</small>
+              </label>
+            </div>
+            {payload.scope_diagnostics?.issues?.map((issue) => <p className="message message-warning" key={issue.rule_id}>{issue.message}</p>)}
+            <div className="coverage-diagnostics-summary">
+              <div><strong>{payload.coverage_diagnostics?.selected_paper_count || 0}</strong><span>{text("已选论文", "Selected papers")}</span></div>
+              <div><strong>{Object.keys(payload.coverage_diagnostics?.year_distribution || {}).length}</strong><span>{text("年份区间点", "Publication years")}</span></div>
+              <div><strong>{Object.keys(payload.coverage_diagnostics?.source_distribution || {}).length}</strong><span>{text("来源期刊", "Source venues")}</span></div>
+              <div><strong>{payload.coverage_diagnostics?.topic_clusters?.length || 0}</strong><span>{text("基础主题簇", "Basic topic clusters")}</span></div>
+            </div>
+            {payload.coverage_diagnostics?.warnings?.map((issue) => <p className="message message-warning" key={issue.rule_id}>{issue.rule_id === "coverage.search_cutoff_unrecorded" ? text("尚未记录检索截止日期。", "The search cutoff date has not been recorded.") : issue.rule_id === "coverage.publication_year_missing" ? text("部分已选论文缺少规范化发表年份。", "Some selected papers have no normalized publication year.") : text("覆盖信息不完整。", issue.message || "Coverage information is incomplete.")}</p>)}
+          </section>
           <section className="outline-editor-card"><div className="section-heading"><div><h2>{text("新手大纲编辑器", "Beginner outline editor")}</h2><p>{text("大标题和小标题必须对应当前检索主题；新手模式会自动生成系统需要的格式。", "Every heading and subheading must match the current discovery topic; beginner mode generates the required format automatically.")}</p></div><button className="button button-primary" type="button" disabled={!outlineReady || saveOutline.isPending} onClick={() => saveOutline.mutate()}>{saveOutline.isPending ? text("保存中…", "Saving…") : text("保存大纲", "Save outline")}</button></div><OutlineBuilder value={outlineDraft} papers={papers} onChange={setOutlineDraft} />{!outlineReady && outlineDraft.trim() ? <p className="message message-warning">{text("请补全每个章节的标题，并至少选择一篇Matrix论文。", "Complete every section title and select at least one Matrix paper per section.")}</p> : null}{saveOutline.error ? <p className="message message-error">{saveOutline.error.message}</p> : null}</section>
           <details className="outline-options"><summary>{text("查看系统生成的候选大纲", "View system-generated outline candidates")}</summary><pre>{payload.outline_options_md || text("暂无候选大纲。", "No candidate outlines yet.")}</pre></details>
         </section>
@@ -164,10 +253,13 @@ function BlueprintWorkspace({ payload }: { payload: PlanningPayload }) {
   const [selectedId, setSelectedId] = useState(String(sections[0]?.section_id || ""));
   const [detailTab, setDetailTab] = useState<"section" | "plan" | "outline">("section");
   const section = sections.find((item) => String(item.section_id) === selectedId) || sections[0];
+  const issues = [...(payload.scope_diagnostics?.issues || []), ...(payload.taxonomy_diagnostics?.issues || [])];
+  const adjustments = payload.section_blueprint?.auto_routing_adjustments || [];
+  const resolvedOutline = payload.section_blueprint?.resolved_outline_md || payload.selected_outline_md;
   return (
     <div className="blueprint-grid-react">
       <section className="pane blueprint-section-list"><div className="pane-head"><div><span className="step-label">{text("Blueprint章节", "Blueprint sections")}</span><h2>{sections.length} {text("个章节", "sections")}</h2></div></div><div className="keyword-list">{sections.map((item) => { const papers = item.major_papers || item.assigned_papers || []; const claims = item.review_claims || item.paragraph_plan || []; const missing = !papers.length || !claims.length; return <button key={String(item.section_id)} type="button" className={item === section ? "active" : ""} onClick={() => { setSelectedId(String(item.section_id)); setDetailTab("section"); }}><strong>{String(item.section_id || "")} · {String(item.title || text("无标题", "Untitled"))}</strong><small>{papers.length} {text("篇论文", "papers")} · {claims.length} {text("个段落计划", "paragraph plans")} · {missing ? text("需要检查", "Needs review") : text("就绪", "Ready")}</small></button>; })}</div></section>
-      <section className="pane blueprint-detail-react"><div className="pane-head"><div><span className="step-label">{text("Blueprint详情", "Blueprint detail")}</span><h2>{section?.title || "Blueprint"}</h2><p>{String(section?.section_thesis || section?.section_goal || "")}</p></div></div><nav className="detail-tabs"><button type="button" className={detailTab === "section" ? "active" : ""} onClick={() => setDetailTab("section")}>{text("章节", "Section")}</button><button type="button" className={detailTab === "plan" ? "active" : ""} onClick={() => setDetailTab("plan")}>{text("写作计划", "Writing plan")}</button><button type="button" className={detailTab === "outline" ? "active" : ""} onClick={() => setDetailTab("outline")}>{text("选定大纲", "Selected outline")}</button></nav>{detailTab === "section" ? <div className="blueprint-json-fields">{section ? Object.entries(section).filter(([, value]) => value !== null && value !== "" && (!Array.isArray(value) || value.length)).map(([key, value]) => <section key={key}><h3>{key.replaceAll("_", " ")}</h3><pre>{typeof value === "string" ? value : JSON.stringify(value, null, 2)}</pre></section>) : <div className="empty-state">{text("请先生成Blueprint。", "Generate a blueprint first.")}</div>}</div> : <pre className="markdown-preview">{detailTab === "plan" ? payload.section_writing_plan_md : payload.selected_outline_md}</pre>}</section>
+      <section className="pane blueprint-detail-react"><div className="pane-head"><div><span className="step-label">{text("Blueprint详情", "Blueprint detail")}</span><h2>{section?.title || "Blueprint"}</h2><p>{String(section?.section_thesis || section?.section_goal || "")}</p></div></div>{issues.length ? <div className="planning-diagnostics">{issues.map((issue) => <p className={issue.severity === "planning_blocker" ? "message message-error" : "message message-warning"} key={`${issue.rule_id}-${issue.message}`}>{issue.message}</p>)}</div> : <><p className="message message-success">{text("Scope、分类依据和论文路由已通过自动检查。", "Scope, classification basis, and paper routing passed automatic checks.")}</p>{adjustments.length ? <div className="planning-diagnostics"><p className="message message-info">{text(`系统已自动重新分配 ${adjustments.reduce((total, item) => total + (item.paper_ids?.length || 0), 0)} 篇未分类论文。`, `The system automatically rerouted ${adjustments.reduce((total, item) => total + (item.paper_ids?.length || 0), 0)} previously unclassified papers.`)}</p>{adjustments.map((item, index) => <p className="muted" key={`${item.target_section}-${index}`}>{text(`已分配至：${item.target_section || "—"}`, `Routed to: ${item.target_section || "—"}`)}</p>)}</div> : null}</>}<nav className="detail-tabs"><button type="button" className={detailTab === "section" ? "active" : ""} onClick={() => setDetailTab("section")}>{text("章节", "Section")}</button><button type="button" className={detailTab === "plan" ? "active" : ""} onClick={() => setDetailTab("plan")}>{text("写作计划", "Writing plan")}</button><button type="button" className={detailTab === "outline" ? "active" : ""} onClick={() => setDetailTab("outline")}>{text("选定大纲", "Selected outline")}</button></nav>{detailTab === "section" ? <div className="blueprint-json-fields">{section ? Object.entries(section).filter(([, value]) => value !== null && value !== "" && (!Array.isArray(value) || value.length)).map(([key, value]) => <section key={key}><h3>{key.replaceAll("_", " ")}</h3><pre>{typeof value === "string" ? value : JSON.stringify(value, null, 2)}</pre></section>) : <div className="empty-state">{text("请先生成Blueprint。", "Generate a blueprint first.")}</div>}</div> : <pre className="markdown-preview">{detailTab === "plan" ? payload.section_writing_plan_md : resolvedOutline}</pre>}</section>
     </div>
   );
 }
@@ -202,6 +294,12 @@ export function PlanningPage() {
       navigate(`/sections?project=${encodeURIComponent(project!.project_id)}`);
     },
   });
+  const planningBlocked = planning.data?.scope_diagnostics?.can_confirm === false || planning.data?.taxonomy_diagnostics?.can_confirm === false;
+  const autoRepairableRouting = Boolean(
+    planning.data?.blueprint_current
+    && planning.data?.outline_selection?.manually_edited !== true
+    && planning.data?.taxonomy_diagnostics?.issues?.some((issue) => issue.rule_id === "taxonomy.catch_all_body_section")
+  );
 
   return (
     <main className="workspace page-container workspace-page">
@@ -209,7 +307,7 @@ export function PlanningPage() {
       <nav className="workspace-step-tabs"><button type="button" className={tab === "matrix" ? "active" : ""} onClick={() => { const next = new URLSearchParams(searchParams); next.set("tab", "matrix"); setSearchParams(next); }}>1 {text("文献Matrix与大纲", "Literature matrix and outline")}</button><button type="button" className={tab === "blueprint" ? "active" : ""} onClick={() => { const next = new URLSearchParams(searchParams); next.set("tab", "blueprint"); setSearchParams(next); }}>2 {text("章节Blueprint", "Section blueprint")}</button></nav>
       {planning.isPending ? <div className="empty-state">{text("正在加载Planning产物…", "Loading planning artifacts…")}</div> : null}
       {planning.error ? <ErrorState error={planning.error} onRetry={() => planning.refetch()} /> : null}
-      {planning.data && project ? <>{!planning.data.outline_current && planning.data.selected_outline_md?.trim() ? <p className="message message-warning">{text("当前仍显示旧大纲供参考，但它不属于新的 Matrix。请在“大纲选择与上传”中重新选择或保存大纲后再生成 Blueprint。", "The previous outline remains visible for reference, but it does not belong to the new matrix. Choose or save an outline again before generating the blueprint.")}</p> : null}{tab === "blueprint" && !planning.data.blueprint_current && planning.data.section_blueprint?.sections?.length ? <p className="message message-warning">{text("当前仍显示旧 Blueprint 供核对，但它已经过期，不能确认进入章节阶段。请先使用当前 Matrix 和大纲重新生成。", "The previous blueprint remains visible for comparison, but it is stale and cannot be confirmed. Regenerate it from the current matrix and outline first.")}</p> : null}{tab === "matrix" ? <MatrixWorkspace payload={planning.data} projectId={project.project_id} refresh={refresh} /> : <BlueprintWorkspace payload={planning.data} />}<div className="stage-action-bar"><div><strong>{tab === "matrix" ? text("生成Blueprint", "Generate blueprint") : text("确认Blueprint", "Confirm blueprint")}</strong><p>{tab === "matrix" ? text("使用当前Matrix与已保存大纲生成章节任务。", "Generate section tasks from the current matrix and saved outline.") : text("确认章节论点、论文分配、段落计划和图表需求后进入章节写作。", "Review section claims, paper assignments, paragraph plans, and figure needs before section writing.")}</p></div>{tab === "matrix" ? <button className="button button-primary" type="button" disabled={generateBlueprint.isPending || !planning.data.outline_current} onClick={() => generateBlueprint.mutate()}>{generateBlueprint.isPending ? text("生成中…", "Generating…") : text("生成Blueprint", "Generate blueprint")}</button> : <button className="button button-primary" type="button" disabled={confirmBlueprint.isPending || !planning.data.blueprint_current} onClick={() => confirmBlueprint.mutate()}>{confirmBlueprint.isPending ? text("确认中…", "Confirming…") : text("确认并进入章节", "Confirm and enter sections")}</button>}{(generateBlueprint.error || confirmBlueprint.error) ? <span className="message message-error">{(generateBlueprint.error || confirmBlueprint.error)?.message}</span> : null}</div></> : null}
+      {planning.data && project ? <>{!planning.data.outline_current && planning.data.selected_outline_md?.trim() ? <p className="message message-warning">{text("当前仍显示旧大纲供参考，但它不属于新的 Matrix。请在“大纲选择与上传”中重新选择或保存大纲后再生成 Blueprint。", "The previous outline remains visible for reference, but it does not belong to the new matrix. Choose or save an outline again before generating the blueprint.")}</p> : null}{tab === "blueprint" && !planning.data.blueprint_current && planning.data.section_blueprint?.sections?.length ? <p className="message message-warning">{text("当前仍显示旧 Blueprint 供核对，但它已经过期，不能确认进入章节阶段。请先使用当前 Matrix 和大纲重新生成。", "The previous blueprint remains visible for comparison, but it is stale and cannot be confirmed. Regenerate it from the current matrix and outline first.")}</p> : null}{tab === "matrix" ? <MatrixWorkspace payload={planning.data} projectId={project.project_id} refresh={refresh} /> : <BlueprintWorkspace payload={planning.data} />}<div className="stage-action-bar"><div><strong>{tab === "matrix" ? text("生成Blueprint", "Generate blueprint") : autoRepairableRouting ? text("自动调整大纲", "Auto-adjust outline") : text("确认Blueprint", "Confirm blueprint")}</strong><p>{tab === "matrix" ? text("使用当前Matrix与已保存大纲生成章节任务；系统生成的未分类项会自动重新路由。", "Generate section tasks from the current matrix and saved outline; system-generated unclassified items are rerouted automatically.") : autoRepairableRouting ? text("系统将根据当前分类规则和论文内容重新分配未分类论文，然后更新 Blueprint。", "The system will reroute unclassified papers from the current taxonomy and paper evidence, then update the Blueprint.") : planningBlocked ? text("先在当前Planning页面修复Scope或分类阻断项；不需要增加新的确认步骤。", "Resolve Scope or taxonomy blockers on this Planning page; no additional confirmation step is required.") : text("确认章节论点、论文分配、综合需求和图表需求后进入章节写作。", "Review section claims, paper assignments, synthesis requirements, and figure needs before section writing.")}</p></div>{tab === "matrix" ? <button className="button button-primary" type="button" disabled={generateBlueprint.isPending || !planning.data.outline_current} onClick={() => generateBlueprint.mutate()}>{generateBlueprint.isPending ? text("生成中…", "Generating…") : text("生成Blueprint", "Generate blueprint")}</button> : autoRepairableRouting ? <button className="button button-primary" type="button" disabled={generateBlueprint.isPending} onClick={() => generateBlueprint.mutate()}>{generateBlueprint.isPending ? text("自动调整中…", "Auto-adjusting…") : text("自动调整并重新生成Blueprint", "Auto-adjust and regenerate blueprint")}</button> : <button className="button button-primary" type="button" disabled={confirmBlueprint.isPending || !planning.data.blueprint_current || planningBlocked} onClick={() => confirmBlueprint.mutate()}>{confirmBlueprint.isPending ? text("确认中…", "Confirming…") : text("确认并进入章节", "Confirm and enter sections")}</button>}{(generateBlueprint.error || confirmBlueprint.error) ? <span className="message message-error">{(generateBlueprint.error || confirmBlueprint.error)?.message}</span> : null}</div></> : null}
     </main>
   );
 }

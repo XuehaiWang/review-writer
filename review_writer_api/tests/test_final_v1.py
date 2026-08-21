@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import uuid
+import zipfile
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -9,8 +10,10 @@ from PIL import Image
 from sqlalchemy import select
 
 from review_writer_api.database import Project
+from review_writer_api.domain_services.final import _clean_reference_affiliation_markup
 from review_writer_api.tests.figure_test_support import NativeFigureApiTestCase
 from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
+from review_writer_core.manuscript_state import build_manuscript_state
 
 
 class FinalV1Tests(NativeFigureApiTestCase):
@@ -81,14 +84,77 @@ class FinalV1Tests(NativeFigureApiTestCase):
                 / "review.docx"
             )
             output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_bytes(b"PK\x03\x04test-docx")
+            with zipfile.ZipFile(output, "w") as archive:
+                archive.writestr(
+                    "[Content_Types].xml",
+                    '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+                )
+                archive.writestr(
+                    "word/document.xml",
+                    '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Review</w:t></w:r></w:p></w:body></w:document>',
+                )
             return {"output_path": str(output), "download_name": "review.docx"}
+
+        def pdf(context, pdf_payload):
+            output_dir = (
+                self.root
+                / "users"
+                / context.user_id
+                / ".review-writer"
+                / "test-final-pdf"
+            )
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output = output_dir / "review.pdf"
+            tex = output_dir / "review.tex"
+            log = output_dir / "compile.log"
+            output.write_bytes(b"%PDF-1.7\n% test-pdf\n")
+            tex.write_text("\\documentclass{article}\\begin{document}test\\end{document}\n", encoding="utf-8")
+            log.write_text("LuaHBTeX test; shell escape disabled\n", encoding="utf-8")
+            state = build_manuscript_state(
+                pdf_payload["final_markdown"],
+                artifact_paths=pdf_payload.get("figure_artifact_paths") or {},
+            )
+            profile = pdf_payload["language_profile"]
+            return {
+                "output_path": str(output),
+                "tex_path": str(tex),
+                "compile_log_path": str(log),
+                "manuscript_state": state,
+                "render_manifest": {
+                    "schema_version": 1,
+                    "template": "modern-survey",
+                    "template_version": "modern-survey/2",
+                    "language_profile": profile,
+                    "compiler": "LuaHBTeX test",
+                    "shell_escape": False,
+                    "source_final_artifact_id": pdf_payload["source_final_artifact_id"],
+                    "source_release_artifact_id": pdf_payload["source_release_artifact_id"],
+                    "source_markdown_sha256": state["source_markdown_sha256"],
+                    "semantic_sha256": state["semantic_sha256"],
+                    "asset_sha256": {
+                        artifact_id: "sha256:test"
+                        for artifact_id in pdf_payload.get(
+                            "figure_artifact_paths", {}
+                        )
+                    },
+                },
+                "pdf_qa": {
+                    "schema_version": 1,
+                    "status": "pass",
+                    "page_count": 3,
+                    "all_fonts_embedded": True,
+                    "blocking_issues": [],
+                    "warning_issues": [],
+                },
+                "download_name": f"review.{profile}.pdf",
+            }
 
         return {
             "draft.evaluate": evaluate,
             "final.conclusion": conclusion,
             "final.overview": overview,
             "final.export": export,
+            "final.pdf": pdf,
         }
 
     def prepare_approved_draft(self, client: TestClient) -> dict:
@@ -188,6 +254,25 @@ class FinalV1Tests(NativeFigureApiTestCase):
         )
         self.assertLess(assembled.index(marker), assembled.index("## 1. Introduction"))
         self.assertGreater(assembled.index(marker), assembled.index("Abstract text."))
+
+    def test_reference_affiliation_residue_is_removed_without_losing_science(self) -> None:
+        markdown = (
+            "# Review\n\nA result <sup>2</sup> was reported.\n\n"
+            "## References\n\n"
+            "[1] Yuli Wang<sup></sup> and Shengming Ma<sup>, </sup>. Article.\n"
+            "[2] Ogasawara, <sup>[]</sup> Yonghui Ge. Article.\n"
+            "[3] Isotope-labeling with <sup>13</sup>C. Article.\n"
+        )
+
+        cleaned = _clean_reference_affiliation_markup(markdown)
+
+        self.assertIn("A result <sup>2</sup> was reported.", cleaned)
+        self.assertIn("Yuli Wang and Shengming Ma. Article.", cleaned)
+        self.assertIn("Ogasawara, Yonghui Ge. Article.", cleaned)
+        self.assertIn("<sup>13</sup>C", cleaned)
+        self.assertNotIn("<sup></sup>", cleaned)
+        self.assertNotIn("<sup>, </sup>", cleaned)
+        self.assertNotIn("<sup>[]</sup>", cleaned)
 
     def test_re_evaluation_invalidates_old_draft_approval_and_blocks_final(self) -> None:
         with TestClient(self.app) as client:
@@ -608,6 +693,48 @@ class FinalV1Tests(NativeFigureApiTestCase):
         self.assertEqual("succeeded", job["status"])
         self.assertEqual(200, downloaded.status_code)
         self.assertTrue(downloaded.content.startswith(b"PK"))
+
+    def test_pdf_export_supports_both_profiles_without_invalidating_docx(self) -> None:
+        with TestClient(self.app) as client:
+            self.prepare_approved_draft(client)
+            built = client.post(
+                f"/api/v1/projects/{self.project_id}/final/build",
+                headers=self.headers("pdf-build"),
+            )
+            self.assertEqual(200, built.status_code, built.text)
+            word = client.post(
+                f"/api/v1/projects/{self.project_id}/final/export-jobs",
+                json={},
+                headers=self.headers("pdf-word-first"),
+            )
+            self.assertEqual(
+                "succeeded", self.wait_job(client, word.json()["id"])["status"]
+            )
+            english = client.post(
+                f"/api/v1/projects/{self.project_id}/final/pdf-jobs",
+                json={"language_profile": "en"},
+                headers=self.headers("pdf-en"),
+            )
+            english_job = self.wait_job(client, english.json()["id"])
+            chinese = client.post(
+                f"/api/v1/projects/{self.project_id}/final/pdf-jobs",
+                json={"language_profile": "zh-CN"},
+                headers=self.headers("pdf-zh"),
+            )
+            chinese_job = self.wait_job(client, chinese.json()["id"])
+            current = client.get(
+                f"/api/v1/projects/{self.project_id}/final"
+            ).json()
+            downloaded = client.get(current["pdf_url"])
+        self.assertEqual("succeeded", english_job["status"], english_job)
+        self.assertEqual("succeeded", chinese_job["status"], chinese_job)
+        self.assertEqual("zh-CN", current["pdf_language_profile"])
+        self.assertTrue(current["final_pdf_exists"])
+        self.assertFalse(current["final_pdf_stale"])
+        self.assertTrue(current["final_draft_docx_exists"])
+        self.assertEqual("pass", current["pdf_qa"]["status"])
+        self.assertEqual(200, downloaded.status_code)
+        self.assertTrue(downloaded.content.startswith(b"%PDF"))
 
     def test_final_freshness_tracks_optional_component_versions(self) -> None:
         with TestClient(self.app) as client:

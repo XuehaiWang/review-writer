@@ -874,6 +874,36 @@ class WorkflowRepository:
             )
             return self._stage_run_record(run) if run else None
 
+    def get_latest_stage_run(
+        self,
+        user_id: str,
+        project_id: str,
+        stage_id: str,
+        *,
+        status: str = "succeeded",
+    ) -> StageRunRecord | None:
+        """Return the newest owned run for deterministic input-diff diagnostics."""
+
+        if stage_id not in INTERNAL_STAGES:
+            raise WorkflowValidationError(f"Unknown workflow stage: {stage_id}")
+        user_uuid = self._uuid(user_id, not_found_message="Stage run not found.")
+        project_uuid = self._uuid(project_id, not_found_message="Stage run not found.")
+        with database_session(self.session_factory) as session:
+            run = session.scalar(
+                select(WorkflowStageRun)
+                .join(Project, Project.id == WorkflowStageRun.project_id)
+                .where(
+                    WorkflowStageRun.project_id == project_uuid,
+                    WorkflowStageRun.stage_id == stage_id,
+                    WorkflowStageRun.status == str(status),
+                    Project.user_id == user_uuid,
+                    Project.deleted_at.is_(None),
+                )
+                .order_by(WorkflowStageRun.started_at.desc(), WorkflowStageRun.id.desc())
+                .limit(1)
+            )
+            return self._stage_run_record(run) if run else None
+
     def compare_and_set_stage(
         self,
         user_id: str,
@@ -982,6 +1012,7 @@ class WorkflowRepository:
         approval_events: list[dict[str, Any]] | None = None,
         expected_current_artifacts: dict[str, str] | None = None,
         expected_stage_states: dict[str, dict[str, Any]] | None = None,
+        run_output_snapshot: Any = None,
     ) -> StageStateRecord:
         """Promote one or more immutable outputs and advance their stage in one commit."""
 
@@ -1159,6 +1190,19 @@ class WorkflowRepository:
                             },
                         )
             now = utc_now()
+            run.status = "succeeded"
+            run.output_snapshot = (
+                run_output_snapshot
+                if run_output_snapshot is not None
+                else {
+                    "artifact_ids": {
+                        logical_name: str(artifact_uuid)
+                        for logical_name, artifact_uuid in parsed_artifacts.items()
+                    }
+                }
+            )
+            run.finished_at = now
+            run.updated_at = now
             for event in pending_approvals:
                 approval_id = self._uuid(
                     event.get("id"), not_found_message="Approval ID is invalid."

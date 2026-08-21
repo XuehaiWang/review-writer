@@ -1,7 +1,7 @@
 import type { Job } from "../../api/types";
 import { useUiText } from "../../i18n/useUiText";
 
-export type FinalAction = "conclusion" | "overview" | "build" | "export";
+export type FinalAction = "conclusion" | "overview" | "build" | "export" | "pdf";
 
 type FinalJobStatusProps = {
   job?: Job;
@@ -13,7 +13,7 @@ const activeStatuses = new Set(["queued", "running", "cancel_requested"]);
 
 function actionFromJob(job: Job | undefined, fallback: FinalAction): FinalAction {
   const value = String(job?.job_type || "").replace(/^final\./, "");
-  return value === "conclusion" || value === "overview" || value === "build" || value === "export"
+  return value === "conclusion" || value === "overview" || value === "build" || value === "export" || value === "pdf"
     ? value
     : fallback;
 }
@@ -35,6 +35,8 @@ export function FinalJobStatus({ job, startingAction = "build", submissionError 
       ? text("总览图生成", "Overview figure generation")
       : action === "export"
         ? text("Word 生成与下载", "Word generation and download")
+        : action === "pdf"
+          ? text("LaTeX PDF 生成与下载", "LaTeX PDF generation and download")
         : text("最终稿生成", "Final draft generation");
 
   let title = text("正在提交任务", "Submitting job");
@@ -49,6 +51,8 @@ export function FinalJobStatus({ job, startingAction = "build", submissionError 
         ? text("正在生成并校验总览图", "Generating and validating overview figure")
         : action === "export"
           ? text("正在生成 Word 文档", "Generating Word document")
+          : action === "pdf"
+            ? text("正在编译并校验 PDF", "Compiling and validating PDF")
           : text("正在合并并审计最终稿", "Assembling and auditing final draft");
     if (action === "conclusion") {
       detail = current <= 1
@@ -64,6 +68,12 @@ export function FinalJobStatus({ job, startingAction = "build", submissionError 
       detail = current <= 1
         ? text("正在准备最终 Markdown、图片和参考文献。", "Preparing final Markdown, images, and references.")
         : text("正在生成、校验并发布 DOCX 文件。", "Generating, validating, and publishing the DOCX file.");
+    } else if (action === "pdf") {
+      detail = current <= 1
+        ? text("正在构建受控 LaTeX 渲染包。", "Building the controlled LaTeX render bundle.")
+        : current < total - 1
+          ? text("LuaLaTeX 正在无 shell escape 模式下编译。", "LuaLaTeX is compiling with shell escape disabled.")
+          : text("正在检查字体嵌入、页面、引用和缺字。", "Checking embedded fonts, pages, citations, and missing glyphs.");
     } else {
       detail = current <= 1
         ? text("正在确认当前初稿和可用的结论、总览图。", "Checking the current draft and available conclusion and overview figure.")
@@ -78,6 +88,8 @@ export function FinalJobStatus({ job, startingAction = "build", submissionError 
     title = text("任务已完成", "Job completed");
     detail = action === "export"
       ? text("Word 已生成；浏览器将开始下载，也可使用下方的当前 DOCX 下载入口。", "The Word file is ready. The browser will start the download, and the current DOCX link remains available below.")
+      : action === "pdf"
+        ? text("PDF 已通过自动 QA；浏览器将开始下载。", "The PDF passed automatic QA and the browser download will begin.")
       : text("结果已保存并同步到当前终稿阶段。", "The result was saved and synchronized to the current Final stage.");
   } else if (status === "failed") {
     title = text("任务执行失败", "Job failed");

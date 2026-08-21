@@ -58,6 +58,20 @@ describe("DiscoveryJobProgress", () => {
     expect(screen.getByRole("progressbar", { name: "文献检索进度" })).toHaveAttribute("aria-valuenow", "100");
   });
 
+  it("states that discovery was not run when credit is insufficient", () => {
+    render(<DiscoveryJobProgress job={job({
+      status: "failed",
+      error_code: "INSUFFICIENT_CREDIT",
+      error_message: "余额不足，无法执行本次智能任务。",
+      progress_current: 2,
+      finished_at: "2026-08-14T00:00:03Z",
+    })} />);
+
+    expect(screen.getByText("检索未执行")).toBeInTheDocument();
+    expect(screen.getByText(/没有生成新的候选结果/)).toBeInTheDocument();
+    expect(screen.queryByText("检索完成")).not.toBeInTheDocument();
+  });
+
   it("shows persisted per-source progress after polling", () => {
     render(<DiscoveryJobProgress job={job({ result: { source_progress: { sources: { crossref: { status: "completed", count: 12 }, openalex: { status: "running", count: 0 }, semantic_scholar: { status: "failed", count: 0 }, arxiv: { status: "completed", count: 5 } } } } })} />);
 

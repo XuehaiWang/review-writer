@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import json
 import hashlib
+import base64
+import io
 import os
 import re
 import shutil
 import sys
 import uuid
+import urllib.error
+import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +104,7 @@ class NativeWorkflowHandlers:
             "final.conclusion": self.final_conclusion,
             "final.overview": self.final_overview,
             "final.export": self.final_export,
+            "final.pdf": self.final_pdf,
         }
 
     def _environment(self, user_id: str) -> tuple[dict[str, str], dict[str, str]]:
@@ -472,7 +478,9 @@ class NativeWorkflowHandlers:
         return self._result(staging, "00_discovery/combined_results_by_keyword.json")
 
     @staticmethod
-    def _section_progress_callback(context, status_file: Path):
+    def _section_progress_callback(
+        context, status_file: Path, checkpoint_file: Path | None = None
+    ):
         """Publish each completed chapter without exposing mutable artifacts."""
 
         previous = ""
@@ -496,7 +504,14 @@ class NativeWorkflowHandlers:
                 if hasattr(context, "report_progress"):
                     context.report_progress(current, total)
                 if hasattr(context, "report_partial_result"):
-                    context.report_partial_result({"section_progress": status})
+                    result = {"section_progress": status}
+                    if checkpoint_file is not None and checkpoint_file.is_file():
+                        checkpoint = json.loads(
+                            checkpoint_file.read_text(encoding="utf-8")
+                        )
+                        if isinstance(checkpoint, dict):
+                            result["section_checkpoint"] = checkpoint
+                    context.report_partial_result(result)
             except Exception:
                 # Progress reporting is observational and must never invalidate
                 # a scientifically valid result that is ready to publish.
@@ -573,7 +588,16 @@ class NativeWorkflowHandlers:
         normal, secrets = self._text_gateway_environment(context)
         relative_stage = Path("section-workspace") / "review-projects" / project_id / "02_section_drafting"
         progress_file = section_stage / "generation_progress.json"
+        checkpoint_file = section_stage / "section_checkpoints.json"
         progress_file.unlink(missing_ok=True)
+        resume_checkpoint = payload.get("resume_checkpoint")
+        if isinstance(resume_checkpoint, dict):
+            checkpoint_file.write_text(
+                json.dumps(resume_checkpoint, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        else:
+            checkpoint_file.unlink(missing_ok=True)
         self.runner.run(
             [
                 sys.executable,
@@ -595,11 +619,15 @@ class NativeWorkflowHandlers:
                 (relative_stage / "section_drafts.json").as_posix(),
                 (relative_stage / "section_drafts.md").as_posix(),
                 (relative_stage / "section_drafting_report.md").as_posix(),
+                (relative_stage / "synthesis_state.json").as_posix(),
+                (relative_stage / "writing_plan.json").as_posix(),
             ),
             env=normal,
             secret_env=secrets,
             cancel_requested=context.cancellation_requested,
-            progress_callback=self._section_progress_callback(context, progress_file),
+            progress_callback=self._section_progress_callback(
+                context, progress_file, checkpoint_file
+            ),
             timeout_seconds=15 * 60,
         )
         drafts = json.loads(
@@ -651,6 +679,12 @@ class NativeWorkflowHandlers:
         )
         return {
             "sections": drafts.get("sections") or [],
+            "synthesis_state": json.loads(
+                (section_stage / "synthesis_state.json").read_text(encoding="utf-8")
+            ),
+            "writing_plan": json.loads(
+                (section_stage / "writing_plan.json").read_text(encoding="utf-8")
+            ),
             "section_drafts_md": (section_stage / "section_drafts.md").read_text(
                 encoding="utf-8"
             ),
@@ -1567,3 +1601,183 @@ class NativeWorkflowHandlers:
             timeout_seconds=5 * 60,
         )
         return {"output_path": str(output), "download_name": "final_draft.docx"}
+
+    def final_pdf(self, context, payload):
+        """Render the released manuscript through the locked journal-style LuaLaTeX path."""
+
+        staging = self._staging(context.user_id, context.job_id)
+        bundle = staging / "pdf-render-bundle"
+        bundle.mkdir(parents=True, exist_ok=True)
+        input_path = staging / "pdf-render-input.json"
+        self._write_json(
+            input_path,
+            {
+                "final_markdown": str(payload.get("final_markdown") or ""),
+                "artifact_paths": dict(payload.get("figure_artifact_paths") or {}),
+                "language_profile": str(payload.get("language_profile") or "en"),
+                "source_final_artifact_id": payload.get("source_final_artifact_id"),
+                "source_release_artifact_id": payload.get("source_release_artifact_id"),
+            },
+        )
+        renderer_url = str(
+            os.environ.get("REVIEW_WRITER_PDF_RENDERER_URL") or ""
+        ).strip()
+        if renderer_url:
+            user_root = self.workspaces.user_root(context.user_id)
+            assets = []
+            for artifact_id, raw_path in sorted(
+                dict(payload.get("figure_artifact_paths") or {}).items()
+            ):
+                source = self._trusted_user_file(user_root, raw_path)
+                if source is None:
+                    raise RuntimeError("A PDF asset is outside the trusted user workspace.")
+                raw = source.read_bytes()
+                assets.append(
+                    {
+                        "artifact_id": str(artifact_id),
+                        "filename": source.name,
+                        "sha256": hashlib.sha256(raw).hexdigest(),
+                        "data_base64": base64.b64encode(raw).decode("ascii"),
+                    }
+                )
+            request = urllib.request.Request(
+                renderer_url,
+                data=json.dumps(
+                    {
+                        "final_markdown": str(payload.get("final_markdown") or ""),
+                        "language_profile": str(payload.get("language_profile") or "en"),
+                        "source_final_artifact_id": payload.get("source_final_artifact_id"),
+                        "source_release_artifact_id": payload.get("source_release_artifact_id"),
+                        "assets": assets,
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                method="POST",
+                headers={
+                    "Authorization": "Bearer "
+                    + str(os.environ.get("REVIEW_WRITER_PDF_RENDERER_TOKEN") or ""),
+                    "Content-Type": "application/json",
+                    "Accept": "application/zip",
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=15 * 60) as response:
+                    archive_bytes = response.read(200 * 1024 * 1024 + 1)
+            except urllib.error.HTTPError as exc:
+                renderer_body = exc.read(4000).decode("utf-8", "replace")
+                if exc.code == 422:
+                    try:
+                        renderer_payload = json.loads(renderer_body)
+                    except json.JSONDecodeError:
+                        renderer_payload = {}
+                    renderer_detail = str(
+                        renderer_payload.get("detail")
+                        if isinstance(renderer_payload, dict)
+                        else ""
+                    )
+                    blocking_checks = sorted(
+                        set(
+                            re.findall(
+                                r'"type"\s*:\s*"([a-z0-9_\-]+)"',
+                                renderer_detail,
+                                flags=re.IGNORECASE,
+                            )
+                        )
+                    )
+                    check_suffix = (
+                        " Blocking checks: " + ", ".join(blocking_checks) + "."
+                        if blocking_checks
+                        else ""
+                    )
+                    raise WorkflowValidationError(
+                        "PDF publication checks failed. Rebuild the current Final "
+                        "manuscript to remove unsupported markup or unresolved "
+                        "placeholders, then generate the PDF again."
+                        + check_suffix,
+                        details={
+                            "renderer_status": 422,
+                            "blocking_checks": blocking_checks,
+                        },
+                    ) from exc
+                raise RuntimeError(
+                    f"The isolated PDF renderer rejected the job (HTTP {exc.code})."
+                ) from exc
+            except (urllib.error.URLError, TimeoutError) as exc:
+                raise RuntimeError(f"The isolated PDF renderer is unavailable: {exc}") from exc
+            if len(archive_bytes) > 200 * 1024 * 1024:
+                raise RuntimeError("The isolated PDF renderer response exceeded 200 MiB.")
+            expected = {
+                "manuscript.pdf",
+                "manuscript.tex",
+                "manuscript_state.json",
+                "render_manifest.json",
+                "pdf_qa.json",
+                "compile.log",
+            }
+            try:
+                with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+                    names = set(archive.namelist())
+                    if names != expected:
+                        raise RuntimeError(
+                            "The isolated PDF renderer returned an unexpected file set."
+                        )
+                    total_output_size = sum(
+                        archive.getinfo(name).file_size for name in expected
+                    )
+                    if total_output_size > 200 * 1024 * 1024:
+                        raise RuntimeError(
+                            "The PDF renderer output bundle exceeded 200 MiB."
+                        )
+                    for name in sorted(expected):
+                        info = archive.getinfo(name)
+                        if info.file_size > 150 * 1024 * 1024:
+                            raise RuntimeError("A PDF renderer output exceeded 150 MiB.")
+                        (bundle / name).write_bytes(archive.read(info))
+            except zipfile.BadZipFile as exc:
+                raise RuntimeError("The isolated PDF renderer returned an invalid archive.") from exc
+        else:
+            relative = Path("pdf-render-bundle")
+            self.runner.run(
+                [
+                    sys.executable,
+                    str(
+                        self.root
+                        / "skills"
+                        / "review-final-audit-release"
+                        / "scripts"
+                        / "render_modern_survey_pdf.py"
+                    ),
+                    "--input-json",
+                    str(input_path),
+                    "--output-dir",
+                    str(bundle),
+                ],
+                cwd=self.root,
+                staging_directory=staging,
+                expected_outputs=(
+                    (relative / "manuscript.pdf").as_posix(),
+                    (relative / "manuscript.tex").as_posix(),
+                    (relative / "manuscript_state.json").as_posix(),
+                    (relative / "render_manifest.json").as_posix(),
+                    (relative / "pdf_qa.json").as_posix(),
+                    (relative / "compile.log").as_posix(),
+                ),
+                cancel_requested=context.cancellation_requested,
+                timeout_seconds=12 * 60,
+            )
+        profile = str(payload.get("language_profile") or "en")
+        return {
+            "output_path": str(bundle / "manuscript.pdf"),
+            "tex_path": str(bundle / "manuscript.tex"),
+            "compile_log_path": str(bundle / "compile.log"),
+            "manuscript_state": json.loads(
+                (bundle / "manuscript_state.json").read_text(encoding="utf-8")
+            ),
+            "render_manifest": json.loads(
+                (bundle / "render_manifest.json").read_text(encoding="utf-8")
+            ),
+            "pdf_qa": json.loads(
+                (bundle / "pdf_qa.json").read_text(encoding="utf-8")
+            ),
+            "download_name": f"final_draft.{profile}.pdf",
+        }

@@ -1533,10 +1533,11 @@ review_writer_core/retrieval/
 
 重点调整：
 
-- `view/assets/dashboard/review-ui.js`
-- `view/assets/dashboard/review-i18n.js`
+- `frontend/src/features/library/LibraryPage.tsx`
+- `frontend/src/features/discovery/DiscoveryPage.tsx`
+- `frontend/src/i18n/messages.ts`
 - `frontend/src/features/projects/ProjectsPage.tsx`
-- 对应 Dashboard 样式文件。
+- `frontend/src/styles/app.css`。
 
 只增加项目分类选项、状态、来源、索引和证据展示，不重新设计九阶段布局。
 

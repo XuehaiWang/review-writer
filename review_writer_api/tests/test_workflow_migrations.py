@@ -34,9 +34,13 @@ WORKFLOW_TABLES = {
     "workflow_approvals",
     "workflow_migrations",
     "library_papers",
+    "library_bibliography_audits",
     "library_artifacts",
     "library_document_indexes",
     "library_document_chunks",
+    "user_credit_accounts",
+    "credit_reservations",
+    "credit_transactions",
 }
 
 
@@ -47,7 +51,7 @@ class WorkflowMigrationTests(unittest.TestCase):
     def test_workflow_schema_has_separate_workflow_and_job_scope_revisions(self) -> None:
         script = ScriptDirectory.from_config(self.alembic_config())
 
-        self.assertEqual(["20260819_0012"], script.get_heads())
+        self.assertEqual(["20260820_0014"], script.get_heads())
         workflow_revision = script.get_revision("20260813_0002")
         self.assertEqual("20260811_0001", workflow_revision.down_revision)
         job_scope_revision = script.get_revision("20260813_0003")
@@ -68,6 +72,10 @@ class WorkflowMigrationTests(unittest.TestCase):
         self.assertEqual("20260818_0009", mineru_usage_revision.down_revision)
         document_index_revision = script.get_revision("20260819_0012")
         self.assertEqual("20260818_0011", document_index_revision.down_revision)
+        bibliography_audit_revision = script.get_revision("20260820_0013")
+        self.assertEqual("20260819_0012", bibliography_audit_revision.down_revision)
+        credit_billing_revision = script.get_revision("20260820_0014")
+        self.assertEqual("20260820_0013", credit_billing_revision.down_revision)
 
     def test_foundation_and_workflow_revisions_upgrade_independently(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

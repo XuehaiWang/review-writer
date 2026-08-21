@@ -1,14 +1,19 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiRequest, jsonBody } from "../../api/client";
+import { apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
 import {
+  adminUsageQuery,
+  adminUsersQuery,
   adminProviderAuditQuery,
   adminProviderSettingsQuery,
+  meQuery,
   queryKeys,
 } from "../../api/queries";
 import type {
+  AdminUser,
   AdminProviderTestResult,
+  CreditTransaction,
   ProviderKind,
   ProviderSettings,
 } from "../../api/types";
@@ -194,10 +199,98 @@ function ProviderEditor({ record }: { record: ProviderSettings }) {
   );
 }
 
+function UserAndCreditManagement({ users, currentUserId }: { users: AdminUser[]; currentUserId: string }) {
+  const { text } = useUiText();
+  const queryClient = useQueryClient();
+  const [query, setQuery] = useState("");
+  const [targetUserId, setTargetUserId] = useState(users[0]?.user_id || "");
+  const [amount, setAmount] = useState("");
+  const [reason, setReason] = useState("");
+  const [message, setMessage] = useState("");
+  const [adjustmentKey, setAdjustmentKey] = useState(() => newIdempotencyKey());
+
+  useEffect(() => {
+    if (!targetUserId && users[0]) setTargetUserId(users[0].user_id);
+  }, [targetUserId, users]);
+
+  const refreshBilling = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKeys.adminUsers }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.adminUsage }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.balance }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.balanceTransactions }),
+    ]);
+  };
+  const adjustment = useMutation({
+    mutationFn: () => apiRequest<CreditTransaction>("/api/v1/admin/credits/adjustments", {
+      method: "POST",
+      ...jsonBody({ target_user_id: targetUserId, amount_usd: amount, reason }),
+      headers: { "Content-Type": "application/json", "Idempotency-Key": adjustmentKey },
+    }),
+    onSuccess: async () => {
+      setMessage(text("额度调整已写入不可变资金流水。", "Adjustment was written to the append-only ledger."));
+      setAmount("");
+      setReason("");
+      setAdjustmentKey(newIdempotencyKey());
+      await refreshBilling();
+    },
+  });
+  const updateUser = useMutation({
+    mutationFn: ({ userId, patch }: { userId: string; patch: { role?: string; status?: string } }) => apiRequest<AdminUser>(
+      `/api/v1/admin/users/${encodeURIComponent(userId)}`,
+      { method: "PATCH", ...jsonBody(patch) },
+    ),
+    onSuccess: refreshBilling,
+  });
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const visibleUsers = users.filter((user) => !normalizedQuery
+    || user.email.toLocaleLowerCase().includes(normalizedQuery)
+    || user.display_name.toLocaleLowerCase().includes(normalizedQuery));
+
+  return (
+    <section className="surface admin-user-panel">
+      <div className="section-heading admin-user-heading">
+        <div><span className="step-label">ACCOUNTS</span><h2>{text("用户与额度管理", "Users and credits")}</h2><p>{text("停用账户会立即撤销其登录会话；额度调整必须填写原因，并完整保留管理员审计信息。", "Disabling an account immediately revokes its sessions. Credit changes require a reason and preserve administrator audit data.")}</p></div>
+        <label className="admin-user-search"><span>{text("查找用户", "Find user")}</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={text("邮箱或显示名称", "Email or display name")} /></label>
+      </div>
+
+      <div className="admin-credit-form">
+        <label><span>{text("目标用户", "Target user")}</span><select value={targetUserId} onChange={(event) => setTargetUserId(event.target.value)}>{users.map((user) => <option value={user.user_id} key={user.user_id}>{user.display_name || user.email} · {user.email}</option>)}</select></label>
+        <label><span>{text("调整金额（USD）", "Amount (USD)")}</span><input type="number" step="0.01" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder={text("增加填正数，扣减填负数", "Positive to add, negative to deduct")} /></label>
+        <label className="admin-credit-reason"><span>{text("调整原因", "Reason")}</span><input value={reason} maxLength={2000} onChange={(event) => setReason(event.target.value)} placeholder={text("例如：测试额度、人工退款或纠正记录", "For example: test credit, refund, or correction")} /></label>
+        <button className="button button-primary" type="button" disabled={adjustment.isPending || !targetUserId || !amount || !reason.trim()} onClick={() => adjustment.mutate()}>{adjustment.isPending ? text("写入中…", "Posting…") : text("确认调整额度", "Post adjustment")}</button>
+      </div>
+      {message ? <p className="message" role="status">{message}</p> : null}
+      {adjustment.error || updateUser.error ? <p className="message message-error" role="alert">{(adjustment.error || updateUser.error)?.message}</p> : null}
+
+      <div className="admin-user-table-wrap">
+        <table className="admin-user-table">
+          <thead><tr><th>{text("用户", "User")}</th><th>{text("可用余额", "Available")}</th><th>{text("累计成本", "Usage cost")}</th><th>{text("项目", "Projects")}</th><th>{text("角色", "Role")}</th><th>{text("状态", "Status")}</th></tr></thead>
+          <tbody>{visibleUsers.map((user) => {
+            const isSelf = user.user_id === currentUserId;
+            return <tr key={user.user_id}>
+              <td><strong>{user.display_name || text("未命名用户", "Unnamed user")}{isSelf ? text("（当前账户）", " (you)") : ""}</strong><small>{user.email}</small></td>
+              <td><strong>${Number(user.available_usd).toFixed(4)}</strong><small>{Number(user.reserved_usd) > 0 ? text(`冻结 $${Number(user.reserved_usd).toFixed(4)}`, `$${Number(user.reserved_usd).toFixed(4)} reserved`) : text("无冻结", "No hold")}</small></td>
+              <td><strong>${Number(user.estimated_cost_usd).toFixed(4)}</strong><small>USD</small></td>
+              <td>{user.project_count.toLocaleString()}</td>
+              <td><select aria-label={text(`${user.email} 的角色`, `Role for ${user.email}`)} value={user.role} disabled={updateUser.isPending || isSelf} onChange={(event) => updateUser.mutate({ userId: user.user_id, patch: { role: event.target.value } })}><option value="user">User</option><option value="admin">Admin</option></select></td>
+              <td><select aria-label={text(`${user.email} 的状态`, `Status for ${user.email}`)} value={user.status} disabled={updateUser.isPending || isSelf} onChange={(event) => updateUser.mutate({ userId: user.user_id, patch: { status: event.target.value } })}><option value="active">{text("正常", "Active")}</option><option value="disabled">{text("停用", "Disabled")}</option></select></td>
+            </tr>;
+          })}</tbody>
+        </table>
+      </div>
+      {!visibleUsers.length ? <div className="empty-state compact-empty">{text("没有匹配的用户。", "No matching users.")}</div> : null}
+    </section>
+  );
+}
+
 export function AdminPage() {
   const { text } = useUiText();
   const providers = useQuery(adminProviderSettingsQuery);
   const audit = useQuery(adminProviderAuditQuery);
+  const users = useQuery(adminUsersQuery);
+  const usage = useQuery(adminUsageQuery);
+  const me = useQuery(meQuery);
   const records = new Map(providers.data?.items.map((item) => [item.provider_kind, item]));
 
   return (
@@ -205,14 +298,27 @@ export function AdminPage() {
       <div className="workspace-heading admin-heading">
         <div>
           <p className="eyebrow">{text("管理员后台", "Administration")}</p>
-          <h1>{text("服务器 Provider 管理", "Server provider management")}</h1>
-          <p className="muted">{text("密钥采用 AES-256-GCM 加密保存。保存后只影响之后启动的任务，浏览器不会再次读取明文密钥。", "Secrets are encrypted with AES-256-GCM. Changes affect newly started jobs, and plaintext keys are never returned to the browser.")}</p>
+          <h1>{text("用户、额度与 Provider 管理", "Users, credits, and providers")}</h1>
+          <p className="muted">{text("集中查看全站用量、管理用户状态与额度，并维护服务器外部服务连接。所有资金变化都会写入可追溯流水。", "Review site-wide usage, manage user access and credits, and maintain external provider connections. Every balance change is written to an auditable ledger.")}</p>
         </div>
-        <button className="button button-quiet" type="button" disabled={providers.isFetching || audit.isFetching} onClick={() => { void providers.refetch(); void audit.refetch(); }}>
-          {providers.isFetching || audit.isFetching ? text("刷新中…", "Refreshing…") : text("刷新后台", "Refresh")}
+        <button className="button button-quiet" type="button" disabled={providers.isFetching || audit.isFetching || users.isFetching || usage.isFetching} onClick={() => { void providers.refetch(); void audit.refetch(); void users.refetch(); void usage.refetch(); }}>
+          {providers.isFetching || audit.isFetching || users.isFetching || usage.isFetching ? text("刷新中…", "Refreshing…") : text("刷新后台", "Refresh")}
         </button>
       </div>
 
+      {usage.error ? <ErrorState error={usage.error} onRetry={() => usage.refetch()} /> : null}
+      <section className="admin-overview-grid">
+        <article><span>{text("注册用户", "Registered users")}</span><strong>{usage.data?.user_count.toLocaleString() ?? "—"}</strong><small>{usage.data ? text(`${usage.data.active_user_count} 个正常账户`, `${usage.data.active_user_count} active`) : "—"}</small></article>
+        <article><span>{text("有效项目", "Active projects")}</span><strong>{usage.data?.project_count.toLocaleString() ?? "—"}</strong><small>{text("未删除项目", "not deleted")}</small></article>
+        <article><span>{text("累计 Tokens", "Lifetime tokens")}</span><strong>{usage.data?.total_tokens.toLocaleString() ?? "—"}</strong><small>{usage.data ? text(`${usage.data.text_request_count} 次文本请求`, `${usage.data.text_request_count} text requests`) : "—"}</small></article>
+        <article><span>{text("外部服务成本", "Provider cost")}</span><strong>{usage.data ? `$${Number(usage.data.estimated_cost_usd).toFixed(4)}` : "—"}</strong><small>{text("文本 + 图像 + MinerU", "text + image + MinerU")}</small></article>
+        <article><span>{text("用户余额总额", "Account balances")}</span><strong>{usage.data ? `$${Number(usage.data.account_balance_total_usd).toFixed(4)}` : "—"}</strong><small>{usage.data ? text(`冻结 $${Number(usage.data.reserved_total_usd).toFixed(4)}`, `$${Number(usage.data.reserved_total_usd).toFixed(4)} reserved`) : "—"}</small></article>
+      </section>
+
+      {users.error ? <ErrorState error={users.error} onRetry={() => users.refetch()} /> : null}
+      {users.data && me.data ? <UserAndCreditManagement users={users.data.items} currentUserId={me.data.user_id} /> : null}
+
+      <div className="section-heading admin-provider-section-heading"><div><span className="step-label">PROVIDERS</span><h2>{text("服务器外部服务", "Server providers")}</h2><p>{text("密钥采用 AES-256-GCM 加密保存；浏览器不会再次读取明文密钥。", "Secrets are encrypted with AES-256-GCM and plaintext keys are never returned to the browser.")}</p></div></div>
       {providers.error ? <ErrorState error={providers.error} onRetry={() => providers.refetch()} /> : null}
       <section className="admin-provider-stack">
         {providerOrder.map((kind) => {

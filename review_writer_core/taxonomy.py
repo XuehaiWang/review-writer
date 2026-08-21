@@ -62,6 +62,7 @@ TAXONOMY_PROFILES: tuple[TaxonomyProfileDefinition, ...] = (
     ),
 )
 TAXONOMY_PROFILE_BY_ID = {item.id: item for item in TAXONOMY_PROFILES}
+PUBLIC_TAXONOMY_PROFILE_IDS = frozenset({"general_academic", "chemistry_general"})
 
 PROFILE_TOPIC_SIGNALS: dict[str, tuple[str, ...]] = {
     "allene": (
@@ -168,10 +169,43 @@ def load_taxonomy_rules(
     *,
     profile: str = "",
     rules_path: str | Path = "",
+    topic_text: str = "",
 ) -> list[tuple[str, str, list[str]]]:
-    return load_rules_from_path(
-        resolve_taxonomy_path(review_root, profile=profile, rules_path=rules_path)
-    )
+    configured_rules_path = str(
+        rules_path or os.environ.get("REVIEW_CLASSIFICATION_RULES", "")
+    ).strip()
+    if configured_rules_path:
+        return load_rules_from_path(
+            resolve_taxonomy_path(
+                review_root,
+                profile=profile,
+                rules_path=configured_rules_path,
+            )
+        )
+
+    selected_profile = str(
+        profile
+        or os.environ.get("REVIEW_TAXONOMY_PROFILE", DEFAULT_TAXONOMY_PROFILE)
+    ).strip().lower()
+    active_profiles = [selected_profile]
+    if selected_profile == "chemistry_general" and str(topic_text or "").strip():
+        specialized = suggest_taxonomy_profile(topic_text)
+        if specialized not in {DEFAULT_TAXONOMY_PROFILE, selected_profile}:
+            active_profiles.append(specialized)
+
+    combined: list[tuple[str, str, list[str]]] = []
+    indexes: dict[tuple[str, str], int] = {}
+    for active_profile in active_profiles:
+        path = resolve_taxonomy_path(review_root, profile=active_profile)
+        for label, category, aliases in load_rules_from_path(path):
+            key = (category, label)
+            if key not in indexes:
+                indexes[key] = len(combined)
+                combined.append((label, category, list(aliases)))
+                continue
+            current = combined[indexes[key]][2]
+            current.extend(alias for alias in aliases if alias not in current)
+    return combined
 
 
 def load_validation_taxonomy_rules(
@@ -217,9 +251,18 @@ def suggest_taxonomy_profile(topic: str) -> str:
 
 
 def taxonomy_profile_catalog() -> list[dict[str, Any]]:
-    """Return stable public metadata for project-selectable profiles."""
+    """Return stable public metadata for user-selectable profiles.
 
-    return [asdict(item) for item in TAXONOMY_PROFILES]
+    Topic-specific profiles such as ``allene`` remain installed so existing
+    projects and internal topic routing keep their specialist vocabulary, but
+    they are not exposed as top-level project categories.
+    """
+
+    return [
+        asdict(item)
+        for item in TAXONOMY_PROFILES
+        if item.id in PUBLIC_TAXONOMY_PROFILE_IDS
+    ]
 
 
 def validate_taxonomy_profile(profile: str) -> str:
@@ -228,6 +271,17 @@ def validate_taxonomy_profile(profile: str) -> str:
     normalized = str(profile or "").strip().lower()
     if normalized not in TAXONOMY_PROFILE_BY_ID:
         raise TaxonomyConfigurationError(f"Unknown taxonomy profile: {normalized or '<empty>'}")
+    return normalized
+
+
+def validate_selectable_taxonomy_profile(profile: str) -> str:
+    """Validate a taxonomy profile accepted from the public project UI/API."""
+
+    normalized = validate_taxonomy_profile(profile)
+    if normalized not in PUBLIC_TAXONOMY_PROFILE_IDS:
+        raise TaxonomyConfigurationError(
+            f"Taxonomy profile is internal and cannot be selected: {normalized}"
+        )
     return normalized
 
 

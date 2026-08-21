@@ -121,7 +121,73 @@ export type UsageSummary = {
   mineru_cache_hit_count: number;
   estimated_mineru_cost_usd: string;
   estimated_cost_usd: string;
-  billing_mode: "record_only";
+  billing_mode: "record_only" | "credit";
+};
+
+export type Balance = {
+  currency: "USD" | string;
+  balance_usd: string;
+  reserved_usd: string;
+  available_usd: string;
+  lifetime_credited_usd: string;
+  lifetime_debited_usd: string;
+  billing_mode: "credit";
+  updated_at: string;
+};
+
+export type CreditTransaction = {
+  id: string;
+  user_id: string;
+  job_id: string | null;
+  reservation_id: string | null;
+  actor_user_id: string | null;
+  transaction_type: "admin_adjustment" | "reservation" | "settlement" | "release" | string;
+  balance_delta_usd: string;
+  reserved_delta_usd: string;
+  balance_after_usd: string;
+  reserved_after_usd: string;
+  currency: string;
+  reason: string;
+  details: Record<string, unknown>;
+  created_at: string;
+};
+
+export type CreditTransactionList = {
+  items: CreditTransaction[];
+  count: number;
+};
+
+export type AdminUser = Balance & {
+  user_id: string;
+  email: string;
+  display_name: string;
+  role: "user" | "admin";
+  status: "active" | "disabled";
+  project_count: number;
+  estimated_cost_usd: string;
+  created_at: string;
+  last_login_at: string | null;
+};
+
+export type AdminUserList = {
+  items: AdminUser[];
+  count: number;
+};
+
+export type AdminUsageSummary = {
+  user_count: number;
+  active_user_count: number;
+  project_count: number;
+  text_request_count: number;
+  total_tokens: number;
+  image_count: number;
+  mineru_billable_pages: number;
+  estimated_text_cost_usd: string;
+  estimated_image_cost_usd: string;
+  estimated_mineru_cost_usd: string;
+  estimated_cost_usd: string;
+  account_balance_total_usd: string;
+  reserved_total_usd: string;
 };
 
 export type UsageTimelineItem = {
@@ -158,6 +224,14 @@ export type LibraryPaper = {
   structured_tags_verified?: boolean;
   human_review_status?: string | null;
   needs_human_check?: boolean | null;
+  bibliography_audit?: {
+    status?: "verified" | "conflict" | "pending_retry" | "not_found" | string;
+    checked_at?: string;
+    sources?: Record<string, { status?: string; error?: string }>;
+    field_provenance?: Record<string, Array<{ source?: string; value?: unknown; confidence?: number }>>;
+    conflicts?: Array<{ field?: string; status?: string; candidates?: unknown[] }>;
+    manual_review_status?: string;
+  };
   index_status?: {
     mineru: "ready" | "unavailable";
     fulltext: "not_indexed" | "queued" | "building" | "ready" | "failed" | "rebuild_required";

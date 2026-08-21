@@ -22,6 +22,7 @@ from review_writer_api.domain_services.library import (
     MinerUPreciseParseFailed,
 )
 from review_writer_api.domain_services.library_index import LibraryIndexService
+from review_writer_api.database import utc_now
 from review_writer_api.errors import (
     ArtifactRangeNotSatisfiable,
     WorkflowConflict,
@@ -37,6 +38,8 @@ from review_writer_api.workflow_schemas import (
     LiteratureSearchRequest,
 )
 from review_writer_core.metadata_tags import structured_tags_are_verified
+from review_writer_core.bibliography_audit import audit_bibliography
+from review_writer_core.paper_sources.service import default_connectors
 
 
 def _paper_payload(
@@ -73,6 +76,7 @@ def _paper_payload(
         "structured_tags": record.tags,
         "structured_tags_verified": structured_tags_are_verified(metadata),
         "human_review_status": (metadata.get("human_review") or {}).get("status"),
+        "bibliography_audit": record.bibliography_audit,
         "needs_human_check": (metadata.get("quality") or {}).get("needs_human_check"),
         "mineru_parse_status": resolved_index_status["mineru"],
         "document_index_status": resolved_index_status["fulltext"],
@@ -112,6 +116,73 @@ def build_library_router(
         return result
 
     job_service.register_handler("library.index", index_handler)
+
+    def bibliography_audit_handler(context, payload):
+        principal = Principal(context.user_id, frozenset({Role.USER}))
+        paper_id = str(payload.get("paper_id") or "")
+        context.report_progress(0, 2)
+        record = library_service.get(principal, paper_id)
+        connectors = default_connectors(("crossref", "openalex"))
+        if payload.get("retry_failed_only") and record.bibliography_audit:
+            source_states = dict(record.bibliography_audit.get("sources") or {})
+            failed_names = {
+                name
+                for name, state in source_states.items()
+                if str((state or {}).get("status") or "")
+                in {"unavailable", "rate_limited"}
+            }
+            retry_connectors = [row for row in connectors if row.name in failed_names]
+            if retry_connectors:
+                connectors = retry_connectors
+        result = audit_bibliography(
+            record.metadata,
+            connectors=connectors,
+            pdf_path=library_service.file(principal, paper_id, "pdf"),
+            previous_audit=record.bibliography_audit,
+        )
+        result["checked_at"] = utc_now().isoformat()
+        context.report_progress(1, 2)
+        saved = library_service.update_bibliography_audit(
+            principal, paper_id, result
+        )
+        context.repository.update_job_progress(context.job_id, 2, 2)
+        return {
+            "paper_id": paper_id,
+            "status": saved.bibliography_audit.get("status", ""),
+            "bibliography_audit": saved.bibliography_audit,
+        }
+
+    job_service.register_handler("library.bibliography-audit", bibliography_audit_handler)
+
+    def enqueue_bibliography_audit(
+        principal: Principal,
+        paper_id: str,
+        *,
+        force: bool = False,
+        suppress_active_conflict: bool = False,
+    ):
+        record = library_service.get(principal, paper_id)
+        metadata_version = str(record.artifact_ids.get("metadata") or record.content_sha256)
+        try:
+            return job_service.submit(
+                principal,
+                scope="library",
+                project_id=None,
+                job_type="library.bibliography-audit",
+                idempotency_key=(
+                    f"manual:{uuid.uuid4()}" if force else f"metadata:{metadata_version}"
+                ),
+                payload={
+                    "paper_id": paper_id,
+                    "metadata_artifact_id": metadata_version,
+                    "retry_failed_only": bool(force),
+                },
+                operation_key=f"bibliography-audit:{paper_id}",
+            )
+        except WorkflowConflict:
+            if suppress_active_conflict:
+                return None
+            raise
 
     def enqueue_index(
         principal: Principal,
@@ -163,6 +234,11 @@ def build_library_router(
                     record.paper_id,
                     suppress_active_conflict=True,
                 )
+                enqueue_bibliography_audit(
+                    principal,
+                    record.paper_id,
+                    suppress_active_conflict=True,
+                )
             return result
 
         job_service.register_handler("library.download", reconcile_download)
@@ -185,6 +261,9 @@ def build_library_router(
         index_job = enqueue_index(
             principal, record.paper_id, suppress_active_conflict=True
         )
+        audit_job = enqueue_bibliography_audit(
+            principal, record.paper_id, suppress_active_conflict=True
+        )
         context.repository.update_job_progress(context.job_id, 3, 3)
         return {
             **_paper_payload(record),
@@ -192,6 +271,7 @@ def build_library_router(
             "mineru_ready": True,
             "library_count": library_service.count(principal),
             "index_job_id": index_job.id if index_job is not None else None,
+            "bibliography_audit_job_id": audit_job.id if audit_job is not None else None,
         }
 
     job_service.register_handler("library.upload", upload_handler)
@@ -328,12 +408,16 @@ def build_library_router(
             index_job = enqueue_index(
                 principal, record.paper_id, suppress_active_conflict=True
             )
+            audit_job = enqueue_bibliography_audit(
+                principal, record.paper_id, suppress_active_conflict=True
+            )
             payload = {
                 **_paper_payload(record),
                 "status": outcome,
                 "mineru_ready": True,
                 "library_count": library_service.count(principal),
                 "index_job_id": index_job.id if index_job is not None else None,
+                "bibliography_audit_job_id": audit_job.id if audit_job is not None else None,
             }
             return JSONResponse(
                 status_code=(status.HTTP_200_OK if outcome == "duplicate_file" else status.HTTP_201_CREATED),
@@ -483,6 +567,36 @@ def build_library_router(
         principal: Principal = Depends(principal_dependency),
     ) -> dict[str, Any]:
         return library_service.get(principal, paper_id).metadata
+
+    @router.get("/papers/{paper_id}/bibliography-audit")
+    def bibliography_audit_state(
+        paper_id: str,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        record = library_service.get(principal, paper_id)
+        job = job_service.repository.get_current_job(
+            principal.user_id,
+            scope="library",
+            job_type="library.bibliography-audit",
+            operation_key=f"bibliography-audit:{paper_id}",
+        )
+        return {
+            "paper_id": paper_id,
+            "audit": record.bibliography_audit,
+            "job": _job_response(job).model_dump() if job is not None else None,
+        }
+
+    @router.post(
+        "/papers/{paper_id}/bibliography-audit-jobs",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def create_bibliography_audit_job(
+        paper_id: str,
+        force: bool = False,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        job = enqueue_bibliography_audit(principal, paper_id, force=force)
+        return _job_response(job).model_dump()
 
     @router.put("/papers/{paper_id}/metadata")
     def save_metadata(

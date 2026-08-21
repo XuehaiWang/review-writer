@@ -12,7 +12,11 @@ from review_writer_api.errors import WorkflowConflict
 from review_writer_api.job_service import JobService
 from review_writer_api.routers.jobs import _job_response
 from review_writer_api.security import Principal, Role
-from review_writer_api.workflow_schemas import FinalActionRequest, FinalOverviewTextRequest
+from review_writer_api.workflow_schemas import (
+    FinalActionRequest,
+    FinalOverviewTextRequest,
+    FinalPdfRequest,
+)
 
 
 def build_final_router(
@@ -49,6 +53,7 @@ def build_final_router(
     register("final.conclusion", final_service.publish_conclusion, progress_total=3)
     register("final.overview", final_service.publish_overview, progress_total=4)
     register("final.export", final_service.publish_export, progress_total=3)
+    register("final.pdf", final_service.publish_pdf, progress_total=5)
 
     def build_handler(context, payload):
         principal = Principal(context.user_id, frozenset({Role.USER}))
@@ -173,6 +178,25 @@ def build_final_router(
             "final.export",
             idempotency_key,
             final_service.export_payload(principal, project_id),
+        )
+
+    @router.post("/pdf-jobs", status_code=status.HTTP_202_ACCEPTED)
+    def start_pdf(
+        project_id: str,
+        payload: FinalPdfRequest,
+        idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+        principal: Principal = Depends(principal_dependency),
+    ):
+        return submit(
+            principal,
+            project_id,
+            "final.pdf",
+            idempotency_key,
+            final_service.pdf_payload(
+                principal,
+                project_id,
+                language_profile=payload.language_profile,
+            ),
         )
 
     return router

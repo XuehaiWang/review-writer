@@ -37,10 +37,17 @@ from review_writer_core.review_structure import (
     infer_section_role,
 )
 from review_writer_api.domain_services.library_index import LibraryIndexService
+from review_writer_core.academic_contracts import (
+    ACADEMIC_SCHEMA_VERSION,
+    evidence_key as academic_evidence_key,
+    evidence_level,
+)
 
 
 SECTION_INDEX_LOGICAL_NAME = "sections/section_drafts.json"
 EVIDENCE_PACKAGE_LOGICAL_NAME = "sections/evidence_package.json"
+SYNTHESIS_STATE_LOGICAL_NAME = "sections/synthesis_state.json"
+WRITING_PLAN_LOGICAL_NAME = "sections/writing_plan.json"
 
 
 class BlueprintPapersMissing(WorkflowConflict):
@@ -58,17 +65,29 @@ class SectionProviderUnavailable(WorkflowError):
 
 
 def _job_payload(job: JobRecord) -> dict[str, Any]:
+    actions: list[str] = []
+    if job.status in {"queued", "running", "cancel_requested"}:
+        actions.append("cancel")
+    if job.status in {"failed", "cancelled", "interrupted"}:
+        actions.append("retry")
     return {
         "id": job.id,
+        "project_id": job.project_id,
+        "scope": job.scope,
         "status": job.status,
         "job_type": job.job_type,
+        "result": job.result,
         "progress_current": job.progress_current,
         "progress_total": job.progress_total,
+        "cancellation_requested": job.cancellation_requested,
         "error_code": job.error_code,
         "error_message": job.error_message,
-        "result": job.result,
+        "retry_of_job_id": job.retry_of_job_id,
         "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
+        "started_at": job.started_at.isoformat() if job.started_at else None,
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "available_actions": actions,
     }
 
 
@@ -320,8 +339,14 @@ class SectionsService:
                     for hit in coverage_hits:
                         by_chunk.setdefault(hit.chunk_id, hit)
                     hits = list(by_chunk.values())
-            hit_rows = [
-                {
+            hit_rows = []
+            for hit in hits:
+                stable_key = academic_evidence_key(
+                    hit.paper_id, hit.chunk_id, hit.source_lineage_hash
+                )
+                hit_rows.append({
+                    "evidence_id": f"EV-{stable_key.removeprefix('sha256:')[:12].upper()}",
+                    "evidence_key": stable_key,
                     "paper_id": hit.paper_id,
                     "paper_title": catalog[hit.paper_id].title
                     if hit.paper_id in catalog
@@ -338,9 +363,10 @@ class SectionsService:
                     "is_neighbor": hit.is_neighbor,
                     "index_id": hit.index_id,
                     "source_lineage_hash": hit.source_lineage_hash,
-                }
-                for hit in hits
-            ]
+                    "previous_chunk_id": hit.previous_chunk_id,
+                    "next_chunk_id": hit.next_chunk_id,
+                    "evidence_level": evidence_level(hit.content),
+                })
             evidence_papers = sorted({row["paper_id"] for row in hit_rows})
             missing_primary = [
                 paper_id for paper_id in primary if paper_id not in evidence_papers
@@ -368,12 +394,46 @@ class SectionsService:
                     "hits": hit_rows,
                 }
             )
+        registry: dict[str, dict[str, Any]] = {}
+        for section in sections:
+            for hit in section.get("hits") or []:
+                if isinstance(hit, dict) and str(hit.get("evidence_key") or ""):
+                    registry.setdefault(str(hit["evidence_key"]), dict(hit))
         return {
-            "schema_version": 1,
+            "schema_version": ACADEMIC_SCHEMA_VERSION + 1,
             "project_id": project_id,
             "retrieval_engine": "normalized_exact_phrase+postgresql_fulltext",
+            "evidence_registry": list(registry.values()),
             "sections": sections,
         }
+
+    @staticmethod
+    def _dirty_section_ids(
+        tasks: list[dict[str, Any]],
+        current_snapshot: dict[str, Any],
+        previous_snapshot: Any,
+    ) -> list[str]:
+        section_ids = [str(task.get("section_id") or "") for task in tasks]
+        if not isinstance(previous_snapshot, dict) or not previous_snapshot:
+            return section_ids
+        for key in (
+            "blueprint_artifact_id",
+            "matrix_artifact_id",
+            "outline_artifact_id",
+        ):
+            if str(previous_snapshot.get(key) or "") != str(current_snapshot.get(key) or ""):
+                return section_ids
+        previous_ids = {str(item) for item in previous_snapshot.get("section_ids") or []}
+        current_ids = set(section_ids)
+        dirty = current_ids.symmetric_difference(previous_ids)
+        previous_keys = previous_snapshot.get("evidence_keys_by_section") or {}
+        current_keys = current_snapshot.get("evidence_keys_by_section") or {}
+        for section_id in current_ids & previous_ids:
+            if set(previous_keys.get(section_id) or []) != set(
+                current_keys.get(section_id) or []
+            ):
+                dirty.add(section_id)
+        return [section_id for section_id in section_ids if section_id in dirty]
 
     def generation_payload(
         self, principal: Principal, project_id: str
@@ -445,6 +505,29 @@ class SectionsService:
         state = self.repository.get_stage_state(
             principal.user_id, project_id, "sections"
         )
+        input_snapshot = {
+            "blueprint_artifact_id": blueprint_artifact.id,
+            "matrix_artifact_id": matrix_artifact.id,
+            "outline_artifact_id": outline_artifact.id,
+            "section_ids": [str(task.get("section_id") or "") for task in tasks],
+            "evidence_keys_by_section": {
+                str(section.get("section_id") or ""): sorted(
+                    str(hit.get("evidence_key") or "")
+                    for hit in section.get("hits") or []
+                    if isinstance(hit, dict) and hit.get("evidence_key")
+                )
+                for section in evidence_package.get("sections") or []
+                if isinstance(section, dict)
+            },
+        }
+        previous_run = self.repository.get_latest_stage_run(
+            principal.user_id, project_id, "sections"
+        )
+        dirty_object_ids = self._dirty_section_ids(
+            tasks,
+            input_snapshot,
+            previous_run.input_snapshot if previous_run is not None else None,
+        )
         return {
             "project_id": project_id,
             "source_blueprint_artifact_id": blueprint_artifact.id,
@@ -455,6 +538,10 @@ class SectionsService:
             "matrix": matrix,
             "outline_md": str(outline.get("outline_md") or ""),
             "tasks": tasks,
+            "run_input_snapshot": {
+                **input_snapshot,
+                "dirty_object_ids": dirty_object_ids,
+            },
             "evidence_package": {
                 **evidence_package,
                 "source_blueprint_artifact_id": blueprint_artifact.id,
@@ -466,6 +553,388 @@ class SectionsService:
                 for paper_id in assigned
             },
         }
+
+    @staticmethod
+    def _fallback_synthesis_state(
+        payload: dict[str, Any],
+        built: dict[str, Any],
+        evidence_package: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Adapt legacy section writers without inventing synthesis content."""
+
+        evidence_by_section = {
+            str(item.get("section_id") or ""): item
+            for item in evidence_package.get("sections") or []
+            if isinstance(item, dict)
+        }
+        built_by_section = {
+            str(item.get("section_id") or ""): item
+            for item in built.get("sections") or []
+            if isinstance(item, dict)
+        }
+        blueprint_by_section = {
+            str(item.get("section_id") or ""): item
+            for item in (payload.get("blueprint") or {}).get("sections") or []
+            if isinstance(item, dict)
+        }
+        sections = []
+        for task in payload.get("tasks") or []:
+            section_id = str(task.get("section_id") or "")
+            evidence = evidence_by_section.get(section_id, {})
+            evidence_keys = list(
+                dict.fromkeys(
+                    str(hit.get("evidence_key") or "")
+                    for hit in evidence.get("hits") or []
+                    if isinstance(hit, dict) and hit.get("evidence_key")
+                )
+            )
+            blueprint_section = blueprint_by_section.get(section_id, {})
+            generated_section = built_by_section.get(section_id, {})
+            components = []
+            for index, requirement in enumerate(
+                blueprint_section.get("synthesis_requirements") or [], start=1
+            ):
+                if not isinstance(requirement, dict):
+                    continue
+                component_type = str(requirement.get("component") or "").strip()
+                if not component_type:
+                    continue
+                components.append(
+                    {
+                        "component_id": f"{section_id}-{component_type}-{index:02d}",
+                        "component_type": component_type,
+                        "necessity": str(requirement.get("necessity") or "recommended"),
+                        "purpose": str(requirement.get("reason") or ""),
+                        "status": "evidence_ready" if evidence_keys else "insufficient_evidence",
+                        "evidence_keys": evidence_keys,
+                        "summary": str(generated_section.get("overview") or ""),
+                        "provenance": "legacy_adapter",
+                    }
+                )
+            sections.append(
+                {
+                    "section_id": section_id,
+                    "components": components,
+                }
+            )
+        return {
+            "schema_version": ACADEMIC_SCHEMA_VERSION,
+            "project_id": payload.get("project_id"),
+            "planning_mode": "legacy_adapter",
+            "source_blueprint_artifact_id": payload.get("source_blueprint_artifact_id"),
+            "source_evidence_registry": EVIDENCE_PACKAGE_LOGICAL_NAME,
+            "sections": sections,
+        }
+
+    @staticmethod
+    def _fallback_writing_plan(
+        payload: dict[str, Any],
+        built: dict[str, Any],
+        evidence_package: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Derive a compatibility plan for legacy/test writers.
+
+        The current scientific writer emits an evidence-first plan directly.
+        This adapter only keeps old artifacts readable and is explicitly
+        labelled so it cannot be mistaken for a pre-draft planning result.
+        """
+
+        registry = {
+            (str(item.get("paper_id") or ""), str(item.get("chunk_id") or "")): item
+            for item in evidence_package.get("evidence_registry") or []
+            if isinstance(item, dict)
+        }
+        built_by_section = {
+            str(item.get("section_id") or ""): item
+            for item in built.get("sections") or []
+            if isinstance(item, dict)
+        }
+        output_sections = []
+        for task in payload.get("tasks") or []:
+            section_id = str(task.get("section_id") or "")
+            generated = built_by_section.get(section_id, {})
+            paragraph_plans: list[dict[str, Any]] = []
+            claim_plans: list[dict[str, Any]] = []
+            for paragraph_index, paragraph in enumerate(
+                generated.get("paragraphs") or [], start=1
+            ):
+                if not isinstance(paragraph, dict):
+                    continue
+                paragraph_id = str(
+                    paragraph.get("paragraph_id")
+                    or f"{section_id}-p{paragraph_index}"
+                )
+                paragraph_claim_ids: list[str] = []
+                evidence_claims = [
+                    item
+                    for item in paragraph.get("evidence") or []
+                    if isinstance(item, dict)
+                ]
+                for claim_index, evidence in enumerate(evidence_claims, start=1):
+                    claim_id = f"{paragraph_id}-C{claim_index:02d}"
+                    paper_id = str(evidence.get("paper_id") or "")
+                    refs = []
+                    levels = []
+                    for chunk_id in evidence.get("chunk_ids") or []:
+                        hit = registry.get((paper_id, str(chunk_id)))
+                        if not hit:
+                            continue
+                        refs.append(
+                            {
+                                "evidence_id": hit.get("evidence_id"),
+                                "evidence_key": hit.get("evidence_key"),
+                            }
+                        )
+                        levels.append(str(hit.get("evidence_level") or "reported_result"))
+                    claim_plans.append(
+                        {
+                            "claim_id": claim_id,
+                            "paragraph_id": paragraph_id,
+                            "sequence": claim_index,
+                            "claim": str(evidence.get("claim") or "").strip(),
+                            "claim_kind": "reported_finding",
+                            "epistemic_status": "direct_source_report",
+                            "support_status": "supported" if refs else "partially_supported",
+                            "citation_group": [paper_id] if paper_id else [],
+                            "evidence_refs": refs,
+                            "evidence_ceiling": (
+                                "Do not generalize beyond the selected source passage."
+                                if levels
+                                else "Legacy source mode: use only bounded attribution."
+                            ),
+                        }
+                    )
+                    paragraph_claim_ids.append(claim_id)
+                cited = list(
+                    dict.fromkeys(
+                        str(item)
+                        for item in paragraph.get("cited_paper_ids")
+                        or ([paragraph.get("paper_id")] if paragraph.get("paper_id") else [])
+                        if str(item or "").strip()
+                    )
+                )
+                if not paragraph_claim_ids and cited:
+                    claim_id = f"{paragraph_id}-C01"
+                    claim_plans.append(
+                        {
+                            "claim_id": claim_id,
+                            "paragraph_id": paragraph_id,
+                            "sequence": 1,
+                            "claim": "Bounded source-attributed statement from the legacy section writer.",
+                            "claim_kind": "reported_finding",
+                            "epistemic_status": "direct_source_report",
+                            "support_status": "partially_supported",
+                            "citation_group": cited,
+                            "evidence_refs": [],
+                            "evidence_ceiling": "Do not make quantitative, causal or mechanistic claims without chunk evidence.",
+                        }
+                    )
+                    paragraph_claim_ids.append(claim_id)
+                takeaway = next(
+                    (
+                        str(item.get("claim") or "").strip()
+                        for item in evidence_claims
+                        if str(item.get("claim") or "").strip()
+                    ),
+                    str(task.get("core_argument") or "").strip(),
+                )
+                paragraph_plans.append(
+                    {
+                        "paragraph_id": paragraph_id,
+                        "theme": takeaway or str(task.get("heading") or section_id),
+                        "argument_role": "synthesis" if len(cited) > 1 else "reported_evidence",
+                        "objective": takeaway or "Realize the section's evidence-backed argument.",
+                        "target_words": {"min": 120, "max": 320},
+                        "primary_papers": [item for item in cited if item in task.get("primary_papers", [])],
+                        "supporting_papers": [item for item in cited if item in task.get("supporting_papers", [])],
+                        "reader_takeaway": takeaway or "A bounded source-attributed finding.",
+                        "positive_synthesis": "State the supported finding before its evidence boundary.",
+                        "caveat_policy": "diagnostic_only",
+                        "claim_ids": paragraph_claim_ids,
+                    }
+                )
+            output_sections.append(
+                {
+                    "section_id": section_id,
+                    "route": "B" if len(paragraph_plans) > 1 else "A",
+                    "paragraphs": paragraph_plans,
+                    "claims": claim_plans,
+                }
+            )
+        return {
+            "schema_version": ACADEMIC_SCHEMA_VERSION,
+            "project_id": payload.get("project_id"),
+            "planning_mode": "legacy_derived_after_generation",
+            "source_blueprint_artifact_id": payload.get("source_blueprint_artifact_id"),
+            "source_evidence_registry": EVIDENCE_PACKAGE_LOGICAL_NAME,
+            "sections": output_sections,
+        }
+
+    @staticmethod
+    def _validate_academic_bundle(
+        payload: dict[str, Any],
+        built: dict[str, Any],
+        synthesis_state: dict[str, Any],
+        writing_plan: dict[str, Any],
+        evidence_package: dict[str, Any],
+    ) -> None:
+        expected_sections = {
+            str(task.get("section_id") or "") for task in payload.get("tasks") or []
+        }
+        synthesis_sections = {
+            str(item.get("section_id") or "")
+            for item in synthesis_state.get("sections") or []
+            if isinstance(item, dict)
+        }
+        writing_sections = {
+            str(item.get("section_id") or "")
+            for item in writing_plan.get("sections") or []
+            if isinstance(item, dict)
+        }
+        if synthesis_sections != expected_sections or writing_sections != expected_sections:
+            raise WorkflowValidationError(
+                "Academic bundle does not match the current Blueprint section set.",
+                details={
+                    "expected": sorted(expected_sections),
+                    "synthesis": sorted(synthesis_sections),
+                    "writing": sorted(writing_sections),
+                },
+            )
+        evidence_registry = {
+            str(item.get("evidence_key") or ""): item
+            for item in evidence_package.get("evidence_registry") or []
+            if isinstance(item, dict) and item.get("evidence_key")
+        }
+        evidence_sections = {
+            str(item.get("section_id") or ""): item
+            for item in evidence_package.get("sections") or []
+            if isinstance(item, dict)
+        }
+        generated_by_section = {
+            str(section.get("section_id") or ""): section
+            for section in built.get("sections") or []
+            if isinstance(section, dict)
+        }
+        planned_paragraphs: set[str] = set()
+        generated_paragraphs: set[str] = set()
+        claim_ids: set[str] = set()
+        for section in writing_plan.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            section_id = str(section.get("section_id") or "")
+            section_paragraphs: set[str] = set()
+            for paragraph in section.get("paragraphs") or []:
+                if not isinstance(paragraph, dict):
+                    continue
+                paragraph_id = str(paragraph.get("paragraph_id") or "")
+                if not paragraph_id or paragraph_id in planned_paragraphs:
+                    raise WorkflowValidationError("Writing Plan contains a missing or duplicate paragraph ID.")
+                planned_paragraphs.add(paragraph_id)
+                section_paragraphs.add(paragraph_id)
+            generated_section = generated_by_section.get(section_id, {})
+            generated_section_paragraphs = {
+                str(paragraph.get("paragraph_id") or "")
+                for paragraph in generated_section.get("paragraphs") or []
+                if isinstance(paragraph, dict) and paragraph.get("paragraph_id")
+            }
+            generated_paragraphs.update(generated_section_paragraphs)
+            if section_paragraphs != generated_section_paragraphs:
+                raise WorkflowValidationError(
+                    "A Writing Plan section does not match its generated paragraphs.",
+                    details={
+                        "section_id": section_id,
+                        "planned_only": sorted(section_paragraphs - generated_section_paragraphs),
+                        "generated_only": sorted(generated_section_paragraphs - section_paragraphs),
+                    },
+                )
+            section_claim_ids: set[str] = set()
+            lexical = str(
+                evidence_sections.get(section_id, {}).get("retrieval_mode") or ""
+            ) == "lexical"
+            for claim in section.get("claims") or []:
+                if not isinstance(claim, dict):
+                    continue
+                claim_id = str(claim.get("claim_id") or "")
+                if not claim_id or claim_id in claim_ids:
+                    raise WorkflowValidationError("Writing Plan contains a missing or duplicate Claim ID.")
+                claim_ids.add(claim_id)
+                section_claim_ids.add(claim_id)
+                if str(claim.get("paragraph_id") or "") not in section_paragraphs:
+                    raise WorkflowValidationError("A Claim references an unknown planned paragraph.")
+                if str(claim.get("support_status") or "") == "blocked":
+                    raise WorkflowValidationError(
+                        "A blocked Claim cannot enter a publishable section draft.",
+                        details={"claim_id": claim_id},
+                    )
+                ref_papers: set[str] = set()
+                refs = [ref for ref in claim.get("evidence_refs") or [] if isinstance(ref, dict)]
+                for ref in claim.get("evidence_refs") or []:
+                    key = str(ref.get("evidence_key") or "") if isinstance(ref, dict) else ""
+                    if key not in evidence_registry:
+                        raise WorkflowValidationError(
+                            "A Claim references evidence outside the current Evidence Package.",
+                            details={"claim_id": claim_id, "evidence_key": key},
+                        )
+                    ref_papers.add(str(evidence_registry[key].get("paper_id") or ""))
+                if lexical and not refs:
+                    raise WorkflowValidationError(
+                        "An indexed-evidence Claim must reference at least one current evidence key.",
+                        details={"claim_id": claim_id},
+                    )
+                citation_group = {
+                    str(paper_id)
+                    for paper_id in claim.get("citation_group") or []
+                    if str(paper_id or "")
+                }
+                if refs and citation_group != ref_papers:
+                    raise WorkflowValidationError(
+                        "A Claim citation group does not match its evidence sources.",
+                        details={
+                            "claim_id": claim_id,
+                            "citation_group": sorted(citation_group),
+                            "evidence_papers": sorted(ref_papers),
+                        },
+                    )
+            if str(writing_plan.get("planning_mode") or "").startswith("evidence_first"):
+                realized_claim_ids = {
+                    str(realization.get("claim_id") or "")
+                    for paragraph in generated_section.get("paragraphs") or []
+                    if isinstance(paragraph, dict)
+                    for realization in paragraph.get("claim_realizations") or []
+                    if isinstance(realization, dict) and realization.get("claim_id")
+                }
+                if realized_claim_ids != section_claim_ids:
+                    raise WorkflowValidationError(
+                        "Generated prose does not realize the current Claim Plan exactly.",
+                        details={
+                            "section_id": section_id,
+                            "planned_only": sorted(section_claim_ids - realized_claim_ids),
+                            "generated_only": sorted(realized_claim_ids - section_claim_ids),
+                        },
+                    )
+        for section in synthesis_state.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            for component in section.get("components") or []:
+                if not isinstance(component, dict):
+                    continue
+                for key in component.get("evidence_keys") or []:
+                    if str(key) not in evidence_registry:
+                        raise WorkflowValidationError(
+                            "A Synthesis component references evidence outside the current Evidence Package.",
+                            details={
+                                "component_id": component.get("component_id"),
+                                "evidence_key": str(key),
+                            },
+                        )
+        if planned_paragraphs != generated_paragraphs:
+            raise WorkflowValidationError(
+                "Writing Plan paragraph IDs do not match generated section paragraphs.",
+                details={
+                    "planned_only": sorted(planned_paragraphs - generated_paragraphs),
+                    "generated_only": sorted(generated_paragraphs - planned_paragraphs),
+                },
+            )
 
     def publish_generation(
         self,
@@ -521,6 +990,23 @@ class SectionsService:
             for item in evidence_package.get("sections") or []
             if isinstance(item, dict)
         }
+        synthesis_state = deepcopy(built.get("synthesis_state"))
+        if not isinstance(synthesis_state, dict):
+            synthesis_state = self._fallback_synthesis_state(
+                payload, built, evidence_package
+            )
+        writing_plan = deepcopy(built.get("writing_plan"))
+        if not isinstance(writing_plan, dict):
+            writing_plan = self._fallback_writing_plan(
+                payload, built, evidence_package
+            )
+        self._validate_academic_bundle(
+            payload,
+            built,
+            synthesis_state,
+            writing_plan,
+            evidence_package,
+        )
         index_sections: list[dict[str, Any]] = []
         files: dict[str, tuple[bytes, str]] = {}
         for section_id, task in expected_tasks.items():
@@ -645,9 +1131,14 @@ class SectionsService:
             "section_drafts_md": merged + "\n",
             "report_md": report_md + "\n" if report_md else "",
             "evidence_package_logical_name": EVIDENCE_PACKAGE_LOGICAL_NAME,
+            "synthesis_state_logical_name": SYNTHESIS_STATE_LOGICAL_NAME,
+            "writing_plan_logical_name": WRITING_PLAN_LOGICAL_NAME,
         }
         stored_evidence_package = {
             **evidence_package,
+            "source_blueprint_artifact_id": payload["source_blueprint_artifact_id"],
+            "source_matrix_artifact_id": payload["source_matrix_artifact_id"],
+            "source_outline_artifact_id": payload["source_outline_artifact_id"],
             "published_at": utc_now().isoformat(),
         }
         files[EVIDENCE_PACKAGE_LOGICAL_NAME] = (
@@ -655,6 +1146,18 @@ class SectionsService:
                 json.dumps(stored_evidence_package, ensure_ascii=False, indent=2)
                 + "\n"
             ).encode("utf-8"),
+            "json",
+        )
+        files[SYNTHESIS_STATE_LOGICAL_NAME] = (
+            (json.dumps(synthesis_state, ensure_ascii=False, indent=2) + "\n").encode(
+                "utf-8"
+            ),
+            "json",
+        )
+        files[WRITING_PLAN_LOGICAL_NAME] = (
+            (json.dumps(writing_plan, ensure_ascii=False, indent=2) + "\n").encode(
+                "utf-8"
+            ),
             "json",
         )
         files[SECTION_INDEX_LOGICAL_NAME] = (
@@ -671,12 +1174,16 @@ class SectionsService:
                 "sections",
                 status="succeeded",
                 attempt=max(1, int(attempts)),
-                input_snapshot={
-                    "blueprint_artifact_id": payload["source_blueprint_artifact_id"],
-                    "matrix_artifact_id": payload["source_matrix_artifact_id"],
-                    "outline_artifact_id": payload["source_outline_artifact_id"],
-                    "section_ids": list(expected_tasks),
-                },
+                input_snapshot=dict(
+                    payload.get("run_input_snapshot")
+                    or {
+                        "blueprint_artifact_id": payload["source_blueprint_artifact_id"],
+                        "matrix_artifact_id": payload["source_matrix_artifact_id"],
+                        "outline_artifact_id": payload["source_outline_artifact_id"],
+                        "section_ids": list(expected_tasks),
+                        "dirty_object_ids": list(expected_tasks),
+                    }
+                ),
             )
             staging = self.artifacts.stage_run_directory(
                 principal.user_id, project_id, run.id
@@ -1013,6 +1520,19 @@ class SectionsService:
                     "draft",
                     "final",
                 ),
+                run_output_snapshot={
+                    "artifact_ids": {
+                        artifact.logical_name: artifact.id
+                        for artifact in [*source_artifacts.values(), *published.values()]
+                    },
+                    "recomputed_object_ids": list(expected_tasks),
+                    "academic_bundle": [
+                        SYNTHESIS_STATE_LOGICAL_NAME,
+                        WRITING_PLAN_LOGICAL_NAME,
+                        EVIDENCE_PACKAGE_LOGICAL_NAME,
+                        SECTION_INDEX_LOGICAL_NAME,
+                    ],
+                },
             )
         return {
             "section_count": len(index_sections),
@@ -1021,8 +1541,17 @@ class SectionsService:
             "evidence_package_artifact_id": published[
                 EVIDENCE_PACKAGE_LOGICAL_NAME
             ].id,
+            "synthesis_state_artifact_id": published[
+                SYNTHESIS_STATE_LOGICAL_NAME
+            ].id,
+            "writing_plan_artifact_id": published[WRITING_PLAN_LOGICAL_NAME].id,
             "revision": state.revision,
             "attempts": max(1, int(attempts)),
+            "dirty_object_ids": list(
+                (payload.get("run_input_snapshot") or {}).get("dirty_object_ids")
+                or []
+            ),
+            "recomputed_object_ids": list(expected_tasks),
         }
 
     def get(self, principal: Principal, project_id: str) -> dict[str, Any]:
@@ -1078,6 +1607,8 @@ class SectionsService:
         )
         section_files: list[dict[str, Any]] = []
         evidence_package: dict[str, Any] | None = None
+        synthesis_state: dict[str, Any] | None = None
+        writing_plan: dict[str, Any] | None = None
         if current:
             for section in index.get("sections") or []:
                 if not isinstance(section, dict):
@@ -1118,6 +1649,28 @@ class SectionsService:
                         parsed_evidence = None
                     if isinstance(parsed_evidence, dict):
                         evidence_package = parsed_evidence
+                synthesis_state, synthesis_artifact = self._read_json_artifact(
+                    principal,
+                    project_id,
+                    SYNTHESIS_STATE_LOGICAL_NAME,
+                    required=False,
+                )
+                writing_plan, writing_artifact = self._read_json_artifact(
+                    principal,
+                    project_id,
+                    WRITING_PLAN_LOGICAL_NAME,
+                    required=False,
+                )
+                if (
+                    index.get("synthesis_state_logical_name")
+                    and synthesis_artifact is None
+                ) or (
+                    index.get("writing_plan_logical_name")
+                    and writing_artifact is None
+                ):
+                    current = False
+                    synthesis_state = None
+                    writing_plan = None
         jobs = self.repository.list_project_jobs(
             principal.user_id, project_id, job_type="sections.generate"
         )
@@ -1137,6 +1690,8 @@ class SectionsService:
             else "",
             "section_files": section_files,
             "evidence_package": evidence_package if current else None,
+            "synthesis_state": synthesis_state if current else None,
+            "writing_plan": writing_plan if current else None,
             "section_drafting_report_md": str((index or {}).get("report_md") or "")
             if current
             else "",

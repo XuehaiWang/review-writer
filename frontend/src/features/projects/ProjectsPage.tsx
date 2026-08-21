@@ -17,9 +17,14 @@ type ProjectFields = {
   model_tier: "sol" | "terra" | "luna";
 };
 
+function publicTaxonomyProfileId(profile: string) {
+  return profile === "allene" ? "chemistry_general" : profile;
+}
+
 function ProjectCard({ project, deleting, modelUpdating, taxonomyUpdating, taxonomyProfiles, pendingTaxonomyProfile, onModelChange, onTaxonomyChange, onConfirmTaxonomyChange, onCancelTaxonomyChange, onDelete }: { project: Project; deleting: boolean; modelUpdating: boolean; taxonomyUpdating: boolean; taxonomyProfiles: TaxonomyProfile[]; pendingTaxonomyProfile: string; onModelChange: (project: Project, modelTier: Project["model_tier"]) => void; onTaxonomyChange: (project: Project, profile: string) => void; onConfirmTaxonomyChange: (project: Project, profile: string) => void; onCancelTaxonomyChange: () => void; onDelete: (project: Project) => void }) {
   const { text } = useUiText();
-  const profile = taxonomyProfiles.find((item) => item.id === project.taxonomy_profile);
+  const visibleProfileId = publicTaxonomyProfileId(project.taxonomy_profile);
+  const profile = taxonomyProfiles.find((item) => item.id === visibleProfileId);
   return (
     <article className="project-card">
       <div className="project-card-head">
@@ -30,15 +35,36 @@ function ProjectCard({ project, deleting, modelUpdating, taxonomyUpdating, taxon
         <span className="badge">{project.discovery_status || "pending"}</span>
       </div>
       <p>{project.topic || text("尚未填写研究主题", "No research topic yet")}</p>
-      <div className="project-meta">
-        <span>{project.completed_stages.length ? text(`已完成 ${project.completed_stages.length} 个阶段`, `${project.completed_stages.length} stages completed`) : text("尚未完成阶段", "No stages completed")}</span>
-        <label>{text("分类", "Taxonomy")}<select value={project.taxonomy_profile} disabled={taxonomyUpdating} onChange={(event) => onTaxonomyChange(project, event.target.value)}>{taxonomyProfiles.map((item) => <option key={item.id} value={item.id}>{text(item.label_zh, item.label_en)}</option>)}</select></label>
-        {profile ? <small>{text(profile.description_zh, profile.description_en)}</small> : <span>{project.taxonomy_profile}</span>}
-        <label>{text("模型", "Model")}<select value={project.model_tier} disabled={modelUpdating} onChange={(event) => onModelChange(project, event.target.value as Project["model_tier"])}><option value="sol">Sol</option><option value="terra">Terra</option><option value="luna">Luna</option></select></label>
-        <Link className="button button-secondary" to={`/library?project=${encodeURIComponent(project.project_id)}`}>{text("进入工作流", "Open workflow")}</Link>
-        <button className="button button-danger" type="button" disabled={deleting} onClick={() => onDelete(project)}>
-          {deleting ? text("删除中…", "Deleting…") : text("删除项目", "Delete project")}
-        </button>
+      <div className="project-card-controls">
+        <div className="project-card-config">
+          <div className="project-card-field project-progress-field">
+            <span className="project-card-field-label">{text("进度", "Progress")}</span>
+            <span className="project-progress-pill">
+              {project.completed_stages.length ? text(`已完成 ${project.completed_stages.length} 个阶段`, `${project.completed_stages.length} stages completed`) : text("尚未完成阶段", "No stages completed")}
+            </span>
+          </div>
+          <label className="project-card-field project-taxonomy-field">
+            <span className="project-card-field-label">{text("分类", "Taxonomy")}</span>
+            <select value={visibleProfileId} disabled={taxonomyUpdating} onChange={(event) => onTaxonomyChange(project, event.target.value)}>
+              {taxonomyProfiles.map((item) => <option key={item.id} value={item.id}>{text(item.label_zh, item.label_en)}</option>)}
+            </select>
+            <small>{profile ? text(profile.description_zh, profile.description_en) : project.taxonomy_profile}</small>
+          </label>
+          <label className="project-card-field project-model-field">
+            <span className="project-card-field-label">{text("模型", "Model")}</span>
+            <select value={project.model_tier} disabled={modelUpdating} onChange={(event) => onModelChange(project, event.target.value as Project["model_tier"])}>
+              <option value="sol">Sol</option>
+              <option value="terra">Terra</option>
+              <option value="luna">Luna</option>
+            </select>
+          </label>
+        </div>
+        <div className="project-card-actions">
+          <button className="button button-danger" type="button" disabled={deleting} onClick={() => onDelete(project)}>
+            {deleting ? text("删除中…", "Deleting…") : text("删除项目", "Delete project")}
+          </button>
+          <Link className="button button-primary" to={`/library?project=${encodeURIComponent(project.project_id)}`}>{text("进入工作流", "Open workflow")}</Link>
+        </div>
       </div>
       {pendingTaxonomyProfile ? <div className="message message-warning" role="status"><p>{text("该项目已经进入 Matrix。保存新的分类配置会保留已有产物，但把 Matrix 及后续阶段标记为需更新。", "This project has entered Matrix. Saving the new taxonomy profile preserves existing artifacts but marks Matrix and all downstream stages stale.")}</p><div className="button-row"><button className="button button-danger" type="button" disabled={taxonomyUpdating} onClick={() => onConfirmTaxonomyChange(project, pendingTaxonomyProfile)}>{text("确认修改", "Confirm change")}</button><button className="button button-quiet" type="button" disabled={taxonomyUpdating} onClick={onCancelTaxonomyChange}>{text("取消", "Cancel")}</button></div></div> : null}
     </article>

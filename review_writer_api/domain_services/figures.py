@@ -13,7 +13,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from PIL import UnidentifiedImageError
+from PIL import Image as PILImage, UnidentifiedImageError
 
 from review_writer_api.artifact_service import ArtifactService
 from review_writer_api.database import utc_now
@@ -35,6 +35,7 @@ from review_writer_api.figure_rules import (
 )
 from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
+from review_writer_core.publication_caption import publication_caption_fields
 
 
 SECTION_INDEX = "sections/section_drafts.json"
@@ -54,6 +55,32 @@ SAFETY_ERROR = re.compile(
 
 def artifact_url(artifact_id: str) -> str:
     return f"/api/v1/artifacts/{artifact_id}/content"
+
+
+def _edge_check(path: Path, *, safe_margin_px: int = 8) -> dict[str, Any]:
+    """Detect dark/color ink touching a raster boundary without changing the image."""
+
+    with PILImage.open(path) as image:
+        grayscale = image.convert("L")
+        mask = grayscale.point(lambda value: 255 if value < 235 else 0)
+        bbox = mask.getbbox()
+        width, height = image.size
+    if bbox is None:
+        return {
+            "status": "warning",
+            "ink_touches_edge": False,
+            "margin_px": None,
+            "reason": "no_detectable_ink",
+        }
+    left, top, right, bottom = bbox
+    margin = min(left, top, width - right, height - bottom)
+    return {
+        "status": "warning" if margin < safe_margin_px else "pass",
+        "ink_touches_edge": margin < safe_margin_px,
+        "margin_px": int(margin),
+        "safe_margin_px": int(safe_margin_px),
+        "ink_bbox": [int(left), int(top), int(right), int(bottom)],
+    }
 
 
 class FigureCandidatesMissing(WorkflowConflict):
@@ -199,15 +226,6 @@ class FiguresService:
         project_id: str,
         candidate: dict[str, Any],
     ) -> tuple[ArtifactRecord, Path]:
-        anchor = str(
-            candidate.get("target_paragraph_id")
-            or candidate.get("paragraph_id")
-            or ""
-        ).strip()
-        if not anchor:
-            raise FigureParagraphAnchorMissing(
-                "The selected candidate has no matching manuscript paragraph anchor."
-            )
         artifact_id = str(candidate.get("source_image_artifact_id") or "").strip()
         if not artifact_id:
             raise WorkflowValidationError(
@@ -223,6 +241,56 @@ class FiguresService:
                 "The selected candidate source image is unreadable."
             ) from exc
         return artifact, path
+
+    def _derive_current_placement(
+        self,
+        principal: Principal,
+        project_id: str,
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Derive manuscript placement from the current paper-to-paragraph evidence map."""
+
+        paper_id = str(candidate.get("paper_id") or "").strip()
+        section_index, _artifact = self._read_json(
+            principal, project_id, SECTION_INDEX
+        )
+        matches: list[tuple[str, str]] = []
+        for section in section_index.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            section_id = str(section.get("section_id") or "")
+            for paragraph in section.get("paragraphs") or []:
+                if not isinstance(paragraph, dict):
+                    continue
+                cited = {
+                    str(value)
+                    for value in (
+                        paragraph.get("cited_paper_ids")
+                        or ([paragraph.get("paper_id")] if paragraph.get("paper_id") else [])
+                    )
+                    if str(value)
+                }
+                cited.update(
+                    str(item.get("paper_id") or "")
+                    for item in paragraph.get("evidence") or []
+                    if isinstance(item, dict) and str(item.get("paper_id") or "")
+                )
+                paragraph_id = str(paragraph.get("paragraph_id") or "").strip()
+                if paper_id and paragraph_id and paper_id in cited:
+                    matches.append((section_id, paragraph_id))
+        updated = dict(candidate)
+        updated["source_target_paragraph_id"] = str(
+            candidate.get("target_paragraph_id") or candidate.get("paragraph_id") or ""
+        )
+        if matches:
+            updated["section_id"], updated["target_paragraph_id"] = matches[0]
+            updated["placement_status"] = "derived_from_current_section_evidence"
+            updated["placement_candidate_paragraph_ids"] = [value for _section, value in matches]
+        else:
+            updated["target_paragraph_id"] = ""
+            updated["placement_status"] = "waiting_for_supported_paragraph"
+            updated["placement_candidate_paragraph_ids"] = []
+        return updated
 
     def _effective_review(
         self,
@@ -282,15 +350,7 @@ class FiguresService:
                 candidates.append(candidate)
             paper["candidates"] = candidates
             paper["review_required"] = any(
-                bool(candidate.get("source_image_url"))
-                and bool(
-                    str(
-                        candidate.get("target_paragraph_id")
-                        or candidate.get("paragraph_id")
-                        or ""
-                    ).strip()
-                )
-                for candidate in candidates
+                bool(candidate.get("source_image_url")) for candidate in candidates
             )
             paper_id = str(paper.get("paper_id") or "")
             review = (
@@ -404,24 +464,23 @@ class FiguresService:
                 reviewable = any(
                     isinstance(candidate, dict)
                     and bool(candidate.get("source_image_artifact_id"))
-                    and bool(
-                        str(
-                            candidate.get("target_paragraph_id")
-                            or candidate.get("paragraph_id")
-                            or ""
-                        ).strip()
-                    )
                     for candidate in paper.get("candidates") or []
                 )
                 if reviewable:
                     missing.append(paper_id)
                 continue
             _paper, candidate = self._candidate(papers, paper_id, selected_index)
+            candidate = self._derive_current_placement(
+                principal, project_id, candidate
+            )
             source_artifact, _source_path = self._validate_candidate(
                 principal, project_id, candidate
             )
             candidate["source_image_artifact_id"] = source_artifact.id
             candidate["source_review_note"] = str(review.get("review_note") or "")
+            candidate["representative_role"] = str(
+                review.get("representative_role") or "paper_overview"
+            )
             selected.append(candidate)
         return selected, missing
 
@@ -511,6 +570,7 @@ class FiguresService:
         revision: int,
         candidate_index: int,
         review_note: str,
+        representative_role: str = "paper_overview",
     ) -> dict[str, Any]:
         principal.require(Permission.PROJECT_WRITE)
         paper_payload, paper_artifact = self._read_json(
@@ -532,6 +592,7 @@ class FiguresService:
             "selected_candidate_index": int(candidate_index),
             "selected_source_artifact_id": source_artifact.id,
             "review_note": str(review_note or "").strip(),
+            "representative_role": str(representative_role or "paper_overview"),
             "selection_source": "human",
             "reviewed_at": utc_now().isoformat(),
         }
@@ -717,7 +778,17 @@ class FiguresService:
         available = {str(row.get("figure_id") or ""): row for row in figures}
         requested = list(dict.fromkeys(str(item).strip() for item in figure_ids if str(item).strip()))
         if not requested:
-            requested = list(available)
+            current_manifest, _manifest_artifact = self._current_manifest(
+                principal, project_id, inputs_artifact.id
+            )
+            excluded_ids = {
+                str(value)
+                for value in current_manifest.get("excluded_figure_ids") or []
+                if str(value)
+            }
+            requested = [
+                figure_id for figure_id in available if figure_id not in excluded_ids
+            ]
         unknown = sorted(set(requested) - set(available))
         if unknown:
             raise WorkflowValidationError(
@@ -758,6 +829,16 @@ class FiguresService:
         current_manifest, _manifest_artifact = self._current_manifest(
             principal, project_id, inputs_artifact.id
         )
+        excluded_ids = {
+            str(value)
+            for value in current_manifest.get("excluded_figure_ids") or []
+            if str(value)
+        }
+        if set(requested) & excluded_ids:
+            raise WorkflowConflict(
+                "One or more requested figures were explicitly excluded from the manuscript. Re-include them before redrawing.",
+                details={"figure_ids": sorted(set(requested) & excluded_ids)},
+            )
         baseline_outputs = {
             str(row.get("figure_id") or ""): str(row.get("output_artifact_id") or "")
             for row in current_manifest.get("figures") or []
@@ -929,6 +1010,8 @@ class FiguresService:
                     "section_heading": item["figure"].get("section_heading"),
                     "target_paragraph_id": item["figure"].get("target_paragraph_id"),
                     "source_label": item["figure"].get("source_label"),
+                    "source_caption_text": item["figure"].get("source_caption_text"),
+                    "representative_role": item["figure"].get("representative_role"),
                     "source_artifact_id": source_artifact.id,
                     "output_artifact_id": output_artifact.id,
                     "producer_job_id": str(job_payload.get("producer_job_id") or ""),
@@ -938,6 +1021,9 @@ class FiguresService:
                     ),
                     "updated_at": utc_now().isoformat(),
                 }
+            )
+            row.update(
+                publication_caption_fields(item["figure"].get("source_caption_text"))
             )
             rows = [
                 old
@@ -996,6 +1082,11 @@ class FiguresService:
         if manifest_artifact is None:
             return None, set()
         selected = {str(row.get("figure_id") or ""): row for row in figures}
+        excluded_ids = {
+            str(value)
+            for value in manifest.get("excluded_figure_ids") or []
+            if str(value)
+        }
         public_rows: list[dict[str, Any]] = []
         usable: set[str] = set()
         for raw_row in manifest.get("figures") or []:
@@ -1019,6 +1110,7 @@ class FiguresService:
                 integrity = aspect_ratio_integrity(
                     image_size(source_path), image_size(output_path)
                 )
+                edge_check = _edge_check(output_path)
                 output_current = True
             except (
                 WorkflowNotFound,
@@ -1027,8 +1119,10 @@ class FiguresService:
                 UnidentifiedImageError,
             ):
                 integrity = {"status": "unavailable"}
+                edge_check = {"status": "unavailable", "ink_touches_edge": None}
                 output_current = False
             row["aspect_ratio_integrity"] = integrity
+            row["edge_check"] = edge_check
             approval = dict(row.get("human_approval") or {})
             approval["current_source_match"] = bool(
                 approval.get("source_artifact_id") == current_source_id
@@ -1067,6 +1161,9 @@ class FiguresService:
             row["source_current"] = source_current
             row["output_current"] = output_current
             row["requires_human_approval"] = requires_approval
+            row["manuscript_selected"] = figure_id not in excluded_ids
+            if figure_id in excluded_ids:
+                usable.discard(figure_id)
             row["usable"] = figure_id in usable
             if output_id:
                 row["redrawn_image_url"] = artifact_url(output_id)
@@ -1114,9 +1211,20 @@ class FiguresService:
 
     def get(self, principal: Principal, project_id: str) -> dict[str, Any]:
         figures, inputs_artifact = self._selected_inputs(principal, project_id)
+        current_manifest, _current_manifest_artifact = self._current_manifest(
+            principal, project_id, inputs_artifact.id
+        )
+        excluded_ids = {
+            str(value)
+            for value in current_manifest.get("excluded_figure_ids") or []
+            if str(value)
+        }
         public_figures: list[dict[str, Any]] = []
         for raw in figures:
             row = deepcopy(raw)
+            row["manuscript_selected"] = (
+                str(row.get("figure_id") or "") not in excluded_ids
+            )
             source_id = str(row.get("source_image_artifact_id") or "")
             row["source_image_url"] = artifact_url(source_id)
             row["source_image_path"] = row["source_image_url"]
@@ -1238,7 +1346,9 @@ class FiguresService:
         selected_ids = {
             str(row.get("figure_id") or "")
             for row in figures
-            if row.get("figure_id") and row.get("manuscript_selected") is not False
+            if row.get("figure_id")
+            and row.get("manuscript_selected") is not False
+            and str(row.get("figure_id") or "") not in excluded_ids
         }
         return {
             "project_id": project_id,
@@ -1283,6 +1393,73 @@ class FiguresService:
                 "stale": bool(selected_ids - usable),
             },
             "report": {"jobs": [self._job_payload(job) for job in jobs]},
+        }
+
+    def set_manuscript_inclusion(
+        self,
+        principal: Principal,
+        project_id: str,
+        figure_id: str,
+        *,
+        included: bool,
+    ) -> dict[str, Any]:
+        """Include/exclude one figure without changing its Stage 4 source selection."""
+
+        principal.require(Permission.PROJECT_WRITE)
+        figures, inputs_artifact = self._selected_inputs(principal, project_id)
+        selected_ids = {
+            str(row.get("figure_id") or "")
+            for row in figures
+            if str(row.get("figure_id") or "")
+        }
+        normalized = str(figure_id or "").strip()
+        if normalized not in selected_ids:
+            raise WorkflowNotFound("Selected figure was not found.")
+        manifest, manifest_artifact = self._current_manifest(
+            principal, project_id, inputs_artifact.id
+        )
+        excluded = {
+            str(value)
+            for value in manifest.get("excluded_figure_ids") or []
+            if str(value)
+        }
+        if included:
+            excluded.discard(normalized)
+        else:
+            excluded.add(normalized)
+        manifest["excluded_figure_ids"] = sorted(excluded)
+        manifest["updated_at"] = utc_now().isoformat()
+        stage_state = self.repository.get_stage_state(
+            principal.user_id, project_id, "figures"
+        )
+        published, state = self._publish_files(
+            principal,
+            project_id,
+            stage_id="figures",
+            files={
+                FIGURE_MANIFEST: (
+                    (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode(),
+                    "json",
+                )
+            },
+            expected_revision=stage_state.revision if stage_state else 0,
+            status="review",
+            invalidate_stages=("draft", "final"),
+            metadata={
+                "figure_id": normalized,
+                "manuscript_selected": included,
+            },
+            expected_current_artifacts=(
+                {FIGURE_MANIFEST: manifest_artifact.id}
+                if manifest_artifact is not None
+                else None
+            ),
+        )
+        return {
+            "figure_id": normalized,
+            "manuscript_selected": included,
+            "manifest_artifact_id": published[FIGURE_MANIFEST].id,
+            "revision": state.revision,
         }
 
     def create_full_svg(
@@ -1539,6 +1716,7 @@ class FiguresService:
             )
             row = {
                 **figure,
+                **publication_caption_fields(figure.get("source_caption_text")),
                 "figure_id": figure_id,
                 "source_artifact_id": source_artifact.id,
                 "output_artifact_id": output_artifact.id,
@@ -1864,6 +2042,18 @@ class FiguresService:
         if active.get("status") in {"queued", "running", "cancel_requested"}:
             raise FigureOutputsIncomplete(
                 "Figure generation is still running. Wait or stop it before entering Draft."
+            )
+        unplaced = [
+            str(row.get("figure_id") or "")
+            for row in payload.get("figure_candidates") or []
+            if isinstance(row, dict)
+            and row.get("manuscript_selected") is not False
+            and not str(row.get("target_paragraph_id") or "").strip()
+        ]
+        if unplaced:
+            raise FigureOutputsIncomplete(
+                "One or more paper-level figures have no supported paragraph placement in the current section drafts. Exclude them or regenerate the relevant section before entering Draft.",
+                details={"figure_ids": unplaced, "reason": "waiting_for_supported_paragraph"},
             )
         if selected <= 0 or usable != selected:
             raise FigureOutputsIncomplete(

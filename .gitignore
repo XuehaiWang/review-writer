@@ -8,6 +8,7 @@
 !/pyproject.toml
 !/alembic.ini
 !/Dockerfile.api
+!/Dockerfile.pdf-renderer
 !/compose.yaml
 !/review_writer_api/
 !/review_writer_api/**
@@ -23,10 +24,10 @@
 !/examples/**
 !/review_writer_core/
 !/review_writer_core/**
+!/review_writer_pdf_renderer/
+!/review_writer_pdf_renderer/**
 !/migrations/
 !/migrations/**
-!/infra/
-!/infra/**
 !/docs/
 !/docs/**
 !/tests/
@@ -66,8 +67,14 @@
 # Local Codex/agent execution records and planning artifacts.
 /.agents/
 /.codex/
+/.codex-qa/
+/.codex-tmp/
 /.superpowers/
 /docs/superpowers/
+/output/
+/outputs/
+/tmp/
+/review_writer.egg-info/
 /frontend/node_modules/
 /frontend/dist/
 /frontend/*.tsbuildinfo

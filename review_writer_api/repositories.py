@@ -353,6 +353,24 @@ class HostedProjectRepository:
         except ValueError as exc:
             raise ProjectOperationError(str(exc)) from exc
         with database_session(self.session_factory) as session:
+            # Deletion is intentionally soft until the workspace has been moved to
+            # trash.  The database-level user/slug uniqueness constraint therefore
+            # still sees the tombstone.  Reusing a deleted slug must create a clean
+            # project, not restore its stale workflow state, so purge only the
+            # matching deleted row inside the same transaction before inserting the
+            # replacement.  Active projects remain protected by the unique key.
+            deleted_project = session.scalar(
+                select(Project)
+                .where(
+                    Project.user_id == user_uuid,
+                    Project.slug == safe_slug,
+                    Project.deleted_at.is_not(None),
+                )
+                .with_for_update()
+            )
+            if deleted_project is not None:
+                session.delete(deleted_project)
+                session.flush()
             project = Project(
                 user_id=user_uuid,
                 slug=safe_slug,

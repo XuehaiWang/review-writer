@@ -248,6 +248,24 @@ class ScientificRunnerTests(unittest.TestCase):
         self.assertIn("No API key available", str(failed.exception))
         self.assertNotIn("Adapted prompt length", str(failed.exception))
 
+    def test_failure_prefers_error_over_trailing_report_path(self) -> None:
+        script = (
+            "import sys; "
+            "print('ERROR: Exact skeleton could not be composited.', file=sys.stderr); "
+            "print('Report saved to: /tmp/overview_template_match.json', file=sys.stderr); "
+            "sys.exit(1)"
+        )
+        with self.assertRaises(self.RunFailed) as failed:
+            self.runner.run(
+                [sys.executable, "-c", script],
+                cwd=self.root,
+                staging_directory=self.root,
+                expected_outputs=("never-created.txt",),
+            )
+
+        self.assertIn("Exact skeleton could not be composited", str(failed.exception))
+        self.assertNotIn("Report saved to", str(failed.exception))
+
     def test_transient_503_retries_twice_then_succeeds(self) -> None:
         script = (
             "import json,pathlib,sys; p=pathlib.Path('attempt.txt'); "
@@ -389,6 +407,29 @@ class ScientificRunnerTests(unittest.TestCase):
         self.assertTrue(failed.exception.retryable)
         self.assertEqual(524, failed.exception.details["http_status"])
         self.assertIn("timed out (HTTP 524) after 3 attempts", str(failed.exception))
+
+    def test_insufficient_credit_is_not_retried_and_has_a_safe_business_error(self) -> None:
+        from review_writer_api.scientific_runner import ScientificInsufficientCredit
+
+        script = (
+            "import json,sys; "
+            "sys.stderr.write('REVIEW_WRITER_ERROR:'+json.dumps({"
+            "'category':'insufficient_credit','provider_call_completed':False,"
+            "'http_status':402})+'\\n'); "
+            "sys.exit(1)"
+        )
+        with self.assertRaises(ScientificInsufficientCredit) as failed:
+            self.runner.run(
+                [sys.executable, "-c", script],
+                cwd=self.root,
+                staging_directory=self.root,
+                expected_outputs=("credit-output.json",),
+            )
+
+        self.assertEqual(1, failed.exception.attempts)
+        self.assertFalse(failed.exception.retryable)
+        self.assertEqual("INSUFFICIENT_CREDIT", failed.exception.code)
+        self.assertIn("余额不足", str(failed.exception))
 
     def test_real_inventory_script_runs_through_the_scientific_adapter(self) -> None:
         project_root = Path(__file__).resolve().parents[2]

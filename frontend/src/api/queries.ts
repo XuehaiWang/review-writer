@@ -3,7 +3,11 @@ import { queryOptions } from "@tanstack/react-query";
 import { apiRequest } from "./client";
 import type {
   AuthConfig,
+  AdminUsageSummary,
+  AdminUserList,
   AdminProviderAuditList,
+  Balance,
+  CreditTransactionList,
   LibraryList,
   ModelCatalog,
   Principal,
@@ -23,8 +27,12 @@ export const queryKeys = {
   adminProviderSettings: ["admin", "provider-settings"] as const,
   adminProviderAudit: ["admin", "provider-audit"] as const,
   modelCatalog: ["model-catalog"] as const,
-  usageSummary: ["usage-summary"] as const,
-  usageTimeline: (days: number) => ["usage-timeline", days] as const,
+  usageSummary: (projectId = "") => ["usage-summary", projectId] as const,
+  usageTimeline: (days: number, projectId = "") => ["usage-timeline", projectId, days] as const,
+  balance: ["balance"] as const,
+  balanceTransactions: ["balance", "transactions"] as const,
+  adminUsers: ["admin", "users"] as const,
+  adminUsage: ["admin", "usage"] as const,
   libraryUploadJobs: ["library", "upload-jobs"] as const,
   library: (query: string) => ["library", query] as const,
   libraryMetadata: (paperId: string) => ["library", paperId, "metadata"] as const,
@@ -76,17 +84,41 @@ export const modelCatalogQuery = queryOptions({
   staleTime: 30 * 60 * 1000,
 });
 
-export const usageSummaryQuery = queryOptions({
-  queryKey: queryKeys.usageSummary,
-  queryFn: () => apiRequest<UsageSummary>("/api/v1/usage/summary"),
-});
-
-export function usageTimelineQuery(days = 30) {
+export function usageSummaryQuery(projectId = "") {
+  const suffix = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
   return queryOptions({
-    queryKey: queryKeys.usageTimeline(days),
-    queryFn: () => apiRequest<UsageTimeline>(`/api/v1/usage/timeline?days=${days}`),
+    queryKey: queryKeys.usageSummary(projectId),
+    queryFn: () => apiRequest<UsageSummary>(`/api/v1/usage/summary${suffix}`),
   });
 }
+
+export function usageTimelineQuery(days = 30, projectId = "") {
+  const project = projectId ? `&project_id=${encodeURIComponent(projectId)}` : "";
+  return queryOptions({
+    queryKey: queryKeys.usageTimeline(days, projectId),
+    queryFn: () => apiRequest<UsageTimeline>(`/api/v1/usage/timeline?days=${days}${project}`),
+  });
+}
+
+export const balanceQuery = queryOptions({
+  queryKey: queryKeys.balance,
+  queryFn: () => apiRequest<Balance>("/api/v1/balance"),
+});
+
+export const balanceTransactionsQuery = queryOptions({
+  queryKey: queryKeys.balanceTransactions,
+  queryFn: () => apiRequest<CreditTransactionList>("/api/v1/balance/transactions?limit=100"),
+});
+
+export const adminUsersQuery = queryOptions({
+  queryKey: queryKeys.adminUsers,
+  queryFn: () => apiRequest<AdminUserList>("/api/v1/admin/users?limit=200"),
+});
+
+export const adminUsageQuery = queryOptions({
+  queryKey: queryKeys.adminUsage,
+  queryFn: () => apiRequest<AdminUsageSummary>("/api/v1/admin/usage"),
+});
 
 export function libraryQuery(query: string) {
   return queryOptions({

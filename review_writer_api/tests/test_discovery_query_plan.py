@@ -392,7 +392,26 @@ class DiscoveryQueryPlanTests(unittest.TestCase):
                 EMPTY_RULES,
             )
         self.assertEqual("dashboard_deterministic", plan["planner"])
-        self.assertIn("TimeoutError", plan["planner_notice"])
+        self.assertEqual("planner_unavailable", plan["planner_notice_code"])
+        self.assertNotIn("TimeoutError", plan["planner_notice"])
+        self.assertNotIn("offline", plan["planner_notice"])
+
+    def test_auto_planner_stops_discovery_when_credit_is_insufficient(self) -> None:
+        failure = discover.GatewayRequestError(
+            "余额不足，无法使用智能服务。",
+            status_code=402,
+            code="INSUFFICIENT_CREDIT",
+            details={"required_usd": "0.00321480", "available_usd": "0"},
+        )
+        with patch.object(discover, "llm_query_plan", side_effect=failure):
+            with self.assertRaises(discover.GatewayRequestError) as raised:
+                discover.build_auto_query_plan(
+                    "photoredox catalysis",
+                    [],
+                    EMPTY_RULES,
+                )
+        self.assertEqual("INSUFFICIENT_CREDIT", raised.exception.code)
+        self.assertNotIn("0.00321480", str(raised.exception))
 
     def test_auto_planner_keeps_model_plan_when_provider_uses_normalized_alias(self) -> None:
         topic = (

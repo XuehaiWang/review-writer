@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import re
 import subprocess
 import sys
 import tempfile
@@ -20,7 +19,6 @@ from review_writer_api.security import Principal, Role
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DASHBOARD = ROOT / "view" / "assets" / "dashboard"
 TEST_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("=")
 REMOVED_RUNTIME = (
     ROOT / "review_writer_api" / "workflow_compat.py",
@@ -79,26 +77,15 @@ class NoLegacyRuntimeTests(unittest.TestCase):
         self.assertIn("REVIEW_WRITER_RUN_POSTGRES_TESTS: \"1\"", workflow)
         self.assertNotIn("sqlite+pysqlite", workflow)
 
-    def test_dashboard_workflow_requests_use_only_versioned_api(self) -> None:
-        offenders: list[str] = []
-        for path in sorted(DASHBOARD.glob("*")):
-            if path.suffix not in {".html", ".js"}:
-                continue
-            source = path.read_text(encoding="utf-8")
-            for match in re.finditer(r"(?:fetch\s*\(|endpoint\s*:\s*)[`'\"](/api/[^`'\"${}]*)", source):
-                route = match.group(1)
-                if not route.startswith("/api/v1/"):
-                    offenders.append(f"{path.name}: {route}")
-            if "/api/project/" in source or "/file?" in source:
-                offenders.append(f"{path.name}: legacy workflow/file route")
-        self.assertEqual([], offenders)
-
-    def test_native_dashboard_is_mounted_without_compatibility_gateway(self) -> None:
+    def test_react_frontend_is_mounted_without_legacy_static_fallbacks(self) -> None:
         source = (ROOT / "review_writer_api" / "app.py").read_text(encoding="utf-8")
         self.assertNotIn("WorkflowCompatibilityGateway", source)
         self.assertNotIn("workflow_gateway", source)
-        self.assertIn("dashboard_page_paths", source)
-        self.assertRegex(source, r'app\.mount\(\s*"/assets"')
+        self.assertNotIn("dashboard_page_paths", source)
+        self.assertNotIn("dashboard_response", source)
+        self.assertNotIn('"/assets/app"', source)
+        self.assertIn('app.mount(\n            "/assets/react"', source)
+        self.assertIn('app.mount(\n        "/assets/ketcher"', source)
 
     def test_retired_local_mode_does_not_mount_nonfunctional_workflow_pages(self) -> None:
         with tempfile.TemporaryDirectory() as raw, TestClient(

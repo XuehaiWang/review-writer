@@ -65,8 +65,16 @@ export function DiscoveryJobProgress({ job, submitting = false }: DiscoveryJobPr
     title = text("检索完成", "Search complete");
     detail = text("最新候选论文和分类分组已经载入下方审核区。", "The latest candidates and taxonomy groups are loaded below.");
   } else if (status === "failed") {
-    title = text("检索失败", "Search failed");
-    detail = job?.error_message || text("检索任务执行失败，请检查错误信息后重试。", "The search failed. Review the error and try again.");
+    if (job?.error_code === "INSUFFICIENT_CREDIT") {
+      title = text("检索未执行", "Search not run");
+      detail = text(
+        "余额不足，本次检索已停止，且没有生成新的候选结果。请在“API 设置”中查看余额，或联系管理员添加额度后重新检索。",
+        "Your balance is insufficient. This search was stopped and did not create new candidates. Review your balance in API Settings or contact an administrator for credit, then run the search again.",
+      );
+    } else {
+      title = text("检索失败", "Search failed");
+      detail = job?.error_message || text("检索任务执行失败，请检查错误信息后重试。", "The search failed. Review the error and try again.");
+    }
   } else if (status === "cancelled") {
     title = text("检索已取消", "Search cancelled");
     detail = text("本次任务没有发布新的检索结果。", "This run did not publish new discovery results.");

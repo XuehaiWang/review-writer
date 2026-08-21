@@ -71,6 +71,7 @@ type DiscoveryPayload = {
   query_plan?: {
     planner?: string;
     planner_notice?: string;
+    planner_notice_code?: string;
     group_by?: string[];
   };
   results: DiscoveryGroup[];
@@ -98,6 +99,25 @@ const CATEGORY_ORDER = [
   "document_scope",
   "unclassified",
 ];
+
+function publicPlannerNotice(
+  plan: DiscoveryPayload["query_plan"],
+  text: (zh: string, en: string) => string,
+) {
+  const raw = String(plan?.planner_notice || "");
+  const insufficient = plan?.planner_notice_code === "insufficient_credit"
+    || /INSUFFICIENT_CREDIT|HTTP\s*402|余额不足/i.test(raw);
+  if (insufficient) {
+    return text(
+      "余额不足，智能查询规划未运行。本次检索已自动使用确定性查询规划；请在“API 设置”中查看余额，或联系管理员添加额度。",
+      "Your balance is insufficient for intelligent query planning. Deterministic planning was used automatically; review your balance in API Settings or contact an administrator for credit.",
+    );
+  }
+  return text(
+    "智能查询规划暂不可用，本次检索已自动使用确定性查询规划。",
+    "Intelligent query planning was temporarily unavailable, so deterministic planning was used automatically.",
+  );
+}
 
 const CATEGORY_LABELS: Record<string, [string, string]> = {
   product: ["产物", "Product"],
@@ -328,6 +348,11 @@ export function DiscoveryPage() {
   }
 
   const noArtifact = discovery.error instanceof ApiError && discovery.error.status === 404;
+  const insufficientCreditStop = Boolean(
+    jobId
+    && job.data?.status === "failed"
+    && job.data.error_code === "INSUFFICIENT_CREDIT",
+  );
   return (
     <main className="workspace page-container workspace-page">
       <div className="workspace-heading">
@@ -345,8 +370,9 @@ export function DiscoveryPage() {
           </div>
           {discovery.data?.has_published_matrix ? <p className="message message-info">{text("重新检索只生成新的待确认结果，不会删除或隐藏阶段 3–7 的现有内容。确认采用后，只有论文集合或主题确实变化时，依赖阶段才会标记为过期。", "A new search creates reviewable results without deleting or hiding existing Stage 3–7 work. After confirmation, dependent stages are marked stale only when the paper set or topic actually changes.")}</p> : null}
           {(run.isPending || jobId) ? <DiscoveryJobProgress job={job.data} submitting={run.isPending && !jobId} /> : null}
-          {discovery.data?.query_plan?.planner_notice ? <p className="message message-warning">{text("本次检索使用了确定性查询规划：", "This search used the deterministic query planner: ")}{discovery.data.query_plan.planner_notice}</p> : null}
-          {discovery.data?.query_plan_source === "dashboard_llm" && !discovery.data?.query_plan?.planner_notice ? <p className="message message-info">{text("已使用当前所选文本模型完成查询规划。", "The current selected text model produced the query plan.")}</p> : null}
+          {insufficientCreditStop && discovery.data ? <p className="message message-info">{text("下方保留的是上一次成功检索的结果；本次余额不足的检索未执行，也没有覆盖这些结果。", "The results below are from the last successful search. The current search was not run because of insufficient credit and did not overwrite them.")}</p> : null}
+          {!insufficientCreditStop && discovery.data?.query_plan?.planner_notice ? <p className="message message-warning">{publicPlannerNotice(discovery.data.query_plan, text)}</p> : null}
+          {!insufficientCreditStop && discovery.data?.query_plan_source === "dashboard_llm" && !discovery.data?.query_plan?.planner_notice ? <p className="message message-info">{text("已使用当前所选文本模型完成查询规划。", "The current selected text model produced the query plan.")}</p> : null}
           {run.error ? <p className="message message-error">{run.error.message}</p> : null}
         </section>
       ) : null}

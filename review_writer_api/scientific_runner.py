@@ -78,6 +78,18 @@ class ScientificRunFailed(ScientificRunError):
     code = "SCIENTIFIC_RUN_FAILED"
 
 
+class ScientificInsufficientCredit(ScientificRunError):
+    code = "INSUFFICIENT_CREDIT"
+    status_code = 402
+
+    def __init__(self, *, attempts: int):
+        super().__init__(
+            "余额不足，无法执行本次智能任务。请在“API 设置”中查看余额，或联系管理员添加额度。",
+            attempts=attempts,
+            retryable=False,
+        )
+
+
 class ScientificRunCancelled(ScientificRunError):
     code = "SCIENTIFIC_RUN_CANCELLED"
     status_code = 409
@@ -306,6 +318,8 @@ class ScientificRunner:
                     category == "transient_timeout"
                     or http_status in {408, 504, 524}
                 )
+                if category == "insufficient_credit":
+                    raise ScientificInsufficientCredit(attempts=attempt)
                 if timed_out:
                     reason = (
                         "Scientific task exceeded its execution time limit after "
@@ -380,7 +394,21 @@ class ScientificRunner:
         lines = useful_lines(stderr) or useful_lines(stdout)
         if not lines:
             return ""
-        diagnostic = lines[-1]
+        # A few scientific scripts persist a diagnostic report after printing
+        # the actual ``ERROR: ...`` line.  The trailing "Report saved to" path
+        # is useful for developers but is not the failure reason users need.
+        # Prefer the last explicit error/exception line whenever one exists.
+        explicit_errors = [
+            line
+            for line in lines
+            if re.search(
+                r"(?:^|\b)(?:ERROR|RuntimeError|ValueError|PermissionError|"
+                r"FileNotFoundError|Exception)\s*:",
+                line,
+                re.IGNORECASE,
+            )
+        ]
+        diagnostic = (explicit_errors or lines)[-1]
         diagnostic = re.sub(
             r"^(?:RuntimeError|ValueError|PermissionError|FileNotFoundError|Exception):\s*",
             "",

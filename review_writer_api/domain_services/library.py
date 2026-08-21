@@ -19,11 +19,16 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
+from review_writer_api.billing import BillingService
 from review_writer_api.database import MinerUUsageEvent, database_session, utc_now
 from review_writer_api.errors import WorkflowError, WorkflowNotFound, WorkflowValidationError
 from review_writer_api.mineru_artifacts import mineru_storage_paths
 from review_writer_api.security import Permission, Principal
-from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
+from review_writer_api.workflow_models import (
+    LibraryArtifact,
+    LibraryBibliographyAudit,
+    LibraryPaper,
+)
 from review_writer_api.workspaces import HostedWorkspaceManager
 from review_writer_api.scientific_runner import (
     SENSITIVE_ENVIRONMENT_KEY,
@@ -49,6 +54,7 @@ class LibraryPaperRecord:
     original_filename: str
     content_sha256: str
     metadata: dict[str, Any]
+    bibliography_audit: dict[str, Any]
     pdf_relative_path: str
     markdown_relative_path: str
     artifact_ids: dict[str, str]
@@ -88,6 +94,7 @@ class LibraryService:
         scientific_runner: ScientificRunner | None = None,
         mineru_price_usd_per_page: Decimal = Decimal("0"),
         mineru_max_concurrency: int = 2,
+        billing_service: BillingService | None = None,
     ):
         self.session_factory = session_factory
         self.workspace_manager = workspace_manager
@@ -97,6 +104,7 @@ class LibraryService:
         self.mineru_price_usd_per_page = Decimal(mineru_price_usd_per_page).quantize(
             Decimal("0.00000001")
         )
+        self.billing_service = billing_service
         self._parse_slots = BoundedSemaphore(max(1, int(mineru_max_concurrency)))
 
     @staticmethod
@@ -153,7 +161,7 @@ class LibraryService:
         digest: str,
         page_count: int,
         job_id: str | None = None,
-    ) -> str:
+    ) -> tuple[str, int]:
         user_id = uuid.UUID(principal.user_id)
         event = MinerUUsageEvent(
             user_id=user_id,
@@ -168,7 +176,7 @@ class LibraryService:
             with database_session(self.session_factory) as session:
                 session.add(event)
                 session.flush()
-                return str(event.id)
+                return str(event.id), int(event.attempt_count)
         except IntegrityError:
             pass
         with database_session(self.session_factory) as session:
@@ -199,7 +207,7 @@ class LibraryService:
             row.error_message = ""
             row.finished_at = None
             row.updated_at = utc_now()
-            return str(row.id)
+            return str(row.id), int(row.attempt_count)
 
     def _finish_mineru_usage(
         self,
@@ -613,6 +621,7 @@ class LibraryService:
     @staticmethod
     def _record(row: LibraryPaper) -> LibraryPaperRecord:
         metadata = dict(row.metadata_json or {})
+        audit_row = row.bibliography_audit_row
         return LibraryPaperRecord(
             id=str(row.id),
             paper_id=row.paper_id,
@@ -623,6 +632,7 @@ class LibraryService:
             original_filename=row.original_filename,
             content_sha256=row.content_sha256,
             metadata=metadata,
+            bibliography_audit=dict(audit_row.audit_json or {}) if audit_row else {},
             pdf_relative_path=row.pdf_relative_path,
             markdown_relative_path=row.markdown_relative_path,
             artifact_ids=dict((row.metadata_json or {}).get("_artifact_ids") or {}),
@@ -719,7 +729,7 @@ class LibraryService:
             )
             return duplicate_record, "duplicate_file"
         page_count = self._pdf_page_count(staged_pdf)
-        usage_event_id = self._begin_mineru_usage(
+        usage_event_id, usage_attempt = self._begin_mineru_usage(
             principal,
             filename=filename,
             digest=digest,
@@ -727,7 +737,45 @@ class LibraryService:
             job_id=job_id,
         )
         result: dict[str, Any] = {}
+        reservation_id: str | None = None
+
+        def settle_provider_cost(billed_pages: int, *, reconciliation: bool = False) -> None:
+            if self.billing_service is not None and reservation_id is not None:
+                actual = (Decimal(max(0, int(billed_pages))) * self.mineru_price_usd_per_page).quantize(
+                    Decimal("0.00000001")
+                )
+                self.billing_service.settle(
+                    reservation_id,
+                    actual_usd=actual,
+                    details={
+                        "page_count": max(0, int(billed_pages)),
+                        "reconciliation_required": reconciliation,
+                    },
+                )
+
+        def release_provider_hold(error: Exception) -> None:
+            if self.billing_service is not None and reservation_id is not None:
+                self.billing_service.release(
+                    reservation_id,
+                    reason="MinerU 调用未产生费用，释放冻结额度",
+                    details={"error": str(error)[:500]},
+                )
+
         try:
+            if self.billing_service is not None:
+                reservation = self.billing_service.reserve(
+                    user_id=principal.user_id,
+                    amount_usd=(
+                        Decimal(max(0, page_count)) * self.mineru_price_usd_per_page
+                    ).quantize(Decimal("0.00000001")),
+                    reference_type="mineru",
+                    reference_id=usage_event_id,
+                    attempt_number=usage_attempt,
+                    job_id=job_id,
+                    reason="MinerU PDF 精确解析冻结",
+                    details={"filename": filename, "estimated_pages": page_count},
+                )
+                reservation_id = str(reservation.id)
             if self.precise_ingest:
                 result = self.precise_ingest(root, filename, staged_pdf)
             else:
@@ -756,6 +804,10 @@ class LibraryService:
                 page_count=page_count,
                 error_message=str(exc),
             )
+            if provider_completed:
+                settle_provider_cost(page_count, reconciliation=True)
+            else:
+                release_provider_hold(exc)
             raise
         except RuntimeError as exc:
             self._finish_mineru_usage(
@@ -764,6 +816,7 @@ class LibraryService:
                 page_count=page_count,
                 error_message=str(exc),
             )
+            release_provider_hold(exc)
             raise MinerUPreciseParseFailed(str(exc)) from exc
         except Exception as exc:
             self._finish_mineru_usage(
@@ -772,6 +825,7 @@ class LibraryService:
                 page_count=page_count,
                 error_message=str(exc),
             )
+            release_provider_hold(exc)
             raise
         if not isinstance(result, dict):
             self._finish_mineru_usage(
@@ -780,8 +834,10 @@ class LibraryService:
                 page_count=page_count,
                 error_message="MinerU returned an invalid result object.",
             )
+            settle_provider_cost(page_count, reconciliation=True)
             raise MinerUPreciseParseFailed("MinerU returned an invalid result object.")
         page_count = max(0, int(result.get("page_count") or page_count))
+        settle_provider_cost(page_count)
         provider_request_id = str(
             result.get("provider_request_id") or result.get("batch_id") or ""
         )
@@ -1308,6 +1364,45 @@ class LibraryService:
             record = self._record(row)
         self._write_compatibility_metadata(principal, paper_id, stored_metadata)
         return record
+
+    def update_bibliography_audit(
+        self,
+        principal: Principal,
+        paper_id: str,
+        audit: dict[str, Any],
+    ) -> LibraryPaperRecord:
+        """Persist mutable provider-audit state without versioning canonical metadata."""
+
+        principal.require(Permission.PROJECT_WRITE)
+        if not isinstance(audit, dict):
+            raise WorkflowValidationError("Bibliography audit must be a JSON object.")
+        user_uuid = uuid.UUID(principal.user_id)
+        paper_id = self._validated_paper_id(paper_id)
+        with database_session(self.session_factory) as session:
+            row = session.scalar(
+                select(LibraryPaper).where(
+                    LibraryPaper.user_id == user_uuid,
+                    LibraryPaper.paper_id == paper_id,
+                    LibraryPaper.deleted_at.is_(None),
+                )
+            )
+            if row is None:
+                raise WorkflowNotFound("Library paper not found.")
+            audit_row = row.bibliography_audit_row
+            if audit_row is None:
+                audit_row = LibraryBibliographyAudit(
+                    user_id=user_uuid,
+                    library_paper_id=row.id,
+                    paper_id=row.paper_id,
+                    audit_json=dict(audit),
+                )
+                session.add(audit_row)
+                row.bibliography_audit_row = audit_row
+            else:
+                audit_row.audit_json = dict(audit)
+                audit_row.updated_at = utc_now()
+            session.flush()
+            return self._record(row)
 
     @staticmethod
     def _safe_stored_path(root: Path, relative_path: str) -> Path:

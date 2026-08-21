@@ -25,6 +25,7 @@ from review_writer_core.taxonomy import (  # noqa: E402
     labels_by_category,
     load_validation_taxonomy_rules,
 )
+from review_writer_core.metadata_tags import structured_tags_are_verified  # noqa: E402
 
 
 BLOCKING_FIELDS = ["paper_id", "slug", "title", "authors", "year", "abstract", "source_paths", "structured_tags"]
@@ -97,13 +98,17 @@ def validate_one(path: Path, allowed_labels: dict[str, set[str]]) -> dict[str, A
         issues.append("missing_title_value")
     structured = meta.get("structured_tags")
     structured_value = structured.get("value") if isinstance(structured, dict) else None
+    tags_verified = structured_tags_are_verified(meta)
     if not isinstance(structured_value, dict):
         issues.append("missing_structured_tags_value")
     else:
         for key in STRUCTURED_TAG_KEYS:
             if not has_value(structured_value.get(key)):
                 issues.append(f"missing_structured_tag_{key}")
-            elif str(structured_value.get(key)).strip().lower() == "not specified":
+            elif (
+                tags_verified
+                and str(structured_value.get(key)).strip().lower() == "not specified"
+            ):
                 warnings.append(f"structured_tag_not_specified_{key}")
             elif str(structured_value.get(key)).strip() not in allowed_labels.get(key, set()):
                 issues.append(f"invalid_structured_tag_{key}")

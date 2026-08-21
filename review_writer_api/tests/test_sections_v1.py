@@ -370,9 +370,27 @@ class SectionsV1Tests(unittest.TestCase):
             )
             self.assertEqual(200, confirmed.status_code, confirmed.text)
             planning = client.get(f"/api/v1/projects/{self.project_id}/planning").json()
+            outline_md = (
+                "# Selected Outline\n\n"
+                "## Introduction\n"
+                "Section role: introduction\n"
+                "Purpose: define the scope and mechanistic vocabulary.\n\n"
+                "## Copper-catalyzed allenation strategies\n"
+                "Section role: body\n"
+                "Assigned papers: P001, P002, P003.\n"
+                "Purpose: compare the evidence, mechanisms, selectivity, and limitations.\n\n"
+                "## Cross-strategy comparison and conclusion\n"
+                "Section role: conclusion\n"
+                "Purpose: synthesize supported trends, limitations, and future directions.\n"
+            )
             selected = client.put(
                 f"/api/v1/projects/{self.project_id}/planning/outline",
-                json={"revision": planning["matrix_revision"], "outline_style": "reaction"},
+                json={
+                    "revision": planning["matrix_revision"],
+                    "outline_style": "custom",
+                    "outline_md": outline_md,
+                    "manual": True,
+                },
                 headers=self.headers(),
             )
             self.assertEqual(200, selected.status_code, selected.text)
@@ -549,6 +567,14 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertTrue(job["result"]["evidence_package_artifact_id"])
         package = payload["evidence_package"]
         self.assertTrue(package["sections"])
+        self.assertTrue(package["evidence_registry"])
+        self.assertTrue(
+            all(
+                str(item["evidence_key"]).startswith("sha256:")
+                and str(item["evidence_id"]).startswith("EV-")
+                for item in package["evidence_registry"]
+            )
+        )
         self.assertTrue(
             all(section["retrieval_mode"] == "lexical" for section in package["sections"])
         )
@@ -623,13 +649,13 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertEqual("failed", job["status"])
         self.assertEqual("WORKFLOW_VALIDATION_FAILED", job["error_code"])
 
-    def test_transient_provider_failure_retries_three_times(self) -> None:
-        self.transient_failures = 2
+    def test_transient_provider_failure_is_not_replayed_by_stage_router(self) -> None:
+        self.transient_failures = 1
         with TestClient(self.app) as client:
             job = self.start(client, "retry-503")
-        self.assertEqual("succeeded", job["status"])
-        self.assertEqual(3, self.writer_calls)
-        self.assertEqual(3, job["result"]["attempts"])
+        self.assertEqual("failed", job["status"])
+        self.assertEqual(1, self.writer_calls)
+        self.assertEqual("SECTION_PROVIDER_UNAVAILABLE", job["error_code"])
 
     def test_successful_task_publishes_section_artifact(self) -> None:
         with TestClient(self.app) as client:
@@ -638,6 +664,26 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertEqual("succeeded", job["status"])
         self.assertTrue(payload["section_files"])
         self.assertIn("Grounded synthesis", payload["section_files"][0]["content"])
+        self.assertTrue(job["result"]["synthesis_state_artifact_id"])
+        self.assertTrue(job["result"]["writing_plan_artifact_id"])
+        self.assertEqual("legacy_adapter", payload["synthesis_state"]["planning_mode"])
+        self.assertEqual(
+            "legacy_derived_after_generation",
+            payload["writing_plan"]["planning_mode"],
+        )
+        for logical_name in (
+            "sections/synthesis_state.json",
+            "sections/writing_plan.json",
+            "sections/evidence_package.json",
+            "sections/section_drafts.json",
+        ):
+            self.assertIsNotNone(
+                self.app.state.workflow_repository.get_current_artifact(
+                    self.first.user_id,
+                    self.project_id,
+                    logical_name,
+                )
+            )
         artifact_id = payload["section_files"][0]["artifact_id"]
         self.assertEqual(
             artifact_id,
@@ -668,6 +714,30 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertIn(first["id"], job_ids)
         self.assertIn(second["id"], job_ids)
         self.assertEqual(payload["section_tasks"].__len__(), payload["report"]["current_task_count"])
+
+    def test_stage_run_records_dirty_and_recomputed_section_ids(self) -> None:
+        with TestClient(self.app) as client:
+            first = self.start(client, "dirty-first")
+            second = self.start(client, "dirty-second")
+        self.assertEqual("succeeded", first["status"], first)
+        self.assertEqual("succeeded", second["status"], second)
+        self.assertEqual(first["result"]["section_ids"], first["result"]["dirty_object_ids"])
+        self.assertEqual([], second["result"]["dirty_object_ids"])
+        self.assertEqual(
+            second["result"]["section_ids"],
+            second["result"]["recomputed_object_ids"],
+        )
+        latest = self.app.state.workflow_repository.get_latest_stage_run(
+            self.first.user_id,
+            self.project_id,
+            "sections",
+        )
+        self.assertIsNotNone(latest)
+        self.assertEqual([], latest.input_snapshot["dirty_object_ids"])
+        self.assertEqual(
+            second["result"]["section_ids"],
+            latest.output_snapshot["recomputed_object_ids"],
+        )
 
     def test_generation_publishes_anchored_source_images_as_project_artifacts(self) -> None:
         self.include_figures = True

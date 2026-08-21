@@ -427,6 +427,17 @@ export function LibraryPage() {
     queryFn: () => apiRequest<string>(`/api/v1/library/papers/${encodeURIComponent(selectedPaper!.paper_id)}/markdown`),
     enabled: Boolean(selectedPaper) && tab === "markdown",
   });
+  const bibliographyAudit = useQuery({
+    queryKey: ["library", "bibliography-audit", selectedPaper?.paper_id || ""],
+    queryFn: () => apiRequest<{ audit: NonNullable<LibraryPaper["bibliography_audit"]>; job: Job | null }>(`/api/v1/library/papers/${encodeURIComponent(selectedPaper!.paper_id)}/bibliography-audit`),
+    enabled: Boolean(selectedPaper),
+    refetchInterval: (query) => ["queued", "running", "cancel_requested"].includes(String(query.state.data?.job?.status || "")) ? 1200 : false,
+  });
+  useEffect(() => {
+    if (["succeeded", "failed", "cancelled"].includes(String(bibliographyAudit.data?.job?.status || ""))) {
+      void queryClient.invalidateQueries({ queryKey: ["library"] });
+    }
+  }, [bibliographyAudit.data?.job?.status, queryClient]);
   useEffect(() => {
     if (metadata.data) setMetadataDraft(JSON.stringify(metadata.data, null, 2));
   }, [metadata.data]);
@@ -462,6 +473,13 @@ export function LibraryPage() {
       ...jsonBody({ force: false }),
     }),
     onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["library"] });
+    },
+  });
+  const verifyBibliography = useMutation({
+    mutationFn: () => apiRequest<Job>(`/api/v1/library/papers/${encodeURIComponent(selectedPaper!.paper_id)}/bibliography-audit-jobs?force=true`, { method: "POST" }),
+    onSuccess: async () => {
+      await bibliographyAudit.refetch();
       await queryClient.invalidateQueries({ queryKey: ["library"] });
     },
   });
@@ -546,6 +564,9 @@ export function LibraryPage() {
             <>
               <div className="pane-head paper-title"><div><span className="step-label" title={selectedPaper.paper_id}>{paperLabels.get(selectedPaper.paper_id) || selectedPaper.paper_id}</span><h2>{selectedPaper.title}</h2><p>{selectedPaper.authors?.join(", ")}</p></div><div className="paper-title-actions"><button className="button button-secondary" type="button" disabled={reindexPaper.isPending || ["queued", "building"].includes(selectedPaper.index_status?.fulltext || "")} onClick={() => reindexPaper.mutate()}>{reindexPaper.isPending ? text("提交中…", "Submitting…") : text("重建全文索引", "Rebuild full-text index")}</button><button className="button button-quiet danger" type="button" disabled={deletePaper.isPending} onClick={() => { if (window.confirm(text(`确认删除 ${paperLabels.get(selectedPaper.paper_id) || selectedPaper.paper_id}？`, `Delete ${paperLabels.get(selectedPaper.paper_id) || selectedPaper.paper_id}?`))) deletePaper.mutate(); }}>{text("删除", "Delete")}</button></div></div>
               <DocumentIndexStatus paper={selectedPaper} />
+              <div className="document-index-status bibliography-audit-status"><div><strong>{text("书目信息核验", "Bibliography verification")}</strong><p>{text("Crossref、OpenAlex 与 PDF 首页独立核验；外部服务失败不会阻断后续阶段。", "Crossref, OpenAlex, and the PDF first page are checked independently; provider failures do not block later stages.")}</p></div><span className="status-chip">{String(bibliographyAudit.data?.audit?.status || selectedPaper.bibliography_audit?.status || text("等待核验", "Pending"))}</span><button className="button button-secondary" type="button" disabled={verifyBibliography.isPending || ["queued", "running"].includes(String(bibliographyAudit.data?.job?.status || ""))} onClick={() => verifyBibliography.mutate()}>{verifyBibliography.isPending || ["queued", "running"].includes(String(bibliographyAudit.data?.job?.status || "")) ? text("核验中…", "Verifying…") : text("重新核验失败来源", "Retry verification")}</button></div>
+              {Object.keys(bibliographyAudit.data?.audit?.sources || selectedPaper.bibliography_audit?.sources || {}).length ? <details className="figure-data"><summary>{text("查看核验来源与字段冲突", "View sources and field conflicts")}</summary><pre>{JSON.stringify({ sources: bibliographyAudit.data?.audit?.sources || selectedPaper.bibliography_audit?.sources, field_provenance: bibliographyAudit.data?.audit?.field_provenance || selectedPaper.bibliography_audit?.field_provenance, conflicts: bibliographyAudit.data?.audit?.conflicts || selectedPaper.bibliography_audit?.conflicts }, null, 2)}</pre></details> : null}
+              {verifyBibliography.error ? <p className="message message-error">{verifyBibliography.error.message}</p> : null}
               {selectedPaper.search_match ? <button type="button" className="library-search-match" onClick={() => setTab("markdown")}><span>{text(`正文命中 · 第 ${selectedPaper.search_match.page_start || "?"} 页`, `Full-text match · Page ${selectedPaper.search_match.page_start || "?"}`)}</span><p>{selectedPaper.search_match.content}</p><code>{selectedPaper.search_match.chunk_id}</code></button> : null}
               {reindexPaper.error ? <p className="message message-error index-error">{reindexPaper.error.message}</p> : null}
               <nav className="detail-tabs">{(["metadata", "markdown", "pdf"] as const).map((value) => <button key={value} className={tab === value ? "active" : ""} type="button" onClick={() => setTab(value)}>{value === "metadata" ? "Metadata" : value === "markdown" ? "Markdown" : "PDF"}</button>)}</nav>

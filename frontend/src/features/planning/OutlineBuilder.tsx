@@ -16,6 +16,7 @@ export type OutlineSectionDraft = {
   title: string;
   purpose: string;
   paperIds: string[];
+  contextPaperIds?: string[];
   notes: string;
   sectionRole?: "introduction" | "body" | "conclusion" | "references";
 };
@@ -36,7 +37,7 @@ export function parseOutlineMarkdown(value: string): VisualOutlineDraft {
   for (const rawLine of String(value || "").replace(/\r\n?/g, "\n").split("\n")) {
     const heading = rawLine.trim().match(/^##\s+(?:\d+[.)]\s*)?(.+?)\s*$/);
     if (heading) {
-      current = { title: heading[1].trim(), purpose: "", paperIds: [], notes: "" };
+      current = { title: heading[1].trim(), purpose: "", paperIds: [], contextPaperIds: [], notes: "" };
       sections.push(current);
       continue;
     }
@@ -47,6 +48,11 @@ export function parseOutlineMarkdown(value: string): VisualOutlineDraft {
     const assigned = rawLine.trim().match(/^Assigned papers:\s*(.*)$/i);
     if (assigned) {
       current.paperIds = unique(assigned[1].replace(/[.。]\s*$/, "").split(/[,，;；]/));
+      continue;
+    }
+    const contextual = rawLine.trim().match(/^(?:Context|Contextual) papers:\s*(.*)$/i);
+    if (contextual) {
+      current.contextPaperIds = unique(contextual[1].replace(/[.。]\s*$/, "").split(/[,，;；]/));
       continue;
     }
     const role = rawLine.trim().match(/^Section role:\s*(introduction|body|conclusion|references)\s*$/i);
@@ -74,6 +80,7 @@ export function serializeOutlineMarkdown(draft: VisualOutlineDraft): string {
     ];
     if (section.sectionRole) lines.push(`Section role: ${section.sectionRole}`);
     if (section.paperIds.length) lines.push(`Assigned papers: ${unique(section.paperIds).join(", ")}.`);
+    if (section.contextPaperIds?.length) lines.push(`Context papers: ${unique(section.contextPaperIds).join(", ")}.`);
     lines.push(`Purpose: ${purpose}`);
     if (section.notes.trim()) lines.push(section.notes.trim());
     return lines.join("\n");
@@ -124,13 +131,13 @@ export function OutlineBuilder({ value, papers, onChange }: { value: string; pap
   }
 
   function addSection(title = "") {
-    commit({ ...draft, sections: [...draft.sections, { title, purpose: "", paperIds: [], notes: "" }] });
+    commit({ ...draft, sections: [...draft.sections, { title, purpose: "", paperIds: [], contextPaperIds: [], notes: "" }] });
   }
 
   function addStarterSections() {
     const ids = papers.map((paper) => paper.paper_id);
-    const introduction: OutlineSectionDraft = { title: text("引言与范围", "Introduction and scope"), purpose: text("说明综述范围、术语和组织问题。", "Define the review scope, terminology, and organizing question."), paperIds: ids.slice(0, Math.min(6, ids.length)), notes: "", sectionRole: "introduction" };
-    const conclusion: OutlineSectionDraft = { title: text("结论与展望", "Conclusion and outlook"), purpose: text("比较主要证据、局限与未来方向。", "Compare the main evidence, limitations, and future directions."), paperIds: ids.slice(Math.max(0, ids.length - 6)), notes: "", sectionRole: "conclusion" };
+    const introduction: OutlineSectionDraft = { title: text("引言与范围", "Introduction and scope"), purpose: text("说明综述范围、术语和组织问题。", "Define the review scope, terminology, and organizing question."), paperIds: ids.slice(0, Math.min(6, ids.length)), contextPaperIds: [], notes: "", sectionRole: "introduction" };
+    const conclusion: OutlineSectionDraft = { title: text("结论与展望", "Conclusion and outlook"), purpose: text("比较主要证据、局限与未来方向。", "Compare the main evidence, limitations, and future directions."), paperIds: ids.slice(Math.max(0, ids.length - 6)), contextPaperIds: [], notes: "", sectionRole: "conclusion" };
     const hasIntroduction = draft.sections.some((section) => section.sectionRole === "introduction" || /^(?:introduction|引言)/i.test(section.title.trim()));
     const hasConclusion = draft.sections.some((section) => section.sectionRole === "conclusion" || /^(?:conclusion|结论)/i.test(section.title.trim()));
     commit({
@@ -172,6 +179,7 @@ export function OutlineBuilder({ value, papers, onChange }: { value: string; pap
         return <article className="outline-builder-card" key={`${index}-${section.title}`}><div className="outline-builder-card-head"><strong>{text(`第 ${index + 1} 节`, `Section ${index + 1}`)}</strong><div><button type="button" className="button button-quiet" onClick={() => updateSection(index, { paperIds: recommendPapers(section, papers) })}>{text("推荐论文", "Recommend papers")}</button><button type="button" className="button button-quiet" disabled={index === 0} onClick={() => move(index, -1)}>↑</button><button type="button" className="button button-quiet" disabled={index === draft.sections.length - 1} onClick={() => move(index, 1)}>↓</button><button type="button" className="button button-quiet danger" onClick={() => commit({ ...draft, sections: draft.sections.filter((_, sectionIndex) => sectionIndex !== index) })}>{text("删除", "Delete")}</button></div></div>
           <label className="outline-builder-field"><span>{text("章节标题", "Section title")}</span><input value={section.title} onChange={(event) => updateSection(index, { title: event.target.value })} placeholder={text("例如：芳香族底物的反应范围", "e.g. Scope of aromatic substrates")} /></label>
           <label className="outline-builder-field"><span>{text("本节要回答什么问题", "What should this section answer?")}</span><textarea value={section.purpose} onChange={(event) => updateSection(index, { purpose: event.target.value })} placeholder={text("说明本节比较哪些工作、解决什么问题。", "Describe the papers and question this section should compare.")} /></label>
+          {section.contextPaperIds?.length ? <p className="outline-context-note">{text(`系统已将 ${section.contextPaperIds.length} 篇综述或观点文献作为背景证据，不计入正文主分类。`, `${section.contextPaperIds.length} review or perspective paper(s) are retained as contextual evidence rather than primary body evidence.`)}</p> : null}
           <details className="outline-paper-picker"><summary>{text(`选择论文（已选 ${section.paperIds.length} 篇）`, `Select papers (${section.paperIds.length} selected)`)}</summary><div className="outline-paper-picker-body"><input type="search" value={paperFilters[index] || ""} onChange={(event) => setPaperFilters((current) => ({ ...current, [index]: event.target.value }))} placeholder={text("按短序号或标题筛选", "Filter by short number or title")} /><div className="outline-paper-options">{visible.map((paper) => <label key={paper.paper_id} title={text(`内部论文 ID：${paper.paper_id}`, `Internal paper ID: ${paper.paper_id}`)}><input type="checkbox" checked={section.paperIds.includes(paper.paper_id)} onChange={(event) => updateSection(index, { paperIds: event.target.checked ? unique([...section.paperIds, paper.paper_id]) : section.paperIds.filter((paperId) => paperId !== paper.paper_id) })} /><span><strong>{paperLabels.get(paper.paper_id) || paper.paper_id}</strong> · {typeof paper.title === "string" ? paper.title : JSON.stringify(paper.title || "")}</span></label>)}</div></div></details>
           <label className="outline-builder-field"><span>{text("补充要求（可选）", "Additional instructions (optional)")}</span><textarea value={section.notes} onChange={(event) => updateSection(index, { notes: event.target.value })} placeholder={text("例如比较规则、机理重点、图表计划或段落衔接。", "Optional comparison rules, mechanism focus, figures, or transitions.")} /></label>
         </article>;

@@ -7,7 +7,8 @@ Usage:
         --project-id <id> \
         [--api-key <key>] \
         [--base-url <url>] \
-        [--model <model>]
+        [--model <model>] \
+        [--require-ai-skeleton]
 
 The script:
 1. Reads the review outline and selected_discovery_results to extract structure.
@@ -15,7 +16,20 @@ The script:
 3. Selects the best-matching template.
 4. Adapts the template prompt with review-specific content.
 5. Calls the OpenAI-compatible image edit API with the template reference image.
-6. Saves the generated overview figure.
+6. Composites the exact ball-and-stick skeleton into the figure's structure
+   panel (calibrated regions first, automatic blank-panel detection for every
+   other layout).
+7. Saves the generated overview figure.
+
+Chemistry reviews (allene taxonomy profile or an explicit ``skeleton_smiles``
+in the query plan) run in strict *chemical* skeleton mode: an exact
+programmatic skeleton is mandatory.  The optional ai3d style transfer is
+retried up to three times and falls back to that exact programmatic skeleton
+when its probabilistic style gate rejects every attempt.  ``--require-ai-skeleton``
+keeps the stronger opt-in behavior and also requires the AI-styled rendering.
+This guarantees a chemistry overview never fails merely because an aesthetic
+style transfer was rejected, while still refusing a missing or uncomposited
+chemical structure.
 """
 from __future__ import annotations
 
@@ -331,13 +345,29 @@ _VALENCE = {"C": 4, "N": 3, "O": 2, "S": 2, "P": 3, "B": 3, "H": 1,
             "F": 1, "Cl": 1, "Br": 1, "I": 1, "Si": 4, "R": 0}
 _AROMATIC_EL = {"c": "C", "n": "N", "o": "O", "s": "S"}
 _TWO_LETTER = ("Cl", "Br", "Si")
+# Ordered most-specific first: the first matching key wins, so narrow motif
+# names must precede their generic parents (e.g. "allenoate" before "allene",
+# "suzuki" before "alkene").  Keep every key unambiguous as a plain substring:
+# short words that collide with common English ("heck" vs "checked") are
+# deliberately excluded.
 _LABEL_SMILES = [
     ("allenoate", "*C(*)=C=C(C(=O)O*)*"),
     ("biaryl", "*c1ccccc1-c2ccccc2*"),
     ("atropisomer", "*c1ccccc1-c2ccccc2*"),
+    ("suzuki", "*c1ccccc1-c2ccccc2*"),
+    ("cross-coupling", "*c1ccccc1-c2ccccc2*"),
+    ("negishi", "*c1ccccc1-c2ccccc2*"),
+    ("kumada", "*c1ccccc1-c2ccccc2*"),
     ("indole", "c1ccc2[nH]ccc2c1"),
     ("cyclopropane", "*C1(*)CC1"),
+    ("sonogashira", "*C#C*"),
     ("propargyl", "OCC#C*"),
+    ("diene", "*C=CC=C*"),
+    ("enone", "*C(=O)C=C*"),
+    ("imine", "*C(*)=N*"),
+    ("nitrile", "*C#N"),
+    ("boronic", "*B(O)O"),
+    ("amide", "*C(=O)N(*)*"),
     ("alkyne", "*C#C*"),
     ("alkene", "*C(*)=C(*)*"),
     ("allene", "*C(*)=C=C(*)*"),
@@ -1037,18 +1067,20 @@ def render_smiles_ball_and_stick(smiles: str, output_path: Path,
 
 
 # Normalized (x0, y0, x1, y1) candidate structure-panel regions per layout for
-# pixel-exact programmatic skeleton compositing.  Layouts not listed keep the
-# model-drawn molecule (extra reference image mode).
-# NOTE: entries must be calibrated against the ACTUAL generated layout of the
-# named template (verified visually).  The previous module-cards / why-strategy-what
-# regions were calibrated against a mismatched artwork and pasted the molecule
-# over category cards, so they were removed; those layouts now use the extra
-# reference image mode until properly recalibrated.
+# pixel-exact programmatic skeleton compositing.  Entries must be calibrated
+# against the ACTUAL generated layout of the named template (verified
+# visually).  The previous module-cards / why-strategy-what regions were
+# calibrated against a mismatched artwork and pasted the molecule over
+# category cards, so they were removed.
 # The model is not fully deterministic: it alternates between a wide horizontal
 # structure panel at the top-left and a tall vertical panel on the left.  Each
 # layout therefore lists candidate regions; compositing pastes into the FIRST
 # candidate that passes the whiteness guard, so a drifted variant simply uses
 # its own blank panel instead of being overwritten or left empty.
+# Layouts without calibrated entries fall back to automatic blank-panel
+# detection (detect_blank_panel): in composite mode the prompt tells the model
+# to leave the structure panel blank, so the largest blank rectangle is the
+# paste target, guarded by the same whiteness check.
 _COMPOSITE_REGIONS: dict[str, list[tuple[float, float, float, float]]] = {
     "module-cards-crosscut-sidebar": [
         # Variant A: wide horizontal structure panel at the top-left
@@ -1061,43 +1093,193 @@ _COMPOSITE_REGIONS: dict[str, list[tuple[float, float, float, float]]] = {
 }
 
 
-def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layout: str) -> tuple[bool, str]:
+def _panel_whiteness(fig: Any, box: tuple[int, int, int, int]) -> float:
+    """Fraction of near-white pixels in a region (coarse sampling guard)."""
+    x0, y0, x1, y1 = box
+    raw = fig.crop((x0, y0, x1, y1)).resize((120, 48)).tobytes()
+    white = sum(1 for i in range(0, len(raw), 3)
+                if raw[i] > 225 and raw[i + 1] > 225 and raw[i + 2] > 225)
+    return white / max(1, len(raw) // 3)
+
+
+_DETECT_GRID_COLS = 24
+_DETECT_GRID_ROWS = 16
+_DETECT_CELL_WHITENESS = 0.90
+
+
+def detect_blank_panel(fig: Any, min_area_fraction: float = 0.03,
+                       max_area_fraction: float = 0.55,
+                       whiteness_threshold: float = 0.85,
+                       ) -> tuple[int, int, int, int] | None:
+    """Locate the largest mostly-blank panel of a generated overview figure.
+
+    Uncalibrated layouts carry no hand-measured structure-panel coordinates.
+    In composite mode the prompt instructs the model to leave exactly one
+    large panel blank white and to fill every other region, so the largest
+    all-blank rectangle is the paste target.  A coarse grid plus the classic
+    histogram-stack maximal-rectangle search finds it; the result is then
+    re-validated at sampled resolution with the same whiteness guard used for
+    calibrated candidates.  Returns the box or None when no region qualifies.
+    """
+    W, H = fig.size
+    small = fig.convert("RGB").resize(
+        (_DETECT_GRID_COLS * 10, _DETECT_GRID_ROWS * 10)
+    )
+    px = small.load()
+    cw = small.size[0] // _DETECT_GRID_COLS
+    ch = small.size[1] // _DETECT_GRID_ROWS
+    grid: list[list[int]] = []
+    for gy in range(_DETECT_GRID_ROWS):
+        row: list[int] = []
+        for gx in range(_DETECT_GRID_COLS):
+            white = total = 0
+            for y in range(gy * ch, (gy + 1) * ch):
+                for x in range(gx * cw, (gx + 1) * cw):
+                    r, g, b = px[x, y]
+                    total += 1
+                    if r > 225 and g > 225 and b > 225:
+                        white += 1
+            row.append(1 if total and white / total >= _DETECT_CELL_WHITENESS else 0)
+        grid.append(row)
+
+    best = (0, 0, 0, 0, 0)  # (area, top, left, bottom, right)
+    heights = [0] * _DETECT_GRID_COLS
+    for gy in range(_DETECT_GRID_ROWS):
+        for gx in range(_DETECT_GRID_COLS):
+            heights[gx] = heights[gx] + 1 if grid[gy][gx] else 0
+        stack: list[int] = []
+        for gx in range(_DETECT_GRID_COLS + 1):
+            h = heights[gx] if gx < _DETECT_GRID_COLS else 0
+            while stack and heights[stack[-1]] > h:
+                top_h = heights[stack.pop()]
+                left = stack[-1] + 1 if stack else 0
+                area = top_h * (gx - left)
+                if area > best[0]:
+                    best = (area, gy - top_h + 1, left, gy, gx - 1)
+            stack.append(gx)
+
+    area, top, left, bottom, right = best
+    fraction = area / (_DETECT_GRID_ROWS * _DETECT_GRID_COLS)
+    if area == 0 or fraction < min_area_fraction or fraction > max_area_fraction:
+        return None
+    box = (
+        int(W * left / _DETECT_GRID_COLS),
+        int(H * top / _DETECT_GRID_ROWS),
+        int(W * (right + 1) / _DETECT_GRID_COLS),
+        int(H * (bottom + 1) / _DETECT_GRID_ROWS),
+    )
+    if _panel_whiteness(fig, box) < whiteness_threshold:
+        return None
+    return box
+
+
+def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layout: str,
+                                   ) -> tuple[bool, str, str]:
     """Paste the exact ball-and-stick model into the layout's structure panel.
 
     Guarantees pixel-exact molecular geometry: the panel is cleared to white
-    and the programmatically rendered model is centered into it.  Multiple
-    candidate regions are tried in order; the first mostly-blank one wins.
+    and the programmatically rendered model is centered into it.  Calibrated
+    layouts try their candidate regions in order; the first mostly-blank one
+    wins.  Uncalibrated layouts fall back to ``detect_blank_panel`` so every
+    chemistry overview receives the exact molecule instead of a model-drawn
+    approximation.
 
-    Returns ``(ok, reason)``.  When ``ok`` is False, ``reason`` explains why
-    compositing was skipped so the match report can surface the guard blind
-    spot: in composite mode the model is told to leave the panel blank, so a
-    skipped run may contain NO molecule at all and needs a manual check.
+    Returns ``(ok, reason, panel_source)`` where ``panel_source`` is
+    ``"calibrated"``, ``"auto-detected"``, ``"appended-dock"``, or ``""``.
+    If the image model ignored the reserved-blank-panel instruction, the
+    generated overview is preserved pixel-for-pixel and a white structure
+    dock is appended to its right.  This is deliberately safer than clearing
+    a non-white region that may contain scientific text or diagram content.
     """
-    boxes = _COMPOSITE_REGIONS.get(layout)
-    if not boxes:
-        return False, "layout_not_calibrated"
     if not skeleton_path.exists():
-        return False, "skeleton_missing"
+        return False, "skeleton_missing", ""
     try:
         from PIL import Image
     except ImportError:
-        return False, "pillow_unavailable"
+        return False, "pillow_unavailable", ""
     with Image.open(figure_path) as fig:
         fig = fig.convert("RGB")
         W, H = fig.size
         target = None
-        for box in boxes:
+        panel_source = ""
+        for box in _COMPOSITE_REGIONS.get(layout, []):
             x0, y0, x1, y1 = (int(W * box[0]), int(H * box[1]), int(W * box[2]), int(H * box[3]))
             # Guard: only paste into a mostly-blank panel.  If the layout drifted
             # and the region contains cards/text/colors, keep the model's drawing.
-            raw = fig.crop((x0, y0, x1, y1)).resize((120, 48)).tobytes()
-            white = sum(1 for i in range(0, len(raw), 3)
-                        if raw[i] > 225 and raw[i + 1] > 225 and raw[i + 2] > 225)
-            if white / max(1, len(raw) // 3) >= 0.85:
+            if _panel_whiteness(fig, (x0, y0, x1, y1)) >= 0.85:
                 target = (x0, y0, x1, y1)
+                panel_source = "calibrated"
                 break
         if target is None:
-            return False, "guard_rejected_no_white_panel"
+            detected = detect_blank_panel(fig)
+            if detected is not None:
+                target = detected
+                panel_source = "auto-detected"
+        if target is None:
+            # The provider occasionally fills the explicitly reserved panel
+            # with its own approximate molecule.  Never overwrite a populated
+            # region: extend the canvas and place the integrity-checked exact
+            # skeleton in a dedicated white dock instead.  The original image
+            # remains unscaled and uncropped, so no generated content is lost.
+            try:
+                with Image.open(skeleton_path) as sk:
+                    sk = sk.convert("RGB")
+                    mask = sk.convert("L").point(lambda p: 255 if p < 245 else 0)
+                    bbox = mask.getbbox()
+                    if bbox:
+                        sk = sk.crop(bbox)
+
+                    dock_width = max(320, min(480, int(round(W * 0.38))))
+                    padding = max(22, int(round(dock_width * 0.08)))
+                    canvas = Image.new("RGB", (W + dock_width, H), "white")
+                    canvas.paste(fig, (0, 0))
+
+                    # A restrained separator/frame makes the appended area
+                    # read as an intentional scientific inset without adding
+                    # any model-generated labels or changing the source art.
+                    from PIL import ImageDraw
+                    draw = ImageDraw.Draw(canvas)
+                    separator_x = W + max(8, padding // 3)
+                    draw.line(
+                        (separator_x, padding, separator_x, H - padding),
+                        fill=(38, 75, 130),
+                        width=max(2, W // 500),
+                    )
+                    title = "Representative substrate"
+                    title_font = _label_font(max(18, min(28, dock_width // 15)))
+                    title_box = draw.textbbox((0, 0), title, font=title_font)
+                    title_width = title_box[2] - title_box[0]
+                    draw.text(
+                        (W + (dock_width - title_width) // 2, padding),
+                        title,
+                        fill=(24, 56, 102),
+                        font=title_font,
+                    )
+                    title_height = max(44, (title_box[3] - title_box[1]) + padding)
+                    inset = (
+                        W + padding,
+                        padding + title_height,
+                        W + dock_width - padding,
+                        H - padding,
+                    )
+                    draw.rounded_rectangle(
+                        inset,
+                        radius=max(12, padding // 2),
+                        fill="white",
+                        outline=(182, 199, 219),
+                        width=max(2, W // 500),
+                    )
+
+                    available_w = max(1, inset[2] - inset[0] - 2 * padding)
+                    available_h = max(1, inset[3] - inset[1] - 2 * padding)
+                    sk.thumbnail((available_w, available_h))
+                    sx = inset[0] + (inset[2] - inset[0] - sk.width) // 2
+                    sy = inset[1] + (inset[3] - inset[1] - sk.height) // 2
+                    canvas.paste(sk, (sx, sy))
+                    canvas.save(figure_path, format="PNG")
+                return True, "", "appended-dock"
+            except Exception as exc:
+                return False, f"append_dock_failed:{type(exc).__name__}", ""
         x0, y0, x1, y1 = target
         _clear_panel_specks(fig, (x0, y0, x1, y1))
         with Image.open(skeleton_path) as sk:
@@ -1112,7 +1294,7 @@ def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layou
             sy = y0 + (y1 - y0 - sk.height) // 2
             fig.paste(sk, (sx, sy))
         fig.save(figure_path, format="PNG")
-    return True, ""
+    return True, "", panel_source
 
 
 def _clear_panel_specks(fig: Any, box: tuple[int, int, int, int],
@@ -1191,7 +1373,15 @@ def render_skeleton_model(features: dict[str, Any], output_path: Path,
 
 
 def skeleton_atom_counts(smiles: str) -> tuple[int, int] | None:
-    """(visible non-H atom count, R-group count) used by the AI-redraw gate."""
+    """(rendered atom count, R-group count) used by the AI-redraw gate.
+
+    The exact reference renderer expands implicit hydrogens into visible white
+    spheres, and the AI prompt explicitly requires preserving those spheres.
+    Counting only heavy atoms made a correct ``OCC#C*`` redraw look like nine
+    blobs against an expectation of five and falsely rejected it.  The gate is
+    deliberately only a catastrophic-hallucination check, so its expectation
+    must match every atom actually present in the reference image.
+    """
     try:
         atoms, bonds = parse_smiles(smiles)
         if not atoms:
@@ -1199,7 +1389,7 @@ def skeleton_atom_counts(smiles: str) -> tuple[int, int] | None:
         atoms, bonds = _expand_hydrogens(atoms, bonds)
     except Exception:
         return None
-    visible = sum(1 for a in atoms if a["el"] != "H")
+    visible = len(atoms)
     r_count = sum(1 for a in atoms if a["el"] == "R")
     return visible, r_count
 
@@ -1237,6 +1427,11 @@ _AI_SKELETON_REDRAW_PROMPT = (
     "Do not add, remove, merge or relabel atoms. No caption, no border, no extra text; "
     "output only the molecule centered on white."
 )
+
+# The redraw is non-deterministic and the gate probabilistic, so a single
+# rejection is not evidence the model cannot do the job: retry the full
+# request before declaring the redraw failed.
+_AI_SKELETON_REDRAW_ATTEMPTS = 3
 
 
 def _blob_stats(mask: Any, min_px: int) -> list[tuple[float, float, float, int, int, int, int]]:
@@ -1340,7 +1535,7 @@ def _clustered_blob_count(
     return len({find(i) for i in range(count)})
 
 
-def _ai_redraw_gate(img: Any, expected_visible: int, expected_r: int) -> tuple[bool, str]:
+def _ai_redraw_gate(img: Any, expected_atoms: int, expected_r: int) -> tuple[bool, str]:
     """Sanity-check an AI skeleton redraw: atom-blob and R-label counts.
 
     Bonds are thin, atoms are thick: eroding the ink mask removes bonds so
@@ -1365,8 +1560,8 @@ def _ai_redraw_gate(img: Any, expected_visible: int, expected_r: int) -> tuple[b
     blobs = _count_blobs(ink.filter(ImageFilter.MinFilter(_GATE_INK_EROSION)),
                          _GATE_ATOM_BLOB_MIN_PX)
     lo, hi = _GATE_ATOM_BLOB_RANGE
-    if not (lo * expected_visible <= blobs <= hi * expected_visible):
-        return False, f"atom_blobs_{blobs}_expected_about_{expected_visible}"
+    if not (lo * expected_atoms <= blobs <= hi * expected_atoms):
+        return False, f"atom_blobs_{blobs}_expected_about_{expected_atoms}"
     # No erosion for the blue mask: specular highlights hole the spheres and
     # erosion would fragment them; R spheres are large, so a size floor suffices.
     # A highlight band can still split one sphere into disconnected fragments,
@@ -1380,43 +1575,59 @@ def _ai_redraw_gate(img: Any, expected_visible: int, expected_r: int) -> tuple[b
 
 def attempt_ai_skeleton_redraw(features: dict[str, Any], reference_png: Path,
                                output_png: Path, api_key: str, base_url: str,
-                               model: str, wire_api: str) -> tuple[Path | None, str]:
+                               model: str, wire_api: str,
+                               attempts: int = _AI_SKELETON_REDRAW_ATTEMPTS,
+                               ) -> tuple[Path | None, str, list[str]]:
     """Ask the image model to restyle the exact skeleton into a 3D render.
 
-    Returns ``(path, note)``; ``path`` is None when the call fails or the
-    sanity gate rejects the redraw (caller then keeps the programmatic one).
+    Returns ``(path, note, attempt_notes)``; ``path`` is None when every
+    attempt failed or the sanity gate rejected each redraw (the caller then
+    keeps the programmatic skeleton, or fails in strict mode).  The redraw is
+    non-deterministic, so the full request is retried up to ``attempts``
+    times before giving up.
     """
     smiles = resolve_skeleton_smiles(features)
     counts = skeleton_atom_counts(smiles) if smiles else None
     if counts is None:
-        return None, "no_smiles_for_gate"
-    try:
-        image_bytes = call_image_edit_api(
-            api_key, base_url, reference_png, _AI_SKELETON_REDRAW_PROMPT,
-            model=model, wire_api=wire_api)
-    except Exception as exc:
-        return None, f"api_error:{exc}"[:300]
-    try:
-        import io
-        from PIL import Image
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    except Exception as exc:
-        return None, f"undecodable_image:{exc}"[:300]
-    try:
-        ok, note = _ai_redraw_gate(img, counts[0], counts[1])
-    except Exception as exc:
-        return None, f"gate_error:{exc}"[:300]
-    if not ok:
-        # Keep the rejected draft for human inspection / gate tuning.
+        return None, "no_smiles_for_gate", ["no_smiles_for_gate"]
+    attempt_notes: list[str] = []
+    for attempt in range(1, max(1, attempts) + 1):
         try:
-            output_png.parent.mkdir(parents=True, exist_ok=True)
-            output_png.with_name(output_png.stem + "_rejected.png").write_bytes(image_bytes)
-        except OSError:
-            pass
-        return None, f"gate_rejected:{note}"
-    output_png.parent.mkdir(parents=True, exist_ok=True)
-    output_png.write_bytes(image_bytes)
-    return output_png, "gate_passed"
+            image_bytes = call_image_edit_api(
+                api_key, base_url, reference_png, _AI_SKELETON_REDRAW_PROMPT,
+                model=model, wire_api=wire_api)
+        except Exception as exc:
+            attempt_notes.append(f"attempt_{attempt}:api_error:{exc}"[:300])
+            continue
+        try:
+            import io
+            from PIL import Image
+            img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        except Exception as exc:
+            attempt_notes.append(f"attempt_{attempt}:undecodable_image:{exc}"[:300])
+            continue
+        try:
+            ok, note = _ai_redraw_gate(img, counts[0], counts[1])
+        except Exception as exc:
+            attempt_notes.append(f"attempt_{attempt}:gate_error:{exc}"[:300])
+            continue
+        if not ok:
+            # Keep every rejected draft for human inspection / gate tuning.
+            try:
+                output_png.parent.mkdir(parents=True, exist_ok=True)
+                suffix = "" if attempt == 1 else f"_{attempt}"
+                output_png.with_name(
+                    output_png.stem + f"_rejected{suffix}.png"
+                ).write_bytes(image_bytes)
+            except OSError:
+                pass
+            attempt_notes.append(f"attempt_{attempt}:gate_rejected:{note}")
+            continue
+        attempt_notes.append(f"attempt_{attempt}:gate_passed")
+        output_png.parent.mkdir(parents=True, exist_ok=True)
+        output_png.write_bytes(image_bytes)
+        return output_png, "gate_passed", attempt_notes
+    return None, attempt_notes[-1] if attempt_notes else "no_attempts", attempt_notes
 
 
 def resolve_api_key(cli_value: str, base_url: str) -> str:
@@ -1450,6 +1661,7 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
         "substrate_keywords": [],
         "catalyst_keywords": [],
         "skeleton_smiles": "",
+        "overview_axis_contract": {},
     }
 
     # Read query plan for group_by, filters, keywords, and topic
@@ -1488,6 +1700,28 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
             }
             features["classification_rule"] = rule_map.get(gb[0], f"By {gb[0]}")
         features["skeleton_smiles"] = str(qp.get("skeleton_smiles", "") or qp.get("smiles", "") or "")
+
+    # The confirmed Planning contract is authoritative for the overview's
+    # primary grouping. Discovery query hints must not silently retheme the
+    # final overview to a different taxonomy.
+    blueprint_path = project_dir / "01_matrix_outline" / "section_blueprint.json"
+    if blueprint_path.exists():
+        blueprint = read_json(blueprint_path)
+        basis = blueprint.get("classification_basis") if isinstance(blueprint, dict) else {}
+        if isinstance(basis, dict):
+            axis = str(basis.get("overview_axis") or basis.get("primary_axis") or "").strip()
+            axis_map = {
+                "substrate_classes": "substrate",
+                "catalyst_or_method": "catalyst_or_method",
+                "reaction_strategy": "reaction_type",
+                "user_defined": "document_scope",
+            }
+            if axis:
+                features["overview_axis_contract"] = basis
+                features["group_by"] = [axis_map.get(axis, axis)]
+                features["classification_rule"] = str(
+                    basis.get("description") or f"By {axis.replace('_', ' ')}"
+                )
 
     # Fallback: recover the review topic from PostgreSQL artifacts that the
     # native final-overview compatibility workspace actually materializes,
@@ -1902,8 +2136,27 @@ def _build_approved_terminology(features: dict[str, Any]) -> str:
     return ", ".join(terms) + "."
 
 
-def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any]) -> str:
-    """Adapt the template prompt with review-specific content (fully generic)."""
+def is_chemistry_skeleton_project(features: dict[str, Any]) -> bool:
+    """Whether the overview must embed an exact molecular skeleton.
+
+    Signals: the allene (domain-rules) taxonomy profile, or an explicit
+    skeleton SMILES supplied by the discovery query plan.  Generic academic
+    reviews have no molecule and keep the optional-skeleton behavior.
+    """
+    profile = str(features.get("taxonomy_profile") or "").strip().casefold()
+    if profile == "allene":
+        return True
+    return bool(str(features.get("skeleton_smiles") or "").strip())
+
+
+def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any],
+                         composite_mode: bool = False) -> str:
+    """Adapt the template prompt with review-specific content (fully generic).
+
+    ``composite_mode`` switches the structure-panel rule: the exact skeleton
+    is pasted programmatically after generation, so the model must leave that
+    panel blank white instead of drawing the molecule itself.
+    """
     profile = str(features.get("taxonomy_profile") or "").strip().casefold()
     generic_project = bool(profile and profile != "allene")
     base_prompt = "" if generic_project else _retheme_base_prompt(template.get("prompt", ""), features)
@@ -1963,7 +2216,7 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any]) -> 
         for old, new in replacements:
             visual_style_desc = visual_style_desc.replace(old, new)
 
-    if template.get("layout_type", "") in _COMPOSITE_REGIONS:
+    if composite_mode:
         structure_rule = (
             "- Leave the large structure/molecule panel COMPLETELY EMPTY (plain white, "
             "no molecule, no drawing): an exact ball-and-stick model is inserted "
@@ -3097,7 +3350,8 @@ def _build_report(args, template: dict, features: dict, prompt: str,
                          status: str = "pending", output_path: str = "",
                          output_size: int = 0, error: str = "",
                          request_metadata: dict[str, str] | None = None,
-                         composite: dict[str, Any] | None = None) -> dict:
+                         composite: dict[str, Any] | None = None,
+                         skeleton: dict[str, Any] | None = None) -> dict:
     """Build a single report dict (replaces 3 duplicate blocks in main)."""
     report = {
         "project_id": args.project_id,
@@ -3122,6 +3376,8 @@ def _build_report(args, template: dict, features: dict, prompt: str,
         report["error"] = error
     if composite is not None:
         report["composite"] = dict(composite)
+    if skeleton is not None:
+        report["skeleton"] = dict(skeleton)
     return report
 
 
@@ -3150,6 +3406,14 @@ def main():
         help="Ball-and-stick skeleton rendering style; 'flat' restores the original 2D vector look; "
              "'ai3d' asks the image model to restyle the exact skeleton into a 3D render, gated by a "
              "programmatic sanity check with automatic fallback to the programmatic 3D skeleton.",
+    )
+    parser.add_argument(
+        "--require-ai-skeleton",
+        action="store_true",
+        help="Stronger opt-in strict mode: require both the exact chemical skeleton and "
+             "an AI-styled 3D skeleton. Chemistry reviews always require the exact "
+             "chemical skeleton, but normally fall back to the exact programmatic 3D "
+             "render when AI style transfer is rejected.",
     )
     parser.add_argument("--output", default="", help="Output path for generated figure")
     parser.add_argument("--dry-run", action="store_true", help="Only show template matching, don't call API")
@@ -3202,33 +3466,83 @@ def main():
     extra_images: list[Path] = []
     skeleton_png = out_dir / "skeleton_model.png"
     layout_type = best_template["layout_type"]
-    will_composite = False
     program_style = "3d" if args.skeleton_style == "ai3d" else args.skeleton_style
-    skeleton_rendered = render_skeleton_model(features, skeleton_png,
-                                               style=program_style)
-    skeleton_source = "programmatic"
+    ai_style_required = bool(args.require_ai_skeleton)
+    strict_skeleton = ai_style_required or is_chemistry_skeleton_project(features)
+    smiles = resolve_skeleton_smiles(features)
+    skeleton_attempts: list[str] = []
     ai_redraw_note = ""
-    if skeleton_rendered and args.skeleton_style == "ai3d":
-        ai_png, ai_redraw_note = attempt_ai_skeleton_redraw(
+
+    def _fail_skeleton(status: str, error: str) -> None:
+        """Strict mode: refuse to ship an overview without the exact molecule."""
+        print(f"\nERROR: {error}", file=sys.stderr)
+        report = _build_report(
+            args, best_template, features, "", reference_image, base_url, args.model,
+            status=status, error=error,
+            skeleton={
+                "strict": True,
+                "ai_style_required": ai_style_required,
+                "style": args.skeleton_style,
+                "smiles": smiles,
+                "attempts": skeleton_attempts,
+            },
+        )
+        write_json(out_dir / "overview_template_match.json", report)
+        print(f"  Report saved to: {out_dir / 'overview_template_match.json'}", file=sys.stderr)
+        sys.exit(4)
+
+    if strict_skeleton and not smiles:
+        _fail_skeleton(
+            "skeleton_smiles_missing",
+            "Strict skeleton mode: no core-motif SMILES could be resolved for this "
+            "chemistry review. Set 'skeleton_smiles' in the discovery query plan "
+            "(or include a recognizable motif keyword) so the overview can embed "
+            "an exact molecule.",
+        )
+    skeleton_rendered = render_skeleton_model(features, skeleton_png,
+                                              style=program_style)
+    skeleton_source = "programmatic"
+    if strict_skeleton and not skeleton_rendered:
+        _fail_skeleton(
+            "skeleton_render_failed",
+            f"Strict skeleton mode: the ball-and-stick renderer rejected SMILES {smiles!r}.",
+        )
+    if skeleton_rendered and args.skeleton_style == "ai3d" and not args.dry_run:
+        ai_png, ai_redraw_note, skeleton_attempts = attempt_ai_skeleton_redraw(
             features, skeleton_png, out_dir / "skeleton_model_ai3d.png",
             api_key, base_url, args.model, wire_api)
         if ai_png is not None:
             skeleton_png = ai_png
             skeleton_source = "ai_redraw"
             print(f"  AI 3D skeleton redraw accepted by the sanity gate: {ai_png}")
+        elif ai_style_required:
+            _fail_skeleton(
+                "skeleton_redraw_failed",
+                "Strict skeleton mode: the AI 3D skeleton redraw failed every "
+                f"attempt ({'; '.join(skeleton_attempts)}). Refusing to ship a "
+                "degraded overview; re-run the overview generation to retry.",
+            )
         else:
-            print(f"  WARNING: AI 3D skeleton redraw not used ({ai_redraw_note}); "
-                  "falling back to the programmatic skeleton.", file=sys.stderr)
+            skeleton_source = "programmatic_fallback"
+            print(
+                f"  WARNING: AI 3D skeleton redraw not used ({ai_redraw_note}); "
+                "using the exact programmatic 3D skeleton.",
+                file=sys.stderr,
+            )
+    # Composite whenever an exact skeleton exists: calibrated layouts use the
+    # measured regions, every other layout auto-detects its blank panel, so
+    # the molecule is always pixel-exact instead of model-drawn.
+    will_composite = bool(skeleton_rendered)
     if skeleton_rendered:
         features["_skeleton_image"] = skeleton_png
-        will_composite = layout_type in _COMPOSITE_REGIONS
         if will_composite:
             features["_composite_layout"] = layout_type
         # always provide the exact model as an extra reference: the model draws
         # a faithful fallback in case the guarded compositing later skips
         extra_images.append(skeleton_png)
         print(f"  Accurate ball-and-stick model rendered: {skeleton_png}")
-    adapted_prompt = build_adapted_prompt(best_template, features)
+    adapted_prompt = build_adapted_prompt(best_template, features,
+                                          composite_mode=will_composite)
     print(f"\n  Adapted prompt length: {len(adapted_prompt)} chars")
 
     if args.dry_run:
@@ -3309,18 +3623,18 @@ def main():
         "enabled": will_composite,
         "status": "not_applicable",
         "reason": "",
+        "panel_source": "",
     }
     if not will_composite:
-        if not skeleton_rendered:
-            composite_report["reason"] = "skeleton_render_failed"
-        elif layout_type not in _COMPOSITE_REGIONS:
-            composite_report["reason"] = "layout_not_calibrated"
+        composite_report["reason"] = "skeleton_render_failed"
     else:
-        composited, skip_reason = composite_skeleton_into_figure(
+        composited, skip_reason, panel_source = composite_skeleton_into_figure(
             output_path, skeleton_png, layout_type)
         if composited:
             composite_report["status"] = "success"
-            print("  Exact skeleton composited into the structure panel (pixel-exact).")
+            composite_report["panel_source"] = panel_source
+            print(f"  Exact skeleton composited into the structure panel "
+                  f"(pixel-exact, panel source: {panel_source}).")
         else:
             composite_report["status"] = "skipped"
             composite_report["reason"] = skip_reason
@@ -3335,15 +3649,46 @@ def main():
     composite_report["skeleton_source"] = skeleton_source
     if args.skeleton_style == "ai3d":
         composite_report["ai_redraw_gate"] = ai_redraw_note or "not_attempted"
+    skeleton_report = {
+        "strict": strict_skeleton,
+        "ai_style_required": ai_style_required,
+        "style": args.skeleton_style,
+        "source": skeleton_source,
+        "smiles": smiles,
+        "attempts": skeleton_attempts,
+    }
+    if composite_report["status"] == "skipped" and strict_skeleton:
+        # In composite mode the model was told to leave the panel blank, so a
+        # skipped compositing pass can leave the overview without ANY molecule.
+        # Strict mode refuses to publish that degraded result.
+        report = _build_report(args, best_template, features, adapted_prompt,
+                               reference_image, base_url, args.model,
+                               status="composite_skipped",
+                               error=str(composite_report["reason"]),
+                               output_path=str(output_path),
+                               output_size=output_path.stat().st_size,
+                               request_metadata=request_metadata,
+                               composite=composite_report,
+                               skeleton=skeleton_report)
+        write_json(out_dir / "overview_template_match.json", report)
+        print(
+            "\nERROR: Strict skeleton mode: skeleton compositing was skipped "
+            f"({composite_report['reason']}); the overview may lack the molecule. "
+            "Re-run the overview generation to retry.",
+            file=sys.stderr,
+        )
+        sys.exit(5)
     print(f"\n  Overview figure saved to: {output_path}")
-    print(f"  File size: {len(image_bytes):,} bytes")
+    print(f"  File size: {output_path.stat().st_size:,} bytes")
 
     # Save match report
     report = _build_report(args, best_template, features, adapted_prompt,
                            reference_image, base_url, args.model,
                            status="success", output_path=str(output_path),
-                           output_size=len(image_bytes), request_metadata=request_metadata,
-                           composite=composite_report)
+                           output_size=output_path.stat().st_size,
+                           request_metadata=request_metadata,
+                           composite=composite_report,
+                           skeleton=skeleton_report)
     write_json(out_dir / "overview_template_match.json", report)
     print(f"  Match report saved to: {out_dir / 'overview_template_match.json'}")
 

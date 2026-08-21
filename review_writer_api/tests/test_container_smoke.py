@@ -50,11 +50,11 @@ class ContainerConfigurationTests(unittest.TestCase):
             r"(?s)api:.*?depends_on:\s*\n\s+migrate:\s*\n\s+condition: service_completed_successfully",
         )
         self.assertIn(
-            "${REVIEW_WRITER_MIGRATION_REPORTS_DIR:-./migration-reports}:/app/migration-reports",
+            "${REVIEW_WRITER_MIGRATION_REPORTS_DIR:-./.review-writer/migration-reports}:/app/migration-reports",
             source,
         )
         self.assertIn(
-            "${REVIEW_WRITER_MIGRATION_BACKUPS_DIR:-./migration-backups}:/app/migration-backups",
+            "${REVIEW_WRITER_MIGRATION_BACKUPS_DIR:-./.review-writer/migration-backups}:/app/migration-backups",
             source,
         )
 
@@ -72,8 +72,14 @@ class ContainerConfigurationTests(unittest.TestCase):
         self.assertIn("REVIEW_WRITER_BIND_ADDRESS=127.0.0.1", source)
         self.assertIn("REVIEW_WRITER_HTTP_PORT=8770", source)
         self.assertIn("REVIEW_WRITER_POSTGRES_BIND_PORT=5432", source)
-        self.assertIn("REVIEW_WRITER_MIGRATION_REPORTS_DIR=./migration-reports", source)
-        self.assertIn("REVIEW_WRITER_MIGRATION_BACKUPS_DIR=./migration-backups", source)
+        self.assertIn(
+            "REVIEW_WRITER_MIGRATION_REPORTS_DIR=./.review-writer/migration-reports",
+            source,
+        )
+        self.assertIn(
+            "REVIEW_WRITER_MIGRATION_BACKUPS_DIR=./.review-writer/migration-backups",
+            source,
+        )
         self.assertIn("REVIEW_WRITER_MIGRATION_ACCEPT_FILE_DRIFT=false", source)
 
     def test_automatic_migration_bootstrap_is_available(self) -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -80,6 +80,7 @@ class OutlineSaveRequest(BaseModel):
     revision: StrictInt = Field(ge=0)
     outline_style: StrictStr = Field(min_length=1, max_length=160)
     outline_md: StrictStr | None = Field(default=None, max_length=250_000)
+    scope_contract: dict[str, Any] | None = None
 
 
 class ReferenceOutlineUploadRequest(BaseModel):
@@ -108,6 +109,9 @@ class FigureReviewSelectionRequest(BaseModel):
     revision: StrictInt = Field(ge=0)
     candidate_index: StrictInt = Field(ge=0)
     review_note: StrictStr = Field(default="", max_length=10_000)
+    representative_role: Literal[
+        "core_transformation", "mechanism", "scope", "paper_overview"
+    ] = "paper_overview"
 
 
 class FigureReviewConfirmRequest(BaseModel):
@@ -188,6 +192,12 @@ class DraftApprovalRequest(BaseModel):
 
 class FinalActionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class FinalPdfRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    language_profile: Literal["en", "zh-CN"] = "en"
 
 
 class FinalOverviewTextRequest(BaseModel):

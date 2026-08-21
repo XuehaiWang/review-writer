@@ -5,10 +5,13 @@ from pathlib import Path
 
 from review_writer_core.taxonomy import (
     DEFAULT_TAXONOMY_PROFILE,
+    TaxonomyConfigurationError,
     load_taxonomy_rules,
     suggest_taxonomy_profile,
     taxonomy_identity,
     taxonomy_profile_catalog,
+    validate_selectable_taxonomy_profile,
+    validate_taxonomy_profile,
 )
 
 
@@ -27,13 +30,28 @@ class TaxonomyProfileTests(unittest.TestCase):
         self.assertEqual("general_academic", identity["profile"])
         self.assertIs(False, identity["domain_rules_enabled"])
 
-    def test_explicit_domain_profiles_remain_available(self) -> None:
+    def test_public_catalog_hides_topic_specific_profiles(self) -> None:
         profiles = {item["id"]: item for item in taxonomy_profile_catalog()}
+        self.assertEqual({"general_academic", "chemistry_general"}, set(profiles))
         self.assertIs(True, profiles["chemistry_general"]["domain_rules_enabled"])
-        self.assertIs(True, profiles["allene"]["domain_rules_enabled"])
+
+    def test_topic_specific_profile_remains_internal_for_compatibility(self) -> None:
+        self.assertEqual("allene", validate_taxonomy_profile("allene"))
+        with self.assertRaises(TaxonomyConfigurationError):
+            validate_selectable_taxonomy_profile("allene")
         self.assertEqual(
             "allene", suggest_taxonomy_profile("Axially chiral allene synthesis")
         )
+
+    def test_general_chemistry_activates_internal_topic_rules(self) -> None:
+        general = load_taxonomy_rules(ROOT, profile="chemistry_general")
+        specialized = load_taxonomy_rules(
+            ROOT,
+            profile="chemistry_general",
+            topic_text="Axially chiral allene synthesis from 3-alkynoates",
+        )
+        self.assertNotIn("alkynoates", {label for label, _, _ in general})
+        self.assertIn("alkynoates", {label for label, _, _ in specialized})
 
 
 if __name__ == "__main__":

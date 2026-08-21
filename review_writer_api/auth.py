@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from .database import User, UserSession, database_session, utc_now
+from .database import User, UserCreditAccount, UserSession, database_session, utc_now
 from .security import Principal, Role
 
 
@@ -227,6 +227,7 @@ class AuthService:
                 database.flush()
             except IntegrityError as exc:
                 raise AuthError("该邮箱已经注册，请直接登录。") from exc
+            database.add(UserCreditAccount(user_id=user.id))
             return self._new_session(database, user)
 
     def login(self, *, email: str, password: str) -> AuthenticatedSession:

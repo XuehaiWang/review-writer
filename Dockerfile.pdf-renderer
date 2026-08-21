@@ -1,0 +1,35 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    SOURCE_DATE_EPOCH=1704067200
+
+WORKDIR /app
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      texlive-luatex texlive-latex-extra texlive-lang-chinese \
+      texlive-lang-japanese \
+      fonts-texgyre fonts-dejavu-core fonts-noto-cjk \
+      librsvg2-bin poppler-utils && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN python -m pip install --upgrade pip && \
+    python -m pip install "fastapi>=0.135,<1" "uvicorn[standard]>=0.40,<1" "pypdf>=6,<7"
+
+COPY review_writer_core ./review_writer_core
+COPY review_writer_pdf_renderer ./review_writer_pdf_renderer
+COPY skills/review-final-audit-release ./skills/review-final-audit-release
+
+RUN useradd --create-home --uid 10002 pdfrenderer && \
+    chown -R pdfrenderer:pdfrenderer /app
+
+USER pdfrenderer
+
+EXPOSE 8781
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8781/health', timeout=3)" || exit 1
+
+CMD ["python", "-m", "uvicorn", "review_writer_pdf_renderer.app:app", "--host", "0.0.0.0", "--port", "8781", "--no-access-log"]

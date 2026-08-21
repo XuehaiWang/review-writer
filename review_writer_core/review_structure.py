@@ -92,6 +92,9 @@ def assign_primary_paper_sections(
             item.get("title"), item.get("section_role")
         )
         item["paper_ids"] = _unique(item.get("paper_ids") or [])
+        item["context_paper_ids"] = _unique(
+            item.get("context_paper_ids") or item.get("context_papers") or []
+        )
         item["primary_papers"] = []
         item["supporting_papers"] = []
         normalized.append(item)
@@ -126,8 +129,13 @@ def assign_primary_paper_sections(
             for paper_id in item["paper_ids"]
             if paper_id in primary_owner
         ]
+        contextual = [
+            paper_id
+            for paper_id in item["context_paper_ids"]
+            if paper_id not in primary_owner
+        ]
         item["supporting_papers"] = (
-            requested or representatives
+            _unique([*contextual, *(requested or representatives)])
         )[: max(1, int(max_synthesis_papers))]
 
     return normalized, primary_owner

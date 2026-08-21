@@ -51,6 +51,7 @@ class JobContext:
         self.project_id = job.project_id
         self.scope = job.scope
         self.job_type = job.job_type
+        self.retry_of_job_id = job.retry_of_job_id
 
     def cancellation_requested(self) -> bool:
         return self.shutting_down() or self.repository.job_cancellation_requested(

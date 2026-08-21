@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -77,6 +78,104 @@ class UserSession(Base, TimestampMixin):
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class UserCreditAccount(Base, TimestampMixin):
+    """Materialized account balance derived from the immutable credit ledger."""
+
+    __tablename__ = "user_credit_accounts"
+    __table_args__ = (
+        CheckConstraint("reserved_usd >= 0", name="reserved_nonnegative"),
+        CheckConstraint("lifetime_credited_usd >= 0", name="credited_nonnegative"),
+        CheckConstraint("lifetime_debited_usd >= 0", name="debited_nonnegative"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
+    balance_usd: Mapped[Decimal] = mapped_column(Numeric(18, 8), default=0, nullable=False)
+    reserved_usd: Mapped[Decimal] = mapped_column(Numeric(18, 8), default=0, nullable=False)
+    lifetime_credited_usd: Mapped[Decimal] = mapped_column(
+        Numeric(18, 8), default=0, nullable=False
+    )
+    lifetime_debited_usd: Mapped[Decimal] = mapped_column(
+        Numeric(18, 8), default=0, nullable=False
+    )
+
+
+class CreditReservation(Base, TimestampMixin):
+    """Idempotent hold around one external provider attempt."""
+
+    __tablename__ = "credit_reservations"
+    __table_args__ = (
+        UniqueConstraint(
+            "reference_type",
+            "reference_id",
+            "attempt_number",
+            name="uq_credit_reservation_reference_attempt",
+        ),
+        Index("ix_credit_reservations_user_created", "user_id", "created_at"),
+        Index("ix_credit_reservations_job_created", "job_id", "created_at"),
+        CheckConstraint("amount_usd >= 0", name="amount_nonnegative"),
+        CheckConstraint("settled_amount_usd >= 0", name="settled_nonnegative"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("workflow_jobs.id", ondelete="SET NULL"), index=True
+    )
+    reference_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    reference_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(default=1, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    settled_amount_usd: Mapped[Decimal] = mapped_column(
+        Numeric(18, 8), default=0, nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CreditTransaction(Base):
+    """Append-only audit ledger for every balance and reservation mutation."""
+
+    __tablename__ = "credit_transactions"
+    __table_args__ = (
+        Index("ix_credit_transactions_user_created", "user_id", "created_at"),
+        Index("ix_credit_transactions_job_created", "job_id", "created_at"),
+        Index("ix_credit_transactions_actor_created", "actor_user_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("workflow_jobs.id", ondelete="SET NULL"), index=True
+    )
+    reservation_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("credit_reservations.id", ondelete="SET NULL"), index=True
+    )
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    transaction_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    balance_delta_usd: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    reserved_delta_usd: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    balance_after_usd: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    reserved_after_usd: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
 
 
 class Project(Base, TimestampMixin):

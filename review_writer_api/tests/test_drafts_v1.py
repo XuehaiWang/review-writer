@@ -222,6 +222,53 @@ class DraftsV1Tests(NativeFigureApiTestCase):
         self.assertIn("[1] Study one", markdown)
         self.assertIn("[2] Study two", markdown)
 
+    def test_figure_caption_is_normalized_without_leaking_conditions_into_prose(self) -> None:
+        source_caption = (
+            r"Scheme 1. $Pd_{2}(dba)_{3}\cdot CHCl_{3}$ , "
+            r"$(S)-(-)$ -MeO-MOP, $CHCl_{3}$ ; $-78^{\circ}C$"
+        )
+        markdown = self.app.state.drafts_service._assemble_markdown(
+            "Review",
+            {
+                "sections": [
+                    {
+                        "section_id": "S01",
+                        "heading": "Methods",
+                        "paragraphs": [
+                            {
+                                "paragraph_id": "S01-p1",
+                                "paper_id": "P001",
+                                "cited_paper_ids": ["P001"],
+                                "text": "The study reports an asymmetric transformation.",
+                            }
+                        ],
+                    }
+                ]
+            },
+            {
+                "figures": [
+                    {
+                        "figure_id": "P001-F01",
+                        "paper_id": "P001",
+                        "target_paragraph_id": "S01-p1",
+                        "output_artifact_id": "artifact-1",
+                        "status": "redrawn",
+                        "source_caption_text": source_caption,
+                    }
+                ]
+            },
+            {"rows": [{"paper_id": "P001", "title": "Study one"}]},
+        )
+
+        prose, figure_block = markdown.split("<!-- paragraph_id: S01-p1 -->", 1)
+        self.assertNotIn("Pd_{2}", prose)
+        self.assertIn("Figure 1 provides visual context", prose)
+        self.assertIn(
+            "Figure 1. Pd₂(dba)₃·CHCl₃, (S)-(−)-MeO-MOP, CHCl₃; −78 °C",
+            figure_block,
+        )
+        self.assertNotIn("$", figure_block)
+
     def test_rewrite_payload_carries_the_complete_evaluated_draft(self) -> None:
         service = object.__new__(DraftsService)
         complete_draft = (

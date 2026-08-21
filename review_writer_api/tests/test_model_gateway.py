@@ -16,6 +16,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from review_writer_api.billing import BillingService
 from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User, database_session
 from review_writer_api.model_catalog import resolve_model_tier
@@ -191,6 +192,99 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(30, len(timeline["items"]))
         self.assertEqual(150, timeline["items"][-1]["total_tokens"])
         self.assertEqual(1, timeline["items"][-1]["request_count"])
+
+    async def test_credit_is_reserved_settled_and_not_charged_again_on_cache_hit(self) -> None:
+        billing = BillingService(self.sessions)
+        billing.adjust(
+            actor_user_id=self.user_id,
+            target_user_id=self.user_id,
+            amount_usd="1",
+            reason="Gateway test credit",
+            idempotency_key="gateway-credit",
+        )
+        self.service.billing_service = billing
+        provider_result = {
+            "id": "resp_billed",
+            "output_text": '{"score": 92}',
+            "usage": {
+                "input_tokens": 120,
+                "output_tokens": 30,
+                "total_tokens": 150,
+                "input_tokens_details": {"cached_tokens": 20},
+            },
+        }
+        with mock.patch.object(
+            self.service,
+            "_provider_call",
+            new=mock.AsyncMock(return_value=provider_result),
+        ) as provider_call:
+            first = await self.service.complete_json(
+                self.token(),
+                request_key="billed-request",
+                stage="evaluation",
+                prompt="Return a score.",
+            )
+            second = await self.service.complete_json(
+                self.token(),
+                request_key="billed-request",
+                stage="evaluation",
+                prompt="Return a score.",
+            )
+
+        self.assertEqual(1, provider_call.await_count)
+        self.assertFalse(first["cached"])
+        self.assertTrue(second["cached"])
+        self.assertEqual("0.99943600", billing.account_summary(self.user_id)["balance_usd"])
+        self.assertEqual("0.00000000", billing.account_summary(self.user_id)["reserved_usd"])
+        self.assertEqual(3, len(billing.transactions(self.user_id)))
+        self.assertEqual(
+            "credit",
+            self.service.usage_summary(str(self.user_id), str(self.project_id))["billing_mode"],
+        )
+
+    async def test_concurrent_same_request_joins_and_reuses_first_result(self) -> None:
+        provider_started = asyncio.Event()
+        release_provider = asyncio.Event()
+        provider_result = {
+            "id": "resp_joined",
+            "output_text": '{"joined": true}',
+            "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+        }
+
+        async def provider_call(**_kwargs):
+            provider_started.set()
+            await release_provider.wait()
+            return provider_result
+
+        with mock.patch.object(
+            self.service, "_provider_call", side_effect=provider_call
+        ) as provider:
+            first = asyncio.create_task(
+                self.service.complete_json(
+                    self.token(),
+                    request_key="joined-request",
+                    stage="section-academic-planning",
+                    prompt="Return a section plan.",
+                )
+            )
+            await asyncio.wait_for(provider_started.wait(), timeout=1)
+            second = asyncio.create_task(
+                self.service.complete_json(
+                    self.token(),
+                    request_key="joined-request",
+                    stage="section-academic-planning",
+                    prompt="Return a section plan.",
+                )
+            )
+            await asyncio.sleep(0.05)
+            self.assertFalse(second.done())
+            release_provider.set()
+            first_result, second_result = await asyncio.gather(first, second)
+
+        self.assertEqual(1, provider.await_count)
+        self.assertFalse(first_result["cached"])
+        self.assertTrue(second_result["cached"])
+        self.assertEqual(first_result["output_text"], second_result["output_text"])
 
     async def test_provider_client_injects_server_key_and_selected_model(self) -> None:
         observed = {}

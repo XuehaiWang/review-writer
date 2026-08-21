@@ -32,8 +32,9 @@ def verified_structured_tags(
 ) -> dict[str, str]:
     """Return meaningful reusable Tags only after explicit human verification.
 
-    Older rule- or LLM-generated values remain stored in metadata for audit and
-    backward compatibility, but they must not influence retrieval or planning.
+    Unmigrated rule- or LLM-generated values must not influence retrieval or
+    planning.  The administrative cleanup command converts active unverified
+    values to the project-neutral shape while preserving verified Tags.
     """
 
     if not structured_tags_are_verified(metadata):

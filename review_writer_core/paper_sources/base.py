@@ -69,11 +69,17 @@ class HttpPaperSourceConnector:
                 last_error = exc
                 if exc.code not in RETRYABLE_HTTP_STATUSES or attempt >= self.max_retries:
                     raise
+                retry_after = str((exc.headers or {}).get("Retry-After") or "").strip()
+                try:
+                    delay = min(max(float(retry_after), 0.0), 30.0)
+                except ValueError:
+                    delay = min(0.5 * (2**attempt), 2.0)
             except (TimeoutError, urllib.error.URLError) as exc:
                 last_error = exc
                 if attempt >= self.max_retries:
                     raise
-            time.sleep(min(0.5 * (2**attempt), 2.0))
+                delay = min(0.5 * (2**attempt), 2.0)
+            time.sleep(delay)
         if last_error is not None:
             raise last_error
         raise RuntimeError("Paper source request failed without an error.")

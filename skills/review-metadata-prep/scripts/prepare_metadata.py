@@ -40,6 +40,7 @@ from review_writer_core.taxonomy import (  # noqa: E402
 )
 from review_writer_core.metadata_tags import (  # noqa: E402
     neutral_structured_tag_values,
+    structured_tags_are_verified,
 )
 from review_writer_core.workspace import discover_review_root  # noqa: E402
 from review_writer_core.providers import (  # noqa: E402
@@ -900,20 +901,27 @@ def update_quality(meta: dict[str, Any]) -> None:
     for key in ["journal", "doi"]:
         if not has_value(meta.get(key, {}).get("value")):
             warnings.append(f"missing_{key}")
-    structured = structured_tag_values(meta)
-    for key, value in structured.items():
-        if not value or value.lower() == "not specified":
-            warnings.append(f"structured_tag_not_specified_{key}")
+    # Project-neutral metadata intentionally leaves reusable Tags empty until
+    # a human verifies the complete field.  Treating those neutral placeholders
+    # as quality defects recreated the old "Metadata must be tagged" workflow
+    # through warnings even though retrieval no longer trusts automatic Tags.
+    if structured_tags_are_verified(meta):
+        structured = structured_tag_values(meta)
+        for key, value in structured.items():
+            if not value or value.lower() == "not specified":
+                warnings.append(f"structured_tag_not_specified_{key}")
     confidences = []
-    for key in [
+    confidence_keys = [
         "title",
         "authors",
         "year",
         "journal",
         "doi",
         "abstract",
-        "structured_tags",
-    ]:
+    ]
+    if structured_tags_are_verified(meta):
+        confidence_keys.append("structured_tags")
+    for key in confidence_keys:
         field = meta.get(key)
         if isinstance(field, dict):
             confidences.append(float(field.get("confidence") or 0))

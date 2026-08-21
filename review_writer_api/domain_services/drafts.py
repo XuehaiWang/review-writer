@@ -28,6 +28,8 @@ from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_models import LibraryPaper
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
 from review_writer_core.paragraph_markers import ensure_prose_paragraph_markers
+from review_writer_core.publication_caption import normalize_publication_caption
+from review_writer_core.publication_voice import publication_voice_issues
 
 
 DRAFT_DOCUMENT = "draft/manuscript.md"
@@ -382,29 +384,77 @@ class DraftsService:
                         )
                     else:
                         text = f"{text} {callout}"
-                parts.append(f"{text}\n\n<!-- paragraph_id: {paragraph_id} -->")
+                figure_blocks: list[str] = []
+                figure_callouts: list[str] = []
                 for figure in figures_by_paragraph.get(paragraph_id, []):
                     figure_number += 1
                     output_id = str(figure["output_artifact_id"])
-                    label = str(figure.get("source_label") or f"Figure {figure_number}")
+                    paper_id = str(figure.get("paper_id") or "").strip()
+                    caption_text = str(figure.get("source_caption_text") or "").strip()
+                    normalized_caption = normalize_publication_caption(caption_text)
+                    caption_body = str(
+                        normalized_caption.publication_text
+                        or figure.get("publication_caption_text")
+                        or ""
+                    ).strip()
+                    caption_plain = str(
+                        normalized_caption.plain_text
+                        or figure.get("publication_caption_plain_text")
+                        or figure.get("source_label")
+                        or f"Figure {figure_number}"
+                    ).strip()
+                    interpretation_basis = (
+                        "source_caption"
+                        if caption_text
+                        and not re.fullmatch(
+                            r"(?:figure|scheme|table)\s*\d+[a-z]?[.:]?",
+                            caption_text,
+                            re.IGNORECASE,
+                        )
+                        else "identity_only"
+                    )
+                    role = str(figure.get("representative_role") or "paper_overview")
+                    role_text = {
+                        "core_transformation": "core transformation",
+                        "mechanism": "proposed mechanistic framework",
+                        "scope": "reported scope or result pattern",
+                        "paper_overview": "overall research strategy",
+                    }.get(role, "overall research strategy")
+                    figure_callouts.append(
+                        f"Figure {figure_number} provides visual context for the paper's {role_text}."
+                    )
                     metadata = json.dumps(
                         {
                             "figure_id": figure.get("figure_id"),
+                            "paper_id": paper_id,
                             "target_paragraph_id": paragraph_id,
                             "output_artifact_id": output_id,
+                            "representative_role": role,
+                            "published_label": f"Figure {figure_number}",
+                            "interpretation_basis": interpretation_basis,
+                            "caption_normalization_status": normalized_caption.status,
+                            "caption_normalization_version": normalized_caption.version,
                         },
                         ensure_ascii=False,
                         separators=(",", ":"),
                     )
-                    parts.append(
+                    figure_blocks.append(
                         "\n".join(
                             (
                                 f"<!-- inserted_figure: {metadata} -->",
-                                f"![{label}](/api/v1/artifacts/{output_id}/content)",
-                                f"*Figure {figure_number}. {label}*",
+                                f"![{caption_plain}](/api/v1/artifacts/{output_id}/content)",
+                                (
+                                    f"*Figure {figure_number}. {caption_body}*"
+                                    if caption_body
+                                    else f"*Figure {figure_number}.*"
+                                ),
                             )
                         )
                     )
+                if figure_callouts:
+                    text = f"{text} {' '.join(figure_callouts)}"
+                parts.append(f"{text}\n\n<!-- paragraph_id: {paragraph_id} -->")
+                parts.extend(figure_blocks)
         if cited_paper_ids:
             references = ["## References"]
             for paper_id in sorted(cited_paper_ids, key=citation_numbers.__getitem__):
@@ -705,12 +755,17 @@ class DraftsService:
                     "error": job.error_message,
                 },
             )
+        voice_issues = publication_voice_issues(text)
         return {
             "project_id": project_id,
             "revision": state.revision if state else 0,
             "status": state.status if state else "pending",
             "draft_artifact_id": draft_artifact.id if draft_artifact else "",
             "first_draft_md": text,
+            "publication_voice": {
+                "status": "warning" if voice_issues else "pass",
+                "issues": voice_issues,
+            },
             "paragraphs": [
                 {key: value for key, value in row.items() if key not in {"start", "end", "marker_end"}}
                 for row in paragraphs

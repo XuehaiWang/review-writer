@@ -62,6 +62,7 @@ def build_planning_router(
             revision=payload.revision,
             outline_style=payload.outline_style,
             outline_md=payload.outline_md,
+            scope_contract=payload.scope_contract,
             manual="outline_md" in payload.model_fields_set,
         )
 

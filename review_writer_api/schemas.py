@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -191,6 +192,91 @@ class UsageTimelineResponse(BaseModel):
     start_date: str
     end_date: str
     items: list[UsageTimelineItemResponse]
+
+
+class BalanceResponse(BaseModel):
+    currency: str
+    balance_usd: str
+    reserved_usd: str
+    available_usd: str
+    lifetime_credited_usd: str
+    lifetime_debited_usd: str
+    billing_mode: str
+    updated_at: datetime
+
+
+class CreditTransactionResponse(BaseModel):
+    id: str
+    user_id: str
+    job_id: str | None
+    reservation_id: str | None
+    actor_user_id: str | None
+    transaction_type: str
+    balance_delta_usd: str
+    reserved_delta_usd: str
+    balance_after_usd: str
+    reserved_after_usd: str
+    currency: str
+    reason: str
+    details: dict[str, Any]
+    created_at: datetime
+
+
+class CreditTransactionListResponse(BaseModel):
+    items: list[CreditTransactionResponse]
+    count: int
+
+
+class AdminUserResponse(BaseModel):
+    user_id: str
+    email: str
+    display_name: str
+    role: str
+    status: str
+    project_count: int = 0
+    estimated_cost_usd: str = "0.00000000"
+    currency: str
+    balance_usd: str
+    reserved_usd: str
+    available_usd: str
+    lifetime_credited_usd: str
+    lifetime_debited_usd: str
+    billing_mode: str
+    created_at: datetime
+    updated_at: datetime
+    last_login_at: datetime | None
+
+
+class AdminUserListResponse(BaseModel):
+    items: list[AdminUserResponse]
+    count: int
+
+
+class AdminUserUpdateRequest(BaseModel):
+    role: Literal["user", "admin"] | None = None
+    status: Literal["active", "disabled"] | None = None
+
+
+class AdminCreditAdjustmentRequest(BaseModel):
+    target_user_id: str = Field(min_length=1, max_length=64)
+    amount_usd: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class AdminUsageSummaryResponse(BaseModel):
+    user_count: int
+    active_user_count: int
+    project_count: int
+    text_request_count: int
+    total_tokens: int
+    image_count: int
+    mineru_billable_pages: int
+    estimated_text_cost_usd: str
+    estimated_image_cost_usd: str
+    estimated_mineru_cost_usd: str
+    estimated_cost_usd: str
+    account_balance_total_usd: str
+    reserved_total_usd: str
 
 
 class ProviderSettingsResponse(BaseModel):

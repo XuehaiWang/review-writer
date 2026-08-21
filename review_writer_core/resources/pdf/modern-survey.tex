@@ -1,0 +1,62 @@
+\documentclass[10pt,a4paper,twocolumn]{article}
+\usepackage{iftex}
+\ifLuaTeX\else\PackageError{modern-survey}{LuaLaTeX is required}{}\fi
+\usepackage{fontspec}
+%__LANGUAGE_PREAMBLE__%
+\usepackage[a4paper,top=16mm,bottom=17mm,left=18mm,right=18mm,headheight=12pt,headsep=4mm,footskip=8mm,columnsep=7mm]{geometry}
+\usepackage{microtype}
+\usepackage[table]{xcolor}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{booktabs,longtable,tabularx,array}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{caption}
+\usepackage{ragged2e}
+\usepackage{balance}
+\usepackage{dblfloatfix}
+\usepackage[most]{tcolorbox}
+\usepackage[hidelinks,unicode]{hyperref}
+\definecolor{AcademicInk}{HTML}{151A1E}
+\definecolor{AcademicBlue}{HTML}{006BE6}
+\definecolor{AcademicMuted}{HTML}{5F686F}
+\definecolor{AcademicPanel}{HTML}{F0F3F5}
+\definecolor{AcademicHeader}{HTML}{D9D9D9}
+\definecolor{AcademicRow}{HTML}{F2F2F2}
+\hypersetup{colorlinks=true,linkcolor=AcademicBlue,citecolor=AcademicBlue,urlcolor=AcademicBlue,pdfauthor={Review Writer}}
+\setlength{\parindent}{1em}
+\setlength{\parskip}{0.08em}
+\setlength{\columnsep}{7mm}
+\setlist{leftmargin=1.6em,itemsep=0.1em,topsep=0.25em,parsep=0pt}
+\captionsetup{font=footnotesize,labelfont={bf,color=AcademicBlue},textfont={color=AcademicInk},justification=justified,singlelinecheck=false,skip=4pt}
+\titleformat{\section}{\fontsize{12.2}{14}\selectfont\bfseries\sffamily\color{AcademicBlue}}{\thesection}{0.62em}{}
+\titleformat{\subsection}{\fontsize{9.7}{11.2}\selectfont\bfseries\sffamily\color{AcademicBlue}}{\thesubsection}{0.55em}{}
+\titleformat{\subsubsection}{\fontsize{9.2}{10.6}\selectfont\bfseries\sffamily\color{AcademicBlue}}{\thesubsubsection}{0.5em}{}
+\titleformat{\paragraph}[runin]{\fontsize{9.1}{10.6}\selectfont\bfseries\sffamily\color{AcademicInk}}{}{0pt}{}[.]
+\titlespacing*{\section}{0pt}{1.15em}{0.45em}
+\titlespacing*{\subsection}{0pt}{0.9em}{0.28em}
+\titlespacing*{\subsubsection}{0pt}{0.75em}{0.22em}
+\titlespacing*{\paragraph}{0pt}{0.45em}{0.35em}
+\tcbset{journalpanel/.style={enhanced,colback=AcademicPanel,colframe=AcademicPanel,boxrule=0pt,arc=3.5mm,left=5.5mm,right=5.5mm,top=5mm,bottom=4.5mm}}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\fontsize{7.2}{8}\selectfont\sffamily\color{AcademicMuted}\nouppercase{\leftmark}}
+\fancyhead[R]{\fontsize{7.2}{8}\selectfont\sffamily\bfseries\color{AcademicBlue}REVIEW WRITER}
+\fancyfoot[C]{\fontsize{7.5}{8.5}\selectfont\sffamily\color{AcademicMuted}\thepage}
+\renewcommand{\headrulewidth}{0pt}
+\fancypagestyle{firstpage}{\fancyhf{}\fancyfoot[C]{\fontsize{7.5}{8.5}\selectfont\sffamily\color{AcademicMuted}\thepage}\renewcommand{\headrulewidth}{0pt}}
+\begin{document}
+\fontsize{9.15}{11.15}\selectfont
+\color{AcademicInk}
+% Group the full-width lead block so nested optional arguments (notably the
+% tcolorbox style selector) cannot terminate \twocolumn's optional argument.
+\twocolumn[{
+\begin{@twocolumnfalse}
+%__FRONT_MATTER__%
+\vspace{2mm}
+\end{@twocolumnfalse}
+}]
+\thispagestyle{firstpage}
+%__DOCUMENT_BODY__%
+\end{document}
