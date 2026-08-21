@@ -51,7 +51,7 @@ class WorkflowMigrationTests(unittest.TestCase):
     def test_workflow_schema_has_separate_workflow_and_job_scope_revisions(self) -> None:
         script = ScriptDirectory.from_config(self.alembic_config())
 
-        self.assertEqual(["20260820_0014"], script.get_heads())
+        self.assertEqual(["20260821_0015"], script.get_heads())
         workflow_revision = script.get_revision("20260813_0002")
         self.assertEqual("20260811_0001", workflow_revision.down_revision)
         job_scope_revision = script.get_revision("20260813_0003")

@@ -163,6 +163,7 @@ Copy-Item .env.hosted.example .env.hosted
 ```dotenv
 REVIEW_WRITER_POSTGRES_PASSWORD=replace-with-a-long-random-password
 REVIEW_WRITER_CREDENTIAL_ENCRYPTION_KEY=replace-with-32-random-bytes-as-base64url
+REVIEW_WRITER_INTERNAL_WORKER_TOKEN=replace-with-a-different-long-random-token
 REVIEW_WRITER_PUBLIC_ORIGIN=http://127.0.0.1:8770
 REVIEW_WRITER_BIND_ADDRESS=127.0.0.1
 REVIEW_WRITER_SESSION_COOKIE_SECURE=false
@@ -191,17 +192,27 @@ docker compose --env-file .env.hosted ps
 
 首次打开后注册账户、登录，然后进入 **API Settings** 配置个人服务。
 
-Compose 会同时启动一个不暴露主机端口的内部 PDF 渲染器。终稿通过同一份
+Compose 会启动公共 API、独立 PostgreSQL Worker、一个不暴露主机端口的
+文本/图像模型网关，以及内部 PDF 渲染器。API 只提交和查询任务；Worker
+通过数据库租约领取任务并定时发送心跳，所有进度和终态写入都受 fencing
+generation 保护。Worker 只能用当前租约向模型网关换取短期任务令牌，不会
+获得文本或图像服务商的 API Key。终稿通过同一份
 Final Manuscript State 输出 Word 和 PDF；PDF 使用固定 `modern-survey/2`
 期刊型模板与 LuaLaTeX，支持 `en`、`zh-CN` 两种语言配置。首页使用紧凑的
 题名/摘要/关键词信息框并直接进入双栏正文，不生成独立封面或目录；核心
 Scheme 和比较表跨双栏。发布前自动检查引用、字体嵌入、页面一致性和渲染
 清单。Word 导出仍保留原有入口与行为。
 
+默认 Worker 同时监听 `scientific,image,ingest,document` 四类队列。需要按
+负载独立扩容时，可用 `REVIEW_WRITER_WORKER_QUEUES` 将 Worker 限定为其中一类
+或几类；模型网关的全局/单用户并发限制不会随 Worker 数量自动放大。浏览器
+对运行任务采用 2.5 秒低频轮询，刷新或切换页面后仍从 PostgreSQL 恢复状态。
+
 ### 4. 日志与停止
 
 ```powershell
 docker compose --env-file .env.hosted logs -f api
+docker compose --env-file .env.hosted logs -f worker model-gateway
 docker compose --env-file .env.hosted down
 ```
 

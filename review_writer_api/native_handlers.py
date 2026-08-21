@@ -117,16 +117,12 @@ class NativeWorkflowHandlers:
         return normal, secrets
 
     def _text_gateway_environment(self, context) -> tuple[dict[str, str], dict[str, str]]:
-        normal, secrets = self._environment(context.user_id)
-        if self.model_gateway is None:
-            return normal, secrets
-        for key in DIRECT_PROVIDER_ENV_KEYS:
-            normal.pop(key, None)
-            secrets.pop(key, None)
-        gateway_normal, gateway_secrets = self.model_gateway.environment_for_job(context)
-        normal.update(gateway_normal)
-        secrets.update(gateway_secrets)
-        return normal, secrets
+        if self.model_gateway is not None:
+            # In split-worker deployments the worker must never decrypt or
+            # materialize text/image provider credentials. It receives only a
+            # lease-bound gateway token.
+            return self.model_gateway.environment_for_job(context)
+        return self._environment(context.user_id)
 
     @staticmethod
     def _paper_source_environment() -> tuple[dict[str, str], dict[str, str]]:
@@ -149,16 +145,9 @@ class NativeWorkflowHandlers:
         return normal, secrets
 
     def _image_gateway_environment(self, context) -> tuple[dict[str, str], dict[str, str]]:
-        normal, secrets = self._environment(context.user_id)
-        if self.model_gateway is None:
-            return normal, secrets
-        for key in DIRECT_PROVIDER_ENV_KEYS:
-            normal.pop(key, None)
-            secrets.pop(key, None)
-        gateway_normal, gateway_secrets = self.model_gateway.environment_for_job(context)
-        normal.update(gateway_normal)
-        secrets.update(gateway_secrets)
-        return normal, secrets
+        if self.model_gateway is not None:
+            return self.model_gateway.environment_for_job(context)
+        return self._environment(context.user_id)
 
     def _staging(self, user_id: str, job_id: str) -> Path:
         try:

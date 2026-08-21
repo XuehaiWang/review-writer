@@ -13,6 +13,7 @@ class HealthResponse(BaseModel):
     status: str
     api_version: str
     deployment_mode: str
+    components: dict[str, str] = Field(default_factory=dict)
 
 
 class BrowserAuthConfigResponse(BaseModel):

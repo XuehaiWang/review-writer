@@ -66,6 +66,8 @@ class TaskClaims:
     model_tier: str
     capabilities: tuple[str, ...]
     expires_at: int
+    lease_token: str | None = None
+    lease_generation: int | None = None
 
 
 TEXT_GATEWAY_JOB_TYPES = frozenset(
@@ -177,6 +179,8 @@ class ModelGatewayService:
         user_id: str,
         project_id: str | None,
         job_type: str,
+        lease_token: str | None = None,
+        lease_generation: int | None = None,
         lifetime_seconds: int = 8 * 60 * 60,
     ) -> str:
         model_tier = DEFAULT_MODEL_TIER
@@ -192,7 +196,7 @@ class ModelGatewayService:
         if job_type in IMAGE_GATEWAY_JOB_TYPES:
             capabilities.append("image")
         payload = {
-            "v": 2,
+            "v": 3,
             "job_id": str(uuid.UUID(job_id)),
             "user_id": str(uuid.UUID(user_id)),
             "project_id": str(uuid.UUID(project_id)) if project_id else None,
@@ -201,6 +205,12 @@ class ModelGatewayService:
             "capabilities": capabilities,
             "exp": int(time.time()) + max(60, int(lifetime_seconds)),
             "jti": uuid.uuid4().hex,
+            "lease_token": (
+                str(uuid.UUID(str(lease_token))) if lease_token else None
+            ),
+            "lease_generation": (
+                int(lease_generation) if lease_generation is not None else None
+            ),
         }
         encoded = _b64encode(
             json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -217,7 +227,7 @@ class ModelGatewayService:
             if not hmac.compare_digest(supplied_signature, expected_signature):
                 raise ValueError("signature")
             payload = json.loads(_b64decode(encoded).decode("utf-8"))
-            if int(payload.get("v") or 0) != 2 or int(payload.get("exp") or 0) < int(time.time()):
+            if int(payload.get("v") or 0) not in {2, 3} or int(payload.get("exp") or 0) < int(time.time()):
                 raise ValueError("expired")
             claims = TaskClaims(
                 job_id=str(uuid.UUID(str(payload["job_id"]))),
@@ -235,6 +245,16 @@ class ModelGatewayService:
                     if str(item) in {"text", "image"}
                 ),
                 expires_at=int(payload["exp"]),
+                lease_token=(
+                    str(uuid.UUID(str(payload["lease_token"])))
+                    if payload.get("lease_token")
+                    else None
+                ),
+                lease_generation=(
+                    int(payload["lease_generation"])
+                    if payload.get("lease_generation") is not None
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, UnicodeError) as exc:
             raise InvalidTaskToken("The internal task token is invalid or expired.") from exc
@@ -253,6 +273,8 @@ class ModelGatewayService:
             user_id=context.user_id,
             project_id=context.project_id,
             job_type=context.job_type,
+            lease_token=getattr(context, "lease_token", None),
+            lease_generation=getattr(context, "lease_generation", None),
         )
         return (
             {
@@ -268,14 +290,70 @@ class ModelGatewayService:
     def _validate_live_job(self, claims: TaskClaims) -> None:
         with database_session(self.session_factory) as session:
             job = session.get(WorkflowJob, uuid.UUID(claims.job_id))
+            database_now = (
+                session.scalar(select(func.now()))
+                if session.get_bind().dialect.name == "postgresql"
+                else utc_now().replace(tzinfo=None)
+            )
             if (
                 job is None
                 or str(job.user_id) != claims.user_id
                 or (str(job.project_id) if job.project_id else None) != claims.project_id
                 or job.job_type != claims.job_type
                 or job.status != "running"
+                or (
+                    claims.lease_token is not None
+                    and (
+                        str(job.lease_token or "") != claims.lease_token
+                        or job.lease_generation != claims.lease_generation
+                        or job.lease_expires_at is None
+                        or job.lease_expires_at <= database_now
+                    )
+                )
             ):
                 raise InvalidTaskToken("The task token is not bound to a running job.")
+
+    def issue_leased_task_token(
+        self,
+        *,
+        job_id: str,
+        lease_token: str,
+        lease_generation: int,
+        lifetime_seconds: int = 15 * 60,
+    ) -> str:
+        """Exchange a live worker lease for a short-lived model task token."""
+
+        try:
+            job_uuid = uuid.UUID(str(job_id))
+            token_uuid = uuid.UUID(str(lease_token))
+        except ValueError as exc:
+            raise InvalidTaskToken("The worker lease is invalid.") from exc
+        with database_session(self.session_factory) as session:
+            database_now = (
+                session.scalar(select(func.now()))
+                if session.get_bind().dialect.name == "postgresql"
+                else utc_now().replace(tzinfo=None)
+            )
+            job = session.get(WorkflowJob, job_uuid)
+            if (
+                job is None
+                or job.status != "running"
+                or job.cancellation_requested
+                or job.lease_token != token_uuid
+                or job.lease_generation != int(lease_generation)
+                or job.lease_expires_at is None
+                or job.lease_expires_at <= database_now
+            ):
+                raise InvalidTaskToken("The worker no longer owns this job lease.")
+            return self.issue_task_token(
+                job_id=str(job.id),
+                user_id=str(job.user_id),
+                project_id=str(job.project_id) if job.project_id else None,
+                job_type=job.job_type,
+                lease_token=str(job.lease_token),
+                lease_generation=job.lease_generation,
+                lifetime_seconds=lifetime_seconds,
+            )
 
     async def _user_semaphore(self, user_id: str) -> asyncio.Semaphore:
         async with self._user_slots_lock:

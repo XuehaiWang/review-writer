@@ -19,6 +19,10 @@ if str(_BOOTSTRAP_ROOT) not in sys.path:
     sys.path.insert(0, str(_BOOTSTRAP_ROOT))
 
 from review_writer_core.text_safety import incompatible_character_count  # noqa: E402
+from review_writer_core.markdown_images import (  # noqa: E402
+    malformed_markdown_image_lines,
+    parse_markdown_image,
+)
 
 
 PLACEHOLDER_RE = re.compile(
@@ -30,7 +34,6 @@ REF_CALLOUT_RE = re.compile(r"\[(\d+(?:\s*[-,]\s*\d+)*)\]")
 # as `[n]. Reference`, and conventional `n. Reference` lists.  Two capture
 # groups keep the actual reference number available for every accepted form.
 REF_ITEM_RE = re.compile(r"^\s*(?:\[(\d+)\]\s*\.?|(\d+)\.)\s+\S", re.M)
-IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.M)
 
 
@@ -102,7 +105,12 @@ def scan_draft(project: Path) -> dict[str, Any]:
     )
     missing_listed_refs = [r for r in called_refs if listed_refs and r not in listed_refs]
     uncalled_listed_refs = [r for r in listed_refs if r not in called_refs]
-    image_paths = [m.group(1) for m in IMAGE_RE.finditer(text)]
+    image_paths = [
+        image.source
+        for line in text.splitlines()
+        if (image := parse_markdown_image(line)) is not None
+    ]
+    malformed_images = malformed_markdown_image_lines(text)
     broken_images = []
     for raw in image_paths:
         if re.match(r"^[a-z]+://", raw):
@@ -191,6 +199,9 @@ def scan_draft(project: Path) -> dict[str, Any]:
     if broken_images:
         issues.append("broken_markdown_image_paths")
         blocking_issues.append("broken_markdown_image_paths")
+    if malformed_images:
+        issues.append("malformed_markdown_image")
+        blocking_issues.append("malformed_markdown_image")
     if source_placeholder_mode:
         issues.append("source_figure_placeholders_need_redraw_or_permission_check")
         blocking_issues.append("source_figure_placeholders_need_redraw_or_permission_check")
@@ -231,6 +242,7 @@ def scan_draft(project: Path) -> dict[str, Any]:
         "uncalled_listed_refs": uncalled_listed_refs,
         "image_paths": image_paths,
         "broken_images": broken_images,
+        "malformed_markdown_images": malformed_images,
         "source_placeholder_mode": source_placeholder_mode,
         "references_section": references_section,
         "reference_sup_markup_present": reference_sup_markup_present,

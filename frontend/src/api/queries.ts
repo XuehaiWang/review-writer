@@ -1,6 +1,7 @@
 import { queryOptions } from "@tanstack/react-query";
 
 import { apiRequest } from "./client";
+import { ACTIVE_JOB_POLL_INTERVAL_MS } from "./polling";
 import type {
   AuthConfig,
   AdminUsageSummary,
@@ -126,6 +127,6 @@ export function libraryQuery(query: string) {
     queryFn: () => apiRequest<LibraryList>(`/api/v1/library/papers?q=${encodeURIComponent(query)}&mode=hybrid`),
     refetchInterval: (state) => state.state.data?.items.some((paper) =>
       ["queued", "building"].includes(paper.index_status?.fulltext || "")
-    ) ? 1200 : false,
+    ) ? ACTIVE_JOB_POLL_INTERVAL_MS : false,
   });
 }

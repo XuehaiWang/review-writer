@@ -22,6 +22,7 @@ from review_writer_api.errors import (
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
 from review_writer_api.workflow_models import LibraryArtifact
 from review_writer_api.workspaces import HostedWorkspaceManager
+from review_writer_api.persistent_storage import LocalPersistentStorage, PersistentStorage
 
 
 @dataclass(frozen=True)
@@ -35,9 +36,11 @@ class ArtifactService:
         self,
         repository: WorkflowRepository,
         workspace_manager: HostedWorkspaceManager,
+        storage: PersistentStorage | None = None,
     ):
         self.repository = repository
         self.workspace_manager = workspace_manager
+        self.storage = storage or LocalPersistentStorage()
 
     @staticmethod
     def _safe_relative(value: str, *, label: str) -> PurePosixPath:
@@ -189,13 +192,8 @@ class ArtifactService:
             raise WorkflowValidationError(
                 "Artifact destination escaped the project workspace."
             ) from exc
-        destination.parent.mkdir(parents=True, exist_ok=False)
-        if source.stat().st_dev != destination.parent.stat().st_dev:
-            raise WorkflowValidationError(
-                "Staging and artifact directories must use the same filesystem."
-            )
-        stat = source.stat()
-        source.replace(destination)
+        self.repository.require_bound_job_lease()
+        stat = self.storage.commit_staged(source, destination)
         relative_path = destination.relative_to(project_root).as_posix()
         try:
             return self.repository.publish_artifact(
@@ -209,8 +207,8 @@ class ArtifactService:
                 relative_path=relative_path,
                 content_sha256=digest,
                 lineage_sha256=lineage_sha256,
-                size_bytes=stat.st_size,
-                mtime_ns=stat.st_mtime_ns,
+                size_bytes=stat.size_bytes,
+                mtime_ns=stat.mtime_ns,
                 producer_stage=producer_stage,
                 producer_run_id=run_id,
                 metadata=artifact_metadata,
@@ -229,6 +227,11 @@ class ArtifactService:
                 lineage_sha256,
             )
             if existing is None:
+                destination.unlink(missing_ok=True)
+                try:
+                    destination.parent.rmdir()
+                except OSError:
+                    pass
                 raise
             destination.unlink(missing_ok=True)
             try:
@@ -240,6 +243,15 @@ class ArtifactService:
                     user_id, project_id, logical.as_posix(), existing.id
                 )
             return existing
+        except Exception:
+            # A lease loss or database failure must not expose unpublished
+            # bytes as a usable artifact.
+            destination.unlink(missing_ok=True)
+            try:
+                destination.parent.rmdir()
+            except OSError:
+                pass
+            raise
 
     def resolve_owned_artifact(self, user_id: str, artifact_id: str) -> ResolvedArtifact:
         owned = self.repository.get_artifact(user_id, artifact_id)
@@ -262,7 +274,7 @@ class ArtifactService:
                     library.relative_path, label="Stored Library artifact path"
                 )
                 user_root = self.workspace_manager.user_root(user_id)
-                path = (user_root / Path(*relative.parts)).resolve()
+                path = self.storage.resolve(user_root, Path(*relative.parts))
                 try:
                     path.relative_to(user_root)
                 except ValueError as exc:
@@ -293,7 +305,7 @@ class ArtifactService:
             owned.artifact.relative_path, label="Stored artifact path"
         )
         project_root = self.workspace_manager.project_path(user_id, owned.project_slug)
-        path = (project_root / Path(*relative.parts)).resolve()
+        path = self.storage.resolve(project_root, Path(*relative.parts))
         try:
             path.relative_to(project_root)
         except ValueError as exc:
@@ -313,12 +325,7 @@ class ArtifactService:
             return None
         user_root = self.workspace_manager.user_root(user_id)
         trash_root = self._secure_storage_root(user_root, ".trash")
-        if source.stat().st_dev != trash_root.stat().st_dev:
-            raise WorkflowValidationError(
-                "Project workspace and trash must use the same filesystem."
-            )
         destination = (trash_root / f"{project_slug}-{uuid.uuid4()}").resolve()
         if destination.parent != trash_root:
             raise WorkflowValidationError("Project trash path escaped the user workspace.")
-        source.replace(destination)
-        return destination
+        return self.storage.trash(source, destination)

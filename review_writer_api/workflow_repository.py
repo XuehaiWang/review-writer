@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import aliased
 
 from review_writer_api.database import Project, database_session, utc_now
 from review_writer_api.errors import (
@@ -20,6 +21,8 @@ from review_writer_api.errors import (
     WorkflowValidationError,
 )
 from review_writer_api.workflow_contracts import INTERNAL_STAGES, current_user_stage
+from review_writer_api.job_queues import queue_for_job_type
+from review_writer_api.job_lease_context import active_job_lease
 from review_writer_api.workflow_models import (
     WorkflowApproval,
     WorkflowArtifact,
@@ -56,6 +59,7 @@ class JobRecord:
     project_id: str | None
     scope: str
     job_type: str
+    queue_name: str
     status: str
     idempotency_scope_key: str
     idempotency_key: str
@@ -67,6 +71,12 @@ class JobRecord:
     error_code: str
     error_message: str
     retry_of_job_id: str | None
+    lease_owner: str
+    lease_token: str | None
+    lease_generation: int
+    lease_expires_at: datetime | None
+    last_heartbeat_at: datetime | None
+    attempt_count: int
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None
@@ -199,6 +209,7 @@ class WorkflowRepository:
             project_id=str(job.project_id) if job.project_id else None,
             scope=job.scope,
             job_type=job.job_type,
+            queue_name=job.queue_name,
             status=job.status,
             idempotency_scope_key=job.idempotency_scope_key,
             idempotency_key=job.idempotency_key,
@@ -210,6 +221,12 @@ class WorkflowRepository:
             error_code=job.error_code,
             error_message=job.error_message,
             retry_of_job_id=(str(job.retry_of_job_id) if job.retry_of_job_id else None),
+            lease_owner=job.lease_owner,
+            lease_token=str(job.lease_token) if job.lease_token else None,
+            lease_generation=job.lease_generation,
+            lease_expires_at=job.lease_expires_at,
+            last_heartbeat_at=job.last_heartbeat_at,
+            attempt_count=job.attempt_count,
             created_at=job.created_at,
             updated_at=job.updated_at,
             started_at=job.started_at,
@@ -1066,6 +1083,7 @@ class WorkflowRepository:
             for logical_name, artifact_id in artifact_ids.items()
         }
         with database_session(self.session_factory) as session:
+            self._require_bound_job_lease(session)
             project = session.scalar(
                 select(Project)
                 .where(
@@ -1415,6 +1433,7 @@ class WorkflowRepository:
                     project_id=project_uuid,
                     scope=normalized_scope,
                     job_type=normalized_job_type,
+                    queue_name=queue_for_job_type(normalized_job_type),
                     status="queued",
                     idempotency_scope_key=scope_key,
                     idempotency_key=normalized_idempotency_key,
@@ -1660,6 +1679,7 @@ class WorkflowRepository:
         )
         try:
             with database_session(self.session_factory) as session:
+                self._require_bound_job_lease(session)
                 if self._owned_project(session, user_uuid, project_uuid) is None:
                     raise WorkflowNotFound("Project not found.")
                 if run_uuid is not None:
@@ -1735,6 +1755,7 @@ class WorkflowRepository:
         project_uuid = self._uuid(project_id, not_found_message="Artifact not found.")
         artifact_uuid = self._uuid(artifact_id, not_found_message="Artifact not found.")
         with database_session(self.session_factory) as session:
+            self._require_bound_job_lease(session)
             if self._owned_project(session, user_uuid, project_uuid) is None:
                 raise WorkflowNotFound("Artifact not found.")
             artifact = session.scalar(
@@ -1942,14 +1963,252 @@ class WorkflowRepository:
             session.flush()
             return self._migration_record(migration)
 
-    def claim_job(self, job_id: str) -> JobRecord | None:
-        job_uuid = self._uuid(job_id, not_found_message="Job not found.")
-        now = utc_now()
+    @staticmethod
+    def _database_now(session) -> datetime:
+        """Use the database clock for production lease decisions."""
+
+        if session.get_bind().dialect.name == "postgresql":
+            return session.scalar(select(func.now()))
+        # SQLite is retained only for isolated tests; its timestamp functions
+        # lose timezone information, so use the process clock there.
+        return utc_now()
+
+    def _require_bound_job_lease(self, session) -> None:
+        lease = active_job_lease()
+        if lease is None:
+            return
+        now = self._database_now(session)
+        owned = session.scalar(
+            select(WorkflowJob.id).where(
+                *self._lease_matches(
+                    uuid.UUID(lease.job_id),
+                    lease.lease_token,
+                    lease.lease_generation,
+                    now,
+                ),
+                WorkflowJob.status == "running",
+                WorkflowJob.cancellation_requested.is_(False),
+            )
+        )
+        if owned is None:
+            raise WorkflowConflict(
+                "The worker job lease was lost before workflow publication.",
+                details={
+                    "job_id": lease.job_id,
+                    "lease_generation": lease.lease_generation,
+                },
+            )
+
+    def require_bound_job_lease(self) -> None:
+        """Fence a filesystem commit immediately before bytes are moved."""
+
         with database_session(self.session_factory) as session:
+            self._require_bound_job_lease(session)
+
+    @staticmethod
+    def _lease_matches(
+        job_id: uuid.UUID,
+        lease_token: str | None,
+        lease_generation: int | None,
+        now: datetime,
+    ) -> list[Any]:
+        bound = active_job_lease()
+        if bound is not None and bound.job_id == str(job_id):
+            lease_token = lease_token or bound.lease_token
+            if lease_generation is None:
+                lease_generation = bound.lease_generation
+        predicates: list[Any] = [
+            WorkflowJob.id == job_id,
+            WorkflowJob.lease_expires_at.is_not(None),
+            WorkflowJob.lease_expires_at > now,
+        ]
+        if lease_token is not None:
+            predicates.append(WorkflowJob.lease_token == uuid.UUID(str(lease_token)))
+        if lease_generation is not None:
+            predicates.append(WorkflowJob.lease_generation == int(lease_generation))
+        return predicates
+
+    @staticmethod
+    def _apply_claim(
+        job: WorkflowJob,
+        *,
+        owner: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> None:
+        job.status = "running"
+        job.cancellation_requested = False
+        job.lease_owner = str(owner)[:128]
+        job.lease_token = uuid.uuid4()
+        job.lease_generation = int(job.lease_generation or 0) + 1
+        job.lease_expires_at = now + timedelta(seconds=max(15, int(lease_seconds)))
+        job.last_heartbeat_at = now
+        job.attempt_count = int(job.attempt_count or 0) + 1
+        job.started_at = job.started_at or now
+        job.finished_at = None
+        job.updated_at = now
+
+    def claim_job(
+        self,
+        job_id: str,
+        *,
+        owner: str = "legacy-executor",
+        lease_seconds: int = 300,
+    ) -> JobRecord | None:
+        """Claim one known queued job; retained for the in-process compatibility executor."""
+
+        job_uuid = self._uuid(job_id, not_found_message="Job not found.")
+        with database_session(self.session_factory) as session:
+            query = select(WorkflowJob).where(
+                WorkflowJob.id == job_uuid,
+                WorkflowJob.status == "queued",
+            )
+            if session.get_bind().dialect.name == "postgresql":
+                query = query.with_for_update(skip_locked=True)
+            job = session.scalar(query)
+            if job is None:
+                return None
+            now = self._database_now(session)
+            self._apply_claim(job, owner=owner, now=now, lease_seconds=lease_seconds)
+            session.flush()
+            return self._job_record(job)
+
+    def claim_next_job(
+        self,
+        *,
+        owner: str,
+        lease_seconds: int = 300,
+        job_types: set[str] | None = None,
+    ) -> JobRecord | None:
+        """Atomically claim the next fair, runnable job with ``SKIP LOCKED``.
+
+        At most one live lease per user and queue is admitted. An expired
+        running job may be reclaimed with a higher fencing generation; the old
+        worker can no longer mutate it.
+        """
+
+        normalized_owner = str(owner or "").strip()
+        if not normalized_owner:
+            raise WorkflowValidationError("A worker lease owner is required.")
+        with database_session(self.session_factory) as session:
+            now = self._database_now(session)
+            session.execute(
+                update(WorkflowJob)
+                .where(
+                    WorkflowJob.status == "cancel_requested",
+                    WorkflowJob.lease_expires_at.is_not(None),
+                    WorkflowJob.lease_expires_at <= now,
+                )
+                .values(
+                    status="cancelled",
+                    finished_at=now,
+                    updated_at=now,
+                    lease_owner="",
+                    lease_token=None,
+                    lease_expires_at=None,
+                )
+            )
+            active = aliased(WorkflowJob)
+            eligible = or_(
+                WorkflowJob.status == "queued",
+                and_(
+                    WorkflowJob.status == "running",
+                    WorkflowJob.cancellation_requested.is_(False),
+                    WorkflowJob.lease_expires_at.is_not(None),
+                    WorkflowJob.lease_expires_at <= now,
+                ),
+            )
+            another_live_lease = exists(
+                select(active.id).where(
+                    active.id != WorkflowJob.id,
+                    active.user_id == WorkflowJob.user_id,
+                    active.queue_name == WorkflowJob.queue_name,
+                    active.status.in_(("running", "cancel_requested")),
+                    active.lease_expires_at.is_not(None),
+                    active.lease_expires_at > now,
+                )
+            )
+            query = select(WorkflowJob).where(eligible, ~another_live_lease)
+            if job_types is not None:
+                if not job_types:
+                    return None
+                query = query.where(WorkflowJob.job_type.in_(sorted(job_types)))
+            query = query.order_by(
+                WorkflowJob.created_at.asc(), WorkflowJob.id.asc()
+            ).limit(1)
+            if session.get_bind().dialect.name == "postgresql":
+                query = query.with_for_update(skip_locked=True)
+            job = session.scalar(query)
+            if job is None:
+                return None
+            self._apply_claim(
+                job,
+                owner=normalized_owner,
+                now=now,
+                lease_seconds=lease_seconds,
+            )
+            session.flush()
+            return self._job_record(job)
+
+    def renew_job_lease(
+        self,
+        job_id: str,
+        *,
+        lease_token: str,
+        lease_generation: int,
+        lease_seconds: int = 300,
+    ) -> JobRecord | None:
+        job_uuid = self._uuid(job_id, not_found_message="Job not found.")
+        with database_session(self.session_factory) as session:
+            now = self._database_now(session)
             job = session.scalar(
                 update(WorkflowJob)
-                .where(WorkflowJob.id == job_uuid, WorkflowJob.status == "queued")
-                .values(status="running", started_at=now, updated_at=now)
+                .where(
+                    *self._lease_matches(
+                        job_uuid, lease_token, lease_generation, now
+                    ),
+                    WorkflowJob.status.in_(("running", "cancel_requested")),
+                )
+                .values(
+                    lease_expires_at=now
+                    + timedelta(seconds=max(15, int(lease_seconds))),
+                    last_heartbeat_at=now,
+                    updated_at=now,
+                )
+                .returning(WorkflowJob)
+            )
+            return self._job_record(job) if job else None
+
+    def release_job_lease(
+        self,
+        job_id: str,
+        *,
+        lease_token: str,
+        lease_generation: int,
+    ) -> JobRecord | None:
+        """Return a gracefully interrupted worker job to the queue."""
+
+        job_uuid = self._uuid(job_id, not_found_message="Job not found.")
+        with database_session(self.session_factory) as session:
+            now = self._database_now(session)
+            job = session.scalar(
+                update(WorkflowJob)
+                .where(
+                    *self._lease_matches(
+                        job_uuid, lease_token, lease_generation, now
+                    ),
+                    WorkflowJob.status == "running",
+                    WorkflowJob.cancellation_requested.is_(False),
+                )
+                .values(
+                    status="queued",
+                    lease_owner="",
+                    lease_token=None,
+                    lease_expires_at=None,
+                    error_code="",
+                    error_message="",
+                    updated_at=now,
+                )
                 .returning(WorkflowJob)
             )
             return self._job_record(job) if job else None
@@ -1963,6 +2222,22 @@ class WorkflowRepository:
                 query = query.where(WorkflowJob.job_type.in_(sorted(job_types)))
             jobs = session.scalars(query.order_by(WorkflowJob.created_at.asc())).all()
             return [self._job_record(job) for job in jobs]
+
+    def job_queue_counts(self) -> dict[str, dict[str, int]]:
+        """Small operational snapshot for worker heartbeats and structured logs."""
+
+        with database_session(self.session_factory) as session:
+            rows = session.execute(
+                select(
+                    WorkflowJob.queue_name,
+                    WorkflowJob.status,
+                    func.count(WorkflowJob.id),
+                ).group_by(WorkflowJob.queue_name, WorkflowJob.status)
+            ).all()
+        result: dict[str, dict[str, int]] = {}
+        for queue_name, status, count in rows:
+            result.setdefault(str(queue_name), {})[str(status)] = int(count or 0)
+        return result
 
     def request_job_cancellation(self, user_id: str, job_id: str) -> JobRecord | None:
         user_uuid = self._uuid(user_id, not_found_message="Job not found.")
@@ -2022,7 +2297,13 @@ class WorkflowRepository:
             )
 
     def update_job_progress(
-        self, job_id: str, current: int, total: int
+        self,
+        job_id: str,
+        current: int,
+        total: int,
+        *,
+        lease_token: str | None = None,
+        lease_generation: int | None = None,
     ) -> JobRecord | None:
         job_uuid = self._uuid(job_id, not_found_message="Job not found.")
         safe_total = max(0, int(total))
@@ -2030,48 +2311,67 @@ class WorkflowRepository:
         if safe_total:
             safe_current = min(safe_current, safe_total)
         with database_session(self.session_factory) as session:
+            now = self._database_now(session)
             job = session.scalar(
                 update(WorkflowJob)
                 .where(
-                    WorkflowJob.id == job_uuid,
+                    *self._lease_matches(
+                        job_uuid, lease_token, lease_generation, now
+                    ),
                     WorkflowJob.status == "running",
                     WorkflowJob.cancellation_requested.is_(False),
                 )
                 .values(
                     progress_current=safe_current,
                     progress_total=safe_total,
-                    updated_at=utc_now(),
+                    updated_at=now,
                 )
                 .returning(WorkflowJob)
             )
             return self._job_record(job) if job else None
 
     def update_job_result(
-        self, job_id: str, result: dict[str, Any]
+        self,
+        job_id: str,
+        result: dict[str, Any],
+        *,
+        lease_token: str | None = None,
+        lease_generation: int | None = None,
     ) -> JobRecord | None:
         """Persist an incremental result without changing terminal job state."""
 
         job_uuid = self._uuid(job_id, not_found_message="Job not found.")
         with database_session(self.session_factory) as session:
+            now = self._database_now(session)
             job = session.scalar(
                 update(WorkflowJob)
                 .where(
-                    WorkflowJob.id == job_uuid,
+                    *self._lease_matches(
+                        job_uuid, lease_token, lease_generation, now
+                    ),
                     WorkflowJob.status.in_(("running", "cancel_requested")),
                 )
-                .values(result_json=dict(result or {}), updated_at=utc_now())
+                .values(result_json=dict(result or {}), updated_at=now)
                 .returning(WorkflowJob)
             )
             return self._job_record(job) if job else None
 
-    def mark_job_interrupted(self, job_id: str) -> JobRecord | None:
+    def mark_job_interrupted(
+        self,
+        job_id: str,
+        *,
+        lease_token: str | None = None,
+        lease_generation: int | None = None,
+    ) -> JobRecord | None:
         job_uuid = self._uuid(job_id, not_found_message="Job not found.")
-        now = utc_now()
         with database_session(self.session_factory) as session:
+            now = self._database_now(session)
             job = session.scalar(
                 update(WorkflowJob)
                 .where(
-                    WorkflowJob.id == job_uuid,
+                    *self._lease_matches(
+                        job_uuid, lease_token, lease_generation, now
+                    ),
                     WorkflowJob.status.in_(("running", "cancel_requested")),
                 )
                 .values(
@@ -2080,21 +2380,31 @@ class WorkflowRepository:
                     error_message="The server stopped while this job was running.",
                     updated_at=now,
                     finished_at=now,
+                    lease_owner="",
+                    lease_token=None,
+                    lease_expires_at=None,
                 )
                 .returning(WorkflowJob)
             )
             return self._job_record(job) if job else None
 
     def mark_job_succeeded(
-        self, job_id: str, result: dict[str, Any] | None = None
+        self,
+        job_id: str,
+        result: dict[str, Any] | None = None,
+        *,
+        lease_token: str | None = None,
+        lease_generation: int | None = None,
     ) -> JobRecord | None:
         job_uuid = self._uuid(job_id, not_found_message="Job not found.")
-        now = utc_now()
         with database_session(self.session_factory) as session:
+            now = self._database_now(session)
             job = session.scalar(
                 update(WorkflowJob)
                 .where(
-                    WorkflowJob.id == job_uuid,
+                    *self._lease_matches(
+                        job_uuid, lease_token, lease_generation, now
+                    ),
                     WorkflowJob.status.in_(("running", "cancel_requested")),
                 )
                 .values(
@@ -2105,21 +2415,38 @@ class WorkflowRepository:
                     error_message="",
                     updated_at=now,
                     finished_at=now,
+                    lease_owner="",
+                    lease_token=None,
+                    lease_expires_at=None,
                 )
                 .returning(WorkflowJob)
             )
             return self._job_record(job) if job else None
 
-    def mark_job_cancelled(self, job_id: str) -> JobRecord | None:
+    def mark_job_cancelled(
+        self,
+        job_id: str,
+        *,
+        lease_token: str | None = None,
+        lease_generation: int | None = None,
+    ) -> JobRecord | None:
         job_uuid = self._uuid(job_id, not_found_message="Job not found.")
-        now = utc_now()
         with database_session(self.session_factory) as session:
+            now = self._database_now(session)
+            predicates: list[Any] = [
+                WorkflowJob.id == job_uuid,
+                WorkflowJob.status.in_(("queued", "running", "cancel_requested")),
+            ]
+            if lease_token is not None or lease_generation is not None:
+                predicates = [
+                    *self._lease_matches(
+                        job_uuid, lease_token, lease_generation, now
+                    ),
+                    WorkflowJob.status.in_(("running", "cancel_requested")),
+                ]
             job = session.scalar(
                 update(WorkflowJob)
-                .where(
-                    WorkflowJob.id == job_uuid,
-                    WorkflowJob.status.in_(("queued", "running", "cancel_requested")),
-                )
+                .where(*predicates)
                 .values(
                     status="cancelled",
                     cancellation_requested=True,
@@ -2127,21 +2454,32 @@ class WorkflowRepository:
                     error_message="",
                     updated_at=now,
                     finished_at=now,
+                    lease_owner="",
+                    lease_token=None,
+                    lease_expires_at=None,
                 )
                 .returning(WorkflowJob)
             )
             return self._job_record(job) if job else None
 
     def mark_job_failed(
-        self, job_id: str, *, error_code: str, error_message: str
+        self,
+        job_id: str,
+        *,
+        error_code: str,
+        error_message: str,
+        lease_token: str | None = None,
+        lease_generation: int | None = None,
     ) -> JobRecord | None:
         job_uuid = self._uuid(job_id, not_found_message="Job not found.")
-        now = utc_now()
         with database_session(self.session_factory) as session:
+            now = self._database_now(session)
             job = session.scalar(
                 update(WorkflowJob)
                 .where(
-                    WorkflowJob.id == job_uuid,
+                    *self._lease_matches(
+                        job_uuid, lease_token, lease_generation, now
+                    ),
                     WorkflowJob.status == "running",
                     WorkflowJob.cancellation_requested.is_(False),
                 )
@@ -2151,6 +2489,9 @@ class WorkflowRepository:
                     error_message=str(error_message or "Job execution failed."),
                     updated_at=now,
                     finished_at=now,
+                    lease_owner="",
+                    lease_token=None,
+                    lease_expires_at=None,
                 )
                 .returning(WorkflowJob)
             )
@@ -2168,6 +2509,9 @@ class WorkflowRepository:
                     error_message="The server stopped while this job was running.",
                     updated_at=now,
                     finished_at=now,
+                    lease_owner="",
+                    lease_token=None,
+                    lease_expires_at=None,
                 )
             )
             return int(result.rowcount or 0)

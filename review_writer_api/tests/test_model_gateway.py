@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 import uuid
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest import mock
@@ -18,7 +19,7 @@ from sqlalchemy.pool import StaticPool
 
 from review_writer_api.billing import BillingService
 from review_writer_api.config import ApiSettings
-from review_writer_api.database import Base, Project, User, database_session
+from review_writer_api.database import Base, Project, User, database_session, utc_now
 from review_writer_api.model_catalog import resolve_model_tier
 from review_writer_api.model_gateway import (
     InvalidTaskToken,
@@ -147,6 +148,28 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("luna", updated.model_tier)
         self.assertEqual("luna", claims.model_tier)
+
+    def test_worker_token_is_bound_to_current_lease_generation(self) -> None:
+        lease_token = uuid.uuid4()
+        with database_session(self.sessions) as session:
+            job = session.get(WorkflowJob, self.job_id)
+            job.lease_token = lease_token
+            job.lease_generation = 4
+            job.lease_expires_at = utc_now() + timedelta(minutes=5)
+        token = self.service.issue_leased_task_token(
+            job_id=str(self.job_id),
+            lease_token=str(lease_token),
+            lease_generation=4,
+        )
+        claims = self.service.verify_task_token(token)
+        self.service._validate_live_job(claims)
+        self.assertEqual(str(lease_token), claims.lease_token)
+        self.assertEqual(4, claims.lease_generation)
+
+        with database_session(self.sessions) as session:
+            session.get(WorkflowJob, self.job_id).lease_generation = 5
+        with self.assertRaises(InvalidTaskToken):
+            self.service._validate_live_job(claims)
 
     async def test_success_is_metered_and_same_request_is_replayed(self) -> None:
         provider_result = {

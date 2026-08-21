@@ -17,6 +17,7 @@ from review_writer_api.errors import (
     WorkflowValidationError,
 )
 from review_writer_api.security import Permission, Principal
+from review_writer_api.job_lease_context import bind_job_lease
 from review_writer_api.workflow_repository import JobRecord, WorkflowRepository
 
 
@@ -29,6 +30,10 @@ class JobCancellationRequested(Exception):
 
 class JobShutdownRequested(Exception):
     """Internal shutdown signal recorded as interrupted rather than cancelled."""
+
+
+class JobLeaseLost(Exception):
+    """The current executor no longer owns the PostgreSQL fencing lease."""
 
 
 class JobHandler(Protocol):
@@ -52,6 +57,12 @@ class JobContext:
         self.scope = job.scope
         self.job_type = job.job_type
         self.retry_of_job_id = job.retry_of_job_id
+        self.lease_token = job.lease_token
+        self.lease_generation = job.lease_generation
+        self._lease_lost = threading.Event()
+
+    def mark_lease_lost(self) -> None:
+        self._lease_lost.set()
 
     def cancellation_requested(self) -> bool:
         return self.shutting_down() or self.repository.job_cancellation_requested(
@@ -62,6 +73,8 @@ class JobContext:
         return self._shutdown_event.is_set()
 
     def checkpoint(self) -> None:
+        if self._lease_lost.is_set():
+            raise JobLeaseLost()
         if self.shutting_down():
             raise JobShutdownRequested()
         if self.repository.job_cancellation_requested(self.job_id):
@@ -69,12 +82,23 @@ class JobContext:
 
     def report_progress(self, current: int, total: int) -> JobRecord | None:
         self.checkpoint()
-        return self.repository.update_job_progress(self.job_id, current, total)
+        return self.repository.update_job_progress(
+            self.job_id,
+            current,
+            total,
+            lease_token=self.lease_token,
+            lease_generation=self.lease_generation,
+        )
 
     def report_partial_result(self, result: dict[str, Any]) -> JobRecord | None:
         # Do not checkpoint first: a just-completed item must remain observable
         # even when cancellation arrives between artifact publication and here.
-        return self.repository.update_job_result(self.job_id, result)
+        return self.repository.update_job_result(
+            self.job_id,
+            result,
+            lease_token=self.lease_token,
+            lease_generation=self.lease_generation,
+        )
 
 
 class JobService:
@@ -88,10 +112,12 @@ class JobService:
         *,
         max_workers: int = 2,
         shutdown_grace_seconds: float = 5.0,
+        execution_enabled: bool = True,
     ):
         self.repository = repository
         self.max_workers = max(1, min(int(max_workers), 16))
         self.shutdown_grace_seconds = max(0.0, float(shutdown_grace_seconds))
+        self.execution_enabled = bool(execution_enabled)
         self._handlers: dict[str, JobHandler] = {}
         self._executor: DaemonWorkerPool | None = None
         self._futures: dict[str, Future] = {}
@@ -113,11 +139,21 @@ class JobService:
                 )
             self._handlers[normalized] = handler
 
+    @property
+    def handlers(self) -> dict[str, JobHandler]:
+        """Return a snapshot used by the independent worker bootstrap."""
+
+        with self._lock:
+            return dict(self._handlers)
+
     def start(self) -> int:
         with self._lock:
             if self._started:
                 return 0
             self._shutdown_event = threading.Event()
+            if not self.execution_enabled:
+                self._started = True
+                return 0
             interrupted = self.repository.mark_running_jobs_interrupted()
             self._executor = DaemonWorkerPool(
                 self.max_workers,
@@ -133,6 +169,8 @@ class JobService:
         with self._lock:
             executor = self._executor
             if executor is None:
+                self._started = False
+                self._shutdown_event.set()
                 return
             self._executor = None
             self._started = False
@@ -253,7 +291,11 @@ class JobService:
             self._futures.pop(job_id, None)
 
     def _execute(self, job_id: str) -> None:
-        claimed = self.repository.claim_job(job_id)
+        claimed = self.repository.claim_job(
+            job_id,
+            owner="api-compatibility-executor",
+            lease_seconds=8 * 60 * 60,
+        )
         if claimed is None:
             return
         with self._lock:
@@ -269,19 +311,57 @@ class JobService:
 
         try:
             context.checkpoint()
-            result = handler(context, dict(claimed.payload or {}))
-            completed = self.repository.mark_job_succeeded(
-                claimed.id, dict(result or {})
-            )
+            with bind_job_lease(
+                context.job_id, context.lease_token, context.lease_generation
+            ):
+                result = handler(context, dict(claimed.payload or {}))
+            try:
+                completed = self.repository.mark_job_succeeded(
+                    claimed.id,
+                    dict(result or {}),
+                    lease_token=context.lease_token,
+                    lease_generation=context.lease_generation,
+                )
+            except TypeError as exc:
+                # Preserve compatibility with deployment/test wrappers created
+                # against the pre-P0 two-argument callback signature. The
+                # repository still requires a live lease before committing.
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                completed = self.repository.mark_job_succeeded(
+                    claimed.id, dict(result or {})
+                )
             if completed is None and context.cancellation_requested():
                 if context.shutting_down():
-                    self.repository.mark_job_interrupted(claimed.id)
+                    self.repository.mark_job_interrupted(
+                        claimed.id,
+                        lease_token=context.lease_token,
+                        lease_generation=context.lease_generation,
+                    )
                 else:
-                    self.repository.mark_job_cancelled(claimed.id)
+                    self.repository.mark_job_cancelled(
+                        claimed.id,
+                        lease_token=context.lease_token,
+                        lease_generation=context.lease_generation,
+                    )
         except JobShutdownRequested:
-            self.repository.mark_job_interrupted(claimed.id)
+            self.repository.mark_job_interrupted(
+                claimed.id,
+                lease_token=context.lease_token,
+                lease_generation=context.lease_generation,
+            )
+        except JobLeaseLost:
+            LOGGER.warning(
+                "Workflow job lease was lost; stale executor stopped (job_id=%s, generation=%s)",
+                claimed.id,
+                context.lease_generation,
+            )
         except JobCancellationRequested:
-            self.repository.mark_job_cancelled(claimed.id)
+            self.repository.mark_job_cancelled(
+                claimed.id,
+                lease_token=context.lease_token,
+                lease_generation=context.lease_generation,
+            )
         except WorkflowError as exc:
             self._finish_failure(
                 context,
@@ -312,18 +392,36 @@ class JobService:
         error_message: str,
     ) -> None:
         if context.shutting_down():
-            self.repository.mark_job_interrupted(context.job_id)
+            self.repository.mark_job_interrupted(
+                context.job_id,
+                lease_token=context.lease_token,
+                lease_generation=context.lease_generation,
+            )
             return
         if self.repository.job_cancellation_requested(context.job_id):
-            self.repository.mark_job_cancelled(context.job_id)
+            self.repository.mark_job_cancelled(
+                context.job_id,
+                lease_token=context.lease_token,
+                lease_generation=context.lease_generation,
+            )
             return
         failed = self.repository.mark_job_failed(
             context.job_id,
             error_code=error_code,
             error_message=error_message,
+            lease_token=context.lease_token,
+            lease_generation=context.lease_generation,
         )
         if failed is None:
             if context.shutting_down():
-                self.repository.mark_job_interrupted(context.job_id)
+                self.repository.mark_job_interrupted(
+                    context.job_id,
+                    lease_token=context.lease_token,
+                    lease_generation=context.lease_generation,
+                )
             elif self.repository.job_cancellation_requested(context.job_id):
-                self.repository.mark_job_cancelled(context.job_id)
+                self.repository.mark_job_cancelled(
+                    context.job_id,
+                    lease_token=context.lease_token,
+                    lease_generation=context.lease_generation,
+                )

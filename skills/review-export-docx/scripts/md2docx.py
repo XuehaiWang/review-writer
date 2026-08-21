@@ -28,6 +28,7 @@ import argparse
 import hashlib
 import json
 import re
+import sys
 from copy import deepcopy  # noqa: F401
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,6 +41,24 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement, parse_xml  # noqa: F401
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
+
+_BOOTSTRAP_ROOT = next(
+    (
+        parent
+        for parent in Path(__file__).resolve().parents
+        if (parent / "review_writer_core").is_dir()
+    ),
+    None,
+)
+if _BOOTSTRAP_ROOT is None:
+    raise RuntimeError("Could not locate the Review Writer workspace")
+if str(_BOOTSTRAP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BOOTSTRAP_ROOT))
+
+from review_writer_core.markdown_images import parse_markdown_image  # noqa: E402
+from review_writer_core.publication_caption import (  # noqa: E402
+    repair_publication_ocr_splits,
+)
 
 try:
     from latex2word import LatexToWordElement
@@ -743,7 +762,6 @@ _UL_RE         = re.compile(r"^(\s*)[-*+]\s+(.*)")
 _OL_RE         = re.compile(r"^(\s*)\d+[.)]\s+(.*)")
 _FENCE_RE      = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 _MATH_FENCE_RE = re.compile(r"^\$\$\s*$")
-_IMG_RE        = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$")
 _TABLE_ROW_RE  = re.compile(r"^\|.+")
 _HR_RE         = re.compile(r"^(?:-{3,}|_{3,}|\*{3,})\s*$")
 _REF_ENTRY_RE  = re.compile(r"^\[?\d+\]?[.)\s]|\[@[^\]]+\]:")
@@ -759,9 +777,11 @@ def _is_continuation(line: str) -> bool:
     if _AFFIL_START.match(line):
         return False
     for pat in (_HEADING_RE, _FENCE_RE, _TABLE_ROW_RE,
-                _UL_RE, _OL_RE, _HR_RE, _IMG_RE):
+                _UL_RE, _OL_RE, _HR_RE):
         if pat.match(line):
             return False
+    if parse_markdown_image(line) is not None:
+        return False
     return True
 
 
@@ -837,9 +857,9 @@ def tokenize(md_text: str) -> List[Block]:
             continue
 
         # Standalone image
-        m = _IMG_RE.match(line)
-        if m:
-            blocks.append(Block(kind="image", alt=m.group(1), path=m.group(2)))
+        image = parse_markdown_image(line)
+        if image is not None:
+            blocks.append(Block(kind="image", alt=image.alt, path=image.source))
             i += 1
             continue
 
@@ -1218,6 +1238,7 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
             "control character(s) before XML generation."
         )
     md_text = normalize_mineru_latex(md_text)
+    md_text = repair_publication_ocr_splits(md_text)
     # Workflow comments carry internal paragraph/figure identifiers.  They are
     # useful to the dashboard before export, but are never manuscript prose.
     # Strip all HTML comments before tokenizing so metadata cannot leak into

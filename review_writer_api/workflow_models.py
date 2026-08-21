@@ -338,6 +338,20 @@ class WorkflowJob(Base):
         ),
         Index("ix_workflow_jobs_user_status_created", "user_id", "status", "created_at"),
         Index("ix_workflow_jobs_project_type", "project_id", "job_type"),
+        Index(
+            "ix_workflow_jobs_claim",
+            "queue_name",
+            "status",
+            "lease_expires_at",
+            "created_at",
+        ),
+        Index(
+            "ix_workflow_jobs_user_queue_active",
+            "user_id",
+            "queue_name",
+            "status",
+            "lease_expires_at",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid)
@@ -350,6 +364,9 @@ class WorkflowJob(Base):
     )
     scope: Mapped[str] = mapped_column(String(64), nullable=False)
     job_type: Mapped[str] = mapped_column(String(96), nullable=False)
+    queue_name: Mapped[str] = mapped_column(
+        String(32), default="scientific", nullable=False
+    )
     status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
     idempotency_scope_key: Mapped[str] = mapped_column(
         String(255), default="_library_", nullable=False
@@ -365,6 +382,12 @@ class WorkflowJob(Base):
     retry_of_job_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("workflow_jobs.id", ondelete="SET NULL")
     )
+    lease_owner: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    lease_generation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False

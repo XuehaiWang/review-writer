@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
+import { ACTIVE_JOB_POLL_INTERVAL_MS } from "../../api/polling";
 import type { Job } from "../../api/types";
 import { ErrorState } from "../../components/ErrorState";
 import { ProjectSelector, useSelectedProject } from "../../components/ProjectSelector";
@@ -186,7 +187,7 @@ function FigureRedraw({ projectId, onBack }: { projectId: string; onBack: () => 
     refetchInterval: (query) => {
       const value = query.state.data;
       const active = jobIsActive(value?.batch_redraw.status) || Object.values(value?.figure_redraw_states || {}).some((state) => ["queued", "running", "retrying", "cancel_requested"].includes(String(state.status || "")));
-      return active ? 1000 : false;
+      return active ? ACTIVE_JOB_POLL_INTERVAL_MS : false;
     },
     refetchIntervalInBackground: true,
   });

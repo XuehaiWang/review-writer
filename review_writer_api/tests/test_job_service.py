@@ -135,6 +135,31 @@ class JobServiceTests(unittest.TestCase):
         self.assertEqual("succeeded", self._wait_for(first.id).status)
         self.assertEqual(1, calls)
 
+    def test_control_plane_mode_persists_job_without_executing_it(self) -> None:
+        service = job_service_class()(
+            self.repository, max_workers=1, execution_enabled=False
+        )
+        called = threading.Event()
+        service.register_handler(
+            "control-plane-only", lambda _context, _payload: called.set()
+        )
+        try:
+            service.start()
+            queued = service.submit(
+                self.principal,
+                scope="project",
+                project_id=self.project_id,
+                job_type="control-plane-only",
+                idempotency_key="control-plane-only",
+                payload={},
+            )
+            time.sleep(0.05)
+            current = service.status(self.principal, queued.id)
+            self.assertEqual("queued", current.status)
+            self.assertFalse(called.is_set())
+        finally:
+            service.shutdown(wait=True)
+
     def test_executor_is_bounded_and_persists_progress_and_success(self) -> None:
         active = 0
         maximum = 0

@@ -1105,6 +1105,107 @@ def _panel_whiteness(fig: Any, box: tuple[int, int, int, int]) -> float:
 _DETECT_GRID_COLS = 24
 _DETECT_GRID_ROWS = 16
 _DETECT_CELL_WHITENESS = 0.90
+_REFINE_STRIP_BAND = 3
+
+
+def _white_ratio_strip(image: Any, box: tuple[int, int, int, int]) -> float:
+    """Return the near-white ratio for a narrow RGB image strip."""
+    x0, y0, x1, y1 = box
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    crop = image.crop((x0, y0, x1, y1)).convert("RGB")
+    raw = crop.tobytes()
+    white = sum(
+        1
+        for offset in range(0, len(raw), 3)
+        if raw[offset] > 225 and raw[offset + 1] > 225 and raw[offset + 2] > 225
+    )
+    return white / max(1, len(raw) // 3)
+
+
+def _refine_panel_box(
+    fig: Any,
+    box: tuple[int, int, int, int],
+    *,
+    max_dx: int,
+    max_dy: int,
+    whiteness_threshold: float,
+) -> tuple[int, int, int, int]:
+    """Refine a coarse blank-panel box without crossing nearby content.
+
+    Blank-panel detection works on a deliberately coarse grid.  This bounded
+    strip scan recovers white space lost at cell boundaries and trims dirty
+    boundary strips, while never moving an edge by more than one grid cell.
+    """
+    scale = 2
+    small = fig.convert("RGB").resize(
+        (max(1, fig.width // scale), max(1, fig.height // scale))
+    )
+    x0, y0, x1, y1 = (int(round(value / scale)) for value in box)
+    limit_x = max(1, int(round(max_dx / scale)))
+    limit_y = max(1, int(round(max_dy / scale)))
+    threshold = max(0.0, min(1.0, whiteness_threshold))
+    band = _REFINE_STRIP_BAND
+
+    def _steps(limit: int) -> list[int]:
+        return [min(band, limit - offset) for offset in range(0, limit, band)]
+
+    # Expand into adjacent white strips, but only within the coarse-grid error
+    # budget so a page background cannot swallow neighbouring panels.
+    for step in _steps(limit_x):
+        candidate = max(0, x0 - step)
+        if candidate == x0 or _white_ratio_strip(small, (candidate, y0, x0, y1)) < threshold:
+            break
+        x0 = candidate
+    for step in _steps(limit_x):
+        candidate = min(small.width, x1 + step)
+        if candidate == x1 or _white_ratio_strip(small, (x1, y0, candidate, y1)) < threshold:
+            break
+        x1 = candidate
+    for step in _steps(limit_y):
+        candidate = max(0, y0 - step)
+        if candidate == y0 or _white_ratio_strip(small, (x0, candidate, x1, y0)) < threshold:
+            break
+        y0 = candidate
+    for step in _steps(limit_y):
+        candidate = min(small.height, y1 + step)
+        if candidate == y1 or _white_ratio_strip(small, (x0, y1, x1, candidate)) < threshold:
+            break
+        y1 = candidate
+
+    # If the coarse rectangle included a border glyph or coloured edge, trim
+    # only the affected boundary and keep the same one-cell movement cap.
+    for step in _steps(limit_x):
+        width = x1 - x0
+        probe = min(band, max(1, width // 3))
+        if width <= 2 or _white_ratio_strip(small, (x0, y0, x0 + probe, y1)) >= threshold:
+            break
+        x0 = min(x1 - 1, x0 + step)
+    for step in _steps(limit_x):
+        width = x1 - x0
+        probe = min(band, max(1, width // 3))
+        if width <= 2 or _white_ratio_strip(small, (x1 - probe, y0, x1, y1)) >= threshold:
+            break
+        x1 = max(x0 + 1, x1 - step)
+    for step in _steps(limit_y):
+        height = y1 - y0
+        probe = min(band, max(1, height // 3))
+        if height <= 2 or _white_ratio_strip(small, (x0, y0, x1, y0 + probe)) >= threshold:
+            break
+        y0 = min(y1 - 1, y0 + step)
+    for step in _steps(limit_y):
+        height = y1 - y0
+        probe = min(band, max(1, height // 3))
+        if height <= 2 or _white_ratio_strip(small, (x0, y1 - probe, x1, y1)) >= threshold:
+            break
+        y1 = max(y0 + 1, y1 - step)
+
+    return (
+        max(0, min(fig.width - 1, x0 * scale)),
+        max(0, min(fig.height - 1, y0 * scale)),
+        max(1, min(fig.width, x1 * scale)),
+        max(1, min(fig.height, y1 * scale)),
+    )
 
 
 def detect_blank_panel(fig: Any, min_area_fraction: float = 0.03,
@@ -1168,6 +1269,16 @@ def detect_blank_panel(fig: Any, min_area_fraction: float = 0.03,
         int(W * (right + 1) / _DETECT_GRID_COLS),
         int(H * (bottom + 1) / _DETECT_GRID_ROWS),
     )
+    box = _refine_panel_box(
+        fig,
+        box,
+        max_dx=max(1, W // _DETECT_GRID_COLS),
+        max_dy=max(1, H // _DETECT_GRID_ROWS),
+        whiteness_threshold=whiteness_threshold,
+    )
+    refined_fraction = ((box[2] - box[0]) * (box[3] - box[1])) / max(1, W * H)
+    if refined_fraction < min_area_fraction or refined_fraction > max_area_fraction:
+        return None
     if _panel_whiteness(fig, box) < whiteness_threshold:
         return None
     return box
@@ -1225,7 +1336,7 @@ def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layou
                 with Image.open(skeleton_path) as sk:
                     sk = sk.convert("RGB")
                     mask = sk.convert("L").point(lambda p: 255 if p < 245 else 0)
-                    bbox = mask.getbbox()
+                    bbox = _skeleton_content_bbox(mask)
                     if bbox:
                         sk = sk.crop(bbox)
 
@@ -1286,7 +1397,7 @@ def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layou
             sk = sk.convert("RGB")
             # Trim the skeleton's white margins so the molecule uses the panel space.
             mask = sk.convert("L").point(lambda p: 255 if p < 245 else 0)
-            bbox = mask.getbbox()
+            bbox = _skeleton_content_bbox(mask)
             if bbox:
                 sk = sk.crop(bbox)
             sk.thumbnail((x1 - x0 - 40, y1 - y0 - 40))
@@ -1491,6 +1602,37 @@ def _blob_stats(mask: Any, min_px: int) -> list[tuple[float, float, float, int, 
                 )
             )
     return stats
+
+
+def _skeleton_content_bbox(mask: Any) -> tuple[int, int, int, int] | None:
+    """Bound the molecular drawing while discarding isolated raster specks.
+
+    The main connected component anchors the molecule.  Smaller components are
+    retained when they are chemically meaningful in size or close enough to be
+    a detached atom/label; tiny distant artefacts are excluded.  The returned
+    maximum coordinates are exclusive, as required by ``PIL.Image.crop``.
+    """
+    stats = _blob_stats(mask, min_px=8)
+    if not stats:
+        return None
+    main = max(stats, key=lambda item: item[0])
+    main_area, main_cx, main_cy = main[:3]
+    proximity = max(12.0, math.hypot(mask.width, mask.height) * 0.30)
+    min_meaningful_area = max(8.0, main_area * 0.02)
+    kept = [
+        item
+        for item in stats
+        if item[0] >= min_meaningful_area
+        or math.hypot(item[1] - main_cx, item[2] - main_cy) <= proximity
+    ]
+    if not kept:
+        kept = [main]
+    return (
+        min(int(item[3]) for item in kept),
+        min(int(item[4]) for item in kept),
+        max(int(item[5]) for item in kept) + 1,
+        max(int(item[6]) for item in kept) + 1,
+    )
 
 
 def _count_blobs(mask: Any, min_px: int) -> int:
@@ -2149,6 +2291,37 @@ def is_chemistry_skeleton_project(features: dict[str, Any]) -> bool:
     return bool(str(features.get("skeleton_smiles") or "").strip())
 
 
+_COMMON_FIGURE_ELEMENT_SYMBOLS = frozenset(
+    {
+        "Li", "Na", "K", "Mg", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co",
+        "Ni", "Cu", "Zn", "Y", "Zr", "Nb", "Mo", "Ru", "Rh", "Pd", "Ag", "Cd",
+        "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg", "Al", "Ga", "In",
+        "Sn", "Bi", "B", "Si", "P", "S", "Se", "La", "Ce",
+    }
+)
+
+
+def _approved_figure_symbols(features: dict[str, Any]) -> list[str]:
+    """Return only project-supported symbols that the image model may render."""
+    approved: list[str] = []
+    for category in _clean_categories(features.get("metal_categories", [])):
+        token = str(category).strip()
+        if token in _COMMON_FIGURE_ELEMENT_SYMBOLS and token not in approved:
+            approved.append(token)
+
+    profile = str(features.get("taxonomy_profile") or "").strip().casefold()
+    chemistry_project = (
+        profile == "allene"
+        or profile.startswith("chemistry")
+        or bool(str(features.get("skeleton_smiles") or "").strip())
+    )
+    if chemistry_project:
+        for token in ("ee", "R1", "R2", "R3", "R4"):
+            if token not in approved:
+                approved.append(token)
+    return approved
+
+
 def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any],
                          composite_mode: bool = False) -> str:
     """Adapt the template prompt with review-specific content (fully generic).
@@ -2184,6 +2357,12 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any],
     metal_rows_text = _build_metal_rows_text(features)
     take_home_text = _build_take_home_text(features)
     approved_terms = _build_approved_terminology(features)
+    approved_symbols = _approved_figure_symbols(features)
+    symbol_clause = (
+        " or one of these project-approved symbols: " + ", ".join(approved_symbols)
+        if approved_symbols
+        else ""
+    )
 
     # Visual style description with dynamic term replacement
     visual_style_desc = _get_visual_style_description(template)
@@ -2279,7 +2458,8 @@ FORBIDDEN BEHAVIOR (strictly enforced):
 - Do not use placeholder-like pseudo-English or gibberish text.
 - Do not combine two approved phrases into a new unlisted phrase.
 - Do not repeat or truncate words.
-- Every word in the figure must be a correctly spelled English word from the approved list or a standard chemical symbol/abbreviation (Pd, Cu, Ni, ee, R1, R2, etc.).
+- Every word in the figure must be a correctly spelled English word from the approved list{symbol_clause}.
+- Do not render a metal name, element symbol, or category that is absent from the project categories and row labels above.
 """
     return base_prompt + adaptation
 

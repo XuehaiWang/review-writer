@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections import Counter
 from typing import Any
 
+from review_writer_core.markdown_images import (
+    malformed_markdown_image_lines,
+    parse_markdown_image,
+)
+from review_writer_core.publication_caption import repair_publication_ocr_splits
+
 
 SCHEMA_VERSION = 1
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
-IMAGE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$")
 ARTIFACT_IMAGE = re.compile(r"/api/v1/artifacts/([0-9a-fA-F-]{36})/content")
+INSERTED_FIGURE_METADATA = re.compile(
+    r"<!--\s*inserted_figure:\s*(\{.*?\})\s*-->", re.DOTALL
+)
 REFERENCE = re.compile(r"^\s*\[(\d+)\]\s*\.?\s+(.+?)\s*$")
 CITATION = re.compile(r"\[([0-9][0-9,;\s\-–—]*)\]")
 HTML_TAG = re.compile(r"</?[A-Za-z][^>]*>")
@@ -80,7 +89,7 @@ def _table_cells(line: str) -> list[str]:
 def _caption_text(line: str) -> str:
     stripped = line.strip()
     if len(stripped) >= 2 and stripped.startswith("*") and stripped.endswith("*"):
-        return stripped.strip("*").strip()
+        return repair_publication_ocr_splits(stripped.strip("*").strip())
     return ""
 
 
@@ -187,6 +196,20 @@ def build_manuscript_state(
 
     source = str(markdown or "").replace("\r\n", "\n").replace("\r", "\n")
     comments = HTML_COMMENT.findall(source)
+    inserted_figure_artifacts: list[str] = []
+    invalid_inserted_figure_metadata: list[str] = []
+    for match in INSERTED_FIGURE_METADATA.finditer(source):
+        try:
+            metadata = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            invalid_inserted_figure_metadata.append(match.group(1)[:240])
+            continue
+        if not isinstance(metadata, dict):
+            invalid_inserted_figure_metadata.append(match.group(1)[:240])
+            continue
+        artifact_id = str(metadata.get("output_artifact_id") or "").strip()
+        if artifact_id:
+            inserted_figure_artifacts.append(artifact_id)
     # Draft comments contain stable paragraph and figure-routing identifiers.
     # Keep them in the released Markdown for editing lineage, but never expose
     # them as semantic manuscript blocks or printable PDF text.
@@ -214,9 +237,9 @@ def build_manuscript_state(
                 blocks.append({"kind": "heading", "level": level, "text": text})
             index += 1
             continue
-        image = IMAGE.match(stripped)
+        image = parse_markdown_image(stripped)
         if image:
-            alt, source_url = image.groups()
+            alt, source_url = image.alt, image.source
             artifact_match = ARTIFACT_IMAGE.search(source_url)
             artifact_id = artifact_match.group(1) if artifact_match else ""
             resolved = paths.get(artifact_id, source_url if not artifact_id else "")
@@ -308,7 +331,7 @@ def build_manuscript_state(
             candidate = lines[index]
             if (
                 HEADING.match(candidate)
-                or IMAGE.match(candidate.strip())
+                or parse_markdown_image(candidate.strip())
                 or REFERENCE.match(candidate)
                 or re.match(r"^\s*(?:[-*+] |\d+[.)] )", candidate)
                 or (
@@ -332,6 +355,46 @@ def build_manuscript_state(
                 "type": "malformed_html_comment",
                 "message": "Unclosed or unmatched HTML comments must be repaired before PDF publication.",
                 "examples": malformed_comment_delimiters,
+            }
+        )
+    malformed_images = malformed_markdown_image_lines(render_source)
+    if malformed_images:
+        blockers.append(
+            {
+                "type": "malformed_markdown_image",
+                "message": "Image-like Markdown could not be parsed and would be printed as body text.",
+                "examples": malformed_images[:8],
+            }
+        )
+    if invalid_inserted_figure_metadata:
+        blockers.append(
+            {
+                "type": "invalid_inserted_figure_metadata",
+                "message": "Inserted-figure routing metadata is invalid.",
+                "examples": invalid_inserted_figure_metadata[:8],
+            }
+        )
+    parsed_artifact_counts = Counter(
+        str(block.get("artifact_id") or "")
+        for block in blocks
+        if block.get("kind") == "image" and block.get("artifact_id")
+    )
+    expected_artifact_counts = Counter(inserted_figure_artifacts)
+    mismatched_figure_artifacts = [
+        {
+            "artifact_id": artifact_id,
+            "expected_images": expected_count,
+            "parsed_images": parsed_artifact_counts.get(artifact_id, 0),
+        }
+        for artifact_id, expected_count in sorted(expected_artifact_counts.items())
+        if parsed_artifact_counts.get(artifact_id, 0) != expected_count
+    ]
+    if mismatched_figure_artifacts:
+        blockers.append(
+            {
+                "type": "inserted_figure_image_mismatch",
+                "message": "Inserted-figure metadata does not match the parsed manuscript images.",
+                "examples": mismatched_figure_artifacts[:8],
             }
         )
     html_values = sorted(set(HTML_TAG.findall(render_source)))
@@ -430,6 +493,10 @@ def build_manuscript_state(
             "citations": len(citations),
             "references": len(references),
             "comments_ignored": len(comments),
+            "inserted_figure_markers": len(inserted_figure_artifacts),
+            "markdown_image_lines": sum(
+                parse_markdown_image(line) is not None for line in lines
+            ),
         },
         "citation_numbers": citations,
         "reference_numbers": references,

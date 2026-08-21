@@ -154,7 +154,7 @@ class ArtifactServiceTests(unittest.TestCase):
             )
         )
 
-    def test_database_failure_leaves_immutable_orphan_but_no_database_artifact(self) -> None:
+    def test_database_failure_removes_unpublished_file_and_database_artifact(self) -> None:
         run, _source = self._stage(b"<svg>orphan</svg>")
         original_publish = self.repository.publish_artifact
 
@@ -180,7 +180,7 @@ class ArtifactServiceTests(unittest.TestCase):
         orphan_files = [
             path for path in project_root.glob(".artifacts/**/F001.svg") if path.is_file()
         ]
-        self.assertEqual(1, len(orphan_files))
+        self.assertEqual(0, len(orphan_files))
         with self.sessions() as session:
             self.assertEqual(0, session.scalar(select(func.count()).select_from(WorkflowArtifact)))
 

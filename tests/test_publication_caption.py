@@ -40,6 +40,25 @@ class PublicationCaptionTests(unittest.TestCase):
         self.assertEqual(result.status, "partial")
         self.assertNotIn("\x00", result.publication_text)
 
+    def test_unambiguous_chemistry_ocr_word_split_is_repaired(self) -> None:
+        result = normalize_publication_caption(
+            "Figure 1. Mechanism for the phosphine-catalyzed [3+2] cycloaddi tion."
+        )
+
+        self.assertEqual(
+            result.publication_text,
+            "Mechanism for the phosphine-catalyzed [3+2] cycloaddition",
+        )
+        self.assertEqual(result.version, "publication-caption/2")
+
+        capitalized = normalize_publication_caption(
+            "Figure 2. Cycloaddi tions enabled by phosphines."
+        )
+        self.assertEqual(
+            capitalized.publication_text,
+            "Cycloadditions enabled by phosphines",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

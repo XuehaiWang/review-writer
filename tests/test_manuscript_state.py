@@ -55,6 +55,58 @@ The reported systems support a bounded comparison [1, 2].
         table = next(block for block in state["blocks"] if block["kind"] == "table")
         self.assertEqual("Table 1. Representative system and selectivity.", table["caption"])
 
+    def test_nested_chemistry_brackets_in_image_alt_render_as_an_image(self) -> None:
+        artifact_id = "f1984c55-b8bf-4c87-93c8-1e8238f9c87d"
+        markdown = (
+            "# Review\n\n## Introduction\n\n"
+            '<!-- inserted_figure: {"figure_id":"P001-F01",'
+            f'"output_artifact_id":"{artifact_id}"}} -->\n'
+            "![Mechanism for the phosphine-catalyzed [3+2] cycloaddition]"
+            f"(/api/v1/artifacts/{artifact_id}/content)\n"
+            "*Figure 1. Mechanism for the phosphine-catalyzed [3+2] cycloaddi tion.*\n"
+        )
+
+        state = build_manuscript_state(
+            markdown, artifact_paths={artifact_id: "C:/safe/mechanism.png"}
+        )
+
+        self.assertTrue(state["validation"]["valid"])
+        self.assertEqual(1, state["counts"]["images"])
+        image = next(block for block in state["blocks"] if block["kind"] == "image")
+        self.assertEqual(
+            "Mechanism for the phosphine-catalyzed [3+2] cycloaddition",
+            image["alt"],
+        )
+        self.assertIn("cycloaddition", image["caption"])
+        self.assertNotIn("cycloaddi tion", image["caption"])
+        rendered = render_tex(state, profile="en", template=self.template)
+        self.assertIn(r"\includegraphics", rendered)
+        self.assertNotIn("![Mechanism", rendered)
+
+    def test_malformed_image_syntax_blocks_publication(self) -> None:
+        state = build_manuscript_state(
+            "# Review\n\n![Mechanism [3+2](/api/v1/artifacts/broken/content)\n"
+        )
+
+        issue_types = {
+            issue["type"] for issue in state["validation"]["blocking_issues"]
+        }
+        self.assertIn("malformed_markdown_image", issue_types)
+
+    def test_inserted_figure_marker_must_match_a_parsed_image(self) -> None:
+        artifact_id = "f1984c55-b8bf-4c87-93c8-1e8238f9c87d"
+        state = build_manuscript_state(
+            "# Review\n\n"
+            '<!-- inserted_figure: {"figure_id":"P001-F01",'
+            f'"output_artifact_id":"{artifact_id}"}} -->\n'
+            "Body text without its routed image.\n"
+        )
+
+        issue_types = {
+            issue["type"] for issue in state["validation"]["blocking_issues"]
+        }
+        self.assertIn("inserted_figure_image_mismatch", issue_types)
+
     def test_raw_html_and_undefined_citation_are_blockers(self) -> None:
         state = build_manuscript_state(
             "# Review\n\nA result <sup>2</sup> was reported [3].\n\n## References\n\n[1] Source.\n"

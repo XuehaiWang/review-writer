@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
+import { ACTIVE_JOB_POLL_INTERVAL_MS } from "../../api/polling";
 import { libraryQuery, queryKeys } from "../../api/queries";
 import type { Job, LibraryPaper, UploadJob, UploadJobList } from "../../api/types";
 import { ErrorState } from "../../components/ErrorState";
@@ -134,7 +135,7 @@ function useCurrentLibraryJob(kind: "search" | "download", projectId: string, en
     enabled,
     refetchInterval: (query) => {
       const status = query.state.data?.job?.status;
-      return status && ["queued", "running", "cancel_requested"].includes(status) ? 1100 : false;
+      return status && ["queued", "running", "cancel_requested"].includes(status) ? ACTIVE_JOB_POLL_INTERVAL_MS : false;
     },
   });
 }
@@ -341,7 +342,7 @@ export function LibraryPage() {
   const uploadJobs = useQuery({
     queryKey: queryKeys.libraryUploadJobs,
     queryFn: () => apiRequest<UploadJobList>("/api/v1/library/upload-jobs/recent?limit=30"),
-    refetchInterval: (query) => query.state.data?.items.some((job) => ["queued", "running", "cancel_requested"].includes(job.status)) ? 1100 : false,
+    refetchInterval: (query) => query.state.data?.items.some((job) => ["queued", "running", "cancel_requested"].includes(job.status)) ? ACTIVE_JOB_POLL_INTERVAL_MS : false,
   });
   const persistedUploads = useMemo<UploadStatus[]>(() => (uploadJobs.data?.items || []).filter((job) => {
     if (["queued", "running", "cancel_requested"].includes(job.status)) return true;
@@ -431,7 +432,7 @@ export function LibraryPage() {
     queryKey: ["library", "bibliography-audit", selectedPaper?.paper_id || ""],
     queryFn: () => apiRequest<{ audit: NonNullable<LibraryPaper["bibliography_audit"]>; job: Job | null }>(`/api/v1/library/papers/${encodeURIComponent(selectedPaper!.paper_id)}/bibliography-audit`),
     enabled: Boolean(selectedPaper),
-    refetchInterval: (query) => ["queued", "running", "cancel_requested"].includes(String(query.state.data?.job?.status || "")) ? 1200 : false,
+    refetchInterval: (query) => ["queued", "running", "cancel_requested"].includes(String(query.state.data?.job?.status || "")) ? ACTIVE_JOB_POLL_INTERVAL_MS : false,
   });
   useEffect(() => {
     if (["succeeded", "failed", "cancelled"].includes(String(bibliographyAudit.data?.job?.status || ""))) {

@@ -29,6 +29,7 @@ from .credentials import ProviderSettingsError
 from .database import create_session_factory, utc_now
 from .errors import ProjectArchiveFailed, WorkflowError
 from .job_service import JobService
+from .gateway_client import test_provider_through_gateway
 from .model_catalog import DEFAULT_MODEL_TIER, MODEL_TIERS
 from .model_gateway import ModelGatewayError, ModelGatewayService
 from .native_handlers import NativeWorkflowHandlers
@@ -112,6 +113,7 @@ def create_app(
     project_repository: ProjectRepository | None = None,
     workflow_repository_override: WorkflowRepository | None = None,
     job_service_override: JobService | None = None,
+    model_gateway_override: Any | None = None,
     native_workflow_overrides: Mapping[str, Callable] | None = None,
 ) -> FastAPI:
     resolved = settings or ApiSettings.from_env()
@@ -174,7 +176,11 @@ def create_app(
     )
     job_service = (
         job_service_override
-        or JobService(workflow_repository, max_workers=resolved.job_worker_count)
+        or JobService(
+            workflow_repository,
+            max_workers=resolved.job_worker_count,
+            execution_enabled=resolved.job_execution_enabled,
+        )
         if workflow_repository is not None
         else None
     )
@@ -220,7 +226,7 @@ def create_app(
         if session_factory is not None and hosted_workspace_manager is not None
         else None
     )
-    model_gateway = (
+    model_gateway = model_gateway_override or (
         ModelGatewayService(
             session_factory,
             resolved,
@@ -329,7 +335,7 @@ def create_app(
                     "application_heartbeat",
                     {"status": "stopped", "observed_at": utc_now().isoformat()},
                 )
-            if model_gateway is not None:
+            if isinstance(model_gateway, ModelGatewayService):
                 await model_gateway.close()
             if engine is not None:
                 engine.dispose()
@@ -517,10 +523,27 @@ def create_app(
 
     @app.get("/api/v1/health", response_model=HealthResponse, tags=["system"])
     def health() -> HealthResponse:
+        if workflow_repository is not None:
+            # A real query makes the container health check sensitive to a
+            # broken PostgreSQL connection instead of reporting a false OK.
+            workflow_repository.workflow_is_ready()
         return HealthResponse(
             status="ok",
             api_version=API_VERSION,
             deployment_mode=resolved.deployment_mode,
+            components={
+                "postgresql": "ok" if workflow_repository is not None else "not-configured",
+                "job_executor": (
+                    "api-compatibility"
+                    if resolved.job_execution_enabled
+                    else "external-worker"
+                ),
+                "model_gateway": (
+                    "embedded"
+                    if resolved.embedded_gateway_routes_enabled
+                    else "external"
+                ),
+            },
         )
 
     @app.get("/api/v1/model-catalog", response_model=ModelCatalogResponse, tags=["models"])
@@ -935,7 +958,21 @@ def create_app(
             provider_kind: str,
             principal: Principal = Depends(current_principal),
         ) -> AdminProviderTestResponse:
-            result = await provider_settings_service.test_connection(principal, provider_kind)
+            if (
+                not resolved.embedded_gateway_routes_enabled
+                and resolved.internal_worker_token
+            ):
+                result = await asyncio.to_thread(
+                    test_provider_through_gateway,
+                    resolved.internal_gateway_url,
+                    resolved.internal_worker_token,
+                    provider_kind=provider_kind,
+                    actor_user_id=principal.user_id,
+                )
+            else:
+                result = await provider_settings_service.test_connection(
+                    principal, provider_kind
+                )
             return AdminProviderTestResponse.model_validate(result, from_attributes=True)
 
         @app.get(
@@ -955,7 +992,7 @@ def create_app(
                 ]
             )
 
-    if model_gateway is not None:
+    if isinstance(model_gateway, ModelGatewayService):
 
         @app.post(
             "/api/internal/v1/model-responses",
@@ -966,6 +1003,8 @@ def create_app(
             payload: ModelGatewayRequest,
             request: Request,
         ) -> ModelGatewayResponse:
+            if not resolved.embedded_gateway_routes_enabled:
+                raise HTTPException(status_code=404, detail="Not Found")
             authorization = str(request.headers.get("Authorization") or "")
             token = (
                 authorization[7:].strip()
@@ -993,6 +1032,8 @@ def create_app(
             payload: ImageGatewayRequest,
             request: Request,
         ) -> ImageGatewayResponse:
+            if not resolved.embedded_gateway_routes_enabled:
+                raise HTTPException(status_code=404, detail="Not Found")
             authorization = str(request.headers.get("Authorization") or "")
             token = (
                 authorization[7:].strip()

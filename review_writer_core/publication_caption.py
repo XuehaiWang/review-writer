@@ -17,7 +17,7 @@ from typing import Any
 from review_writer_core.text_safety import make_xml_compatible
 
 
-CAPTION_NORMALIZATION_VERSION = "publication-caption/1"
+CAPTION_NORMALIZATION_VERSION = "publication-caption/2"
 
 _HTML_TAG = re.compile(r"<[^>]+>")
 _CAPTION_PREFIX = re.compile(
@@ -38,6 +38,13 @@ _SCRIPT_SINGLE = {
     "_": re.compile(r"\s*_\s*([0-9+\-=()])"),
     "^": re.compile(r"\s*\^\s*([0-9+\-=()])"),
 }
+
+# Conservative repairs for OCR word splits observed in chemistry figure
+# captions.  These are intentionally curated instead of joining arbitrary
+# adjacent words, which could silently alter valid scientific prose.
+_OCR_WORD_SPLITS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bcycloaddi\s+tion(?:s)?\b", re.IGNORECASE),
+)
 
 _SUBSCRIPT = str.maketrans(
     "0123456789+-=()aehijklmnoprstuvx",
@@ -184,6 +191,18 @@ def _typographic_cleanup(value: str) -> str:
     return text
 
 
+def repair_publication_ocr_splits(value: Any) -> str:
+    """Repair a small allowlist of unambiguous scientific OCR word splits."""
+
+    text = str(value or "")
+    for pattern in _OCR_WORD_SPLITS:
+        text = pattern.sub(
+            lambda match: re.sub(r"\s+", "", match.group(0)),
+            text,
+        )
+    return text
+
+
 def normalize_publication_caption(value: Any) -> PublicationCaption:
     """Return a safe derived caption without modifying the source evidence."""
 
@@ -199,6 +218,7 @@ def normalize_publication_caption(value: Any) -> PublicationCaption:
         visible, tex_warnings = _readable_tex(visible)
         warnings.extend(tex_warnings)
         visible = _CAPTION_PREFIX.sub("", visible)
+        visible = repair_publication_ocr_splits(visible)
         visible = _typographic_cleanup(visible).strip().rstrip(".")
         status = "partial" if warnings else "cleaned"
         return PublicationCaption(

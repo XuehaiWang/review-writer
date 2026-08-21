@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
+import { ACTIVE_JOB_POLL_INTERVAL_MS } from "../../api/polling";
 import type { Job } from "../../api/types";
 import { ErrorState } from "../../components/ErrorState";
 import { MarkdownView } from "../../components/MarkdownView";
@@ -87,7 +88,7 @@ export function FinalPage() {
     queryKey: ["final", project?.project_id || ""],
     queryFn: () => apiRequest<FinalPayload>(`/api/v1/projects/${encodeURIComponent(project!.project_id)}/final`),
     enabled: Boolean(project),
-    refetchInterval: (query) => query.state.data?.active_final_job_id ? 1_000 : false,
+    refetchInterval: (query) => query.state.data?.active_final_job_id ? ACTIVE_JOB_POLL_INTERVAL_MS : false,
     refetchIntervalInBackground: true,
   });
   const payload = final.data;

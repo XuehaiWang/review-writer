@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
+import { ACTIVE_JOB_POLL_INTERVAL_MS, PUBLICATION_POLL_INTERVAL_MS } from "../../api/polling";
 import type { Job } from "../../api/types";
 import { ErrorState } from "../../components/ErrorState";
 import { MarkdownView } from "../../components/MarkdownView";
@@ -133,7 +134,7 @@ export function DraftPage() {
     queryKey: ["draft", project?.project_id || ""],
     queryFn: () => apiRequest<DraftPayload>(`/api/v1/projects/${encodeURIComponent(project!.project_id)}/draft`),
     enabled: Boolean(project),
-    refetchInterval: (query) => query.state.data?.active_feedback_job_id ? 1_000 : false,
+    refetchInterval: (query) => query.state.data?.active_feedback_job_id ? ACTIVE_JOB_POLL_INTERVAL_MS : false,
     refetchIntervalInBackground: true,
   });
   const payload = draft.data;
@@ -200,7 +201,7 @@ export function DraftPage() {
       void queryClient.refetchQueries({ queryKey: ["draft", project.project_id], type: "active" });
     };
     refetchPublishedDraft();
-    const timer = window.setInterval(refetchPublishedDraft, 1_000);
+    const timer = window.setInterval(refetchPublishedDraft, PUBLICATION_POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [publicationPending, project?.project_id, queryClient]);
 

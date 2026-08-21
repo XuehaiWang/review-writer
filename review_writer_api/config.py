@@ -46,6 +46,10 @@ class ApiSettings:
     expose_api_docs: bool = True
     hosted_workspace_root: Path | None = None
     job_worker_count: int = 2
+    job_execution_enabled: bool = True
+    worker_poll_seconds: float = 2.0
+    worker_lease_seconds: int = 180
+    worker_heartbeat_seconds: float = 30.0
     auth_rate_limit_attempts: int = 12
     auth_rate_limit_window_seconds: int = 60
     allow_private_provider_urls: bool = False
@@ -64,6 +68,8 @@ class ApiSettings:
     mineru_price_usd_per_page: Decimal = Decimal("0")
     mineru_max_concurrency: int = 2
     internal_gateway_url: str = ""
+    internal_worker_token: str = ""
+    embedded_gateway_routes_enabled: bool = True
     model_gateway_max_concurrency: int = 2
     model_gateway_user_concurrency: int = 1
     image_gateway_max_concurrency: int = 1
@@ -98,6 +104,21 @@ class ApiSettings:
         expose_docs = _environment_flag("REVIEW_WRITER_EXPOSE_API_DOCS", raw_mode == "local")
         job_worker_count = _environment_integer(
             "REVIEW_WRITER_JOB_WORKERS", 2, minimum=1, maximum=16
+        )
+        job_execution_enabled = _environment_flag(
+            "REVIEW_WRITER_API_EXECUTE_JOBS", False
+        )
+        worker_poll_seconds = _environment_float(
+            "REVIEW_WRITER_WORKER_POLL_SECONDS", 2.0, minimum=0.25, maximum=30.0
+        )
+        worker_lease_seconds = _environment_integer(
+            "REVIEW_WRITER_WORKER_LEASE_SECONDS", 180, minimum=30, maximum=3600
+        )
+        worker_heartbeat_seconds = _environment_float(
+            "REVIEW_WRITER_WORKER_HEARTBEAT_SECONDS",
+            30.0,
+            minimum=2.0,
+            maximum=300.0,
         )
         auth_rate_limit_attempts = _environment_integer(
             "REVIEW_WRITER_AUTH_RATE_LIMIT_ATTEMPTS", 12, minimum=2, maximum=100
@@ -172,6 +193,12 @@ class ApiSettings:
             os.environ.get("REVIEW_WRITER_INTERNAL_GATEWAY_URL")
             or f"{public_origin}/api/internal/v1/model-responses"
         ).strip()
+        internal_worker_token = str(
+            os.environ.get("REVIEW_WRITER_INTERNAL_WORKER_TOKEN") or ""
+        ).strip()
+        embedded_gateway_routes_enabled = _environment_flag(
+            "REVIEW_WRITER_EMBEDDED_GATEWAY_ROUTES", False
+        )
         model_gateway_max_concurrency = _environment_integer(
             "REVIEW_WRITER_MODEL_GATEWAY_CONCURRENCY", 2, minimum=1, maximum=32
         )
@@ -238,6 +265,10 @@ class ApiSettings:
             expose_api_docs=expose_docs,
             hosted_workspace_root=hosted_workspace_root,
             job_worker_count=job_worker_count,
+            job_execution_enabled=job_execution_enabled,
+            worker_poll_seconds=worker_poll_seconds,
+            worker_lease_seconds=worker_lease_seconds,
+            worker_heartbeat_seconds=worker_heartbeat_seconds,
             auth_rate_limit_attempts=auth_rate_limit_attempts,
             auth_rate_limit_window_seconds=auth_rate_limit_window_seconds,
             allow_private_provider_urls=allow_private_provider_urls,
@@ -256,6 +287,8 @@ class ApiSettings:
             mineru_price_usd_per_page=mineru_price_usd_per_page,
             mineru_max_concurrency=mineru_max_concurrency,
             internal_gateway_url=internal_gateway_url,
+            internal_worker_token=internal_worker_token,
+            embedded_gateway_routes_enabled=embedded_gateway_routes_enabled,
             model_gateway_max_concurrency=model_gateway_max_concurrency,
             model_gateway_user_concurrency=model_gateway_user_concurrency,
             image_gateway_max_concurrency=image_gateway_max_concurrency,
@@ -274,6 +307,19 @@ def _environment_decimal(name: str, default: str) -> Decimal:
     if value < 0:
         raise ValueError(f"{name} must not be negative.")
     return value.quantize(Decimal("0.00000001"))
+
+
+def _environment_float(
+    name: str, default: float, *, minimum: float, maximum: float
+) -> float:
+    raw = str(os.environ.get(name) or default).strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number.") from exc
+    if value < minimum or value > maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}.")
+    return value
 
 
 def database_url_from_env() -> str:

@@ -34,6 +34,10 @@ from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
 from review_writer_core.latex_renderer import SUPPORTED_PROFILES, TEMPLATE_VERSION
 from review_writer_core.manuscript_state import build_manuscript_state
+from review_writer_core.markdown_images import (
+    malformed_markdown_image_lines,
+    parse_markdown_image,
+)
 from review_writer_core.publication_voice import publication_voice_issues
 
 
@@ -87,6 +91,11 @@ def _figure_argument_findings(markdown: str) -> list[dict[str, Any]]:
     """Check reader-visible figure closure without treating hidden metadata as a callout."""
 
     findings: list[dict[str, Any]] = []
+    parsed_image_sources = {
+        image.source
+        for line in str(markdown or "").splitlines()
+        if (image := parse_markdown_image(line)) is not None
+    }
     for match in INSERTED_FIGURE_METADATA.finditer(markdown or ""):
         try:
             metadata = json.loads(match.group(1))
@@ -102,15 +111,16 @@ def _figure_argument_findings(markdown: str) -> list[dict[str, Any]]:
         if not published_label:
             issues.append("published_label_missing")
         escaped_label = re.escape(published_label)
-        if output_artifact_id and not re.search(
-            rf"!\[[^\]]*\]\(/api/v1/artifacts/{re.escape(output_artifact_id)}/content\)",
-            markdown,
-        ):
+        expected_source = f"/api/v1/artifacts/{output_artifact_id}/content"
+        if output_artifact_id and expected_source not in parsed_image_sources:
             issues.append("image_missing")
         if published_label and not re.search(rf"\*{escaped_label}\.", markdown):
             issues.append("caption_missing")
         visible_prose = INSERTED_FIGURE_METADATA.sub("", markdown)
-        visible_prose = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", visible_prose)
+        visible_prose = "\n".join(
+            "" if parse_markdown_image(line) is not None else line
+            for line in visible_prose.splitlines()
+        )
         visible_prose = re.sub(r"(?m)^\s*\*Figure\s+\d+\..*?\*\s*$", "", visible_prose)
         if published_label and not re.search(
             rf"\b{escaped_label}\b[^\n]{{0,500}}\b(?:presents?|shows?|summarizes?|illustrates?|compares?|depicts?)\b",
@@ -549,10 +559,13 @@ class FinalService:
             set(normalized_sources) - immutable_sources
         )
         blocking_issues: list[str] = []
+        malformed_images = malformed_markdown_image_lines(markdown)
         if missing:
             blocking_issues.append("missing_artifact_references")
         if wrong_project:
             blocking_issues.append("cross_project_artifact_references")
+        if malformed_images:
+            blocking_issues.append("malformed_markdown_image")
         warning_issues: list[str] = []
         if not reference_match:
             warning_issues.append("missing_references_section")
@@ -581,6 +594,7 @@ class FinalService:
             "referenced_artifact_ids": referenced,
             "missing_artifact_ids": missing,
             "cross_project_artifact_ids": wrong_project,
+            "malformed_markdown_images": malformed_images,
             "citation_callouts": sorted(callouts),
             "listed_references": sorted(listed),
             "source_paper_ids": normalized_sources,
@@ -743,7 +757,7 @@ class FinalService:
         )
         if not validation["valid"]:
             raise FinalNotReady(
-                "Final manuscript contains a missing or cross-project artifact reference."
+                "Final manuscript contains publication-blocking markup or an invalid artifact reference."
             )
         release = {
             "status": "released",

@@ -21,11 +21,22 @@ class ContainerConfigurationTests(unittest.TestCase):
     def test_compose_uses_postgres_migration_gate_and_persistent_migration_paths(self) -> None:
         source = (ROOT / "compose.yaml").read_text(encoding="utf-8")
 
-        for service in ("postgres", "migrate", "api"):
+        for service in ("postgres", "migrate", "model-gateway", "worker", "api"):
             self.assertRegex(source, rf"(?m)^  {service}:\s*$")
         self.assertEqual(
-            2,
+            4,
             source.count("image: review-writer-api:${REVIEW_WRITER_IMAGE_TAG:-latest}"),
+        )
+        self.assertIn('REVIEW_WRITER_API_EXECUTE_JOBS: "false"', source)
+        self.assertIn("review_writer_api.gateway_main", source)
+        self.assertIn("review_writer_api.worker_main", source)
+        gateway_block = source.split("  model-gateway:", 1)[1].split(
+            "\n  worker:", 1
+        )[0]
+        self.assertIn("REVIEW_WRITER_SESSION_COOKIE_SECURE:", gateway_block)
+        self.assertRegex(
+            source,
+            r'(?s)worker:.*?healthcheck:\s*\n\s+test: \["CMD-SHELL", "kill -0 1"\]',
         )
         self.assertNotRegex(source.casefold(), r"(?m)^\s*prefect(?:-|_service|:)")
         self.assertNotIn("PREFECT_", source)
