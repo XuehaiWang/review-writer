@@ -71,6 +71,29 @@ class AcademicContractTests(unittest.TestCase):
         self.assertTrue(report["can_confirm"])
         self.assertEqual([], report["issues"])
 
+    def test_dominant_boundary_section_must_be_rerouted(self) -> None:
+        report = taxonomy_diagnostics(
+            [
+                {"section_id": "S01", "title": "Introduction", "section_role": "introduction"},
+                {"section_id": "S02", "title": "Defined precursor class", "section_role": "body", "paper_ids": ["P001", "P002", "P007", "P008"]},
+                {
+                    "section_id": "S03",
+                    "title": "Cross-category evidence and boundary cases",
+                    "section_role": "body",
+                    "paper_ids": ["P003", "P004", "P005", "P006"],
+                },
+                {"section_id": "S04", "title": "Conclusion", "section_role": "conclusion"},
+            ],
+            ["P001", "P002", "P003", "P004", "P005", "P006", "P007", "P008"],
+        )
+
+        self.assertFalse(report["can_confirm"])
+        self.assertEqual(["S03"], report["dominant_boundary_section_ids"])
+        self.assertIn(
+            "taxonomy.dominant_boundary_section",
+            {item["rule_id"] for item in report["issues"]},
+        )
+
     def test_contextual_review_is_routed_without_becoming_a_body_orphan(self) -> None:
         report = taxonomy_diagnostics(
             [

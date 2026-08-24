@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import sys
@@ -22,6 +23,7 @@ from review_writer_api.credentials import (
     ProviderSettingsError,
     ProviderSettingsService,
 )
+from review_writer_api.domain_services.library_index import LibraryIndexService
 from review_writer_api.database import database_session, utc_now
 from review_writer_api.errors import (
     WorkflowConflict,
@@ -34,7 +36,7 @@ from review_writer_api.scientific_runner import (
     ScientificRunner,
 )
 from review_writer_api.workflow_models import LibraryPaper, WorkflowJob
-from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
+from review_writer_api.workflow_repository import ArtifactRecord, JobRecord, WorkflowRepository
 from review_writer_core.taxonomy import TaxonomyConfigurationError, load_taxonomy_rules
 from review_writer_core.metadata_tags import verified_structured_tags
 from review_writer_core.academic_contracts import (
@@ -46,7 +48,9 @@ from review_writer_core.academic_contracts import (
     scope_diagnostics,
     synthesis_requirements,
     taxonomy_diagnostics,
+    evidence_key as academic_evidence_key,
 )
+from review_writer_core.evidence_queries import build_question_query_plans
 from review_writer_core.review_structure import (
     assign_primary_paper_sections,
     infer_section_role,
@@ -60,6 +64,33 @@ BLUEPRINT_LOGICAL_NAME = "blueprint/section_blueprint.json"
 DISCOVERY_LOGICAL_NAME = "discovery/review.json"
 ROUTING_REQUIRED_LABEL = "Routing required — reassign these papers"
 CROSS_CATEGORY_BOUNDARY_LABEL = "Cross-category evidence and boundary cases"
+
+
+def _planning_job_payload(job: JobRecord) -> dict[str, Any]:
+    actions: list[str] = []
+    if job.status in {"queued", "running", "cancel_requested"}:
+        actions.append("cancel")
+    if job.status in {"failed", "cancelled", "interrupted"}:
+        actions.append("retry")
+    return {
+        "id": job.id,
+        "project_id": job.project_id,
+        "scope": job.scope,
+        "status": job.status,
+        "job_type": job.job_type,
+        "result": job.result,
+        "progress_current": job.progress_current,
+        "progress_total": job.progress_total,
+        "cancellation_requested": job.cancellation_requested,
+        "error_code": job.error_code,
+        "error_message": job.error_message,
+        "retry_of_job_id": job.retry_of_job_id,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "available_actions": actions,
+    }
 
 OUTLINE_STYLES: dict[str, dict[str, str]] = {
     "substrate": {
@@ -209,12 +240,14 @@ class PlanningService:
         scientific_runner: ScientificRunner | None = None,
         provider_settings: ProviderSettingsService | None = None,
         model_gateway: Any | None = None,
+        library_index: LibraryIndexService | None = None,
     ):
         self.repository = repository
         self.artifacts = artifacts
         self.scientific_runner = scientific_runner
         self.provider_settings = provider_settings
         self.model_gateway = model_gateway
+        self.library_index = library_index
         self.root = Path(__file__).resolve().parents[2]
         self._write_lock = threading.RLock()
 
@@ -355,6 +388,428 @@ class PlanningService:
         return matrix, artifact
 
     @staticmethod
+    def _matrix_abstract(row: dict[str, Any]) -> str:
+        abstract = row.get("abstract")
+        if isinstance(abstract, dict):
+            abstract = abstract.get("value")
+        normalized = " ".join(str(abstract or "").split()).strip()
+        return "" if "unavailable or unreliable" in normalized.casefold() else normalized
+
+    def matrix_enrichment_payload(
+        self, principal: Principal, project_id: str
+    ) -> dict[str, Any]:
+        """Prepare source-addressable fact candidates for an asynchronous job."""
+
+        principal.require(Permission.PROJECT_WRITE)
+        matrix, matrix_artifact = self._matrix(principal, project_id)
+        state = self.repository.get_stage_state(principal.user_id, project_id, "matrix")
+        if state is None:
+            raise WorkflowConflict("The current Matrix stage state is missing.")
+        rows = [row for row in matrix.get("rows") or [] if isinstance(row, dict)]
+        paper_ids = _paper_ids(rows)
+        summaries = (
+            self.library_index.summaries(principal, paper_ids)
+            if self.library_index is not None and self.library_index.enabled
+            else {}
+        )
+        topic = str(matrix.get("review_topic") or "")
+        papers: list[dict[str, Any]] = []
+        for row in rows:
+            paper_id = str(row.get("paper_id") or "")
+            summary = dict(summaries.get(paper_id) or {})
+            lineage = str(summary.get("source_lineage_hash") or "")
+            source_fingerprint = hashlib.sha256(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "topic": " ".join(topic.casefold().split()),
+                        "paper_id": paper_id,
+                        "source_lineage_hash": lineage,
+                        "chunker_version": summary.get("chunker_version"),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            existing = dict(row.get("fact_enrichment") or {})
+            if (
+                existing.get("source_fingerprint") == source_fingerprint
+                and existing.get("status") in {"complete", "partial", "limited"}
+            ):
+                continue
+            plans = build_question_query_plans(
+                review_topic=topic,
+                heading="",
+                core_argument=topic,
+                section_role="body",
+            )
+            candidates: dict[str, dict[str, Any]] = {}
+            if (
+                self.library_index is not None
+                and self.library_index.enabled
+                and summary.get("fulltext") == "ready"
+            ):
+                for plan in plans:
+                    question_id = str(plan.get("question_id") or "")
+                    if question_id == "section_focus":
+                        continue
+                    hits = self.library_index.retrieve(
+                        principal,
+                        str(plan.get("websearch_query") or ""),
+                        allowed_papers=[paper_id],
+                        top_k=2,
+                        per_paper_limit=2,
+                        include_neighbors=False,
+                        term_groups=list(plan.get("term_groups") or []),
+                        exact_phrases=list(plan.get("exact_phrases") or []),
+                    )
+                    for hit in hits:
+                        if hit.is_neighbor:
+                            continue
+                        key = academic_evidence_key(
+                            hit.paper_id, hit.chunk_id, hit.source_lineage_hash
+                        )
+                        candidate = candidates.setdefault(
+                            key,
+                            {
+                                "evidence_key": key,
+                                "paper_id": hit.paper_id,
+                                "chunk_id": hit.chunk_id,
+                                "page_start": hit.page_start,
+                                "page_end": hit.page_end,
+                                "section_path": list(hit.section_path),
+                                "content_type": hit.content_type,
+                                "content": hit.content,
+                                "source_lineage_hash": hit.source_lineage_hash,
+                                "question_ids": [],
+                            },
+                        )
+                        if question_id not in candidate["question_ids"]:
+                            candidate["question_ids"].append(question_id)
+            abstract = self._matrix_abstract(row)
+            if abstract:
+                abstract_lineage = lineage or hashlib.sha256(
+                    abstract.encode("utf-8")
+                ).hexdigest()
+                abstract_key = academic_evidence_key(
+                    paper_id, "abstract", abstract_lineage
+                )
+                candidates.setdefault(
+                    abstract_key,
+                    {
+                        "evidence_key": abstract_key,
+                        "paper_id": paper_id,
+                        "chunk_id": "abstract",
+                        "page_start": None,
+                        "page_end": None,
+                        "section_path": ["Abstract"],
+                        "content_type": "abstract",
+                        "content": abstract,
+                        "source_lineage_hash": abstract_lineage,
+                        "question_ids": ["abstract_summary"],
+                        "match_type": "abstract_only",
+                    },
+                )
+            papers.append(
+                {
+                    "paper_id": paper_id,
+                    "title": str(row.get("title") or paper_id),
+                    "abstract": abstract,
+                    "index_summary": summary,
+                    "source_fingerprint": source_fingerprint,
+                    "evidence_candidates": list(candidates.values()),
+                }
+            )
+        return {
+            "schema_version": 1,
+            "project_id": project_id,
+            "review_topic": topic,
+            "source_matrix_artifact_id": matrix_artifact.id,
+            "expected_matrix_revision": state.revision,
+            "paper_count": len(rows),
+            "pending_paper_count": len(papers),
+            "fulltext_candidate_paper_count": sum(
+                1
+                for paper in papers
+                if any(
+                    str(item.get("content_type") or "") != "abstract"
+                    for item in paper.get("evidence_candidates") or []
+                    if isinstance(item, dict)
+                )
+            ),
+            "papers": papers,
+        }
+
+    def publish_matrix_enrichment(
+        self,
+        principal: Principal,
+        project_id: str,
+        payload: dict[str, Any],
+        built: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Publish per-paper facts only if the Matrix and source lineage stayed current."""
+
+        principal.require(Permission.PROJECT_WRITE)
+        matrix, matrix_artifact = self._matrix(principal, project_id)
+        if matrix_artifact.id != str(payload.get("source_matrix_artifact_id") or ""):
+            raise WorkflowConflict(
+                "Matrix changed while scientific facts were being extracted. Run enrichment again."
+            )
+        input_by_paper = {
+            str(item.get("paper_id") or ""): item
+            for item in payload.get("papers") or []
+            if isinstance(item, dict) and item.get("paper_id")
+        }
+        built_by_paper = {
+            str(item.get("paper_id") or ""): item
+            for item in built.get("papers") or []
+            if isinstance(item, dict) and item.get("paper_id")
+        }
+        if set(built_by_paper) != set(input_by_paper):
+            raise WorkflowValidationError(
+                "Matrix enrichment result does not match the pending paper set."
+            )
+        updated = deepcopy(matrix)
+        for row in updated.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            paper_id = str(row.get("paper_id") or "")
+            source = input_by_paper.get(paper_id)
+            result = built_by_paper.get(paper_id)
+            if source is None or result is None:
+                continue
+            candidates = {
+                str(item.get("evidence_key") or ""): item
+                for item in source.get("evidence_candidates") or []
+                if isinstance(item, dict) and item.get("evidence_key")
+            }
+            facts = []
+            for fact in result.get("facts") or []:
+                if not isinstance(fact, dict):
+                    continue
+                raw_refs = [
+                    ref for ref in fact.get("evidence_refs") or []
+                    if isinstance(ref, dict)
+                ]
+                if not raw_refs or any(
+                    str(ref.get("evidence_key") or "") not in candidates
+                    for ref in raw_refs
+                ):
+                    continue
+                excerpt = " ".join(
+                    str(fact.get("support_excerpt") or "").split()
+                ).casefold()
+                if not excerpt or not str(fact.get("value") or "").strip():
+                    continue
+                if not str(fact.get("evidence_ceiling") or "").strip():
+                    continue
+                if not all(
+                    excerpt
+                    in " ".join(
+                        str(
+                            candidates[str(ref.get("evidence_key") or "")].get(
+                                "content"
+                            )
+                            or ""
+                        ).split()
+                    ).casefold()
+                    for ref in raw_refs
+                ):
+                    continue
+                field_id = str(fact.get("field_id") or "").casefold()
+                if not field_id or any(
+                    field_id
+                    not in {
+                        str(value).casefold()
+                        for value in candidates[
+                            str(ref.get("evidence_key") or "")
+                        ].get("question_ids") or []
+                    }
+                    for ref in raw_refs
+                ):
+                    continue
+                facts.append({**fact, "evidence_refs": raw_refs})
+            status = str(result.get("status") or "failed")
+            if result.get("facts") and len(facts) < len(result.get("facts") or []):
+                status = "partial" if facts else "failed"
+            row["scientific_facts"] = facts
+            review_status = str(result.get("review_status") or "needs_review")
+            if review_status not in {"not_required", "needs_review", "human_checked"}:
+                review_status = "needs_review"
+            row["fact_enrichment"] = {
+                "schema_version": 2,
+                "status": status,
+                "review_status": review_status,
+                "source_fingerprint": str(source.get("source_fingerprint") or ""),
+                "source_lineage_hash": str(
+                    (source.get("index_summary") or {}).get("source_lineage_hash") or ""
+                ),
+                "fact_count": len(facts),
+                "failed_fields": list(result.get("failed_fields") or []),
+                "error": str(result.get("error") or "")[:1000],
+                "updated_at": utc_now().isoformat(),
+            }
+        published_statuses = [
+            str((row.get("fact_enrichment") or {}).get("status") or "pending")
+            for row in updated.get("rows") or []
+            if isinstance(row, dict)
+        ]
+        updated["fact_enrichment_summary"] = {
+            "schema_version": 2,
+            "source_matrix_artifact_id": matrix_artifact.id,
+            "complete_count": published_statuses.count("complete"),
+            "partial_count": published_statuses.count("partial"),
+            "limited_count": published_statuses.count("limited"),
+            "failed_count": published_statuses.count("failed"),
+            "pending_count": published_statuses.count("pending"),
+            "needs_review_count": sum(
+                1
+                for row in updated.get("rows") or []
+                if isinstance(row, dict)
+                and str((row.get("fact_enrichment") or {}).get("review_status") or "")
+                == "needs_review"
+            ),
+            "updated_at": utc_now().isoformat(),
+        }
+        outline_compatible_ids = [
+            str(artifact_id)
+            for artifact_id in matrix.get("outline_compatible_matrix_artifact_ids") or []
+            if str(artifact_id)
+        ]
+        if matrix_artifact.id not in outline_compatible_ids:
+            outline_compatible_ids.append(matrix_artifact.id)
+        updated["outline_compatible_matrix_artifact_ids"] = outline_compatible_ids[-20:]
+        with self._write_lock:
+            published, run = self._publish_files(
+                principal,
+                project_id,
+                stage_id="matrix",
+                files={MATRIX_LOGICAL_NAME: (_json_bytes(updated), "json")},
+                input_snapshot={
+                    "source_matrix_artifact_id": matrix_artifact.id,
+                    "source_fingerprints": {
+                        paper_id: item.get("source_fingerprint")
+                        for paper_id, item in input_by_paper.items()
+                    },
+                },
+            )
+            state = None
+            for attempt in range(3):
+                current_matrix, current_matrix_artifact = self._matrix(
+                    principal, project_id
+                )
+                if current_matrix_artifact.id != matrix_artifact.id:
+                    raise WorkflowConflict(
+                        "Matrix content changed while scientific facts were being published. Run enrichment again."
+                    )
+                current_state = self.repository.get_stage_state(
+                    principal.user_id, project_id, "matrix"
+                )
+                expected_revision = current_state.revision if current_state else 0
+                try:
+                    state = self.repository.promote_stage_artifacts_atomically(
+                        principal.user_id,
+                        project_id,
+                        "matrix",
+                        artifact_ids={
+                            MATRIX_LOGICAL_NAME: published[MATRIX_LOGICAL_NAME].id
+                        },
+                        run_id=run.id,
+                        expected_revision=expected_revision,
+                        status="review",
+                        invalidate_stages=(
+                            "blueprint",
+                            "sections",
+                            "figure-review",
+                            "figures",
+                            "draft",
+                            "final",
+                        ),
+                        expected_current_artifacts={
+                            MATRIX_LOGICAL_NAME: matrix_artifact.id
+                        },
+                    )
+                    break
+                except WorkflowConflict:
+                    if attempt == 2:
+                        raise
+            if state is None:  # pragma: no cover - defensive invariant
+                raise WorkflowConflict("Scientific facts could not be published.")
+        return {
+            "project_id": project_id,
+            "matrix_artifact_id": published[MATRIX_LOGICAL_NAME].id,
+            "matrix_revision": state.revision,
+            "fact_enrichment_summary": updated["fact_enrichment_summary"],
+        }
+
+    def confirm_matrix_limited_mode(
+        self,
+        principal: Principal,
+        project_id: str,
+        *,
+        revision: int,
+    ) -> dict[str, Any]:
+        """Let the user continue only after every automatic fact extraction failed."""
+
+        principal.require(Permission.PROJECT_WRITE)
+        matrix, matrix_artifact = self._matrix(principal, project_id)
+        rows = [row for row in matrix.get("rows") or [] if isinstance(row, dict)]
+        statuses = [
+            str((row.get("fact_enrichment") or {}).get("status") or "pending")
+            for row in rows
+        ]
+        if not rows or any(status != "failed" for status in statuses):
+            raise WorkflowConflict(
+                "Limited mode is available only when every Matrix fact extraction failed."
+            )
+        summary = {
+            **dict(matrix.get("fact_enrichment_summary") or {}),
+            "limited_mode_confirmed": True,
+            "limited_mode_confirmed_at": utc_now().isoformat(),
+            "limited_mode_reason": "all_scientific_fact_extractions_failed",
+        }
+        updated = {**deepcopy(matrix), "fact_enrichment_summary": summary}
+        outline_compatible_ids = [
+            str(artifact_id)
+            for artifact_id in matrix.get("outline_compatible_matrix_artifact_ids") or []
+            if str(artifact_id)
+        ]
+        if matrix_artifact.id not in outline_compatible_ids:
+            outline_compatible_ids.append(matrix_artifact.id)
+        updated["outline_compatible_matrix_artifact_ids"] = outline_compatible_ids[-20:]
+        with self._write_lock:
+            published, run = self._publish_files(
+                principal,
+                project_id,
+                stage_id="matrix",
+                files={MATRIX_LOGICAL_NAME: (_json_bytes(updated), "json")},
+                input_snapshot={
+                    "operation": "confirm-limited-mode",
+                    "source_matrix_artifact_id": matrix_artifact.id,
+                },
+            )
+            state = self.repository.promote_stage_artifacts_atomically(
+                principal.user_id,
+                project_id,
+                "matrix",
+                artifact_ids={MATRIX_LOGICAL_NAME: published[MATRIX_LOGICAL_NAME].id},
+                run_id=run.id,
+                expected_revision=revision,
+                status="review",
+                invalidate_stages=(
+                    "blueprint", "sections", "figure-review", "figures", "draft", "final"
+                ),
+                expected_current_artifacts={MATRIX_LOGICAL_NAME: matrix_artifact.id},
+            )
+        return {
+            "project_id": project_id,
+            "matrix_artifact_id": published[MATRIX_LOGICAL_NAME].id,
+            "matrix_revision": state.revision,
+            "limited_mode_confirmed": True,
+        }
+
+    @staticmethod
     def _tag_value(value: Any) -> str:
         if isinstance(value, dict) and "value" in value:
             value = value.get("value")
@@ -414,7 +869,33 @@ class PlanningService:
             ):
                 tags.update(project_tags)
             tags_by_paper[record.paper_id] = tags
+            scientific_facts = [
+                item
+                for item in row.get("scientific_facts") or []
+                if isinstance(item, dict)
+                and str(item.get("field_id") or "") != "abstract_summary"
+            ]
+            # Route from the paper's extracted scientific object before title
+            # words.  Product names in titles are otherwise easily mistaken
+            # for the substrate/precursor used by the study.
+            fact_priority = {
+                "object_input": 0,
+                "document_scope": 1,
+                "transformation": 2,
+                "method_family": 3,
+            }
+            fact_parts = [
+                str(item.get("value") or "").strip()
+                for item in sorted(
+                    scientific_facts,
+                    key=lambda item: fact_priority.get(
+                        str(item.get("field_id") or ""), 10
+                    ),
+                )
+                if str(item.get("value") or "").strip()
+            ]
             parts = [
+                " ".join(fact_parts),
                 row.get("title"),
                 " ".join(str(item) for item in (row.get("keywords") or [])),
                 record.title,
@@ -483,9 +964,10 @@ class PlanningService:
                     pattern = rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])"
                     match = re.search(pattern, text)
                     if match:
-                        # _outline_sources puts title/keywords before the
-                        # abstract.  Prefer those direct signals over a longer
-                        # phrase mentioned later as related-work context.
+                        # _outline_sources puts source-addressable scientific
+                        # facts first, followed by title/keywords and abstract.
+                        # Prefer the extracted study object over product words
+                        # and related-work mentions later in the source.
                         score = max(
                             score,
                             100_000
@@ -586,12 +1068,16 @@ class PlanningService:
             return sections, []
 
         repaired = deepcopy(sections)
+        repairable_titles = {
+            ROUTING_REQUIRED_LABEL.casefold(),
+            CROSS_CATEGORY_BOUNDARY_LABEL.casefold(),
+        }
         placeholder_indexes = [
             index
             for index, section in enumerate(repaired)
             if str(section.get("section_role") or "body").casefold() == "body"
             and str(section.get("title") or "").strip().casefold()
-            == ROUTING_REQUIRED_LABEL.casefold()
+            in repairable_titles
         ]
         if not placeholder_indexes:
             return repaired, []
@@ -644,6 +1130,12 @@ class PlanningService:
             len(repaired),
         )
         adjustments: list[dict[str, Any]] = []
+        source_titles = list(
+            dict.fromkeys(
+                str(sections[index].get("title") or ROUTING_REQUIRED_LABEL)
+                for index in placeholder_indexes
+            )
+        )
         for label, paper_ids in grouped.items():
             target = existing_by_title.get(label.casefold())
             created = target is None
@@ -666,7 +1158,7 @@ class PlanningService:
             bucket.extend(paper_id for paper_id in paper_ids if paper_id not in bucket)
             adjustments.append(
                 {
-                    "source_section": ROUTING_REQUIRED_LABEL,
+                    "source_section": ", ".join(source_titles),
                     "target_section": label,
                     "paper_ids": list(paper_ids),
                     "method": (
@@ -705,7 +1197,9 @@ class PlanningService:
         context_pattern = re.compile(
             r"\b(?:this|the present) review\b|\bwe review\b|"
             r"\breview (?:will|article|paper)\b|\bcomprehensive review\b|"
-            r"\bperspective (?:on|article)\b",
+            r"\bperspective (?:on|article)\b|"
+            r"\b(?:this|the|an) account\b|"
+            r"\baccount (?:of|on|surveys|reviews|concerns|summarizes)\b",
             re.I,
         )
         for row in rows:
@@ -719,6 +1213,138 @@ class PlanningService:
             if any(term in document_scope for term in scope_terms) or context_pattern.search(text):
                 contextual.append(paper_id)
         return contextual
+
+    def _realign_generated_body_sections(
+        self,
+        sections: list[dict[str, Any]],
+        rows: list[dict[str, Any]],
+        text_by_paper: dict[str, str],
+        *,
+        outline_style: str,
+        taxonomy_profile: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Realign a system outline when scientific facts contradict old routing.
+
+        Saved generated outlines can predate fact extraction or taxonomy fixes.
+        This pass is intentionally disabled for manually edited outlines.  It
+        preserves roles and ordering while moving each paper to the category
+        supported by its source-addressable study object.
+        """
+
+        definition = OUTLINE_STYLES.get(str(outline_style or "").casefold())
+        if definition is None:
+            return deepcopy(sections), []
+        body_paper_ids = list(
+            dict.fromkeys(
+                str(paper_id)
+                for section in sections
+                if str(section.get("section_role") or "body").casefold() == "body"
+                for paper_id in section.get("paper_ids") or []
+                if str(paper_id or "").strip()
+            )
+        )
+        body_set = set(body_paper_ids)
+        fact_evidence_ids = {
+            str(row.get("paper_id") or "")
+            for row in rows
+            if str(row.get("paper_id") or "") in body_set
+            and any(
+                isinstance(fact, dict)
+                and str(fact.get("field_id") or "") != "abstract_summary"
+                and str(fact.get("value") or "").strip()
+                for fact in row.get("scientific_facts") or []
+            )
+        }
+        if not fact_evidence_ids:
+            return deepcopy(sections), []
+        semantic = self._semantic_outline_groups(
+            [
+                row
+                for row in rows
+                if str(row.get("paper_id") or "").strip() in fact_evidence_ids
+            ],
+            text_by_paper,
+            tag_key=definition["tag_key"],
+            taxonomy_profile=taxonomy_profile,
+        )
+        target_by_paper: dict[str, str] = {}
+        for label, paper_ids in semantic.items():
+            target = (
+                CROSS_CATEGORY_BOUNDARY_LABEL
+                if label == ROUTING_REQUIRED_LABEL
+                else label
+            )
+            for paper_id in paper_ids:
+                target_by_paper.setdefault(str(paper_id), target)
+
+        repaired = deepcopy(sections)
+        body_snapshot = [
+            (section, list(section.get("paper_ids") or []))
+            for section in repaired
+            if str(section.get("section_role") or "body").casefold() == "body"
+        ]
+        existing_by_title = {
+            str(section.get("title") or "").strip().casefold(): section
+            for section, _paper_ids_snapshot in body_snapshot
+        }
+        insert_at = next(
+            (
+                index
+                for index, section in enumerate(repaired)
+                if infer_section_role(
+                    section.get("title"), section.get("section_role")
+                )
+                == "conclusion"
+            ),
+            len(repaired),
+        )
+        adjustments: list[dict[str, Any]] = []
+        for source, source_papers in body_snapshot:
+            source_title = str(source.get("title") or "").strip()
+            for paper_id in source_papers:
+                target_title = target_by_paper.get(str(paper_id))
+                if not target_title or target_title.casefold() == source_title.casefold():
+                    continue
+                source["paper_ids"] = [
+                    current
+                    for current in source.get("paper_ids") or []
+                    if str(current) != str(paper_id)
+                ]
+                target = existing_by_title.get(target_title.casefold())
+                created = target is None
+                if target is None:
+                    target = {
+                        "title": target_title,
+                        "paper_ids": [],
+                        "context_paper_ids": [],
+                        "section_role": "body",
+                        "purpose": (
+                            f"compare the selected papers within this {definition['axis']} "
+                            "category and state its evidence boundaries."
+                        ),
+                        "notes": "Automatically realigned from source-addressable scientific facts.",
+                    }
+                    repaired.insert(insert_at, target)
+                    insert_at += 1
+                    existing_by_title[target_title.casefold()] = target
+                if paper_id not in target["paper_ids"]:
+                    target["paper_ids"].append(paper_id)
+                adjustments.append(
+                    {
+                        "source_section": source_title,
+                        "target_section": target_title,
+                        "paper_ids": [paper_id],
+                        "method": "scientific_object_reassignment",
+                        "created_section": created,
+                    }
+                )
+        repaired = [
+            section
+            for section in repaired
+            if str(section.get("section_role") or "body").casefold() != "body"
+            or bool(section.get("paper_ids"))
+        ]
+        return repaired, adjustments
 
     def _outline_document(
         self,
@@ -902,11 +1528,29 @@ class PlanningService:
             for candidate in all_reference_candidates
             if self._reference_candidate_is_isolated(candidate)
         ]
+        outline_compatible_ids = {
+            str(artifact_id)
+            for artifact_id in matrix.get("outline_compatible_matrix_artifact_ids") or []
+            if str(artifact_id)
+        }
+        # Backward compatibility for enrichment artifacts created before the
+        # explicit compatibility lineage was introduced.
+        enrichment_source_id = str(
+            (matrix.get("fact_enrichment_summary") or {}).get(
+                "source_matrix_artifact_id"
+            )
+            or ""
+        )
+        if enrichment_source_id:
+            outline_compatible_ids.add(enrichment_source_id)
+        outline_source_id = str((outline or {}).get("source_matrix_artifact_id") or "")
         outline_current = bool(
             outline is not None
             and outline_artifact is not None
-            and str(outline.get("source_matrix_artifact_id") or "")
-            == matrix_artifact.id
+            and (
+                outline_source_id == matrix_artifact.id
+                or outline_source_id in outline_compatible_ids
+            )
         )
         blueprint_current = bool(
             blueprint is not None
@@ -925,6 +1569,26 @@ class PlanningService:
         coverage_report = dict((outline or {}).get("coverage_diagnostics") or {})
         basis = dict((outline or {}).get("classification_basis") or {})
         outline_diagnostics = dict((outline or {}).get("taxonomy_diagnostics") or {})
+        enrichment_jobs = self.repository.list_project_jobs(
+            principal.user_id, project_id, job_type="matrix.enrich", limit=20
+        )
+        enrichment_counts = {
+            status: sum(
+                1
+                for row in rows
+                if str((row.get("fact_enrichment") or {}).get("status") or "pending")
+                == status
+            )
+            for status in ("pending", "complete", "partial", "limited", "failed")
+        }
+        enrichment_summary = dict(matrix.get("fact_enrichment_summary") or {})
+        all_enrichment_failed = bool(rows) and enrichment_counts["failed"] == len(rows)
+        latest_enrichment_job = enrichment_jobs[0] if enrichment_jobs else None
+        failed_publish_with_pending_rows = bool(
+            enrichment_counts["pending"]
+            and latest_enrichment_job is not None
+            and latest_enrichment_job.status in {"failed", "cancelled", "interrupted"}
+        )
         return {
             "project_id": project_id,
             "topic": str(matrix.get("review_topic") or (discovery or {}).get("topic") or ""),
@@ -932,6 +1596,23 @@ class PlanningService:
             "matrix_artifact_id": matrix_artifact.id,
             "matrix_revision": matrix_state.revision if matrix_state else 0,
             "matrix_sync": {**matrix_sync, "selection_current": selection_current},
+            "matrix_enrichment": {
+                "summary": enrichment_summary,
+                "counts": enrichment_counts,
+                "jobs": [_planning_job_payload(job) for job in enrichment_jobs],
+                "all_failed": all_enrichment_failed,
+                "failed_publish_with_pending_rows": failed_publish_with_pending_rows,
+                "limited_mode_confirmed": bool(
+                    enrichment_summary.get("limited_mode_confirmed")
+                ),
+                "planning_blocked": bool(
+                    (
+                        all_enrichment_failed
+                        and not enrichment_summary.get("limited_mode_confirmed")
+                    )
+                    or failed_publish_with_pending_rows
+                ),
+            },
             "discovery_selection": {
                 "selected_paper_count": len(selected_ids),
                 "selected_paper_ids": selected_ids,
@@ -993,6 +1674,7 @@ class PlanningService:
         revision: int,
         main_content: str | None,
         most_relevant_figure: dict[str, Any] | None,
+        scientific_facts: list[dict[str, Any]] | None,
         mark_complete: bool,
     ) -> dict[str, Any]:
         principal.require(Permission.PROJECT_WRITE)
@@ -1012,6 +1694,45 @@ class PlanningService:
             row["main_content"] = str(main_content).strip()
         if most_relevant_figure is not None:
             row["most_relevant_figure"] = dict(most_relevant_figure)
+        if scientific_facts is not None:
+            existing_facts = {
+                str(item.get("fact_id") or ""): item
+                for item in row.get("scientific_facts") or []
+                if isinstance(item, dict) and item.get("fact_id")
+            }
+            submitted_ids = {
+                str(item.get("fact_id") or "")
+                for item in scientific_facts
+                if isinstance(item, dict) and item.get("fact_id")
+            }
+            if submitted_ids != set(existing_facts):
+                raise WorkflowValidationError(
+                    "Matrix fact edits must preserve the current source-addressable fact set."
+                )
+            revised_facts = []
+            for submitted in scientific_facts:
+                fact_id = str(submitted.get("fact_id") or "")
+                current = existing_facts[fact_id]
+                value = " ".join(str(submitted.get("value") or "").split()).strip()
+                ceiling = " ".join(
+                    str(submitted.get("evidence_ceiling") or "").split()
+                ).strip()
+                if not value or len(value) > 4000 or len(ceiling) > 2000:
+                    raise WorkflowValidationError(
+                        "A Matrix fact edit has an invalid value or evidence ceiling."
+                    )
+                revised_facts.append(
+                    {
+                        **current,
+                        "value": value,
+                        "evidence_ceiling": ceiling
+                        or str(current.get("evidence_ceiling") or ""),
+                        "human_checked": True,
+                        "review_status": "human_edited",
+                        "human_edited_at": utc_now().isoformat(),
+                    }
+                )
+            row["scientific_facts"] = revised_facts
         if mark_complete and len(re.sub(r"\s+", "", str(row.get("main_content") or ""))) < 300:
             raise WorkflowConflict(
                 "Add at least 300 characters of full-paper reading notes before marking this paper complete."
@@ -1019,6 +1740,7 @@ class PlanningService:
         row["matrix_status"] = (
             "full_reading_complete" if mark_complete else "needs_full_reading"
         )
+        updated.pop("outline_compatible_matrix_artifact_ids", None)
         updated["updated_at"] = utc_now().isoformat()
         with self._write_lock:
             published, run = self._publish_files(
@@ -1494,6 +2216,22 @@ class PlanningService:
     ) -> dict[str, Any]:
         principal.require(Permission.PROJECT_WRITE)
         matrix, matrix_artifact = self._matrix(principal, project_id)
+        matrix_rows = [
+            row for row in matrix.get("rows") or [] if isinstance(row, dict)
+        ]
+        all_fact_extraction_failed = bool(matrix_rows) and all(
+            str((row.get("fact_enrichment") or {}).get("status") or "pending")
+            == "failed"
+            for row in matrix_rows
+        )
+        if all_fact_extraction_failed and not bool(
+            (matrix.get("fact_enrichment_summary") or {}).get(
+                "limited_mode_confirmed"
+            )
+        ):
+            raise WorkflowConflict(
+                "Every Matrix fact extraction failed. Retry extraction or explicitly continue in limited mode."
+            )
         project = self._owned_project(principal, project_id)
         discovery, _discovery_artifact = self._read_json(
             principal, project_id, DISCOVERY_LOGICAL_NAME, required=False
@@ -1510,8 +2248,10 @@ class PlanningService:
         matrix_order = _paper_ids(matrix["rows"])
         auto_routing_adjustments: list[dict[str, Any]] = []
         resolved_outline_md = str(outline["outline_md"])
+        tags_by_paper: dict[str, dict[str, Any]] = {}
+        text_by_paper: dict[str, str] = {}
         if not bool(outline.get("manually_edited")):
-            _tags_by_paper, text_by_paper = self._outline_sources(
+            tags_by_paper, text_by_paper = self._outline_sources(
                 principal, matrix["rows"]
             )
             parsed, auto_routing_adjustments = (
@@ -1523,6 +2263,61 @@ class PlanningService:
                     taxonomy_profile=project.taxonomy_profile,
                 )
             )
+            parsed, evidence_realignments = self._realign_generated_body_sections(
+                parsed,
+                matrix_rows,
+                text_by_paper,
+                outline_style=str(outline.get("outline_style") or ""),
+                taxonomy_profile=project.taxonomy_profile,
+            )
+            auto_routing_adjustments.extend(evidence_realignments)
+            contextual_ids = self._contextual_outline_paper_ids(
+                matrix_rows, tags_by_paper, text_by_paper
+            )
+            if contextual_ids:
+                contextual_set = set(contextual_ids)
+                introduction = next(
+                    (
+                        section
+                        for section in parsed
+                        if infer_section_role(
+                            section.get("title"), section.get("section_role")
+                        )
+                        == "introduction"
+                    ),
+                    None,
+                )
+                if introduction is not None:
+                    intro_context = introduction.setdefault("context_paper_ids", [])
+                    intro_context.extend(
+                        paper_id
+                        for paper_id in contextual_ids
+                        if paper_id not in intro_context
+                    )
+                for section in parsed:
+                    role = infer_section_role(
+                        section.get("title"), section.get("section_role")
+                    )
+                    if role != "body":
+                        continue
+                    before = list(section.get("paper_ids") or [])
+                    removed = [
+                        paper_id for paper_id in before if paper_id in contextual_set
+                    ]
+                    if not removed:
+                        continue
+                    section["paper_ids"] = [
+                        paper_id for paper_id in before if paper_id not in contextual_set
+                    ]
+                    auto_routing_adjustments.append(
+                        {
+                            "source_section": str(section.get("title") or ""),
+                            "target_section": "Introduction (context evidence)",
+                            "paper_ids": removed,
+                            "method": "contextual_source_detection",
+                            "created_section": False,
+                        }
+                    )
             if auto_routing_adjustments:
                 resolved_outline_md = _outline_markdown_from_sections(
                     parsed,
@@ -1537,6 +2332,12 @@ class PlanningService:
             if role == "references":
                 continue
             assigned = list(dict.fromkeys(section["paper_ids"]))
+            if (
+                not bool(outline.get("manually_edited"))
+                and role == "body"
+                and not assigned
+            ):
+                continue
             unknown = sorted(set(assigned) - matrix_ids)
             if unknown:
                 raise WorkflowConflict(
@@ -1558,13 +2359,89 @@ class PlanningService:
         normalized, primary_owner = assign_primary_paper_sections(
             prepared, matrix_order
         )
+        body_primary_papers = list(
+            dict.fromkeys(
+                paper_id
+                for section in normalized
+                if section.get("section_role") == "body"
+                for paper_id in section.get("primary_papers") or []
+            )
+        )
+        rows_by_id = {
+            str(row.get("paper_id") or ""): row for row in matrix_rows
+        }
+        index_summaries = (
+            self.library_index.summaries(principal, matrix_order)
+            if self.library_index is not None and self.library_index.enabled
+            else {}
+        )
+
+        def evidence_readiness(
+            role: str, primary_papers: list[str], context_papers: list[str]
+        ) -> dict[str, Any]:
+            if role in {"introduction", "conclusion"}:
+                return {
+                    "status": "synthesis",
+                    "writeable_primary_papers": [],
+                    "context_only_primary_papers": [],
+                    "unresolved_primary_papers": [],
+                    "context_papers": list(context_papers),
+                }
+            writeable: list[str] = []
+            context_only: list[str] = []
+            unresolved: list[str] = []
+            for paper_id in primary_papers:
+                row = rows_by_id.get(paper_id) or {}
+                summary = index_summaries.get(paper_id) or {}
+                has_fulltext = (
+                    summary.get("fulltext") == "ready"
+                    and int(summary.get("chunk_count") or 0) > 0
+                )
+                has_source_fact = any(
+                    isinstance(fact, dict)
+                    and str(fact.get("field_id") or "") != "abstract_summary"
+                    and str(fact.get("value") or "").strip()
+                    and bool(fact.get("evidence_refs"))
+                    for fact in row.get("scientific_facts") or []
+                )
+                if has_fulltext or has_source_fact:
+                    writeable.append(paper_id)
+                elif self._matrix_abstract(row) or str(
+                    (row.get("fact_enrichment") or {}).get("status") or ""
+                ) == "limited":
+                    context_only.append(paper_id)
+                else:
+                    unresolved.append(paper_id)
+            status = (
+                "ready"
+                if primary_papers and len(writeable) == len(primary_papers)
+                else "partial"
+                if writeable or context_only
+                else "insufficient"
+            )
+            return {
+                "status": status,
+                "assigned_primary_count": len(primary_papers),
+                "writeable_primary_count": len(writeable),
+                "context_only_primary_count": len(context_only),
+                "unresolved_primary_count": len(unresolved),
+                "writeable_primary_papers": writeable,
+                "context_only_primary_papers": context_only,
+                "unresolved_primary_papers": unresolved,
+                "context_papers": list(context_papers),
+            }
+
         sections: list[dict[str, Any]] = []
         for section in normalized:
             role = section["section_role"]
             primary = list(section["primary_papers"])
             supporting = list(section["supporting_papers"])
             context_papers = list(section.get("context_paper_ids") or [])
-            evidence_papers = list(dict.fromkeys([*primary, *supporting]))
+            if role == "conclusion":
+                # A conclusion synthesizes the completed body arguments.  Give
+                # it access to every body-owned paper so citations inherited
+                # from those evidence-bound syntheses remain valid.
+                supporting = list(body_primary_papers)
             if role == "introduction":
                 thesis = (
                     str(section.get("purpose") or "").strip()
@@ -1632,6 +2509,9 @@ class PlanningService:
                     ],
                     "section_transition": "Connect this evidence to the next comparison axis.",
                     "target_words": target_words,
+                    "evidence_readiness": evidence_readiness(
+                        role, primary, context_papers
+                    ),
                 }
             )
             sections[-1]["academic_contract"] = section_academic_contract(sections[-1])

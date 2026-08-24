@@ -714,6 +714,16 @@ class DiscoveryService:
                     existing_by_id.get(paper_id, {}).get("matrix_status")
                     or "needs_full_reading"
                 ),
+                "scientific_facts": list(
+                    existing_by_id.get(paper_id, {}).get("scientific_facts") or []
+                ),
+                "fact_enrichment": dict(
+                    existing_by_id.get(paper_id, {}).get("fact_enrichment") or {
+                        "schema_version": 1,
+                        "status": "pending",
+                        "fact_count": 0,
+                    }
+                ),
             }
             rows.append(row)
         matrix = {

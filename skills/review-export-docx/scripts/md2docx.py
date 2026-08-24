@@ -36,11 +36,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image as PILImage
 from docx import Document
-from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement, parse_xml  # noqa: F401
 from docx.oxml.ns import qn
-from docx.shared import Inches, Pt, RGBColor
+from docx.shared import Inches, Pt
 
 _BOOTSTRAP_ROOT = next(
     (
@@ -974,124 +973,6 @@ def _caption_style(raw_text: str) -> Optional[str]:
     return None
 
 
-def _should_include_in_toc(text: str) -> bool:
-    normalized = text.strip().lower()
-    if normalized in {
-        "table of contents",
-        "abstract",
-        "keywords",
-        "key words",
-        "acknowledgments",
-        "acknowledgements",
-        "references",
-        "reference",
-    }:
-        return False
-    return True
-
-
-def _collect_static_toc_entries(blocks: List[Block]) -> List[Tuple[int, str]]:
-    entries: List[Tuple[int, str]] = []
-    for block in blocks:
-        if block.kind != "heading":
-            continue
-        text = block.text.strip()
-        effective_level = 2 if block.level == 1 and _NUMBERED_SECTION_HEADING_RE.match(text) else block.level
-        if effective_level not in {2, 3, 4}:
-            continue
-        if not text or not _should_include_in_toc(text):
-            continue
-        entries.append((effective_level, text))
-    return entries
-
-
-def _insert_static_toc(doc: Document, entries: List[Tuple[int, str]]) -> None:
-    """Render a compact, hierarchical contents panel instead of a flat list."""
-
-    if not entries:
-        return
-
-    numbered_prefix = re.compile(r"^\s*(\d+(?:\.\d+)*)[.)]?\s+")
-    groups: List[Tuple[str, str, List[Tuple[int, str]]]] = []
-    for level, raw_text in entries:
-        text = raw_text.strip()
-        if level == 2 or not groups:
-            match = numbered_prefix.match(text)
-            number = match.group(1) if match else str(len(groups) + 1)
-            title = text[match.end():].strip() if match else text
-            groups.append((number, title, []))
-            continue
-        groups[-1][2].append((level, text))
-
-    def set_shading(cell, fill: str) -> None:
-        tc_pr = cell._tc.get_or_add_tcPr()
-        shading = tc_pr.find(qn("w:shd"))
-        if shading is None:
-            shading = OxmlElement("w:shd")
-            tc_pr.append(shading)
-        shading.set(qn("w:fill"), fill)
-        shading.set(qn("w:val"), "clear")
-
-    def set_margins(cell, *, top: int, start: int, bottom: int, end: int) -> None:
-        tc_pr = cell._tc.get_or_add_tcPr()
-        margins = tc_pr.find(qn("w:tcMar"))
-        if margins is None:
-            margins = OxmlElement("w:tcMar")
-            tc_pr.append(margins)
-        for edge, value in (("top", top), ("start", start), ("bottom", bottom), ("end", end)):
-            node = margins.find(qn(f"w:{edge}"))
-            if node is None:
-                node = OxmlElement(f"w:{edge}")
-                margins.append(node)
-            node.set(qn("w:w"), str(value))
-            node.set(qn("w:type"), "dxa")
-
-    table = doc.add_table(rows=0, cols=2)
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    table.autofit = False
-    table.columns[0].width = Inches(0.72)
-    for row_index, (number, title, children) in enumerate(groups):
-        cells = table.add_row().cells
-        badge, content = cells
-        badge.width = Inches(0.72)
-        badge.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-        content.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-        set_shading(badge, "1F6B54")
-        set_shading(content, "F2F7F4" if row_index % 2 == 0 else "FAFCFB")
-        set_margins(badge, top=130, start=80, bottom=130, end=80)
-        set_margins(content, top=120, start=210, bottom=120, end=160)
-
-        badge_p = badge.paragraphs[0]
-        badge_p.style = doc.styles[_S["body"]]
-        badge_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        badge_p.paragraph_format.space_after = Pt(0)
-        badge_text = number.zfill(2) if number.isdigit() else number
-        badge_run = badge_p.add_run(badge_text)
-        badge_run.bold = True
-        badge_run.font.name = "Times New Roman"
-        badge_run.font.size = Pt(11)
-        badge_run.font.color.rgb = RGBColor(255, 255, 255)
-
-        title_p = content.paragraphs[0]
-        title_p.style = doc.styles[_S["body"]]
-        title_p.paragraph_format.space_after = Pt(2 if children else 0)
-        apply_runs(title_p, parse_inline(title), spec_key="body", force_bold=True)
-        for run in title_p.runs:
-            run.font.color.rgb = RGBColor(31, 74, 59)
-        for child_level, child_text in children:
-            child_p = content.add_paragraph(style=_S["body"])
-            child_p.paragraph_format.space_before = Pt(0)
-            child_p.paragraph_format.space_after = Pt(1)
-            child_p.paragraph_format.left_indent = Inches(0.18 if child_level == 3 else 0.36)
-            prefix = "• " if child_level == 3 else "– "
-            apply_runs(child_p, parse_inline(prefix + child_text), spec_key="table_body")
-            for run in child_p.runs:
-                run.font.color.rgb = RGBColor(82, 101, 93)
-
-    spacer = doc.add_paragraph(style=_S["body"])
-    spacer.paragraph_format.space_after = Pt(2)
-
-
 # ---------------------------------------------------------------------------
 # Document body clear
 # ---------------------------------------------------------------------------
@@ -1245,7 +1126,6 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
     # the opening paragraph of the Word document.
     md_text = re.sub(r"<!--.*?-->", "", md_text, flags=re.S)
     blocks  = tokenize(md_text)
-    toc_entries = _collect_static_toc_entries(blocks)
     # Only the global review overview is included.  Per-section mini-outline
     # images are intentionally excluded by _load_summary_chart_bundle().
     chart_bundle = _load_summary_chart_bundle(md_path, blocks)
@@ -1254,20 +1134,9 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
 
     ctx: str           = "body"
     front_matter: bool = False
-    inserted_toc_heading = False
-    saw_toc_heading = False
-    skipping_source_toc = False
     full_chart_inserted = False
     inserted_section_charts: set[str] = set()
     chart_number = 0
-
-    def insert_toc_once() -> None:
-        nonlocal inserted_toc_heading
-        if inserted_toc_heading:
-            return
-        _para(doc, "body", "h2", "Table of Contents", force_bold=True)
-        _insert_static_toc(doc, toc_entries)
-        inserted_toc_heading = True
 
     def insert_chart(image_path: Path, caption: str) -> None:
         nonlocal chart_number
@@ -1286,13 +1155,7 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
             plain_heading = block.text.strip().lower()
             numbered_h1_section = block.level == 1 and _NUMBERED_SECTION_HEADING_RE.match(block.text.strip())
             if plain_heading == "table of contents":
-                saw_toc_heading = True
-                skipping_source_toc = True
-                insert_toc_once()
                 continue
-            elif block.level >= 2 and not inserted_toc_heading:
-                insert_toc_once()
-            skipping_source_toc = False
             effective_level = 2 if numbered_h1_section else block.level
             chart_heading_key = _normalize_chart_heading(block.text)
             if (
@@ -1322,13 +1185,8 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
             # Bold-only section label  e.g. **Abstract**
             new_ctx = _section_ctx(plain)
             if new_ctx:
-                skipping_source_toc = False
-                if new_ctx in {"abstract", "keywords"} and not inserted_toc_heading and not saw_toc_heading:
-                    insert_toc_once()
                 ctx = new_ctx
                 _para(doc, "body", "body", text, force_bold=True)
-                continue
-            if skipping_source_toc:
                 continue
 
             # Front matter: author / affiliation
@@ -1348,8 +1206,6 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
                 _para(doc, key, key, text)
 
         elif block.kind == "indented_block":
-            if skipping_source_toc:
-                continue
             for raw_line in block.lines:
                 text = raw_line.strip()
                 if not text:
@@ -1360,13 +1216,9 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
                 _para(doc, key, spec, text)
 
         elif block.kind == "ref_def":
-            if skipping_source_toc:
-                continue
             _para(doc, "references", "references", block.text)
 
         elif block.kind == "list_item":
-            if skipping_source_toc:
-                continue
             indent = "  " * block.depth
             bullet = (f"{indent}- {block.text}"
                       if not block.ordered else f"{indent}{block.text}")
@@ -1376,27 +1228,19 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
                 _para(doc, "body", "body", bullet)
 
         elif block.kind == "code_block":
-            if skipping_source_toc:
-                continue
             p  = doc.add_paragraph(style=_S["body"])
             wr = p.add_run(block.code)
             wr.font.name = "Courier New"
             wr.font.size = Pt(9)
 
         elif block.kind == "math_block":
-            if skipping_source_toc:
-                continue
             p = doc.add_paragraph(style=_S["body"])
             _apply_math(p, block.latex)
 
         elif block.kind == "table":
-            if skipping_source_toc:
-                continue
             _add_table(doc, block.header, block.rows)
 
         elif block.kind == "image":
-            if skipping_source_toc:
-                continue
             img_path = Path(block.path)
             if not img_path.is_absolute():
                 img_path = md_path.parent / img_path
@@ -1422,9 +1266,6 @@ def convert(md_path: Path, out_path: Path, template_path: Path) -> None:
             # Horizontal rules in review Markdown are section separators, not
             # desired visual borders in the final DOCX.
             continue
-
-    if not inserted_toc_heading and not saw_toc_heading:
-        insert_toc_once()
 
     if chart_bundle is not None:
         if not full_chart_inserted:

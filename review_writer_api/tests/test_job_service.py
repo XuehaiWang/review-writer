@@ -160,6 +160,51 @@ class JobServiceTests(unittest.TestCase):
         finally:
             service.shutdown(wait=True)
 
+    def test_library_job_listing_keeps_all_active_jobs_beyond_history_limit(self) -> None:
+        self.service.register_handler(
+            "library.upload", lambda _context, payload: {"name": payload["name"]}
+        )
+        self.service.start()
+        completed = []
+        for index in range(2):
+            submitted = self.service.submit(
+                self.principal,
+                scope="library",
+                project_id=None,
+                job_type="library.upload",
+                idempotency_key=f"completed-upload-{index}",
+                operation_key=f"upload:completed-{index}",
+                payload={"name": f"completed-{index}.pdf"},
+            )
+            completed.append(self._wait_for(submitted.id))
+
+        queued_service = job_service_class()(
+            self.repository, max_workers=1, execution_enabled=False
+        )
+        queued_service.register_handler("library.upload", lambda *_args: {})
+        try:
+            queued = queued_service.submit(
+                self.principal,
+                scope="library",
+                project_id=None,
+                job_type="library.upload",
+                idempotency_key="queued-upload",
+                operation_key="upload:queued",
+                payload={"name": "queued.pdf"},
+            )
+            rows = self.repository.list_library_jobs(
+                self.principal.user_id,
+                job_type="library.upload",
+                limit=1,
+                include_all_active=True,
+            )
+        finally:
+            queued_service.shutdown(wait=True)
+
+        self.assertEqual(2, len(rows))
+        self.assertIn(queued.id, {row.id for row in rows})
+        self.assertEqual(1, sum(row.status == "succeeded" for row in rows))
+
     def test_executor_is_bounded_and_persists_progress_and_success(self) -> None:
         active = 0
         maximum = 0

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, delete, exists, func, or_, select, update
+from sqlalchemy import and_, case, delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -1542,8 +1542,15 @@ class WorkflowRepository:
         *,
         job_type: str | None = None,
         limit: int = 100,
+        include_all_active: bool = False,
     ) -> list[JobRecord]:
-        """Return recent persisted Library jobs for one authenticated user."""
+        """Return persisted Library jobs for one authenticated user.
+
+        Active jobs are optionally returned without applying the recent-history
+        limit so a large upload selection remains visible after a refresh.  The
+        limit still bounds terminal history and keeps the dashboard response
+        from growing forever.
+        """
 
         user_uuid = self._uuid(user_id, not_found_message="Job not found.")
         with database_session(self.session_factory) as session:
@@ -1554,12 +1561,91 @@ class WorkflowRepository:
             )
             if job_type:
                 statement = statement.where(WorkflowJob.job_type == str(job_type))
-            rows = session.scalars(
-                statement.order_by(WorkflowJob.created_at.desc()).limit(
-                    max(1, min(int(limit), 500))
+            bounded_limit = max(1, min(int(limit), 500))
+            if include_all_active:
+                active_statuses = ("queued", "running", "cancel_requested")
+                active_rows = session.scalars(
+                    statement.where(WorkflowJob.status.in_(active_statuses)).order_by(
+                        WorkflowJob.created_at.desc()
+                    )
+                ).all()
+                terminal_rows = session.scalars(
+                    statement.where(WorkflowJob.status.not_in(active_statuses))
+                    .order_by(WorkflowJob.created_at.desc())
+                    .limit(bounded_limit)
+                ).all()
+                rows = sorted(
+                    [*active_rows, *terminal_rows],
+                    key=lambda row: row.created_at,
+                    reverse=True,
                 )
-            ).all()
+            else:
+                rows = session.scalars(
+                    statement.order_by(WorkflowJob.created_at.desc()).limit(
+                        bounded_limit
+                    )
+                ).all()
             return [self._job_record(row) for row in rows]
+
+    def summarize_library_upload_batches(
+        self,
+        user_id: str,
+        *,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return stable per-batch upload counts without loading every job row."""
+
+        user_uuid = self._uuid(user_id, not_found_message="Job not found.")
+        batch_id = WorkflowJob.payload_json["batch_id"].as_string()
+
+        def status_count(*statuses: str):
+            return func.sum(
+                case((WorkflowJob.status.in_(statuses), 1), else_=0)
+            )
+
+        with database_session(self.session_factory) as session:
+            rows = session.execute(
+                select(
+                    batch_id.label("batch_id"),
+                    func.count(WorkflowJob.id).label("total"),
+                    status_count("queued").label("queued"),
+                    status_count("running").label("running"),
+                    status_count("cancel_requested").label("cancel_requested"),
+                    status_count("succeeded").label("succeeded"),
+                    status_count("failed").label("failed"),
+                    status_count("cancelled").label("cancelled"),
+                    status_count("interrupted").label("interrupted"),
+                    func.min(WorkflowJob.created_at).label("created_at"),
+                    func.max(WorkflowJob.updated_at).label("updated_at"),
+                )
+                .where(
+                    WorkflowJob.user_id == user_uuid,
+                    WorkflowJob.project_id.is_(None),
+                    WorkflowJob.scope == "library",
+                    WorkflowJob.job_type == "library.upload",
+                    batch_id.is_not(None),
+                    batch_id != "",
+                )
+                .group_by(batch_id)
+                .order_by(func.max(WorkflowJob.created_at).desc())
+                .limit(max(1, min(int(limit), 100)))
+            ).all()
+        return [
+            {
+                "batch_id": str(row.batch_id),
+                "total": int(row.total or 0),
+                "queued": int(row.queued or 0),
+                "running": int(row.running or 0),
+                "cancel_requested": int(row.cancel_requested or 0),
+                "succeeded": int(row.succeeded or 0),
+                "failed": int(row.failed or 0),
+                "cancelled": int(row.cancelled or 0),
+                "interrupted": int(row.interrupted or 0),
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+            }
+            for row in rows
+        ]
 
     def get_current_job(
         self,

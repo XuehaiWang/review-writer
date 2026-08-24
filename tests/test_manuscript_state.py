@@ -4,8 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from review_writer_core.latex_renderer import latex_escape, render_tex
-from review_writer_core.manuscript_state import build_manuscript_state
+from PIL import Image
+
+from review_writer_core.latex_renderer import TEMPLATE_VERSION, latex_escape, render_tex
+from review_writer_core.manuscript_state import (
+    build_manuscript_state,
+    choose_figure_layout,
+)
 
 
 class ManuscriptStateTests(unittest.TestCase):
@@ -172,7 +177,7 @@ The reported systems support a bounded comparison [1, 2].
         chinese = render_tex(state, profile="zh-CN", template=self.template)
         self.assertIn("TeX Gyre Termes", english)
         self.assertIn("ctex", chinese)
-        self.assertIn("modern-survey/2", english)
+        self.assertIn(TEMPLATE_VERSION, english)
         self.assertIn("twocolumn", english)
         self.assertIn("journalpanel", english)
         self.assertNotIn("titlepage", english)
@@ -202,14 +207,21 @@ The reported systems support a bounded comparison [1, 2].
         self.assertIn(r"\textbackslash{}input", value)
 
     def test_scientific_symbols_use_extractable_math_glyphs(self) -> None:
-        value = latex_escape("The C≡C bond, Pd₂(dba)₃, non-equivalent pathways (A≠B), and 3′ terminus are preserved.")
+        value = latex_escape(
+            "The C≡C bond, Pd₂(dba)₃, speciesᵢ, x²⁺, kⁿ, "
+            "non-equivalent pathways (A≠B), and 3′ terminus are preserved."
+        )
 
         self.assertIn(r"C\ensuremath{\equiv}C", value)
         self.assertIn(r"Pd\ensuremath{_{2}}(dba)\ensuremath{_{3}}", value)
         self.assertIn(r"A\ensuremath{\neq}B", value)
         self.assertIn(r"3\ensuremath{^{\prime}}", value)
+        self.assertIn(r"species\ensuremath{_{i}}", value)
+        self.assertIn(r"x\ensuremath{^{2}}\ensuremath{^{+}}", value)
+        self.assertIn(r"k\ensuremath{^{n}}", value)
         self.assertNotIn("≡", value)
         self.assertNotIn("′", value)
+        self.assertNotIn("ᵢ", value)
 
     def test_latex_owns_figure_and_table_numbering(self) -> None:
         artifact_id = "12345678-1234-1234-1234-123456789abc"
@@ -227,7 +239,102 @@ The reported systems support a bounded comparison [1, 2].
         self.assertNotIn("Scheme 7", rendered)
         self.assertNotIn("Table 4", rendered)
 
-    def test_references_flush_pending_double_column_figures(self) -> None:
+    def test_figure_layout_uses_geometry_then_semantic_role(self) -> None:
+        self.assertEqual(
+            "double",
+            choose_figure_layout(width=1800, height=900)["span"],
+        )
+        self.assertEqual(
+            "single",
+            choose_figure_layout(
+                representative_role="workflow", width=800, height=1000
+            )["span"],
+        )
+        overview = choose_figure_layout(
+            representative_role="conceptual_overview",
+            width=600,
+            height=900,
+            requested_span="single",
+            review_overview=True,
+        )
+        self.assertEqual("double", overview["span"])
+        self.assertEqual("review_overview_required", overview["reason"])
+        self.assertEqual(
+            "double",
+            choose_figure_layout(representative_role="conceptual_overview")["span"],
+        )
+        self.assertEqual(
+            "single",
+            choose_figure_layout(representative_role="structure_image")["span"],
+        )
+
+    def test_pdf_figures_can_mix_single_and_double_column_layouts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            compact_id = "12345678-1234-1234-1234-123456789abc"
+            wide_id = "22345678-1234-1234-1234-123456789abc"
+            compact = root / "compact.png"
+            wide = root / "wide.png"
+            Image.new("RGB", (800, 1000), "white").save(compact)
+            Image.new("RGB", (1800, 900), "white").save(wide)
+            markdown = (
+                "# Review\n\n## Results\n\n"
+                '<!-- inserted_figure: {"representative_role":"structure_image",'
+                f'"output_artifact_id":"{compact_id}"}} -->\n'
+                f"![Structure](/api/v1/artifacts/{compact_id}/content)\n"
+                "*Figure 1. Representative structure.*\n\n"
+                '<!-- inserted_figure: {"representative_role":"scope_samples",'
+                f'"output_artifact_id":"{wide_id}"}} -->\n'
+                f"![Scope](/api/v1/artifacts/{wide_id}/content)\n"
+                "*Figure 2. Representative substrate scope.*\n"
+            )
+            state = build_manuscript_state(
+                markdown,
+                artifact_paths={compact_id: str(compact), wide_id: str(wide)},
+            )
+
+        images = [block for block in state["blocks"] if block["kind"] == "image"]
+        self.assertEqual(["single", "double"], [block["layout_span"] for block in images])
+        rendered = render_tex(state, profile="en", template=self.template)
+        self.assertIn(r"\begin{figure}[!htbp]", rendered)
+        self.assertIn(r"width=\columnwidth,height=0.42\textheight", rendered)
+        self.assertIn(r"\begin{figure*}[!tbp]", rendered)
+        self.assertIn(r"width=\textwidth,height=0.56\textheight", rendered)
+
+    def test_figure_layout_metadata_can_override_automatic_choice(self) -> None:
+        artifact_id = "12345678-1234-1234-1234-123456789abc"
+        state = build_manuscript_state(
+            "# Review\n\n"
+            '<!-- inserted_figure: {"representative_role":"workflow",'
+            '"layout_span":"single",'
+            f'"output_artifact_id":"{artifact_id}"}} -->\n'
+            f"![Workflow](/api/v1/artifacts/{artifact_id}/content)\n"
+            "*Figure 1. Study workflow.*\n",
+            artifact_paths={artifact_id: "C:/safe/workflow.png"},
+        )
+
+        image = next(block for block in state["blocks"] if block["kind"] == "image")
+        self.assertEqual("single", image["layout_span"])
+        self.assertEqual("explicit_override", image["layout_reason"])
+
+    def test_final_review_overview_is_always_double_column(self) -> None:
+        artifact_id = "12345678-1234-1234-1234-123456789abc"
+        with tempfile.TemporaryDirectory() as temporary:
+            overview = Path(temporary) / "overview.png"
+            Image.new("RGB", (600, 900), "white").save(overview)
+            state = build_manuscript_state(
+                "# Review\n\n"
+                f"![Overview figure](/api/v1/artifacts/{artifact_id}/content)\n"
+                "*Review overview. Classification and evidence flow.*\n",
+                artifact_paths={artifact_id: str(overview)},
+            )
+
+        image = next(block for block in state["blocks"] if block["kind"] == "image")
+        self.assertTrue(image["review_overview"])
+        self.assertEqual("double", image["layout_span"])
+        self.assertEqual("review_overview_required", image["layout_reason"])
+
+    def test_references_drain_figures_without_forcing_a_new_page(self) -> None:
         state = build_manuscript_state(
             "# Review\n\n## Results\n\nText [1].\n\n"
             "## References\n\n[1] Source.\n"
@@ -235,7 +342,20 @@ The reported systems support a bounded comparison [1, 2].
 
         rendered = render_tex(state, profile="en", template=self.template)
 
-        self.assertIn("\\clearpage\n\\balance\n\\section{References}", rendered)
+        self.assertIn("\\FloatBarrier\n\\balance\n\\section{References}", rendered)
+        self.assertNotIn("\\clearpage\n\\balance\n\\section{References}", rendered)
+
+    def test_template_compacts_single_and_double_column_float_queues(self) -> None:
+        self.assertIn(r"\usepackage{placeins}", self.template)
+        self.assertIn(r"\setcounter{totalnumber}{6}", self.template)
+        self.assertIn(r"\setcounter{dbltopnumber}{3}", self.template)
+        self.assertIn(r"\renewcommand{\textfraction}{0.06}", self.template)
+        self.assertIn(r"\renewcommand{\dbltopfraction}{0.92}", self.template)
+        self.assertIn(r"\setlength{\dblfloatsep}{9pt plus 2pt minus 2pt}", self.template)
+        self.assertIn(r"\setlength{\@fpsep}{10pt plus 2pt minus 2pt}", self.template)
+        self.assertIn(r"\setlength{\@fptop}{0pt}", self.template)
+        self.assertIn(r"\setlength{\@dblfpsep}{12pt plus 2pt minus 2pt}", self.template)
+        self.assertIn(r"\setlength{\@dblfptop}{0pt}", self.template)
 
 
 if __name__ == "__main__":

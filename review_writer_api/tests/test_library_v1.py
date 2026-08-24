@@ -39,6 +39,7 @@ from review_writer_api.workflow_models import (
     LibraryDocumentChunk,
     LibraryDocumentIndex,
     LibraryPaper,
+    WorkflowJob,
 )
 from review_writer_api.workspaces import HostedWorkspaceManager
 
@@ -285,13 +286,50 @@ class LibraryV1Tests(unittest.TestCase):
             completed = self.wait_job(client, submitted_job["id"])
             self.assertEqual("succeeded", completed["status"])
             recent = client.get("/api/v1/library/upload-jobs/recent?limit=10")
+            removed_audit_route = client.get(
+                f"/api/v1/library/papers/{completed['result']['paper_id']}/bibliography-audit"
+            )
 
         self.assertEqual(200, recent.status_code)
         self.assertEqual(submitted_job["id"], recent.json()["items"][0]["id"])
         self.assertEqual("persistent.pdf", recent.json()["items"][0]["filename"])
+        self.assertEqual(404, removed_audit_route.status_code)
+        self.assertEqual(
+            {
+                "batch_id": batch_id,
+                "total": 1,
+                "queued": 0,
+                "running": 0,
+                "cancel_requested": 0,
+                "succeeded": 1,
+                "failed": 0,
+                "cancelled": 0,
+                "interrupted": 0,
+            },
+            {
+                key: recent.json()["batch_summaries"][0][key]
+                for key in (
+                    "batch_id",
+                    "total",
+                    "queued",
+                    "running",
+                    "cancel_requested",
+                    "succeeded",
+                    "failed",
+                    "cancelled",
+                    "interrupted",
+                )
+            },
+        )
         with self.sessions() as session:
             usage = session.scalar(select(MinerUUsageEvent))
+            audit_jobs = session.scalars(
+                select(WorkflowJob).where(
+                    WorkflowJob.job_type == "library.bibliography-audit"
+                )
+            ).all()
         self.assertIsNotNone(usage)
+        self.assertEqual([], audit_jobs)
         self.assertEqual(uuid.UUID(submitted_job["id"]), usage.job_id)
         staging = (
             self.settings.hosted_workspace_root

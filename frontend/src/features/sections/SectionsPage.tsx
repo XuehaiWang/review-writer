@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
 import type { Job } from "../../api/types";
@@ -17,6 +17,10 @@ type SectionTask = Record<string, unknown> & {
   section_id?: string;
   heading?: string;
   core_argument?: string;
+  section_role?: string;
+  primary_papers?: string[];
+  supporting_papers?: string[];
+  context_papers?: string[];
   allowed_papers?: string[];
   must_cover_points?: string[];
   avoid_points?: string[];
@@ -45,7 +49,25 @@ type EvidenceSection = {
   retrieval_mode?: string;
   status?: string;
   hit_count?: number;
+  claim_eligible_hit_count?: number;
   paper_count?: number;
+  writeable_primary_papers?: string[];
+  context_only_primary_papers?: string[];
+  unresolved_primary_papers?: string[];
+  corpus_gap_questions?: string[];
+  primary_paper_states?: Array<{
+    paper_id?: string;
+    status?: string;
+    diagnostic?: string;
+    index_status?: string;
+    chunk_count?: number;
+  }>;
+  query_plans?: Array<{
+    question_id?: string;
+    status?: string;
+    websearch_query?: string;
+    diagnostics_by_primary_paper?: Record<string, string>;
+  }>;
   hits?: Array<{
     paper_id?: string;
     paper_title?: string;
@@ -58,6 +80,10 @@ type EvidenceSection = {
     page_end?: number | null;
     section_path?: string[];
     match_reason?: string;
+    match_type?: string;
+    claim_eligible?: boolean;
+    question_ids?: string[];
+    retrieval_passes?: string[];
     is_neighbor?: boolean;
   }>;
 };
@@ -144,6 +170,24 @@ function taskId(task?: SectionTask) {
   return String(task?.section_id || task?.heading || "");
 }
 
+function taskPaperSummary(task: SectionTask | undefined, text: (zh: string, en: string) => string) {
+  const primaryCount = task?.primary_papers?.length || 0;
+  const supportingCount = task?.supporting_papers?.length || 0;
+  const contextCount = task?.context_papers?.length || 0;
+  const availableCount = task?.allowed_papers?.length || 0;
+  const role = String(task?.section_role || "body");
+  const parts = [text(`${primaryCount} 篇主要论文`, `${primaryCount} primary papers`)];
+  if (role === "introduction" || role === "conclusion") {
+    parts.push(text("综合章节", "synthesis section"));
+  }
+  if (supportingCount) parts.push(text(`${supportingCount} 篇支持论文`, `${supportingCount} supporting papers`));
+  if (contextCount) parts.push(text(`${contextCount} 篇背景论文`, `${contextCount} context papers`));
+  if (!supportingCount && !contextCount && availableCount !== primaryCount) {
+    parts.push(text(`${availableCount} 篇可用证据`, `${availableCount} available papers`));
+  }
+  return parts.join(" · ");
+}
+
 function TaskRequirements({ task, paperLabels }: { task?: SectionTask; paperLabels: Map<string, string> }) {
   const { text } = useUiText();
   if (!task) return <div className="empty-state">{text("当前Blueprint没有可用的章节写作任务。", "The current blueprint has no section-writing tasks.")}</div>;
@@ -165,14 +209,31 @@ function EvidenceView({ section, paragraphs, paperLabels }: { section?: Evidence
   const { text } = useUiText();
   if (!section) return <div className="empty-state">{text("当前章节没有已发布的证据包。", "This section has no published evidence package.")}</div>;
   const hits = section.hits || [];
+  const retrievalLabel = section.retrieval_mode === "lexical"
+    ? text("问题级全文证据", "Question-level full-text evidence")
+    : section.retrieval_mode === "abstract_only"
+      ? text("仅摘要证据", "Abstract-only evidence")
+      : section.retrieval_mode === "insufficient_evidence"
+        ? text("暂无可写证据", "No writeable evidence")
+        : text("兼容回退", "Compatibility fallback");
+  const matchLabel = (value?: string) => ({
+    direct_match: text("直接命中", "Direct match"),
+    fact_card_evidence: text("Matrix 事实证据", "Matrix fact evidence"),
+    table_or_figure: text("表格/图像证据", "Table/figure evidence"),
+    neighbor_context: text("相邻上下文", "Adjacent context"),
+    abstract_only: text("仅摘要", "Abstract only"),
+    coverage_only: text("仅覆盖，不可支持论点", "Coverage only; not claim evidence"),
+  }[String(value || "")] || value || text("未分类", "Unclassified"));
   return (
     <div className="section-evidence-view">
-      <header><span className="step-label">{text("检索证据", "Retrieved evidence")}</span><h2>{section.heading || section.section_id}</h2><p>{section.query}</p><div className="chip-list"><span>{section.retrieval_mode === "lexical" ? text("词法全文检索", "Lexical full-text retrieval") : text("旧版前缀回退", "Legacy prefix fallback")}</span><span>{text(`${section.hit_count || 0} 个段落`, `${section.hit_count || 0} passages`)}</span><span>{text(`${section.paper_count || 0} 篇论文`, `${section.paper_count || 0} papers`)}</span></div></header>
+      <header><span className="step-label">{text("检索证据", "Retrieved evidence")}</span><h2>{section.heading || section.section_id}</h2><p>{section.query}</p><div className="chip-list"><span>{retrievalLabel}</span><span>{text(`${section.claim_eligible_hit_count || 0} 个可引用段落`, `${section.claim_eligible_hit_count || 0} claim-ready passages`)}</span><span>{text(`${section.paper_count || 0} 篇可写论文`, `${section.paper_count || 0} writeable papers`)}</span></div></header>
+      {section.primary_paper_states?.length ? <section className="evidence-diagnostic-summary"><h3>{text("主论文写作状态", "Primary-paper writing status")}</h3><div className="chip-list">{section.primary_paper_states.map((item) => <span key={item.paper_id} className={`status-pill ${item.status === "writeable" ? "ok" : "warning"}`} title={`${item.diagnostic || ""} · ${item.index_status || ""} · ${item.chunk_count || 0} chunks`}>{paperLabels.get(String(item.paper_id || "")) || item.paper_id} · {item.status}</span>)}</div>{section.corpus_gap_questions?.length ? <p>{text(`全章缺少：${section.corpus_gap_questions.join("、")}`, `Corpus gaps: ${section.corpus_gap_questions.join(", ")}`)}</p> : null}</section> : null}
+      {section.query_plans?.length ? <details className="evidence-query-plans"><summary>{text(`查看 ${section.query_plans.length} 个问题级查询与诊断`, `View ${section.query_plans.length} question-level queries and diagnostics`)}</summary>{section.query_plans.map((plan) => <article key={plan.question_id}><strong>{plan.question_id} · {plan.status}</strong><code>{plan.websearch_query}</code></article>)}</details> : null}
       {hits.length ? <div className="section-evidence-list">{hits.map((hit, index) => {
         const page = hit.page_start ? (hit.page_end && hit.page_end !== hit.page_start ? `${hit.page_start}–${hit.page_end}` : String(hit.page_start)) : text("未知", "Unknown");
         const supported = (paragraphs || []).filter((paragraph) => paragraph.evidence?.some((item) => item.chunk_ids?.includes(String(hit.chunk_id || ""))));
-        return <article key={hit.evidence_key || hit.chunk_id || index}><div><strong>{paperLabels.get(String(hit.paper_id || "")) || hit.paper_title || hit.paper_id}</strong><span>{text("页", "Page")} {page} · {(hit.section_path || []).join(" › ") || text("未标注章节", "Unlabelled section")}</span></div><p>{hit.content}</p><footer><code>{hit.evidence_id || hit.chunk_id}</code><em>{hit.evidence_level || (hit.is_neighbor ? text("相邻上下文", "Adjacent context") : hit.match_reason)}</em></footer>{supported.length ? <details><summary>{text(`支持 ${supported.length} 个正文段落`, `Supports ${supported.length} draft paragraphs`)}</summary>{supported.map((paragraph) => <p key={paragraph.paragraph_id} className="supported-paragraph"><b>{paragraph.paragraph_id}</b> {paragraph.text}</p>)}</details> : null}</article>;
-      })}</div> : <div className="empty-state">{text("证据不足，当前版本使用兼容回退；请在文献库建立全文索引后重新生成。", "Evidence was insufficient and this version used the compatibility fallback. Build full-text indexes in Library and regenerate.")}</div>}
+        return <article key={hit.evidence_key || hit.chunk_id || index} className={hit.claim_eligible === false ? "context-only-evidence" : undefined}><div><strong>{paperLabels.get(String(hit.paper_id || "")) || hit.paper_title || hit.paper_id}</strong><span>{text("页", "Page")} {page} · {(hit.section_path || []).join(" › ") || text("未标注章节", "Unlabelled section")}</span></div><p>{hit.content}</p><footer><code>{hit.evidence_id || hit.chunk_id}</code><em>{matchLabel(hit.match_type)} · {hit.evidence_level || hit.match_reason}</em></footer>{supported.length ? <details><summary>{text(`支持 ${supported.length} 个正文段落`, `Supports ${supported.length} draft paragraphs`)}</summary>{supported.map((paragraph) => <p key={paragraph.paragraph_id} className="supported-paragraph"><b>{paragraph.paragraph_id}</b> {paragraph.text}</p>)}</details> : null}</article>;
+      })}</div> : <div className="empty-state">{section.retrieval_mode === "insufficient_evidence" ? text("当前章节没有可支持正文论点的证据。请按诊断重建索引、调整分类或补充论文。", "This section has no evidence that can support draft claims. Follow the diagnostics to rebuild indexes, adjust classification, or add papers.") : text("当前没有可显示的全文证据。", "There is no full-text evidence to display.")}</div>}
     </div>
   );
 }
@@ -201,9 +262,11 @@ export function SectionsPage() {
   const { text } = useUiText();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { selected: project } = useSelectedProject();
   const [selectedId, setSelectedId] = useState("");
   const [tab, setTab] = useState<WorkspaceTab>("section");
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [jobId, setJobId] = useState("");
   const sections = useQuery({
     queryKey: ["sections", project?.project_id || ""],
@@ -238,12 +301,25 @@ export function SectionsPage() {
 
   useEffect(() => {
     if (!payload) return;
+    const requestedSection = String(searchParams.get("section") || "");
+    if (requestedSection) {
+      const requestedFile = files.find(
+        (file) => file.section_id === requestedSection || file.name === requestedSection
+      );
+      const requestedTask = tasks.find((task) => taskId(task) === requestedSection);
+      if (requestedFile || requestedTask) {
+        setSelectedId(taskOnly ? taskId(requestedTask) : requestedFile?.name || requestedSection);
+        setTab("evidence");
+        setShowAdvanced(true);
+        return;
+      }
+    }
     const valid = taskOnly
       ? tasks.some((task) => taskId(task) === selectedId)
       : files.some((file) => file.name === selectedId);
     if (!valid) setSelectedId(taskOnly ? taskId(tasks[0]) : files[0]?.name || "");
     if (taskOnly && tab !== "tasks" && tab !== "report") setTab("tasks");
-  }, [files, payload, selectedId, tab, taskOnly, tasks]);
+  }, [files, payload, searchParams, selectedId, tab, taskOnly, tasks]);
 
   useEffect(() => {
     if (!currentJob || jobIsActive(currentJob.status)) return;
@@ -279,6 +355,7 @@ export function SectionsPage() {
     onSuccess: (job) => {
       setJobId(job.id);
       setTab("report");
+      setShowAdvanced(true);
     },
   });
   const confirm = useMutation({
@@ -289,9 +366,12 @@ export function SectionsPage() {
     onSuccess: () => navigate(`/images?tab=review&project=${encodeURIComponent(project!.project_id)}`),
   });
 
-  const availableTabs: Array<[WorkspaceTab, string]> = taskOnly
-    ? [["tasks", text("写作要求", "Writing requirements")], ["report", text("生成报告", "Generation report")]]
-    : [["synthesis", text("综合", "Synthesis")], ["writing", text("写作计划", "Writing Plan")], ["evidence", text("证据", "Evidence")], ["section", text("草稿", "Draft")], ["review", text("审校", "Review")], ["merged", text("合并预览", "Merged preview")], ["tasks", text("写作要求", "Writing requirements")], ["report", text("生成报告", "Generation report")]];
+  const mainTabs: Array<[WorkspaceTab, string]> = taskOnly
+    ? [["tasks", text("写作准备", "Writing preparation")]]
+    : [["section", text("章节草稿", "Section draft")], ["merged", text("合并预览", "Merged preview")]];
+  const advancedTabs: Array<[WorkspaceTab, string]> = taskOnly
+    ? [["report", text("生成报告", "Generation report")]]
+    : [["synthesis", text("综合", "Synthesis")], ["writing", text("写作计划", "Writing Plan")], ["evidence", text("证据", "Evidence")], ["review", text("审校", "Review")], ["tasks", text("写作要求", "Writing requirements")], ["report", text("生成报告", "Generation report")]];
   const error = generate.error || confirm.error || (currentJob?.status === "failed" ? new Error(currentJob.error_message || text("章节生成失败。", "Section generation failed.")) : null);
 
   return (
@@ -306,9 +386,9 @@ export function SectionsPage() {
             const id = taskOnly ? taskId(item as SectionTask) : (item as SectionFile).name;
             const task = taskOnly ? item as SectionTask : tasks.find((candidate) => taskId(candidate) === (item as SectionFile).section_id);
             const file = taskOnly ? undefined : item as SectionFile;
-            return <button key={id} type="button" className={id === selectedId ? "paper-row active" : "paper-row"} onClick={() => { setSelectedId(id); if (!taskOnly && tab !== "tasks") setTab("section"); }}><span className="paper-row-main"><strong>{task?.heading || task?.section_id || file?.name}</strong><small>{file ? `${wordCount(file.content)} words` : `${task?.allowed_papers?.length || 0} ${text("篇论文", "papers")}`}</small></span><span className={file ? "status-dot ok" : "status-dot warning"} /></button>;
+            return <button key={id} type="button" className={id === selectedId ? "paper-row active" : "paper-row"} onClick={() => { setSelectedId(id); if (!taskOnly) { setTab("section"); setShowAdvanced(false); } }}><span className="paper-row-main"><strong>{task?.heading || task?.section_id || file?.name}</strong><small>{file ? `${wordCount(file.content)} words` : taskPaperSummary(task, text)}</small></span><span className={file ? "status-dot ok" : "status-dot warning"} /></button>;
           })}</div></section>
-          <section className="pane section-preview-react"><nav className="detail-tabs">{availableTabs.map(([value, label]) => <button key={value} type="button" className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{label}</button>)}</nav><div className="section-preview-content">
+          <section className="pane section-preview-react"><nav className="detail-tabs">{mainTabs.map(([value, label]) => <button key={value} type="button" className={tab === value ? "active" : ""} onClick={() => { setTab(value); setShowAdvanced(false); }}>{label}</button>)}</nav><details className="advanced-panel section-advanced-tabs" open={showAdvanced} onToggle={(event) => setShowAdvanced(event.currentTarget.open)}><summary>{text("生成依据与检查详情", "Generation inputs and checks")}</summary><div className="advanced-panel-body advanced-tab-list">{advancedTabs.map(([value, label]) => <button key={value} type="button" className={tab === value ? "active" : ""} onClick={() => { setTab(value); setShowAdvanced(true); }}>{label}</button>)}</div></details><div className="section-preview-content">
             {tab === "synthesis" ? <SynthesisView section={activeSynthesis} mode={payload.synthesis_state?.planning_mode} /> : null}
             {tab === "writing" ? <WritingPlanView section={activeWritingPlan} paperLabels={paperLabels} /> : null}
             {tab === "section" ? <MarkdownView content={displayedActiveContent} empty={text("当前章节尚未生成。", "This section has not been generated.")} /> : null}

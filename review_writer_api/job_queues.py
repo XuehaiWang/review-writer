@@ -9,7 +9,6 @@ INGEST_JOB_TYPES = frozenset(
     {
         "library.upload",
         "library.index",
-        "library.bibliography-audit",
         "library.search",
         "library.download",
     }

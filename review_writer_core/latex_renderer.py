@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 
-TEMPLATE_VERSION = "modern-survey/2"
+TEMPLATE_VERSION = "modern-survey/6"
 SUPPORTED_PROFILES = frozenset({"en", "zh-CN"})
 
 
@@ -24,6 +24,16 @@ ALLOWED_MATH_COMMANDS = frozenset(
         "sqrt", "times", "cdot", "le", "ge", "pm", "rightarrow", "leftrightarrow",
     }
 )
+SUPERSCRIPT_TEXT = {
+    **dict(zip("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")),
+    **dict(zip("⁺⁻⁼⁽⁾", "+-=()")),
+    **dict(zip("ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ", "abcdefghijklmnopqrstuvwxyz")),
+}
+SUBSCRIPT_TEXT = {
+    **dict(zip("₀₁₂₃₄₅₆₇₈₉", "0123456789")),
+    **dict(zip("₊₋₌₍₎", "+-=()")),
+    **dict(zip("ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜₓ", "aehijklmnoprstx")),
+}
 
 
 def _escape_plain(text: str) -> str:
@@ -45,16 +55,14 @@ def _escape_plain(text: str) -> str:
         "′": r"\ensuremath{^{\prime}}",
         "≡": r"\ensuremath{\equiv}",
         "≠": r"\ensuremath{\neq}",
-        "₀": r"\ensuremath{_{0}}",
-        "₁": r"\ensuremath{_{1}}",
-        "₂": r"\ensuremath{_{2}}",
-        "₃": r"\ensuremath{_{3}}",
-        "₄": r"\ensuremath{_{4}}",
-        "₅": r"\ensuremath{_{5}}",
-        "₆": r"\ensuremath{_{6}}",
-        "₇": r"\ensuremath{_{7}}",
-        "₈": r"\ensuremath{_{8}}",
-        "₉": r"\ensuremath{_{9}}",
+        **{
+            character: rf"\ensuremath{{^{{{plain}}}}}"
+            for character, plain in SUPERSCRIPT_TEXT.items()
+        },
+        **{
+            character: rf"\ensuremath{{_{{{plain}}}}}"
+            for character, plain in SUBSCRIPT_TEXT.items()
+        },
     }
     escaped = "".join(replacements.get(char, char) for char in text)
     escaped = re.sub(r"\*\*(.+?)\*\*", r"\\textbf{\1}", escaped)
@@ -218,9 +226,9 @@ def render_body(state: dict[str, Any]) -> str:
         if kind == "heading":
             heading_text = str(block.get("text") or "")
             if re.sub(r"^\s*\d+(?:\.\d+)*[.)、：:\-]?\s*", "", heading_text).strip().casefold() in REFERENCE_TITLES:
-                # Flush every double-column figure before the bibliography so
-                # queued method figures cannot appear after References.
-                lines.extend([r"\clearpage", r"\balance"])
+                # Drain pending figures before the bibliography without the
+                # unconditional page break imposed by \clearpage.
+                lines.extend([r"\FloatBarrier", r"\balance"])
             lines.extend([_heading(int(block.get("level") or 2), heading_text), ""])
         elif kind == "paragraph":
             lines.extend([latex_escape(block.get("text")), ""])
@@ -235,6 +243,11 @@ def render_body(state: dict[str, Any]) -> str:
             resolved = str(block.get("resolved_path") or "")
             if not resolved:
                 continue
+            double_column = str(block.get("layout_span") or "single") == "double"
+            figure_environment = "figure*" if double_column else "figure"
+            placement = "!tbp" if double_column else "!htbp"
+            figure_width = r"\textwidth" if double_column else r"\columnwidth"
+            figure_height = r"0.56\textheight" if double_column else r"0.42\textheight"
             raw_caption = str(block.get("caption") or block.get("alt") or "Figure").strip()
             caption = FIGURE_LABEL.sub("", raw_caption).strip()
             caption_name = ""
@@ -244,12 +257,12 @@ def render_body(state: dict[str, Any]) -> str:
                 caption_name = "反应式"
             lines.extend(
                 [
-                    r"\begin{figure*}[!tbp]",
+                    rf"\begin{{{figure_environment}}}[{placement}]",
                     r"\centering",
-                    rf"\includegraphics[width=\textwidth,height=0.56\textheight,keepaspectratio]{{\detokenize{{{Path(resolved).as_posix()}}}}}",
+                    rf"\includegraphics[width={figure_width},height={figure_height},keepaspectratio]{{\detokenize{{{Path(resolved).as_posix()}}}}}",
                     *( [rf"\captionsetup{{name={latex_escape(caption_name)}}}"] if caption_name else [] ),
                     rf"\caption{{{latex_escape(caption or 'Figure')}}}",
-                    r"\end{figure*}",
+                    rf"\end{{{figure_environment}}}",
                     "",
                 ]
             )

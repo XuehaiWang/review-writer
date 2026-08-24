@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
-from collections import Counter
 from collections import Counter
 from typing import Any, Iterable
 
@@ -49,6 +49,16 @@ _ROUTING_PLACEHOLDERS = (
     "待分类",
     "待路由",
     "需要分类",
+)
+
+_BOUNDARY_HEADING_TERMS = (
+    "cross-category",
+    "cross category",
+    "boundary cases",
+    "cross-cutting evidence",
+    "跨类别",
+    "边界案例",
+    "交叉类别",
 )
 
 _MECHANISM_TERMS = (
@@ -109,6 +119,13 @@ def is_catch_all_heading(value: Any) -> bool:
     return any(heading.startswith(prefix) for prefix in _ROUTING_PLACEHOLDERS)
 
 
+def is_boundary_heading(value: Any) -> bool:
+    """Return whether a heading explicitly represents residual boundary cases."""
+
+    heading = normalized_heading(value)
+    return any(term in heading for term in _BOUNDARY_HEADING_TERMS)
+
+
 def evidence_key(paper_id: Any, chunk_id: Any, source_lineage_hash: Any) -> str:
     """Build a stable evidence identity from immutable source coordinates."""
 
@@ -152,7 +169,7 @@ def derive_scope_contract(
     defaults: dict[str, Any] = {
         "schema_version": ACADEMIC_SCHEMA_VERSION,
         "topic": review_topic,
-        "review_type": "bounded_evidence_synthesis",
+        "review_type": "narrative_topic_review",
         "target_question": (
             f"How should the evidence on {review_topic} be organized and compared, "
             "and which conclusions and limitations are supported across studies?"
@@ -381,6 +398,27 @@ def taxonomy_diagnostics(
         )
 
     assigned = _unique(paper_id for item in body for paper_id in item["paper_ids"])
+    analytical_count = len(set(assigned) & matrix_set)
+    dominant_boundary_threshold = max(4, math.ceil(analytical_count * 0.35))
+    dominant_boundary_ids = [
+        item["section_id"]
+        for item in body
+        if analytical_count >= 8
+        and is_boundary_heading(item["title"])
+        and len(set(item["paper_ids"]) & matrix_set) >= dominant_boundary_threshold
+    ]
+    if dominant_boundary_ids:
+        issues.append(
+            {
+                "rule_id": "taxonomy.dominant_boundary_section",
+                "severity": "planning_blocker",
+                "section_ids": dominant_boundary_ids,
+                "message": (
+                    "A residual boundary section owns too much of the selected corpus. "
+                    "Reroute its papers into evidence-based academic categories before writing."
+                ),
+            }
+        )
     contextual = _unique(
         paper_id for item in normalized for paper_id in item["context_paper_ids"]
     )
@@ -453,6 +491,7 @@ def taxonomy_diagnostics(
         "blocking_issue_count": len(blockers),
         "warning_count": len(issues) - len(blockers),
         "catch_all_section_ids": catch_all_ids,
+        "dominant_boundary_section_ids": dominant_boundary_ids,
         "orphan_paper_ids": orphan_ids,
         "assigned_paper_count": len(set(assigned) & matrix_set),
         "contextual_paper_count": len(set(contextual) & matrix_set),

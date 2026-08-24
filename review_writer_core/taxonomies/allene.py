@@ -29,8 +29,8 @@ rules = [
         ('allene-containing natural products', 'product', ['allenic natural product', 'allene-containing natural product', 'allenic pheromone']),
 
         # 2. Substrates
-        ('propargylic alcohols', 'substrate', ['propargylic alcohol', 'propargyl alcohol']),
-        ('propargylic acetates', 'substrate', ['propargylic acetate', 'propargyl acetate', 'ethynylcarbinol acetate']),
+        ('propargylic alcohols', 'substrate', ['propargylic alcohol', 'propargyl alcohol', 'ethynyl tertiary alcohol', 'ethynyl tertiary alcohols', 'alkynyl tertiary alcohol', 'alkynyl tertiary alcohols', 'azaarylethynyl tertiary alcohol', 'azaarylethynyl tertiary alcohols']),
+        ('propargylic acetates', 'substrate', ['propargylic acetate', 'propargyl acetate', 'propargylic benzoate', 'propargylic benzoates', 'ethynylcarbinol acetate']),
         ('propargylic mesylates', 'substrate', ['propargylic mesylate', 'propargyl mesylate', 'propynyl methanesulfonate']),
         ('propargylic sulfinates and sulfonates', 'substrate', ['propargylic sulfinate', 'propargylic sulfonate', 'propargylic tosylate']),
         ('propargylic carbonates', 'substrate', ['propargylic carbonate', 'propargyl carbonate']),
@@ -50,7 +50,9 @@ rules = [
         ('alkynoates', 'substrate', ['alkynoate', 'alkynoates', '3-alkynoate', '3-alkynoates', 'alkynoic ester']),
         ('preformed substituted allenes', 'substrate', ['preformed allene', 'substituted allene substrate', '1-alkylallene-1,3-dicarboxylate', '1-alkylallene-1,3-dicarboxylates', 'tetrasubstituted allene', 'allene hydrocarbon', 'racemic allene', 'racemic axially chiral allene', 'kinetic resolution of axially chiral allenes', 'dynamic kinetic resolution of axially chiral allenes']),
         ('silyl-substituted diene precursors', 'substrate', ['3-bromo-5-silylpenta-1,3-diene', '3-bromo-5-silylpenta-1,3-dienes', 'allenylmethylsilane', 'allenylmethylsilanes', 'allenylmethyl silane']),
-        ('enynes', 'substrate', ['enyne', 'enynes', 'activated enyne', 'allenyne', '1,3-enyne', '1,3-enynes', 'but-1-en-3-yne', 'but-1-en-3-ynes', 'enynamide', 'enynamides', 'enynone', 'enynones']),
+        ('enynes', 'substrate', ['enyne', 'enynes', 'activated enyne', 'activated enynes', 'allenyne', '1,3-enyne', '1,3-enynes', 'but-1-en-3-yne', 'but-1-en-3-ynes', 'enynamide', 'enynamides', 'enynone', 'enynones']),
+        ('enol triflates', 'substrate', ['enol triflate', 'enol triflates', 'vinyl triflate', 'vinyl triflates']),
+        ('rearrangement precursors', 'substrate', ['propargyl claisen rearrangement', 'propargylic claisen rearrangement', 'myers allene synthesis', 'propargylic rearrangement precursor']),
         ('ketenes', 'substrate', ['ketene', 'substituted ketene']),
         ('terminal alkynes', 'substrate', ['terminal alkyne', '1-alkyne', 'acetylene substrate']),
         ('aldehydes', 'substrate', ['aliphatic aldehyde', 'aromatic aldehyde', 'benzaldehyde']),

@@ -6,13 +6,21 @@ import hashlib
 import json
 import re
 from collections import Counter
+from pathlib import Path
 from typing import Any
+
+from PIL import Image as PILImage
+from pypdf import PdfReader
+from pypdf.errors import PyPdfError
 
 from review_writer_core.markdown_images import (
     malformed_markdown_image_lines,
     parse_markdown_image,
 )
-from review_writer_core.publication_caption import repair_publication_ocr_splits
+from review_writer_core.publication_caption import (
+    infer_figure_role,
+    repair_publication_ocr_splits,
+)
 
 
 SCHEMA_VERSION = 1
@@ -31,6 +39,13 @@ CJK = re.compile(r"[\u3400-\u9fff]")
 ABSTRACT_HEADINGS = frozenset({"abstract", "summary", "摘要", "内容摘要"})
 KEYWORD_HEADINGS = frozenset({"keywords", "keyword", "key words", "关键词", "关键字"})
 TABLE_CAPTION = re.compile(r"^\*{0,2}(?:table|表)\s*\d+\s*[.:：]?\s*.+?\*{0,2}$", re.IGNORECASE)
+FIGURE_LAYOUT_SPANS = frozenset({"auto", "single", "double"})
+WIDE_FIGURE_ROLES = frozenset(
+    {"workflow", "scope_samples", "comparison_ablation", "conceptual_overview"}
+)
+COMPACT_FIGURE_ROLES = frozenset({"quantitative_results", "structure_image"})
+SINGLE_COLUMN_MAX_ASPECT_RATIO = 1.35
+DOUBLE_COLUMN_MIN_ASPECT_RATIO = 1.55
 
 
 def _sha256(text: str) -> str:
@@ -91,6 +106,86 @@ def _caption_text(line: str) -> str:
     if len(stripped) >= 2 and stripped.startswith("*") and stripped.endswith("*"):
         return repair_publication_ocr_splits(stripped.strip("*").strip())
     return ""
+
+
+def _asset_dimensions(raw_path: Any) -> tuple[float, float]:
+    """Read only enough asset geometry to choose a PDF column span."""
+
+    try:
+        path = Path(str(raw_path or ""))
+        if not path.is_file():
+            return 0.0, 0.0
+        if path.suffix.casefold() == ".pdf":
+            reader = PdfReader(str(path))
+            if not reader.pages:
+                return 0.0, 0.0
+            box = reader.pages[0].mediabox
+            return float(box.width), float(box.height)
+        with PILImage.open(path) as image:
+            width, height = image.size
+            return float(width), float(height)
+    except (OSError, ValueError, TypeError, PyPdfError):
+        # Geometry is a layout hint, never a publication gate. The existing
+        # asset validation remains responsible for unreadable image files.
+        return 0.0, 0.0
+
+
+def choose_figure_layout(
+    *,
+    representative_role: Any = "unknown",
+    width: Any = 0,
+    height: Any = 0,
+    requested_span: Any = "auto",
+    review_overview: bool = False,
+) -> dict[str, Any]:
+    """Choose a stable one- or two-column figure layout without image AI."""
+
+    requested = str(requested_span or "auto").strip().casefold()
+    if requested not in FIGURE_LAYOUT_SPANS:
+        requested = "auto"
+    role = str(representative_role or "unknown").strip().casefold()
+    try:
+        numeric_width = float(width or 0)
+        numeric_height = float(height or 0)
+    except (TypeError, ValueError):
+        numeric_width, numeric_height = 0.0, 0.0
+    aspect_ratio = (
+        round(numeric_width / numeric_height, 4)
+        if numeric_width > 0 and numeric_height > 0
+        else None
+    )
+    if review_overview:
+        span, reason = "double", "review_overview_required"
+    elif requested in {"single", "double"}:
+        span, reason = requested, "explicit_override"
+    elif aspect_ratio is not None and aspect_ratio >= DOUBLE_COLUMN_MIN_ASPECT_RATIO:
+        span, reason = "double", "wide_aspect_ratio"
+    elif aspect_ratio is not None and aspect_ratio <= SINGLE_COLUMN_MAX_ASPECT_RATIO:
+        span, reason = "single", "compact_aspect_ratio"
+    elif role in WIDE_FIGURE_ROLES:
+        span, reason = "double", "wide_semantic_role"
+    elif role in COMPACT_FIGURE_ROLES:
+        span, reason = "single", "compact_semantic_role"
+    else:
+        span, reason = "single", "conservative_default"
+    return {"span": span, "reason": reason, "aspect_ratio": aspect_ratio}
+
+
+def _is_review_overview(alt: Any, caption: Any) -> bool:
+    """Identify the manuscript-level overview inserted by the Final stage."""
+
+    normalized_alt = re.sub(r"\s+", " ", str(alt or "")).strip().casefold()
+    if normalized_alt in {"overview figure", "review overview figure", "综述总览图", "总览图"}:
+        return True
+    normalized_caption = re.sub(
+        r"^\s*(?:figure|fig\.?|图)\s*\d+\s*[.:：\-]?\s*",
+        "",
+        str(caption or ""),
+        flags=re.IGNORECASE,
+    ).strip().casefold()
+    return normalized_caption.startswith("review overview") or normalized_caption.startswith(
+        "综述总览"
+    )
 
 
 def _split_values(value: str) -> list[str]:
@@ -197,6 +292,7 @@ def build_manuscript_state(
     source = str(markdown or "").replace("\r\n", "\n").replace("\r", "\n")
     comments = HTML_COMMENT.findall(source)
     inserted_figure_artifacts: list[str] = []
+    inserted_figure_metadata: dict[str, list[dict[str, Any]]] = {}
     invalid_inserted_figure_metadata: list[str] = []
     for match in INSERTED_FIGURE_METADATA.finditer(source):
         try:
@@ -210,6 +306,7 @@ def build_manuscript_state(
         artifact_id = str(metadata.get("output_artifact_id") or "").strip()
         if artifact_id:
             inserted_figure_artifacts.append(artifact_id)
+            inserted_figure_metadata.setdefault(artifact_id, []).append(metadata)
     # Draft comments contain stable paragraph and figure-routing identifiers.
     # Keep them in the released Markdown for editing lineage, but never expose
     # them as semantic manuscript blocks or printable PDF text.
@@ -266,6 +363,22 @@ def build_manuscript_state(
                         "message": f"Image `{alt or artifact_id or source_url}` has no explicit caption.",
                     }
                 )
+            metadata_queue = inserted_figure_metadata.get(artifact_id) or []
+            metadata = metadata_queue.pop(0) if metadata_queue else {}
+            representative_role = infer_figure_role(
+                alt,
+                caption,
+                preferred=metadata.get("representative_role"),
+            )
+            asset_width, asset_height = _asset_dimensions(resolved)
+            review_overview = _is_review_overview(alt, caption)
+            layout = choose_figure_layout(
+                representative_role=representative_role,
+                width=asset_width,
+                height=asset_height,
+                requested_span=metadata.get("layout_span", "auto"),
+                review_overview=review_overview,
+            )
             blocks.append(
                 {
                     "kind": "image",
@@ -274,6 +387,11 @@ def build_manuscript_state(
                     "artifact_id": artifact_id,
                     "resolved_path": resolved,
                     "caption": caption,
+                    "representative_role": representative_role,
+                    "review_overview": review_overview,
+                    "layout_span": layout["span"],
+                    "layout_reason": layout["reason"],
+                    "aspect_ratio": layout["aspect_ratio"],
                 }
             )
             index += 1

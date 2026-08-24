@@ -73,7 +73,12 @@ class MatrixRowUpdateRequest(BaseModel):
     revision: StrictInt = Field(ge=0)
     main_content: StrictStr | None = Field(default=None, max_length=2_000_000)
     most_relevant_figure: dict[str, Any] | None = None
+    scientific_facts: list[dict[str, Any]] | None = Field(default=None, max_length=100)
     mark_complete: StrictBool = False
+
+
+class MatrixLimitedModeRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
 
 
 class OutlineSaveRequest(BaseModel):
@@ -110,8 +115,21 @@ class FigureReviewSelectionRequest(BaseModel):
     candidate_index: StrictInt = Field(ge=0)
     review_note: StrictStr = Field(default="", max_length=10_000)
     representative_role: Literal[
-        "core_transformation", "mechanism", "scope", "paper_overview"
-    ] = "paper_overview"
+        "workflow",
+        "core_transformation",
+        "mechanism_model",
+        "scope_samples",
+        "quantitative_results",
+        "comparison_ablation",
+        "conceptual_overview",
+        "structure_image",
+        "unknown",
+        # Legacy values remain readable for projects created before the
+        # discipline-neutral role model was introduced.
+        "mechanism",
+        "scope",
+        "paper_overview",
+    ] = "unknown"
 
 
 class FigureReviewConfirmRequest(BaseModel):
@@ -205,3 +223,15 @@ class FinalOverviewTextRequest(BaseModel):
     title: StrictStr = Field(min_length=1, max_length=500)
     subtitle: StrictStr = Field(default="", max_length=1_000)
     labels: list[StrictStr] = Field(default_factory=list, max_length=100)
+
+
+class FinalFrontMatterRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+    title: StrictStr = Field(min_length=1, max_length=1_000)
+    authors: list[StrictStr] = Field(default_factory=list, max_length=100)
+    affiliations: list[StrictStr] = Field(default_factory=list, max_length=100)
+    abstract: StrictStr = Field(default="", max_length=20_000)
+    keywords: list[StrictStr] = Field(default_factory=list, max_length=100)
+    omitted_fields: list[
+        Literal["authors", "affiliations", "abstract", "keywords"]
+    ] = Field(default_factory=list, max_length=4)

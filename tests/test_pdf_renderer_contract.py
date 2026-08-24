@@ -91,6 +91,7 @@ class PdfRendererContractTests(unittest.TestCase):
         dockerfile = (ROOT / "Dockerfile.pdf-renderer").read_text(encoding="utf-8")
         self.assertIn("texlive-lang-chinese", dockerfile)
         self.assertIn("texlive-lang-japanese", dockerfile)
+        self.assertIn('"Pillow>=12,<13"', dockerfile)
 
     def test_pdf_qa_blocks_internal_workflow_marker_leaks(self) -> None:
         class MediaBox:

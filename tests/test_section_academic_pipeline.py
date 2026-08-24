@@ -141,6 +141,44 @@ class SectionAcademicPipelineTests(unittest.TestCase):
         self.assertEqual("complete", parsed["overview"])
         self.assertNotIn("relay_diagnostic", parsed)
 
+    def test_conclusion_receives_validated_body_synthesis_and_evidence_keys(self) -> None:
+        context, keys = PIPELINE.prior_body_synthesis_context(
+            {
+                "S02": {
+                    "section_id": "S02",
+                    "title": "Defined precursor class",
+                    "section_role": "body",
+                    "section_thesis": "Compare the bounded body evidence.",
+                },
+                "S03": {"section_id": "S03", "section_role": "conclusion"},
+            },
+            [{"section_id": "S02", "summary": "A bounded body conclusion."}],
+            [
+                {
+                    "section_id": "S02",
+                    "section_role": "body",
+                    "claims": [
+                        {
+                            "claim": "The studies support a bounded difference.",
+                            "claim_kind": "cross_study_comparison",
+                            "support_status": "supported",
+                            "citation_group": ["P001", "P002"],
+                            "evidence_refs": [
+                                {"evidence_key": "sha256:a", "relationship": "supports"},
+                                {"evidence_key": "sha256:b", "relationship": "supports"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        )
+
+        self.assertEqual(["S02"], [item["section_id"] for item in context])
+        self.assertEqual({"sha256:a", "sha256:b"}, keys)
+        self.assertEqual(
+            "A bounded body conclusion.", context[0]["validated_synthesis_summary"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

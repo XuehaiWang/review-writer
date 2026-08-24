@@ -680,8 +680,17 @@ class LibraryIndexService:
         top_k: int = 12,
         include_neighbors: bool = True,
         per_paper_limit: int | None = None,
+        term_groups: list[list[str]] | None = None,
+        exact_phrases: list[str] | None = None,
     ) -> list[EvidenceHit]:
-        """Return page-addressable lexical evidence within an explicit paper scope."""
+        """Return page-addressable lexical evidence within an explicit paper scope.
+
+        ``term_groups`` carries the structured query contract used by section
+        evidence retrieval: alternatives inside a group are OR-ed, while every
+        non-empty group must match.  ``query`` remains the PostgreSQL
+        ``websearch_to_tsquery`` representation and keeps older callers
+        backward compatible.
+        """
 
         principal.require(Permission.PROJECT_READ)
         normalized = " ".join(str(query or "").casefold().split())
@@ -690,6 +699,24 @@ class LibraryIndexService:
         )
         if not normalized or not allowed:
             return []
+        normalized_groups = [
+            list(
+                dict.fromkeys(
+                    " ".join(str(term or "").casefold().split())
+                    for term in group
+                    if " ".join(str(term or "").casefold().split())
+                )
+            )
+            for group in (term_groups or [])
+        ]
+        normalized_groups = [group for group in normalized_groups if group]
+        normalized_phrases = list(
+            dict.fromkeys(
+                " ".join(str(phrase or "").casefold().split())
+                for phrase in (exact_phrases or [])
+                if " ".join(str(phrase or "").casefold().split())
+            )
+        )
         user_id = uuid.UUID(principal.user_id)
         limit = max(1, min(int(top_k), 50))
         paper_limit = max(
@@ -737,10 +764,18 @@ class LibraryIndexService:
                 tsquery = func.websearch_to_tsquery("simple", normalized)
                 vector = func.to_tsvector("simple", LibraryDocumentChunk.content)
                 rank = func.ts_rank_cd(vector, tsquery)
-                exact = LibraryDocumentChunk.normalized_content.contains(normalized)
+                phrase_checks = [
+                    LibraryDocumentChunk.normalized_content.contains(phrase)
+                    for phrase in normalized_phrases
+                ]
+                exact = (
+                    or_(*phrase_checks)
+                    if phrase_checks
+                    else LibraryDocumentChunk.normalized_content.contains(normalized)
+                )
                 rows = session.execute(
                     base.add_columns(rank.label("rank"), exact.label("exact"))
-                    .where(or_(vector.op("@@")(tsquery), exact))
+                    .where(vector.op("@@")(tsquery))
                     .order_by(exact.desc(), rank.desc(), LibraryDocumentChunk.ordinal)
                     .limit(min(200, limit * max(2, paper_limit)))
                 ).all()
@@ -759,7 +794,14 @@ class LibraryIndexService:
                 tokens = [match.group(0) for match in _QUERY_TOKEN.finditer(normalized)]
                 for chunk, lineage_hash in rows:
                     text = str(chunk.normalized_content or "")
-                    exact_value = normalized in text
+                    if normalized_groups and not all(
+                        any(term in text for term in group)
+                        for group in normalized_groups
+                    ):
+                        continue
+                    exact_value = any(
+                        phrase in text for phrase in normalized_phrases
+                    ) if normalized_phrases else normalized in text
                     matched = sum(1 for token in tokens if token in text)
                     if not exact_value and not matched:
                         continue

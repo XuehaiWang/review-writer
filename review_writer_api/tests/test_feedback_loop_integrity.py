@@ -140,6 +140,50 @@ class FeedbackLoopIntegrityTests(unittest.TestCase):
 
         self.assertIn("paragraph_marker_in_rewrite", errors)
 
+    def test_rewrite_below_configured_minimum_remains_blocking(self) -> None:
+        original = " ".join(["word"] * 50)
+        candidate = " ".join(["word"] * 49)
+
+        errors, _warnings = feedback_loop.validate_rewrite_report(
+            original,
+            candidate,
+            50,
+            1400,
+        )
+
+        self.assertIn("word_count_49_outside_50_1400", errors)
+
+    def test_repair_prompt_keeps_evidence_and_varies_by_attempt(self) -> None:
+        prompt = feedback_loop.rewrite_repair_prompt(
+            " ".join(["word"] * 50),
+            " ".join(["word"] * 49),
+            ["word_count_49_outside_50_1400"],
+            50,
+            1400,
+            word_range_applicable=True,
+            evidence={
+                "paragraph_id": "S01-p1",
+                "paper_ids": ["P001"],
+                "evidence": [
+                    {
+                        "paper_id": "P001",
+                        "title": "Evidence title",
+                        "original_passages": [
+                            {"ref": "P001-C01", "page": 1, "text": "Grounded evidence."}
+                        ],
+                    }
+                ],
+            },
+            score={"diagnosis": "Expand without adding facts."},
+            rewrite_mode="final_polish",
+            repair_attempt=3,
+        )
+
+        self.assertIn("The rejected candidate contains 49 words", prompt)
+        self.assertIn("Generation attempt: 3", prompt)
+        self.assertIn("Grounded evidence.", prompt)
+        self.assertIn("never return a candidate below", prompt)
+
     def test_paragraph_parser_keeps_adjacent_figure_outside_next_paragraph(self) -> None:
         markdown = """# Results
 

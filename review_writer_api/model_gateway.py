@@ -73,12 +73,14 @@ class TaskClaims:
 TEXT_GATEWAY_JOB_TYPES = frozenset(
     {
         "discovery.search",
+        "matrix.enrich",
         "sections.generate",
         "planning.reference-analyze",
         "draft.evaluate",
         "draft.optimize",
         "draft.rewrite",
         "draft.accept-rewrite",
+        "final.build",
         "final.conclusion",
     }
 )

@@ -11,6 +11,7 @@ import { jobIsActive, useJob } from "../../hooks/useJob";
 import { useUiText } from "../../i18n/useUiText";
 import { buildPaperDisplayLabels } from "../../utils/paperLabels";
 import { DiscoveryJobProgress } from "./DiscoveryJobProgress";
+import { buildMatrixRecommendation } from "./matrixRecommendation";
 
 type ProjectTagMap = Record<string, string[]>;
 
@@ -216,6 +217,7 @@ export function DiscoveryPage() {
   const [jobId, setJobId] = useState("");
   const [selectedKeyword, setSelectedKeyword] = useState("");
   const [selectedPaper, setSelectedPaper] = useState<{ row: DiscoveryRow; kind: "local" | "web" } | null>(null);
+  const [selectionFeedback, setSelectionFeedback] = useState("");
   const discovery = useQuery({
     queryKey: ["discovery", project?.project_id || ""],
     queryFn: () => apiRequest<DiscoveryPayload>(`/api/v1/projects/${encodeURIComponent(project!.project_id)}/discovery`),
@@ -231,6 +233,7 @@ export function DiscoveryPage() {
     setGroups([]);
     setSelectedKeyword("");
     setSelectedPaper(null);
+    setSelectionFeedback("");
   }, [project?.project_id, project?.topic]);
   useEffect(() => {
     const payload = discovery.data;
@@ -256,16 +259,6 @@ export function DiscoveryPage() {
     }),
     onSuccess: (submitted) => setJobId(submitted.id),
   });
-  const save = useMutation({
-    mutationFn: () => apiRequest<DiscoveryPayload>(`/api/v1/projects/${encodeURIComponent(project!.project_id)}/discovery`, {
-      method: "PUT",
-      ...jsonBody({ revision: discovery.data!.revision, results: groups }),
-    }),
-    onSuccess: async (saved) => {
-      queryClient.setQueryData(["discovery", project!.project_id], saved);
-      await discovery.refetch();
-    },
-  });
   const confirm = useMutation({
     mutationFn: async () => {
       const saved = await apiRequest<DiscoveryPayload>(`/api/v1/projects/${encodeURIComponent(project!.project_id)}/discovery`, {
@@ -289,7 +282,12 @@ export function DiscoveryPage() {
     ...(currentGroup?.web_results || []).map((row) => ({ row, kind: "web" as const })),
   ], [currentGroup]);
   const activeGroups = groups.filter((group) => group.keep !== false);
+  const recommendation = useMemo(() => buildMatrixRecommendation(groups), [groups]);
   const selectedCount = new Set(activeGroups.flatMap((group) => group.local_results || []).filter(selectedForMatrix).map((row) => row.paper_id)).size;
+  const hasAnySelection = groups.some((group) => [
+    ...(group.local_results || []),
+    ...(group.web_results || []),
+  ].some((row) => row.selected_for_matrix === true));
   const uniqueCandidateCount = new Set(activeGroups.flatMap((group) => group.local_results || []).map((row) => row.paper_id).filter(Boolean)).size;
   const keywordHitCount = activeGroups.reduce((sum, group) => sum + (group.local_results?.length || 0), 0);
   const paperLabels = useMemo(() => {
@@ -345,6 +343,60 @@ export function DiscoveryPage() {
       local_results: group.local_results?.map((row) => matches(row) ? { ...row, ...update } : row),
       web_results: group.web_results?.map((row) => row === target ? { ...row, ...update } : row),
     })));
+    setSelectionFeedback("");
+  }
+
+  function setSelectedPaperIds(selectedIds: Set<string>, mode: "replace" | "add") {
+    setGroups((current) => current.map((group) => ({
+      ...group,
+      local_results: group.local_results?.map((row) => {
+        const id = String(row.paper_id || "").trim();
+        const selected = id ? selectedIds.has(id) : false;
+        return { ...row, selected_for_matrix: mode === "add" ? selectedForMatrix(row) || selected : selected };
+      }),
+      web_results: mode === "replace"
+        ? group.web_results?.map((row) => ({ ...row, selected_for_matrix: false }))
+        : group.web_results,
+    })));
+    setSelectedPaper((current) => {
+      if (!current) return current;
+      const id = String(current.row.paper_id || "").trim();
+      const selected = current.kind === "local" && Boolean(id) && selectedIds.has(id);
+      return {
+        ...current,
+        row: {
+          ...current.row,
+          selected_for_matrix: mode === "add" ? selectedForMatrix(current.row) || selected : selected,
+        },
+      };
+    });
+  }
+
+  function applyRecommendation() {
+    setSelectedPaperIds(recommendation.recommendedIds, "replace");
+    setSelectionFeedback(text(
+      `已采用系统推荐：预选 ${recommendation.recommendedIds.size} 篇，另有 ${recommendation.reviewIds.size} 篇建议人工复核。`,
+      `Recommendation applied: ${recommendation.recommendedIds.size} preselected and ${recommendation.reviewIds.size} left for review.`,
+    ));
+  }
+
+  function selectCurrentGroup() {
+    const selectedIds = new Set(
+      (currentGroup?.local_results || [])
+        .filter((row) => row.role !== "excluded")
+        .map((row) => String(row.paper_id || "").trim())
+        .filter(Boolean),
+    );
+    setSelectedPaperIds(selectedIds, "add");
+    setSelectionFeedback(text(
+      `已加入当前检索组中的 ${selectedIds.size} 篇非排除论文。`,
+      `Added ${selectedIds.size} non-excluded papers from the current query group.`,
+    ));
+  }
+
+  function clearSelection() {
+    setSelectedPaperIds(new Set(), "replace");
+    setSelectionFeedback(text("已清空当前选择。", "The current selection was cleared."));
   }
 
   const noArtifact = discovery.error instanceof ApiError && discovery.error.status === 404;
@@ -362,12 +414,17 @@ export function DiscoveryPage() {
       {!projects.data?.items.length ? <div className="empty-state">{text("请先在首页创建项目。", "Create a project on the home page first.")}</div> : null}
       {project ? (
         <section className="surface discovery-run-card">
-          <div className="run-form">
+          <div className="run-form discovery-run-primary">
             <label>{text("综述主题", "Review topic")}<input value={topic} onChange={(event) => setTopic(event.target.value)} /></label>
-            <label>{text("补充关键词", "Additional keywords")}<textarea rows={2} value={keywords} onChange={(event) => setKeywords(event.target.value)} placeholder={text("每行或逗号分隔", "Separate with lines or commas")} /></label>
-            <label className="check-label"><input type="checkbox" checked={webSearch} onChange={(event) => setWebSearch(event.target.checked)} />{text("同时使用联网补充检索", "Also search online sources")}</label>
             <button className="button button-primary" type="button" disabled={topic.trim().length < 3 || run.isPending || jobIsActive(job.data?.status)} onClick={() => run.mutate()}>{discovery.data ? text("重新检索", "Run search again") : text("开始检索", "Start search")}</button>
           </div>
+          <details className="advanced-panel discovery-search-advanced">
+            <summary>{text("高级检索设置（可选）", "Advanced search settings (optional)")}</summary>
+            <div className="advanced-panel-body discovery-search-advanced-body">
+              <label>{text("补充关键词", "Additional keywords")}<textarea rows={2} value={keywords} onChange={(event) => setKeywords(event.target.value)} placeholder={text("每行或逗号分隔", "Separate with lines or commas")} /></label>
+              <label className="check-label"><input type="checkbox" checked={webSearch} onChange={(event) => setWebSearch(event.target.checked)} />{text("同时使用联网补充检索", "Also search online sources")}</label>
+            </div>
+          </details>
           {discovery.data?.has_published_matrix ? <p className="message message-info">{text("重新检索只生成新的待确认结果，不会删除或隐藏阶段 3–7 的现有内容。确认采用后，只有论文集合或主题确实变化时，依赖阶段才会标记为过期。", "A new search creates reviewable results without deleting or hiding existing Stage 3–7 work. After confirmation, dependent stages are marked stale only when the paper set or topic actually changes.")}</p> : null}
           {(run.isPending || jobId) ? <DiscoveryJobProgress job={job.data} submitting={run.isPending && !jobId} /> : null}
           {insufficientCreditStop && discovery.data ? <p className="message message-info">{text("下方保留的是上一次成功检索的结果；本次余额不足的检索未执行，也没有覆盖这些结果。", "The results below are from the last successful search. The current search was not run because of insufficient credit and did not overwrite them.")}</p> : null}
@@ -383,6 +440,23 @@ export function DiscoveryPage() {
         <>
           {discovery.data.status === "review" && discovery.data.has_published_matrix ? <p className="message message-warning discovery-candidate-notice">{text("当前显示的是尚未采用的新检索结果；旧 Matrix、章节、图像、初稿和终稿仍被完整保留。请审核论文选择后再确认采用。", "These search results have not been adopted yet. The previous matrix, sections, figures, draft, and final output remain intact. Review the selection before adopting it.")}</p> : null}
           <div className="discovery-stats"><span>{text("主题/关键词组", "Theme / keyword groups")} {groups.length}</span><span>{text("去重候选论文", "Unique candidate papers")} {uniqueCandidateCount}</span><span>{text("关键词命中次数", "Keyword hits")} {keywordHitCount}</span><span className="selected">{text("进入Matrix", "Selected for matrix")} {selectedCount}</span></div>
+          <section className="surface matrix-selection-assistant" aria-label={text("Matrix批量选择", "Matrix bulk selection")}>
+            <div className="matrix-selection-summary">
+              <div><span className="step-label">{text("批量辅助", "Selection assistant")}</span><strong>{text("系统先推荐，用户只需复核例外", "Start from a recommendation and review exceptions")}</strong></div>
+              <div className="matrix-recommendation-counts">
+                <span className="recommended">{text("推荐加入", "Recommended")} {recommendation.recommendedIds.size}</span>
+                <span className="review">{text("待复核", "Review")} {recommendation.reviewIds.size}</span>
+                <span className="excluded">{text("建议排除", "Exclude")} {recommendation.excludedIds.size}</span>
+              </div>
+            </div>
+            <p>{text("推荐优先采用核心与支撑论文，并为尚未覆盖的检索组补充相关背景论文；不会自动确认进入 Matrix。", "Recommendations prioritize core and supporting papers and add a relevant background representative for uncovered query groups. Nothing is confirmed automatically.")}</p>
+            <div className="matrix-selection-actions">
+              <button className="button button-primary" type="button" disabled={!recommendation.recommendedIds.size} onClick={applyRecommendation}>{text(`采用系统推荐（${recommendation.recommendedIds.size}篇）`, `Apply recommendation (${recommendation.recommendedIds.size})`)}</button>
+              <button className="button button-secondary" type="button" disabled={!currentGroup?.local_results?.some((row) => row.role !== "excluded")} onClick={selectCurrentGroup}>{text("全选当前检索组", "Select current query group")}</button>
+              <button className="button button-quiet" type="button" disabled={!hasAnySelection} onClick={clearSelection}>{text("清空选择", "Clear selection")}</button>
+            </div>
+            {selectionFeedback ? <p className="matrix-selection-feedback" role="status">{selectionFeedback}</p> : null}
+          </section>
           <div className="discovery-grid">
             <section className="pane keyword-pane">
               <div className="pane-head"><div><span className="step-label">{text("主题与分类", "Themes and categories")}</span><h2>{text("检索主题/关键词组", "Search themes / keywords")}</h2></div></div>
@@ -394,12 +468,16 @@ export function DiscoveryPage() {
               <div className="result-list">{rows.map(({ row, kind }, index) => {
                 const active = selectedPaper?.row === row;
                 const included = selectedForMatrix(row);
-                return <article key={`${kind}-${row.paper_id || row.candidate_id || index}`} className={active ? "result-card active" : "result-card"} onClick={() => setSelectedPaper({ row, kind })}><div><span className="result-kind" title={kind === "local" ? String(row.paper_id || "") : undefined}>{kind === "local" ? paperLabels.get(String(row.paper_id || "")) || text("本地", "Local") : text("外部", "External")}</span><h3>{row.title || text("无标题", "Untitled")}</h3><p>{[row.year, row.journal, row.source].filter(Boolean).join(" · ")}</p></div><div className="result-actions"><button type="button" className={included ? "button button-primary" : "button button-secondary"} onClick={(event) => { event.stopPropagation(); updateRow(row, { selected_for_matrix: !included, ...(included ? {} : row.role === "excluded" ? { role: "uncertain" } : {}) }); }}>{included ? text("已加入Matrix", "Added to matrix") : text("加入Matrix", "Add to matrix")}</button>{kind === "local" ? <select value={row.role || "uncertain"} onClick={(event) => event.stopPropagation()} onChange={(event) => updateRow(row, { role: event.target.value, ...(event.target.value === "excluded" ? { selected_for_matrix: false } : {}) })}>{["core_candidate", "supporting_candidate", "background", "uncertain", "excluded"].map((role) => <option key={role}>{role}</option>)}</select> : null}</div></article>;
+                const id = String(row.paper_id || "");
+                const recommendationStatus = kind === "local"
+                  ? recommendation.recommendedIds.has(id) ? "recommended" : recommendation.excludedIds.has(id) ? "excluded" : "review"
+                  : "review";
+                return <article key={`${kind}-${row.paper_id || row.candidate_id || index}`} className={active ? "result-card active" : "result-card"} onClick={() => setSelectedPaper({ row, kind })}><div><div className="result-card-labels"><span className="result-kind" title={kind === "local" ? id : undefined}>{kind === "local" ? paperLabels.get(id) || text("本地", "Local") : text("外部", "External")}</span>{kind === "local" ? <span className={`matrix-recommendation-badge ${recommendationStatus}`}>{recommendationStatus === "recommended" ? text("推荐加入", "Recommended") : recommendationStatus === "excluded" ? text("建议排除", "Exclude") : text("待复核", "Review")}</span> : null}</div><h3>{row.title || text("无标题", "Untitled")}</h3><p>{[row.year, row.journal, row.source].filter(Boolean).join(" · ")}</p></div><div className="result-actions"><button type="button" className={included ? "button button-primary" : "button button-secondary"} onClick={(event) => { event.stopPropagation(); updateRow(row, { selected_for_matrix: !included, ...(included ? {} : row.role === "excluded" ? { role: "uncertain" } : {}) }); }}>{included ? text("已加入Matrix", "Added to matrix") : text("加入Matrix", "Add to matrix")}</button>{kind === "local" ? <select value={row.role || "uncertain"} onClick={(event) => event.stopPropagation()} onChange={(event) => updateRow(row, { role: event.target.value, ...(event.target.value === "excluded" ? { selected_for_matrix: false } : {}) })}>{["core_candidate", "supporting_candidate", "background", "uncertain", "excluded"].map((role) => <option key={role}>{role}</option>)}</select> : null}</div></article>;
               })}</div>
             </section>
             <section className="pane discovery-detail-pane"><PaperDetail row={selectedPaper?.row || null} kind={selectedPaper?.kind || "local"} displayLabel={selectedPaper?.kind === "local" ? paperLabels.get(String(selectedPaper.row.paper_id || "")) : undefined} /></section>
           </div>
-          <div className="stage-action-bar"><div><strong>{text("论文选择", "Paper selection")}</strong><p>{text("选择需要进入 Matrix 的论文；项目 Tag 评估会自动同步。确认采用后，系统会先比较新旧输入，再决定是否让后续阶段过期。", "Choose the papers for the matrix; project Tag assessments synchronize automatically. On adoption, the system compares old and new inputs before deciding whether later stages are stale.")}</p></div><button className="button button-secondary" type="button" disabled={save.isPending} onClick={() => save.mutate()}>{save.isPending ? text("保存中…", "Saving…") : text("保存选择", "Save selection")}</button><button className="button button-primary" type="button" disabled={!selectedCount || confirm.isPending} onClick={() => confirm.mutate()}>{confirm.isPending ? text("同步中…", "Syncing…") : text(`确认采用并进入 Matrix（${selectedCount}篇）`, `Adopt and enter matrix (${selectedCount})`)}</button>{(save.error || confirm.error) ? <span className="message message-error">{(save.error || confirm.error)?.message}</span> : null}</div>
+          <div className="stage-action-bar"><div><strong>{text("论文选择", "Paper selection")}</strong><p>{text("选择需要进入 Matrix 的论文；确认采用时会自动保存当前选择，并只在输入确实变化时让后续阶段过期。", "Choose papers for the matrix. Adoption automatically saves the current selection and marks later stages stale only when the inputs actually changed.")}</p></div><button className="button button-primary" type="button" disabled={!selectedCount || confirm.isPending} onClick={() => confirm.mutate()}>{confirm.isPending ? text("同步中…", "Syncing…") : text(`确认采用并进入 Matrix（${selectedCount}篇）`, `Adopt and enter matrix (${selectedCount})`)}</button>{confirm.error ? <span className="message message-error">{confirm.error.message}</span> : null}</div>
         </>
       ) : null}
     </main>

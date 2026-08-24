@@ -17,7 +17,7 @@ from sqlalchemy.orm import sessionmaker
 from review_writer_api.app import create_app
 from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User
-from review_writer_api.errors import WorkflowConflict
+from review_writer_api.errors import WorkflowConflict, WorkflowValidationError
 from review_writer_api.security import Principal, Role
 from review_writer_api.workflow_models import (
     LibraryArtifact,
@@ -494,6 +494,65 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertEqual("conclusion", by_id["S03"]["section_role"])
         self.assertEqual([], by_id["S03"]["primary_papers"])
 
+    def test_context_papers_are_allowed_and_conclusion_is_scheduled_last(self) -> None:
+        tasks = self.app.state.sections_service.tasks_from_blueprint(
+            {
+                "paper_assignment_policy": {
+                    "mode": "single_primary_section_with_supporting_cross_references"
+                },
+                "sections": [
+                    {
+                        "section_id": "S03",
+                        "title": "Conclusion",
+                        "section_role": "conclusion",
+                        "primary_papers": [],
+                        "supporting_papers": ["P001"],
+                    },
+                    {
+                        "section_id": "S01",
+                        "title": "Introduction",
+                        "section_role": "introduction",
+                        "primary_papers": [],
+                        "context_papers": ["P009"],
+                    },
+                    {
+                        "section_id": "S02",
+                        "title": "Primary evidence",
+                        "section_role": "body",
+                        "primary_papers": ["P001"],
+                    },
+                ],
+            }
+        )
+
+        introduction = next(task for task in tasks if task["section_id"] == "S01")
+        self.assertEqual(["P009"], introduction["context_papers"])
+        self.assertIn("P009", introduction["allowed_papers"])
+        self.assertEqual("S03", tasks[-1]["section_id"])
+
+    def test_context_papers_are_not_double_counted_as_supporting(self) -> None:
+        tasks = self.app.state.sections_service.tasks_from_blueprint(
+            {
+                "paper_assignment_policy": {
+                    "mode": "single_primary_section_with_supporting_cross_references"
+                },
+                "sections": [
+                    {
+                        "section_id": "S01",
+                        "title": "Introduction",
+                        "section_role": "introduction",
+                        "primary_papers": [],
+                        "supporting_papers": ["P001", "P009"],
+                        "context_papers": ["P009"],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(["P001"], tasks[0]["supporting_papers"])
+        self.assertEqual(["P009"], tasks[0]["context_papers"])
+        self.assertEqual(["P001", "P009"], tasks[0]["allowed_papers"])
+
     def test_publish_rejects_a_changed_outline_dependency(self) -> None:
         service = self.app.state.sections_service
         payload = service.generation_payload(self.first, self.project_id)
@@ -586,7 +645,7 @@ class SectionsV1Tests(unittest.TestCase):
             )
         )
 
-    def test_evidence_package_guarantees_primary_paper_coverage(self) -> None:
+    def test_coverage_fallback_does_not_make_unmatched_primary_papers_writeable(self) -> None:
         self._seed_document_indexes()
         with self.sessions.begin() as session:
             chunks = {
@@ -622,10 +681,13 @@ class SectionsV1Tests(unittest.TestCase):
         )
 
         section = package["sections"][0]
-        self.assertEqual("ready", section["status"])
+        self.assertEqual("partial", section["status"])
+        self.assertEqual("lexical", section["retrieval_mode"])
         self.assertEqual(3, section["primary_paper_count"])
-        self.assertEqual(3, section["covered_primary_paper_count"])
-        self.assertEqual([], section["missing_primary_papers"])
+        self.assertEqual(1, section["covered_primary_paper_count"])
+        self.assertEqual(["P001"], section["writeable_primary_papers"])
+        self.assertEqual(["P002", "P003"], section["unresolved_primary_papers"])
+        self.assertEqual(["P002", "P003"], section["missing_primary_papers"])
         self.assertEqual(
             set(paper_ids),
             {hit["paper_id"] for hit in section["hits"]},
@@ -638,6 +700,175 @@ class SectionsV1Tests(unittest.TestCase):
                 if hit["match_reason"] == "primary_paper_coverage_fallback"
             },
         )
+        self.assertTrue(
+            all(
+                hit["match_type"] == "coverage_only"
+                and hit["support_level"] == "coverage_only"
+                and not hit["claim_eligible"]
+                and not hit["counts_as_evidence"]
+                for hit in section["hits"]
+                if hit["paper_id"] in {"P002", "P003"}
+            )
+        )
+        p001 = next(
+            hit
+            for hit in section["hits"]
+            if hit["paper_id"] == "P001" and hit["claim_eligible"]
+        )
+        self.assertIn("per_paper_targeted", p001["retrieval_passes"])
+        self.assertEqual("direct", p001["support_level"])
+        self.assertIn("global_comparison", p001["retrieval_passes"])
+        self.assertGreater(len(section["query_plans"]), 1)
+        self.assertTrue(
+            all(len(plan["websearch_query"]) < 1000 for plan in section["query_plans"])
+        )
+
+    def test_academic_validation_uses_section_scoped_evidence_role(self) -> None:
+        evidence_key = "sha256:" + "a" * 64
+        payload = {
+            "tasks": [{"section_id": "S05", "section_role": "body"}],
+        }
+        built = {
+            "sections": [
+                {
+                    "section_id": "S05",
+                    "paragraphs": [
+                        {
+                            "paragraph_id": "S05-p1",
+                            "claim_realizations": [{"claim_id": "S05-p1-C01"}],
+                        }
+                    ],
+                }
+            ]
+        }
+        writing_plan = {
+            "planning_mode": "evidence_first",
+            "sections": [
+                {
+                    "section_id": "S05",
+                    "paragraphs": [{"paragraph_id": "S05-p1"}],
+                    "claims": [
+                        {
+                            "claim_id": "S05-p1-C01",
+                            "paragraph_id": "S05-p1",
+                            "support_status": "supported",
+                            "citation_group": ["P001"],
+                            "evidence_refs": [{"evidence_key": evidence_key}],
+                        }
+                    ],
+                }
+            ],
+        }
+        synthesis_state = {"sections": [{"section_id": "S05", "components": []}]}
+        evidence_package = {
+            # The global registry may contain the first occurrence of a chunk,
+            # where it was only a neighboring context hit in another section.
+            "evidence_registry": [
+                {
+                    "evidence_key": evidence_key,
+                    "paper_id": "P001",
+                    "claim_eligible": False,
+                    "match_type": "neighbor_context",
+                }
+            ],
+            "sections": [
+                {
+                    "section_id": "S05",
+                    "retrieval_mode": "lexical",
+                    "hits": [
+                        {
+                            "evidence_key": evidence_key,
+                            "paper_id": "P001",
+                            "claim_eligible": True,
+                            "match_type": "direct_match",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        self.app.state.sections_service._validate_academic_bundle(
+            payload, built, synthesis_state, writing_plan, evidence_package
+        )
+
+        evidence_package["evidence_registry"][0]["claim_eligible"] = True
+        evidence_package["evidence_registry"][0]["match_type"] = "direct_match"
+        evidence_package["sections"][0]["hits"][0]["claim_eligible"] = False
+        evidence_package["sections"][0]["hits"][0]["match_type"] = "neighbor_context"
+        with self.assertRaisesRegex(
+            WorkflowValidationError,
+            "neighbor or coverage-only context",
+        ):
+            self.app.state.sections_service._validate_academic_bundle(
+                payload, built, synthesis_state, writing_plan, evidence_package
+            )
+
+    def test_conclusion_inherits_only_claim_eligible_body_chunks(self) -> None:
+        tasks = {
+            "S01": {"section_id": "S01", "section_role": "introduction"},
+            "S02": {"section_id": "S02", "section_role": "body"},
+            "S03": {"section_id": "S03", "section_role": "conclusion"},
+        }
+        evidence_sections = {
+            "S01": {
+                "hits": [
+                    {
+                        "paper_id": "P000",
+                        "chunk_id": "intro-direct",
+                        "claim_eligible": True,
+                    }
+                ]
+            },
+            "S02": {
+                "hits": [
+                    {
+                        "paper_id": "P001",
+                        "chunk_id": "body-direct",
+                        "claim_eligible": True,
+                    },
+                    {
+                        "paper_id": "P001",
+                        "chunk_id": "body-neighbor",
+                        "claim_eligible": False,
+                    },
+                ]
+            },
+            "S03": {"hits": []},
+        }
+
+        conclusion_chunks = self.app.state.sections_service._valid_retrieval_chunks(
+            "S03", tasks["S03"], evidence_sections, tasks
+        )
+        self.assertIn(("P001", "body-direct"), conclusion_chunks)
+        self.assertNotIn(("P001", "body-neighbor"), conclusion_chunks)
+        self.assertNotIn(("P000", "intro-direct"), conclusion_chunks)
+
+        introduction_chunks = self.app.state.sections_service._valid_retrieval_chunks(
+            "S01", tasks["S01"], evidence_sections, tasks
+        )
+        self.assertEqual({("P000", "intro-direct")}, introduction_chunks)
+
+    def test_question_query_plan_uses_or_groups_and_separate_questions(self) -> None:
+        service = self.app.state.sections_service
+        plans = service._evidence_queries(
+            {
+                "section_id": "S02",
+                "section_role": "body",
+                "heading": "Propargylic alcohol substrates",
+                "core_argument": "Compare scope and mechanisms.",
+                "must_cover_points": ["Explain catalyst effects on selectivity."],
+            },
+            review_topic='Review of "axial-chiral allene synthesis"',
+        )
+
+        self.assertIn("section_focus", {plan["question_id"] for plan in plans})
+        self.assertIn("scope", {plan["question_id"] for plan in plans})
+        self.assertIn("mechanism", {plan["question_id"] for plan in plans})
+        self.assertIn("required_claim_01", {plan["question_id"] for plan in plans})
+        scope = next(plan for plan in plans if plan["question_id"] == "scope")
+        self.assertEqual(2, len(scope["term_groups"]))
+        self.assertIn(" OR ", scope["websearch_query"])
+        self.assertNotIn("Compare scope and mechanisms", scope["websearch_query"])
 
     def test_unknown_chunk_citation_is_rejected_before_publish(self) -> None:
         self._seed_document_indexes()

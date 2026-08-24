@@ -72,7 +72,7 @@ class FiguresV1Tests(NativeFigureApiTestCase):
         selected = figures.json()["figure_candidates"][0]
         self.assertEqual("P001", selected["paper_id"])
         self.assertEqual("S1-p1", selected["target_paragraph_id"])
-        self.assertEqual("derived_from_current_section_evidence", selected["placement_status"])
+        self.assertEqual("semantic_role_matched", selected["placement_status"])
 
     def test_selection_immediately_updates_redraw_source_without_confirmation(self) -> None:
         with TestClient(self.app) as client:

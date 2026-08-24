@@ -35,7 +35,11 @@ from review_writer_api.figure_rules import (
 )
 from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
-from review_writer_core.publication_caption import publication_caption_fields
+from review_writer_core.publication_caption import (
+    canonical_figure_role,
+    infer_figure_role,
+    publication_caption_fields,
+)
 
 
 SECTION_INDEX = "sections/section_drafts.json"
@@ -254,11 +258,29 @@ class FiguresService:
         section_index, _artifact = self._read_json(
             principal, project_id, SECTION_INDEX
         )
-        matches: list[tuple[str, str]] = []
+        role = infer_figure_role(
+            candidate.get("source_caption_text"),
+            candidate.get("what_it_shows"),
+            candidate.get("why_selected"),
+            preferred=candidate.get("representative_role"),
+        )
+        role_terms = {
+            "workflow": ("workflow", "strategy", "study design", "pipeline", "method"),
+            "core_transformation": ("reaction", "transformation", "synthesis", "conditions", "route"),
+            "mechanism_model": ("mechanism", "pathway", "intermediate", "transition state", "catalytic cycle"),
+            "scope_samples": ("scope", "substrate", "sample", "generality", "tolerance"),
+            "quantitative_results": ("result", "yield", "selectivity", "performance", "kinetic", "trend"),
+            "comparison_ablation": ("comparison", "benchmark", "control", "versus", "ablation"),
+            "conceptual_overview": ("overview", "concept", "introduction", "strategy", "classification"),
+            "structure_image": ("structure", "crystal", "microscopy", "morphology", "imaging"),
+            "unknown": (),
+        }.get(role, ())
+        matches: list[dict[str, Any]] = []
         for section in section_index.get("sections") or []:
             if not isinstance(section, dict):
                 continue
             section_id = str(section.get("section_id") or "")
+            section_heading = str(section.get("heading") or section.get("title") or "")
             for paragraph in section.get("paragraphs") or []:
                 if not isinstance(paragraph, dict):
                     continue
@@ -277,18 +299,101 @@ class FiguresService:
                 )
                 paragraph_id = str(paragraph.get("paragraph_id") or "").strip()
                 if paper_id and paragraph_id and paper_id in cited:
-                    matches.append((section_id, paragraph_id))
+                    paragraph_text = " ".join(
+                        str(paragraph.get(key) or "")
+                        for key in ("text", "paragraph_text", "summary", "purpose")
+                    )
+                    realization_text = " ".join(
+                        " ".join(
+                            str(realization.get(key) or "")
+                            for key in ("claim_text", "text", "intent", "claim_type")
+                        )
+                        for realization in paragraph.get("claim_realizations") or []
+                        if isinstance(realization, dict)
+                    )
+                    searchable = f"{section_heading} {paragraph_text} {realization_text}".casefold()
+                    evidence_ids = list(
+                        dict.fromkeys(
+                            str(ref.get("evidence_id") or "")
+                            for realization in paragraph.get("claim_realizations") or []
+                            if isinstance(realization, dict)
+                            and paper_id
+                            in {
+                                str(value)
+                                for value in realization.get("citation_group") or []
+                            }
+                            for ref in realization.get("evidence_refs") or []
+                            if isinstance(ref, dict)
+                            and str(ref.get("evidence_id") or "")
+                        )
+                    )
+                    claim_ids = list(
+                        dict.fromkeys(
+                            str(realization.get("claim_id") or "")
+                            for realization in paragraph.get("claim_realizations") or []
+                            if isinstance(realization, dict)
+                            and str(realization.get("claim_id") or "")
+                            and paper_id
+                            in {
+                                str(value)
+                                for value in realization.get("citation_group") or []
+                            }
+                        )
+                    )
+                    semantic_matches = [term for term in role_terms if term in searchable]
+                    original_target = str(
+                        candidate.get("target_paragraph_id")
+                        or candidate.get("paragraph_id")
+                        or ""
+                    )
+                    score = len(semantic_matches) * 10
+                    score += 3 if claim_ids else 0
+                    score += min(3, len(evidence_ids))
+                    score += 1 if paragraph_id == original_target else 0
+                    matches.append(
+                        {
+                            "section_id": section_id,
+                            "section_heading": section_heading,
+                            "paragraph_id": paragraph_id,
+                            "evidence_ids": evidence_ids,
+                            "claim_ids": claim_ids,
+                            "score": score,
+                            "semantic_matches": semantic_matches,
+                        }
+                    )
         updated = dict(candidate)
         updated["source_target_paragraph_id"] = str(
             candidate.get("target_paragraph_id") or candidate.get("paragraph_id") or ""
         )
         if matches:
-            updated["section_id"], updated["target_paragraph_id"] = matches[0]
-            updated["placement_status"] = "derived_from_current_section_evidence"
-            updated["placement_candidate_paragraph_ids"] = [value for _section, value in matches]
+            matches.sort(
+                key=lambda item: (
+                    -int(item["score"]),
+                    str(item["section_id"]),
+                    str(item["paragraph_id"]),
+                )
+            )
+            chosen = matches[0]
+            updated["section_id"] = chosen["section_id"]
+            updated["section_heading"] = chosen["section_heading"]
+            updated["target_paragraph_id"] = chosen["paragraph_id"]
+            updated["evidence_ids"] = list(chosen["evidence_ids"])
+            updated["claim_ids"] = list(chosen["claim_ids"])
+            updated["representative_role"] = role
+            updated["placement_status"] = "semantic_role_matched"
+            updated["placement_reason"] = (
+                f"role={role}; matched="
+                + (", ".join(chosen["semantic_matches"]) or "evidence_tie_break")
+            )
+            updated["placement_candidate_paragraph_ids"] = [
+                str(match["paragraph_id"]) for match in matches
+            ]
         else:
             updated["target_paragraph_id"] = ""
+            updated["evidence_ids"] = []
+            updated["claim_ids"] = []
             updated["placement_status"] = "waiting_for_supported_paragraph"
+            updated["placement_reason"] = f"role={role}; no paragraph cites this paper"
             updated["placement_candidate_paragraph_ids"] = []
         return updated
 
@@ -470,17 +575,27 @@ class FiguresService:
                     missing.append(paper_id)
                 continue
             _paper, candidate = self._candidate(papers, paper_id, selected_index)
+            candidate["representative_role"] = infer_figure_role(
+                candidate.get("source_caption_text"),
+                candidate.get("what_it_shows"),
+                preferred=(review or {}).get("representative_role"),
+            )
             candidate = self._derive_current_placement(
                 principal, project_id, candidate
+            )
+            candidate.update(
+                publication_caption_fields(
+                    candidate.get("source_caption_text"),
+                    representative_role=candidate.get("representative_role"),
+                    source_label=candidate.get("source_label"),
+                    context_title=candidate.get("section_heading"),
+                )
             )
             source_artifact, _source_path = self._validate_candidate(
                 principal, project_id, candidate
             )
             candidate["source_image_artifact_id"] = source_artifact.id
             candidate["source_review_note"] = str(review.get("review_note") or "")
-            candidate["representative_role"] = str(
-                review.get("representative_role") or "paper_overview"
-            )
             selected.append(candidate)
         return selected, missing
 
@@ -570,7 +685,7 @@ class FiguresService:
         revision: int,
         candidate_index: int,
         review_note: str,
-        representative_role: str = "paper_overview",
+        representative_role: str = "unknown",
     ) -> dict[str, Any]:
         principal.require(Permission.PROJECT_WRITE)
         paper_payload, paper_artifact = self._read_json(
@@ -592,7 +707,7 @@ class FiguresService:
             "selected_candidate_index": int(candidate_index),
             "selected_source_artifact_id": source_artifact.id,
             "review_note": str(review_note or "").strip(),
-            "representative_role": str(representative_role or "paper_overview"),
+            "representative_role": canonical_figure_role(representative_role),
             "selection_source": "human",
             "reviewed_at": utc_now().isoformat(),
         }
@@ -1023,7 +1138,12 @@ class FiguresService:
                 }
             )
             row.update(
-                publication_caption_fields(item["figure"].get("source_caption_text"))
+                publication_caption_fields(
+                    item["figure"].get("source_caption_text"),
+                    representative_role=item["figure"].get("representative_role"),
+                    source_label=item["figure"].get("source_label"),
+                    context_title=item["figure"].get("section_heading"),
+                )
             )
             rows = [
                 old
@@ -1716,7 +1836,12 @@ class FiguresService:
             )
             row = {
                 **figure,
-                **publication_caption_fields(figure.get("source_caption_text")),
+                **publication_caption_fields(
+                    figure.get("source_caption_text"),
+                    representative_role=figure.get("representative_role"),
+                    source_label=figure.get("source_label"),
+                    context_title=figure.get("section_heading"),
+                ),
                 "figure_id": figure_id,
                 "source_artifact_id": source_artifact.id,
                 "output_artifact_id": output_artifact.id,

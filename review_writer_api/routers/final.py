@@ -14,6 +14,7 @@ from review_writer_api.routers.jobs import _job_response
 from review_writer_api.security import Principal, Role
 from review_writer_api.workflow_schemas import (
     FinalActionRequest,
+    FinalFrontMatterRequest,
     FinalOverviewTextRequest,
     FinalPdfRequest,
 )
@@ -57,6 +58,7 @@ def build_final_router(
 
     def build_handler(context, payload):
         principal = Principal(context.user_id, frozenset({Role.USER}))
+        builder = available.get("final.build")
         context.report_progress(1, 4)
         current = final_service.build_payload(principal, str(context.project_id))
         if current["source_draft_artifact_id"] != payload.get(
@@ -65,8 +67,32 @@ def build_final_router(
             raise WorkflowConflict(
                 "Draft changed while the final-build job was waiting to run."
             )
+        if current.get("source_front_matter_artifact_id") != payload.get(
+            "source_front_matter_artifact_id"
+        ):
+            raise WorkflowConflict(
+                "Front matter changed while the final-build job was waiting to run."
+            )
         context.checkpoint()
         context.report_progress(2, 4)
+        generated: dict = {}
+        generation_error = ""
+        if current.get("generation_fields") and builder is not None:
+            try:
+                generated = dict(builder(context, current) or {})
+            except Exception as exc:
+                if context.cancellation_requested():
+                    raise
+                # Missing auto front matter is a publication warning, not a
+                # reason to discard an otherwise valid final manuscript.
+                generation_error = f"{type(exc).__name__}: {exc}"
+        final_service.publish_generated_front_matter(
+            principal,
+            str(context.project_id),
+            current,
+            generated,
+            generation_error=generation_error,
+        )
         result = final_service.build(principal, str(context.project_id))
         context.repository.update_job_progress(context.job_id, 4, 4)
         return result
@@ -163,6 +189,24 @@ def build_final_router(
             "final.build",
             idempotency_key,
             final_service.build_payload(principal, project_id),
+        )
+
+    @router.put("/front-matter")
+    def save_front_matter(
+        project_id: str,
+        payload: FinalFrontMatterRequest,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict:
+        return final_service.save_front_matter(
+            principal,
+            project_id,
+            revision=payload.revision,
+            title=payload.title,
+            authors=list(payload.authors),
+            affiliations=list(payload.affiliations),
+            abstract=payload.abstract,
+            keywords=list(payload.keywords),
+            omitted_fields=list(payload.omitted_fields),
         )
 
     @router.post("/export-jobs", status_code=status.HTTP_202_ACCEPTED)

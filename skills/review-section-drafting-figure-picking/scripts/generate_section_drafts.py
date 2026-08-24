@@ -478,6 +478,65 @@ def compact_text(value: Any, *, limit: int = 4000) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
 
 
+def build_matrix_comparison_table(
+    section_id: str,
+    paper_ids: list[str],
+    rows: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Align source-addressable Matrix facts without inventing empty cells."""
+
+    cells: list[dict[str, Any]] = []
+    fields: list[str] = []
+    for paper_id in paper_ids:
+        for fact in rows.get(paper_id, {}).get("scientific_facts") or []:
+            if not isinstance(fact, dict):
+                continue
+            field_id = str(fact.get("field_id") or "")
+            refs = [
+                ref
+                for ref in fact.get("evidence_refs") or []
+                if isinstance(ref, dict) and ref.get("evidence_key")
+            ]
+            if not field_id or not refs or not str(fact.get("value") or "").strip():
+                continue
+            if field_id not in fields:
+                fields.append(field_id)
+            cells.append(
+                {
+                    "paper_id": paper_id,
+                    "field_id": field_id,
+                    "value": compact_text(fact.get("value"), limit=1800),
+                    "epistemic_status": fact.get("epistemic_status"),
+                    "confidence": fact.get("confidence"),
+                    "evidence_refs": refs,
+                    "evidence_ceiling": fact.get("evidence_ceiling"),
+                }
+            )
+    counts = {
+        field_id: len(
+            {cell["paper_id"] for cell in cells if cell["field_id"] == field_id}
+        )
+        for field_id in fields
+    }
+    return {
+        "section_id": section_id,
+        "paper_ids": paper_ids,
+        "fields": fields,
+        "comparable_fields": [field for field in fields if counts[field] >= 2],
+        "single_source_fields": [field for field in fields if counts[field] == 1],
+        "missing_cells": [
+            {"paper_id": paper_id, "field_id": field_id, "status": "unresolved"}
+            for field_id in fields
+            for paper_id in paper_ids
+            if not any(
+                cell["paper_id"] == paper_id and cell["field_id"] == field_id
+                for cell in cells
+            )
+        ],
+        "cells": cells,
+    }
+
+
 def normalize_section_plan(
     *,
     section_id: str,
@@ -495,7 +554,9 @@ def normalize_section_plan(
     evidence_by_key = {
         str(item.get("evidence_key") or ""): item
         for item in evidence
-        if isinstance(item, dict) and str(item.get("evidence_key") or "")
+        if isinstance(item, dict)
+        and str(item.get("evidence_key") or "")
+        and bool(item.get("claim_eligible", True))
     }
     evidence_paper_by_key = {
         key: str(item.get("paper_id") or "")
@@ -702,7 +763,7 @@ def normalize_section_plan(
     missing_primary = [paper_id for paper_id in primary if paper_id not in covered_primary]
     if missing_primary:
         raise RuntimeError(
-            f"The academic planner did not route every primary paper into a supported Claim for {section_id}: "
+            f"The academic planner did not route every writeable primary paper into a supported Claim for {section_id}: "
             + ", ".join(missing_primary)
         )
     synthesis_section = {
@@ -719,6 +780,69 @@ def normalize_section_plan(
         "claims": claim_plans,
     }
     return synthesis_section, writing_section
+
+
+def prior_body_synthesis_context(
+    section_specs: dict[str, dict[str, Any]],
+    synthesis_sections: list[dict[str, Any]],
+    writing_sections: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """Build the evidence-bound body conclusions consumed by a conclusion.
+
+    This deliberately transfers validated plans and evidence identities rather
+    than draft prose, preventing the conclusion from inventing a second,
+    disconnected interpretation of the corpus.
+    """
+
+    synthesis_by_id = {
+        str(item.get("section_id") or ""): item
+        for item in synthesis_sections
+        if isinstance(item, dict) and str(item.get("section_id") or "")
+    }
+    context: list[dict[str, Any]] = []
+    evidence_keys: set[str] = set()
+    for writing in writing_sections:
+        if not isinstance(writing, dict):
+            continue
+        section_id = str(writing.get("section_id") or "")
+        spec = section_specs.get(section_id) or {}
+        if str(spec.get("section_role") or "body").casefold() != "body":
+            continue
+        synthesis = synthesis_by_id.get(section_id) or {}
+        claims: list[dict[str, Any]] = []
+        for claim in writing.get("claims") or []:
+            if not isinstance(claim, dict):
+                continue
+            refs = [
+                {
+                    "evidence_key": str(ref.get("evidence_key") or ""),
+                    "relationship": str(ref.get("relationship") or "supports"),
+                }
+                for ref in claim.get("evidence_refs") or []
+                if isinstance(ref, dict) and str(ref.get("evidence_key") or "")
+            ]
+            evidence_keys.update(ref["evidence_key"] for ref in refs)
+            claims.append(
+                {
+                    "claim": compact_text(claim.get("claim")),
+                    "claim_kind": str(claim.get("claim_kind") or ""),
+                    "epistemic_status": str(claim.get("epistemic_status") or ""),
+                    "support_status": str(claim.get("support_status") or ""),
+                    "citation_group": list(claim.get("citation_group") or []),
+                    "evidence_refs": refs,
+                    "evidence_ceiling": compact_text(claim.get("evidence_ceiling")),
+                }
+            )
+        context.append(
+            {
+                "section_id": section_id,
+                "title": str(spec.get("title") or section_id),
+                "section_thesis": compact_text(spec.get("section_thesis")),
+                "validated_synthesis_summary": compact_text(synthesis.get("summary")),
+                "validated_claims": claims,
+            }
+        )
+    return context, evidence_keys
 
 
 def validate_and_realize_section(
@@ -742,7 +866,9 @@ def validate_and_realize_section(
     evidence_by_key = {
         str(item.get("evidence_key") or ""): item
         for item in evidence
-        if isinstance(item, dict) and str(item.get("evidence_key") or "")
+        if isinstance(item, dict)
+        and str(item.get("evidence_key") or "")
+        and bool(item.get("claim_eligible", True))
     }
     raw_paragraphs = generated.get("paragraphs") or []
     realized_by_id = {
@@ -1036,7 +1162,15 @@ def main() -> int:
             completed_sections=completed_progress,
         )
         role = str(task.get("section_role") or "body").strip().casefold()
-        primary = list(
+        body_synthesis_context: list[dict[str, Any]] = []
+        body_synthesis_evidence_keys: set[str] = set()
+        if role == "conclusion":
+            body_synthesis_context, body_synthesis_evidence_keys = (
+                prior_body_synthesis_context(
+                    section_specs, synthesis_sections, writing_sections
+                )
+            )
+        assigned_primary = list(
             dict.fromkeys(
                 str(pid)
                 for pid in task.get("primary_papers", [])
@@ -1047,17 +1181,48 @@ def main() -> int:
             dict.fromkeys(
                 str(pid)
                 for pid in task.get("supporting_papers", [])
-                if str(pid) in rows and str(pid) not in primary
+                if str(pid) in rows and str(pid) not in assigned_primary
+            )
+        )
+        contextual = list(
+            dict.fromkeys(
+                str(pid)
+                for pid in task.get("context_papers", [])
+                if str(pid) in rows
+                and str(pid) not in assigned_primary
+                and str(pid) not in supporting
             )
         )
         allowed = list(
             dict.fromkeys(
                 str(pid)
-                for pid in task.get("allowed_papers", [*primary, *supporting])
+                for pid in task.get("allowed_papers", [*assigned_primary, *supporting])
                 if str(pid) in rows
             )
         )
         section_evidence = evidence_sections.get(section_id, {})
+        primary = list(
+            dict.fromkeys(
+                str(pid)
+                for pid in (
+                    section_evidence.get("writeable_primary_papers")
+                    if "writeable_primary_papers" in section_evidence
+                    else assigned_primary
+                )
+                or []
+                if str(pid) in assigned_primary
+            )
+        )
+        context_only_primary = [
+            str(pid)
+            for pid in section_evidence.get("context_only_primary_papers") or []
+            if str(pid) in assigned_primary
+        ]
+        unresolved_primary = [
+            str(pid)
+            for pid in section_evidence.get("unresolved_primary_papers") or []
+            if str(pid) in assigned_primary
+        ]
         retrieval_mode = str(
             section_evidence.get("retrieval_mode") or "fixed_prefix_fallback"
         )
@@ -1069,8 +1234,47 @@ def main() -> int:
                 and str(item.get("paper_id") or "") in allowed
                 and str(item.get("chunk_id") or "")
             ]
-        else:
+            if role == "conclusion" and body_synthesis_evidence_keys:
+                evidence_by_key = {
+                    str(item.get("evidence_key") or ""): item
+                    for item in evidence
+                    if isinstance(item, dict)
+                    and str(item.get("evidence_key") or "")
+                }
+                for body_section_id, body_evidence in evidence_sections.items():
+                    if (
+                        str(
+                            (section_specs.get(str(body_section_id)) or {}).get(
+                                "section_role"
+                            )
+                            or "body"
+                        ).casefold()
+                        != "body"
+                    ):
+                        continue
+                    for item in body_evidence.get("hits") or []:
+                        if not isinstance(item, dict):
+                            continue
+                        key = str(item.get("evidence_key") or "")
+                        if (
+                            key in body_synthesis_evidence_keys
+                            and key not in evidence_by_key
+                            and str(item.get("paper_id") or "") in allowed
+                        ):
+                            evidence.append(item)
+                            evidence_by_key[key] = item
+        elif retrieval_mode == "abstract_only":
+            evidence = [
+                item
+                for item in section_evidence.get("abstract_context") or []
+                if isinstance(item, dict)
+                and str(item.get("paper_id") or "") in allowed
+                and str(item.get("evidence") or "").strip()
+            ]
+        elif retrieval_mode == "fixed_prefix_fallback":
             evidence = [paper_evidence(root, rows, paper_id) for paper_id in allowed]
+        else:
+            evidence = []
         has_evidence_text = any(
             str(
                 item.get("content")
@@ -1084,7 +1288,7 @@ def main() -> int:
         if not evidence or not has_evidence_text:
             message = (
                 f"No usable indexed evidence for {section_id}."
-                if retrieval_mode == "lexical"
+                if retrieval_mode in {"lexical", "insufficient_evidence"}
                 else f"No usable MinerU Markdown or matrix evidence for {section_id}."
             )
             record_section_failure(
@@ -1110,12 +1314,17 @@ def main() -> int:
             evidence_paper_count=evidence_paper_count,
         )
         spec = section_specs.get(section_id, {})
+        comparison_table = build_matrix_comparison_table(
+            section_id, assigned_primary, rows
+        )
         if role == "introduction":
             paragraph_instruction = """Write 2-4 claim-centered framing paragraphs. Define the problem, scope, terminology, organizing logic, and evidence landscape. Use the supporting papers only as brief representative anchors. Do not give any paper a standalone summary, and do not repeat detailed methods, conditions, datasets, results, yields, or limitations that belong in a body section."""
         elif role == "conclusion":
-            paragraph_instruction = """Write 2-4 claim-centered synthesis paragraphs. Compare conclusions across the body sections, identify shared limitations and defensible future directions, and cite prior evidence concisely. Do not replay the body as a paper-by-paper list and do not repeat full methods, conditions, datasets, or results."""
+            paragraph_instruction = """Write 2-4 claim-centered synthesis paragraphs. Use the validated body-section synthesis supplied below as the analytical input, compare only the body conclusions that were actually completed, identify shared limitations and defensible future directions, and keep every conclusion tied to its inherited evidence identities. Do not replay the body as a paper-by-paper list and do not repeat full methods, conditions, datasets, or results."""
         elif primary:
-            paragraph_instruction = f"""Write claim-centered review paragraphs, not one paragraph per paper. Every primary paper must support at least one paragraph, but related studies should be compared or synthesized together when they address the same claim. A paragraph may cite one or several allowed papers. Discuss detailed study evidence only here, in the paper's primary section. Supporting papers may be used briefly for comparison, without repeating their full descriptions. Cover all {len(primary)} primary papers."""
+            paragraph_instruction = f"""Write claim-centered review paragraphs, not one paragraph per paper. Every writeable primary paper must support at least one paragraph, but related studies should be compared or synthesized together when they address the same claim. A paragraph may cite one or several allowed papers. Discuss detailed study evidence only here, in the paper's primary section. Supporting papers may be used briefly for comparison, without repeating their full descriptions. Cover all {len(primary)} writeable primary papers. Do not force unresolved primary papers into prose."""
+        elif context_only_primary:
+            paragraph_instruction = """Write only a short, explicitly attributed background synthesis supported by the supplied abstracts. Do not state detailed methods, numerical results, mechanisms, scope boundaries, or limitations. The absence of full-text evidence is a writing boundary, not a scientific research gap."""
         else:
             paragraph_instruction = """Write 2-4 cross-cutting synthesis paragraphs using only the supporting evidence. Compare previously introduced findings from a new analytical angle, but do not repeat complete paper descriptions, methods, conditions, datasets, or results."""
         evidence_instruction = (
@@ -1123,8 +1332,14 @@ def main() -> int:
             "indexed evidence. Its citation_group must contain exactly the paper IDs "
             "resolved by those keys."
             if retrieval_mode == "lexical"
-            else "Use only the allowed source paper IDs. Because chunk indexing is not "
-            "available, mark Claims partially_supported and keep them as bounded source attribution."
+            else "Use only the allowed source paper IDs and the supplied bounded source text. "
+            "Mark Claims partially_supported and do not exceed its evidence ceiling."
+        )
+        cross_section_input = (
+            "Validated body-section synthesis (the conclusion may synthesize only these completed, evidence-bound claims):\n"
+            + json.dumps(body_synthesis_context, ensure_ascii=False)
+            if role == "conclusion"
+            else ""
         )
         plan_prompt = f"""Plan one section of a source-grounded scientific review before prose is written.
 
@@ -1137,10 +1352,16 @@ Section role: {role}
 Section thesis: {task.get('core_argument')}
 Required claims: {json.dumps(task.get('must_cover_points') or [], ensure_ascii=False)}
 Comparison axes and constraints: {json.dumps(spec.get('review_claims') or [], ensure_ascii=False)[:10000]}
-Primary paper IDs (detailed discussion belongs only in this section): {', '.join(primary) or 'none'}
+Assigned primary paper IDs: {', '.join(assigned_primary) or 'none'}
+Writeable primary paper IDs (the only papers that must be covered): {', '.join(primary) or 'none'}
+Context-only primary paper IDs (optional broad attribution only): {', '.join(context_only_primary) or 'none'}
+Unresolved primary paper IDs (do not force into prose): {', '.join(unresolved_primary) or 'none'}
 Supporting paper IDs (brief comparison or synthesis only): {', '.join(supporting) or 'none'}
+Context paper IDs (framing only; never substitute for primary evidence): {', '.join(contextual) or 'none'}
 Allowed paper IDs only: {', '.join(allowed)}
 Required synthesis components: {json.dumps(spec.get('synthesis_requirements') or [], ensure_ascii=False)}
+Source-addressable Matrix comparison table (empty cells are unknown, never negative findings):
+{json.dumps(comparison_table, ensure_ascii=False)}
 
 Return an evidence-bound Synthesis and Writing Plan, not manuscript prose. First state the
 section's positive synthesis. Then plan claim-centered paragraphs with one distinct academic
@@ -1149,6 +1370,8 @@ supports comparison. Every planned Claim must separately declare claim_kind,
 epistemic_status, support_status, citation_group, evidence_keys, and an evidence ceiling.
 
 {paragraph_instruction}
+
+{cross_section_input}
 
 Evidence contract: {evidence_instruction}
 Never invent conditions, yields, selectivities, structures, causal relations, or mechanistic
@@ -1182,6 +1405,7 @@ Source evidence (only use claims supported here):\n{json.dumps(evidence, ensure_
                 generated=proposed_plan,
                 synthesis_requirements=list(spec.get("synthesis_requirements") or []),
             )
+            synthesis_section["comparison_table"] = comparison_table
         except RuntimeError as exc:
             message = str(exc)
             if "transport failed" in message.casefold():

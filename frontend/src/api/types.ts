@@ -226,14 +226,6 @@ export type LibraryPaper = {
   structured_tags_verified?: boolean;
   human_review_status?: string | null;
   needs_human_check?: boolean | null;
-  bibliography_audit?: {
-    status?: "verified" | "conflict" | "pending_retry" | "not_found" | string;
-    checked_at?: string;
-    sources?: Record<string, { status?: string; error?: string }>;
-    field_provenance?: Record<string, Array<{ source?: string; value?: unknown; confidence?: number }>>;
-    conflicts?: Array<{ field?: string; status?: string; candidates?: unknown[] }>;
-    manual_review_status?: string;
-  };
   index_status?: {
     mineru: "ready" | "unavailable";
     fulltext: "not_indexed" | "queued" | "building" | "ready" | "failed" | "rebuild_required";
@@ -289,9 +281,24 @@ export type UploadJob = Job & {
   batch_id: string;
 };
 
+export type UploadBatchSummary = {
+  batch_id: string;
+  total: number;
+  queued: number;
+  running: number;
+  cancel_requested: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  interrupted: number;
+  created_at: string;
+  updated_at: string;
+};
+
 export type UploadJobList = {
   items: UploadJob[];
   count: number;
+  batch_summaries: UploadBatchSummary[];
 };
 
 export type ApiErrorPayload = {

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 
 import type { AuthConfig, Principal } from "../api/types";
@@ -32,11 +32,19 @@ function withCurrentProject(href: string, search: string): string {
 
 export function AppShell({ authConfig, identity, children }: AppShellProps) {
   const location = useLocation();
+  const workflowNavRef = useRef<HTMLDivElement>(null);
   const language = usePreferences((state) => state.language);
   const setLanguage = usePreferences((state) => state.setLanguage);
   useEffect(() => {
     document.documentElement.lang = language;
   }, [language]);
+  useEffect(() => {
+    const nav = workflowNavRef.current;
+    const active = nav?.querySelector<HTMLElement>(".workflow-link.active");
+    if (!nav || !active || nav.scrollWidth <= nav.clientWidth) return;
+    const centered = active.offsetLeft - (nav.clientWidth - active.offsetWidth) / 2;
+    nav.scrollLeft = Math.max(0, Math.min(centered, nav.scrollWidth - nav.clientWidth));
+  }, [location.pathname, location.search]);
   const logout = useSessionLogout();
 
   return (
@@ -85,7 +93,7 @@ export function AppShell({ authConfig, identity, children }: AppShellProps) {
       </header>
 
       <nav className="workflow-nav" aria-label={language === "en" ? "Review workflow" : "综述工作流"}>
-        <div className="workflow-nav-inner">
+        <div className="workflow-nav-inner" ref={workflowNavRef}>
           <NavLink to="/workspace" end className={({ isActive }) => (isActive ? "workflow-link workflow-home active" : "workflow-link workflow-home")}>
             <span className="workflow-link-index">00</span>
             <span className="workflow-link-copy"><strong>{translate(language, "projects")}</strong><small>{language === "en" ? "Workspace" : "工作台"}</small></span>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -26,30 +27,6 @@ class DocxExportLayoutTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.export = load_export_module()
 
-    def test_static_toc_is_grouped_into_styled_section_cards(self) -> None:
-        doc = self.export.Document(str(TEMPLATE))
-        self.export._clear_body(doc)
-
-        self.export._insert_static_toc(
-            doc,
-            [
-                (2, "1. Introduction"),
-                (3, "1.1 Scope and terminology"),
-                (4, "1.1.1 Evidence boundary"),
-                (2, "2. Catalytic strategies"),
-                (3, "2.1 Copper catalysis"),
-            ],
-        )
-
-        self.assertEqual(1, len(doc.tables))
-        table = doc.tables[0]
-        self.assertEqual(2, len(table.rows))
-        self.assertEqual("01", table.cell(0, 0).text)
-        self.assertIn("Introduction", table.cell(0, 1).text)
-        self.assertIn("Scope and terminology", table.cell(0, 1).text)
-        self.assertEqual("02", table.cell(1, 0).text)
-        self.assertIn('w:fill="1F6B54"', table.cell(0, 0)._tc.xml)
-
     def test_full_review_chart_anchor_is_before_introduction(self) -> None:
         self.assertTrue(
             self.export.should_insert_full_chart_before_heading("1. Introduction")
@@ -60,6 +37,25 @@ class DocxExportLayoutTests(unittest.TestCase):
         self.assertFalse(
             self.export.should_insert_full_chart_before_heading("Results and discussion")
         )
+
+    def test_docx_export_does_not_insert_a_table_of_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            source = directory / "review.md"
+            output = directory / "review.docx"
+            source.write_text(
+                "# Review title\n\n## Abstract\n\nA bounded abstract.\n\n"
+                "## 1. Introduction\n\nOpening text.\n\n"
+                "## 2. Methods\n\nMethod text.\n",
+                encoding="utf-8",
+            )
+
+            self.export.convert(source, output, TEMPLATE)
+
+            document = self.export.Document(str(output))
+            visible = "\n".join(paragraph.text for paragraph in document.paragraphs)
+            self.assertNotIn("Table of Contents", visible)
+            self.assertEqual([], document.tables)
 
 
 if __name__ == "__main__":

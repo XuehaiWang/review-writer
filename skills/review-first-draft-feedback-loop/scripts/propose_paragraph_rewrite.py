@@ -143,6 +143,10 @@ def propose(args: argparse.Namespace) -> dict:
                 args.max_case_words,
                 word_range_applicable=word_range_applicable,
                 allowed_unsupported_claims=allowed_unsupported_claims,
+                evidence=evidence,
+                score=finding,
+                rewrite_mode=rewrite_mode,
+                repair_attempt=attempt,
             )
         )
         response = loop.call_json_model(

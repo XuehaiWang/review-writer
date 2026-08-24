@@ -262,7 +262,9 @@ class DraftsV1Tests(NativeFigureApiTestCase):
 
         prose, figure_block = markdown.split("<!-- paragraph_id: S01-p1 -->", 1)
         self.assertNotIn("Pd_{2}", prose)
-        self.assertIn("Figure 1 provides visual context", prose)
+        self.assertIn(
+            "Figure 1 provides source-linked visual context for this discussion", prose
+        )
         self.assertIn(
             "Figure 1. Pd₂(dba)₃·CHCl₃, (S)-(−)-MeO-MOP, CHCl₃; −78 °C",
             figure_block,
@@ -456,10 +458,12 @@ class DraftsV1Tests(NativeFigureApiTestCase):
                 json={"text": current["first_draft_md"], "revision": current["revision"]},
                 headers=self.headers("stale-draft-edit"),
             )
+            after = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
             old = client.get(f"/api/v1/artifacts/{before_id}/content")
         self.assertEqual(200, edited.status_code, edited.text)
         self.assertNotEqual(before_id, edited.json()["draft_artifact_id"])
         self.assertEqual(409, stale.status_code, stale.text)
+        self.assertIn(paragraph["paragraph_id"], after["draft_manual_paragraph_ids"])
         self.assertEqual(200, old.status_code)
         self.assertNotIn("Manual edit.", old.text)
 
@@ -581,7 +585,7 @@ class DraftsV1Tests(NativeFigureApiTestCase):
         self.assertTrue(issue["paragraph"]["images"])
         self.assertEqual("completed", payload["quality"]["status"])
 
-    def test_evaluation_persists_missing_paragraph_markers_before_scoring(self) -> None:
+    def test_manual_save_persists_missing_paragraph_markers_before_scoring(self) -> None:
         with TestClient(self.app) as client:
             self.prepare_draft(client)
             current = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
@@ -594,6 +598,11 @@ class DraftsV1Tests(NativeFigureApiTestCase):
                 headers=self.headers("remove-markers"),
             )
             self.assertEqual(200, saved.status_code, saved.text)
+            saved_payload = client.get(
+                f"/api/v1/projects/{self.project_id}/draft"
+            ).json()
+            self.assertIn("<!-- paragraph_id:", saved_payload["first_draft_md"])
+            self.assertEqual("full-edit", saved_payload["versions"][0]["operation"])
             started = client.post(
                 f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
                 json={},
@@ -604,9 +613,7 @@ class DraftsV1Tests(NativeFigureApiTestCase):
         self.assertEqual("succeeded", job["status"])
         self.assertIn("<!-- paragraph_id:", payload["first_draft_md"])
         self.assertTrue(payload["quality"]["issues"][0]["paragraph"]["text"])
-        self.assertEqual(
-            "evaluation-marker-normalization", payload["versions"][0]["operation"]
-        )
+        self.assertEqual("full-edit", payload["versions"][0]["operation"])
 
     def test_batch_safe_optimization_requires_review_then_publishes_atomically(self) -> None:
         with TestClient(self.app) as client:

@@ -39,6 +39,7 @@ DRAFT_OPTIMIZATIONS = "draft/optimization-proposals.json"
 DRAFT_OVERLAYS = "draft/rewrite-overlays.json"
 DRAFT_APPROVAL = "draft/approval.json"
 SECTION_INDEX = "sections/section_drafts.json"
+SECTION_EVIDENCE = "sections/evidence_package.json"
 FIGURE_MANIFEST = "figures/manifest.json"
 PARAGRAPH_MARKER = re.compile(
     r"<!--\s*paragraph_id:\s*([A-Za-z0-9_.:-]+)\s*-->"
@@ -318,7 +319,21 @@ class DraftsService:
         section_index: dict[str, Any],
         figure_manifest: dict[str, Any],
         matrix: dict[str, Any],
+        evidence_package: dict[str, Any] | None = None,
     ) -> str:
+        evidence_registry = {
+            str(row.get("evidence_key") or ""): row
+            for row in (evidence_package or {}).get("evidence_registry") or []
+            if isinstance(row, dict) and str(row.get("evidence_key") or "")
+        }
+        evidence_by_paper_chunk = {
+            (
+                str(row.get("paper_id") or ""),
+                str(row.get("chunk_id") or ""),
+            ): row
+            for row in evidence_registry.values()
+            if str(row.get("paper_id") or "") and str(row.get("chunk_id") or "")
+        }
         figures_by_paragraph: dict[str, list[dict[str, Any]]] = {}
         for row in figure_manifest.get("figures") or []:
             if not isinstance(row, dict) or row.get("status") != "redrawn":
@@ -384,6 +399,55 @@ class DraftsService:
                         )
                     else:
                         text = f"{text} {callout}"
+                paragraph_evidence_rows: list[dict[str, Any]] = []
+                claim_ids: list[str] = []
+                for realization in paragraph.get("claim_realizations") or []:
+                    if not isinstance(realization, dict):
+                        continue
+                    claim_id = str(realization.get("claim_id") or "")
+                    if claim_id:
+                        claim_ids.append(claim_id)
+                    for ref in realization.get("evidence_refs") or []:
+                        if not isinstance(ref, dict):
+                            continue
+                        key = str(ref.get("evidence_key") or "")
+                        registered = evidence_registry.get(key, {})
+                        paragraph_evidence_rows.append(
+                            {
+                                "evidence_id": str(
+                                    ref.get("evidence_id")
+                                    or registered.get("evidence_id")
+                                    or ""
+                                ),
+                                "evidence_key": key,
+                                "paper_id": str(registered.get("paper_id") or ""),
+                            }
+                        )
+                for claim_evidence in paragraph.get("evidence") or []:
+                    if not isinstance(claim_evidence, dict):
+                        continue
+                    paper_id = str(claim_evidence.get("paper_id") or "")
+                    claim_id = str(claim_evidence.get("claim_id") or "")
+                    if claim_id:
+                        claim_ids.append(claim_id)
+                    for chunk_id in claim_evidence.get("chunk_ids") or []:
+                        registered = evidence_by_paper_chunk.get(
+                            (paper_id, str(chunk_id)), {}
+                        )
+                        paragraph_evidence_rows.append(
+                            {
+                                "evidence_id": str(registered.get("evidence_id") or ""),
+                                "evidence_key": str(registered.get("evidence_key") or ""),
+                                "paper_id": paper_id,
+                            }
+                        )
+                paragraph_evidence_ids = list(
+                    dict.fromkeys(
+                        str(row.get("evidence_id") or "")
+                        for row in paragraph_evidence_rows
+                        if str(row.get("evidence_id") or "")
+                    )
+                )
                 figure_blocks: list[str] = []
                 figure_callouts: list[str] = []
                 for figure in figures_by_paragraph.get(paragraph_id, []):
@@ -391,16 +455,21 @@ class DraftsService:
                     output_id = str(figure["output_artifact_id"])
                     paper_id = str(figure.get("paper_id") or "").strip()
                     caption_text = str(figure.get("source_caption_text") or "").strip()
-                    normalized_caption = normalize_publication_caption(caption_text)
+                    role = str(figure.get("representative_role") or "unknown")
+                    normalized_caption = normalize_publication_caption(
+                        caption_text,
+                        representative_role=role,
+                        source_label=figure.get("source_label"),
+                        context_title=figure.get("section_heading"),
+                    )
                     caption_body = str(
-                        normalized_caption.publication_text
-                        or figure.get("publication_caption_text")
+                        figure.get("publication_caption_text")
+                        or normalized_caption.publication_text
                         or ""
                     ).strip()
                     caption_plain = str(
-                        normalized_caption.plain_text
-                        or figure.get("publication_caption_plain_text")
-                        or figure.get("source_label")
+                        figure.get("alt_text")
+                        or normalized_caption.alt_text
                         or f"Figure {figure_number}"
                     ).strip()
                     interpretation_basis = (
@@ -413,16 +482,32 @@ class DraftsService:
                         )
                         else "identity_only"
                     )
-                    role = str(figure.get("representative_role") or "paper_overview")
-                    role_text = {
-                        "core_transformation": "core transformation",
-                        "mechanism": "proposed mechanistic framework",
-                        "scope": "reported scope or result pattern",
-                        "paper_overview": "overall research strategy",
-                    }.get(role, "overall research strategy")
-                    figure_callouts.append(
-                        f"Figure {figure_number} provides visual context for the paper's {role_text}."
+                    figure_evidence_ids = list(
+                        dict.fromkeys(
+                            str(row.get("evidence_id") or "")
+                            for row in paragraph_evidence_rows
+                            if str(row.get("evidence_id") or "")
+                            and (
+                                not paper_id
+                                or str(row.get("paper_id") or "") == paper_id
+                            )
+                        )
                     )
+                    role_text = {
+                        "workflow": "shows the study workflow discussed here",
+                        "core_transformation": "summarizes the core transformation discussed here",
+                        "mechanism": "depicts the proposed mechanistic framework discussed here",
+                        "mechanism_model": "depicts the proposed mechanistic framework discussed here",
+                        "scope": "summarizes the reported scope or result pattern discussed here",
+                        "scope_samples": "summarizes the reported scope or sample pattern discussed here",
+                        "quantitative_results": "summarizes the quantitative result discussed here",
+                        "comparison_ablation": "supports the comparison discussed here",
+                        "paper_overview": "summarizes the study's overall research strategy",
+                        "conceptual_overview": "provides a conceptual overview for this discussion",
+                        "structure_image": "shows the representative structure or image discussed here",
+                        "unknown": "provides source-linked visual context for this discussion",
+                    }.get(role, "provides source-linked visual context for this discussion")
+                    figure_callouts.append(f"Figure {figure_number} {role_text}.")
                     metadata = json.dumps(
                         {
                             "figure_id": figure.get("figure_id"),
@@ -432,8 +517,13 @@ class DraftsService:
                             "representative_role": role,
                             "published_label": f"Figure {figure_number}",
                             "interpretation_basis": interpretation_basis,
+                            "claim_ids": list(dict.fromkeys(claim_ids)),
+                            "evidence_ids": paragraph_evidence_ids,
+                            "figure_evidence_ids": figure_evidence_ids,
                             "caption_normalization_status": normalized_caption.status,
                             "caption_normalization_version": normalized_caption.version,
+                            "caption_quality": figure.get("caption_quality")
+                            or normalized_caption.manifest_fields().get("caption_quality"),
                         },
                         ensure_ascii=False,
                         separators=(",", ":"),
@@ -497,6 +587,9 @@ class DraftsService:
         manifest, manifest_artifact = self._read_json(
             principal, project_id, FIGURE_MANIFEST
         )
+        evidence_package, evidence_package_artifact = self._read_json(
+            principal, project_id, SECTION_EVIDENCE, required=False
+        )
         overlays, overlay_artifact = self._read_json(
             principal, project_id, DRAFT_OVERLAYS, required=False
         )
@@ -508,8 +601,16 @@ class DraftsService:
             sections,
             manifest,
             matrix,
+            evidence_package,
         )
         markdown, overlay_replay = self._apply_rewrite_overlays(markdown, overlays)
+        expected_current_artifacts = {
+            SECTION_INDEX: sections_artifact.id,
+            FIGURE_MANIFEST: manifest_artifact.id,
+            MATRIX_LOGICAL_NAME: matrix_artifact.id,
+        }
+        if evidence_package_artifact is not None:
+            expected_current_artifacts[SECTION_EVIDENCE] = evidence_package_artifact.id
         with self._write_lock:
             published, next_state = self._publish_files(
                 principal,
@@ -520,17 +621,18 @@ class DraftsService:
                     "source_sections_artifact_id": sections_artifact.id,
                     "source_figure_manifest_artifact_id": manifest_artifact.id,
                     "source_matrix_artifact_id": matrix_artifact.id,
+                    "source_section_evidence_artifact_id": (
+                        evidence_package_artifact.id
+                        if evidence_package_artifact is not None
+                        else ""
+                    ),
                     "source_rewrite_overlay_artifact_id": (
                         overlay_artifact.id if overlay_artifact else ""
                     ),
                     "overlay_replay": overlay_replay,
                     "operation": "assemble",
                 },
-                expected_current_artifacts={
-                    SECTION_INDEX: sections_artifact.id,
-                    FIGURE_MANIFEST: manifest_artifact.id,
-                    MATRIX_LOGICAL_NAME: matrix_artifact.id,
-                },
+                expected_current_artifacts=expected_current_artifacts,
                 expected_stage_states={
                     "figures": {
                         "revision": figures_state.revision,
@@ -551,7 +653,11 @@ class DraftsService:
         sections = self._artifact(principal, project_id, SECTION_INDEX)
         figures = self._artifact(principal, project_id, FIGURE_MANIFEST)
         matrix = self._artifact(principal, project_id, MATRIX_LOGICAL_NAME)
+        evidence = self._artifact(principal, project_id, SECTION_EVIDENCE)
         metadata = dict(draft.metadata if draft else {})
+        source_evidence_id = str(
+            metadata.get("source_section_evidence_artifact_id") or ""
+        )
         upstream_stale = bool(
             draft
             and (
@@ -561,6 +667,13 @@ class DraftsService:
                 or metadata.get("source_sections_artifact_id") != sections.id
                 or metadata.get("source_figure_manifest_artifact_id") != figures.id
                 or metadata.get("source_matrix_artifact_id") != matrix.id
+                or (
+                    source_evidence_id
+                    and (
+                        evidence is None
+                        or source_evidence_id != evidence.id
+                    )
+                )
             )
         )
         return {
@@ -761,6 +874,16 @@ class DraftsService:
             "revision": state.revision if state else 0,
             "status": state.status if state else "pending",
             "draft_artifact_id": draft_artifact.id if draft_artifact else "",
+            "draft_manual_paragraph_ids": sorted(
+                str(value)
+                for value in (
+                    (draft_artifact.metadata if draft_artifact else {}).get(
+                        "unverified_manual_paragraph_ids"
+                    )
+                    or []
+                )
+                if str(value).strip()
+            ),
             "first_draft_md": text,
             "publication_voice": {
                 "status": "warning" if voice_issues else "pass",
@@ -828,11 +951,38 @@ class DraftsService:
         if self._freshness(principal, project_id, current)["upstream_stale"]:
             raise DraftNotReady("Draft inputs changed. Reassemble Draft before editing.")
         canonical = str(text).rstrip() + "\n"
+        if operation == "full-edit" or operation.startswith("paragraph-edit:"):
+            canonical, _marker_report = ensure_prose_paragraph_markers(canonical)
+            canonical = canonical.rstrip() + "\n"
         if canonical == current_text:
             raise WorkflowValidationError("The edited draft has no content change.")
         metadata = dict(current.metadata)
         metadata["operation"] = operation
         metadata["previous_draft_artifact_id"] = current.id
+        if operation == "full-edit" or operation.startswith("paragraph-edit:"):
+            before = {
+                str(row["paragraph_id"]): self._normalized(str(row["text"]))
+                for row in self._paragraph_spans(current_text)
+            }
+            after = {
+                str(row["paragraph_id"]): self._normalized(str(row["text"]))
+                for row in self._paragraph_spans(canonical)
+            }
+            changed = {
+                paragraph_id
+                for paragraph_id, paragraph_text in after.items()
+                if before.get(paragraph_id) != paragraph_text
+            }
+            if operation.startswith("paragraph-edit:"):
+                changed.add(operation.split(":", 1)[1])
+            metadata["unverified_manual_paragraph_ids"] = sorted(
+                {
+                    str(value)
+                    for value in metadata.get("unverified_manual_paragraph_ids") or []
+                    if str(value).strip()
+                }
+                | changed
+            )
         with self._write_lock:
             published, state = self._publish_files(
                 principal,
@@ -989,6 +1139,9 @@ class DraftsService:
         sections, _sections_artifact = self._read_json(
             principal, project_id, SECTION_INDEX, required=False
         )
+        section_evidence, _section_evidence_artifact = self._read_json(
+            principal, project_id, SECTION_EVIDENCE, required=False
+        )
         figures, _figures_artifact = self._read_json(
             principal, project_id, FIGURE_MANIFEST, required=False
         )
@@ -1031,10 +1184,243 @@ class DraftsService:
             "matrix": matrix,
             "blueprint": blueprint,
             "section_index": sections,
+            "section_evidence": section_evidence,
             "figure_manifest": figures,
             "figure_artifact_paths": artifact_paths,
             "library_metadata": library_metadata,
             "rewrite_overlays": overlays,
+        }
+
+    def automatic_synthesis_source(
+        self,
+        principal: Principal,
+        project_id: str,
+        *,
+        text: str | None = None,
+        draft: ArtifactRecord | None = None,
+    ) -> dict[str, Any]:
+        """Return only source-verified Draft prose for automatic downstream synthesis."""
+
+        if text is None or draft is None:
+            text, draft = self._read_text(principal, project_id, DRAFT_DOCUMENT)
+        quality, quality_artifact = self._read_json(
+            principal, project_id, DRAFT_QUALITY, required=False
+        )
+        excluded = {
+            str(value)
+            for value in quality.get("unverified_manual_paragraph_ids") or []
+            if str(value).strip()
+        }
+        if (
+            quality_artifact is None
+            or quality.get("source_draft_artifact_id") != draft.id
+        ):
+            excluded = set()
+        filtered = str(text)
+        removed: list[str] = []
+        for paragraph in reversed(self._paragraph_spans(filtered)):
+            paragraph_id = str(paragraph["paragraph_id"])
+            if paragraph_id not in excluded:
+                continue
+            filtered = (
+                filtered[: int(paragraph["start"])]
+                + "\n"
+                + filtered[int(paragraph["marker_end"]) :]
+            )
+            removed.append(paragraph_id)
+        return {
+            "draft_text": filtered.rstrip() + "\n",
+            "source_draft_artifact_id": draft.id,
+            "source_quality_artifact_id": quality_artifact.id if quality_artifact else "",
+            "excluded_manual_paragraph_ids": sorted(removed),
+            "warning_required": bool(removed),
+        }
+
+    @staticmethod
+    def _quality_routing(
+        built: dict[str, Any], job_payload: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Route quality failures to the earliest workflow stage that can fix them."""
+
+        paragraph_sections = {
+            str(paragraph.get("paragraph_id") or ""): str(
+                section.get("section_id") or ""
+            )
+            for section in (job_payload.get("section_index") or {}).get("sections") or []
+            if isinstance(section, dict)
+            for paragraph in section.get("paragraphs") or []
+            if isinstance(paragraph, dict) and paragraph.get("paragraph_id")
+        }
+        evidence_sections = {
+            str(section.get("section_id") or ""): section
+            for section in (job_payload.get("section_evidence") or {}).get("sections") or []
+            if isinstance(section, dict)
+        }
+        paragraph_scores = {
+            str(row.get("paragraph_id") or ""): row
+            for row in built.get("paragraph_scores") or []
+            if isinstance(row, dict)
+        }
+        stage_priority = {"discovery": 0, "planning": 1, "sections": 2, "draft": 3}
+        labels = {
+            "discovery": "Return to literature retrieval",
+            "planning": "Return to Matrix and outline",
+            "sections": "Return to section evidence and writing",
+            "draft": "Revise wording in the current Draft",
+        }
+        discovery_terms = {
+            "search", "retrieval", "coverage", "corpus", "literature",
+            "missing_primary", "recall", "sampling", "publication_bias",
+        }
+        planning_terms = {
+            "taxonomy", "classification", "matrix", "outline", "organization",
+            "section_structure", "category", "comparison_axis",
+        }
+        section_terms = {
+            "source", "evidence", "citation", "factual", "fact", "mechanism",
+            "result", "quantitative", "support", "claim", "reference",
+            "scope",
+        }
+
+        routed_issues: list[dict[str, Any]] = []
+        by_stage: dict[str, list[str]] = {stage: [] for stage in stage_priority}
+        for index, raw_issue in enumerate(built.get("issues") or [], 1):
+            if not isinstance(raw_issue, dict):
+                continue
+            issue = dict(raw_issue)
+            paragraph_id = str(issue.get("paragraph_id") or "")
+            score = paragraph_scores.get(paragraph_id, {})
+            section_id = paragraph_sections.get(paragraph_id, "")
+            section_evidence = evidence_sections.get(section_id, {})
+            source_status = str(
+                score.get("source_check_status")
+                or issue.get("source_check_status")
+                or "not_assessed"
+            ).casefold()
+            route = str(score.get("route") or issue.get("route") or "").casefold()
+            failed_dimensions = [
+                str(value) for value in score.get("failed_dimensions")
+                or issue.get("failed_dimensions") or []
+                if str(value).strip()
+            ]
+            searchable = " ".join(
+                [
+                    route,
+                    source_status,
+                    *failed_dimensions,
+                    str(issue.get("diagnosis") or issue.get("message") or ""),
+                ]
+            ).casefold()
+            has_term = lambda terms: any(
+                re.search(
+                    rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])",
+                    searchable,
+                )
+                for term in terms
+            )
+            if has_term(discovery_terms):
+                stage = "discovery"
+                action = "Broaden or correct the retrieval scope, then refresh Matrix evidence."
+            elif has_term(planning_terms):
+                stage = "planning"
+                action = "Correct the Matrix classification or section structure before rewriting."
+            elif (
+                source_status
+                in {"partially_supported", "unsupported", "needs_human_review"}
+                or route == "local_source_recheck"
+                or has_term(section_terms)
+            ):
+                stage = "sections"
+                action = "Recheck the section question evidence and regenerate only the affected section."
+            else:
+                stage = "draft"
+                action = "Revise this paragraph without changing supported scientific claims."
+            question_diagnostics = [
+                {
+                    "question_id": str(question.get("question_id") or ""),
+                    "status": str(question.get("status") or ""),
+                    "diagnostics_by_primary_paper": dict(
+                        question.get("diagnostics_by_primary_paper") or {}
+                    ),
+                }
+                for question in section_evidence.get("query_plans") or []
+                if isinstance(question, dict)
+                and str(question.get("status") or "")
+                in {"partial", "abstract_limited", "insufficient"}
+            ]
+            issue_id = str(issue.get("issue_id") or issue.get("id") or f"PAR-{index:03d}")
+            issue.update(
+                {
+                    "issue_id": issue_id,
+                    "section_id": section_id,
+                    "source_check_status": source_status,
+                    "source_evidence_refs": list(score.get("source_evidence_refs") or []),
+                    "recommended_return_stage": stage,
+                    "recommended_action": action,
+                    "section_evidence_status": str(section_evidence.get("status") or ""),
+                    "unresolved_primary_papers": list(
+                        section_evidence.get("unresolved_primary_papers") or []
+                    ),
+                    "corpus_gap_questions": list(
+                        section_evidence.get("corpus_gap_questions") or []
+                    ),
+                    "question_diagnostics": question_diagnostics,
+                }
+            )
+            routed_issues.append(issue)
+            by_stage[stage].append(issue_id)
+
+        active_stages = [stage for stage, issue_ids in by_stage.items() if issue_ids]
+        recommended = min(active_stages, key=stage_priority.get) if active_stages else "draft"
+        return routed_issues, {
+            "recommended_return_stage": recommended,
+            "recommended_action": labels[recommended],
+            "issues_by_stage": by_stage,
+            "counts_by_stage": {stage: len(issue_ids) for stage, issue_ids in by_stage.items()},
+        }
+
+    @classmethod
+    def _manual_claim_review(
+        cls, current: ArtifactRecord, built: dict[str, Any]
+    ) -> dict[str, Any]:
+        manual_ids = {
+            str(value)
+            for value in current.metadata.get("unverified_manual_paragraph_ids") or []
+            if str(value).strip()
+        }
+        scores = {
+            str(row.get("paragraph_id") or ""): row
+            for row in built.get("paragraph_scores") or []
+            if isinstance(row, dict)
+        }
+        entries = []
+        verified: list[str] = []
+        unverified: list[str] = []
+        for paragraph_id in sorted(manual_ids):
+            score = scores.get(paragraph_id, {})
+            source_status = str(score.get("source_check_status") or "not_assessed")
+            evidence_refs = [
+                str(value)
+                for value in score.get("source_evidence_refs") or []
+                if str(value).strip()
+            ]
+            is_verified = source_status == "verified" and bool(evidence_refs)
+            (verified if is_verified else unverified).append(paragraph_id)
+            entries.append(
+                {
+                    "paragraph_id": paragraph_id,
+                    "status": "verified" if is_verified else "unverified",
+                    "source_check_status": source_status,
+                    "source_evidence_refs": evidence_refs,
+                    "export_allowed": True,
+                    "automatic_synthesis_allowed": is_verified,
+                }
+            )
+        return {
+            "entries": entries,
+            "verified_manual_paragraph_ids": verified,
+            "unverified_manual_paragraph_ids": unverified,
+            "warning_required": bool(unverified),
         }
 
     def publish_evaluation(
@@ -1048,8 +1434,19 @@ class DraftsService:
         if current is None or current.id != job_payload["source_draft_artifact_id"]:
             raise WorkflowConflict("Draft changed while evaluation was running.")
         score = max(0.0, min(float(built.get("score") or 0), 100.0))
+        routed_issues, routing = self._quality_routing(built, job_payload)
+        manual_review = self._manual_claim_review(current, built)
         quality = {
             **{key: value for key, value in built.items() if key != "source_draft_artifact_id"},
+            "issues": routed_issues,
+            "routing": routing,
+            "manual_claim_review": manual_review,
+            "verified_manual_paragraph_ids": manual_review[
+                "verified_manual_paragraph_ids"
+            ],
+            "unverified_manual_paragraph_ids": manual_review[
+                "unverified_manual_paragraph_ids"
+            ],
             "source_draft_artifact_id": current.id,
             "score": score,
             "goal": float(built.get("goal") or job_payload.get("goal") or 90),
@@ -1437,6 +1834,18 @@ class DraftsService:
                     "selected_paragraph_ids": sorted(selected_ids),
                     "status": "completed",
                     "evaluated_at": decided_at,
+                }
+            )
+            manual_review = self._manual_claim_review(current, candidate_quality)
+            candidate_quality.update(
+                {
+                    "manual_claim_review": manual_review,
+                    "verified_manual_paragraph_ids": manual_review[
+                        "verified_manual_paragraph_ids"
+                    ],
+                    "unverified_manual_paragraph_ids": manual_review[
+                        "unverified_manual_paragraph_ids"
+                    ],
                 }
             )
 
@@ -2077,6 +2486,18 @@ class DraftsService:
             built,
             paragraph_id=paragraph_id,
             source_quality_artifact_id=quality_artifact.id,
+        )
+        manual_review = self._manual_claim_review(current, updated_quality)
+        updated_quality.update(
+            {
+                "manual_claim_review": manual_review,
+                "verified_manual_paragraph_ids": manual_review[
+                    "verified_manual_paragraph_ids"
+                ],
+                "unverified_manual_paragraph_ids": manual_review[
+                    "unverified_manual_paragraph_ids"
+                ],
+            }
         )
         decided_at = utc_now().isoformat()
         candidate.update(

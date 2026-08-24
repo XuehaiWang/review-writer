@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 import uuid
 import zipfile
@@ -10,9 +11,13 @@ from PIL import Image
 from sqlalchemy import select
 
 from review_writer_api.database import Project
-from review_writer_api.domain_services.final import _clean_reference_affiliation_markup
+from review_writer_api.domain_services.final import (
+    _clean_reference_affiliation_markup,
+    _normalize_publication_markup,
+)
 from review_writer_api.tests.figure_test_support import NativeFigureApiTestCase
 from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
+from review_writer_core.latex_renderer import TEMPLATE_VERSION
 from review_writer_core.manuscript_state import build_manuscript_state
 
 
@@ -44,6 +49,14 @@ class FinalV1Tests(NativeFigureApiTestCase):
             return {
                 "markdown": "## Conclusion\n\nCopper reactivity supports a bounded outlook.\n",
                 "report": {"validation": {"passes_validation": True}},
+            }
+
+        def front_matter(_context, payload):
+            self.assertNotIn("## Conclusion", payload["abstract_source"])
+            return {
+                "abstract": "This review synthesizes the approved body evidence without using a generated conclusion.",
+                "keywords": ["copper catalysis", "evidence synthesis", "selectivity"],
+                "warnings": [],
             }
 
         def overview(context, _payload):
@@ -123,7 +136,7 @@ class FinalV1Tests(NativeFigureApiTestCase):
                 "render_manifest": {
                     "schema_version": 1,
                     "template": "modern-survey",
-                    "template_version": "modern-survey/2",
+                    "template_version": TEMPLATE_VERSION,
                     "language_profile": profile,
                     "compiler": "LuaHBTeX test",
                     "shell_escape": False,
@@ -151,6 +164,7 @@ class FinalV1Tests(NativeFigureApiTestCase):
 
         return {
             "draft.evaluate": evaluate,
+            "final.build": front_matter,
             "final.conclusion": conclusion,
             "final.overview": overview,
             "final.export": export,
@@ -245,6 +259,9 @@ class FinalV1Tests(NativeFigureApiTestCase):
         self.assertEqual("final.build", payload["latest_final_job_type"])
         self.assertEqual("succeeded", payload["latest_final_job_status"])
         self.assertTrue(payload["final_current"])
+        self.assertIn("## Abstract", payload["final_draft_md"])
+        self.assertIn("**Authors:** First", payload["final_draft_md"])
+        self.assertEqual("generated", payload["front_matter"]["field_states"]["abstract"])
 
     def test_overview_block_is_inserted_immediately_before_introduction(self) -> None:
         source = "# Review title\n\nAbstract text.\n\n## 1. Introduction\n\nOpening."
@@ -262,6 +279,7 @@ class FinalV1Tests(NativeFigureApiTestCase):
             "[1] Yuli Wang<sup></sup> and Shengming Ma<sup>, </sup>. Article.\n"
             "[2] Ogasawara, <sup>[]</sup> Yonghui Ge. Article.\n"
             "[3] Isotope-labeling with <sup>13</sup>C. Article.\n"
+            "[4] Zhaoqiang Chen, <sup>∥</sup> Huanan Wang, <sup>‖</sup> Ping Du. Article.\n"
         )
 
         cleaned = _clean_reference_affiliation_markup(markdown)
@@ -273,6 +291,30 @@ class FinalV1Tests(NativeFigureApiTestCase):
         self.assertNotIn("<sup></sup>", cleaned)
         self.assertNotIn("<sup>, </sup>", cleaned)
         self.assertNotIn("<sup>[]</sup>", cleaned)
+        self.assertIn("Zhaoqiang Chen, Huanan Wang, Ping Du. Article.", cleaned)
+        self.assertNotIn("<sup>∥</sup>", cleaned)
+        self.assertNotIn("<sup>‖</sup>", cleaned)
+
+    def test_publication_markup_normalization_preserves_content_and_comments(self) -> None:
+        markdown = (
+            "# Review\n\n"
+            "<!-- paragraph_id: S01-p1 -->\n"
+            "A <strong>supported</strong> result used H<sub>2</sub>O and x<sup>2</sup>."
+            "<br><span class=\"note\">Further context</span>.\n\n"
+            "<script>discard this</script>\n\n"
+            "## References\n\n"
+            "[1] Chen, <sup>∥</sup> Wang. Article.\n"
+        )
+
+        normalized = _normalize_publication_markup(markdown)
+
+        self.assertIn("<!-- paragraph_id: S01-p1 -->", normalized)
+        self.assertIn("A **supported** result used H₂O and x².", normalized)
+        self.assertIn("Further context.", normalized)
+        self.assertIn("[1] Chen, Wang. Article.", normalized)
+        self.assertNotIn("discard this", normalized)
+        visible = re.sub(r"<!--.*?-->", "", normalized, flags=re.DOTALL)
+        self.assertIsNone(re.search(r"</?[A-Za-z][^>]*>", visible))
 
     def test_re_evaluation_invalidates_old_draft_approval_and_blocks_final(self) -> None:
         with TestClient(self.app) as client:
@@ -559,6 +601,60 @@ class FinalV1Tests(NativeFigureApiTestCase):
         self.assertEqual("released", release.json()["status"])
         self.assertIn("citation_callouts", audit.json())
         self.assertNotEqual(audit.json(), release.json())
+
+    def test_front_matter_is_user_authored_and_bound_to_final_version(self) -> None:
+        with TestClient(self.app) as client:
+            self.prepare_approved_draft(client)
+            initial = client.get(
+                f"/api/v1/projects/{self.project_id}/final"
+            ).json()
+            self.assertEqual(["First"], initial["front_matter"]["authors"])
+            self.assertEqual("generated", initial["front_matter"]["field_states"]["authors"])
+            saved = client.put(
+                f"/api/v1/projects/{self.project_id}/final/front-matter",
+                json={
+                    "revision": initial["revision"],
+                    "title": "Evidence-bound copper catalysis",
+                    "authors": ["A. Researcher", "B. Researcher"],
+                    "affiliations": ["Institute of Verified Synthesis"],
+                    "abstract": "This review synthesizes the confirmed corpus.",
+                    "keywords": ["copper", "evidence synthesis"],
+                },
+                headers=self.headers("save-front-matter"),
+            )
+            self.assertEqual(200, saved.status_code, saved.text)
+            built = client.post(
+                f"/api/v1/projects/{self.project_id}/final/build",
+                headers=self.headers("front-matter-build"),
+            )
+            self.assertEqual(200, built.status_code, built.text)
+            current = client.get(
+                f"/api/v1/projects/{self.project_id}/final"
+            ).json()
+            edited = client.put(
+                f"/api/v1/projects/{self.project_id}/final/front-matter",
+                json={
+                    "revision": current["revision"],
+                    "title": "Updated evidence-bound copper catalysis",
+                    "authors": ["A. Researcher", "B. Researcher"],
+                    "affiliations": ["Institute of Verified Synthesis"],
+                    "abstract": "This review synthesizes the confirmed corpus.",
+                    "keywords": ["copper", "evidence synthesis"],
+                },
+                headers=self.headers("edit-front-matter"),
+            )
+            self.assertEqual(200, edited.status_code, edited.text)
+            stale = client.get(
+                f"/api/v1/projects/{self.project_id}/final"
+            ).json()
+        self.assertTrue(current["front_matter_current"])
+        self.assertTrue(current["final_current"])
+        self.assertIn("# Evidence-bound copper catalysis", current["final_draft_md"])
+        self.assertIn("**Authors:** A. Researcher, B. Researcher", current["final_draft_md"])
+        self.assertIn("## Abstract", current["final_draft_md"])
+        self.assertIn("**Keywords:** copper, evidence synthesis", current["final_draft_md"])
+        self.assertFalse(stale["final_current"])
+        self.assertTrue(stale["freshness"]["stale"])
 
     def test_final_audit_warns_for_citation_issues_but_blocks_cross_project_artifacts(self) -> None:
         with self.sessions.begin() as session:

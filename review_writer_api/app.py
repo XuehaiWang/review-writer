@@ -275,6 +275,7 @@ def create_app(
             scientific_runner=scientific_runner,
             provider_settings=provider_settings_service,
             model_gateway=model_gateway,
+            library_index=library_index_service,
         )
         if workflow_repository is not None and artifact_service is not None
         else None
@@ -1349,11 +1350,19 @@ def create_app(
                 current_principal,
                 discovery_service,
                 job_service,
+                planning_service,
                 native_handlers,
             )
         )
-    if planning_service is not None:
-        app.include_router(build_planning_router(current_principal, planning_service))
+    if planning_service is not None and job_service is not None:
+        app.include_router(
+            build_planning_router(
+                current_principal,
+                planning_service,
+                job_service,
+                native_handlers,
+            )
+        )
     if sections_service is not None and job_service is not None:
         app.include_router(
             build_sections_router(

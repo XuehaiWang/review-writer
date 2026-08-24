@@ -328,19 +328,26 @@ export function AdminPage() {
       </section>
 
       <section className="surface admin-audit-panel">
-        <div className="section-heading compact">
-          <div><span className="step-label">AUDIT</span><h2>{text("最近管理记录", "Recent administrative activity")}</h2></div>
-        </div>
         {audit.error ? <ErrorState error={audit.error} onRetry={() => audit.refetch()} /> : null}
-        <div className="admin-audit-list">
-          {audit.data?.items.length ? audit.data.items.map((item) => (
-            <article key={item.id}>
-              <strong>{item.provider_kind.toUpperCase()} · {item.action}</strong>
-              <span>{item.summary}</span>
-              <small>{item.actor_email} · {new Date(item.created_at).toLocaleString()}</small>
-            </article>
-          )) : <div className="empty-state compact-empty">{text("还没有管理记录。", "No administrative activity yet.")}</div>}
-        </div>
+        <details className="admin-audit-disclosure">
+          <summary className="admin-audit-summary">
+            <div>
+              <span className="step-label">AUDIT</span>
+              <h2>{text("最近管理记录", "Recent administrative activity")}</h2>
+              <small>{audit.data?.items.length ? text(`${audit.data.items.length} 条记录，展开后可滚动查看`, `${audit.data.items.length} records · scroll after expanding`) : text("还没有管理记录", "No administrative activity yet")}</small>
+            </div>
+            <span className="admin-audit-toggle">{text("查看记录", "View activity")}</span>
+          </summary>
+          <div className="admin-audit-list">
+            {audit.data?.items.length ? audit.data.items.map((item) => (
+              <article key={item.id}>
+                <strong>{item.provider_kind.toUpperCase()} · {item.action}</strong>
+                <span>{item.summary}</span>
+                <small>{item.actor_email} · {new Date(item.created_at).toLocaleString()}</small>
+              </article>
+            )) : <div className="empty-state compact-empty">{text("服务器配置发生变更后会显示在这里。", "Provider configuration changes will appear here.")}</div>}
+          </div>
+        </details>
       </section>
     </main>
   );

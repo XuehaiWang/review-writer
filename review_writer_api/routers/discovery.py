@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, status
 
 from review_writer_api.domain_services.discovery import DiscoveryService
+from review_writer_api.domain_services.planning import PlanningService
 from review_writer_api.job_service import JobService
 from review_writer_api.routers.jobs import _job_response
 from review_writer_api.security import Principal, Role
@@ -25,6 +26,7 @@ def build_discovery_router(
     principal_dependency: Callable[..., Principal],
     discovery_service: DiscoveryService,
     job_service: JobService,
+    planning_service: PlanningService | None = None,
     handlers: Mapping[str, Callable] | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/projects/{project_id}/discovery", tags=["discovery"])
@@ -119,8 +121,23 @@ def build_discovery_router(
         payload: DiscoveryConfirmRequest,
         principal: Principal = Depends(principal_dependency),
     ) -> dict[str, Any]:
-        return discovery_service.confirm(
+        result = discovery_service.confirm(
             principal, project_id, payload.revision
         )
+        if planning_service is not None and "matrix.enrich" in job_service.handlers:
+            job = job_service.submit(
+                principal,
+                scope="project",
+                project_id=project_id,
+                job_type="matrix.enrich",
+                idempotency_key=f"matrix-enrich:{result['matrix_artifact_id']}",
+                operation_key="matrix-enrichment",
+                payload={
+                    "prepare_on_start": True,
+                    "source_matrix_artifact_id": result["matrix_artifact_id"],
+                },
+            )
+            result["matrix_enrichment_job"] = _job_response(job).model_dump()
+        return result
 
     return router

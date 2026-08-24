@@ -16,6 +16,7 @@
 \usepackage{ragged2e}
 \usepackage{balance}
 \usepackage{dblfloatfix}
+\usepackage{placeins}
 \usepackage[most]{tcolorbox}
 \usepackage[hidelinks,unicode]{hyperref}
 \definecolor{AcademicInk}{HTML}{151A1E}
@@ -28,6 +29,35 @@
 \setlength{\parindent}{1em}
 \setlength{\parskip}{0.08em}
 \setlength{\columnsep}{7mm}
+% Keep dense scientific figure sequences moving without forcing them onto
+% mostly empty pages. These values preserve source order while allowing more
+% single- and double-column floats to share a page with a small amount of text.
+\setcounter{topnumber}{4}
+\setcounter{bottomnumber}{3}
+\setcounter{totalnumber}{6}
+\setcounter{dbltopnumber}{3}
+\renewcommand{\topfraction}{0.92}
+\renewcommand{\bottomfraction}{0.88}
+\renewcommand{\textfraction}{0.06}
+\renewcommand{\floatpagefraction}{0.68}
+\renewcommand{\dbltopfraction}{0.92}
+\renewcommand{\dblfloatpagefraction}{0.68}
+\setlength{\floatsep}{8pt plus 2pt minus 2pt}
+\setlength{\textfloatsep}{10pt plus 3pt minus 2pt}
+\setlength{\intextsep}{8pt plus 2pt minus 2pt}
+\setlength{\dblfloatsep}{9pt plus 2pt minus 2pt}
+\setlength{\dbltextfloatsep}{11pt plus 3pt minus 2pt}
+% LaTeX normally gives float-only pages infinitely stretchable space between
+% figures. Keep only the page-edge glue elastic so consecutive figures stay
+% grouped instead of being spread across the full page height.
+\makeatletter
+\setlength{\@fptop}{0pt}
+\setlength{\@fpsep}{10pt plus 2pt minus 2pt}
+\setlength{\@fpbot}{0pt plus 1fil}
+\setlength{\@dblfptop}{0pt}
+\setlength{\@dblfpsep}{12pt plus 2pt minus 2pt}
+\setlength{\@dblfpbot}{0pt plus 1fil}
+\makeatother
 \setlist{leftmargin=1.6em,itemsep=0.1em,topsep=0.25em,parsep=0pt}
 \captionsetup{font=footnotesize,labelfont={bf,color=AcademicBlue},textfont={color=AcademicInk},justification=justified,singlelinecheck=false,skip=4pt}
 \titleformat{\section}{\fontsize{12.2}{14}\selectfont\bfseries\sffamily\color{AcademicBlue}}{\thesection}{0.62em}{}

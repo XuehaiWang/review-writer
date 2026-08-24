@@ -95,12 +95,14 @@ class NativeWorkflowHandlers:
             "library.search": self.library_search,
             "library.download": self.library_download,
             "discovery.search": self.discovery_search,
+            "matrix.enrich": self.matrix_enrich,
             "sections.generate": self.sections_generate,
             "figures.redraw": self.figures_redraw,
             "draft.evaluate": self.draft_evaluate,
             "draft.optimize": self.draft_optimize,
             "draft.rewrite": self.draft_rewrite,
             "draft.accept-rewrite": self.draft_accept_rewrite,
+            "final.build": self.final_front_matter,
             "final.conclusion": self.final_conclusion,
             "final.overview": self.final_overview,
             "final.export": self.final_export,
@@ -1154,6 +1156,7 @@ class NativeWorkflowHandlers:
                 or []
             ),
         }
+
         source_paragraph_evaluation = {
             "evaluation_scope": "single_paragraph",
             "evaluation_mode": "stored_source_score",
@@ -1347,6 +1350,62 @@ class NativeWorkflowHandlers:
             "candidate_evaluation": candidate_evaluation,
         }
 
+    def matrix_enrich(self, context, payload):
+        """Extract per-paper Matrix facts through the scoped text gateway."""
+
+        staging = self._staging(context.user_id, context.job_id)
+        input_path = staging / "matrix-enrichment-input.json"
+        output_path = staging / "matrix-enrichment-output.json"
+        progress_path = staging / "matrix-enrichment-progress.json"
+        checkpoint_path = staging / "matrix-enrichment-checkpoint.json"
+        self._write_json(input_path, payload)
+        resume_checkpoint = payload.get("resume_checkpoint")
+        if isinstance(resume_checkpoint, dict):
+            self._write_json(checkpoint_path, resume_checkpoint)
+        normal, secrets = self._text_gateway_environment(context)
+        self.runner.run(
+            [
+                sys.executable,
+                str(
+                    self.root
+                    / "skills"
+                    / "review-literature-matrix-outline"
+                    / "scripts"
+                    / "enrich_matrix_facts.py"
+                ),
+                "--input",
+                str(input_path),
+                "--output",
+                str(output_path),
+                "--progress",
+                str(progress_path),
+                "--checkpoint",
+                str(checkpoint_path),
+            ],
+            cwd=self.root,
+            staging_directory=staging,
+            expected_outputs=("matrix-enrichment-output.json",),
+            env=normal,
+            secret_env=secrets,
+            cancel_requested=context.cancellation_requested,
+            progress_callback=self._section_progress_callback(
+                context, progress_path, checkpoint_path
+            ),
+            timeout_seconds=max(
+                30 * 60,
+                min(
+                    8 * 60 * 60,
+                    int(payload.get("pending_paper_count") or 1) * 8 * 60,
+                ),
+            ),
+        )
+        result = self._result(staging, "matrix-enrichment-output.json")
+        if checkpoint_path.is_file():
+            result["matrix_enrichment_checkpoint"] = json.loads(
+                checkpoint_path.read_text(encoding="utf-8")
+            )
+        return result
+
     def draft_accept_rewrite(self, context, payload):
         """Evaluate only the accepted candidate paragraph in an isolated workspace."""
 
@@ -1469,6 +1528,39 @@ class NativeWorkflowHandlers:
             "markdown": (first / "conclusion_generated.md").read_text(encoding="utf-8"),
             "report": report,
         }
+
+    def final_front_matter(self, context, payload):
+        """Generate only missing/stale machine-owned abstract and keywords."""
+
+        staging = self._staging(context.user_id, context.job_id)
+        input_path = staging / "final-front-matter-input.json"
+        output_path = staging / "final-front-matter-output.json"
+        self._write_json(input_path, payload)
+        normal, secrets = self._text_gateway_environment(context)
+        self.runner.run(
+            [
+                sys.executable,
+                str(
+                    self.root
+                    / "skills"
+                    / "review-final-audit-release"
+                    / "scripts"
+                    / "generate_front_matter.py"
+                ),
+                "--input",
+                str(input_path),
+                "--output",
+                str(output_path),
+            ],
+            cwd=self.root,
+            staging_directory=staging,
+            expected_outputs=("final-front-matter-output.json",),
+            env=normal,
+            secret_env=secrets,
+            cancel_requested=context.cancellation_requested,
+            timeout_seconds=10 * 60,
+        )
+        return self._result(staging, "final-front-matter-output.json")
 
     def final_overview(self, context, payload):
         staging, workspace, project = self._compatibility_workspace(

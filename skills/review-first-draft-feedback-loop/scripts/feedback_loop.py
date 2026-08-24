@@ -1895,8 +1895,12 @@ def rewrite_repair_prompt(
     *,
     word_range_applicable: bool,
     allowed_unsupported_claims: list[str] | None = None,
+    evidence: dict[str, Any] | None = None,
+    score: dict[str, Any] | None = None,
+    rewrite_mode: str = "section_rewrite",
+    repair_attempt: int = 2,
 ) -> str:
-    """Ask once for a mechanical repair without relaxing protected-fact checks."""
+    """Repair a candidate with the same evidence and strict integrity checks."""
     protected = protected_signature(original)
     hard_protected = {
         key: value for key, value in protected.items() if key in HARD_PROTECTED_FIELDS
@@ -1904,9 +1908,16 @@ def rewrite_repair_prompt(
     soft_protected = {
         key: value for key, value in protected.items() if key in SOFT_PROTECTED_FIELDS
     }
+    candidate_word_count = len(clean_text(rejected_candidate).split())
+    target_floor = min(
+        max_words,
+        min_words + min(30, 10 + max(0, repair_attempt - 2) * 5),
+    )
+    target_ceiling = min(max_words, max(target_floor, target_floor + 20))
     length_instruction = (
-        f"The corrected paragraph must contain {min_words}-{max_words} whitespace-delimited words; "
-        f"aim for {min(max_words, min_words + 25)}-{min(max_words, min_words + 60)} words."
+        f"The corrected paragraph must contain {min_words}-{max_words} whitespace-delimited words. "
+        f"The rejected candidate contains {candidate_word_count} words. Aim for {target_floor}-{target_ceiling} words "
+        "and count before returning; never return a candidate below the configured minimum."
         if word_range_applicable
         else f"Keep the corrected supporting paragraph concise and at or below {max_words} words."
     )
@@ -1926,7 +1937,11 @@ def rewrite_repair_prompt(
         "Do not add facts or use chemical identities from supplied evidence unless they already occur in the original. "
         f"{protection_instruction} "
         f"{length_instruction}\n"
+        f"Generation attempt: {repair_attempt}. Rewrite mode: {rewrite_mode}.\n"
         f"Validation errors to fix: {json.dumps(validation_errors, ensure_ascii=False)}\n"
+        f"Diagnosis: {json.dumps(score or {}, ensure_ascii=False)}\n"
+        "Local evidence (use it only to ground or clarify statements already permitted by the original paragraph): "
+        f"{json.dumps(compact_rewrite_evidence_for_prompt(evidence or {}, minimal=True), ensure_ascii=False)}\n"
         f"Hard-protected signature: {json.dumps(hard_protected, ensure_ascii=False)}\n"
         f"Soft terminology (may be grammatically rephrased, never used to add a claim): "
         f"{json.dumps(soft_protected, ensure_ascii=False)}\n"
@@ -3106,6 +3121,10 @@ def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
                             args.max_case_words,
                             word_range_applicable=word_range_applicable,
                             allowed_unsupported_claims=allowed_unsupported_claims,
+                            evidence=evidence.get(paragraph_id, {}),
+                            score=failure,
+                            rewrite_mode=rewrite_mode,
+                            repair_attempt=rewrite_attempt,
                         )
                     )
                     request_label = (

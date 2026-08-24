@@ -196,26 +196,34 @@ export function SettingsPage() {
           <article><span>{text("累计实际扣除", "Lifetime debits")}</span><strong>{balance.data ? `$${Number(balance.data.lifetime_debited_usd).toFixed(4)}` : "—"}</strong><small>{text("包含管理员人工扣减", "includes administrative debits")}</small></article>
         </div>
         {transactions.error ? <ErrorState error={transactions.error} onRetry={() => transactions.refetch()} /> : null}
-        <div className="balance-ledger">
-          <div className="balance-ledger-head"><strong>{text("最近资金流水", "Recent ledger activity")}</strong><small>{text("只追加审计记录，不会覆盖历史", "Append-only audit history")}</small></div>
-          {transactions.data?.items.length ? transactions.data.items.map((item) => {
-            const balanceDelta = Number(item.balance_delta_usd);
-            const reservedDelta = Number(item.reserved_delta_usd);
-            const displayDelta = balanceDelta !== 0 ? balanceDelta : reservedDelta;
-            return (
-              <article key={item.id}>
-                <div>
-                  <strong>{transactionLabel(item, text)}</strong>
-                  <small>{item.reason || text("系统自动记录", "Recorded automatically")}{item.job_id ? ` · Job ${item.job_id.slice(0, 8)}` : ""}</small>
-                </div>
-                <div className="balance-ledger-amount">
-                  <strong className={displayDelta < 0 ? "negative" : displayDelta > 0 ? "positive" : ""}>{displayDelta > 0 ? "+" : ""}${displayDelta.toFixed(4)}</strong>
-                  <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time>
-                </div>
-              </article>
-            );
-          }) : <div className="empty-state compact-empty">{text("还没有资金流水。管理员添加额度或任务产生费用后会显示在这里。", "No ledger activity yet. Adjustments and task costs will appear here.")}</div>}
-        </div>
+        <details className="balance-ledger">
+          <summary className="balance-ledger-head">
+            <div>
+              <strong>{text("最近资金流水", "Recent ledger activity")}</strong>
+              <small>{transactions.data?.items.length ? text(`${transactions.data.items.length} 条记录，展开后可滚动查看`, `${transactions.data.items.length} records · scroll after expanding`) : text("还没有资金流水", "No ledger activity yet")}</small>
+            </div>
+            <span className="balance-ledger-toggle">{text("查看明细", "View details")}</span>
+          </summary>
+          <div className="balance-ledger-list">
+            {transactions.data?.items.length ? transactions.data.items.map((item) => {
+              const balanceDelta = Number(item.balance_delta_usd);
+              const reservedDelta = Number(item.reserved_delta_usd);
+              const displayDelta = balanceDelta !== 0 ? balanceDelta : reservedDelta;
+              return (
+                <article key={item.id}>
+                  <div>
+                    <strong>{transactionLabel(item, text)}</strong>
+                    <small>{item.reason || text("系统自动记录", "Recorded automatically")}{item.job_id ? ` · Job ${item.job_id.slice(0, 8)}` : ""}</small>
+                  </div>
+                  <div className="balance-ledger-amount">
+                    <strong className={displayDelta < 0 ? "negative" : displayDelta > 0 ? "positive" : ""}>{displayDelta > 0 ? "+" : ""}${displayDelta.toFixed(4)}</strong>
+                    <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time>
+                  </div>
+                </article>
+              );
+            }) : <div className="empty-state compact-empty">{text("管理员添加额度或任务产生费用后会显示在这里。", "Adjustments and task costs will appear here.")}</div>}
+          </div>
+        </details>
       </section>
 
       <section className="surface usage-dashboard">

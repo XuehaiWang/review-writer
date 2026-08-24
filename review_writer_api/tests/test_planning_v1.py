@@ -191,6 +191,112 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertEqual(200, response.status_code, response.text)
         return response.json()
 
+    def test_all_fact_failures_require_explicit_limited_mode(self) -> None:
+        service = self.app.state.planning_service
+        current = service.get(self.first, self.project_id)
+        rows = current["literature_matrix"]["rows"]
+        source_payload = {
+            "source_matrix_artifact_id": current["matrix_artifact_id"],
+            "expected_matrix_revision": current["matrix_revision"],
+            "papers": [
+                {
+                    "paper_id": row["paper_id"],
+                    "source_fingerprint": f"failed-{row['paper_id']}",
+                    "index_summary": {},
+                    "evidence_candidates": [],
+                }
+                for row in rows
+            ],
+        }
+        built = {
+            "papers": [
+                {
+                    "paper_id": row["paper_id"],
+                    "status": "failed",
+                    "facts": [],
+                    "failed_fields": ["all"],
+                    "error": "provider unavailable",
+                }
+                for row in rows
+            ]
+        }
+        service.publish_matrix_enrichment(
+            self.first, self.project_id, source_payload, built
+        )
+
+        with TestClient(self.app) as client:
+            blocked = self.planning(client)
+            self.assertTrue(blocked["matrix_enrichment"]["planning_blocked"])
+            self.choose_outline(client)
+            blocked = self.planning(client)
+            response = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/blueprint",
+                json={"revision": blocked["blueprint_revision"]},
+                headers=self.headers(),
+            )
+            self.assertEqual(409, response.status_code, response.text)
+
+            limited = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/matrix/enrichment/limited-mode",
+                json={"revision": blocked["matrix_revision"]},
+                headers=self.headers(),
+            )
+            self.assertEqual(200, limited.status_code, limited.text)
+            self.choose_outline(client)
+            allowed = self.planning(client)
+            response = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/blueprint",
+                json={"revision": allowed["blueprint_revision"]},
+                headers=self.headers(),
+            )
+            self.assertEqual(200, response.status_code, response.text)
+
+    def test_fact_publish_tolerates_outline_revision_drift(self) -> None:
+        service = self.app.state.planning_service
+        current = service.get(self.first, self.project_id)
+        rows = current["literature_matrix"]["rows"]
+        source_payload = {
+            "source_matrix_artifact_id": current["matrix_artifact_id"],
+            "expected_matrix_revision": current["matrix_revision"],
+            "papers": [
+                {
+                    "paper_id": row["paper_id"],
+                    "source_fingerprint": f"fact-{row['paper_id']}",
+                    "index_summary": {},
+                    "evidence_candidates": [],
+                }
+                for row in rows
+            ],
+        }
+        built = {
+            "papers": [
+                {
+                    "paper_id": row["paper_id"],
+                    "status": "failed",
+                    "facts": [],
+                    "failed_fields": ["all"],
+                    "error": "no source-addressable evidence",
+                }
+                for row in rows
+            ]
+        }
+
+        with TestClient(self.app) as client:
+            self.choose_outline(client, "reaction")
+            selected = self.planning(client)
+
+        self.assertEqual(current["matrix_artifact_id"], selected["matrix_artifact_id"])
+        self.assertGreater(selected["matrix_revision"], current["matrix_revision"])
+        published = service.publish_matrix_enrichment(
+            self.first, self.project_id, source_payload, built
+        )
+        reloaded = service.get(self.first, self.project_id)
+
+        self.assertGreater(published["matrix_revision"], selected["matrix_revision"])
+        self.assertEqual(35, reloaded["matrix_enrichment"]["counts"]["failed"])
+        self.assertEqual(0, reloaded["matrix_enrichment"]["counts"]["pending"])
+        self.assertTrue(reloaded["outline_current"])
+
     @staticmethod
     def isolated_reference_analysis(
         _principal,
@@ -472,6 +578,84 @@ class PlanningV1Tests(unittest.TestCase):
         )
         self.assertEqual(["P004", "P002"], by_title["enynes"]["paper_ids"])
         self.assertEqual(2, len(adjustments))
+
+    def test_generated_boundary_section_is_repaired_again_from_scientific_objects(self) -> None:
+        service = self.app.state.planning_service
+        repaired, adjustments = service._auto_repair_generated_routing_sections(
+            [
+                {"title": "Introduction", "section_role": "introduction", "paper_ids": []},
+                {
+                    "title": "Cross-category evidence and boundary cases",
+                    "section_role": "body",
+                    "paper_ids": ["P001", "P002"],
+                },
+                {"title": "Conclusion", "section_role": "conclusion", "paper_ids": []},
+            ],
+            [{"paper_id": "P001"}, {"paper_id": "P002"}],
+            {
+                "P001": "propargylic benzoates are converted to axially chiral allenes",
+                "P002": "activated enynes are converted to axially chiral allenes",
+            },
+            outline_style="substrate",
+            taxonomy_profile="chemistry_general",
+        )
+
+        by_title = {section["title"]: section for section in repaired}
+        self.assertNotIn("Cross-category evidence and boundary cases", by_title)
+        self.assertEqual(["P001"], by_title["activated propargylic derivatives"]["paper_ids"])
+        self.assertEqual(["P002"], by_title["enynes"]["paper_ids"])
+        self.assertEqual(2, len(adjustments))
+
+    def test_account_language_is_contextual_evidence(self) -> None:
+        contextual = self.app.state.planning_service._contextual_outline_paper_ids(
+            [{"paper_id": "P001"}, {"paper_id": "P002"}],
+            {"P001": {}, "P002": {}},
+            {
+                "P001": "The account concerns palladium-catalyzed cyclization reactions.",
+                "P002": "We report a controlled primary study.",
+            },
+        )
+
+        self.assertEqual(["P001"], contextual)
+
+    def test_generated_body_is_realigned_from_input_object_not_product_title(self) -> None:
+        repaired, adjustments = (
+            self.app.state.planning_service._realign_generated_body_sections(
+                [
+                    {"title": "Introduction", "section_role": "introduction", "paper_ids": []},
+                    {
+                        "title": "allenoates",
+                        "section_role": "body",
+                        "paper_ids": ["P001"],
+                    },
+                    {"title": "Conclusion", "section_role": "conclusion", "paper_ids": []},
+                ],
+                [
+                    {
+                        "paper_id": "P001",
+                        "scientific_facts": [
+                            {
+                                "field_id": "object_input",
+                                "value": "nitroalkanes and activated enynes",
+                            }
+                        ],
+                    }
+                ],
+                {
+                    "P001": (
+                        "nitroalkanes and activated enynes are the input objects. "
+                        "enantioselective synthesis of axially chiral allenes and allenoates"
+                    )
+                },
+                outline_style="substrate",
+                taxonomy_profile="chemistry_general",
+            )
+        )
+
+        by_title = {section["title"]: section for section in repaired}
+        self.assertNotIn("allenoates", by_title)
+        self.assertEqual(["P001"], by_title["enynes"]["paper_ids"])
+        self.assertEqual("scientific_object_reassignment", adjustments[0]["method"])
 
     def test_outline_sources_prefer_confirmed_or_automatic_project_tags(self) -> None:
         service = self.app.state.planning_service
