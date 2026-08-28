@@ -2757,21 +2757,39 @@ def is_chemistry_context(features: dict[str, Any]) -> bool:
     # Explicit non-chemistry profile overrides keyword detection
     if profile == "general_academic":
         return False
-    if profile.startswith("chemistry") or profile == "allene":
+    if profile == "allene":
         return True
-    # Check product keywords for chemistry signals (only when profile is unset)
-    if not profile:
-        products = features.get("product_keywords", [])
-        if products:
-            prod_text = " ".join(str(p) for p in products).lower()
-            chemistry_signals = (
-                "allene", "alkene", "alkyne", "biaryl", "atropisomer", "indole",
-                "cyclopropane", "amide", "imine", "nitrile", "boronic", "diene",
-                "enone", "allenoate", "catalyst", "ligand", "substrate",
-                "enantioselective", "asymmetric", "chiral",
-            )
-            if any(sig in prod_text for sig in chemistry_signals):
-                return True
+
+    # A broad chemistry-capable profile is a ruleset choice, not proof that
+    # this particular topic is chemical.  Require a positive topic/evidence
+    # signal so a generic project cannot inherit molecules from a template.
+    chemistry_text = " ".join(
+        str(value)
+        for value in [
+            features.get("review_title"),
+            features.get("display_title"),
+            *(features.get("product_keywords") or []),
+            *(features.get("substrate_keywords") or []),
+            *(features.get("catalyst_keywords") or []),
+        ]
+        if str(value).strip()
+    ).casefold()
+    chemistry_signals = (
+        "allene", "alkene", "alkyne", "biaryl", "atropisomer", "indole",
+        "cyclopropane", "amide", "imine", "nitrile", "boronic", "diene",
+        "enone", "allenoate", "catalyst", "ligand", "substrate", "reaction",
+        "synthesis", "organometallic", "enantioselective", "asymmetric", "chiral",
+        "photochemical", "electrochemical", "polymerization", "functionalization",
+    )
+    if features.get("has_reaction_focus") or features.get("has_chirality"):
+        return True
+    if any(signal in chemistry_text for signal in chemistry_signals):
+        return True
+    if any(
+        str(category).strip() in _COMMON_FIGURE_ELEMENT_SYMBOLS
+        for category in features.get("metal_categories") or []
+    ):
+        return True
     return False
 
 
@@ -2876,7 +2894,7 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any],
         for old, new in replacements:
             visual_style_desc = visual_style_desc.replace(old, new)
 
-    if composite_mode:
+    if composite_mode and chemistry_project:
         structure_rule = (
             "- Leave the large structure/molecule panel COMPLETELY EMPTY (plain white, "
             "no molecule, no drawing): an exact ball-and-stick model is inserted "
@@ -2886,7 +2904,7 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any],
             "- Every panel, arc, box, and cell in the layout MUST contain the provided "
             "text, EXCEPT the structure panel which must stay blank white."
         )
-    else:
+    elif chemistry_project:
         structure_rule = (
             "- The left-page structure area shows ONLY a single representative "
             "skeleton/motif."
@@ -2894,6 +2912,15 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any],
         blank_rule = (
             "- Every panel, arc, box, and cell in the layout MUST contain the provided "
             "text; absolutely no blank regions."
+        )
+    else:
+        structure_rule = (
+            "- The left-page concept area contains only the current project's "
+            "evidence-backed concept map; do not draw a molecule or reaction."
+        )
+        blank_rule = (
+            "- Every panel, arc, box, and cell in the layout must contain current-project "
+            "content; do not preserve source-template subject matter."
         )
     adaptation = f"""
 REFERENCE IMAGE USAGE (read first):
@@ -2958,8 +2985,18 @@ def _build_skeleton_description(features: dict[str, Any]) -> str:
         features.get("display_title") or build_overview_display_title(features)
     ).strip()
 
-    # Non-chemistry reviews: concept illustration instead of molecule
-    if not is_chemistry_context(features):
+    # A broad chemistry-capable taxonomy is not itself evidence that this
+    # particular review owns a molecular skeleton.  Require one positive
+    # project signal before drawing atoms; otherwise generic academic topics
+    # could receive a fabricated ball-and-stick model labelled "product".
+    has_molecular_subject = bool(
+        is_chemistry_skeleton_project(features)
+        or products
+        or features.get("has_reaction_focus")
+    )
+
+    # Non-chemistry or molecule-unspecified reviews use a concept illustration.
+    if not is_chemistry_context(features) or not has_molecular_subject:
         return f"""LEFT-PAGE CONCEPT AREA (center of left page):
 Draw one clean scientific concept illustration for the current review topic: "{topic or prod_label}".
 Use only concepts and labels supported by the supplied project outline. Do not introduce a molecule,
