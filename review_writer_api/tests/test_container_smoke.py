@@ -22,7 +22,9 @@ class ContainerConfigurationTests(unittest.TestCase):
         source = (ROOT / "compose.yaml").read_text(encoding="utf-8")
 
         for service in ("postgres", "migrate", "model-gateway", "worker", "api"):
-            self.assertRegex(source, rf"(?m)^  {service}:\s*$")
+            # A base worker may carry a YAML anchor so queue-specific workers
+            # can reuse the hardened environment and volume contract.
+            self.assertRegex(source, rf"(?m)^  {service}:(?:\s+&[A-Za-z0-9_-]+)?\s*$")
         self.assertEqual(
             4,
             source.count("image: review-writer-api:${REVIEW_WRITER_IMAGE_TAG:-latest}"),

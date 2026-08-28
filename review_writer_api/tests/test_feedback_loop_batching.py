@@ -51,6 +51,71 @@ def batch_result(ids: list[str], d1: float, d2: float) -> dict[str, object]:
 
 
 class FeedbackLoopBatchingTests(unittest.TestCase):
+    def test_global_dimensions_are_scored_once_and_local_dimensions_are_batched(self) -> None:
+        mixed_rubric = {
+            "dimensions": [
+                {"id": "M01", "weight": 40},
+                {"id": "P01", "weight": 60},
+            ]
+        }
+        paragraphs = [paragraph("p1"), paragraph("p2"), paragraph("p3")]
+        merged = feedback_loop.merge_batched_evaluations(
+            mixed_rubric,
+            [
+                (
+                    paragraphs[:2],
+                    {
+                        "dimension_scores": [
+                            {"id": "P01", "level": 4, "evidence": "local one"}
+                        ],
+                        "paragraph_scores": [
+                            {"paragraph_id": "p1", "score": 90},
+                            {"paragraph_id": "p2", "score": 90},
+                        ],
+                    },
+                ),
+                (
+                    paragraphs[2:],
+                    {
+                        "dimension_scores": [
+                            {"id": "P01", "level": 1, "evidence": "local two"}
+                        ],
+                        "paragraph_scores": [
+                            {"paragraph_id": "p3", "score": 70}
+                        ],
+                    },
+                ),
+            ],
+            global_dimension_scores=[
+                {"id": "M01", "level": 3, "evidence": "whole draft"}
+            ],
+        )
+
+        self.assertEqual(
+            {"M01": 3.0, "P01": 3.0},
+            {item["id"]: item["level"] for item in merged["dimension_scores"]},
+        )
+
+    def test_global_prompt_contains_each_paragraph_once_under_a_bound(self) -> None:
+        paragraphs = [
+            {**paragraph(f"p{index}"), "text": "evidence " * 2_000}
+            for index in range(100)
+        ]
+        global_rubric = {
+            "dimensions": [{"id": "M01", "weight": 100, "scope": "global"}]
+        }
+
+        prompt = feedback_loop.global_evaluation_prompt(
+            global_rubric,
+            paragraphs,
+            {"checks": {}},
+            90,
+        )
+
+        self.assertLess(len(prompt), 80_000)
+        for index in range(100):
+            self.assertEqual(1, prompt.count(f'"paragraph_id": "p{index}"'))
+
     def test_internal_gateway_uses_task_token_without_provider_key(self) -> None:
         class Response:
             def __enter__(self):
@@ -157,6 +222,85 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
         self.assertIn("verifiable source passage", prompt)
         self.assertNotIn("duplicated abstract", prompt)
         self.assertNotIn('"paragraph_id": "p2"', prompt)
+
+    def test_source_check_prefers_exact_claim_bound_chunk_over_lexical_reretrieval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir)
+            section_dir = project / "02_section_drafting"
+            section_dir.mkdir(parents=True)
+            (section_dir / "writing_plan.json").write_text(
+                json.dumps(
+                    {
+                        "sections": [
+                            {
+                                "claims": [
+                                    {
+                                        "claim_id": "S02-p1-C01",
+                                        "paragraph_id": "S02-p1",
+                                        "citation_group": ["P001"],
+                                        "evidence_refs": [
+                                            {"evidence_key": "sha256:exact"}
+                                        ],
+                                    }
+                                ],
+                                "paragraphs": [
+                                    {
+                                        "paragraph_id": "S02-p1",
+                                        "claim_ids": ["S02-p1-C01"],
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (section_dir / "section_evidence.json").write_text(
+                json.dumps(
+                    {
+                        "evidence_registry": [
+                            {
+                                "evidence_key": "sha256:exact",
+                                "paper_id": "P001",
+                                "chunk_id": "C0042",
+                                "page_start": 7,
+                                "content": "The exact supporting passage.",
+                                "claim_eligible": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            contract = feedback_loop.claim_evidence_contract(project)
+            with mock.patch.object(
+                feedback_loop,
+                "retrieve_original_passages",
+            ) as lexical_fallback:
+                result = feedback_loop.source_evidence(
+                    project,
+                    project,
+                    {
+                        "paragraph_id": "S02-p1",
+                        "heading": "Method",
+                        "text": "A claim [1].",
+                    },
+                    {
+                        "claim_realizations": [
+                            {"claim_id": "S02-p1-C01"}
+                        ]
+                    },
+                    {"P001": {"title": "Paper one"}},
+                    {},
+                    contract,
+                )
+
+        lexical_fallback.assert_not_called()
+        self.assertEqual("claim_bound_indexed_evidence", result["evidence_scope"])
+        passage = result["evidence"][0]["original_passages"][0]
+        self.assertEqual("C0042", passage["chunk_id"])
+        self.assertEqual(7, passage["page"])
+        self.assertEqual("The exact supporting passage.", passage["text"])
 
     def test_http_524_is_returned_to_adaptive_split_without_identical_retries(self) -> None:
         timeout = urllib.error.HTTPError(
@@ -538,7 +682,7 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
         self.assertEqual(["sec1-p1"], list(best))
         self.assertTrue(
             any(
-                "candidate_score_not_improved" in row.get("reasons", [])
+                "candidate_score_or_evidence_not_improved" in row.get("reasons", [])
                 for row in excluded
             )
         )
@@ -558,6 +702,71 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
         self.assertIn("Improved first paragraph [1].", payload["candidate_draft_text"])
         self.assertIn("Original second paragraph [2].", payload["candidate_draft_text"])
         self.assertEqual(payload, persisted)
+
+    def test_batch_review_keeps_a_lower_scored_candidate_when_evidence_improves(self) -> None:
+        source = (
+            "# Review\n\n"
+            "Unsupported detailed claim [1].\n\n"
+            "<!-- paragraph_id: sec1-p1 -->\n"
+        )
+        candidate = source.replace(
+            "Unsupported detailed claim [1].",
+            "The available source supports only a limited interpretation [1].",
+        )
+        source_evaluation = {
+            "paragraph_scores": [
+                {
+                    "paragraph_id": "sec1-p1",
+                    "score": 90,
+                    "source_check_status": "unsupported",
+                    "unsupported_claims": ["Unsupported detailed claim"],
+                }
+            ]
+        }
+        candidate_evaluation = {
+            "paragraph_scores": [
+                {
+                    "paragraph_id": "sec1-p1",
+                    "score": 87,
+                    "source_check_status": "partially_supported",
+                    "unsupported_claims": [],
+                    "source_evidence_refs": ["P001:p1:b2"],
+                }
+            ]
+        }
+        preflight = {
+            "paragraph_checks": [
+                {
+                    "paragraph_id": "sec1-p1",
+                    "word_range_applicable": False,
+                    "issues": [],
+                }
+            ]
+        }
+        best: dict[str, dict[str, object]] = {}
+
+        excluded = feedback_loop.update_best_paragraph_candidates(
+            best,
+            source_markdown=source,
+            candidate_markdown=candidate,
+            source_evaluation=source_evaluation,
+            candidate_evaluation=candidate_evaluation,
+            source_preflight=preflight,
+            candidate_preflight=preflight,
+            candidate_evidence={
+                "sec1-p1": {
+                    "paper_ids": ["P001"],
+                    "evidence_scope": "local_full_text",
+                }
+            },
+            min_words=1,
+            max_words=200,
+            iteration=1,
+        )
+
+        self.assertEqual([], excluded)
+        self.assertTrue(best["sec1-p1"]["accuracy_improved"])
+        self.assertEqual(-3.0, best["sec1-p1"]["score_delta"])
 
 
 if __name__ == "__main__":

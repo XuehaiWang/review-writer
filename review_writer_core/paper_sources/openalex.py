@@ -61,14 +61,19 @@ class OpenAlexConnector(HttpPaperSourceConnector):
             source = primary.get("source") or {}
             oa = item.get("open_access") or {}
             best_oa = item.get("best_oa_location") or {}
+            publication_date = str(item.get("publication_date") or "")
+            publication_year = item.get("publication_year")
             candidates.append(
                 {
                     "identifiers": {"doi": doi, "arxiv_id": "", "openalex_id": openalex_id, "semantic_scholar_id": ""},
                     "title": str(item.get("display_name") or item.get("title") or "(untitled)"),
                     "abstract": _abstract_from_inverted_index(item.get("abstract_inverted_index")),
                     "authors": [name for name in authors if name],
-                    "year": item.get("publication_year"),
-                    "publication_date": str(item.get("publication_date") or ""),
+                    "year": publication_year,
+                    "bibliographic_year": publication_year,
+                    "first_publication_date": publication_date or publication_year,
+                    "publication_date": publication_date,
+                    "publication_status": "unknown",
                     "journal": str(source.get("display_name") or ""),
                     "document_type": str(item.get("type") or ""),
                     "citation_count": item.get("cited_by_count"),

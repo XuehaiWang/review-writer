@@ -38,6 +38,12 @@ PLACEHOLDER = re.compile(r"(?:\{\{[^{}]+\}\}|\b(?:TODO|TBD)\b)", re.IGNORECASE)
 CJK = re.compile(r"[\u3400-\u9fff]")
 ABSTRACT_HEADINGS = frozenset({"abstract", "summary", "摘要", "内容摘要"})
 KEYWORD_HEADINGS = frozenset({"keywords", "keyword", "key words", "关键词", "关键字"})
+EMPHASIZED_FRONT_MATTER_LABEL = re.compile(
+    r"(\*\*|__|\*|_)\s*"
+    r"((?:authors?|作者|affiliations?|机构|单位|date|日期|"
+    r"keywords?|key words|关键词|关键字)\s*[:：])\s*\1",
+    re.IGNORECASE,
+)
 TABLE_CAPTION = re.compile(r"^\*{0,2}(?:table|表)\s*\d+\s*[.:：]?\s*.+?\*{0,2}$", re.IGNORECASE)
 FIGURE_LAYOUT_SPANS = frozenset({"auto", "single", "double"})
 WIDE_FIGURE_ROLES = frozenset(
@@ -196,6 +202,19 @@ def _split_values(value: str) -> list[str]:
     ]
 
 
+def _normalize_front_matter_label_markup(value: Any) -> str:
+    """Expose known metadata labels wrapped in Markdown emphasis.
+
+    Final manuscripts conventionally use forms such as ``**Keywords:**``.
+    The emphasis belongs to presentation, not to the field identity, so remove
+    it before front-matter matching while leaving all other prose markup alone.
+    """
+
+    return EMPHASIZED_FRONT_MATTER_LABEL.sub(
+        lambda match: str(match.group(2) or ""), str(value or "")
+    )
+
+
 def _front_matter(blocks: list[dict[str, Any]]) -> dict[str, Any]:
     """Extract explicit journal metadata without inventing authors or claims."""
 
@@ -217,7 +236,7 @@ def _front_matter(blocks: list[dict[str, Any]]) -> dict[str, Any]:
         block = blocks[index]
         if block.get("kind") != "paragraph":
             continue
-        text = str(block.get("text") or "").strip()
+        text = _normalize_front_matter_label_markup(block.get("text")).strip()
         matched = False
         for pattern, target, split in metadata_patterns:
             match = pattern.match(text)
@@ -254,15 +273,25 @@ def _front_matter(blocks: list[dict[str, Any]]) -> dict[str, Any]:
         while cursor < len(blocks) and blocks[cursor].get("kind") != "heading":
             candidate = blocks[cursor]
             if candidate.get("kind") == "paragraph":
-                text = str(candidate.get("text") or "").strip()
-                keyword_match = re.match(
-                    r"^(?:keywords?|key words|关键词|关键字)\s*[:：]\s*(.+)$",
+                text = _normalize_front_matter_label_markup(
+                    candidate.get("text")
+                ).strip()
+                # Final Markdown from an editor can place ``Keywords:`` on
+                # the next source line without a blank Markdown paragraph.
+                # The block parser then joins it to the abstract sentence, so
+                # detect the labelled tail anywhere in this front-matter
+                # paragraph and split the two semantic fields deterministically.
+                keyword_match = re.search(
+                    r"(?:^|\s)(?:keywords?|key words|关键词|关键字)\s*[:：]\s*(.+)$",
                     text,
                     re.IGNORECASE,
                 )
                 if heading in KEYWORD_HEADINGS:
                     keywords.extend(_split_values(text))
                 elif keyword_match:
+                    abstract_prefix = text[: keyword_match.start()].strip()
+                    if abstract_prefix:
+                        abstract_parts.append(abstract_prefix)
                     keywords.extend(_split_values(keyword_match.group(1)))
                 elif text:
                     abstract_parts.append(text)

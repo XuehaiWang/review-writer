@@ -24,17 +24,20 @@ class ProviderKind(StrEnum):
     MINERU = "mineru"
     TEXT = "text"
     IMAGE = "image"
+    EMBEDDING = "embedding"
 
 
 WIRE_APIS: dict[ProviderKind, frozenset[str]] = {
     ProviderKind.MINERU: frozenset({""}),
     ProviderKind.TEXT: frozenset({"chat-completions", "responses"}),
     ProviderKind.IMAGE: frozenset({"images", "chat-completions"}),
+    ProviderKind.EMBEDDING: frozenset({"embeddings"}),
 }
 DEFAULT_PROVIDER_BASE_URLS: dict[ProviderKind, str] = {
     ProviderKind.MINERU: "https://mineru.net",
     ProviderKind.TEXT: DEFAULT_OPENAI_BASE_URL,
     ProviderKind.IMAGE: DEFAULT_OPENAI_BASE_URL,
+    ProviderKind.EMBEDDING: DEFAULT_OPENAI_BASE_URL,
 }
 
 
@@ -50,7 +53,9 @@ def effective_provider_base_url(provider_kind: ProviderKind | str, raw_url: str)
             else ProviderKind(str(provider_kind or "").strip().casefold())
         )
     except ValueError as exc:
-        raise ProviderSettingsError("Provider must be one of: mineru, text, image.") from exc
+        raise ProviderSettingsError(
+            "Provider must be one of: mineru, text, image, embedding."
+        ) from exc
     submitted = str(raw_url or "").strip().rstrip("/")
     default = DEFAULT_PROVIDER_BASE_URLS[kind]
     if kind is ProviderKind.MINERU:
@@ -242,7 +247,9 @@ class ProviderSettingsService:
         try:
             return ProviderKind(str(raw_kind or "").strip().casefold())
         except ValueError as exc:
-            raise ProviderSettingsError("Provider must be one of: mineru, text, image.") from exc
+            raise ProviderSettingsError(
+                "Provider must be one of: mineru, text, image, embedding."
+            ) from exc
 
     @staticmethod
     def _record(row: ProviderCredential) -> ProviderSettingsRecord:

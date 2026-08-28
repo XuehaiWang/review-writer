@@ -88,13 +88,43 @@ def build_drafts_router(
     if optimize_builder is not None:
         def optimize_handler(context, payload):
             principal = Principal(context.user_id, frozenset({Role.USER}))
+            context.report_partial_result(
+                {"feedback_status": {"phase": "diagnosing"}}
+            )
             context.report_progress(1, 5)
             built = optimize_builder(context, payload)
             context.checkpoint()
+            context.report_partial_result(
+                {"feedback_status": {"phase": "repairing_deterministic"}}
+            )
+            context.report_progress(3, 5)
+            context.report_partial_result(
+                {"feedback_status": {"phase": "repairing_evidence"}}
+            )
             context.report_progress(4, 5)
             result = drafts_service.publish_optimization(
                 principal, str(context.project_id), payload, built
             )
+            context.report_partial_result(
+                {"feedback_status": {"phase": "validating"}}
+            )
+            if (
+                bool(payload.get("auto_apply_safe", True))
+                and result.get("proposal_created")
+                and result.get("proposal_id")
+            ):
+                automatic = drafts_service.auto_apply_optimization_proposal(
+                    principal,
+                    str(context.project_id),
+                    str(result["proposal_id"]),
+                    revision=int(result["revision"]),
+                )
+                result = {**result, **automatic}
+                if (
+                    automatic.get("auto_applied") is False
+                    and automatic.get("auto_apply_status") == "manual_review_required"
+                ):
+                    result["repair_status"] = "requires_user_input"
             context.report_progress(5, 5)
             return result
 
@@ -198,6 +228,8 @@ def build_drafts_router(
             min_case_words=payload.min_case_words,
             max_case_words=payload.max_case_words,
         )
+        job_payload["auto_apply_safe"] = payload.auto_apply_safe
+        job_payload["repair_references"] = True
         return _job_response(
             job_service.submit(
                 principal,

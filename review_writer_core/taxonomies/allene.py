@@ -59,7 +59,7 @@ rules = [
         ('ketones', 'substrate', ['ketone', 'dialkyl ketone', 'aryl alkyl ketone']),
 
         # 3. Central metals, catalysts, and enabling methods
-        ('copper catalysis', 'catalyst_or_method', ['Cu', 'copper-catalyzed', 'copper catalysis', 'cu(i)', 'cu(ii)', 'copper complex', 'organocopper', 'organocuprate', 'lithium dialkylcuprate', 'gilman reagent']),
+        ('copper catalysis', 'catalyst_or_method', ['Cu', 'CuI', 'CuBr', 'CuBr2', 'copper-catalyzed', 'copper catalysis', 'cu(i)', 'cu(ii)', 'copper complex', 'organocopper', 'organocuprate', 'lithium dialkylcuprate', 'gilman reagent']),
         ('palladium catalysis', 'catalyst_or_method', ['Pd', 'palladium-catalyzed', 'palladium catalysis', 'pd(0)', 'pd(ii)', 'palladium complex']),
         ('gold catalysis', 'catalyst_or_method', ['Au', 'gold-catalyzed', 'gold catalysis', 'au(i)', 'au(iii)', 'gold complex']),
         ('platinum catalysis', 'catalyst_or_method', ['Pt', 'platinum-catalyzed', 'platinum catalysis', 'pt(ii)', 'platinum complex']),
@@ -70,8 +70,9 @@ rules = [
         ('cobalt catalysis', 'catalyst_or_method', ['Co', 'cobalt-catalyzed', 'cobalt catalysis', 'cobalt complex']),
         ('ruthenium catalysis', 'catalyst_or_method', ['Ru', 'ruthenium-catalyzed', 'ruthenium catalysis', 'ruthenium complex']),
         ('silver catalysis', 'catalyst_or_method', ['Ag', 'Ag-catalyzed', 'silver(i)-mediated', 'agno3-mediated', 'agbf4', 'agotf']),
-        ('zinc catlysis', 'catalyst_or_method', ['Zn', 'Zn-catalyzed', 'zni2-mediated', 'zinc iodide']),
-        ('cadmium catalysis', 'catalyst_or_method', ['Cd', 'cdi2-mediated', 'cadmium iodide']),
+        ('zinc catalysis or mediation', 'catalyst_or_method', ['Zn', 'ZnBr2', 'ZnI2', 'Zn-catalyzed', 'zni2-mediated', 'zinc iodide']),
+        ('cadmium catalysis', 'catalyst_or_method', ['Cd', 'CdI2', 'cdi2-mediated', 'cadmium iodide']),
+        ('titanium mediation', 'catalyst_or_method', ['Ti', 'titanium-promoted', 'titanium-mediated', 'ti(oet)4', 'titanium tetraethoxide']),
         ('zirconium catalysis', 'catalyst_or_method', ['Zr', 'cp2zr(h)cl', 'schwartz reagent', 'zirconium hydride']),
         ('main-group metal mediation', 'catalyst_or_method', ['organolithium', 'organoaluminum', 'grignard reagent', 'main-group metal']),
         ('phase-transfer catalysis', 'catalyst_or_method', ['phase-transfer catalyst', 'phase-transfer catalysis', 'quaternary ammonium salt', 'chiral ammonium salt']),
@@ -114,6 +115,9 @@ rules = [
         ('carbamate leaving groups', 'leaving_group', ['carbamate leaving group', 'propargylic carbamate']),
 
         # 7. Reaction types
+        ('formaldehyde-based terminal-alkyne homologation', 'reaction_type', ['crabbé homologation', 'homologation of acetylenes', 'formaldehyde-mediated allene synthesis', 'paraformaldehyde', 'terminal allenes from terminal alkynes', 'terminal allene from terminal alkyne']),
+        ('aldehyde-based three-component ATA', 'reaction_type', ['terminal alkynes and aldehydes', '1-alkynes, aldehydes', 'aldehyde-derived iminium', 'aldehyde-alkyne-amine coupling', 'one-pot chiral amine ata', 'aryl-substituted allenes from terminal alkynes, aromatic aldehydes']),
+        ('ketone-based three-component ATA', 'reaction_type', ['terminal alkynes and ketones', 'terminal alkyne and ketone', 'ketoniminium', 'ketones in a one-pot process', 'trisubstituted allenes from ketones']),
         ('allenation of terminal alkyne', 'reaction_type', ['allenylation of terminal alkynes', 'ata reaction', 'crabbé homologation', 'homologation of acetylenes', 'terminal allene from terminal alkyne', 'formaldehyde-mediated allene synthesis', 'terminal alkyne aldehyde amine allene synthesis', 'terminal alkyne ketone amine allene synthesis', 'one-pot chiral amine ata', 'bimetallic ata reaction', 'zn/cu-mediated terminal alkyne allenylation', 'tbs-directed alpha-allenol synthesis', 'protected propynol allenylation']),
         ('propargylamine formation and allene rearrangement', 'reaction_type', ['a3 coupling', 'aldehyde-alkyne-amine coupling', 'propargylamine formation', 'propargylamine to allene', 'propargylamine-to-allene transformation', 'hydride-transfer allene synthesis']),
         ('propargylic substitution and cross-coupling', 'reaction_type', ['gamma-selective coupling of propargylic electrophiles', 'γ-selective coupling of propargylic electrophiles', 'organocuprate 1,3-substitution', 'copper-mediated 1,3-substitution', 'propargylic 1,3-substitution', "sn2' substitution", 'sn2-prime substitution', 'propargylic substitution to allene', 'propargylic coupling with arylboronic acid', 'propargylic coupling with triorganoindium', 'propargylic carbonate organozinc coupling', 'dynamic kinetic asymmetric transformation of propargylic electrophiles']),
@@ -143,3 +147,14 @@ rules = [
         ('ligand-development study', 'document_scope', ['ligand development', 'phosphametallocene synthesis and application']),
 
 ]
+
+verification_profile = {
+    "chemical_suffixes": ["allene"],
+    "soft_stereo_terms": ["axial chirality"],
+    "cross_language_terms": [
+        ["chirality transfer", ["手性转移", "轴手性向中心手性转移"]],
+        ["axial-to-central", ["轴手性向中心手性转移", "轴手性", "中心手性"]],
+        ["allenol", ["联烯醇"]],
+        ["allene", ["联烯"]],
+    ],
+}

@@ -15,6 +15,67 @@ from typing import Any, Iterable
 
 
 SECTION_ROLES = {"introduction", "body", "conclusion", "references"}
+INTERNAL_TOPIC_PARTITION_BOUNDARY = "Topic-partition boundary cases"
+INTERNAL_CROSS_CATEGORY_BOUNDARY = "Cross-category evidence and boundary cases"
+INTERNAL_ROUTING_REQUIRED = "Routing required — reassign these papers"
+PUBLIC_CROSS_CATEGORY_TITLE = "Cross-category comparison"
+
+
+def publication_section_title(topic_partition: Any = "", category: Any = "") -> str:
+    """Return a reader-facing title without leaking workflow placeholders."""
+
+    partition = re.sub(r"\s+", " ", str(topic_partition or "")).strip()
+    group = re.sub(r"\s+", " ", str(category or "")).strip()
+    if partition.casefold() == INTERNAL_TOPIC_PARTITION_BOUNDARY.casefold():
+        partition = ""
+    if group.casefold() in {
+        INTERNAL_CROSS_CATEGORY_BOUNDARY.casefold(),
+        INTERNAL_ROUTING_REQUIRED.casefold(),
+    }:
+        group = ""
+    if partition and group and partition.casefold() == group.casefold():
+        return group
+    if partition and group:
+        return f"{partition} — {group}"
+    return partition or group or PUBLIC_CROSS_CATEGORY_TITLE
+
+
+def sanitize_internal_section_title(
+    title: Any,
+    *,
+    topic_partition: Any = "",
+) -> str:
+    """Translate an old generated boundary heading into publication language.
+
+    The diagnostic partition and rationale remain in structured workflow data;
+    only the heading shown to readers is changed.
+    """
+
+    original = re.sub(r"\s+", " ", str(title or "")).strip()
+    lowered = original.casefold()
+    internal_terms = {
+        INTERNAL_TOPIC_PARTITION_BOUNDARY.casefold(),
+        INTERNAL_CROSS_CATEGORY_BOUNDARY.casefold(),
+        INTERNAL_ROUTING_REQUIRED.casefold(),
+    }
+    if not any(term in lowered for term in internal_terms):
+        return original
+
+    partition = re.sub(r"\s+", " ", str(topic_partition or "")).strip()
+    category = original
+    if " — " in original:
+        left, right = original.split(" — ", 1)
+        if (
+            left.casefold() != INTERNAL_TOPIC_PARTITION_BOUNDARY.casefold()
+            and right.casefold() == INTERNAL_CROSS_CATEGORY_BOUNDARY.casefold()
+        ):
+            partition = left
+        elif not partition:
+            partition = left
+        category = right
+    elif original.casefold() == INTERNAL_TOPIC_PARTITION_BOUNDARY.casefold():
+        category = ""
+    return publication_section_title(partition, category)
 
 
 def _normalized_heading(title: Any) -> str:

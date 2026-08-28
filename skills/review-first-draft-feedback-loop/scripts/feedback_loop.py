@@ -41,6 +41,13 @@ from review_writer_core.paragraph_markers import (  # noqa: E402
 )
 from review_writer_core.text_safety import make_xml_compatible  # noqa: E402
 from review_writer_core.publication_voice import publication_voice_issues  # noqa: E402
+from review_writer_core.writing_contracts import (  # noqa: E402
+    CASE_PARAGRAPH_MAX_WORDS,
+    CASE_PARAGRAPH_MIN_WORDS,
+)
+from review_writer_core.taxonomy_verification import (  # noqa: E402
+    load_taxonomy_verification_profile,
+)
 
 
 PARAGRAPH_MARKER_RE = re.compile(r"<!--\s*paragraph_id:\s*([A-Za-z0-9_.:-]+)\s*-->")
@@ -240,6 +247,12 @@ STEREO_RE = re.compile(
     r"\b(?:ee|er|dr|de|R|S|E|Z)\b",
     re.I,
 )
+EVIDENCE_BOUNDARY_RE = re.compile(
+    r"\b(?:does not establish|cannot (?:establish|support|demonstrate)|"
+    r"insufficient evidence|evidence (?:is|remains) (?:insufficient|limited)|"
+    r"cannot be concluded from (?:the )?(?:available|selected) evidence)\b",
+    re.I,
+)
 # Protect only explicit manuscript/chemical labels.  The former expression
 # allowed `int` to consume the prefix of ordinary words such as
 # "interpretation", "intermolecular", and "into", rejecting harmless prose
@@ -252,54 +265,10 @@ REQUIRED_LABEL_RE = re.compile(
     r")"
 )
 CHEMICAL_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9+*/().\-′']*")
-CHEMICAL_SUFFIXES = (
-    "acid",
-    "alcohol",
-    "aldehyde",
-    "allene",
-    "alkyne",
-    "amine",
-    "boronate",
-    "bromide",
-    "carbonate",
-    "carbene",
-    "chloride",
-    "ester",
-    "ether",
-    "halide",
-    "hydride",
-    "ketone",
-    "ligand",
-    "oxide",
-    "phosphine",
-    "reagent",
-    "sulfide",
-)
-CHEMICAL_ELEMENTS_AND_METALS = {
-    "boron",
-    "chromium",
-    "cobalt",
-    "copper",
-    "fluorine",
-    "indium",
-    "iron",
-    "manganese",
-    "nickel",
-    "palladium",
-    "phosphorus",
-    "sulfur",
-    "titanium",
-    "zinc",
-}
-EXPLICIT_CHEMICAL_SYMBOLS = {
-    "Ag", "Al", "Au", "Co", "Cr", "Cu", "Fe", "Li", "Mg", "Mn",
-    "Ni", "Pd", "Pt", "Sc", "Ti", "Zn",
-}
-SOFT_STEREO_RE = re.compile(
-    r"\b(?:racemic|enantioselective|enantiospecific|diastereoselective|"
-    r"stereoselective|stereospecific|axial chirality)\b",
-    re.I,
-)
+CHEMICAL_SUFFIXES: tuple[str, ...] = ()
+CHEMICAL_ELEMENTS_AND_METALS: set[str] = set()
+EXPLICIT_CHEMICAL_SYMBOLS: set[str] = set()
+SOFT_STEREO_RE = re.compile(r"(?!x)x")
 HARD_PROTECTED_FIELDS = {
     "callouts",
     "numbers",
@@ -321,35 +290,47 @@ SOURCE_STOPWORDS = {
 }
 MAX_SOURCE_PASSAGES_PER_PAPER = 4
 MAX_SOURCE_PASSAGE_CHARS = 700
-CROSS_LANGUAGE_CHEMISTRY_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("gold", ("Au", "金催化", "金盐")),
-    ("silver", ("Ag", "银催化", "银盐")),
-    ("palladium", ("Pd", "钯催化", "零价钯", "二价钯")),
-    ("pd(0)", ("Pd(0)", "零价钯")),
-    ("pd(ii)", ("Pd(II)", "二价钯")),
-    ("nickel", ("Ni", "镍催化", "镍盐")),
-    ("copper", ("Cu", "铜催化", "铜盐")),
-    ("water", ("水参与", "水合", "水")),
-    ("dihydrofuran", ("二氢呋喃",)),
-    ("epoxide", ("环氧", "环氧化合物")),
-    ("allylic bromide", ("烯丙基溴", "烯丙基溴化物")),
-    ("aminative", ("胺化", "氨基化")),
-    ("amination", ("胺化", "氨基化")),
-    ("three-component", ("三组分",)),
-    ("three component", ("三组分",)),
-    ("beta-hydrogen", ("β-H", "β-氢", "β-H消除")),
-    ("β-hydrogen", ("β-H", "β-氢", "β-H消除")),
-    ("elimination", ("消除反应", "消除")),
-    ("dimerization", ("二聚反应", "二聚")),
-    ("cyclization", ("环化反应", "环化")),
-    ("carbonylation", ("羰基化",)),
-    ("rearrangement", ("重排反应", "重排")),
-    ("radical", ("自由基反应", "自由基")),
-    ("chirality transfer", ("手性转移", "轴手性向中心手性转移")),
-    ("axial-to-central", ("轴手性向中心手性转移", "轴手性", "中心手性")),
-    ("allenol", ("联烯醇",)),
-    ("allene", ("联烯",)),
-)
+CROSS_LANGUAGE_CHEMISTRY_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+
+def apply_verification_profile(profile: dict[str, Any]) -> None:
+    """Install the active project's domain guards for this worker process."""
+
+    global CHEMICAL_SUFFIXES
+    global CHEMICAL_ELEMENTS_AND_METALS
+    global EXPLICIT_CHEMICAL_SYMBOLS
+    global SOFT_STEREO_RE
+    global CROSS_LANGUAGE_CHEMISTRY_TERMS
+
+    CHEMICAL_SUFFIXES = tuple(
+        str(value).casefold() for value in profile.get("chemical_suffixes") or []
+    )
+    CHEMICAL_ELEMENTS_AND_METALS = {
+        str(value).casefold() for value in profile.get("named_entities") or []
+    }
+    EXPLICIT_CHEMICAL_SYMBOLS = {
+        str(value) for value in profile.get("explicit_symbols") or []
+    }
+    stereo = [
+        re.escape(str(value))
+        for value in profile.get("soft_stereo_terms") or []
+        if str(value).strip()
+    ]
+    SOFT_STEREO_RE = (
+        re.compile(r"\b(?:" + "|".join(stereo) + r")\b", re.I)
+        if stereo
+        else re.compile(r"(?!x)x")
+    )
+    CROSS_LANGUAGE_CHEMISTRY_TERMS = tuple(
+        (
+            str(item[0]).casefold(),
+            tuple(str(value) for value in item[1]),
+        )
+        for item in profile.get("cross_language_terms") or []
+        if isinstance(item, (list, tuple))
+        and len(item) == 2
+        and isinstance(item[1], (list, tuple))
+    )
 
 
 def utc_now() -> str:
@@ -488,6 +469,123 @@ def paragraph_metadata(project: Path) -> dict[str, dict[str, Any]]:
             if isinstance(paragraph, dict) and paragraph.get("paragraph_id"):
                 result[str(paragraph["paragraph_id"])] = paragraph
     return result
+
+
+def claim_evidence_contract(project: Path) -> dict[str, Any]:
+    """Load the exact Claim-to-chunk contract for draft evaluation."""
+
+    writing = read_json(project / "02_section_drafting" / "writing_plan.json", {})
+    package = read_json(project / "02_section_drafting" / "section_evidence.json", {})
+    claims: dict[str, dict[str, Any]] = {}
+    paragraph_claim_ids: dict[str, list[str]] = {}
+    for section in writing.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for claim in section.get("claims") or []:
+            if not isinstance(claim, dict) or not claim.get("claim_id"):
+                continue
+            claim_id = str(claim["claim_id"])
+            claims[claim_id] = claim
+            paragraph_id = str(claim.get("paragraph_id") or "")
+            if paragraph_id:
+                paragraph_claim_ids.setdefault(paragraph_id, []).append(claim_id)
+        for paragraph in section.get("paragraphs") or []:
+            if not isinstance(paragraph, dict) or not paragraph.get("paragraph_id"):
+                continue
+            paragraph_id = str(paragraph["paragraph_id"])
+            declared = [
+                str(value)
+                for value in paragraph.get("claim_ids") or []
+                if str(value) in claims
+            ]
+            if declared:
+                paragraph_claim_ids[paragraph_id] = declared
+
+    evidence_by_key: dict[str, dict[str, Any]] = {}
+    for row in package.get("evidence_registry") or []:
+        if isinstance(row, dict) and row.get("evidence_key"):
+            evidence_by_key[str(row["evidence_key"])] = row
+    # A section-local direct hit is stronger than a global registry entry that
+    # first encountered the same chunk only as neighboring context.
+    for section in package.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for row in section.get("hits") or []:
+            if not isinstance(row, dict) or not row.get("evidence_key"):
+                continue
+            key = str(row["evidence_key"])
+            current = evidence_by_key.get(key)
+            if current is None or (
+                bool(row.get("claim_eligible"))
+                and not bool(current.get("claim_eligible"))
+            ):
+                evidence_by_key[key] = row
+    return {
+        "claims": claims,
+        "paragraph_claim_ids": paragraph_claim_ids,
+        "evidence_by_key": evidence_by_key,
+    }
+
+
+def claim_bound_evidence(
+    paragraph_id: str,
+    structured: dict[str, Any],
+    contract: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    """Resolve exact indexed chunks for a generated paragraph's Claims."""
+
+    claim_ids = [
+        str(item.get("claim_id") or "")
+        for item in structured.get("claim_realizations") or []
+        if isinstance(item, dict) and str(item.get("claim_id") or "")
+    ]
+    if not claim_ids:
+        claim_ids = list(
+            (contract.get("paragraph_claim_ids") or {}).get(paragraph_id) or []
+        )
+    claims = contract.get("claims") or {}
+    evidence_by_key = contract.get("evidence_by_key") or {}
+    by_paper: dict[str, list[dict[str, Any]]] = {}
+    seen: set[tuple[str, str]] = set()
+    for claim_id in claim_ids:
+        claim = claims.get(claim_id)
+        if not isinstance(claim, dict):
+            continue
+        allowed_papers = {
+            str(value) for value in claim.get("citation_group") or [] if str(value)
+        }
+        for ref in claim.get("evidence_refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            evidence_key = str(ref.get("evidence_key") or "")
+            row = evidence_by_key.get(evidence_key)
+            if (
+                not isinstance(row, dict)
+                or not bool(row.get("claim_eligible"))
+                or not clean_text(row.get("content") or row.get("evidence"))
+            ):
+                continue
+            paper_id = str(row.get("paper_id") or "")
+            if not paper_id or (allowed_papers and paper_id not in allowed_papers):
+                continue
+            identity = (paper_id, evidence_key)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            by_paper.setdefault(paper_id, []).append(
+                {
+                    "ref": evidence_key,
+                    "evidence_key": evidence_key,
+                    "chunk_id": str(row.get("chunk_id") or ""),
+                    "page": row.get("page_start"),
+                    "page_end": row.get("page_end"),
+                    "claim_id": claim_id,
+                    "text": clean_text(row.get("content") or row.get("evidence"))[
+                        :MAX_SOURCE_PASSAGE_CHARS
+                    ],
+                }
+            )
+    return by_paper
 
 
 def citation_entries(project: Path) -> list[dict[str, Any]]:
@@ -807,7 +905,41 @@ def source_evidence(
     structured: dict[str, Any],
     rows: dict[str, dict[str, Any]],
     source_cache: dict[str, dict[str, Any]] | None = None,
+    academic_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    exact = claim_bound_evidence(
+        str(paragraph.get("paragraph_id") or ""),
+        structured,
+        academic_contract or {},
+    )
+    if exact:
+        paper_ids = list(exact)
+        return {
+            "paragraph_id": paragraph["paragraph_id"],
+            "heading": paragraph.get("heading", ""),
+            "paper_ids": paper_ids,
+            "local_source_available": True,
+            "original_source_ready": True,
+            "evidence_scope": "claim_bound_indexed_evidence",
+            "evidence": [
+                {
+                    "paper_id": paper_id,
+                    "title": str((rows.get(paper_id) or {}).get("title") or ""),
+                    "abstract": "",
+                    "main_content": "",
+                    "local_source_available": True,
+                    "original_text_available": True,
+                    "source_kind": "section_evidence_package",
+                    "source_path": "02_section_drafting/section_evidence.json",
+                    "source_text_chars": sum(
+                        len(str(item.get("text") or ""))
+                        for item in exact[paper_id]
+                    ),
+                    "original_passages": exact[paper_id],
+                }
+                for paper_id in paper_ids
+            ],
+        }
     paper_ids = [
         str(value)
         for value in (structured.get("cited_paper_ids") or [structured.get("paper_id")])
@@ -923,6 +1055,8 @@ def deterministic_preflight(
     findings: list[dict[str, Any]] = []
     paragraph_checks: list[dict[str, Any]] = []
     source_cache: dict[str, dict[str, Any]] = {}
+    academic_contract = claim_evidence_contract(project)
+    section_boundary_sentences: dict[str, set[str]] = {}
     for paragraph in paragraphs:
         paragraph_id = str(paragraph["paragraph_id"])
         text = clean_text(paragraph["text"])
@@ -936,6 +1070,7 @@ def deterministic_preflight(
             structured_paragraph,
             rows,
             source_cache,
+            academic_contract,
         )
         issues: list[str] = []
         if word_range_applicable and (words < min_words or words > max_words):
@@ -971,6 +1106,49 @@ def deterministic_preflight(
                     "severity": "major",
                     "diagnosis": "An identical sentence is repeated inside the paragraph.",
                     "route": "section_rewrite",
+                }
+            )
+        section_id = paragraph_id.rsplit("-p", 1)[0]
+        seen_boundary = section_boundary_sentences.setdefault(section_id, set())
+        repeated_boundary = False
+        for sentence, sentence_key in zip(sentences, normalized, strict=True):
+            if not sentence_key or not EVIDENCE_BOUNDARY_RE.search(sentence):
+                continue
+            if sentence_key in seen_boundary:
+                repeated_boundary = True
+            seen_boundary.add(sentence_key)
+        if repeated_boundary:
+            issues.append("P09")
+            findings.append(
+                {
+                    "paragraph_id": paragraph_id,
+                    "rule": "P09",
+                    "severity": "major",
+                    "diagnosis": (
+                        "This section repeats the same evidence-boundary disclaimer; "
+                        "retain at most one concise boundary statement."
+                    ),
+                    "route": "section_rewrite",
+                }
+            )
+        voice_issues = publication_voice_issues(text)
+        if voice_issues:
+            issues.append("M05")
+            findings.append(
+                {
+                    "paragraph_id": paragraph_id,
+                    "rule": "M05",
+                    "severity": "minor",
+                    "diagnosis": (
+                        "Internal workflow language remains in publication prose: "
+                        + ", ".join(
+                            dict.fromkeys(
+                                str(item.get("phrase") or "")
+                                for item in voice_issues
+                            )
+                        )[:300]
+                    ),
+                    "route": "final_polish",
                 }
             )
         if evidence["paper_ids"] and not evidence["local_source_available"]:
@@ -1236,6 +1414,79 @@ def rubric_dimensions(rubric: dict[str, Any]) -> list[dict[str, Any]]:
     return dimensions
 
 
+def rubric_dimension_scope(definition: dict[str, Any]) -> str:
+    """Return the evaluation scope for one rubric dimension."""
+
+    explicit = clean_text(definition.get("scope")).lower()
+    if explicit in {"global", "paragraph"}:
+        return explicit
+    dimension_id = str(definition.get("id") or "").upper()
+    if dimension_id.startswith(("M", "S")) or dimension_id in {"G01", "G10", "G12"}:
+        return "global"
+    return "paragraph"
+
+
+def scoped_rubric(rubric: dict[str, Any], scope: str) -> dict[str, Any]:
+    return {
+        **rubric,
+        "dimensions": [
+            item
+            for item in rubric_dimensions(rubric)
+            if rubric_dimension_scope(item) == scope
+        ],
+    }
+
+
+def global_evaluation_prompt(
+    rubric: dict[str, Any],
+    paragraphs: list[dict[str, Any]],
+    preflight: dict[str, Any],
+    goal: float,
+    *,
+    compact: bool = False,
+    evidence: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    """Build one bounded whole-manuscript evaluation request."""
+
+    total_budget = 24_000 if compact else 48_000
+    per_paragraph = max(
+        180,
+        min(700 if not compact else 360, total_budget // max(1, len(paragraphs))),
+    )
+    evidence = evidence or {}
+    overview = []
+    for item in paragraphs:
+        paragraph_id = str(item.get("paragraph_id") or "")
+        bound = evidence.get(paragraph_id) or {}
+        overview.append(
+            {
+                "paragraph_id": paragraph_id,
+                "heading": clean_text(item.get("heading")),
+                "paper_ids": list(bound.get("paper_ids") or []),
+                "evidence_scope": str(bound.get("evidence_scope") or ""),
+                "text_preview": clean_text(item.get("text"))[:per_paragraph],
+            }
+        )
+    preflight_summary = {
+        "checks": preflight.get("checks") or {},
+        "hard_regressions": preflight.get("hard_regressions") or [],
+    }
+    return (
+        "Act as a whole-manuscript scientific review evaluator. Do not rewrite text. "
+        "Score only the supplied global rubric dimensions at levels 0-4. Judge "
+        "organization, coverage, progression, synthesis, and workflow-state accuracy "
+        "from the complete ordered draft overview. Do not infer paragraph-level fact "
+        "errors from a truncated preview; those are checked separately against exact "
+        "evidence. Treat deterministic preflight findings as binding. Return JSON with "
+        "dimension_scores only. It must include every supplied rubric id exactly once, "
+        "with id, level, and evidence. Keep evidence under 40 words.\n\n"
+        f"Overall goal: {goal}.\n"
+        f"Global rubric: {json.dumps(rubric, ensure_ascii=False)}\n"
+        f"Deterministic preflight summary: {json.dumps(preflight_summary, ensure_ascii=False)}\n"
+        f"Complete ordered draft overview: {json.dumps(overview, ensure_ascii=False)}"
+    )
+
+
 def compact_evidence_for_prompt(raw: dict[str, Any]) -> dict[str, Any]:
     """Keep verifiable passages while omitting duplicated metadata prose."""
 
@@ -1317,23 +1568,6 @@ def compact_rewrite_evidence_for_prompt(
                     "text": excerpt,
                 }
             )
-        voice_issues = publication_voice_issues(text)
-        if voice_issues:
-            issues.append("M05")
-            findings.append(
-                {
-                    "paragraph_id": paragraph_id,
-                    "rule": "M05",
-                    "severity": "minor",
-                    "diagnosis": (
-                        "Internal workflow language remains in publication prose: "
-                        + ", ".join(
-                            dict.fromkeys(str(item.get("phrase") or "") for item in voice_issues)
-                        )[:300]
-                    ),
-                    "route": "final_polish",
-                }
-            )
         compact_paper = {
             "paper_id": paper.get("paper_id"),
             "title": clean_text(paper.get("title"))[:80 if minimal else 160],
@@ -1405,7 +1639,7 @@ def evaluation_prompt(
     ]
     return (
         "Act as a detect-first scientific review evaluator. Do not rewrite text. "
-        f"This is scoring batch {batch_index} of {batch_total}. Score the complete rubric at levels 0-4 "
+        f"This is paragraph scoring batch {batch_index} of {batch_total}. Score the supplied paragraph-level rubric at levels 0-4 "
         "against the supplied batch and score every supplied marked paragraph on a 0-100 scale. "
         "Use the draft structure index to preserve whole-draft order and section context. Batch results will be "
         "combined deterministically, so do not refer to paragraphs that are absent from this batch. "
@@ -1420,7 +1654,7 @@ def evaluation_prompt(
         "The configured case-paragraph word range applies only where deterministic preflight marks "
         "word_range_applicable=true. Supporting, transition, caption-adjacent, introduction, and synthesis prose must not "
         "fail P01 solely because it is shorter than a case paragraph. "
-        "Return JSON with dimension_scores and paragraph_scores. dimension_scores must include every rubric id exactly once "
+        "Return JSON with dimension_scores and paragraph_scores. dimension_scores must include every supplied rubric id exactly once "
         "with id, level, evidence. paragraph_scores must include every paragraph exactly once with paragraph_id, score, "
         "failed_dimensions, severity (none|minor|major|critical), diagnosis, route "
         "(pass|section_rewrite|local_source_recheck|final_polish|human_confirmation), source_check_status, "
@@ -1455,10 +1689,17 @@ def paragraph_batches(
 def merge_batched_evaluations(
     rubric: dict[str, Any],
     batches: list[tuple[list[dict[str, Any]], dict[str, Any]]],
+    *,
+    global_dimension_scores: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Merge independently bounded model calls into one normalization input."""
 
-    expected_dimensions = [str(item["id"]) for item in rubric_dimensions(rubric)]
+    all_dimensions = rubric_dimensions(rubric)
+    expected_dimensions = [
+        str(item["id"])
+        for item in all_dimensions
+        if global_dimension_scores is None or rubric_dimension_scope(item) == "paragraph"
+    ]
     dimension_levels: dict[str, list[tuple[float, int]]] = {
         dimension_id: [] for dimension_id in expected_dimensions
     }
@@ -1516,7 +1757,7 @@ def merge_batched_evaluations(
         seen_paragraphs.update(raw_ids)
         paragraph_scores.extend(item for item in raw_scores if isinstance(item, dict))
 
-    merged_dimensions = []
+    merged_by_id: dict[str, dict[str, Any]] = {}
     for dimension_id in expected_dimensions:
         levels = dimension_levels[dimension_id]
         if not levels:
@@ -1525,13 +1766,42 @@ def merge_batched_evaluations(
             weight for _level, weight in levels
         )
         evidence_text = " | ".join(dimension_evidence[dimension_id][:3])[:900]
-        merged_dimensions.append(
-            {
+        merged_by_id[dimension_id] = {
+            "id": dimension_id,
+            "level": round(weighted_level, 3),
+            "evidence": evidence_text,
+        }
+    if global_dimension_scores is not None:
+        expected_global = {
+            str(item["id"])
+            for item in all_dimensions
+            if rubric_dimension_scope(item) == "global"
+        }
+        supplied_global = [
+            str(item.get("id") or "")
+            for item in global_dimension_scores
+            if isinstance(item, dict)
+        ]
+        if (
+            len(supplied_global) != len(expected_global)
+            or len(set(supplied_global)) != len(supplied_global)
+            or set(supplied_global) != expected_global
+        ):
+            raise RuntimeError(
+                "Whole-draft feedback must score every global rubric dimension exactly once"
+            )
+        for item in global_dimension_scores:
+            dimension_id = str(item.get("id") or "")
+            merged_by_id[dimension_id] = {
                 "id": dimension_id,
-                "level": round(weighted_level, 3),
-                "evidence": evidence_text,
+                "level": max(0.0, min(4.0, float(item.get("level", 0)))),
+                "evidence": clean_text(item.get("evidence")),
             }
-        )
+    merged_dimensions = [
+        merged_by_id[str(item["id"])]
+        for item in all_dimensions
+        if str(item["id"]) in merged_by_id
+    ]
     return {
         "dimension_scores": merged_dimensions,
         "paragraph_scores": paragraph_scores,
@@ -1848,7 +2118,8 @@ def rewrite_prompt(
         "source_recheck_cleanup": (
             "This paragraph is in original-source recheck. Retain claims supported by the supplied passages and remove "
             "or explicitly qualify only the listed unsupported_claims. Absence from a passage is not evidence that a "
-            "claim is false. Do not describe the paragraph as source-verified."
+            "claim is false. Do not describe the paragraph as source-verified. Narrow the scientific statement itself; "
+            "do not add a generic evidence disclaimer or repeat stock phrases such as 'does not establish'."
         ),
         "review_synthesis_cleanup": (
             "This is uncited review-synthesis prose. Remove unsupported specifics or recast them explicitly as a bounded "
@@ -2108,7 +2379,7 @@ def update_best_paragraph_candidates(
     max_words: int,
     iteration: int,
 ) -> list[dict[str, Any]]:
-    """Keep only individually safer, higher-scoring paragraph candidates."""
+    """Keep individually safe candidates that improve score or evidence accuracy."""
 
     source_rows = {
         str(item.get("paragraph_id") or ""): item
@@ -2167,20 +2438,54 @@ def update_best_paragraph_candidates(
         )
         old_score = float(source_score.get("score") or 0)
         new_score = float(candidate_score.get("score") or 0)
-        if errors or new_score <= old_score:
+        source_status = str(source_score.get("source_check_status") or "not_assessed")
+        candidate_status = str(
+            candidate_score.get("source_check_status") or "not_assessed"
+        )
+        evidence_rank = {
+            "not_assessed": 0,
+            "needs_human_review": 1,
+            "unsupported": 1,
+            "partially_supported": 2,
+            "not_applicable": 3,
+            "verified": 4,
+        }
+        source_unsupported = {
+            clean_text(value)
+            for value in source_score.get("unsupported_claims") or []
+            if clean_text(value)
+        }
+        candidate_unsupported = {
+            clean_text(value)
+            for value in candidate_score.get("unsupported_claims") or []
+            if clean_text(value)
+        }
+        accuracy_improved = bool(
+            evidence_rank.get(candidate_status, 0)
+            > evidence_rank.get(source_status, 0)
+            or candidate_unsupported < source_unsupported
+        )
+        if errors or (new_score <= old_score and not accuracy_improved):
             excluded.append(
                 {
                     "paragraph_id": paragraph_id,
                     "source_paragraph_score": round(old_score, 2),
                     "candidate_paragraph_score": round(new_score, 2),
-                    "reasons": errors or ["candidate_score_not_improved"],
+                    "reasons": errors or ["candidate_score_or_evidence_not_improved"],
                     "iteration": iteration,
                 }
             )
             continue
         previous = best_candidates.get(paragraph_id)
-        if previous and float(previous.get("candidate_paragraph_score") or 0) >= new_score:
-            continue
+        if previous:
+            previous_accuracy = bool(previous.get("accuracy_improved"))
+            if previous_accuracy and not accuracy_improved:
+                continue
+            if (
+                previous_accuracy == accuracy_improved
+                and float(previous.get("candidate_paragraph_score") or 0) >= new_score
+            ):
+                continue
         local_preflight = _paragraph_preflight(candidate_preflight, paragraph_id)
         best_candidates[paragraph_id] = {
             "paragraph_id": paragraph_id,
@@ -2192,6 +2497,11 @@ def update_best_paragraph_candidates(
             "overall_score_delta": round(
                 (new_score - old_score) / paragraph_count, 4
             ),
+            "accuracy_improved": accuracy_improved,
+            "source_check_status_before": source_status,
+            "source_check_status_after": candidate_status,
+            "unsupported_claims_before": sorted(source_unsupported),
+            "unsupported_claims_after": sorted(candidate_unsupported),
             "iteration": iteration,
             "validation_warnings": warnings,
             "candidate_evaluation": {
@@ -2504,6 +2814,7 @@ def evaluate_current_draft(
     structured = paragraph_metadata(project)
     rows = matrix_rows(project)
     source_cache: dict[str, dict[str, Any]] = {}
+    academic_contract = claim_evidence_contract(project)
     update_status(project, phase="source_checking")
     evidence = {
         str(paragraph["paragraph_id"]): source_evidence(
@@ -2513,6 +2824,7 @@ def evaluate_current_draft(
             structured.get(str(paragraph["paragraph_id"]), {}),
             rows,
             source_cache,
+            academic_contract,
         )
         for paragraph in paragraphs
     }
@@ -2531,6 +2843,32 @@ def evaluate_current_draft(
         for item in paragraphs
     ]
     raw_batches: list[tuple[list[dict[str, Any]], dict[str, Any]]] = []
+    global_rubric = scoped_rubric(rubric, "global")
+    paragraph_rubric = scoped_rubric(rubric, "paragraph")
+    try:
+        raw_global = call_json_model(
+            global_evaluation_prompt(
+                global_rubric,
+                paragraphs,
+                preflight,
+                float(args.goal),
+                evidence=evidence,
+            ),
+            label="Whole-draft rubric evaluation",
+        )
+    except (ProviderRequestBodyBudgetExceeded, ProviderDeadlineExceeded):
+        raw_global = call_json_model(
+            global_evaluation_prompt(
+                global_rubric,
+                paragraphs,
+                preflight,
+                float(args.goal),
+                compact=True,
+                evidence=evidence,
+            ),
+            label="Whole-draft rubric evaluation compact retry",
+        )
+    global_dimension_scores = raw_global.get("dimension_scores") or []
     completed = 0
     update_status(
         project,
@@ -2545,7 +2883,7 @@ def evaluate_current_draft(
         try:
             raw_batch = call_json_model(
                 evaluation_prompt(
-                    rubric,
+                    paragraph_rubric,
                     batch,
                     evidence,
                     preflight,
@@ -2585,7 +2923,11 @@ def evaluate_current_draft(
             scoring_batch_completed=len(raw_batches),
             scoring_batch_total=len(batches),
         )
-    raw = merge_batched_evaluations(rubric, raw_batches)
+    raw = merge_batched_evaluations(
+        rubric,
+        raw_batches,
+        global_dimension_scores=global_dimension_scores,
+    )
     evaluation = normalize_evaluation(
         raw,
         rubric,
@@ -2645,21 +2987,28 @@ def automatic_rewrite_mode(
     if float(finding.get("score", 0)) >= paragraph_goal:
         return ""
     route = str(finding.get("route") or "")
-    if route == "section_rewrite":
-        return "section_rewrite"
-    if route != "local_source_recheck" or not (finding.get("unsupported_claims") or []):
-        return ""
     source_status = str(finding.get("source_check_status") or "")
     paper_ids = paragraph_evidence.get("paper_ids") or []
-    if source_status == "not_applicable" and not paper_ids:
+    unsupported_claims = finding.get("unsupported_claims") or []
+    if source_status == "not_applicable" and not paper_ids and unsupported_claims:
         return "review_synthesis_cleanup"
     original_text_available = any(
         bool(item.get("original_text_available"))
         for item in paragraph_evidence.get("evidence") or []
         if isinstance(item, dict)
     )
-    if source_status in {"partially_supported", "needs_human_review"} and original_text_available:
+    if (
+        unsupported_claims
+        and source_status in {
+            "partially_supported",
+            "unsupported",
+            "needs_human_review",
+        }
+        and original_text_available
+    ):
         return "source_recheck_cleanup"
+    if route == "section_rewrite":
+        return "section_rewrite"
     return ""
 
 
@@ -2696,6 +3045,26 @@ def interactive_rewrite_mode(
 def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
     review_root = Path(args.review_root).resolve()
     project = review_root / "review-projects" / args.project_id
+    project_config = read_json(project / "project_config.json", {})
+    blueprint = read_json(
+        project / "01_matrix_outline" / "section_blueprint.json", {}
+    )
+    taxonomy_profile = str(
+        project_config.get("taxonomy_profile")
+        or blueprint.get("taxonomy_profile")
+        or "general_academic"
+    )
+    apply_verification_profile(
+        load_taxonomy_verification_profile(
+            review_root,
+            profile=taxonomy_profile,
+            topic_text=str(
+                blueprint.get("review_topic")
+                or project_config.get("topic")
+                or ""
+            ),
+        )
+    )
     first = project / "04_first_draft"
     draft_path = first / "first_draft.md"
     if not draft_path.is_file():
@@ -3514,8 +3883,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--paragraph-goal", type=float, default=85.0)
     parser.add_argument("--max-iterations", type=int, default=3)
     parser.add_argument("--min-improvement", type=float, default=1.0)
-    parser.add_argument("--min-case-words", type=int, default=140)
-    parser.add_argument("--max-case-words", type=int, default=280)
+    parser.add_argument(
+        "--min-case-words", type=int, default=CASE_PARAGRAPH_MIN_WORDS
+    )
+    parser.add_argument(
+        "--max-case-words", type=int, default=CASE_PARAGRAPH_MAX_WORDS
+    )
     parser.add_argument("--evaluate-only", action="store_true")
     args = parser.parse_args()
     if not 0 <= args.goal <= 100 or not 0 <= args.paragraph_goal <= 100:

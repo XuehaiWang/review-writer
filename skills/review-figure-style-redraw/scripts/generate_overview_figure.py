@@ -72,6 +72,9 @@ from review_writer_core.model_gateway_client import (  # noqa: E402
     call_image_model as call_gateway_image,
     image_gateway_configured,
 )
+from review_writer_core.review_titles import (  # noqa: E402
+    build_publication_review_title,
+)
 from review_writer_core.taxonomy import (  # noqa: E402
     suggest_taxonomy_profile as _suggest_taxonomy_profile,
 )
@@ -329,9 +332,36 @@ _CPK_COLORS = {
     "C": (35, 35, 35), "H": (245, 245, 245), "O": (220, 30, 30),
     "N": (40, 80, 220), "S": (230, 200, 40), "P": (250, 140, 30),
     "Si": (200, 170, 120), "B": (240, 150, 180), "R": (70, 130, 200),
+    # Halogens
+    "F": (80, 220, 80), "Cl": (30, 190, 30), "Br": (160, 50, 30),
+    "I": (130, 0, 150),
+    # Transition metals (CPK-inspired distinct colors for catalysis reviews)
+    "Pd": (0, 105, 133), "Cu": (200, 120, 50), "Fe": (225, 100, 30),
+    "Zn": (125, 125, 130), "Ni": (80, 208, 80), "Co": (240, 144, 160),
+    "Au": (255, 209, 35), "Ag": (192, 192, 192), "Pt": (208, 208, 224),
+    "Ir": (22, 153, 139), "Rh": (10, 122, 135), "Ru": (36, 144, 144),
+    "Mn": (156, 122, 197), "Ti": (191, 194, 199), "Cr": (138, 153, 199),
+    "V": (166, 166, 171), "Mo": (84, 181, 181), "W": (34, 148, 201),
+    "Re": (38, 125, 125), "Os": (38, 102, 150),
+    # Main group metals
+    "Al": (191, 166, 165), "Sn": (102, 128, 128), "Li": (204, 128, 255),
+    "Na": (171, 92, 242), "K": (143, 64, 212), "Mg": (138, 255, 0),
+    "Ca": (61, 255, 0), "Se": (255, 161, 0), "Te": (212, 122, 0),
 }
-_ATOM_RADIUS = {"C": 20, "H": 12, "O": 19, "N": 19, "S": 22, "P": 22,
-                "Si": 22, "B": 19, "R": 24}
+_ATOM_RADIUS = {
+    "C": 20, "H": 12, "O": 19, "N": 19, "S": 22, "P": 22,
+    "Si": 22, "B": 19, "R": 24,
+    # Halogens
+    "F": 14, "Cl": 20, "Br": 22, "I": 24,
+    # Transition metals (slightly larger spheres)
+    "Pd": 26, "Cu": 24, "Fe": 24, "Zn": 24, "Ni": 24, "Co": 24,
+    "Au": 26, "Ag": 26, "Pt": 26, "Ir": 26, "Rh": 26, "Ru": 25,
+    "Mn": 24, "Ti": 26, "Cr": 24, "V": 24, "Mo": 26, "W": 26,
+    "Re": 26, "Os": 26,
+    # Main group metals
+    "Al": 24, "Sn": 26, "Li": 28, "Na": 30, "K": 32, "Mg": 26,
+    "Ca": 28, "Se": 22, "Te": 24,
+}
 
 
 # Generic SMILES -> accurate 3D geometry.  Any review topic can supply its
@@ -342,9 +372,17 @@ _ATOM_RADIUS = {"C": 20, "H": 12, "O": 19, "N": 19, "S": 22, "P": 22,
 # planes (allene chirality).
 
 _VALENCE = {"C": 4, "N": 3, "O": 2, "S": 2, "P": 3, "B": 3, "H": 1,
-            "F": 1, "Cl": 1, "Br": 1, "I": 1, "Si": 4, "R": 0}
-_AROMATIC_EL = {"c": "C", "n": "N", "o": "O", "s": "S"}
-_TWO_LETTER = ("Cl", "Br", "Si")
+            "F": 1, "Cl": 1, "Br": 1, "I": 1, "Si": 4, "R": 0,
+            # Transition metals (common in catalytic chemistry reviews)
+            "Pd": 2, "Cu": 2, "Fe": 2, "Zn": 2, "Ni": 2, "Co": 2,
+            "Au": 1, "Ag": 1, "Pt": 2, "Ir": 3, "Rh": 3, "Ru": 2,
+            "Mn": 2, "Ti": 4, "Al": 3, "Sn": 4, "Se": 2, "Te": 2,
+            "Li": 1, "Na": 1, "K": 1, "Mg": 2, "Ca": 2}
+_AROMATIC_EL = {"c": "C", "n": "N", "o": "O", "s": "S", "p": "P",
+                "se": "Se", "te": "Te"}
+_TWO_LETTER = ("Cl", "Br", "Si", "Fe", "Cu", "Zn", "Ni", "Co", "Au", "Ag",
+               "Pt", "Ir", "Rh", "Ru", "Mn", "Ti", "Al", "Sn", "Se", "Te",
+               "Li", "Na", "Mg", "Ca", "Pd")
 # Ordered most-specific first: the first matching key wins, so narrow motif
 # names must precede their generic parents (e.g. "allenoate" before "allene",
 # "suzuki" before "alkene").  Keep every key unambiguous as a plain substring:
@@ -382,8 +420,104 @@ def _smiles_for_label(label: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# RDKit fast-path: if available, parse SMILES and generate 3D coordinates
+# using the industry-standard cheminformatics toolkit.  Falls back to the
+# lightweight built-in parser below when RDKit is not installed.
+# ---------------------------------------------------------------------------
+
+def _try_rdkit_parse(smiles: str):
+    """Attempt RDKit SMILES parsing; returns (atoms, bonds) or None."""
+    try:
+        from rdkit import Chem  # noqa: F811
+    except ImportError:
+        return None
+    mol = Chem.MolFromSmiles(smiles, sanitize=True)
+    if mol is None:
+        # Retry without strict sanitization for exotic SMILES
+        mol = Chem.MolFromSmiles(smiles, sanitize=False)
+        if mol is None:
+            return None
+    atoms: list[dict[str, Any]] = []
+    bonds: list[tuple[int, int, float]] = []
+    for rd_atom in mol.GetAtoms():
+        el = rd_atom.GetSymbol()
+        aromatic = rd_atom.GetIsAromatic()
+        num_hs = rd_atom.GetTotalNumHs()
+        atoms.append({"el": el, "aromatic": aromatic, "h": num_hs})
+    for rd_bond in mol.GetBonds():
+        a = rd_bond.GetBeginAtomIdx()
+        b = rd_bond.GetEndAtomIdx()
+        bt = rd_bond.GetBondTypeAsDouble()
+        # RDKit uses 1.0/2.0/3.0 for S/D/T and 1.5 for aromatic
+        bonds.append((a, b, bt))
+    return atoms, bonds
+
+
+def _try_rdkit_3d(smiles: str):
+    """Attempt RDKit 3D coordinate generation.
+
+    Returns ``(coords, atoms, bonds)`` with explicit hydrogens, or ``None``
+    on any failure (never raises).
+    """
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+    except ImportError:
+        return None
+    try:
+        mol = Chem.MolFromSmiles(smiles, sanitize=False)
+        if mol is None:
+            return None
+        try:
+            Chem.SanitizeMol(mol)
+        except Exception:
+            pass
+        mol = Chem.AddHs(mol)
+        result = AllChem.EmbedMolecule(mol, randomSeed=42, useRandomCoords=True)
+        if result == -1:
+            return None
+        AllChem.MMFFOptimizeMolecule(mol, maxIters=300)
+        conf = mol.GetConformer()
+        coords = []
+        for i in range(mol.GetNumAtoms()):
+            pos = conf.GetAtomPosition(i)
+            coords.append((pos.x, pos.y, pos.z))
+        # RDKit generates coords for all atoms including H; re-derive the
+        # atom/bond lists from the same mol object so indices align.
+        rd_atoms: list[dict[str, Any]] = []
+        for rd_atom in mol.GetAtoms():
+            rd_atoms.append({"el": rd_atom.GetSymbol(), "aromatic": False, "h": 0})
+        rd_bonds: list[tuple[int, int, float]] = []
+        for rd_bond in mol.GetBonds():
+            rd_bonds.append(
+                (rd_bond.GetBeginAtomIdx(), rd_bond.GetEndAtomIdx(),
+                 rd_bond.GetBondTypeAsDouble())
+            )
+        return coords, rd_atoms, rd_bonds
+    except Exception:
+        return None
+
+
 def parse_smiles(smiles: str):
-    """Parse an organic-subset SMILES into atoms/bonds (aromatic bond = 1.5)."""
+    """Parse a SMILES string into atoms/bonds (aromatic bond = 1.5).
+
+    Attempts RDKit first for maximum chemical accuracy, falls back to the
+    built-in lightweight parser when RDKit is unavailable.
+    """
+    # --- RDKit fast-path (preferred) ---
+    rdkit_result = _try_rdkit_parse(smiles)
+    if rdkit_result is not None:
+        atoms, bonds = rdkit_result
+        if atoms:
+            return atoms, bonds
+
+    # --- Fallback: built-in lightweight parser ---
+    return _parse_smiles_fallback(smiles)
+
+
+def _parse_smiles_fallback(smiles: str):
+    """Built-in organic-subset SMILES parser (aromatic bond = 1.5)."""
     atoms: list[dict[str, Any]] = []
     bonds: list[tuple[int, int, float]] = []
     stack: list[int] = []
@@ -397,8 +531,14 @@ def parse_smiles(smiles: str):
             stack.append(prev); i += 1; continue
         if ch == ")":
             prev = stack.pop(); i += 1; continue
-        if ch in "=#-":
-            pending = {"=": 2.0, "#": 3.0, "-": 1.0}[ch]; i += 1; continue
+        if ch in "=#-/:\\":
+            if ch == ":":
+                pending = 1.5
+            elif ch in "/\\":
+                pending = 1.0  # stereo slashes; treat as single bond
+            else:
+                pending = {"=": 2.0, "#": 3.0, "-": 1.0}[ch]
+            i += 1; continue
         num = None
         if ch == "%":
             num = int(smiles[i + 1:i + 3]); i += 2
@@ -414,15 +554,24 @@ def parse_smiles(smiles: str):
             i += 1
             continue
         aromatic, bracket_h = False, 0
+        charge = 0
         if ch == "[":
-            j = smiles.index("]", i)
+            j = smiles.index("]", i) if "]" in smiles[i:] else i + 1
             tok = smiles[i + 1:j]
-            m = re.match(r"([A-Za-z][a-z]?)", tok)
-            raw = m.group(1) if m else "C"
+            m = re.match(r"(\d*)([A-Za-z][a-z]?)(@{0,2})", tok)
+            raw = m.group(2) if m and m.group(2) else "C"
             aromatic = raw in _AROMATIC_EL
-            el = _AROMATIC_EL.get(raw, raw[0].upper() + raw[1:])
+            el = _AROMATIC_EL.get(raw, raw[0].upper() + raw[1:] if len(raw) > 1 else raw)
             hm = re.search(r"H(\d*)", tok)
             bracket_h = 1 if hm and hm.group(1) == "" else (int(hm.group(1)) if hm else 0)
+            # Parse charge: +, -, ++, --, +2, -2, etc.
+            cm = re.search(r"([+-]+|\+[0-9]+|-[0-9]+)", tok)
+            if cm:
+                c_str = cm.group(1)
+                if c_str == "+": charge = 1
+                elif c_str == "-": charge = -1
+                elif c_str.startswith("+"): charge = int(c_str[1:]) if len(c_str) > 1 else len(c_str.rstrip("+"))
+                elif c_str.startswith("-"): charge = -int(c_str[1:]) if len(c_str) > 1 else -len(c_str.rstrip("-"))
             i = j + 1
         elif ch in _AROMATIC_EL:
             el, aromatic = _AROMATIC_EL[ch], True
@@ -435,7 +584,7 @@ def parse_smiles(smiles: str):
         else:
             i += 1
             continue
-        atoms.append({"el": el, "aromatic": aromatic, "h": bracket_h})
+        atoms.append({"el": el, "aromatic": aromatic, "h": bracket_h, "charge": charge})
         idx = len(atoms) - 1
         if prev >= 0:
             order = pending or 1.0
@@ -975,17 +1124,27 @@ def render_smiles_ball_and_stick(smiles: str, output_path: Path,
         from PIL import Image, ImageDraw
     except ImportError:
         return None
-    try:
-        atoms, bonds = parse_smiles(smiles)
-        if not atoms:
+    # --- Try RDKit 3D fast-path: more accurate geometry for complex molecules ---
+    rdkit_3d_result = _try_rdkit_3d(smiles)
+    if rdkit_3d_result is not None:
+        coords, atoms, bonds = rdkit_3d_result
+        if not any(c is None for c in coords) and atoms:
+            print(f"  Using RDKit 3D coordinates for {smiles!r}")
+        else:
+            rdkit_3d_result = None
+    # --- Fallback to built-in pipeline ---
+    if rdkit_3d_result is None:
+        try:
+            atoms, bonds = parse_smiles(smiles)
+            if not atoms:
+                return None
+            atoms, bonds = _expand_hydrogens(atoms, bonds)
+            coords = build_3d(atoms, bonds)
+            if any(c is None for c in coords):
+                return None
+        except Exception as exc:
+            print(f"  WARNING: skeleton build failed for {smiles!r}: {exc}")
             return None
-        atoms, bonds = _expand_hydrogens(atoms, bonds)
-        coords = build_3d(atoms, bonds)
-        if any(c is None for c in coords):
-            return None
-    except Exception as exc:
-        print(f"  WARNING: skeleton build failed for {smiles!r}: {exc}")
-        return None
     pts = [_rotate(p, math.radians(18), math.radians(28)) for p in coords]
     basis = _cumulated_view_basis(atoms, bonds, coords)
     if basis:
@@ -1028,8 +1187,10 @@ def render_smiles_ball_and_stick(smiles: str, output_path: Path,
             dx, dy = x2 - x1, y2 - y1
             ln = math.hypot(dx, dy) or 1.0
             nx, ny = -dy / ln, dx / ln
+            # .get() guards against unconventional RDKit bond orders
+            # (e.g. 0.0 for dative/coordinate bonds) — draw a single line.
             offsets = {1.0: [0.0], 2.0: [-5.0, 5.0], 3.0: [-7.0, 0.0, 7.0],
-                       1.5: [-4.0, 4.0]}[order]
+                       1.5: [-4.0, 4.0]}.get(order, [0.0])
             if style == "flat":
                 for off in offsets:
                     draw.line([(x1 + nx * off, y1 + ny * off), (x2 + nx * off, y2 + ny * off)],
@@ -1095,7 +1256,8 @@ _COMPOSITE_REGIONS: dict[str, list[tuple[float, float, float, float]]] = {
 def _panel_whiteness(fig: Any, box: tuple[int, int, int, int]) -> float:
     """Fraction of near-white pixels in a region (coarse sampling guard)."""
     x0, y0, x1, y1 = box
-    raw = fig.crop((x0, y0, x1, y1)).resize((120, 48)).tobytes()
+    # Force RGB: the stride-3 pixel walk below would misalign on RGBA/other modes.
+    raw = fig.crop((x0, y0, x1, y1)).convert("RGB").resize((120, 48)).tobytes()
     white = sum(1 for i in range(0, len(raw), 3)
                 if raw[i] > 225 and raw[i + 1] > 225 and raw[i + 2] > 225)
     return white / max(1, len(raw) // 3)
@@ -1223,6 +1385,34 @@ def _looks_like_page_margin(box: tuple[int, int, int, int], width: int, height: 
     return w >= 0.8 * width and h <= 0.15 * height
 
 
+def _looks_like_structure_panel(
+    box: tuple[int, int, int, int], width: int, height: int
+) -> bool:
+    """Reject ordinary whitespace that cannot be the reserved molecule panel.
+
+    The overview provider sometimes leaves a shallow white strip above the
+    footer or beside the final card.  The maximal-rectangle detector used to
+    accept that strip and paste the molecule there, which produced an
+    unframed model floating in the lower-right corner.  A real structure panel
+    is intentionally large in at least one direction and substantial in the
+    other, remains inside the page margins, and does not start in the footer.
+    """
+    x0, y0, x1, y1 = box
+    panel_w = x1 - x0
+    panel_h = y1 - y0
+    if panel_w <= 0 or panel_h <= 0:
+        return False
+    if x0 <= 0.008 * width or y0 <= 0.008 * height:
+        return False
+    if x1 >= 0.992 * width or y1 >= 0.992 * height:
+        return False
+    if y0 >= 0.80 * height:
+        return False
+    wide_panel = panel_w >= 0.30 * width and panel_h >= 0.15 * height
+    tall_panel = panel_w >= 0.15 * width and panel_h >= 0.28 * height
+    return wide_panel or tall_panel
+
+
 def detect_blank_panel(fig: Any, min_area_fraction: float = 0.03,
                        max_area_fraction: float = 0.55,
                        whiteness_threshold: float = 0.85,
@@ -1315,6 +1505,8 @@ def detect_blank_panel(fig: Any, min_area_fraction: float = 0.03,
         if _looks_like_page_margin(box, W, H):
             rejected_margins.append(box)
             continue
+        if not _looks_like_structure_panel(box, W, H):
+            continue
         if _panel_whiteness(fig, box) < whiteness_threshold:
             continue
         return box
@@ -1360,7 +1552,11 @@ def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layou
                 )
                 # Guard: only paste into a mostly-blank panel.  If the layout
                 # drifted and the region contains cards/text/colors, preserve it.
-                if _panel_whiteness(fig, (x0, y0, x1, y1)) >= 0.85:
+                candidate = (x0, y0, x1, y1)
+                if (
+                    _looks_like_structure_panel(candidate, W, H)
+                    and _panel_whiteness(fig, candidate) >= 0.965
+                ):
                     target = (x0, y0, x1, y1)
                     panel_source = "calibrated-fallback"
                     break
@@ -1438,9 +1634,51 @@ def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layou
             bbox = _skeleton_content_bbox(mask)
             if bbox:
                 sk = sk.crop(bbox)
-            sk.thumbnail((x1 - x0 - 40, y1 - y0 - 40))
-            sx = x0 + (x1 - x0 - sk.width) // 2
-            sy = y0 + (y1 - y0 - sk.height) // 2
+
+            # Draw a deterministic inset frame instead of relying on the
+            # image provider to preserve a visible panel border.  The header
+            # and padding make the molecule read as a deliberate scientific
+            # element, never as a loose overlay.
+            from PIL import ImageDraw
+            draw = ImageDraw.Draw(fig)
+            panel_w = x1 - x0
+            panel_h = y1 - y0
+            border_width = max(2, min(W, H) // 420)
+            radius = max(10, min(panel_w, panel_h) // 14)
+            inset = max(border_width + 2, min(panel_w, panel_h) // 35)
+            framed_box = (x0 + inset, y0 + inset, x1 - inset, y1 - inset)
+            draw.rounded_rectangle(
+                framed_box,
+                radius=radius,
+                fill="white",
+                outline=(182, 199, 219),
+                width=border_width,
+            )
+            title = "Representative structure"
+            title_font = _label_font(max(14, min(24, panel_w // 28)))
+            title_box = draw.textbbox((0, 0), title, font=title_font)
+            title_width = title_box[2] - title_box[0]
+            title_height = title_box[3] - title_box[1]
+            title_x = x0 + (panel_w - title_width) // 2
+            title_y = y0 + inset + max(8, panel_h // 40)
+            draw.text(
+                (title_x, title_y),
+                title,
+                fill=(24, 56, 102),
+                font=title_font,
+            )
+            inner_padding = max(14, min(panel_w, panel_h) // 16)
+            content_box = (
+                framed_box[0] + inner_padding,
+                title_y + title_height + inner_padding,
+                framed_box[2] - inner_padding,
+                framed_box[3] - inner_padding,
+            )
+            available_w = max(1, content_box[2] - content_box[0])
+            available_h = max(1, content_box[3] - content_box[1])
+            sk.thumbnail((available_w, available_h))
+            sx = content_box[0] + (available_w - sk.width) // 2
+            sy = content_box[1] + (available_h - sk.height) // 2
             fig.paste(sk, (sx, sy))
         fig.save(figure_path, format="PNG")
     return True, "", panel_source
@@ -1489,26 +1727,169 @@ def _clear_panel_specks(fig: Any, box: tuple[int, int, int, int],
                     px[x0 + cx, y0 + cy] = (255, 255, 255)
 
 
+def _looks_like_smiles(token: str) -> bool:
+    """Cheap structural pre-filter before expensive parse validation.
+
+    Rejects plain English words early: a SMILES token must contain at least
+    one atom letter AND one structural feature (bond symbol, ring digit,
+    branch parenthesis, bracket, or R-group marker).
+    """
+    if not re.search(r"[BCNOPSFIbcnops]|[A-Z][a-z]", token):
+        return False
+    if not re.search(r"[=#()\[\]*0-9%]", token):
+        return False
+    return True
+
+
+def _validate_smiles_strict(token: str) -> bool:
+    """Strict SMILES validation: RDKit sanitization when available.
+
+    Without RDKit, rejects mostly-lowercase letter runs (English words)
+    and requires >= 3 atoms from the fallback parser.
+    """
+    try:
+        from rdkit import Chem
+        from rdkit import RDLogger
+        RDLogger.DisableLog("rdApp.*")
+        return Chem.MolFromSmiles(token, sanitize=True) is not None
+    except ImportError:
+        pass
+    # No RDKit: English words are mostly lowercase; real SMILES carry
+    # uppercase atoms, digits, or bracketed groups.
+    letters = [c for c in token if c.isalpha()]
+    if letters and all(c.islower() for c in letters) \
+            and not re.search(r"[0-9\[\]*/]", token):
+        return False
+    try:
+        atoms, _bonds = _parse_smiles_fallback(token)
+        return bool(atoms) and len(atoms) >= 3
+    except Exception:
+        return False
+
+
+def _extract_smiles_from_text(text: str) -> str:
+    """Scan free text (manuscript/outline) for a representative SMILES string.
+
+    Extracts candidate tokens bounded by non-word characters, applies a
+    structural pre-filter, then strict validation (RDKit when installed).
+    Markdown bold markers (``**``) around a candidate are stripped first.
+
+    Selection is score-based, NOT longest-wins: review manuscripts are full
+    of specific substrate/product SMILES in reaction tables, and the longest
+    one is almost always an example compound rather than the representative
+    core motif.  Scoring therefore prefers generic R-group motifs (``*``),
+    repeated occurrences, and moderate length.
+    """
+    if not text:
+        return ""
+    raw_candidates = re.findall(
+        r"(?<![\w.])"
+        r"([*\[\]A-Za-z0-9@+\-=#:/\\()%.]{3,60})"
+        r"(?![\w])",
+        text,
+    )
+    # Normalize (strip markdown bold markers) and count occurrences
+    cleaned: list[str] = []
+    for cand in raw_candidates:
+        while cand.startswith("**") and cand.endswith("**") and len(cand) > 4:
+            cand = cand[2:-2]
+        if len(cand) >= 3:
+            cleaned.append(cand)
+    counts: dict[str, int] = {}
+    for cand in cleaned:
+        counts[cand] = counts.get(cand, 0) + 1
+
+    best = ""
+    best_score = 0.0
+    for cand, freq in counts.items():
+        if not _looks_like_smiles(cand):
+            continue
+        if not _validate_smiles_strict(cand):
+            continue
+        score = 1.0
+        # Generic R-group motifs represent the core family, not one example
+        if "*" in cand:
+            score += 5.0
+        # Repeated occurrences suggest a recurring core structure
+        score += min(freq, 3)
+        # Short-to-moderate length suggests a motif; very long strings are
+        # usually specific example compounds from tables/schemes.
+        if len(cand) <= 25:
+            score += 1.0
+        elif len(cand) > 45:
+            score -= 3.0
+        if score > best_score:
+            best_score = score
+            best = cand
+    return best
+
+
 def resolve_skeleton_smiles(features: dict[str, Any]) -> str:
     """Resolve the review's core-motif SMILES.
 
-    Resolution order: explicit project override (query_plan
-    "skeleton_smiles"/"smiles") -> product keyword map -> title/outline/draft
-    keyword scan.  Returns "" when no motif can be determined.
+    Resolution priority:
+    1. Explicit ``skeleton_smiles`` / ``smiles`` from query_plan (optional override).
+    2. Theme-driven match: review title + product keywords against
+       ``_LABEL_SMILES``.  The review THEME defines the representative core
+       motif for the overview; this is more reliable than scanning the
+       manuscript, which is full of specific example compounds.
+    3. Scored scan of the final manuscript / draft text (theme-unmatched only).
+    4. Outline text scan and broad keyword blob fallback.
+
+    Returns "" when no motif can be determined.
     """
-    smiles = features.get("skeleton_smiles", "") or ""
-    if not smiles:
-        products = features.get("product_keywords", [])
-        smiles = _smiles_for_label(products[0] if products else "") or ""
-    if not smiles:
-        blob_parts = [features.get("review_title", ""), features.get("_outline_text", "")[:800]]
-        project_dir = features.get("_project_dir")
+    # Priority 1: explicit skeleton_smiles (optional override, not required)
+    smiles = str(features.get("skeleton_smiles", "") or "").strip()
+    if smiles:
+        return smiles
+    smiles = str(features.get("smiles", "") or "").strip()
+    if smiles:
+        return smiles
+
+    # Only chemistry-context projects should attempt molecule extraction
+    if not is_chemistry_context(features):
+        return ""
+
+    # Priority 2: theme-driven motif lookup (title + product keywords).
+    # Example: "axially chiral allenes" -> *C(*)=C=C(*)* regardless of the
+    # specific substrate/product SMILES scattered through the manuscript.
+    products = features.get("product_keywords", [])
+    theme_blob = " ".join(
+        [str(features.get("review_title", "") or "")]
+        + [str(p) for p in products]
+    )
+    smiles = _smiles_for_label(theme_blob) or ""
+    if smiles:
+        return smiles
+
+    # Priority 3: scan manuscript/draft text (theme did not match a motif)
+    project_dir = features.get("_project_dir")
+    if project_dir:
+        # Try final/first draft (most authoritative, generated before overview)
+        for sub in ("04_first_draft", "02_section_drafting"):
+            for name in ("first_draft.md", "section_drafts.md"):
+                draft_path = Path(project_dir) / sub / name
+                if draft_path.exists():
+                    text = draft_path.read_text(encoding="utf-8", errors="ignore")
+                    smiles = _extract_smiles_from_text(text)
+                    if smiles:
+                        return smiles
+
+    # Priority 4: outline text scan and broad keyword blob fallback
+    outline = str(features.get("_outline_text", "") or "")
+    if outline:
+        smiles = _extract_smiles_from_text(outline)
+        if smiles:
+            return smiles
+        blob_parts = [features.get("review_title", ""), outline[:800]]
         if project_dir:
             draft_path = Path(project_dir) / "04_first_draft" / "first_draft.md"
             if draft_path.exists():
                 blob_parts.append(draft_path.read_text(encoding="utf-8", errors="ignore")[:1200])
         smiles = _smiles_for_label(" ".join(blob_parts)) or ""
-    return smiles
+        if smiles:
+            return smiles
+    return ""
 
 
 def render_skeleton_model(features: dict[str, Any], output_path: Path,
@@ -1819,6 +2200,14 @@ def resolve_api_key(cli_value: str, base_url: str) -> str:
     )
 
 
+def build_overview_display_title(features: dict[str, Any]) -> str:
+    """Return the shared concise title used by overview and final outputs."""
+    return build_publication_review_title(
+        features.get("review_title") or "",
+        manuscript_title=features.get("manuscript_title") or "",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Template matching logic
 # ---------------------------------------------------------------------------
@@ -1836,6 +2225,8 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
         "reaction_type": "",
         "group_by": [],
         "review_title": "",
+        "manuscript_title": "",
+        "display_title": "",
         "classification_rule": "",
         "product_keywords": [],
         "substrate_keywords": [],
@@ -1954,6 +2345,7 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
     # Resolve the taxonomy profile for cross-domain prompt adaptation.
     # Without this, non-chemistry reviews inherit allene-centric prompts.
     _resolve_taxonomy_profile(project_dir, features)
+    features["display_title"] = build_overview_display_title(features)
 
     # Store project dir for multi-pass extraction in _build_metal_rows_text
     features["_project_dir"] = project_dir
@@ -2046,6 +2438,11 @@ def _apply_outline_signals(text: str, features: dict[str, Any]) -> None:
     text = str(text or "")
     if not text.strip():
         return
+    manuscript_heading = re.search(r"^#\s+(.+?)\s*$", text, re.MULTILINE)
+    if manuscript_heading and not features.get("manuscript_title"):
+        heading = " ".join(manuscript_heading.group(1).split()).strip()
+        if heading and heading.casefold() not in {"draft", "first draft", "review"}:
+            features["manuscript_title"] = heading
     if not features.get("_outline_text"):
         features["_outline_text"] = text
     low = text.lower()
@@ -2296,9 +2693,11 @@ def _build_approved_terminology(features: dict[str, Any]) -> str:
             kw = kw.strip().lower()
             if kw and kw not in terms:
                 terms.append(kw)
-    review_title = features.get("review_title", "")
-    if review_title and not re.search(r"[\u4e00-\u9fff]", review_title):
-        title_lower = review_title.strip().lower()
+    display_title = str(
+        features.get("display_title") or build_overview_display_title(features)
+    )
+    if display_title and not re.search(r"[\u4e00-\u9fff]", display_title):
+        title_lower = display_title.strip().lower()
         if title_lower and title_lower not in terms:
             terms.append(title_lower)
     generic = [
@@ -2319,14 +2718,61 @@ def _build_approved_terminology(features: dict[str, Any]) -> str:
 def is_chemistry_skeleton_project(features: dict[str, Any]) -> bool:
     """Whether the overview must embed an exact molecular skeleton.
 
-    Signals: the allene (domain-rules) taxonomy profile, or an explicit
-    skeleton SMILES supplied by the discovery query plan.  Generic academic
-    reviews have no molecule and keep the optional-skeleton behavior.
+    Detection strategy (B2: explicit SMILES is the primary signal):
+    1. Explicit ``skeleton_smiles`` in the query plan → mandatory skeleton.
+    2. Profile == "allene" (domain-rules taxonomy) → mandatory skeleton.
+    3. Profile starts with "chemistry" but no explicit SMILES → NOT mandatory
+       (generic chemistry reviews may lack a single core molecule; skeleton
+       is rendered only when a SMILES is available).
+
+    Generic academic reviews (profile "general_academic" or unmatched) never
+    trigger skeleton mode.
     """
+    # Primary signal: explicit skeleton SMILES from query plan
+    if str(features.get("skeleton_smiles") or "").strip():
+        return True
+
     profile = str(features.get("taxonomy_profile") or "").strip().casefold()
+
+    # Allene profile: domain-rules chemistry with mandatory skeleton
     if profile == "allene":
         return True
-    return bool(str(features.get("skeleton_smiles") or "").strip())
+
+    return False
+
+
+def is_chemistry_context(features: dict[str, Any]) -> bool:
+    """Whether the review operates in a chemistry context (broader check).
+
+    This determines whether chemistry-aware rendering features (molecular
+    colors, bond rendering rules, element symbols) should be activated,
+    even if a mandatory skeleton is not required.
+
+    The taxonomy_profile is authoritative: "general_academic" always means
+    non-chemistry, regardless of product keywords.
+    """
+    if is_chemistry_skeleton_project(features):
+        return True
+    profile = str(features.get("taxonomy_profile") or "").strip().casefold()
+    # Explicit non-chemistry profile overrides keyword detection
+    if profile == "general_academic":
+        return False
+    if profile.startswith("chemistry") or profile == "allene":
+        return True
+    # Check product keywords for chemistry signals (only when profile is unset)
+    if not profile:
+        products = features.get("product_keywords", [])
+        if products:
+            prod_text = " ".join(str(p) for p in products).lower()
+            chemistry_signals = (
+                "allene", "alkene", "alkyne", "biaryl", "atropisomer", "indole",
+                "cyclopropane", "amide", "imine", "nitrile", "boronic", "diene",
+                "enone", "allenoate", "catalyst", "ligand", "substrate",
+                "enantioselective", "asymmetric", "chiral",
+            )
+            if any(sig in prod_text for sig in chemistry_signals):
+                return True
+    return False
 
 
 _COMMON_FIGURE_ELEMENT_SYMBOLS = frozenset(
@@ -2347,13 +2793,7 @@ def _approved_figure_symbols(features: dict[str, Any]) -> list[str]:
         if token in _COMMON_FIGURE_ELEMENT_SYMBOLS and token not in approved:
             approved.append(token)
 
-    profile = str(features.get("taxonomy_profile") or "").strip().casefold()
-    chemistry_project = (
-        profile == "allene"
-        or profile.startswith("chemistry")
-        or bool(str(features.get("skeleton_smiles") or "").strip())
-    )
-    if chemistry_project:
+    if is_chemistry_context(features):
         for token in ("ee", "R1", "R2", "R3", "R4"):
             if token not in approved:
                 approved.append(token)
@@ -2368,20 +2808,23 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any],
     is pasted programmatically after generation, so the model must leave that
     panel blank white instead of drawing the molecule itself.
     """
-    profile = str(features.get("taxonomy_profile") or "").strip().casefold()
-    generic_project = bool(profile and profile != "allene")
-    base_prompt = "" if generic_project else _retheme_base_prompt(template.get("prompt", ""), features)
+    # Chemistry projects retheme the template (replace hardcoded categories);
+    # generic academic projects skip retheming since templates may not apply.
+    chemistry_project = is_chemistry_context(features)
+    base_prompt = _retheme_base_prompt(template.get("prompt", ""), features) if chemistry_project else ""
 
     # Build English title: if original is non-English, construct from keywords
     gb = features.get("group_by", [])
-    review_title = features.get("review_title", "Review")
-    if re.search(r"[\u4e00-\u9fff]", review_title):
+    display_title = str(
+        features.get("display_title") or build_overview_display_title(features)
+    )
+    if re.search(r"[\u4e00-\u9fff]", display_title):
         products = features.get("product_keywords", [])
         prod = products[0] if products else "target compounds"
         time_w = features.get("time_window", "recent years")
         english_title = f"Recent Advances in {prod.title()} ({time_w})"
     else:
-        english_title = review_title
+        english_title = display_title
 
     metals = _clean_categories(features.get("metal_categories", []))
     if not metals:
@@ -2404,7 +2847,7 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any],
 
     # Visual style description with dynamic term replacement
     visual_style_desc = _get_visual_style_description(template)
-    if generic_project:
+    if not chemistry_project:
         visual_style_desc = (
             f"Use the abstract panel geometry and reading order of the {template.get('layout_type', 'overview')} "
             "reference, but discard all source-domain objects and wording. Render only the current project's "
@@ -2465,8 +2908,7 @@ VISUAL STYLE REQUIREMENTS (match the reference template exactly):
 
 ADAPTATION INSTRUCTIONS FOR THIS REVIEW:
 
-Banner title (English, for the navy banner): "{english_title}"
-Original topic (for reference): "{review_title}"
+Banner title (English, for the navy banner; render EXACTLY this concise title and no request text): "{english_title}"
 Time window: {time_window}
 Classification rule: "{classification_rule}"
 
@@ -2479,6 +2921,7 @@ Classification rule: "{classification_rule}"
 CRITICAL RULES:
 - ALL text in the figure MUST be in ENGLISH only. No Chinese or other non-English characters.
 - If the review title (banner) is in Chinese or any non-English language, translate it to professional English before rendering.
+- Never print the user's search/query instruction (for example, "Please write a review...") anywhere in the figure.
 - Do NOT draw a reaction equation (no arrow, no substrate-to-product transformation).
 {structure_rule}
 - Keep all text concise. Category labels stay SHORT (symbols or max 2 words). No long names in hexagons.
@@ -2503,15 +2946,20 @@ FORBIDDEN BEHAVIOR (strictly enforced):
 
 
 def _build_skeleton_description(features: dict[str, Any]) -> str:
-    """Determine what 3D ball-and-stick model to draw based on product keywords."""
+    """Determine what to draw in the left-page structure/concept area.
+
+    For chemistry reviews with a resolved SMILES: use composite/skeleton image.
+    For non-chemistry reviews: use a generic concept illustration.
+    """
     products = features.get("product_keywords", [])
     prod_label = products[0] if products else "product"
 
-    # The reference template may originate from a chemistry project. An
-    # unrelated review must never inherit its molecule-specific geometry.
-    profile = str(features.get("taxonomy_profile") or "").strip().casefold()
-    topic = str(features.get("review_title") or "").strip()
-    if not products or (profile and profile != "allene" and not features.get("has_reaction_focus")):
+    topic = str(
+        features.get("display_title") or build_overview_display_title(features)
+    ).strip()
+
+    # Non-chemistry reviews: concept illustration instead of molecule
+    if not is_chemistry_context(features):
         return f"""LEFT-PAGE CONCEPT AREA (center of left page):
 Draw one clean scientific concept illustration for the current review topic: "{topic or prod_label}".
 Use only concepts and labels supported by the supplied project outline. Do not introduce a molecule,
@@ -2523,43 +2971,13 @@ GENERAL RENDERING RULES:
 - Use crisp vector-like edges, readable labels, and the template's established color palette.
 - Do not reuse subject matter from the reference template."""
 
-    # Map product types to ball-and-stick model descriptions (generic, extensible)
-    skeleton_map = {
-        "axially chiral allenes": ("A 3D ball-and-stick model of an allene (C=C=C). Show three carbon spheres in a linear arrangement: two terminal carbons (black spheres) on opposite ends, one central carbon (black sphere) in the middle. The two terminal carbons each have two substituent spheres (colored, e.g. blue for R groups) arranged in PERPENDICULAR planes — one pair horizontal, one pair vertical — demonstrating axial chirality.", "axially chiral allene"),
-        "allenes": ("A 3D ball-and-stick model of an allene (C=C=C). Three black carbon spheres in a line, with two colored substituent spheres on each terminal carbon. The substituent pairs are in perpendicular planes.", "allene"),
-        "trisubstituted allenes": ("A 3D ball-and-stick model of a trisubstituted allene (C=C=C) with one H sphere (white) and two R group spheres on one terminal carbon, and two R spheres on the other.", "trisubstituted allene"),
-        "tetrasubstituted allenes": ("A 3D ball-and-stick model of a tetrasubstituted allene (C=C=C) with four R group spheres on the two terminal carbons, in perpendicular planes.", "tetrasubstituted allene"),
-        "allenoates": ("A 3D ball-and-stick model of an allenoate: C=C=C-C(=O)-O- with red oxygen spheres.", "allenoate"),
-        "allenyl silanes": ("A 3D ball-and-stick model with C=C=C-Si, tan/gold silicon sphere.", "allenyl silane"),
-        "allenyl boranes": ("A 3D ball-and-stick model with C=C=C-B, pink/orange boron sphere.", "allenyl borane"),
-        "biaryl compounds": ("A 3D ball-and-stick model of two connected benzene rings (Ar-Ar) at an angle, showing axial chirality with restricted rotation.", "biaryl"),
-        "atropisomers": ("A 3D ball-and-stick model of two aromatic rings at an angle with restricted rotation.", "atropisomer"),
-        "cyclopropanes": ("A 3D ball-and-stick model of a three-membered carbon ring (triangle of black spheres).", "cyclopropane"),
-        "alkenes": ("A 3D ball-and-stick model of an alkene C=C with four substituent spheres.", "alkene"),
-        "alkynes": ("A 3D ball-and-stick model of an alkyne C≡C with two substituent spheres.", "alkyne"),
-        "alpha-allenic alcohols": ("A 3D ball-and-stick model of an allene with an OH group (red oxygen sphere).", "alpha-allenic alcohol"),
-    }
-
-    # Find matching pattern
-    skeleton = None
+    # Chemistry reviews: determine label from product keywords
     label = prod_label
-    prod_lower = prod_label.lower()
-    for key, (desc, lbl) in skeleton_map.items():
-        if key in prod_lower or prod_lower in key:
-            skeleton = desc
-            label = lbl
-            break
-
-    if not skeleton:
-        skeleton = f"A 3D ball-and-stick model representing '{prod_label}'. Use black spheres for carbon, red for oxygen, blue for nitrogen, white for hydrogen, and colored spheres for R groups."
-        label = prod_label
 
     # Composite mode pastes the exact skeleton for EVERY layout (calibrated
     # regions first, auto-detected blank panel otherwise), so the model must
     # leave the reserved structure panel blank white regardless of whether
-    # the layout carries calibrated coordinates.  Telling uncalibrated
-    # layouts to reproduce the molecule here made the reserved panel
-    # non-blank and sent the blank-panel detector to page-background strips.
+    # the layout carries calibrated coordinates.
     if features.get("_composite_layout"):
         return f"""LEFT-PAGE STRUCTURE AREA (center of left page):
 Draw an EMPTY white rounded panel here — NO molecule, NO atoms, NO bonds.
@@ -2573,32 +2991,28 @@ Reproduce it EXACTLY in the structure area: identical atoms, bond angles, bond o
 colors, and orientation. Do NOT redraw, modify, extend, or substitute its geometry.
 Label below: "{label}"."""
 
+    # No skeleton image available: provide generic 3D ball-and-stick instructions
+    skeleton_desc = f"A 3D ball-and-stick model representing '{label}'. Use standard CPK coloring."
+
     return f"""LEFT-PAGE STRUCTURE AREA (center of left page):
 Draw a SINGLE 3D ball-and-stick molecular model (NOT a reaction equation, NO arrow, NO 2D bond-line):
-  Model: {skeleton}
+  Model: {skeleton_desc}
   Label below: "{label}"
 
 BALL-AND-STICK RENDERING RULES:
-- *** CRITICAL: BOND ANGLES MUST BE CHEMICALLY CORRECT — sp2 ~120°, sp3 ~109°, sp (cumulated C=C=C) ~180°. ABSOLUTELY NO 90° ANGLES ANYWHERE IN THE MODEL. ***
+- Bond angles must be chemically correct: sp3 ~109°, sp2 ~120°, sp ~180°. NO 90° angles.
 - Render as a 3D BALL-AND-STICK model (not 2D bond-line notation)
-- Atoms = colored spheres: Carbon=black, Hydrogen=white, Oxygen=red, Nitrogen=blue, Sulfur=yellow, Phosphorus=orange, Silicon=tan, Boron=pink
+- Atoms = colored spheres (CPK): C=dark gray, H=white, O=red, N=blue, S=yellow, P=orange, metals=distinct colors
 - Bonds = gray cylinders/sticks connecting spheres
-- For allenes (C=C=C): the central carbon is sp (180°), terminal carbons are sp2 (120°). The two substituent pairs are at ~120° from each other on each terminal carbon, and the two planes are perpendicular (90° to each other in ORIENTATION, but bond angles within each plane are 120°).
-- Double bonds = two parallel sticks; cumulated double bonds = consecutive pairs
+- Double bonds = two parallel sticks; triple bonds = three parallel sticks
 - R-group substituents = colored spheres labeled R1, R2, R3, R4
 - Use a clean 3D perspective view (slightly rotated) so the spatial arrangement is clear
 - White or light gray background
-- The model should look like a standard chemistry textbook 3D molecular model
-
-STEREOCHEMISTRY (must be visually prominent):
-- For AXIAL CHIRALITY (allenes): show the two substituent planes clearly PERPENDICULAR (one horizontal, one vertical) — this is the key visual feature
-- The 3D perspective should make the chirality obvious at a glance
 
 QUALITY CHECK:
-- Verify ALL bond angles are ~120° (sp2) or ~180° (sp) — NO 90° angles allowed
+- Verify ALL bond angles are chemically plausible
 - Verify the 3D arrangement clearly shows the molecular geometry
-- Verify no atoms are missing or misplaced
-- Verify the model is recognizable as the intended molecule"""
+- Verify no atoms are missing or misplaced"""
 
 
 def _build_metal_rows_text(features: dict[str, Any]) -> str:

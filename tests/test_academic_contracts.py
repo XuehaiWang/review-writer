@@ -178,7 +178,7 @@ class AcademicContractTests(unittest.TestCase):
                 {"year": "", "journal": "Journal B"},
             ],
         )
-        self.assertEqual("selected_corpus_only", report["coverage_claim"])
+        self.assertEqual("selected_local_corpus_only", report["coverage_claim"])
         self.assertIsNone(report["global_coverage_percentage"])
         self.assertEqual(3, report["selected_paper_count"])
         self.assertEqual({"2022": 1, "2026": 1}, report["year_distribution"])

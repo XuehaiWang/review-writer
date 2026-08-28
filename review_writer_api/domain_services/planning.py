@@ -31,6 +31,7 @@ from review_writer_api.errors import (
     WorkflowValidationError,
 )
 from review_writer_api.security import Permission, Principal
+from review_writer_api.model_catalog import resolve_model_tier
 from review_writer_api.scientific_runner import (
     SENSITIVE_ENVIRONMENT_KEY,
     ScientificRunner,
@@ -39,6 +40,7 @@ from review_writer_api.workflow_models import LibraryPaper, WorkflowJob
 from review_writer_api.workflow_repository import ArtifactRecord, JobRecord, WorkflowRepository
 from review_writer_core.taxonomy import TaxonomyConfigurationError, load_taxonomy_rules
 from review_writer_core.metadata_tags import verified_structured_tags
+from review_writer_core.bibliography_audit import bibliography_candidates
 from review_writer_core.academic_contracts import (
     ACADEMIC_SCHEMA_VERSION,
     classification_basis,
@@ -50,10 +52,21 @@ from review_writer_core.academic_contracts import (
     taxonomy_diagnostics,
     evidence_key as academic_evidence_key,
 )
-from review_writer_core.evidence_queries import build_question_query_plans
+from review_writer_core.evidence_queries import (
+    COMPARISON_FIELD_IDS,
+    build_question_query_plans,
+)
 from review_writer_core.review_structure import (
     assign_primary_paper_sections,
     infer_section_role,
+    publication_section_title,
+    sanitize_internal_section_title,
+)
+from review_writer_core.classification_axes import (
+    CLASSIFICATION_CONTRACT_VERSION,
+    canonical_classification_contract,
+    classification_contract_from_document,
+    normalize_classification_axes_semantics,
 )
 
 
@@ -64,6 +77,10 @@ BLUEPRINT_LOGICAL_NAME = "blueprint/section_blueprint.json"
 DISCOVERY_LOGICAL_NAME = "discovery/review.json"
 ROUTING_REQUIRED_LABEL = "Routing required — reassign these papers"
 CROSS_CATEGORY_BOUNDARY_LABEL = "Cross-category evidence and boundary cases"
+# Bump this whenever retrieval/query or source-validation semantics change.
+# It is part of every per-paper fingerprint, so previously cached facts are
+# re-extracted once under the new scientific contract.
+MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION = 7
 
 
 def _planning_job_payload(job: JobRecord) -> dict[str, Any]:
@@ -114,7 +131,739 @@ OUTLINE_STYLES: dict[str, dict[str, str]] = {
         "tag_key": "reaction_type",
         "introduction": "organize the literature by transformation logic and mechanistic strategy",
     },
+    "topic-guided": {
+        "en": "Topic-guided hybrid",
+        "zh": "按 Topic 要求组织",
+        "axis": "the explicit organization instructions in the user topic",
+        "tag_key": "reaction_type",
+        "introduction": "define the review scope and explain the organization requested in the topic",
+    },
 }
+
+TOPIC_GUIDED_STYLE = "topic-guided"
+TOPIC_AXIS_LABELS: dict[str, dict[str, str]] = {
+    "reaction_type": {"en": "reaction type", "zh": "反应类型"},
+    "stereochemical_regime": {
+        "en": "stereochemical regime",
+        "zh": "立体化学模式",
+    },
+    "catalyst_or_method": {
+        "en": "catalytic or promoting system",
+        "zh": "催化或促进体系",
+    },
+    "substrate": {"en": "substrate class", "zh": "底物类别"},
+    "product": {"en": "product class", "zh": "产物类别"},
+    "organometallic_partner": {
+        "en": "organometallic partner",
+        "zh": "金属有机试剂",
+    },
+    "ligand_or_chiral_source": {
+        "en": "ligand or chiral source",
+        "zh": "配体或手性来源",
+    },
+    "leaving_group": {"en": "leaving-group class", "zh": "离去基团类别"},
+    "document_scope": {"en": "evidence or document type", "zh": "证据或文献类型"},
+}
+TOPIC_AXIS_ALIASES: dict[str, tuple[str, ...]] = {
+    "reaction_type": (
+        "reaction type",
+        "reaction types",
+        "transformation type",
+        "mechanistic strategy",
+        "反应类型",
+        "转化类型",
+    ),
+    "stereochemical_regime": (
+        "stereochemical regime",
+        "stereochemical mode",
+        "racemic versus enantioselective",
+        "racemic and enantioselective",
+        "立体化学模式",
+        "消旋与不对称合成",
+    ),
+    "catalyst_or_method": (
+        "catalytic/promoting system",
+        "catalytic or promoting system",
+        "catalytic system",
+        "promoting system",
+        "catalyst and method",
+        "catalyst",
+        "catalysts",
+        "催化/促进体系",
+        "催化或促进体系",
+        "催化体系",
+        "促进体系",
+    ),
+    "substrate": (
+        "substrate class",
+        "substrate type",
+        "different substrates",
+        "substrate",
+        "substrates",
+        "底物类别",
+        "底物类型",
+        "不同底物",
+    ),
+    "product": (
+        "product class",
+        "product type",
+        "products",
+        "product",
+        "产物类别",
+        "产物类型",
+        "产物",
+    ),
+    "organometallic_partner": (
+        "organometallic partner",
+        "organometallic reagent",
+        "metal-organic reagent",
+        "金属有机试剂",
+        "有机金属试剂",
+    ),
+    "ligand_or_chiral_source": (
+        "ligand or chiral source",
+        "chiral source",
+        "ligands",
+        "ligand",
+        "配体或手性来源",
+        "手性来源",
+        "配体",
+    ),
+    "leaving_group": (
+        "leaving group",
+        "leaving groups",
+        "离去基团",
+    ),
+    "document_scope": (
+        "document type",
+        "document types",
+        "document scope",
+        "evidence type",
+        "文献类型",
+        "文献范围",
+        "证据类型",
+    ),
+}
+TOPIC_PARTITION_BOUNDARY_LABEL = "Topic-partition boundary cases"
+_TOPIC_MATCH_STOPWORDS = {
+    "and",
+    "or",
+    "the",
+    "of",
+    "for",
+    "review",
+    "evidence",
+    "method",
+    "methods",
+    "study",
+    "studies",
+}
+
+
+def _capitalize_outline_heading(value: Any) -> str:
+    """Capitalize a generated heading without title-casing chemical names."""
+
+    heading = str(value or "").strip()
+    match = re.search(r"[A-Za-z]", heading)
+    if not match:
+        return heading
+    index = match.start()
+    return heading[:index] + heading[index].upper() + heading[index + 1 :]
+
+
+def _sanitize_outline_markdown_headings(markdown: Any) -> str:
+    """Sanitize only generated heading text while preserving outline metadata."""
+
+    heading = re.compile(
+        r"(?m)^(\s*#{1,6}\s+)(\d+(?:\.\d+)*[.)]?\s+)?(.+?)\s*$"
+    )
+
+    def replace(match: re.Match[str]) -> str:
+        return (
+            f"{match.group(1)}{match.group(2) or ''}"
+            f"{sanitize_internal_section_title(match.group(3))}"
+        )
+
+    return heading.sub(replace, str(markdown or ""))
+
+
+def _clean_topic_partition(value: Any) -> str:
+    label = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n,;:.-")
+    label = re.sub(r"^(?:the|a|an)\s+", "", label, flags=re.I)
+    return label[:100]
+
+
+def _topic_partitions(topic: str) -> list[str]:
+    text = str(topic or "")
+    match = re.search(
+        r"\b(?:separately\s+discuss|discuss\s+separately|separate\s+discussion\s+of)\s+"
+        r"(.{3,220}?)(?=[.;]|$)",
+        text,
+        re.I,
+    )
+    if match:
+        values = re.split(r"\s+(?:and|versus|vs\.?)\s+|\s*[、；]\s*", match.group(1), flags=re.I)
+    else:
+        chinese = re.search(r"分别(?:讨论|比较|分析)\s*(.{3,160}?)(?=[。；;]|$)", text)
+        values = re.split(r"\s*(?:与|和|及|、)\s*", chinese.group(1)) if chinese else []
+    return list(
+        dict.fromkeys(
+            label
+            for value in values
+            if 2 <= len(label := _clean_topic_partition(value)) <= 100
+        )
+    )[:4]
+
+
+def _matrix_classification_axes(
+    matrix: dict[str, Any],
+    topic_partitions: list[str],
+) -> list[dict[str, Any]]:
+    # Runtime coverage/recommendation fields are derived from the current
+    # Matrix. They must not become extraction inputs or every successful
+    # refresh would change its own source fingerprint and trigger another run.
+    source_contract = classification_contract_from_document(
+        matrix,
+        primary_axis_hint=str(
+            (matrix.get("classification_recommendation") or {}).get(
+                "primary_axis_id"
+            )
+            or ""
+        ),
+        source="matrix_evidence_contract",
+    )
+    axes = [
+        {
+            key: deepcopy(value)
+            for key, value in item.items()
+            if key not in {"evidence_coverage", "role_status"}
+        }
+        for item in source_contract.get("axes") or []
+        if isinstance(item, dict)
+        and str(item.get("axis_id") or "").strip()
+        and isinstance(item.get("partitions"), list)
+    ]
+    if axes:
+        return normalize_classification_axes_semantics(axes)[:4]
+    if not topic_partitions:
+        return []
+    return normalize_classification_axes_semantics([
+        {
+            "axis_id": "topic_independent_partition",
+            "label": "Topic-requested independent discussion",
+            "source_surface": "separately discussed Topic partitions",
+            "source_type": "explicit_topic",
+            "axis_role": "required_independent_discussion",
+            "role_status": "explicit",
+            "mutual_exclusivity": "partially_overlapping",
+            "heading_requirement": "secondary_heading",
+            "partitions": [
+                {
+                    "partition_id": re.sub(
+                        r"[^a-z0-9_]+", "_", label.casefold()
+                    ).strip("_")
+                    or f"partition_{index:02d}",
+                    "label": label,
+                    "aliases": [label],
+                    "positive_discriminators": [label],
+                    "negative_or_ambiguous_signals": [],
+                }
+                for index, label in enumerate(topic_partitions, start=1)
+            ],
+        }
+    ])
+
+
+def _split_topic_examples(value: Any) -> list[str]:
+    values = re.split(
+        r"\s*(?:,(?!\s*\d)|，|、|;|；|/|\band\b|\bor\b|以及|及|和)\s*",
+        str(value or ""),
+        flags=re.I,
+    )
+    cleaned: list[str] = []
+    for raw in values:
+        label = re.sub(r"\b(?:etc|and so on)\.?\b", "", raw, flags=re.I)
+        label = _clean_topic_partition(label)
+        if 1 <= len(label) <= 100 and label not in cleaned:
+            cleaned.append(label)
+    return cleaned[:16]
+
+
+def _topic_axis_examples(topic: str, axes: list[str]) -> dict[str, list[str]]:
+    """Read parenthetical examples attached to any declared organization axis."""
+
+    text = str(topic or "")
+    result: dict[str, list[str]] = {}
+    for axis in axes:
+        aliases = sorted(TOPIC_AXIS_ALIASES.get(axis, ()), key=len, reverse=True)
+        for alias in aliases:
+            match = re.search(
+                rf"(?<![a-z0-9]){re.escape(alias)}\s*[（(]([^()（）]{{1,240}})[）)]",
+                text,
+                re.I,
+            )
+            if not match:
+                continue
+            examples = _split_topic_examples(match.group(1))
+            if examples:
+                result[axis] = examples
+                break
+    return result
+
+
+def _topic_focus_dimensions(topic: str) -> list[str]:
+    """Keep an explicit focus clause as coverage context without naming its science."""
+
+    match = re.search(
+        r"(?:\bfocus(?:ing|ed)?\s+on\b|\bwith\s+emphasis\s+on\b|重点关注|聚焦于?)\s*"
+        r"(.{3,240}?)(?=\b(?:organize|organise|categorize|categorise|separately\s+discuss)\b|[.;。；]|$)",
+        str(topic or ""),
+        re.I,
+    )
+    if not match:
+        return []
+    value = re.sub(r"\s+", " ", match.group(1)).strip(" ,;:.-")
+    return [value] if value else []
+
+
+def _topic_outline_intent(
+    topic: Any,
+    discovery: dict[str, Any] | None,
+    classification_axes: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Extract explicit organization instructions already present in the Topic.
+
+    Discovery's validated query plan is the primary source because it has
+    already resolved user terminology. Deterministic text parsing is only a
+    fallback and does not invent a disciplinary taxonomy.
+    """
+
+    text = str(topic or "").strip()
+    query_plan = (
+        dict((discovery or {}).get("query_plan") or {})
+        if isinstance(discovery, dict)
+        else {}
+    )
+    raw_contract_axes = normalize_classification_axes_semantics([
+        deepcopy(axis)
+        for axis in (
+            classification_axes
+            if classification_axes is not None
+            else query_plan.get("classification_axes") or []
+        )
+        if isinstance(axis, dict)
+        and str(axis.get("axis_id") or "")
+        and str(axis.get("axis_role") or "") != "scope_filter"
+    ])
+    declared_groups = [
+        str(axis)
+        for axis in query_plan.get("group_by") or []
+        if str(axis).strip()
+    ]
+    for index, axis_id in enumerate(declared_groups):
+        if any(
+            str(axis.get("axis_id") or "") == axis_id
+            for axis in raw_contract_axes
+        ):
+            continue
+        raw_contract_axes.append(
+            {
+                "axis_id": axis_id,
+                "label": str(
+                    (TOPIC_AXIS_LABELS.get(axis_id) or {}).get("en")
+                    or axis_id.replace("_", " ").title()
+                ),
+                "source_surface": axis_id,
+                "source_type": "agent_recommended",
+                "axis_role": (
+                    "primary_organization"
+                    if index == 0
+                    else "comparison_dimension"
+                ),
+                "heading_requirement": (
+                    "primary_heading" if index == 0 else "comparison_only"
+                ),
+                "mutual_exclusivity": "partially_overlapping",
+                "partitions": [],
+            }
+        )
+    primary_hint = declared_groups[0] if declared_groups else ""
+    classification_contract = canonical_classification_contract(
+        raw_contract_axes,
+        primary_axis_hint=primary_hint,
+        source=(
+            "matrix_evidence_classification_contract"
+            if classification_axes is not None
+            else "validated_query_plan_and_topic"
+        ),
+    )
+    contract_axes = list(classification_contract["axes"])
+    # A provider can encode two academic instructions in one contract:
+    # "organize by reaction type" plus "separately discuss racemic versus
+    # enantioselective". Fact extraction correctly repairs the latter to a
+    # stereochemical axis, but that repair must not replace the requested
+    # reaction-type hierarchy. Split the dimensions only for outline planning.
+    repaired_primary = next(
+        (
+            axis
+            for axis in contract_axes
+            if str(axis.get("axis_role") or "") == "primary_organization"
+        ),
+        None,
+    )
+    reaction_type_requested = "reaction_type" in {
+        str(axis) for axis in query_plan.get("group_by") or []
+    } or bool(
+        re.search(
+            r"(?:organiz(?:e|ed|ation)|group(?:ed|ing)?|classif(?:y|ied|ication))"
+            r".{0,80}\breaction\s+types?\b|(?:按照|按)\s*反应(?:种类|类型)",
+            " ".join(
+                str((repaired_primary or {}).get(key) or "")
+                for key in ("source_surface", "recommendation_rationale")
+            ),
+            re.I,
+        )
+    )
+    if (
+        repaired_primary is not None
+        and str(repaired_primary.get("axis_id") or "")
+        == "stereochemical_regime"
+        and isinstance(repaired_primary.get("semantic_repair"), dict)
+        and reaction_type_requested
+        and not any(
+            str(axis.get("axis_id") or "") == "reaction_type"
+            for axis in contract_axes
+        )
+    ):
+        stereochemical = deepcopy(repaired_primary)
+        stereochemical["axis_role"] = "required_independent_discussion"
+        stereochemical["heading_requirement"] = "secondary_heading"
+        reaction_axis = {
+            "axis_id": "reaction_type",
+            "label": "Reaction type",
+            "source_surface": str(
+                repaired_primary.get("source_surface") or "reaction type"
+            ),
+            "source_type": str(
+                repaired_primary.get("source_type") or "explicit_topic"
+            ),
+            "axis_role": "primary_organization",
+            "mutual_exclusivity": "partially_overlapping",
+            "heading_requirement": "primary_heading",
+            "recommendation_rationale": (
+                "Preserve the Topic-requested reaction-type hierarchy while "
+                "treating stereochemical regime as an independent discussion axis."
+            ),
+            "partitions": [],
+            "semantic_split": {
+                "status": "auto_split",
+                "source_axis_id": "stereochemical_regime",
+                "reason": (
+                    "Reaction type controls the outline hierarchy; racemic versus "
+                    "enantioselective evidence remains a separate stereochemical axis."
+                ),
+            },
+        }
+        contract_axes = [
+            reaction_axis,
+            stereochemical,
+            *[axis for axis in contract_axes if axis is not repaired_primary],
+        ]
+    primary_contract = next(
+        (
+            axis
+            for axis in contract_axes
+            if str(axis.get("axis_role") or "") == "primary_organization"
+        ),
+        contract_axes[0] if contract_axes else None,
+    )
+    secondary_contracts = [
+        axis
+        for axis in contract_axes
+        if axis is not primary_contract
+        and str(axis.get("axis_role") or "")
+        in {"required_independent_discussion", "comparison_dimension"}
+    ]
+    axes = [
+        str(primary_contract.get("axis_id") or "")
+        if primary_contract is not None
+        else "",
+        *[str(axis.get("axis_id") or "") for axis in secondary_contracts],
+    ]
+    axes = [axis for axis in axes if axis]
+    if not axes:
+        axes = [
+            str(axis)
+            for axis in query_plan.get("group_by") or []
+            if str(axis) in TOPIC_AXIS_LABELS
+        ]
+    if not axes:
+        lowered = text.casefold()
+        positioned: list[tuple[int, str]] = []
+        for axis, aliases in TOPIC_AXIS_ALIASES.items():
+            positions = [lowered.find(alias.casefold()) for alias in aliases]
+            valid = [position for position in positions if position >= 0]
+            if valid:
+                positioned.append((min(valid), axis))
+        axes = [axis for _position, axis in sorted(positioned)]
+    axes = list(dict.fromkeys(axes))[:3]
+    contract_partitions = [
+        _clean_topic_partition(partition.get("label"))
+        for axis in secondary_contracts
+        if str(axis.get("axis_role") or "") == "required_independent_discussion"
+        for partition in axis.get("partitions") or []
+        if isinstance(partition, dict)
+        and _clean_topic_partition(partition.get("label"))
+    ]
+    partitions = list(dict.fromkeys(contract_partitions or _topic_partitions(text)))
+    axis_examples = _topic_axis_examples(text, axes)
+    comparison_dimensions = list(dict.fromkeys([
+        *[
+            _clean_topic_partition(partition.get("label"))
+            for axis in secondary_contracts
+            if str(axis.get("axis_role") or "") == "comparison_dimension"
+            for partition in axis.get("partitions") or []
+            if isinstance(partition, dict)
+            and _clean_topic_partition(partition.get("label"))
+        ],
+        *[
+            value
+            for axis in axes[1:]
+            for value in axis_examples.get(axis, [])
+        ],
+    ]))
+    focus_dimensions = _topic_focus_dimensions(text)
+    available = bool(contract_axes or axes or len(partitions) >= 2)
+    primary_axis = axes[0] if axes else "reaction_type"
+    primary_axis_label = str(
+        (primary_contract or {}).get("label")
+        or (TOPIC_AXIS_LABELS.get(primary_axis) or {}).get("en")
+        or primary_axis.replace("_", " ")
+    )
+    return {
+        "available": available,
+        "source": (
+            "matrix_evidence_classification_contract"
+            if classification_axes is not None and contract_axes
+            else "validated_query_plan_and_topic"
+            if query_plan
+            else "topic_text"
+        ),
+        "primary_axis": primary_axis,
+        "primary_axis_label": primary_axis_label,
+        "secondary_axes": axes[1:],
+        "secondary_axis_labels": {
+            str(axis.get("axis_id") or ""): str(axis.get("label") or "")
+            for axis in secondary_contracts
+        },
+        "classification_axes": contract_axes,
+        "classification_contract": classification_contract,
+        "classification_contract_version": CLASSIFICATION_CONTRACT_VERSION,
+        "system_recommended": bool(
+            primary_contract is not None
+            and str(primary_contract.get("source_type") or "") == "agent_recommended"
+        ),
+        # Only an explicit instruction to discuss categories separately creates
+        # an outline-trace requirement.  Named systems and product outcomes are
+        # comparison/coverage dimensions; requiring each of them to become a
+        # chapter would turn a multi-dimensional Topic into a contradictory
+        # flat taxonomy.
+        "required_partitions": partitions,
+        "partitions": partitions,
+        "axis_examples": axis_examples,
+        "comparison_dimensions": comparison_dimensions,
+        "focus_dimensions": focus_dimensions,
+        # Compatibility fields keep existing saved frontend payloads readable.
+        # Their values now come only from general axis/focus parsing.
+        "named_systems": comparison_dimensions,
+        "requested_outcomes": focus_dimensions,
+        "outcome_dimensions": focus_dimensions,
+        "partition_trace_policy": "source_bounded_model_or_section_contract",
+    }
+
+
+def _basis_with_axis_contract(
+    basis: dict[str, Any],
+    contract: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach the canonical academic axes to the legacy diagnostics basis."""
+
+    updated = deepcopy(basis)
+    axes = [
+        deepcopy(axis)
+        for axis in contract.get("axes") or []
+        if isinstance(axis, dict) and str(axis.get("axis_id") or "")
+    ]
+    primary_axis = str(contract.get("primary_axis_id") or "")
+    if primary_axis:
+        updated["primary_axis"] = primary_axis
+        updated["overview_axis"] = primary_axis
+    secondary = [
+        str(axis.get("axis_id") or "")
+        for axis in axes
+        if str(axis.get("axis_id") or "") != primary_axis
+    ]
+    updated["orthogonal_axes"] = list(
+        dict.fromkeys([*(updated.get("orthogonal_axes") or []), *secondary])
+    )
+    updated["overview_secondary_axes"] = list(
+        dict.fromkeys(
+            [*(updated.get("overview_secondary_axes") or []), *secondary]
+        )
+    )
+    updated["axis_contract_version"] = int(
+        contract.get("contract_version") or CLASSIFICATION_CONTRACT_VERSION
+    )
+    updated["axis_contract_fingerprint"] = str(
+        contract.get("fingerprint") or ""
+    )
+    updated["required_route_axis_ids"] = list(
+        contract.get("required_route_axis_ids") or []
+    )
+    updated["classification_axes"] = axes
+    return updated
+
+
+def _topic_partition_for_text(text: str, partitions: list[str]) -> str:
+    if not partitions:
+        return ""
+    normalized = re.sub(r"[^a-z0-9\u3400-\u9fff]+", " ", text.casefold())
+    token_sets = [
+        {
+            term
+            for term in re.findall(r"[a-z0-9\u3400-\u9fff]{3,}", label.casefold())
+            if term not in _TOPIC_MATCH_STOPWORDS
+        }
+        for label in partitions
+    ]
+    common_terms = (
+        set.intersection(*token_sets)
+        if len(token_sets) > 1 and all(token_sets)
+        else set()
+    )
+    ranked: list[tuple[int, int, str]] = []
+    for index, label in enumerate(partitions):
+        parenthetical = re.findall(r"[（(]([^()（）]{2,40})[）)]", label)
+        base = re.sub(r"\s*[（(][^()（）]{2,40}[）)]\s*", " ", label)
+        aliases = [base, *parenthetical]
+        exact_score = max(
+            (
+                len(alias_normalized.split()) * 20
+                for alias in aliases
+                if (
+                    alias_normalized := re.sub(
+                        r"[^a-z0-9\u3400-\u9fff]+",
+                        " ",
+                        alias.casefold(),
+                    ).strip()
+                )
+                and re.search(
+                    rf"(?:^|\s){re.escape(alias_normalized)}(?:$|\s)",
+                    normalized,
+                )
+            ),
+            default=0,
+        )
+        specific_terms = token_sets[index] - common_terms
+        term_score = sum(
+            10
+            for term in specific_terms
+            if re.search(rf"(?:^|\s){re.escape(term)}(?:$|\s)", normalized)
+        )
+        ranked.append((max(exact_score, term_score), -index, label))
+    best = max(ranked, default=(0, 0, ""))
+    tied = sum(1 for score, _index, _label in ranked if score == best[0]) > 1
+    return best[2] if best[0] > 0 and not tied else ""
+
+
+def _canonical_declared_partition(value: Any, partitions: list[str]) -> str:
+    normalized = _clean_topic_partition(value).casefold()
+    if not normalized:
+        return ""
+    for label in partitions:
+        aliases = [
+            label,
+            re.sub(r"\s*[（(][^()（）]{2,40}[）)]\s*", " ", label).strip(),
+            *re.findall(r"[（(]([^()（）]{2,40})[）)]", label),
+        ]
+        if any(
+            normalized == _clean_topic_partition(alias).casefold()
+            for alias in aliases
+            if _clean_topic_partition(alias)
+        ):
+            return label
+    return ""
+
+
+def _topic_partition_for_row(
+    row: dict[str, Any],
+    partitions: list[str],
+    fallback_text: str,
+) -> str:
+    """Use source-bound model classification before conservative text matching."""
+
+    formal_matches: list[tuple[float, str]] = []
+    formal_tags = row.get("evidence_backed_tags") or {}
+    if isinstance(formal_tags, dict):
+        for values in formal_tags.values():
+            for tag in values or []:
+                if not isinstance(tag, dict):
+                    continue
+                label = _canonical_declared_partition(
+                    tag.get("partition_label"), partitions
+                )
+                try:
+                    confidence = float(tag.get("confidence") or 0)
+                except (TypeError, ValueError):
+                    confidence = 0.0
+                if (
+                    label
+                    and confidence >= 0.75
+                    and bool(tag.get("fact_ids"))
+                    and bool(tag.get("evidence_refs"))
+                ):
+                    formal_matches.append((confidence, label))
+    if formal_matches:
+        formal_matches.sort(reverse=True)
+        best_confidence = formal_matches[0][0]
+        best_labels = list(
+            dict.fromkeys(
+                label
+                for confidence, label in formal_matches
+                if confidence == best_confidence
+            )
+        )
+        return best_labels[0] if len(best_labels) == 1 else ""
+
+    classification = row.get("topic_partition_classification")
+    if isinstance(classification, dict):
+        status = str(classification.get("status") or "").casefold()
+        if status == "classified":
+            label = _canonical_declared_partition(
+                classification.get("partition"), partitions
+            )
+            try:
+                confidence = float(classification.get("confidence") or 0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            if (
+                label
+                and confidence >= 0.75
+                and bool(classification.get("evidence_refs"))
+            ):
+                return label
+            return ""
+        if status in {
+            "boundary",
+            "insufficient_evidence",
+            "cross_category",
+            "out_of_scope",
+        }:
+            # A completed evidence-bound model pass explicitly found no safe
+            # route. Do not overrule it with a keyword appearing in related
+            # work, a caption, or an unsupported negative inference.
+            return ""
+    return _topic_partition_for_text(fallback_text, partitions)
 
 
 def _json_bytes(payload: Any) -> bytes:
@@ -123,6 +872,21 @@ def _json_bytes(payload: Any) -> bytes:
 
 def _paper_ids(rows: list[dict[str, Any]]) -> list[str]:
     return [str(row.get("paper_id")) for row in rows if str(row.get("paper_id") or "").strip()]
+
+
+def _publication_year(value: Any) -> int | None:
+    if isinstance(value, dict):
+        value = value.get("value")
+    match = re.search(r"(?:18|19|20|21)\d{2}", str(value or ""))
+    return int(match.group(0)) if match else None
+
+
+def _matrix_publication_year(row: dict[str, Any]) -> int | None:
+    return (
+        _publication_year(row.get("first_publication_date"))
+        or _publication_year(row.get("bibliographic_year"))
+        or _publication_year(row.get("year"))
+    )
 
 
 def _outline_sections(markdown: str) -> list[dict[str, Any]]:
@@ -140,6 +904,8 @@ def _outline_sections(markdown: str) -> list[dict[str, Any]]:
                 "section_role": infer_section_role(title),
                 "purpose": "",
                 "notes": "",
+                "topic_partition": "",
+                "boundary_rationale": "",
             }
             sections.append(current)
             continue
@@ -175,6 +941,12 @@ def _outline_sections(markdown: str) -> list[dict[str, Any]]:
             continue
         if current is not None and line.casefold().startswith("notes:"):
             current["notes"] = line.split(":", 1)[1].strip()
+            continue
+        if current is not None and line.casefold().startswith("topic partition:"):
+            current["topic_partition"] = line.split(":", 1)[1].strip().rstrip(".。")
+            continue
+        if current is not None and line.casefold().startswith("boundary rationale:"):
+            current["boundary_rationale"] = line.split(":", 1)[1].strip()
     return sections
 
 
@@ -224,11 +996,115 @@ def _outline_markdown_from_sections(
         purpose = str(section.get("purpose") or "").strip()
         if purpose:
             lines.append(f"Purpose: {purpose}")
+        topic_partition = str(section.get("topic_partition") or "").strip()
+        if topic_partition:
+            lines.append(f"Topic partition: {topic_partition}.")
+        boundary_rationale = str(section.get("boundary_rationale") or "").strip()
+        if boundary_rationale:
+            lines.append(f"Boundary rationale: {boundary_rationale}")
         notes = str(section.get("notes") or "").strip()
         if notes:
             lines.append(f"Notes: {notes}")
         lines.append("")
     return "\n".join(lines).strip() + "\n"
+
+
+def _blueprint_restructure_record(
+    previous: dict[str, Any] | None,
+    current_sections: list[dict[str, Any]],
+    *,
+    previous_artifact_id: str = "",
+    trigger_reasons: list[str] | None = None,
+) -> dict[str, Any]:
+    """Describe a structure change without erasing the prior Blueprint.
+
+    Section IDs are positional and can change during regrouping, so the map is
+    based on paper overlap first and normalized headings second.  The record is
+    intentionally stored inside the new version for audit and rollback UX.
+    """
+
+    old_sections = [
+        item
+        for item in (previous or {}).get("sections") or []
+        if isinstance(item, dict)
+    ]
+
+    def paper_ids(section: dict[str, Any]) -> set[str]:
+        return {
+            str(item)
+            for item in (
+                section.get("primary_papers")
+                or section.get("major_papers")
+                or section.get("paper_ids")
+                or []
+            )
+            if str(item).strip()
+        }
+
+    def heading(section: dict[str, Any]) -> str:
+        return re.sub(
+            r"[^a-z0-9\u4e00-\u9fff]+",
+            " ",
+            str(section.get("title") or "").casefold(),
+        ).strip()
+
+    mappings: list[dict[str, Any]] = []
+    used_targets: set[str] = set()
+    for old in old_sections:
+        old_id = str(old.get("section_id") or "")
+        old_papers = paper_ids(old)
+        candidates: list[tuple[float, dict[str, Any]]] = []
+        for new in current_sections:
+            new_papers = paper_ids(new)
+            union = old_papers | new_papers
+            overlap = len(old_papers & new_papers) / len(union) if union else 0.0
+            if heading(old) and heading(old) == heading(new):
+                overlap = max(overlap, 1.0)
+            candidates.append((overlap, new))
+        score, target = max(candidates, key=lambda item: item[0], default=(0.0, {}))
+        target_id = str(target.get("section_id") or "") if score > 0 else ""
+        if target_id:
+            used_targets.add(target_id)
+        mappings.append(
+            {
+                "previous_section_id": old_id,
+                "previous_title": str(old.get("title") or ""),
+                "current_section_id": target_id or None,
+                "current_title": str(target.get("title") or "") if target_id else None,
+                "paper_overlap": round(score, 4),
+                "migration_action": "reuse_and_revalidate" if target_id else "retire",
+            }
+        )
+    for new in current_sections:
+        new_id = str(new.get("section_id") or "")
+        if new_id and new_id not in used_targets:
+            mappings.append(
+                {
+                    "previous_section_id": None,
+                    "previous_title": None,
+                    "current_section_id": new_id,
+                    "current_title": str(new.get("title") or ""),
+                    "paper_overlap": 0.0,
+                    "migration_action": "generate_new",
+                }
+            )
+
+    old_signature = [
+        (heading(item), sorted(paper_ids(item)), str(item.get("section_role") or "body"))
+        for item in old_sections
+    ]
+    new_signature = [
+        (heading(item), sorted(paper_ids(item)), str(item.get("section_role") or "body"))
+        for item in current_sections
+    ]
+    return {
+        "is_restructure": bool(old_sections) and old_signature != new_signature,
+        "previous_blueprint_artifact_id": previous_artifact_id or None,
+        "trigger_reasons": list(dict.fromkeys(trigger_reasons or [])),
+        "section_mapping": mappings,
+        "rollback_supported": bool(previous_artifact_id),
+        "created_at": utc_now().isoformat(),
+    }
 
 
 class PlanningService:
@@ -387,6 +1263,113 @@ class PlanningService:
             )
         return matrix, artifact
 
+    def _with_current_bibliography(
+        self,
+        principal: Principal,
+        matrix: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """Overlay canonical Library bibliography while retaining Matrix facts.
+
+        Bibliography verification may complete after the Matrix artifact was
+        published.  Planning consumes the latest low-risk canonical fields and
+        records their immutable metadata artifact IDs in the Blueprint, while
+        scientific facts and user Matrix edits continue to come from Matrix.
+        """
+
+        updated = deepcopy(matrix)
+        rows = [row for row in updated.get("rows") or [] if isinstance(row, dict)]
+        paper_ids = [
+            str(row.get("paper_id") or "")
+            for row in rows
+            if str(row.get("paper_id") or "")
+        ]
+        if not paper_ids:
+            return updated, {}
+        with database_session(self.repository.session_factory) as session:
+            library_rows = session.scalars(
+                select(LibraryPaper).where(
+                    LibraryPaper.user_id == uuid.UUID(principal.user_id),
+                    LibraryPaper.paper_id.in_(paper_ids),
+                    LibraryPaper.status == "active",
+                    LibraryPaper.deleted_at.is_(None),
+                )
+            ).all()
+            audit_by_id = {
+                row.paper_id: (
+                    dict(row.bibliography_audit_row.audit_json or {})
+                    if row.bibliography_audit_row is not None
+                    else {}
+                )
+                for row in library_rows
+            }
+        by_id = {row.paper_id: row for row in library_rows}
+        artifact_ids: dict[str, str] = {}
+        for row in rows:
+            paper_id = str(row.get("paper_id") or "")
+            library_row = by_id.get(paper_id)
+            if library_row is None:
+                continue
+            metadata = dict(library_row.metadata_json or {})
+            for field in (
+                "title",
+                "authors",
+                "year",
+                "first_publication_date",
+                "bibliographic_year",
+                "publication_status",
+                "journal",
+                "doi",
+            ):
+                value = metadata.get(field)
+                if isinstance(value, dict) and "value" in value:
+                    value = value.get("value")
+                if value not in (None, "", []):
+                    row[field] = deepcopy(value)
+            metadata_artifact_id = str(
+                (metadata.get("_artifact_ids") or {}).get("metadata") or ""
+            )
+            if metadata_artifact_id:
+                artifact_ids[paper_id] = metadata_artifact_id
+            audit = audit_by_id.get(paper_id) or {}
+            audit_status = str(audit.get("status") or "not_audited")
+            manual_status = str(audit.get("manual_review_status") or "")
+            resolution_complete = manual_status in {
+                "approved",
+                "resolved",
+                "verified",
+                "supporting_only",
+            }
+            row["bibliography_identity"] = {
+                "status": audit_status,
+                "verified": bool(audit_status == "verified" or resolution_complete),
+                "manual_review_status": manual_status or "not_reviewed",
+                "resolved_by": str(audit.get("resolved_by") or ""),
+                "resolved_at": audit.get("resolved_at"),
+                "unresolved_conflict_count": len(
+                    audit.get("unresolved_conflicts") or []
+                ),
+                "missing_fields": list(
+                    audit.get("automatic_resolution_missing_fields") or []
+                ),
+                "candidate_count": len(bibliography_candidates(audit)),
+                "verification_method": str(
+                    audit.get("verification_method") or ""
+                ),
+                "bibliography_role": str(
+                    audit.get("bibliography_role") or "primary"
+                ),
+                "direct_claim_eligible": bool(
+                    audit.get("direct_claim_eligible", True)
+                ),
+                "context_only": bool(audit.get("context_only", False)),
+                "parent_paper_id": str(audit.get("parent_paper_id") or ""),
+            }
+        updated["bibliography_overlay"] = {
+            "source_metadata_artifact_ids": artifact_ids,
+            "applied_at": utc_now().isoformat(),
+        }
+        return updated, artifact_ids
+
     @staticmethod
     def _matrix_abstract(row: dict[str, Any]) -> str:
         abstract = row.get("abstract")
@@ -396,37 +1379,230 @@ class PlanningService:
         return "" if "unavailable or unreliable" in normalized.casefold() else normalized
 
     def matrix_enrichment_payload(
-        self, principal: Principal, project_id: str
+        self,
+        principal: Principal,
+        project_id: str,
+        *,
+        force: bool = False,
     ) -> dict[str, Any]:
         """Prepare source-addressable fact candidates for an asynchronous job."""
 
         principal.require(Permission.PROJECT_WRITE)
+        project = self._owned_project(principal, project_id)
         matrix, matrix_artifact = self._matrix(principal, project_id)
         state = self.repository.get_stage_state(principal.user_id, project_id, "matrix")
         if state is None:
             raise WorkflowConflict("The current Matrix stage state is missing.")
         rows = [row for row in matrix.get("rows") or [] if isinstance(row, dict)]
         paper_ids = _paper_ids(rows)
+        if (
+            self.library_index is not None
+            and self.library_index.enabled
+            and bool(getattr(self.library_index, "vector_enabled", False))
+        ):
+            self.library_index.ensure_embeddings(principal, paper_ids)
         summaries = (
             self.library_index.summaries(principal, paper_ids)
             if self.library_index is not None and self.library_index.enabled
             else {}
         )
         topic = str(matrix.get("review_topic") or "")
+        topic_partitions = _topic_partitions(topic)
+        classification_axes = _matrix_classification_axes(matrix, topic_partitions)
+        classification_contract = canonical_classification_contract(
+            classification_axes,
+            primary_axis_hint=str(
+                (matrix.get("classification_recommendation") or {}).get(
+                    "primary_axis_id"
+                )
+                or (matrix.get("classification_contract") or {}).get(
+                    "primary_axis_id"
+                )
+                or ""
+            ),
+            source="matrix_fact_extraction",
+        )
+        classification_axes = list(classification_contract["axes"])
+        routing_axis_id = str(
+            classification_contract.get("primary_axis_id")
+            or next(
+                (
+                    axis.get("axis_id")
+                    for axis in classification_axes
+                    if str(axis.get("axis_role") or "") == "primary_organization"
+                ),
+                "",
+            )
+        ).strip()
+        routing_categories: list[dict[str, Any]] = []
+        routing_category_labels: set[str] = set()
+
+        def add_routing_category(label: Any, aliases: Any = ()) -> None:
+            normalized_label = str(label or "").strip()
+            identity = normalized_label.casefold()
+            if not normalized_label or identity in routing_category_labels:
+                return
+            routing_category_labels.add(identity)
+            routing_categories.append(
+                {
+                    "label": normalized_label[:160],
+                    "aliases": list(
+                        dict.fromkeys(
+                            str(value).strip()[:160]
+                            for value in aliases or []
+                            if str(value or "").strip()
+                        )
+                    )[:16],
+                }
+            )
+
+        primary_axis = next(
+            (
+                axis
+                for axis in classification_axes
+                if str(axis.get("axis_id") or "") == routing_axis_id
+            ),
+            {},
+        )
+        for partition in primary_axis.get("partitions") or []:
+            if not isinstance(partition, dict):
+                continue
+            add_routing_category(
+                partition.get("label"),
+                [
+                    *(partition.get("aliases") or []),
+                    *(partition.get("positive_discriminators") or []),
+                ],
+            )
+        if routing_axis_id:
+            try:
+                for label, category, aliases in load_taxonomy_rules(
+                    self.root,
+                    profile=project.taxonomy_profile,
+                    topic_text=topic,
+                ):
+                    if str(category or "") == routing_axis_id:
+                        add_routing_category(label, aliases)
+            except TaxonomyConfigurationError:
+                # Formal contract partitions above remain usable.  A missing
+                # optional taxonomy profile must not break fact extraction.
+                pass
+        routing_categories_fingerprint = hashlib.sha256(
+            json.dumps(
+                routing_categories,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        deterministic_routing_by_paper: dict[str, str] = {}
+        if routing_axis_id:
+            routing_tags, routing_text = self._outline_sources(principal, rows)
+            for row in rows:
+                paper_id = str(row.get("paper_id") or "").strip()
+                if not paper_id:
+                    continue
+                label = self._tag_value(
+                    (routing_tags.get(paper_id) or {}).get(routing_axis_id)
+                )
+                if not label:
+                    semantic = self._semantic_outline_groups(
+                        [row],
+                        {paper_id: routing_text.get(paper_id, "")},
+                        tag_key=routing_axis_id,
+                        taxonomy_profile=project.taxonomy_profile,
+                    )
+                    label = next(
+                        (
+                            candidate_label
+                            for candidate_label, assigned in semantic.items()
+                            if candidate_label != ROUTING_REQUIRED_LABEL
+                            and paper_id in assigned
+                        ),
+                        "",
+                    )
+                if label:
+                    deterministic_routing_by_paper[paper_id] = label
+        classification_partition_queries: list[dict[str, str]] = []
+        seen_partition_queries: set[tuple[str, str]] = set()
+        for axis in classification_axes:
+            axis_id = str(axis.get("axis_id") or "")
+            for partition in axis.get("partitions") or []:
+                if not isinstance(partition, dict):
+                    continue
+                label = str(partition.get("label") or "").strip()
+                if not label:
+                    continue
+                terms = list(dict.fromkeys(
+                    str(value).strip()
+                    for value in [
+                        label,
+                        *(partition.get("aliases") or []),
+                        *(partition.get("positive_discriminators") or []),
+                    ]
+                    if str(value).strip()
+                ))
+                query = " ".join(terms[:5])[:700]
+                identity = (axis_id, label.casefold())
+                if not query or identity in seen_partition_queries:
+                    continue
+                seen_partition_queries.add(identity)
+                classification_partition_queries.append(
+                    {
+                        "axis_id": axis_id,
+                        "partition_id": str(partition.get("partition_id") or ""),
+                        "label": label,
+                        "query": query,
+                    }
+                )
         papers: list[dict[str, Any]] = []
         for row in rows:
             paper_id = str(row.get("paper_id") or "")
             summary = dict(summaries.get(paper_id) or {})
             lineage = str(summary.get("source_lineage_hash") or "")
+            fingerprint_input = {
+                "schema_version": 2,
+                "fact_enrichment_contract_version": (
+                    MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION
+                ),
+                "topic": " ".join(topic.casefold().split()),
+                "taxonomy_profile": project.taxonomy_profile,
+                "paper_id": paper_id,
+                "source_lineage_hash": lineage,
+                "chunker_version": summary.get("chunker_version"),
+                "embedding_profile": summary.get("embedding_profile"),
+                "embedding_model": (
+                    summary.get("embedding_model")
+                    if summary.get("semantic") == "ready"
+                    else ""
+                ),
+                "embedding_dimension": (
+                    summary.get("embedding_dimension")
+                    if summary.get("semantic") == "ready"
+                    else 0
+                ),
+                "prompt_schema_version": 1,
+                "routing_adjudicator_version": 1,
+                "routing_axis_id": routing_axis_id,
+                "routing_categories_fingerprint": routing_categories_fingerprint,
+                "deterministic_routing_label": deterministic_routing_by_paper.get(
+                    paper_id, ""
+                ),
+                "actual_model_id": resolve_model_tier(project.model_tier).model,
+            }
+            if topic_partitions or classification_axes:
+                fingerprint_input.update(
+                    {
+                        "topic_partition_classifier_version": 2,
+                        "topic_partitions": topic_partitions,
+                        "classification_contract_fingerprint": (
+                            classification_contract["fingerprint"]
+                        ),
+                    }
+                )
             source_fingerprint = hashlib.sha256(
                 json.dumps(
-                    {
-                        "schema_version": 1,
-                        "topic": " ".join(topic.casefold().split()),
-                        "paper_id": paper_id,
-                        "source_lineage_hash": lineage,
-                        "chunker_version": summary.get("chunker_version"),
-                    },
+                    fingerprint_input,
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
@@ -434,7 +1610,8 @@ class PlanningService:
             ).hexdigest()
             existing = dict(row.get("fact_enrichment") or {})
             if (
-                existing.get("source_fingerprint") == source_fingerprint
+                not force
+                and existing.get("source_fingerprint") == source_fingerprint
                 and existing.get("status") in {"complete", "partial", "limited"}
             ):
                 continue
@@ -445,28 +1622,25 @@ class PlanningService:
                 section_role="body",
             )
             candidates: dict[str, dict[str, Any]] = {}
+            partition_candidates: dict[str, dict[str, Any]] = {}
+            strict_question_hit_count = 0
+            relaxed_question_hit_count = 0
             if (
                 self.library_index is not None
                 and self.library_index.enabled
                 and summary.get("fulltext") == "ready"
             ):
-                for plan in plans:
-                    question_id = str(plan.get("question_id") or "")
-                    if question_id == "section_focus":
-                        continue
-                    hits = self.library_index.retrieve(
-                        principal,
-                        str(plan.get("websearch_query") or ""),
-                        allowed_papers=[paper_id],
-                        top_k=2,
-                        per_paper_limit=2,
-                        include_neighbors=False,
-                        term_groups=list(plan.get("term_groups") or []),
-                        exact_phrases=list(plan.get("exact_phrases") or []),
-                    )
+                def add_question_hits(
+                    hits: list[Any],
+                    *,
+                    question_id: str,
+                    retrieval_pass: str,
+                ) -> int:
+                    added = 0
                     for hit in hits:
                         if hit.is_neighbor:
                             continue
+                        added += 1
                         key = academic_evidence_key(
                             hit.paper_id, hit.chunk_id, hit.source_lineage_hash
                         )
@@ -483,10 +1657,125 @@ class PlanningService:
                                 "content": hit.content,
                                 "source_lineage_hash": hit.source_lineage_hash,
                                 "question_ids": [],
+                                "retrieval_passes": [],
                             },
                         )
                         if question_id not in candidate["question_ids"]:
                             candidate["question_ids"].append(question_id)
+                        if retrieval_pass not in candidate["retrieval_passes"]:
+                            candidate["retrieval_passes"].append(retrieval_pass)
+                    return added
+
+                for plan in plans:
+                    question_id = str(plan.get("question_id") or "")
+                    if question_id == "section_focus":
+                        continue
+                    strict_hits = self.library_index.retrieve(
+                        principal,
+                        str(plan.get("websearch_query") or ""),
+                        allowed_papers=[paper_id],
+                        top_k=2,
+                        per_paper_limit=2,
+                        include_neighbors=False,
+                        term_groups=list(plan.get("term_groups") or []),
+                        exact_phrases=list(plan.get("exact_phrases") or []),
+                    )
+                    strict_added = add_question_hits(
+                        strict_hits,
+                        question_id=question_id,
+                        retrieval_pass="strict_topic_and_question",
+                    )
+                    strict_question_hit_count += strict_added
+                    # Matrix papers have already passed Topic admission. If a
+                    # strict same-chunk Topic+question query returns nothing,
+                    # search only inside that admitted paper for the scientific
+                    # question. Source-addressable excerpt validation remains
+                    # unchanged at publish time, so this restores recall without
+                    # weakening factual acceptance.
+                    question_groups = list(
+                        plan.get("question_term_groups") or []
+                    )
+                    if not strict_added and question_groups:
+                        relaxed_parts: list[str] = []
+                        for group in question_groups:
+                            alternatives = [
+                                f'"{term}"' if " " in str(term) else str(term)
+                                for term in group
+                                if str(term).strip()
+                            ]
+                            if alternatives:
+                                relaxed_parts.append(
+                                    "(" + " OR ".join(alternatives) + ")"
+                                )
+                        relaxed_query = " ".join(relaxed_parts)
+                        if relaxed_query:
+                            relaxed_added = add_question_hits(
+                                self.library_index.retrieve(
+                                    principal,
+                                    relaxed_query,
+                                    allowed_papers=[paper_id],
+                                    top_k=2,
+                                    per_paper_limit=2,
+                                    include_neighbors=False,
+                                    term_groups=question_groups,
+                                    exact_phrases=[
+                                        str(term)
+                                        for group in question_groups
+                                        for term in group
+                                        if " " in str(term)
+                                    ],
+                                ),
+                                question_id=question_id,
+                                retrieval_pass=(
+                                    "admitted_paper_question_recovery"
+                                ),
+                            )
+                            relaxed_question_hit_count += relaxed_added
+                for partition_query in classification_partition_queries:
+                    hits = self.library_index.retrieve(
+                        principal,
+                        partition_query["query"],
+                        allowed_papers=[paper_id],
+                        top_k=4,
+                        per_paper_limit=4,
+                        include_neighbors=True,
+                    )
+                    for hit in hits:
+                        key = academic_evidence_key(
+                            hit.paper_id, hit.chunk_id, hit.source_lineage_hash
+                        )
+                        partition_candidates.setdefault(
+                            key,
+                            {
+                                "evidence_key": key,
+                                "paper_id": hit.paper_id,
+                                "chunk_id": hit.chunk_id,
+                                "page_start": hit.page_start,
+                                "page_end": hit.page_end,
+                                "section_path": list(hit.section_path),
+                                "content_type": hit.content_type,
+                                "content": hit.content,
+                                "source_lineage_hash": hit.source_lineage_hash,
+                                "matched_partitions": [],
+                                "retrieval_passes": [],
+                            },
+                        )
+                        matched = partition_candidates[key]["matched_partitions"]
+                        partition_identity = {
+                            "axis_id": partition_query["axis_id"],
+                            "partition_id": partition_query["partition_id"],
+                            "label": partition_query["label"],
+                        }
+                        if partition_identity not in matched:
+                            matched.append(partition_identity)
+                        retrieval_pass = (
+                            "classification_neighbor_context"
+                            if hit.is_neighbor
+                            else "classification_discriminator_search"
+                        )
+                        passes = partition_candidates[key]["retrieval_passes"]
+                        if retrieval_pass not in passes:
+                            passes.append(retrieval_pass)
             abstract = self._matrix_abstract(row)
             if abstract:
                 abstract_lineage = lineage or hashlib.sha256(
@@ -495,20 +1784,28 @@ class PlanningService:
                 abstract_key = academic_evidence_key(
                     paper_id, "abstract", abstract_lineage
                 )
+                abstract_candidate = {
+                    "evidence_key": abstract_key,
+                    "paper_id": paper_id,
+                    "chunk_id": "abstract",
+                    "page_start": None,
+                    "page_end": None,
+                    "section_path": ["Abstract"],
+                    "content_type": "abstract",
+                    "content": abstract,
+                    "source_lineage_hash": abstract_lineage,
+                    "question_ids": ["abstract_summary"],
+                    "match_type": "abstract_only",
+                }
                 candidates.setdefault(
                     abstract_key,
+                    abstract_candidate,
+                )
+                partition_candidates.setdefault(
+                    abstract_key,
                     {
-                        "evidence_key": abstract_key,
-                        "paper_id": paper_id,
-                        "chunk_id": "abstract",
-                        "page_start": None,
-                        "page_end": None,
-                        "section_path": ["Abstract"],
-                        "content_type": "abstract",
-                        "content": abstract,
-                        "source_lineage_hash": abstract_lineage,
-                        "question_ids": ["abstract_summary"],
-                        "match_type": "abstract_only",
+                        **abstract_candidate,
+                        "matched_partitions": [],
                     },
                 )
             papers.append(
@@ -518,13 +1815,45 @@ class PlanningService:
                     "abstract": abstract,
                     "index_summary": summary,
                     "source_fingerprint": source_fingerprint,
+                    "taxonomy_profile": project.taxonomy_profile,
+                    "deterministic_routing_label": deterministic_routing_by_paper.get(
+                        paper_id, ""
+                    ),
+                    "retrieval_summary": {
+                        "strict_question_hit_count": strict_question_hit_count,
+                        "relaxed_question_hit_count": relaxed_question_hit_count,
+                        "classification_query_count": len(
+                            classification_partition_queries
+                        ),
+                        "mode": (
+                            "hybrid_targeted"
+                            if summary.get("semantic") == "ready"
+                            else "lexical_targeted"
+                        ),
+                    },
                     "evidence_candidates": list(candidates.values()),
+                    "partition_evidence_candidates": list(
+                        partition_candidates.values()
+                    ),
                 }
             )
         return {
-            "schema_version": 1,
+            "schema_version": 2,
+            "fact_enrichment_contract_version": (
+                MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION
+            ),
+            "force_refresh": bool(force),
             "project_id": project_id,
             "review_topic": topic,
+            "topic_partitions": topic_partitions,
+            "classification_axes": classification_axes,
+            "classification_contract": classification_contract,
+            "classification_contract_version": CLASSIFICATION_CONTRACT_VERSION,
+            "routing_axis_id": routing_axis_id,
+            "routing_categories": routing_categories,
+            "routing_adjudicator_version": 1,
+            "taxonomy_profile": project.taxonomy_profile,
+            "actual_model_id": resolve_model_tier(project.model_tier).model,
             "source_matrix_artifact_id": matrix_artifact.id,
             "expected_matrix_revision": state.revision,
             "paper_count": len(rows),
@@ -571,6 +1900,19 @@ class PlanningService:
                 "Matrix enrichment result does not match the pending paper set."
             )
         updated = deepcopy(matrix)
+        declared_partitions = [
+            _clean_topic_partition(value)
+            for value in payload.get("topic_partitions") or []
+            if _clean_topic_partition(value)
+        ]
+        routing_axis_id = str(payload.get("routing_axis_id") or "").strip()
+        allowed_routing_labels = {
+            str(item.get("label") or "").strip().casefold(): str(
+                item.get("label") or ""
+            ).strip()
+            for item in payload.get("routing_categories") or []
+            if isinstance(item, dict) and str(item.get("label") or "").strip()
+        }
         for row in updated.get("rows") or []:
             if not isinstance(row, dict):
                 continue
@@ -584,6 +1926,15 @@ class PlanningService:
                 for item in source.get("evidence_candidates") or []
                 if isinstance(item, dict) and item.get("evidence_key")
             }
+            partition_candidates = {
+                str(item.get("evidence_key") or ""): item
+                for item in [
+                    *(source.get("partition_evidence_candidates") or []),
+                    *(source.get("evidence_candidates") or []),
+                ]
+                if isinstance(item, dict) and item.get("evidence_key")
+            }
+            fact_candidates = {**partition_candidates, **candidates}
             facts = []
             for fact in result.get("facts") or []:
                 if not isinstance(fact, dict):
@@ -593,7 +1944,7 @@ class PlanningService:
                     if isinstance(ref, dict)
                 ]
                 if not raw_refs or any(
-                    str(ref.get("evidence_key") or "") not in candidates
+                    str(ref.get("evidence_key") or "") not in fact_candidates
                     for ref in raw_refs
                 ):
                     continue
@@ -608,7 +1959,7 @@ class PlanningService:
                     excerpt
                     in " ".join(
                         str(
-                            candidates[str(ref.get("evidence_key") or "")].get(
+                            fact_candidates[str(ref.get("evidence_key") or "")].get(
                                 "content"
                             )
                             or ""
@@ -619,26 +1970,433 @@ class PlanningService:
                     continue
                 field_id = str(fact.get("field_id") or "").casefold()
                 if not field_id or any(
-                    field_id
+                    field_id != "topic_partition"
+                    and field_id
                     not in {
                         str(value).casefold()
-                        for value in candidates[
+                        for value in fact_candidates[
                             str(ref.get("evidence_key") or "")
                         ].get("question_ids") or []
                     }
                     for ref in raw_refs
                 ):
                     continue
-                facts.append({**fact, "evidence_refs": raw_refs})
+                assertion_ceiling = str(fact.get("assertion_ceiling") or "").strip()
+                if not assertion_ceiling:
+                    content_types = {
+                        str(
+                            fact_candidates[str(ref.get("evidence_key") or "")].get(
+                                "content_type"
+                            )
+                            or "body"
+                        ).casefold()
+                        for ref in raw_refs
+                    }
+                    assertion_ceiling = (
+                        "abstract_report_only"
+                        if content_types == {"abstract"}
+                        else "direct_source_report"
+                    )
+                facts.append(
+                    {
+                        **fact,
+                        "assertion_ceiling": assertion_ceiling,
+                        "evidence_refs": raw_refs,
+                    }
+                )
+            raw_classification = result.get("topic_partition_classification")
+            if not declared_partitions:
+                partition_classification = {
+                    "schema_version": 1,
+                    "status": "not_requested",
+                    "partition": "",
+                    "confidence": 0.0,
+                    "evidence_refs": [],
+                }
+            elif isinstance(raw_classification, dict):
+                status_value = str(
+                    raw_classification.get("status") or "insufficient_evidence"
+                ).casefold()
+                if status_value == "boundary":
+                    status_value = "insufficient_evidence"
+                canonical_partition = _canonical_declared_partition(
+                    raw_classification.get("partition"), declared_partitions
+                )
+                try:
+                    partition_confidence = max(
+                        0.0,
+                        min(
+                            1.0,
+                            float(raw_classification.get("confidence") or 0),
+                        ),
+                    )
+                except (TypeError, ValueError):
+                    partition_confidence = 0.0
+                partition_refs = [
+                    dict(ref)
+                    for ref in raw_classification.get("evidence_refs") or []
+                    if isinstance(ref, dict)
+                    and str(ref.get("evidence_key") or "") in partition_candidates
+                ]
+                support_excerpt = " ".join(
+                    str(raw_classification.get("support_excerpt") or "").split()
+                )
+                excerpt_valid = bool(
+                    support_excerpt
+                    and partition_refs
+                    and all(
+                        support_excerpt.casefold()
+                        in " ".join(
+                            str(
+                                partition_candidates[
+                                    str(ref.get("evidence_key") or "")
+                                ].get("content")
+                                or ""
+                            ).split()
+                        ).casefold()
+                        for ref in partition_refs
+                    )
+                )
+                classified = bool(
+                    status_value == "classified"
+                    and canonical_partition
+                    and partition_confidence >= 0.75
+                    and excerpt_valid
+                )
+                unresolved_status = (
+                    status_value
+                    if status_value
+                    in {"insufficient_evidence", "cross_category", "out_of_scope"}
+                    else "insufficient_evidence"
+                )
+                if unresolved_status in {"cross_category", "out_of_scope"} and not excerpt_valid:
+                    unresolved_status = "insufficient_evidence"
+                partition_classification = {
+                    "schema_version": 1,
+                    "status": "classified" if classified else unresolved_status,
+                    "partition": canonical_partition if classified else "",
+                    "candidate_partition": (
+                        canonical_partition
+                        if canonical_partition and not classified
+                        else ""
+                    ),
+                    "confidence": round(partition_confidence, 4),
+                    "rationale": str(
+                        raw_classification.get("rationale") or ""
+                    )[:800],
+                    "boundary_reason": (
+                        ""
+                        if classified
+                        else str(
+                            raw_classification.get("boundary_reason")
+                            or "The source-bound classification did not meet the evidence and confidence requirements."
+                        )[:800]
+                    ),
+                    "classification_reason": (
+                        ""
+                        if classified
+                        else str(
+                            raw_classification.get("classification_reason")
+                            or raw_classification.get("boundary_reason")
+                            or "The source-bound classification did not meet the evidence and confidence requirements."
+                        )[:800]
+                    ),
+                    "support_excerpt": support_excerpt if excerpt_valid else "",
+                    "evidence_ceiling": str(
+                        raw_classification.get("evidence_ceiling")
+                        or "Do not infer a contrasting partition from information absent in the cited passage."
+                    )[:600],
+                    "evidence_refs": partition_refs if excerpt_valid else [],
+                    "review_status": (
+                        "not_required" if classified else "needs_review"
+                    ),
+                    "extraction_method": "model_classified_from_bounded_source",
+                }
+            else:
+                partition_classification = {
+                    "schema_version": 1,
+                    "status": "insufficient_evidence",
+                    "partition": "",
+                    "confidence": 0.0,
+                    "evidence_refs": [],
+                    "boundary_reason": "The model returned no valid Topic-partition classification.",
+                    "review_status": "needs_review",
+                    "extraction_method": "model_classification_missing",
+                }
+            axis_contract = {
+                str(axis.get("axis_id") or ""): axis
+                for axis in payload.get("classification_axes") or []
+                if isinstance(axis, dict) and str(axis.get("axis_id") or "")
+            }
+            allowed_partitions = {
+                axis_id: {
+                    str(partition.get("partition_id") or "")
+                    for partition in axis.get("partitions") or []
+                    if isinstance(partition, dict)
+                    and str(partition.get("partition_id") or "")
+                }
+                for axis_id, axis in axis_contract.items()
+            }
+            facts_by_id = {
+                str(fact.get("fact_id") or ""): fact
+                for fact in facts
+                if str(fact.get("fact_id") or "")
+            }
+            evidence_backed_tags: dict[str, list[dict[str, Any]]] = {}
+            raw_tags = result.get("evidence_backed_tags")
+            if isinstance(raw_tags, dict):
+                for axis_id, raw_values in raw_tags.items():
+                    axis_id = str(axis_id or "")
+                    if axis_id not in axis_contract or not isinstance(raw_values, list):
+                        continue
+                    for raw_tag in raw_values:
+                        if not isinstance(raw_tag, dict):
+                            continue
+                        partition_id = str(raw_tag.get("partition_id") or "")
+                        fact_ids = list(
+                            dict.fromkeys(
+                                str(value)
+                                for value in raw_tag.get("fact_ids") or []
+                                if str(value)
+                            )
+                        )
+                        if (
+                            partition_id not in allowed_partitions.get(axis_id, set())
+                            or not fact_ids
+                            or any(
+                                fact_id not in facts_by_id
+                                or str(facts_by_id[fact_id].get("field_id") or "")
+                                != "topic_partition"
+                                for fact_id in fact_ids
+                            )
+                        ):
+                            continue
+                        evidence_refs = [
+                            dict(ref)
+                            for ref in raw_tag.get("evidence_refs") or []
+                            if isinstance(ref, dict)
+                            and str(ref.get("evidence_key") or "") in partition_candidates
+                        ]
+                        if not evidence_refs:
+                            continue
+                        try:
+                            tag_confidence = max(
+                                0.0,
+                                min(1.0, float(raw_tag.get("confidence") or 0)),
+                            )
+                        except (TypeError, ValueError):
+                            tag_confidence = 0.0
+                        evidence_backed_tags.setdefault(axis_id, []).append(
+                            {
+                                "axis_label": str(
+                                    axis_contract[axis_id].get("label") or ""
+                                )[:120],
+                                "axis_role": str(
+                                    axis_contract[axis_id].get("axis_role")
+                                    or "comparison_dimension"
+                                )[:80],
+                                "partition_id": partition_id,
+                                "partition_label": str(raw_tag.get("partition_label") or "")[:120],
+                                "relation_to_paper": str(
+                                    raw_tag.get("relation_to_paper") or "primary_contribution"
+                                ),
+                                "fact_ids": fact_ids,
+                                "evidence_refs": evidence_refs,
+                                "confidence": tag_confidence,
+                                "assertion_ceiling": str(
+                                    raw_tag.get("assertion_ceiling")
+                                    or "direct_source_report"
+                                ),
+                            }
+                        )
+            classification_outcomes: list[dict[str, Any]] = []
+            for raw_outcome in result.get("classification_outcomes") or []:
+                if not isinstance(raw_outcome, dict):
+                    continue
+                axis_id = str(raw_outcome.get("axis_id") or "")
+                if axis_id not in axis_contract or axis_id in evidence_backed_tags:
+                    continue
+                outcome_status = str(
+                    raw_outcome.get("status") or "insufficient_evidence"
+                ).casefold()
+                if outcome_status not in {
+                    "insufficient_evidence",
+                    "cross_category",
+                    "out_of_scope",
+                }:
+                    outcome_status = "insufficient_evidence"
+                refs = [
+                    dict(ref)
+                    for ref in raw_outcome.get("evidence_refs") or []
+                    if isinstance(ref, dict)
+                    and str(ref.get("evidence_key") or "") in partition_candidates
+                ]
+                if outcome_status in {"cross_category", "out_of_scope"} and not refs:
+                    outcome_status = "insufficient_evidence"
+                classification_outcomes.append(
+                    {
+                        "axis_id": axis_id,
+                        "axis_role": str(
+                            axis_contract[axis_id].get("axis_role") or "comparison_dimension"
+                        )[:80],
+                        "status": outcome_status,
+                        "reason": str(raw_outcome.get("reason") or "")[:800],
+                        "support_excerpt": str(
+                            raw_outcome.get("support_excerpt") or ""
+                        )[:1600]
+                        if refs
+                        else "",
+                        "evidence_refs": refs,
+                        "resolution": str(
+                            raw_outcome.get("resolution")
+                            or "auto_route_from_positive_evidence_only"
+                        )[:120],
+                        "user_action_required": bool(
+                            raw_outcome.get("user_action_required", False)
+                        ),
+                    }
+                )
+            raw_routing = result.get("routing_recommendation")
+            if not isinstance(raw_routing, dict):
+                raw_routing = {}
+            requested_routing_label = str(raw_routing.get("label") or "").strip()
+            routing_label = allowed_routing_labels.get(
+                requested_routing_label.casefold(), ""
+            )
+            try:
+                routing_confidence = max(
+                    0.0, min(1.0, float(raw_routing.get("confidence") or 0))
+                )
+            except (TypeError, ValueError):
+                routing_confidence = 0.0
+            routing_refs = [
+                dict(ref)
+                for ref in raw_routing.get("evidence_refs") or []
+                if isinstance(ref, dict)
+                and str(ref.get("evidence_key") or "") in fact_candidates
+            ]
+            routing_excerpt = " ".join(
+                str(raw_routing.get("support_excerpt") or "").split()
+            )
+            routing_excerpt_valid = bool(
+                routing_excerpt
+                and routing_refs
+                and all(
+                    routing_excerpt.casefold()
+                    in " ".join(
+                        str(
+                            fact_candidates[
+                                str(ref.get("evidence_key") or "")
+                            ].get("content")
+                            or ""
+                        ).split()
+                    ).casefold()
+                    for ref in routing_refs
+                )
+            )
+            routing_classified = bool(
+                routing_axis_id
+                and str(raw_routing.get("axis_id") or "") == routing_axis_id
+                and str(raw_routing.get("status") or "").casefold()
+                == "classified"
+                and routing_label
+                and routing_confidence >= 0.75
+                and routing_excerpt_valid
+            )
+            formal_route_available = bool(
+                routing_axis_id in evidence_backed_tags
+                or str(raw_routing.get("status") or "").casefold()
+                == "formal_axis_route_available"
+            )
+            deterministic_route_available = bool(
+                str(raw_routing.get("status") or "").casefold()
+                == "deterministic_route_available"
+                and routing_label
+            )
+            routing_recommendation = {
+                "schema_version": 1,
+                "axis_id": routing_axis_id,
+                "status": (
+                    "classified"
+                    if routing_classified
+                    else "deterministic_route_available"
+                    if deterministic_route_available
+                    else "formal_axis_route_available"
+                    if formal_route_available
+                    else "insufficient_evidence"
+                ),
+                "label": (
+                    routing_label
+                    if routing_classified or deterministic_route_available
+                    else ""
+                ),
+                "candidate_label": (
+                    routing_label
+                    if routing_label and not routing_classified
+                    else ""
+                ),
+                "confidence": round(routing_confidence, 4),
+                "rationale": str(raw_routing.get("rationale") or "")[:800],
+                "reason": (
+                    ""
+                    if routing_classified
+                    or deterministic_route_available
+                    or formal_route_available
+                    else str(
+                        raw_routing.get("reason")
+                        or "The bounded routing adjudicator found no supported publication category."
+                    )[:800]
+                ),
+                "support_excerpt": (
+                    routing_excerpt if routing_classified else ""
+                ),
+                "evidence_ceiling": str(
+                    raw_routing.get("evidence_ceiling")
+                    or "Do not extend this routing decision beyond the cited study design."
+                )[:600],
+                "evidence_refs": routing_refs if routing_classified else [],
+                "review_status": (
+                    "not_required"
+                    if routing_classified
+                    or deterministic_route_available
+                    or formal_route_available
+                    else "auto_unresolved"
+                ),
+                "extraction_method": str(
+                    raw_routing.get("extraction_method")
+                    or "model_routing_not_completed"
+                )[:120],
+            }
             status = str(result.get("status") or "failed")
             if result.get("facts") and len(facts) < len(result.get("facts") or []):
                 status = "partial" if facts else "failed"
             row["scientific_facts"] = facts
+            row["topic_partition_classification"] = partition_classification
+            row["evidence_backed_tags"] = evidence_backed_tags
+            row["classification_outcomes"] = classification_outcomes
+            row["routing_recommendation"] = routing_recommendation
+            row["comparison_evidence"] = {
+                field_id: [
+                    dict(fact)
+                    for fact in facts
+                    if str(fact.get("field_id") or "") == field_id
+                ]
+                for field_id in COMPARISON_FIELD_IDS
+            }
             review_status = str(result.get("review_status") or "needs_review")
-            if review_status not in {"not_required", "needs_review", "human_checked"}:
+            if review_status not in {
+                "not_required",
+                "auto_resolved",
+                "needs_review",
+                "human_checked",
+            }:
                 review_status = "needs_review"
             row["fact_enrichment"] = {
                 "schema_version": 2,
+                "contract_version": int(
+                    payload.get("fact_enrichment_contract_version")
+                    or MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION
+                ),
                 "status": status,
                 "review_status": review_status,
                 "source_fingerprint": str(source.get("source_fingerprint") or ""),
@@ -648,8 +2406,110 @@ class PlanningService:
                 "fact_count": len(facts),
                 "failed_fields": list(result.get("failed_fields") or []),
                 "error": str(result.get("error") or "")[:1000],
+                "automatic_resolution": deepcopy(
+                    result.get("automatic_resolution") or {}
+                ),
                 "updated_at": utc_now().isoformat(),
             }
+        classification_axes = [
+            deepcopy(axis)
+            for axis in payload.get("classification_axes") or updated.get("classification_axes") or []
+            if isinstance(axis, dict) and str(axis.get("axis_id") or "")
+        ]
+        axis_coverage: dict[str, dict[str, Any]] = {}
+        for axis in classification_axes:
+            axis_id = str(axis.get("axis_id") or "")
+            partition_counts: dict[str, int] = {}
+            paper_ids: set[str] = set()
+            for matrix_row in updated.get("rows") or []:
+                if not isinstance(matrix_row, dict):
+                    continue
+                values = (matrix_row.get("evidence_backed_tags") or {}).get(axis_id) or []
+                if not values:
+                    continue
+                paper_id = str(matrix_row.get("paper_id") or "")
+                if paper_id:
+                    paper_ids.add(paper_id)
+                for value in values:
+                    if not isinstance(value, dict):
+                        continue
+                    partition_id = str(value.get("partition_id") or "")
+                    if partition_id:
+                        partition_counts[partition_id] = partition_counts.get(partition_id, 0) + 1
+            axis_coverage[axis_id] = {
+                "paper_ids": sorted(paper_ids),
+                "paper_count": len(paper_ids),
+                "partition_counts": partition_counts,
+            }
+            axis["evidence_coverage"] = deepcopy(axis_coverage[axis_id])
+            if paper_ids:
+                axis["role_status"] = "evidence_confirmed"
+            elif str(axis.get("source_type") or "") != "explicit_topic":
+                axis["role_status"] = "provisional"
+
+        explicit_primary = next(
+            (
+                axis
+                for axis in classification_axes
+                if str(axis.get("source_type") or "") == "explicit_topic"
+                and str(axis.get("axis_role") or "") == "primary_organization"
+            ),
+            None,
+        )
+        recommended_primary = explicit_primary
+        if recommended_primary is None and classification_axes:
+            recommended_primary = max(
+                classification_axes,
+                key=lambda axis: (
+                    int(
+                        (axis_coverage.get(str(axis.get("axis_id") or "")) or {}).get(
+                            "paper_count"
+                        )
+                        or 0
+                    ),
+                    str(axis.get("axis_role") or "") == "primary_organization",
+                ),
+            )
+            for axis in classification_axes:
+                if axis is recommended_primary:
+                    axis["axis_role"] = "primary_organization"
+                    axis["heading_requirement"] = "primary_heading"
+                elif str(axis.get("axis_role") or "") == "primary_organization":
+                    axis["axis_role"] = "comparison_dimension"
+                    axis["heading_requirement"] = "comparison_only"
+        updated["classification_axes"] = classification_axes
+        updated["classification_recommendation"] = {
+            "schema_version": 1,
+            "source": (
+                "explicit_topic_with_matrix_evidence"
+                if explicit_primary is not None
+                else "system_recommended_from_selected_matrix_evidence"
+            ),
+            "primary_axis_id": str(
+                (recommended_primary or {}).get("axis_id") or ""
+            ),
+            "primary_axis_label": str(
+                (recommended_primary or {}).get("label") or ""
+            ),
+            "requires_existing_blueprint_confirmation": True,
+            "axis_coverage": axis_coverage,
+            "updated_at": utc_now().isoformat(),
+        }
+        updated_classification_contract = canonical_classification_contract(
+            classification_axes,
+            primary_axis_hint=str(
+                (recommended_primary or {}).get("axis_id") or ""
+            ),
+            source=(
+                "explicit_topic_with_matrix_evidence"
+                if explicit_primary is not None
+                else "matrix_evidence_recommendation"
+            ),
+        )
+        updated["classification_contract"] = updated_classification_contract
+        updated["classification_contract_version"] = (
+            CLASSIFICATION_CONTRACT_VERSION
+        )
         published_statuses = [
             str((row.get("fact_enrichment") or {}).get("status") or "pending")
             for row in updated.get("rows") or []
@@ -657,6 +2517,10 @@ class PlanningService:
         ]
         updated["fact_enrichment_summary"] = {
             "schema_version": 2,
+            "contract_version": int(
+                payload.get("fact_enrichment_contract_version")
+                or MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION
+            ),
             "source_matrix_artifact_id": matrix_artifact.id,
             "complete_count": published_statuses.count("complete"),
             "partial_count": published_statuses.count("partial"),
@@ -670,7 +2534,62 @@ class PlanningService:
                 and str((row.get("fact_enrichment") or {}).get("review_status") or "")
                 == "needs_review"
             ),
+            "topic_partition_classified_count": sum(
+                1
+                for row in updated.get("rows") or []
+                if isinstance(row, dict)
+                and str(
+                    (row.get("topic_partition_classification") or {}).get(
+                        "status"
+                    )
+                    or ""
+                )
+                == "classified"
+            ),
+            "topic_partition_insufficient_evidence_count": sum(
+                1
+                for row in updated.get("rows") or []
+                if isinstance(row, dict)
+                and str(
+                    (row.get("topic_partition_classification") or {}).get(
+                        "status"
+                    )
+                    or ""
+                )
+                == "insufficient_evidence"
+            ),
+            "topic_partition_cross_category_count": sum(
+                1
+                for row in updated.get("rows") or []
+                if isinstance(row, dict)
+                and str(
+                    (row.get("topic_partition_classification") or {}).get("status")
+                    or ""
+                )
+                == "cross_category"
+            ),
+            "topic_partition_out_of_scope_count": sum(
+                1
+                for row in updated.get("rows") or []
+                if isinstance(row, dict)
+                and str(
+                    (row.get("topic_partition_classification") or {}).get("status")
+                    or ""
+                )
+                == "out_of_scope"
+            ),
+            "evidence_backed_tag_paper_count": sum(
+                1
+                for row in updated.get("rows") or []
+                if isinstance(row, dict) and bool(row.get("evidence_backed_tags"))
+            ),
             "updated_at": utc_now().isoformat(),
+        }
+        updated["comparison_schema"] = {
+            "schema_version": 1,
+            "field_ids": list(COMPARISON_FIELD_IDS),
+            "missing_value_policy": "keep_empty_and_do_not_infer",
+            "source": "source_addressable_scientific_facts",
         }
         outline_compatible_ids = [
             str(artifact_id)
@@ -680,6 +2599,107 @@ class PlanningService:
         if matrix_artifact.id not in outline_compatible_ids:
             outline_compatible_ids.append(matrix_artifact.id)
         updated["outline_compatible_matrix_artifact_ids"] = outline_compatible_ids[-20:]
+
+        def evidence_state_by_paper(document: dict[str, Any]) -> dict[str, Any]:
+            return {
+                str(row.get("paper_id") or ""): {
+                    "scientific_facts": row.get("scientific_facts") or [],
+                    "topic_partition_classification": row.get(
+                        "topic_partition_classification"
+                    )
+                    or {},
+                    "evidence_backed_tags": row.get("evidence_backed_tags") or {},
+                    "classification_outcomes": row.get("classification_outcomes") or [],
+                    "routing_recommendation": row.get("routing_recommendation") or {},
+                    "fact_status": str(
+                        (row.get("fact_enrichment") or {}).get("status") or "pending"
+                    ),
+                }
+                for row in document.get("rows") or []
+                if isinstance(row, dict) and str(row.get("paper_id") or "")
+            }
+
+        previous_evidence_state = evidence_state_by_paper(matrix)
+        next_evidence_state = evidence_state_by_paper(updated)
+        changed_paper_ids = sorted(
+            paper_id
+            for paper_id in set(previous_evidence_state) | set(next_evidence_state)
+            if previous_evidence_state.get(paper_id) != next_evidence_state.get(paper_id)
+        )
+        def stable_classification_contract(document: dict[str, Any]) -> dict[str, Any]:
+            contract = classification_contract_from_document(
+                document,
+                primary_axis_hint=str(
+                    (document.get("classification_recommendation") or {}).get(
+                        "primary_axis_id"
+                    )
+                    or ""
+                ),
+                source="matrix_contract_comparison",
+            )
+            return {
+                "contract_version": contract["contract_version"],
+                "fingerprint": contract["fingerprint"],
+            }
+
+        classification_contract_changed = bool(
+            stable_classification_contract(matrix)
+            != stable_classification_contract(updated)
+        )
+
+        def enrichment_cache_state(document: dict[str, Any]) -> dict[str, Any]:
+            return {
+                str(row.get("paper_id") or ""): {
+                    "source_fingerprint": str(
+                        (row.get("fact_enrichment") or {}).get("source_fingerprint") or ""
+                    ),
+                    "source_lineage_hash": str(
+                        (row.get("fact_enrichment") or {}).get("source_lineage_hash") or ""
+                    ),
+                    "failed_fields": list(
+                        (row.get("fact_enrichment") or {}).get("failed_fields") or []
+                    ),
+                }
+                for row in document.get("rows") or []
+                if isinstance(row, dict) and str(row.get("paper_id") or "")
+            }
+
+        previous_cache_state = enrichment_cache_state(matrix)
+        next_cache_state = enrichment_cache_state(updated)
+        refreshed_paper_ids = sorted(
+            paper_id
+            for paper_id in set(previous_cache_state) | set(next_cache_state)
+            if previous_cache_state.get(paper_id) != next_cache_state.get(paper_id)
+        )
+        updated["matrix_change_set"] = {
+            "schema_version": 1,
+            "operation": "scientific_fact_refresh",
+            "changed_paper_ids": changed_paper_ids,
+            "changed_paper_count": len(changed_paper_ids),
+            "classification_contract_changed": classification_contract_changed,
+            "refreshed_paper_ids": refreshed_paper_ids,
+            "dependency_policy": "invalidate_only_when_evidence_state_changed",
+            "updated_at": utc_now().isoformat(),
+        }
+        if (
+            not changed_paper_ids
+            and not refreshed_paper_ids
+            and not classification_contract_changed
+        ):
+            current_state = self.repository.get_stage_state(
+                principal.user_id, project_id, "matrix"
+            )
+            return {
+                "project_id": project_id,
+                "matrix_artifact_id": matrix_artifact.id,
+                "matrix_revision": current_state.revision if current_state else 0,
+                "fact_enrichment_summary": matrix.get("fact_enrichment_summary")
+                or updated["fact_enrichment_summary"],
+                "changed_paper_ids": [],
+                "refreshed_paper_ids": [],
+                "classification_contract_changed": False,
+                "unchanged": True,
+            }
         with self._write_lock:
             published, run = self._publish_files(
                 principal,
@@ -719,12 +2739,16 @@ class PlanningService:
                         expected_revision=expected_revision,
                         status="review",
                         invalidate_stages=(
-                            "blueprint",
-                            "sections",
-                            "figure-review",
-                            "figures",
-                            "draft",
-                            "final",
+                            (
+                                "blueprint",
+                                "sections",
+                                "figure-review",
+                                "figures",
+                                "draft",
+                                "final",
+                            )
+                            if changed_paper_ids or classification_contract_changed
+                            else ()
                         ),
                         expected_current_artifacts={
                             MATRIX_LOGICAL_NAME: matrix_artifact.id
@@ -741,6 +2765,10 @@ class PlanningService:
             "matrix_artifact_id": published[MATRIX_LOGICAL_NAME].id,
             "matrix_revision": state.revision,
             "fact_enrichment_summary": updated["fact_enrichment_summary"],
+            "changed_paper_ids": changed_paper_ids,
+            "refreshed_paper_ids": refreshed_paper_ids,
+            "classification_contract_changed": classification_contract_changed,
+            "unchanged": False,
         }
 
     def confirm_matrix_limited_mode(
@@ -858,14 +2886,53 @@ class PlanningService:
             )
             tags = verified_structured_tags(metadata)
             row = rows_by_id.get(record.paper_id) or {}
-            # Project Tags are scoped to the active project. Explicit legacy
-            # confirmations and the current automatic Discovery assessment
-            # both take precedence over reusable Library metadata without
-            # mutating the Library record.
+            # Organization precedence is separate from Claim eligibility:
+            # verified Library metadata < formal Matrix fact classifications
+            # < explicit human project tags. Stage 02 retrieval hints and
+            # legacy automatic screening tags never organize the outline.
             project_tags = row.get("project_tags")
-            if (
-                row.get("project_tag_review_status") in {"confirmed", "automatic"}
-                and isinstance(project_tags, dict)
+            formal_tags = row.get("evidence_backed_tags") or {}
+            if isinstance(formal_tags, dict):
+                for axis_id, values in formal_tags.items():
+                    labels = [
+                        str(value.get("partition_label") or "").strip()
+                        for value in values or []
+                        if isinstance(value, dict)
+                        and str(value.get("partition_label") or "").strip()
+                    ]
+                    if labels:
+                        tags[str(axis_id)] = labels
+                        axis_label = next(
+                            (
+                                str(value.get("axis_label") or "").strip()
+                                for value in values or []
+                                if isinstance(value, dict)
+                                and str(value.get("axis_label") or "").strip()
+                            ),
+                            "",
+                        )
+                        if axis_label:
+                            tags[axis_label] = labels
+            routing = row.get("routing_recommendation")
+            if isinstance(routing, dict):
+                routing_axis = str(routing.get("axis_id") or "").strip()
+                routing_label = str(routing.get("label") or "").strip()
+                if (
+                    routing_axis
+                    and routing_label
+                    and str(routing.get("status") or "") == "classified"
+                    and routing_axis not in tags
+                    and bool(routing.get("evidence_refs"))
+                ):
+                    # This bounded Agent recommendation is a routing aid only.
+                    # It does not become Claim evidence or replace a stronger
+                    # formal axis assignment.
+                    tags[routing_axis] = [routing_label]
+            human_tags = row.get("human_confirmed_tags")
+            if isinstance(human_tags, dict) and human_tags:
+                tags.update(human_tags)
+            elif row.get("project_tag_review_status") == "confirmed" and isinstance(
+                project_tags, dict
             ):
                 tags.update(project_tags)
             tags_by_paper[record.paper_id] = tags
@@ -1036,11 +3103,9 @@ class PlanningService:
             bucket.extend(paper_id for paper_id in paper_ids if paper_id not in bucket)
         still_unresolved = list(semantic.get(ROUTING_REQUIRED_LABEL) or [])
         if still_unresolved:
-            # A built-in outline must remain actionable.  When the configured
-            # taxonomy cannot confidently name a narrower category, keep the
-            # papers in an explicit analytical boundary section instead of a
-            # workflow-only placeholder that blocks Blueprint confirmation.
-            repaired[CROSS_CATEGORY_BOUNDARY_LABEL] = still_unresolved
+            # Keep unresolved classification as workflow state. It must not be
+            # converted into a reader-facing catch-all or "boundary" chapter.
+            repaired[ROUTING_REQUIRED_LABEL] = still_unresolved
         return repaired or groups
 
     def _auto_repair_generated_routing_sections(
@@ -1051,21 +3116,26 @@ class PlanningService:
         *,
         outline_style: str,
         taxonomy_profile: str,
+        tag_key_override: str = "",
+        axis_label_override: str = "",
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Resolve system-created routing placeholders before Blueprint build.
 
         User-authored catch-all sections remain subject to the normal academic
         gate.  Only the exact placeholder emitted by older built-in outline
-        versions is repaired automatically.  Taxonomy matches are merged into
+        versions is repaired automatically. Taxonomy matches are merged into
         an existing same-title section when possible; otherwise a defensible
-        category is inserted before the conclusion.  Truly unresolved sources
-        enter a named cross-category boundary analysis rather than ``Other``.
+        category is inserted before the conclusion. Truly unresolved primary
+        studies remain explicit Matrix routing state instead of being relabeled
+        as Introduction context or exposed as a reader-facing ``Other`` section.
         """
 
         style = str(outline_style or "").casefold()
         definition = OUTLINE_STYLES.get(style)
         if definition is None:
             return sections, []
+        routing_tag_key = str(tag_key_override or definition["tag_key"])
+        routing_axis_label = str(axis_label_override or definition["axis"])
 
         repaired = deepcopy(sections)
         repairable_titles = {
@@ -1098,7 +3168,7 @@ class PlanningService:
         semantic = self._semantic_outline_groups(
             unresolved_rows,
             text_by_paper,
-            tag_key=definition["tag_key"],
+            tag_key=routing_tag_key,
             taxonomy_profile=taxonomy_profile,
         )
         grouped: dict[str, list[str]] = {
@@ -1108,8 +3178,6 @@ class PlanningService:
         }
         routed = {paper_id for paper_ids in grouped.values() for paper_id in paper_ids}
         still_unresolved = [paper_id for paper_id in unresolved_ids if paper_id not in routed]
-        if still_unresolved:
-            grouped[CROSS_CATEGORY_BOUNDARY_LABEL] = still_unresolved
 
         repaired = [
             section
@@ -1136,36 +3204,49 @@ class PlanningService:
                 for index in placeholder_indexes
             )
         )
+        if still_unresolved:
+            adjustments.append(
+                {
+                    "source_section": ", ".join(source_titles),
+                    "target_section": "Matrix routing unresolved",
+                    "paper_ids": list(still_unresolved),
+                    "method": "unresolved_classification_retained",
+                    "created_section": False,
+                }
+            )
         for label, paper_ids in grouped.items():
-            target = existing_by_title.get(label.casefold())
+            public_label = publication_section_title("", label)
+            target = existing_by_title.get(public_label.casefold())
             created = target is None
             if target is None:
                 target = {
-                    "title": label,
+                    "title": public_label,
                     "paper_ids": [],
                     "context_paper_ids": [],
                     "section_role": "body",
                     "purpose": (
-                        f"compare the selected papers within this {definition['axis']} "
+                        f"compare the selected papers within this {routing_axis_label} "
                         "category and state its evidence boundaries."
                     ),
                     "notes": "Automatically routed from a system-generated placeholder.",
                 }
+                if label == CROSS_CATEGORY_BOUNDARY_LABEL:
+                    target["boundary_rationale"] = (
+                        "The available source evidence does not support assigning these papers "
+                        "to one primary-axis category; retain them for explicit cross-category "
+                        "comparison until a narrower evidence-backed route is available."
+                    )
                 repaired.insert(insert_at, target)
                 insert_at += 1
-                existing_by_title[label.casefold()] = target
+                existing_by_title[public_label.casefold()] = target
             bucket = target.setdefault("paper_ids", [])
             bucket.extend(paper_id for paper_id in paper_ids if paper_id not in bucket)
             adjustments.append(
                 {
                     "source_section": ", ".join(source_titles),
-                    "target_section": label,
+                    "target_section": public_label,
                     "paper_ids": list(paper_ids),
-                    "method": (
-                        "taxonomy_evidence_match"
-                        if label != CROSS_CATEGORY_BOUNDARY_LABEL
-                        else "cross_category_boundary_fallback"
-                    ),
+                    "method": "taxonomy_evidence_match",
                     "created_section": created,
                 }
             )
@@ -1214,6 +3295,36 @@ class PlanningService:
                 contextual.append(paper_id)
         return contextual
 
+    @staticmethod
+    def _sanitize_generated_outline_titles(
+        sections: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Keep classification diagnostics out of reader-facing headings."""
+
+        repaired = deepcopy(sections)
+        adjustments: list[dict[str, Any]] = []
+        for section in repaired:
+            if str(section.get("section_role") or "body").casefold() != "body":
+                continue
+            original = str(section.get("title") or "").strip()
+            public = sanitize_internal_section_title(
+                original,
+                topic_partition=section.get("topic_partition"),
+            )
+            if not public or public == original:
+                continue
+            section["title"] = public
+            adjustments.append(
+                {
+                    "source_section": original,
+                    "target_section": public,
+                    "paper_ids": list(section.get("paper_ids") or []),
+                    "method": "publication_title_sanitization",
+                    "created_section": False,
+                }
+            )
+        return repaired, adjustments
+
     def _realign_generated_body_sections(
         self,
         sections: list[dict[str, Any]],
@@ -1222,6 +3333,8 @@ class PlanningService:
         *,
         outline_style: str,
         taxonomy_profile: str,
+        tag_key_override: str = "",
+        axis_label_override: str = "",
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Realign a system outline when scientific facts contradict old routing.
 
@@ -1234,6 +3347,8 @@ class PlanningService:
         definition = OUTLINE_STYLES.get(str(outline_style or "").casefold())
         if definition is None:
             return deepcopy(sections), []
+        routing_tag_key = str(tag_key_override or definition["tag_key"])
+        routing_axis_label = str(axis_label_override or definition["axis"])
         body_paper_ids = list(
             dict.fromkeys(
                 str(paper_id)
@@ -1264,16 +3379,14 @@ class PlanningService:
                 if str(row.get("paper_id") or "").strip() in fact_evidence_ids
             ],
             text_by_paper,
-            tag_key=definition["tag_key"],
+            tag_key=routing_tag_key,
             taxonomy_profile=taxonomy_profile,
         )
         target_by_paper: dict[str, str] = {}
         for label, paper_ids in semantic.items():
-            target = (
-                CROSS_CATEGORY_BOUNDARY_LABEL
-                if label == ROUTING_REQUIRED_LABEL
-                else label
-            )
+            if label == ROUTING_REQUIRED_LABEL:
+                continue
+            target = label
             for paper_id in paper_ids:
                 target_by_paper.setdefault(str(paper_id), target)
 
@@ -1301,8 +3414,20 @@ class PlanningService:
         adjustments: list[dict[str, Any]] = []
         for source, source_papers in body_snapshot:
             source_title = str(source.get("title") or "").strip()
+            source_partition = str(source.get("topic_partition") or "").strip()
             for paper_id in source_papers:
-                target_title = target_by_paper.get(str(paper_id))
+                target_category = target_by_paper.get(str(paper_id))
+                if not target_category:
+                    continue
+                display_category = target_category
+                target_title = publication_section_title(
+                    _capitalize_outline_heading(source_partition),
+                    (
+                        _capitalize_outline_heading(display_category)
+                        if source_partition
+                        else display_category
+                    ),
+                )
                 if not target_title or target_title.casefold() == source_title.casefold():
                     continue
                 source["paper_ids"] = [
@@ -1318,8 +3443,9 @@ class PlanningService:
                         "paper_ids": [],
                         "context_paper_ids": [],
                         "section_role": "body",
+                        "topic_partition": source_partition,
                         "purpose": (
-                            f"compare the selected papers within this {definition['axis']} "
+                            f"compare the selected papers within this {routing_axis_label} "
                             "category and state its evidence boundaries."
                         ),
                         "notes": "Automatically realigned from source-addressable scientific facts.",
@@ -1345,6 +3471,259 @@ class PlanningService:
             or bool(section.get("paper_ids"))
         ]
         return repaired, adjustments
+
+    def _topic_outline_document(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        tags_by_paper: dict[str, dict[str, Any]],
+        text_by_paper: dict[str, str],
+        taxonomy_profile: str,
+        intent: dict[str, Any],
+    ) -> str:
+        """Build a Matrix-grounded outline from explicit Topic organization.
+
+        The Topic controls the hierarchy, while Matrix evidence controls paper
+        placement. This prevents the recommendation from becoming a decorative
+        restatement of the prompt or assigning papers by prompt words alone.
+        """
+
+        primary_axis = str(intent.get("primary_axis") or "reaction_type")
+        secondary_axes = [
+            str(axis)
+            for axis in intent.get("secondary_axes") or []
+            if str(axis) and str(axis) != primary_axis
+        ]
+        partitions = [
+            _clean_topic_partition(label)
+            for label in (
+                intent.get("required_partitions")
+                or intent.get("partitions")
+                or []
+            )
+            if _clean_topic_partition(label)
+        ]
+        comparison_dimensions = [
+            str(value).strip()
+            for value in (
+                intent.get("comparison_dimensions")
+                or intent.get("named_systems")
+                or []
+            )
+            if str(value).strip()
+        ]
+        focus_dimensions = [
+            str(value).strip()
+            for value in (
+                intent.get("focus_dimensions")
+                or intent.get("outcome_dimensions")
+                or intent.get("requested_outcomes")
+                or []
+            )
+            if str(value).strip()
+        ]
+        contextual_paper_ids = self._contextual_outline_paper_ids(
+            rows,
+            tags_by_paper,
+            text_by_paper,
+        )
+        for row in rows:
+            paper_id = str(row.get("paper_id") or "").strip()
+            positively_out_of_scope = any(
+                isinstance(outcome, dict)
+                and str(outcome.get("status") or "") == "out_of_scope"
+                and bool(outcome.get("evidence_refs"))
+                for outcome in row.get("classification_outcomes") or []
+            ) or (
+                str(
+                    (row.get("topic_partition_classification") or {}).get("status")
+                    or ""
+                )
+                == "out_of_scope"
+                and bool(
+                    (row.get("topic_partition_classification") or {}).get(
+                        "evidence_refs"
+                    )
+                )
+            )
+            if paper_id and positively_out_of_scope and paper_id not in contextual_paper_ids:
+                contextual_paper_ids.append(paper_id)
+        contextual_set = set(contextual_paper_ids)
+        analytical_rows = [
+            row
+            for row in rows
+            if str(row.get("paper_id") or "").strip() not in contextual_set
+        ]
+        partitioned_rows: dict[str, list[dict[str, Any]]] = {}
+        if partitions:
+            for row in analytical_rows:
+                paper_id = str(row.get("paper_id") or "").strip()
+                label = _topic_partition_for_row(
+                    row,
+                    partitions,
+                    text_by_paper.get(paper_id, ""),
+                )
+                partitioned_rows.setdefault(label, []).append(row)
+        else:
+            partitioned_rows[""] = analytical_rows
+
+        primary_label = str(
+            intent.get("primary_axis_label")
+            or (TOPIC_AXIS_LABELS.get(primary_axis) or {}).get("en")
+            or primary_axis.replace("_", " ")
+        )
+        secondary_axis_labels = dict(intent.get("secondary_axis_labels") or {})
+        secondary_labels = [
+            str(
+                secondary_axis_labels.get(axis)
+                or (TOPIC_AXIS_LABELS.get(axis) or {}).get("en")
+                or axis.replace("_", " ")
+            )
+            for axis in secondary_axes
+        ]
+        structure_description = primary_label
+        if secondary_labels:
+            structure_description += ", with " + ", ".join(secondary_labels) + " as secondary axes"
+        if partitions:
+            structure_description += "; separate " + " versus ".join(partitions)
+        if focus_dimensions:
+            structure_description += "; cover " + ", ".join(focus_dimensions)
+        ordered_partitions = [
+            *[label for label in partitions if label in partitioned_rows],
+            *[label for label in partitioned_rows if label not in partitions],
+        ]
+        groups_by_partition: dict[str, dict[str, list[str]]] = {}
+        for partition in ordered_partitions:
+            groups = self._outline_groups(
+                partitioned_rows.get(partition) or [],
+                tags_by_paper,
+                text_by_paper,
+                tag_key=primary_axis,
+                taxonomy_profile=taxonomy_profile,
+            )
+            # An unresolved primary-study route is not evidence that the paper
+            # is a review or an Introduction-only source. Keep its Matrix
+            # routing status explicit instead of silently changing its role.
+            groups.pop(ROUTING_REQUIRED_LABEL, None)
+            groups_by_partition[partition] = groups
+        lines = [
+            "# Selected Outline",
+            "",
+            f"Primary structure: Topic-guided ({structure_description}).",
+            (
+                "This system-recommended organization is grounded in the selected Matrix evidence and remains editable before Blueprint generation."
+                if intent.get("system_recommended")
+                else "This recommendation implements the explicit organization instructions in the user Topic and remains editable before Blueprint generation."
+            ),
+            "",
+            "## Introduction",
+            "Section role: introduction",
+            "Purpose: define the review terminology, scope, explicit focus dimensions, and the evidence basis for the Topic-requested organization.",
+        ]
+        if focus_dimensions:
+            lines.append(
+                "Focus dimensions: " + ", ".join(focus_dimensions) + "."
+            )
+        if contextual_paper_ids:
+            lines.extend(
+                [
+                    f"Context papers: {', '.join(contextual_paper_ids)}.",
+                    "Notes: Use field-level sources for terminology and historical framing, not as primary body evidence.",
+                ]
+            )
+        lines.append("")
+
+        body_index = 0
+        for partition in ordered_partitions:
+            partition_rows = partitioned_rows.get(partition) or []
+            groups = groups_by_partition.get(partition) or {}
+            for group, paper_ids in groups.items():
+                if not paper_ids:
+                    continue
+                body_index += 1
+                partition_label = (
+                    _capitalize_outline_heading(partition) if partition else ""
+                )
+                group_title = _capitalize_outline_heading(group)
+                title = publication_section_title(partition_label, group_title)
+                purpose_parts = [
+                    f"compare the selected evidence within this {primary_label} category"
+                ]
+                if secondary_labels:
+                    purpose_parts.append(
+                        "compare " + ", ".join(secondary_labels) + " within the category"
+                    )
+                if comparison_dimensions:
+                    purpose_parts.append(
+                        "track the explicitly named comparison examples where supported: "
+                        + ", ".join(comparison_dimensions)
+                    )
+                if focus_dimensions:
+                    purpose_parts.append(
+                        "cover the requested focus dimensions where supported: "
+                        + ", ".join(focus_dimensions)
+                    )
+                paper_id_set = set(paper_ids)
+                group_rows = [
+                    row
+                    for row in partition_rows
+                    if str(row.get("paper_id") or "") in paper_id_set
+                ]
+                represented_secondary: dict[str, list[str]] = {}
+                for secondary_axis in secondary_axes:
+                    secondary_groups = self._outline_groups(
+                        group_rows,
+                        tags_by_paper,
+                        text_by_paper,
+                        tag_key=secondary_axis,
+                        taxonomy_profile=taxonomy_profile,
+                    )
+                    represented_secondary[secondary_axis] = [
+                        label
+                        for label, assigned in secondary_groups.items()
+                        if assigned and label != ROUTING_REQUIRED_LABEL
+                    ]
+                lines.extend(
+                    [
+                        f"## {body_index}. {title}",
+                        "Section role: body",
+                        f"Assigned papers: {', '.join(paper_ids)}.",
+                        *(
+                            [f"Topic partition: {partition}."]
+                            if partition in partitions
+                            else []
+                        ),
+                        "Purpose: " + "; ".join(purpose_parts) + ".",
+                    ]
+                )
+                notes: list[str] = []
+                for secondary_axis, represented in represented_secondary.items():
+                    if represented:
+                        notes.append(
+                            str(
+                                secondary_axis_labels.get(secondary_axis)
+                                or (TOPIC_AXIS_LABELS.get(secondary_axis) or {}).get("en")
+                                or secondary_axis.replace("_", " ")
+                            ).capitalize()
+                            + " represented by assigned evidence: "
+                            + ", ".join(represented)
+                            + "."
+                        )
+                if notes:
+                    normalized_notes = " ".join(
+                        note.removeprefix("Notes: ").strip() for note in notes
+                    )
+                    lines.append(f"Notes: {normalized_notes}")
+                lines.append("")
+        lines.extend(
+            [
+                "## Cross-regime comparison, limitations, and outlook",
+                "Section role: conclusion",
+                "Purpose: compare the primary categories, secondary axes, explicit focus dimensions, evidence boundaries, limitations, and future directions across the Topic-requested partitions.",
+                "",
+            ]
+        )
+        return "\n".join(lines)
 
     def _outline_document(
         self,
@@ -1374,6 +3753,9 @@ class PlanningService:
             tag_key=definition["tag_key"],
             taxonomy_profile=taxonomy_profile,
         )
+        # Only document-scope evidence may create an Introduction context
+        # source. Failed taxonomy routing remains an explicit Matrix state.
+        groups.pop(ROUTING_REQUIRED_LABEL, None)
         lines = [
             "# Selected Outline",
             "",
@@ -1393,15 +3775,16 @@ class PlanningService:
             )
         lines.append("")
         for index, (label, paper_ids) in enumerate(groups.items(), start=1):
-            lines.extend(
-                [
-                    f"## {index}. {label}",
-                    "Section role: body",
-                    f"Assigned papers: {', '.join(paper_ids)}.",
-                    f"Purpose: compare the selected papers within this {definition['axis']} category.",
-                    "",
-                ]
+            public_label = publication_section_title(
+                "", _capitalize_outline_heading(label)
             )
+            block = [
+                f"## {index}. {public_label}",
+                "Section role: body",
+                f"Assigned papers: {', '.join(paper_ids)}.",
+                f"Purpose: compare the selected papers within this {definition['axis']} category.",
+            ]
+            lines.extend([*block, ""])
         lines.extend(
             [
                 "## Cross-category comparison and conclusion",
@@ -1456,6 +3839,9 @@ class PlanningService:
 
     def get(self, principal: Principal, project_id: str) -> dict[str, Any]:
         matrix, matrix_artifact = self._matrix(principal, project_id)
+        matrix, bibliography_metadata_artifact_ids = self._with_current_bibliography(
+            principal, matrix
+        )
         discovery, _discovery_artifact = self._read_json(
             principal, project_id, DISCOVERY_LOGICAL_NAME, required=False
         )
@@ -1477,6 +3863,14 @@ class PlanningService:
         rows = matrix["rows"]
         project = self._owned_project(principal, project_id)
         tags_by_paper, text_by_paper = self._outline_sources(principal, rows)
+        review_topic = str(
+            matrix.get("review_topic") or (discovery or {}).get("topic") or ""
+        )
+        topic_intent = _topic_outline_intent(
+            review_topic,
+            discovery,
+            list(matrix.get("classification_axes") or []),
+        )
         selected_ids: list[str] = []
         for group in (discovery or {}).get("results") or []:
             if not isinstance(group, dict) or group.get("keep") is False:
@@ -1510,14 +3904,38 @@ class PlanningService:
                 "source": "builtin",
             }
             for style, definition in OUTLINE_STYLES.items()
+            if style != TOPIC_GUIDED_STYLE
         ]
+        if topic_intent.get("available"):
+            generated.insert(
+                0,
+                {
+                    "candidate_id": TOPIC_GUIDED_STYLE,
+                    "outline_style": TOPIC_GUIDED_STYLE,
+                    "labels": {
+                        "en": "Recommended from your Topic",
+                        "zh": "根据你的 Topic 推荐",
+                    },
+                    "outline_md": self._topic_outline_document(
+                        rows,
+                        tags_by_paper=tags_by_paper,
+                        text_by_paper=text_by_paper,
+                        taxonomy_profile=project.taxonomy_profile,
+                        intent=topic_intent,
+                    ),
+                    "source": "topic",
+                    "topic_outline_intent": topic_intent,
+                },
+            )
         if outline_artifact is not None and outline is not None:
             generated.append(
                 {
                     "candidate_id": "saved-current",
                     "outline_style": outline.get("outline_style", "custom"),
                     "labels": {"en": "Saved outline", "zh": "已保存大纲"},
-                    "outline_md": str(outline.get("outline_md") or ""),
+                    "outline_md": _sanitize_outline_markdown_headings(
+                        outline.get("outline_md")
+                    ),
                     "source": "saved",
                     "artifact_id": outline_artifact.id,
                 }
@@ -1564,10 +3982,37 @@ class PlanningService:
             and blueprint_state is not None
             and blueprint_state.status != "stale"
         )
+        public_outline = deepcopy(outline) if isinstance(outline, dict) else None
+        if public_outline is not None:
+            public_outline["outline_md"] = _sanitize_outline_markdown_headings(
+                public_outline.get("outline_md")
+            )
+        public_blueprint = (
+            deepcopy(blueprint) if isinstance(blueprint, dict) else None
+        )
+        if public_blueprint is not None:
+            for section in public_blueprint.get("sections") or []:
+                if not isinstance(section, dict):
+                    continue
+                section["title"] = sanitize_internal_section_title(
+                    section.get("title"),
+                    topic_partition=section.get("topic_partition"),
+                )
+            public_blueprint["section_writing_plan_md"] = (
+                _sanitize_outline_markdown_headings(
+                    public_blueprint.get("section_writing_plan_md")
+                )
+            )
         scope_contract = dict((outline or {}).get("scope_contract") or {})
         scope_report = dict((outline or {}).get("scope_diagnostics") or {})
         coverage_report = dict((outline or {}).get("coverage_diagnostics") or {})
         basis = dict((outline or {}).get("classification_basis") or {})
+        public_classification_contract = dict(
+            (blueprint or {}).get("classification_contract")
+            or (outline or {}).get("classification_contract")
+            or matrix.get("classification_contract")
+            or {}
+        )
         outline_diagnostics = dict((outline or {}).get("taxonomy_diagnostics") or {})
         enrichment_jobs = self.repository.list_project_jobs(
             principal.user_id, project_id, job_type="matrix.enrich", limit=20
@@ -1591,9 +4036,10 @@ class PlanningService:
         )
         return {
             "project_id": project_id,
-            "topic": str(matrix.get("review_topic") or (discovery or {}).get("topic") or ""),
+            "topic": review_topic,
             "literature_matrix": matrix,
             "matrix_artifact_id": matrix_artifact.id,
+            "bibliography_metadata_artifact_ids": bibliography_metadata_artifact_ids,
             "matrix_revision": matrix_state.revision if matrix_state else 0,
             "matrix_sync": {**matrix_sync, "selection_current": selection_current},
             "matrix_enrichment": {
@@ -1618,10 +4064,12 @@ class PlanningService:
                 "selected_paper_ids": selected_ids,
                 "selection_current": selection_current,
             },
-            "selected_outline_md": str((outline or {}).get("outline_md") or ""),
+            "selected_outline_md": str(
+                (public_outline or {}).get("outline_md") or ""
+            ),
             "outline_selection": (
-                {**outline, "artifact_id": outline_artifact.id}
-                if outline is not None and outline_artifact is not None
+                {**public_outline, "artifact_id": outline_artifact.id}
+                if public_outline is not None and outline_artifact is not None
                 else None
             ),
             "outline_current": outline_current,
@@ -1635,6 +4083,7 @@ class PlanningService:
                 or coverage_report
             ),
             "classification_basis": basis,
+            "classification_contract": public_classification_contract,
             "taxonomy_diagnostics": dict(
                 (blueprint or {}).get("taxonomy_diagnostics")
                 or outline_diagnostics
@@ -1643,12 +4092,12 @@ class PlanningService:
             "reference_outline_candidates": reference_candidates,
             "legacy_reference_outline_count": len(all_reference_candidates)
             - len(reference_candidates),
-            "section_blueprint": blueprint,
+            "section_blueprint": public_blueprint,
             "blueprint_artifact_id": blueprint_artifact.id if blueprint_artifact else None,
             "blueprint_revision": blueprint_state.revision if blueprint_state else 0,
             "blueprint_current": blueprint_current,
             "section_writing_plan_md": str(
-                (blueprint or {}).get("section_writing_plan_md") or ""
+                (public_blueprint or {}).get("section_writing_plan_md") or ""
             ),
             "workspace": {
                 "active_stage": "planning",
@@ -1788,10 +4237,28 @@ class PlanningService:
     ) -> dict[str, Any]:
         principal.require(Permission.PROJECT_WRITE)
         matrix, matrix_artifact = self._matrix(principal, project_id)
+        matrix, _bibliography_metadata_artifact_ids = self._with_current_bibliography(
+            principal, matrix
+        )
         project = self._owned_project(principal, project_id)
         rows = matrix["rows"]
         matrix_ids = set(_paper_ids(rows))
         style = str(outline_style or "").strip().casefold()
+        discovery, _discovery_artifact = self._read_json(
+            principal,
+            project_id,
+            DISCOVERY_LOGICAL_NAME,
+            required=False,
+        )
+        review_topic = str(
+            matrix.get("review_topic") or (discovery or {}).get("topic") or ""
+        )
+        topic_intent = _topic_outline_intent(
+            review_topic,
+            discovery,
+            list(matrix.get("classification_axes") or []),
+        )
+        topic_text_by_paper: dict[str, str] = {}
         if style == "custom" and not manual:
             markdown = ""
             complete = False
@@ -1823,6 +4290,24 @@ class PlanningService:
                 raise WorkflowValidationError("Unknown outline style.")
             markdown = self._validate_outline(str(outline_md or ""), matrix_ids)
             complete = True
+        elif style == TOPIC_GUIDED_STYLE:
+            if not topic_intent.get("available"):
+                raise WorkflowValidationError(
+                    "The Topic does not contain a usable organization instruction."
+                )
+            tags_by_paper, text_by_paper = self._outline_sources(principal, rows)
+            topic_text_by_paper = text_by_paper
+            markdown = self._validate_outline(
+                self._topic_outline_document(
+                    rows,
+                    tags_by_paper=tags_by_paper,
+                    text_by_paper=text_by_paper,
+                    taxonomy_profile=project.taxonomy_profile,
+                    intent=topic_intent,
+                ),
+                matrix_ids,
+            )
+            complete = True
         else:
             if style not in OUTLINE_STYLES:
                 raise WorkflowValidationError("Unknown outline style.")
@@ -1842,7 +4327,6 @@ class PlanningService:
             required=False,
         )
         parsed_sections = _outline_sections(markdown) if complete else []
-        diagnostics = taxonomy_diagnostics(parsed_sections, _paper_ids(rows))
         previous_scope = (
             (current_outline or {}).get("scope_contract")
             if isinstance(current_outline, dict)
@@ -1858,28 +4342,160 @@ class PlanningService:
             and previous_style == style
         ):
             scope_input = previous_scope
+        scope_seed = dict(scope_input or {})
+        scope_seed.setdefault(
+            "coverage_mode", str(matrix.get("coverage_mode") or "local_bounded")
+        )
+        discovery_coverage = matrix.get("coverage_diagnostics")
+        if isinstance(discovery_coverage, dict):
+            scope_seed.setdefault(
+                "discovery_coverage_diagnostics", deepcopy(discovery_coverage)
+            )
+        scope_style = (
+            "reaction"
+            if style == TOPIC_GUIDED_STYLE
+            and topic_intent.get("primary_axis") == "reaction_type"
+            else "catalyst"
+            if style == TOPIC_GUIDED_STYLE
+            and topic_intent.get("primary_axis") == "catalyst_or_method"
+            else "substrate"
+            if style == TOPIC_GUIDED_STYLE
+            and topic_intent.get("primary_axis") == "substrate"
+            else style
+        )
         scope = derive_scope_contract(
             matrix.get("review_topic"),
-            style,
+            scope_style,
             rows,
-            current=scope_input,
+            current=scope_seed,
         )
+        if style == TOPIC_GUIDED_STYLE:
+            scope["primary_navigation_axis"] = str(
+                topic_intent.get("primary_axis") or "reaction_type"
+            )
+            scope["secondary_axes"] = list(topic_intent.get("secondary_axes") or [])
         scope_report = scope_diagnostics(scope)
         coverage_report = coverage_diagnostics(scope, rows)
-        basis = classification_basis(style)
+        basis = classification_basis(scope_style)
+        if style == TOPIC_GUIDED_STYLE:
+            required_partitions = list(
+                topic_intent.get("required_partitions")
+                or topic_intent.get("partitions")
+                or []
+            )
+            if not topic_text_by_paper:
+                _topic_tags, topic_text_by_paper = self._outline_sources(
+                    principal, rows
+                )
+            represented_partitions = {
+                label
+                for row in rows
+                if (
+                    label := _topic_partition_for_row(
+                        row,
+                        required_partitions,
+                        topic_text_by_paper.get(
+                            str(row.get("paper_id") or ""), ""
+                        ),
+                    )
+                )
+                in required_partitions
+            }
+            partition_coverage_boundaries = {
+                partition: {
+                    "reason": (
+                        "No selected Matrix paper currently has a source-supported, "
+                        "high-confidence route to this independently requested partition."
+                    ),
+                    "source": "matrix_evidence_partition_classifier",
+                }
+                for partition in required_partitions
+                if partition not in represented_partitions
+            }
+            basis.update(
+                {
+                    "primary_axis": scope["primary_navigation_axis"],
+                    "overview_axis": scope["primary_navigation_axis"],
+                    "orthogonal_axes": list(topic_intent.get("secondary_axes") or []),
+                    "overview_secondary_axes": list(
+                        topic_intent.get("secondary_axes") or []
+                    ),
+                    "topic_partitions": required_partitions,
+                    "required_outline_partitions": required_partitions,
+                    "topic_partition_coverage_boundaries": partition_coverage_boundaries,
+                    "topic_comparison_dimensions": list(
+                        topic_intent.get("comparison_dimensions")
+                        or topic_intent.get("named_systems")
+                        or []
+                    ),
+                    "topic_axis_examples": dict(
+                        topic_intent.get("axis_examples") or {}
+                    ),
+                    "topic_outcome_dimensions": list(
+                        topic_intent.get("focus_dimensions")
+                        or topic_intent.get("outcome_dimensions")
+                        or topic_intent.get("requested_outcomes")
+                        or []
+                    ),
+                    "topic_focus_dimensions": list(
+                        topic_intent.get("focus_dimensions")
+                        or topic_intent.get("outcome_dimensions")
+                        or topic_intent.get("requested_outcomes")
+                        or []
+                    ),
+                    "partition_trace_policy": str(
+                        topic_intent.get("partition_trace_policy")
+                        or "source_bounded_model_or_section_contract"
+                    ),
+                    "boundary_policy": "explicit_rationale_allowed",
+                    "source": "explicit_user_topic",
+                }
+            )
+        selected_axis_contract = canonical_classification_contract(
+            (
+                (topic_intent.get("classification_contract") or {}).get("axes")
+                if style == TOPIC_GUIDED_STYLE
+                and isinstance(topic_intent.get("classification_contract"), dict)
+                else matrix.get("classification_axes") or []
+            ),
+            primary_axis_hint=str(
+                scope.get("primary_navigation_axis")
+                or basis.get("primary_axis")
+                or ""
+            ),
+            source="selected_outline",
+        )
+        basis = _basis_with_axis_contract(basis, selected_axis_contract)
+        diagnostics = taxonomy_diagnostics(
+            parsed_sections,
+            _paper_ids(rows),
+            classification_contract=basis,
+        )
         payload = {
             "schema_version": ACADEMIC_SCHEMA_VERSION,
             "outline_style": style,
             "outline_md": markdown,
             "outline_complete": complete,
-            "selection_source": "manual" if manual else "custom_draft" if not complete else "template",
+            "selection_source": (
+                "manual"
+                if manual
+                else "custom_draft"
+                if not complete
+                else "topic_recommendation"
+                if style == TOPIC_GUIDED_STYLE
+                else "template"
+            ),
             "manually_edited": bool(manual),
             "source_matrix_artifact_id": matrix_artifact.id,
             "scope_contract": scope,
             "scope_diagnostics": scope_report,
             "coverage_diagnostics": coverage_report,
             "classification_basis": basis,
+            "classification_contract": selected_axis_contract,
             "taxonomy_diagnostics": diagnostics,
+            "topic_outline_intent": (
+                topic_intent if style == TOPIC_GUIDED_STYLE else None
+            ),
             "saved_at": utc_now().isoformat(),
         }
         current_state = self.repository.get_stage_state(
@@ -1899,7 +4515,11 @@ class PlanningService:
             and current_outline.get("scope_diagnostics") == scope_report
             and current_outline.get("coverage_diagnostics") == coverage_report
             and current_outline.get("classification_basis") == basis
+            and current_outline.get("classification_contract")
+            == selected_axis_contract
             and current_outline.get("taxonomy_diagnostics") == diagnostics
+            and current_outline.get("topic_outline_intent")
+            == payload.get("topic_outline_intent")
         ):
             return {
                 "project_id": project_id,
@@ -1911,6 +4531,7 @@ class PlanningService:
                 "scope_diagnostics": scope_report,
                 "coverage_diagnostics": coverage_report,
                 "classification_basis": basis,
+                "classification_contract": selected_axis_contract,
                 "taxonomy_diagnostics": diagnostics,
                 "outline_artifact_id": current_outline_artifact.id,
                 "matrix_revision": current_state.revision,
@@ -1951,6 +4572,7 @@ class PlanningService:
             "scope_diagnostics": scope_report,
             "coverage_diagnostics": coverage_report,
             "classification_basis": basis,
+            "classification_contract": selected_axis_contract,
             "taxonomy_diagnostics": diagnostics,
             "outline_artifact_id": published[OUTLINE_LOGICAL_NAME].id,
             "matrix_revision": state.revision,
@@ -2215,7 +4837,16 @@ class PlanningService:
         revision: int,
     ) -> dict[str, Any]:
         principal.require(Permission.PROJECT_WRITE)
+        previous_blueprint, previous_blueprint_artifact = self._read_json(
+            principal, project_id, BLUEPRINT_LOGICAL_NAME, required=False
+        )
+        previous_blueprint_state = self.repository.get_stage_state(
+            principal.user_id, project_id, "blueprint"
+        )
         matrix, matrix_artifact = self._matrix(principal, project_id)
+        matrix, bibliography_metadata_artifact_ids = self._with_current_bibliography(
+            principal, matrix
+        )
         matrix_rows = [
             row for row in matrix.get("rows") or [] if isinstance(row, dict)
         ]
@@ -2248,6 +4879,18 @@ class PlanningService:
         matrix_order = _paper_ids(matrix["rows"])
         auto_routing_adjustments: list[dict[str, Any]] = []
         resolved_outline_md = str(outline["outline_md"])
+        outline_style = str(outline.get("outline_style") or "")
+        routing_style = outline_style
+        routing_tag_key = ""
+        routing_axis_label = ""
+        if outline_style == TOPIC_GUIDED_STYLE:
+            primary_axis = str(
+                (outline.get("topic_outline_intent") or {}).get("primary_axis")
+                or ""
+            )
+            if primary_axis in TOPIC_AXIS_LABELS:
+                routing_tag_key = primary_axis
+                routing_axis_label = TOPIC_AXIS_LABELS[primary_axis]["en"]
         tags_by_paper: dict[str, dict[str, Any]] = {}
         text_by_paper: dict[str, str] = {}
         if not bool(outline.get("manually_edited")):
@@ -2259,18 +4902,26 @@ class PlanningService:
                     parsed,
                     matrix["rows"],
                     text_by_paper,
-                    outline_style=str(outline.get("outline_style") or ""),
+                    outline_style=routing_style,
                     taxonomy_profile=project.taxonomy_profile,
+                    tag_key_override=routing_tag_key,
+                    axis_label_override=routing_axis_label,
                 )
             )
             parsed, evidence_realignments = self._realign_generated_body_sections(
                 parsed,
                 matrix_rows,
                 text_by_paper,
-                outline_style=str(outline.get("outline_style") or ""),
+                outline_style=routing_style,
                 taxonomy_profile=project.taxonomy_profile,
+                tag_key_override=routing_tag_key,
+                axis_label_override=routing_axis_label,
             )
             auto_routing_adjustments.extend(evidence_realignments)
+            parsed, title_adjustments = self._sanitize_generated_outline_titles(
+                parsed
+            )
+            auto_routing_adjustments.extend(title_adjustments)
             contextual_ids = self._contextual_outline_paper_ids(
                 matrix_rows, tags_by_paper, text_by_paper
             )
@@ -2321,7 +4972,7 @@ class PlanningService:
             if auto_routing_adjustments:
                 resolved_outline_md = _outline_markdown_from_sections(
                     parsed,
-                    outline_style=str(outline.get("outline_style") or ""),
+                    outline_style=outline_style,
                     automatically_adjusted=True,
                 )
         prepared = []
@@ -2355,6 +5006,75 @@ class PlanningService:
                     ),
                 }
             )
+
+        scope = derive_scope_contract(
+            matrix.get("review_topic") or (discovery or {}).get("topic"),
+            outline.get("outline_style"),
+            matrix["rows"],
+            current=outline.get("scope_contract")
+            if isinstance(outline.get("scope_contract"), dict)
+            else None,
+        )
+        time_span = (
+            scope.get("time_span") if isinstance(scope.get("time_span"), dict) else {}
+        )
+        scope_year_from = _publication_year(time_span.get("from"))
+        scope_year_to = _publication_year(time_span.get("to"))
+        if scope_year_from is not None and scope_year_to is not None:
+            if scope_year_from > scope_year_to:
+                scope_year_from, scope_year_to = scope_year_to, scope_year_from
+            rows_by_scope_id = {
+                str(row.get("paper_id") or ""): row
+                for row in matrix_rows
+                if str(row.get("paper_id") or "")
+            }
+            for section in prepared:
+                if str(section.get("section_role") or "body") != "body":
+                    continue
+                assigned = list(section.get("paper_ids") or [])
+                outside = [
+                    paper_id
+                    for paper_id in assigned
+                    if (
+                        (year := _matrix_publication_year(
+                            rows_by_scope_id.get(paper_id) or {}
+                        ))
+                        is not None
+                        and not (scope_year_from <= year <= scope_year_to)
+                    )
+                ]
+                if not outside:
+                    continue
+                section["paper_ids"] = [
+                    paper_id for paper_id in assigned if paper_id not in set(outside)
+                ]
+                section["context_paper_ids"] = list(
+                    dict.fromkeys(
+                        [*(section.get("context_paper_ids") or []), *outside]
+                    )
+                )
+                auto_routing_adjustments.append(
+                    {
+                        "source_section": str(section.get("title") or ""),
+                        "target_section": f"Context evidence outside {scope_year_from}–{scope_year_to}",
+                        "paper_ids": outside,
+                        "method": "explicit_time_scope_role_downgrade",
+                        "created_section": False,
+                    }
+                )
+            if not bool(outline.get("manually_edited")):
+                prepared = [
+                    section
+                    for section in prepared
+                    if section.get("section_role") != "body"
+                    or section.get("paper_ids")
+                    or section.get("context_paper_ids")
+                ]
+                resolved_outline_md = _outline_markdown_from_sections(
+                    prepared,
+                    outline_style=outline_style,
+                    automatically_adjusted=bool(auto_routing_adjustments),
+                )
 
         normalized, primary_owner = assign_primary_paper_sections(
             prepared, matrix_order
@@ -2488,6 +5208,12 @@ class PlanningService:
                     "section_id": section["section_id"],
                     "title": section["title"],
                     "section_role": role,
+                    "topic_partition": str(
+                        section.get("topic_partition") or ""
+                    ).strip(),
+                    "boundary_rationale": str(
+                        section.get("boundary_rationale") or ""
+                    ).strip(),
                     "section_thesis": thesis,
                     "review_problem": problem,
                     "major_papers": primary,
@@ -2520,7 +5246,6 @@ class PlanningService:
             )
         if not sections:
             raise WorkflowValidationError("The selected outline contains no usable sections.")
-        diagnostics = taxonomy_diagnostics(sections, matrix_order)
         contextual_paper_ids = list(
             dict.fromkeys(
                 paper_id
@@ -2528,17 +5253,82 @@ class PlanningService:
                 for paper_id in section.get("context_papers") or []
             )
         )
-        scope = derive_scope_contract(
-            matrix.get("review_topic") or (discovery or {}).get("topic"),
-            outline.get("outline_style"),
-            matrix["rows"],
-            current=outline.get("scope_contract")
-            if isinstance(outline.get("scope_contract"), dict)
-            else None,
-        )
         scope_report = scope_diagnostics(scope)
         coverage_report = coverage_diagnostics(scope, matrix["rows"])
-        basis = dict(outline.get("classification_basis") or classification_basis(outline.get("outline_style")))
+        basis = dict(
+            outline.get("classification_basis")
+            or classification_basis(outline.get("outline_style"))
+        )
+        selected_axis_contract = classification_contract_from_document(
+            outline,
+            primary_axis_hint=str(basis.get("primary_axis") or ""),
+            source="blueprint_from_selected_outline",
+        )
+        basis = _basis_with_axis_contract(basis, selected_axis_contract)
+        diagnostics = taxonomy_diagnostics(
+            sections,
+            matrix_order,
+            classification_contract=basis,
+        )
+        restructure_reasons: list[str] = []
+        if auto_routing_adjustments:
+            restructure_reasons.append("evidence_based_paper_routing_changed")
+        if any(
+            str((section.get("evidence_readiness") or {}).get("status") or "")
+            in {"partial", "insufficient"}
+            for section in sections
+            if str(section.get("section_role") or "body") == "body"
+        ):
+            restructure_reasons.append("section_evidence_distribution_is_uneven")
+        for issue in diagnostics.get("issues") or []:
+            if isinstance(issue, dict) and issue.get("rule_id"):
+                restructure_reasons.append(str(issue["rule_id"]))
+        restructure_record = _blueprint_restructure_record(
+            previous_blueprint,
+            sections,
+            previous_artifact_id=(
+                previous_blueprint_artifact.id if previous_blueprint_artifact else ""
+            ),
+            trigger_reasons=restructure_reasons,
+        )
+        current_sections_artifact = self.repository.get_current_artifact(
+            principal.user_id, project_id, "sections/section_drafts.json"
+        )
+        current_draft_artifact = self.repository.get_current_artifact(
+            principal.user_id, project_id, "draft/manuscript.md"
+        )
+        has_manual_draft = bool(
+            current_draft_artifact
+            and (
+                current_draft_artifact.metadata.get("unverified_manual_paragraph_ids")
+                or str(current_draft_artifact.metadata.get("operation") or "")
+                == "full-edit"
+                or str(current_draft_artifact.metadata.get("operation") or "").startswith(
+                    "paragraph-edit:"
+                )
+            )
+        )
+        safe_auto_apply = bool(
+            restructure_record["is_restructure"]
+            and previous_blueprint_state is not None
+            and previous_blueprint_state.status == "approved"
+            and current_sections_artifact is None
+            and current_draft_artifact is None
+            and not bool(outline.get("manually_edited"))
+        )
+        restructure_record.update(
+            {
+                "application_mode": (
+                    "auto_applied_before_section_generation"
+                    if safe_auto_apply
+                    else "candidate_requires_existing_blueprint_confirmation"
+                    if restructure_record["is_restructure"]
+                    else "not_applicable"
+                ),
+                "downstream_sections_present": current_sections_artifact is not None,
+                "manual_draft_content_present": has_manual_draft,
+            }
+        )
         matrix_state = self.repository.get_stage_state(
             principal.user_id, project_id, "matrix"
         )
@@ -2555,12 +5345,37 @@ class PlanningService:
             "scope_diagnostics": scope_report,
             "coverage_diagnostics": coverage_report,
             "classification_basis": basis,
+            "classification_contract": selected_axis_contract,
+            "classification_contract_lineage": {
+                "matrix_fingerprint": str(
+                    classification_contract_from_document(
+                        matrix,
+                        primary_axis_hint=str(
+                            (matrix.get("classification_recommendation") or {}).get(
+                                "primary_axis_id"
+                            )
+                            or ""
+                        ),
+                        source="blueprint_matrix_input",
+                    ).get("fingerprint")
+                    or ""
+                ),
+                "outline_fingerprint": str(
+                    selected_axis_contract.get("fingerprint") or ""
+                ),
+                "effective_fingerprint": str(
+                    selected_axis_contract.get("fingerprint") or ""
+                ),
+                "status": "selected_outline_contract_applied",
+            },
             "taxonomy_profile": project.taxonomy_profile,
             "taxonomy_diagnostics": diagnostics,
             "source_matrix_artifact_id": matrix_artifact.id,
             "source_outline_artifact_id": outline_artifact.id,
+            "source_bibliography_metadata_artifact_ids": bibliography_metadata_artifact_ids,
             "resolved_outline_md": resolved_outline_md,
             "auto_routing_adjustments": auto_routing_adjustments,
+            "restructure_record": restructure_record,
             "rule_pack": "general",
             "rule_pack_path": "references/rule_packs/general",
             "generated_at": utc_now().isoformat(),
@@ -2600,6 +5415,10 @@ class PlanningService:
                 input_snapshot={
                     "matrix_artifact_id": matrix_artifact.id,
                     "outline_artifact_id": outline_artifact.id,
+                    "bibliography_metadata_artifact_ids": bibliography_metadata_artifact_ids,
+                    "classification_contract_fingerprint": str(
+                        selected_axis_contract.get("fingerprint") or ""
+                    ),
                 },
             )
             state = self.repository.promote_stage_artifacts_atomically(
@@ -2609,7 +5428,7 @@ class PlanningService:
                 artifact_ids={BLUEPRINT_LOGICAL_NAME: published[BLUEPRINT_LOGICAL_NAME].id},
                 run_id=run.id,
                 expected_revision=revision,
-                status="review",
+                status="approved" if safe_auto_apply else "review",
                 invalidate_stages=(
                     "sections",
                     "figure-review",
@@ -2625,6 +5444,8 @@ class PlanningService:
             "blueprint_artifact_id": published[BLUEPRINT_LOGICAL_NAME].id,
             "blueprint_revision": state.revision,
             "matrix_revision": matrix_state.revision + 1,
+            "auto_applied": safe_auto_apply,
+            "restructure_record": restructure_record,
         }
 
     def confirm_blueprint(
@@ -2674,4 +5495,123 @@ class PlanningService:
             "status": state.status,
             "next_stage": "sections",
             "next_path": f"/sections?project={project_id}",
+        }
+
+    def restore_blueprint(
+        self,
+        principal: Principal,
+        project_id: str,
+        *,
+        revision: int,
+        artifact_id: str,
+    ) -> dict[str, Any]:
+        """Publish an older Blueprint as a new reviewable version.
+
+        Immutable artifacts are never made current directly: restoring creates
+        a new version with an explicit lineage record, then invalidates only
+        the downstream products that depended on the replaced Blueprint.
+        """
+
+        principal.require(Permission.PROJECT_WRITE)
+        current_blueprint, current_artifact = self._read_json(
+            principal, project_id, BLUEPRINT_LOGICAL_NAME
+        )
+        if current_artifact is None:
+            raise WorkflowNotFound("The current Blueprint was not found.")
+        if str(current_artifact.id) == str(artifact_id):
+            raise WorkflowValidationError(
+                "The selected Blueprint version is already current."
+            )
+
+        resolved = self.artifacts.resolve_owned_artifact(
+            principal.user_id, artifact_id
+        )
+        if (
+            str(resolved.artifact.project_id) != str(project_id)
+            or resolved.artifact.logical_name != BLUEPRINT_LOGICAL_NAME
+        ):
+            raise WorkflowNotFound("Blueprint version not found.")
+        try:
+            restored_source = json.loads(resolved.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise WorkflowConflict("The selected Blueprint version is unreadable.") from exc
+        if not isinstance(restored_source, dict):
+            raise WorkflowConflict("The selected Blueprint version is invalid.")
+
+        _matrix, matrix_artifact = self._matrix(principal, project_id)
+        _outline, outline_artifact = self._read_json(
+            principal, project_id, OUTLINE_LOGICAL_NAME
+        )
+        if (
+            str(restored_source.get("source_matrix_artifact_id") or "")
+            != str(matrix_artifact.id)
+            or str(restored_source.get("source_outline_artifact_id") or "")
+            != str(outline_artifact.id)
+        ):
+            raise WorkflowConflict(
+                "This Blueprint version belongs to an older Matrix or outline and cannot be restored directly. Regenerate a Blueprint from the current planning inputs instead."
+            )
+
+        restored = deepcopy(restored_source)
+        restored["restructure_record"] = {
+            "is_restructure": True,
+            "application_mode": "restored_candidate_requires_confirmation",
+            "previous_blueprint_artifact_id": current_artifact.id,
+            "restored_from_artifact_id": resolved.artifact.id,
+            "trigger_reasons": ["user_restored_previous_blueprint"],
+            "section_mapping": _blueprint_restructure_record(
+                current_blueprint,
+                [
+                    item
+                    for item in restored.get("sections") or []
+                    if isinstance(item, dict)
+                ],
+                previous_artifact_id=current_artifact.id,
+                trigger_reasons=["user_restored_previous_blueprint"],
+            ).get("section_mapping", []),
+            "rollback_supported": True,
+            "created_at": utc_now().isoformat(),
+        }
+        restored["restored_at"] = utc_now().isoformat()
+
+        with self._write_lock:
+            published, run = self._publish_files(
+                principal,
+                project_id,
+                stage_id="blueprint",
+                files={BLUEPRINT_LOGICAL_NAME: (_json_bytes(restored), "json")},
+                input_snapshot={
+                    "operation": "restore_blueprint",
+                    "restored_from_artifact_id": resolved.artifact.id,
+                    "replaced_artifact_id": current_artifact.id,
+                },
+            )
+            state = self.repository.promote_stage_artifacts_atomically(
+                principal.user_id,
+                project_id,
+                "blueprint",
+                artifact_ids={
+                    BLUEPRINT_LOGICAL_NAME: published[BLUEPRINT_LOGICAL_NAME].id
+                },
+                run_id=run.id,
+                expected_revision=revision,
+                status="review",
+                invalidate_stages=(
+                    "sections",
+                    "figure-review",
+                    "figures",
+                    "draft",
+                    "final",
+                ),
+                expected_current_artifacts={
+                    BLUEPRINT_LOGICAL_NAME: current_artifact.id
+                },
+            )
+        return {
+            "project_id": project_id,
+            "section_blueprint": restored,
+            "blueprint_artifact_id": published[BLUEPRINT_LOGICAL_NAME].id,
+            "blueprint_revision": state.revision,
+            "status": state.status,
+            "restored_from_artifact_id": resolved.artifact.id,
         }

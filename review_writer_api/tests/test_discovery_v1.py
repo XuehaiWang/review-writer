@@ -126,6 +126,24 @@ class DiscoveryV1Tests(unittest.TestCase):
                                         "reaction_type": ["allenation"],
                                     },
                                     "evidence": [],
+                                    **(
+                                        {
+                                            "classification_status": "evidence_backed_screening",
+                                            "provisional_screening_tags": [
+                                                {
+                                                    "axis_id": "reaction_type",
+                                                    "partition_id": "allenation",
+                                                    "partition_label": "allenation",
+                                                    "relation_to_paper": "primary_contribution",
+                                                    "confidence": 0.91,
+                                                    "evidence_key": "P001:screening:abstract:test",
+                                                    "support_excerpt": "We report allenation.",
+                                                }
+                                            ],
+                                        }
+                                        if payload["topic"] == "Screened tags"
+                                        else {}
+                                    ),
                                 },
                                 "confirmed_project_tags": {},
                                 "tag_review_status": "pending",
@@ -171,6 +189,24 @@ class DiscoveryV1Tests(unittest.TestCase):
                                         "reaction_type": ["allenation"],
                                     },
                                     "evidence": [],
+                                    **(
+                                        {
+                                            "classification_status": "evidence_backed_screening",
+                                            "provisional_screening_tags": [
+                                                {
+                                                    "axis_id": "reaction_type",
+                                                    "partition_id": "allenation",
+                                                    "partition_label": "allenation",
+                                                    "relation_to_paper": "primary_contribution",
+                                                    "confidence": 0.91,
+                                                    "evidence_key": "P001:screening:abstract:test",
+                                                    "support_excerpt": "We report allenation.",
+                                                }
+                                            ],
+                                        }
+                                        if payload["topic"] == "Screened tags"
+                                        else {}
+                                    ),
                                 },
                                 "confirmed_project_tags": {},
                                 "tag_review_status": "pending",
@@ -228,11 +264,12 @@ class DiscoveryV1Tests(unittest.TestCase):
             review = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
             project = client.get("/api/v1/projects").json()["items"][0]
         self.assertEqual("succeeded", job["status"])
-        self.assertEqual(4, job["progress_current"])
-        self.assertEqual(4, job["progress_total"])
+        self.assertEqual(6, job["progress_current"])
+        self.assertEqual(6, job["progress_total"])
         self.assertEqual(3, review["statistics"]["candidate_count"])
         self.assertEqual(4, review["statistics"]["keyword_hit_count"])
         self.assertEqual(0, review["statistics"]["selected_count"])
+        self.assertFalse(review["hybrid_retrieval"]["matrix_facts_used"])
         self.assertEqual("review", project["discovery_status"])
 
     def test_discovery_job_snapshots_the_project_taxonomy_profile(self) -> None:
@@ -240,6 +277,194 @@ class DiscoveryV1Tests(unittest.TestCase):
             job = self.discover(client)
             self.assertEqual("succeeded", job["status"])
         self.assertEqual("general_academic", self.discovery_payloads[-1]["taxonomy_profile"])
+
+    def test_refresh_can_recover_current_discovery_job_without_resubmitting(self) -> None:
+        repository = self.app.state.workflow_repository
+        current = repository.create_or_get_job(
+            self.first.user_id,
+            self.project_id,
+            "project",
+            "discovery.search",
+            "refresh-recovery",
+            {
+                "topic": "Persisted running topic",
+                "keywords": "",
+                "web_search": False,
+                "project_id": self.project_id,
+                "taxonomy_profile": "general_academic",
+            },
+        )
+        self.assertEqual("queued", current.status)
+
+        with TestClient(self.app) as client:
+            recovered = client.get(
+                f"/api/v1/projects/{self.project_id}/discovery/jobs/current"
+            )
+            duplicate = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/jobs",
+                json={
+                    "topic": "A different accidental resubmission",
+                    "keywords": "",
+                    "web_search": False,
+                },
+                headers=self.headers("refresh-duplicate"),
+            )
+
+        self.assertEqual(200, recovered.status_code, recovered.text)
+        self.assertEqual(current.id, recovered.json()["active_job"]["id"])
+        self.assertEqual(202, duplicate.status_code, duplicate.text)
+        self.assertEqual(current.id, duplicate.json()["id"])
+
+    def test_semantic_recall_does_not_assign_a_concrete_partition_without_lexical_evidence(self) -> None:
+        class FakeLibraryIndex:
+            enabled = True
+            vector_enabled = False
+
+            def __init__(self) -> None:
+                self.promote_p003 = False
+                self.queries = []
+
+            def retrieve_paper_relevance(self, _principal, _queries, _allowed, **_kwargs):
+                self.queries = _queries
+                p003_lexical = 1 if self.promote_p003 else 0
+                return {
+                    "status": "ready",
+                    "semantic_status": "ready",
+                    "rrf_constant": 60,
+                    "papers": {
+                        "P002": {
+                            "paper_id": "P002",
+                            "rrf_score": 0.04,
+                            # Deliberately polluted legacy field: the service
+                            # must recompute assignment from query evidence.
+                            "matched_partitions": ["partition_01", "partition_02"],
+                            "matched_query_ids": ["topic_core", "partition_01", "partition_02"],
+                            "retrieval_channels": ["fulltext_lexical", "semantic"],
+                            "query_matches": {
+                                "partition_01": {
+                                    "lexical_chunk_count": 1,
+                                    "semantic_chunk_count": 1,
+                                },
+                                "partition_02": {
+                                    "lexical_chunk_count": 0,
+                                    "semantic_chunk_count": 1,
+                                },
+                            },
+                            "top_chunks": [],
+                        },
+                        "P003": {
+                            "paper_id": "P003",
+                            "rrf_score": 0.03,
+                            "matched_partitions": ["partition_02"],
+                            "matched_query_ids": ["topic_core", "partition_02"],
+                            "retrieval_channels": ["semantic"],
+                            "query_matches": {
+                                "partition_02": {
+                                    "lexical_chunk_count": p003_lexical,
+                                    "semantic_chunk_count": 1,
+                                }
+                            },
+                            "top_chunks": [],
+                        },
+                    },
+                    "index_statuses": {},
+                }
+
+        fake_index = FakeLibraryIndex()
+        service = self.app.state.discovery_service
+        previous_index = service.library_index
+        service.library_index = fake_index
+        built = {
+            "project_id": self.project_id,
+            "topic": "A general topic organized by Method A and Method B",
+            "query_plan": {
+                "filters": {},
+                "semantic_queries": [
+                    {
+                        "query_id": "topic_core",
+                        "kind": "topic_core",
+                        "label": "Core topic",
+                        "query": "general topic",
+                    },
+                    {
+                        "query_id": "partition_01",
+                        "kind": "topic_partition",
+                        "label": "Method A",
+                        "source_surface": "Method A",
+                        "query": "general topic ; Method A",
+                        "lexical_term_groups": [["general topic"], ["Method A"]],
+                    },
+                    {
+                        "query_id": "partition_02",
+                        "kind": "topic_partition",
+                        "label": "Method B",
+                        "source_surface": "Method B",
+                        "query": "general topic ; Method B",
+                        "lexical_term_groups": [["general topic"], ["Method B"]],
+                    },
+                ],
+            },
+            "results": [
+                {"keyword": "Method A", "category": "catalyst_or_method", "keep": True, "local_results": [], "web_results": []},
+                {"keyword": "Method B", "category": "catalyst_or_method", "keep": True, "local_results": [], "web_results": []},
+            ],
+        }
+        try:
+            screened = service.enrich_hybrid(self.first, self.project_id, built)
+            self.assertEqual("Method A", fake_index.queries[1]["query"])
+            self.assertEqual([["Method A"]], fake_index.queries[1]["lexical_term_groups"])
+            self.assertEqual("topic_core", fake_index.queries[1]["admission_query_id"])
+            by_keyword = {group["keyword"]: group for group in screened["results"]}
+            self.assertEqual([], by_keyword["Method A"]["local_results"])
+            self.assertEqual([], by_keyword["Method B"]["local_results"])
+            pending = next(
+                group
+                for group in screened["results"]
+                if group.get("system_group") == "__topic_candidates_pending_evidence__"
+            )
+            self.assertEqual(
+                ["P002", "P003"],
+                sorted(row["paper_id"] for row in pending["local_results"]),
+            )
+            pending_by_id = {
+                row["paper_id"]: row for row in pending["local_results"]
+            }
+            self.assertEqual(
+                "deferred_to_matrix", pending_by_id["P002"]["classification_status"]
+            )
+            self.assertEqual([], pending_by_id["P002"]["matched_partitions"])
+            self.assertEqual(
+                ["partition_01"],
+                pending_by_id["P002"]["lexical_partition_candidates"],
+            )
+            self.assertEqual(
+                "deferred_to_matrix", pending_by_id["P003"]["classification_status"]
+            )
+            self.assertEqual([], pending_by_id["P003"]["matched_partitions"])
+            self.assertEqual(
+                ["partition_02"],
+                pending_by_id["P003"]["semantic_partition_candidates"],
+            )
+
+            fake_index.promote_p003 = True
+            promoted = service.enrich_hybrid(self.first, self.project_id, screened)
+            promoted_by_keyword = {group["keyword"]: group for group in promoted["results"]}
+            self.assertEqual([], promoted_by_keyword["Method B"]["local_results"])
+            promoted_pending = next(
+                group
+                for group in promoted["results"]
+                if group.get("system_group") == "__topic_candidates_pending_evidence__"
+            )
+            promoted_by_id = {
+                row["paper_id"]: row for row in promoted_pending["local_results"]
+            }
+            self.assertEqual(
+                ["partition_02"],
+                promoted_by_id["P003"]["lexical_partition_candidates"],
+            )
+            self.assertEqual([], promoted_by_id["P003"]["matched_partitions"])
+        finally:
+            service.library_index = previous_index
 
     def test_failed_restart_preserves_current_project(self) -> None:
         with TestClient(self.app) as client:
@@ -689,7 +914,7 @@ class DiscoveryV1Tests(unittest.TestCase):
         )
         self.assertEqual("allenation", matrix_row["base_tags"]["reaction_type"])
 
-    def test_project_tag_suggestions_enter_matrix_without_manual_confirmation(self) -> None:
+    def test_legacy_project_tag_suggestions_remain_provisional_in_matrix(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client)
             selected = client.put(
@@ -703,14 +928,28 @@ class DiscoveryV1Tests(unittest.TestCase):
                 headers=self.headers(),
             ).json()
         matrix_row = confirmed["matrix"]["rows"][0]
-        self.assertEqual("automatic", matrix_row["project_tag_review_status"])
-        self.assertEqual(
-            {
-                "catalyst_or_method": ["copper catalysis"],
-                "reaction_type": ["allenation"],
-            },
-            matrix_row["project_tags"],
-        )
+        self.assertEqual("retrieval_hint_only", matrix_row["project_tag_review_status"])
+        self.assertEqual({}, matrix_row["project_tags"])
+
+    def test_stage_two_screening_tags_cannot_organize_matrix(self) -> None:
+        with TestClient(self.app) as client:
+            self.discover(client, topic="Screened tags")
+            selected = client.put(
+                f"/api/v1/projects/{self.project_id}/discovery/selection/P001",
+                json={"selected": True},
+                headers=self.headers(),
+            ).json()
+            confirmed = client.post(
+                f"/api/v1/projects/{self.project_id}/discovery/confirm",
+                json={"revision": selected["revision"]},
+                headers=self.headers(),
+            ).json()
+        matrix_row = confirmed["matrix"]["rows"][0]
+        self.assertEqual("retrieval_hint_only", matrix_row["project_tag_review_status"])
+        self.assertEqual([], matrix_row["provisional_screening_tags"])
+        self.assertEqual({}, matrix_row["project_tags"])
+        self.assertEqual("deferred_to_matrix", matrix_row["screening_classification_status"])
+        self.assertEqual("matrix_after_selection", matrix_row["classification_stage"])
 
     def test_unverified_library_tags_do_not_enter_matrix(self) -> None:
         with self.sessions.begin() as session:
@@ -739,7 +978,7 @@ class DiscoveryV1Tests(unittest.TestCase):
         matrix_row = confirmed["matrix"]["rows"][0]
         self.assertFalse(matrix_row["base_tags_verified"])
         self.assertEqual({}, matrix_row["base_tags"])
-        self.assertEqual("automatic", matrix_row["project_tag_review_status"])
+        self.assertEqual("retrieval_hint_only", matrix_row["project_tag_review_status"])
 
     def test_failed_atomic_save_keeps_previous_discovery_pointer_and_revision(self) -> None:
         repository = self.app.state.workflow_repository
@@ -837,10 +1076,59 @@ class DiscoveryV1Tests(unittest.TestCase):
             external = review["results"][0]["web_results"][0]
             self.assertEqual("crossref:10.1/example", external["candidate_id"])
             self.assertEqual("crossref", external["source"])
+            self.assertFalse(external["selected_for_matrix"])
+
+            review["results"][0]["web_results"][0]["selected_for_matrix"] = True
+            saved = client.put(
+                f"/api/v1/projects/{self.project_id}/discovery",
+                json={"revision": review["revision"], "results": review["results"]},
+                headers=self.headers(),
+            ).json()
+            self.assertFalse(saved["results"][0]["web_results"][0]["selected_for_matrix"])
 
             self.current = self.second
             hidden = client.get(f"/api/v1/projects/{self.project_id}/discovery")
             self.assertEqual(404, hidden.status_code)
+
+    def test_downloaded_external_candidate_publishes_reviewable_revision_without_matrix_change(self) -> None:
+        with TestClient(self.app) as client:
+            self.discover(client)
+            before = client.get(
+                f"/api/v1/projects/{self.project_id}/discovery"
+            ).json()
+            with self.sessions.begin() as session:
+                paper = session.scalar(
+                    select(LibraryPaper).where(
+                        LibraryPaper.user_id == uuid.UUID(self.first.user_id),
+                        LibraryPaper.paper_id == "P002",
+                    )
+                )
+                metadata = dict(paper.metadata_json)
+                metadata["doi"] = {"value": "10.1/example"}
+                paper.metadata_json = metadata
+
+            refreshed = self.app.state.discovery_service.refresh_external_candidate(
+                self.first,
+                self.project_id,
+                candidate_id="crossref:10.1/example",
+                paper_id="P002",
+                source_revision=before["revision"],
+            )
+            after = client.get(
+                f"/api/v1/projects/{self.project_id}/discovery"
+            ).json()
+
+        self.assertEqual("refreshed", refreshed["status"])
+        self.assertGreater(after["revision"], before["revision"])
+        self.assertFalse(after["has_published_matrix"])
+        self.assertFalse(after["results"][0]["web_results"])
+        local = next(
+            row
+            for row in after["results"][0]["local_results"]
+            if row["paper_id"] == "P002"
+        )
+        self.assertEqual("downloaded_to_library", local["access_status"])
+        self.assertFalse(local["selected_for_matrix"])
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ describe("buildMatrixRecommendation", () => {
     expect([...result.reviewIds]).toEqual(["P002"]);
   });
 
-  it("adds one qualified background representative for an uncovered query group", () => {
+  it("does not treat query-group coverage as a reason to recommend background papers", () => {
     const result = buildMatrixRecommendation([
       { local_results: [{ paper_id: "P001", role: "core_candidate", score: 0.8 }] },
       { local_results: [
@@ -28,8 +28,8 @@ describe("buildMatrixRecommendation", () => {
       ] },
     ]);
 
-    expect([...result.recommendedIds]).toEqual(["P001", "P002"]);
-    expect([...result.reviewIds]).toEqual(["P003"]);
+    expect([...result.recommendedIds]).toEqual(["P001"]);
+    expect([...result.reviewIds]).toEqual(["P002", "P003"]);
   });
 
   it("never recommends excluded, zero-score, uncertain, or inactive-group-only papers", () => {

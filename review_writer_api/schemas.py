@@ -147,6 +147,24 @@ class ModelGatewayResponse(BaseModel):
     cached: bool
 
 
+class EmbeddingGatewayRequest(BaseModel):
+    request_key: str = Field(min_length=1, max_length=128)
+    stage: str = Field(default="", max_length=96)
+    inputs: list[str] = Field(min_length=1, max_length=64)
+
+
+class EmbeddingGatewayResponse(BaseModel):
+    request_id: str
+    provider_request_id: str
+    profile: str
+    model: str
+    dimension: int
+    embeddings: list[list[float]]
+    usage: dict[str, int]
+    cost_usd: str
+    cached: bool
+
+
 class ImageGatewayInput(BaseModel):
     mime_type: str = Field(default="image/png", min_length=1, max_length=100)
     data_base64: str = Field(min_length=1, max_length=40_000_000)

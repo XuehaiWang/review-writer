@@ -14,7 +14,7 @@ function job(overrides: Partial<Job> = {}): Job {
     status: "running",
     result: {},
     progress_current: 2,
-    progress_total: 4,
+    progress_total: 6,
     cancellation_requested: false,
     error_code: "",
     error_message: "",
@@ -38,9 +38,9 @@ describe("DiscoveryJobProgress", () => {
     usePreferences.getState().setLanguage("zh-CN");
     render(<DiscoveryJobProgress job={job()} />);
 
-    expect(screen.getByText("正在分析主题并检索论文")).toBeInTheDocument();
-    expect(screen.getByText("步骤 2/4")).toBeInTheDocument();
-    expect(screen.getByRole("progressbar", { name: "文献检索进度" })).toHaveAttribute("aria-valuenow", "50");
+    expect(screen.getByText("正在检索本地与联网来源")).toBeInTheDocument();
+    expect(screen.getByText("步骤 2/6")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "文献检索进度" })).toHaveAttribute("aria-valuenow", "33");
   });
 
   it("uses an indeterminate bar while the request is being submitted", () => {
@@ -52,10 +52,17 @@ describe("DiscoveryJobProgress", () => {
   });
 
   it("keeps the completed state visible", () => {
-    render(<DiscoveryJobProgress job={job({ status: "succeeded", progress_current: 4 })} />);
+    render(<DiscoveryJobProgress job={job({ status: "succeeded", progress_current: 6 })} />);
 
     expect(screen.getByText("检索完成")).toBeInTheDocument();
     expect(screen.getByRole("progressbar", { name: "文献检索进度" })).toHaveAttribute("aria-valuenow", "100");
+  });
+
+  it("shows the semantic paper aggregation milestone", () => {
+    render(<DiscoveryJobProgress job={job({ progress_current: 4 })} />);
+
+    expect(screen.getByText("正在执行论文级语义召回")).toBeInTheDocument();
+    expect(screen.getByText(/聚合为论文级排序/)).toBeInTheDocument();
   });
 
   it("states that discovery was not run when credit is insufficient", () => {
@@ -79,6 +86,22 @@ describe("DiscoveryJobProgress", () => {
     expect(screen.getByText("Crossref")).toBeInTheDocument();
     expect(screen.getByText("Semantic Scholar")).toBeInTheDocument();
     expect(screen.getByText("失败")).toBeInTheDocument();
+  });
+
+  it("shows persisted per-paper screening progress", () => {
+    render(<DiscoveryJobProgress job={job({ result: { source_progress: {
+      stage: "paper_screening",
+      current: 7,
+      total: 16,
+      cached: 3,
+      running: 3,
+      concurrency: 3,
+    } } })} />);
+
+    expect(screen.getByText("正在进行论文初步证据分类")).toBeInTheDocument();
+    expect(screen.getByText("论文 7/16")).toBeInTheDocument();
+    expect(screen.getByText(/复用缓存 3 篇/)).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "文献检索进度" })).toHaveAttribute("aria-valuenow", "44");
   });
 
   it("labels online sources as disabled when online search was not requested", () => {

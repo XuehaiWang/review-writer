@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from review_writer_core.paper_sources import PaperSearchRequest, SourceSearchResult, search_paper_sources
+from review_writer_core.paper_sources.crossref import CrossrefConnector
 from review_writer_core.paper_sources.deduplicate import deduplicate_candidates
 
 
@@ -60,6 +62,46 @@ class FakeConnector:
 
 
 class MultiSourceSearchTests(unittest.TestCase):
+    def test_crossref_uses_exact_work_endpoint_for_doi_query(self) -> None:
+        connector = CrossrefConnector(max_retries=0)
+        payload = {
+            "message": {
+                "DOI": "10.1002/anie.201204796",
+                "title": ["Enantioselective Decarboxylative Amination"],
+                "author": [{"given": "A.", "family": "Author"}],
+                "issued": {"date-parts": [[2013]]},
+                "container-title": ["Angewandte Chemie International Edition"],
+                "URL": "https://doi.org/10.1002/anie.201204796",
+            }
+        }
+        with patch.object(connector, "_request_json", return_value=payload) as request:
+            result = connector.search(
+                PaperSearchRequest(query="10.1002/anie.201204796", limit=5)
+            )
+
+        requested_url = request.call_args.args[0]
+        self.assertIn("/works/10.1002%2Fanie.201204796", requested_url)
+        self.assertNotIn("query.bibliographic", requested_url)
+        self.assertEqual("completed", result.status)
+        self.assertEqual(2013, result.candidates[0]["year"])
+        self.assertEqual(
+            "10.1002/anie.201204796",
+            result.candidates[0]["identifiers"]["doi"],
+        )
+
+    def test_crossref_uses_bibliographic_search_for_article_title(self) -> None:
+        connector = CrossrefConnector(max_retries=0)
+        payload = {"message": {"items": []}}
+        title = "Preparation of (R)-4-Cyclohexyl-2,3-butadien-1-ol"
+        with patch.object(connector, "_request_json", return_value=payload) as request:
+            result = connector.search(PaperSearchRequest(query=title, limit=5))
+
+        requested_url = request.call_args.args[0]
+        self.assertIn("/works?", requested_url)
+        self.assertIn("query.bibliographic=Preparation", requested_url)
+        self.assertNotIn("/works/preparation", requested_url.casefold())
+        self.assertEqual("completed", result.status)
+
     def test_partial_source_failure_preserves_results_and_deduplicates_strong_ids(self) -> None:
         connectors = [
             FakeConnector(

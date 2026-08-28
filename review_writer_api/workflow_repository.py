@@ -152,6 +152,7 @@ class OwnedProjectRecord:
     slug: str
     topic: str
     taxonomy_profile: str
+    model_tier: str
 
 
 @dataclass(frozen=True)
@@ -326,6 +327,7 @@ class WorkflowRepository:
                 slug=project.slug,
                 topic=project.topic,
                 taxonomy_profile=project.taxonomy_profile,
+                model_tier=project.model_tier,
             )
 
     def get_stage_state(

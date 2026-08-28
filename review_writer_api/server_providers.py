@@ -96,7 +96,9 @@ class ServerProviderSettingsService:
                 str(raw_kind or "").strip().casefold()
             )
         except ValueError as exc:
-            raise ProviderSettingsError("Provider must be one of: mineru, text, image.") from exc
+            raise ProviderSettingsError(
+                "Provider must be one of: mineru, text, image, embedding."
+            ) from exc
 
     def _fallback(self, kind: ProviderKind) -> ServerProviderRuntime:
         if kind is ProviderKind.TEXT:
@@ -113,6 +115,19 @@ class ServerProviderSettingsService:
                 kind.value, self.settings.image_provider_base_url.rstrip("/"),
                 self.settings.image_provider_model or DEFAULT_IMAGE_MODEL,
                 self.settings.image_provider_wire_api, secret, bool(secret), "environment",
+                _secret_hint(secret) if secret else "",
+            )
+        if kind is ProviderKind.EMBEDDING:
+            secret = self.settings.embedding_provider_api_key
+            model = self.settings.embedding_provider_model
+            return ServerProviderRuntime(
+                kind.value,
+                self.settings.embedding_provider_base_url.rstrip("/"),
+                model,
+                self.settings.embedding_provider_wire_api,
+                secret,
+                bool(secret and model),
+                "environment",
                 _secret_hint(secret) if secret else "",
             )
         secret = self.settings.mineru_api_token
@@ -143,7 +158,11 @@ class ServerProviderSettingsService:
                 model_name=row.model_name or fallback.model_name,
                 wire_api=row.wire_api or fallback.wire_api,
                 api_key=secret,
-                enabled=bool(row.enabled and secret),
+                enabled=bool(
+                    row.enabled
+                    and secret
+                    and (kind is not ProviderKind.EMBEDDING or (row.model_name or fallback.model_name))
+                ),
                 source="database",
                 api_key_hint=row.secret_hint or fallback.api_key_hint,
                 updated_at=row.updated_at,
@@ -157,7 +176,11 @@ class ServerProviderSettingsService:
             records.append(ServerProviderStatus(
                 provider_kind=kind.value,
                 base_url=runtime.base_url if is_admin else "",
-                model_name=runtime.model_name,
+                model_name=(
+                    runtime.model_name
+                    if is_admin or kind is not ProviderKind.EMBEDDING
+                    else "retrieval_embedding"
+                ),
                 wire_api=runtime.wire_api if is_admin else "",
                 api_key_configured=bool(runtime.api_key),
                 api_key_hint=((runtime.api_key_hint if is_admin else "服务器统一配置")
@@ -188,6 +211,15 @@ class ServerProviderSettingsService:
         )
         submitted_key = None if api_key is None else str(api_key).strip()
         fallback = self._fallback(kind)
+        normalized_model = str(model_name or "").strip()
+        if (
+            kind is ProviderKind.EMBEDDING
+            and enabled
+            and not (normalized_model or fallback.model_name)
+        ):
+            raise ProviderSettingsError(
+                "An embedding model is required before semantic retrieval can be enabled."
+            )
         actor_id = uuid.UUID(principal.user_id)
         with database_session(self.session_factory) as session:
             row = session.scalar(select(ServerProviderCredential).where(
@@ -210,7 +242,7 @@ class ServerProviderSettingsService:
                     "An API key is required before this provider can be enabled."
                 )
             row.base_url = normalized_url
-            row.model_name = str(model_name or "").strip()
+            row.model_name = normalized_model
             row.wire_api = normalized_wire
             row.enabled = bool(enabled)
             session.flush()
@@ -265,22 +297,42 @@ class ServerProviderSettingsService:
         runtime = self.runtime_config(kind)
         if not runtime.enabled:
             raise ProviderSettingsError("The provider is disabled or has no API key.")
-        endpoint = runtime.base_url if kind is ProviderKind.MINERU else f"{runtime.base_url.rstrip('/')}/models"
+        endpoint = (
+            runtime.base_url
+            if kind is ProviderKind.MINERU
+            else (
+                f"{runtime.base_url.rstrip('/')}/embeddings"
+                if kind is ProviderKind.EMBEDDING
+                else f"{runtime.base_url.rstrip('/')}/models"
+            )
+        )
         started = time.perf_counter()
         status_code = 0
         try:
             async with httpx.AsyncClient(timeout=20.0, trust_env=True) as client:
-                response = await client.get(
-                    endpoint,
-                    headers={
-                        "Authorization": f"Bearer {runtime.api_key}",
-                        "Accept": "application/json",
-                        "User-Agent": "ReviewWriter-ProviderCheck/1.0",
-                    },
-                    follow_redirects=True,
-                )
+                headers = {
+                    "Authorization": f"Bearer {runtime.api_key}",
+                    "Accept": "application/json",
+                    "User-Agent": "ReviewWriter-ProviderCheck/1.0",
+                }
+                if kind is ProviderKind.EMBEDDING:
+                    response = await client.post(
+                        endpoint,
+                        headers=headers,
+                        json={
+                            "model": runtime.model_name,
+                            "input": ["semantic retrieval connection test"],
+                        },
+                        follow_redirects=True,
+                    )
+                else:
+                    response = await client.get(
+                        endpoint,
+                        headers=headers,
+                        follow_redirects=True,
+                    )
                 status_code = int(response.status_code)
-            ok = status_code not in {401, 403, 407, 429} and status_code < 500
+            ok = 200 <= status_code < 300
             message = ("Provider connection succeeded." if ok else
                        f"Provider rejected the connection with HTTP {status_code}.")
         except (httpx.TimeoutException, httpx.TransportError) as exc:
@@ -329,6 +381,15 @@ class ServerProviderSettingsService:
                     "IMAGE_OPENAI_MODEL": runtime.model_name or DEFAULT_IMAGE_MODEL,
                     "IMAGE_FALLBACK_MODEL": runtime.model_name or DEFAULT_IMAGE_MODEL,
                     "IMAGE_OPENAI_WIRE_API": runtime.wire_api,
+                })
+        if ProviderKind.EMBEDDING.value in selected:
+            runtime = self.runtime_config(ProviderKind.EMBEDDING)
+            if runtime.enabled:
+                environment.update({
+                    "REVIEW_WRITER_EMBEDDING_API_KEY": runtime.api_key,
+                    "REVIEW_WRITER_EMBEDDING_BASE_URL": runtime.base_url,
+                    "REVIEW_WRITER_EMBEDDING_MODEL": runtime.model_name,
+                    "REVIEW_WRITER_EMBEDDING_WIRE_API": runtime.wire_api,
                 })
         return environment
 

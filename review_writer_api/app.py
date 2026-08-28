@@ -78,6 +78,8 @@ from .schemas import (
     ModelCatalogResponse,
     ModelGatewayRequest,
     ModelGatewayResponse,
+    EmbeddingGatewayRequest,
+    EmbeddingGatewayResponse,
     ImageGatewayRequest,
     ImageGatewayResponse,
     ModelTierResponse,
@@ -253,6 +255,7 @@ def create_app(
             session_factory,
             hosted_workspace_manager,
             enabled=resolved.document_retrieval_enabled,
+            vector_enabled=resolved.vector_retrieval_enabled,
             tuning=resolved.retrieval_tuning,
         )
         if session_factory is not None and hosted_workspace_manager is not None
@@ -268,6 +271,16 @@ def create_app(
         if session_factory is not None and resolved.deployment_mode == "hosted"
         else None
     )
+    if library_index_service is not None and hasattr(
+        model_gateway, "embedding_profile"
+    ):
+        library_index_service.embedding_profile_provider = model_gateway
+    if library_index_service is not None and hasattr(
+        model_gateway, "embed_for_active_job"
+    ):
+        library_index_service.embedding_gateway = model_gateway
+    if discovery_service is not None:
+        discovery_service.library_index = library_index_service
     planning_service = (
         PlanningService(
             workflow_repository,
@@ -1159,6 +1172,34 @@ def create_app(
             except ModelGatewayError as exc:
                 raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
             return ModelGatewayResponse.model_validate(result)
+
+        @app.post(
+            "/api/internal/v1/embeddings",
+            response_model=EmbeddingGatewayResponse,
+            include_in_schema=False,
+        )
+        async def internal_embeddings(
+            payload: EmbeddingGatewayRequest,
+            request: Request,
+        ) -> EmbeddingGatewayResponse:
+            if not resolved.embedded_gateway_routes_enabled:
+                raise HTTPException(status_code=404, detail="Not Found")
+            authorization = str(request.headers.get("Authorization") or "")
+            token = (
+                authorization[7:].strip()
+                if authorization.casefold().startswith("bearer ")
+                else ""
+            )
+            try:
+                result = await model_gateway.complete_embeddings(
+                    token,
+                    request_key=payload.request_key,
+                    stage=payload.stage,
+                    inputs=payload.inputs,
+                )
+            except ModelGatewayError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+            return EmbeddingGatewayResponse.model_validate(result)
 
         @app.post(
             "/api/internal/v1/image-generations",

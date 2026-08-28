@@ -9,8 +9,10 @@ INGEST_JOB_TYPES = frozenset(
     {
         "library.upload",
         "library.index",
+        "library.semantic-backfill",
         "library.search",
         "library.download",
+        "library.bibliography-audit",
     }
 )
 

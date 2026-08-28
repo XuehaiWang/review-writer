@@ -18,6 +18,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from review_writer_core.document_front_matter import (
+    extract_markdown_title,
+    looks_like_placeholder_title,
+    title_field_needs_repair,
+)
 
 MAX_LOCAL_PDF_BYTES = 80 * 1024 * 1024
 MAX_EXTRACTED_TEXT_CHARS = 2_000_000
@@ -177,14 +182,7 @@ def _extract_pages(reader: Any) -> tuple[list[str], list[str]]:
 
 
 def _looks_like_generated_title(value: str) -> bool:
-    low = value.casefold().strip()
-    return not value or low in {
-        "untitled",
-        "untitled document",
-        "microsoft word",
-        "article",
-        "main document",
-    } or low.startswith("doi:")
+    return looks_like_placeholder_title(value)
 
 
 def _title_from_text(text: str, filename: str) -> str:
@@ -220,21 +218,6 @@ def _abstract_from_text(text: str) -> str:
         re.I | re.S,
     )
     return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
-
-
-def _year_from_info(info: dict[str, str], text: str) -> int | None:
-    for haystack in (info.get("creation_date", ""), text[:12000]):
-        match = _YEAR_RE.search(haystack)
-        if match:
-            year = int(match.group(0))
-            if 1800 <= year <= datetime.now().year + 1:
-                return year
-    return None
-
-
-def _doi_from_text(text: str) -> str | None:
-    match = _DOI_RE.search(text[:100_000])
-    return match.group(0).rstrip(".,;)").casefold() if match else None
 
 
 def _markdown_document(title: str, page_texts: list[str]) -> str:
@@ -636,23 +619,33 @@ def ingest_local_pdf(review_root: Path, original_filename: object, staged_pdf: P
                 duplicate,
                 root,
             )
-            title = str((metadata.get("title") or {}).get("value") or "").strip()
+            title_field = metadata.get("title") or {}
+            title = str(
+                title_field.get("value")
+                if isinstance(title_field, dict)
+                else title_field
+                or ""
+            ).strip()
+            recovered_title = (
+                extract_markdown_title(extracted_text)
+                if title_field_needs_repair(title_field)
+                else None
+            )
+            if recovered_title is not None:
+                metadata["title"] = recovered_title
+                title = str(recovered_title["value"])
             info_title = info.get("title", "")
-            if (not title or _looks_like_generated_title(title)) and not _looks_like_generated_title(info_title):
+            if title_field_needs_repair(metadata.get("title")) and not _looks_like_generated_title(info_title):
                 title = _clean_text(info_title)
                 metadata["title"] = _field(title, "pdf_document_info", 0.88)
             title = title or _title_from_text(extracted_text, filename) or Path(filename).stem
-            if not (metadata.get("title") or {}).get("value"):
+            if title_field_needs_repair(metadata.get("title")) and not _looks_like_generated_title(title):
                 metadata["title"] = _field(title, "mineru_markdown_front_matter", 0.82)
             authors = _authors_from_info(info.get("author", ""))
             if authors and not (metadata.get("authors") or {}).get("value"):
                 metadata["authors"] = _field(authors, "pdf_document_info", 0.72)
-            year = _year_from_info(info, extracted_text)
-            if year and not (metadata.get("year") or {}).get("value"):
-                metadata["year"] = _field(year, "pdf_document_info_or_front_matter", 0.68)
-            doi = _doi_from_text(extracted_text)
-            if doi and not (metadata.get("doi") or {}).get("value"):
-                metadata["doi"] = _field(doi, "pdf_text_regex", 0.9)
+            if "doi" not in metadata:
+                metadata["doi"] = _field(None, "awaiting_bibliography_verification", 0.0)
             abstract = _abstract_from_text(extracted_text)
             if abstract and not (metadata.get("abstract") or {}).get("value"):
                 metadata["abstract"] = _field(abstract, "pdf_text_abstract_region", 0.78)

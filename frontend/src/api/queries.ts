@@ -37,6 +37,7 @@ export const queryKeys = {
   libraryUploadJobs: ["library", "upload-jobs"] as const,
   library: (query: string) => ["library", query] as const,
   libraryMetadata: (paperId: string) => ["library", paperId, "metadata"] as const,
+  libraryBibliographyAudit: (paperId: string) => ["library", paperId, "bibliography-audit"] as const,
   libraryMarkdown: (paperId: string) => ["library", paperId, "markdown"] as const,
   job: (jobId: string) => ["job", jobId] as const,
 };
@@ -125,8 +126,22 @@ export function libraryQuery(query: string) {
   return queryOptions({
     queryKey: queryKeys.library(query),
     queryFn: () => apiRequest<LibraryList>(`/api/v1/library/papers?q=${encodeURIComponent(query)}&mode=hybrid`),
-    refetchInterval: (state) => state.state.data?.items.some((paper) =>
-      ["queued", "building"].includes(paper.index_status?.fulltext || "")
-    ) ? ACTIVE_JOB_POLL_INTERVAL_MS : false,
+    refetchInterval: (state) => {
+      const data = state.state.data;
+      const fulltextActive = data?.items.some((paper) =>
+        ["queued", "building"].includes(paper.index_status?.fulltext || "")
+      );
+      const semanticBackfillActive = ["queued", "running", "cancel_requested"].includes(
+        data?.semantic_backfill?.status || "",
+      );
+      if (fulltextActive || semanticBackfillActive) {
+        return ACTIVE_JOB_POLL_INTERVAL_MS;
+      }
+      return ["waiting_retry", "blocked_credit"].includes(
+        data?.semantic_backfill?.status || "",
+      )
+        ? 5 * 60 * 1000
+        : false;
+    },
   });
 }

@@ -24,7 +24,10 @@ from review_writer_api.domain_services.drafts import (
     DRAFT_DOCUMENT,
     DRAFT_QUALITY,
     DraftsService,
+    _clean_reference_doi,
+    _clean_reference_field,
 )
+from review_writer_api.domain_services.discovery import discovery_search_record
 from review_writer_api.errors import (
     WorkflowConflict,
     WorkflowNotFound,
@@ -35,12 +38,26 @@ from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
 from review_writer_core.latex_renderer import SUPPORTED_PROFILES, TEMPLATE_VERSION
+from review_writer_core.draft_bibliography import (
+    citation_entries_from_draft,
+    expand_callouts,
+    ordered_callouts,
+    reference_text,
+)
 from review_writer_core.manuscript_state import build_manuscript_state
 from review_writer_core.markdown_images import (
     malformed_markdown_image_lines,
     parse_markdown_image,
 )
 from review_writer_core.publication_voice import publication_voice_issues
+from review_writer_core.review_titles import (
+    build_publication_overview_text,
+    build_publication_review_title,
+    generated_title_is_acceptable,
+    generated_title_needs_rewrite,
+    overview_text_needs_rewrite,
+)
+from review_writer_core.review_structure import sanitize_internal_section_title
 
 
 FINAL_CONCLUSION = "final/conclusion.md"
@@ -59,6 +76,8 @@ FINAL_TEX = "final/manuscript.tex"
 FINAL_PDF = "final/manuscript.pdf"
 FINAL_PDF_QA = "final/pdf-qa.json"
 FINAL_PDF_COMPILE_LOG = "final/pdf-compile.log"
+DISCOVERY_LOGICAL_NAME = "discovery/review.json"
+BLUEPRINT_LOGICAL_NAME = "blueprint/section_blueprint.json"
 ARTIFACT_URL = re.compile(r"/api/v1/artifacts/([0-9a-fA-F-]{36})/content")
 REFERENCES_HEADING = re.compile(
     r"(?im)^\s*#{1,6}\s*(?:references|reference list|bibliography|cited literature|参考文献)\s*$"
@@ -89,6 +108,14 @@ HTML_EMPHASIS = re.compile(r"<(?:em|i)\b[^>]*>(.*?)</(?:em|i)\s*>", re.IGNORECAS
 HTML_CODE = re.compile(r"<code\b[^>]*>(.*?)</code\s*>", re.IGNORECASE | re.DOTALL)
 INSERTED_FIGURE_METADATA = re.compile(
     r"<!--\s*inserted_figure:\s*(\{.*?\})\s*-->", re.DOTALL
+)
+REFERENCE_WEB_RESIDUE = re.compile(
+    r"\b(?:Cite\s+This|Read\s+Online|Article\s+Recommendations|Supporting\s+Information)\b",
+    re.IGNORECASE,
+)
+TEMPLATE_RESIDUE_LINE = re.compile(
+    r"^\s*(?:[*_`>#-]+\s*)?(?:Review\s+Writer(?:\s*[|·-]\s*modern-survey/\d+)?|modern-survey/\d+)(?:\s*[*_`]+)?\s*$",
+    re.IGNORECASE,
 )
 
 
@@ -138,6 +165,10 @@ def _normalize_publication_markup(markdown: str) -> str:
     """Convert harmless HTML formatting while preserving workflow comments."""
 
     source = _clean_reference_affiliation_markup(str(markdown or ""))
+    # A replacement character is evidence that an upstream byte could not be
+    # decoded.  It has no publishable meaning, so remove it while retaining the
+    # surrounding text instead of blocking all exports.
+    source = source.replace("\ufffd", "")
     comments: list[str] = []
 
     def stash_comment(match: re.Match[str]) -> str:
@@ -162,10 +193,21 @@ def _normalize_publication_markup(markdown: str) -> str:
         normalized = HTML_BLOCK_BOUNDARY.sub("\n", normalized)
         normalized = HTML_ANY_TAG.sub("", normalized)
         normalized = html.unescape(normalized)
-    normalized = "\n".join(
-        re.sub(r"[ \t]{2,}", " ", line).rstrip()
-        for line in normalized.split("\n")
-    )
+    cleaned_lines: list[str] = []
+    in_references = False
+    for line in normalized.split("\n"):
+        if re.match(
+            r"^\s*#{1,6}\s*(?:references|reference list|bibliography|cited literature|参考文献)\s*$",
+            line,
+            re.IGNORECASE,
+        ):
+            in_references = True
+        if TEMPLATE_RESIDUE_LINE.match(line):
+            continue
+        if in_references:
+            line = REFERENCE_WEB_RESIDUE.sub("", line)
+        cleaned_lines.append(re.sub(r"[ \t]{2,}", " ", line).rstrip())
+    normalized = "\n".join(cleaned_lines)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized)
     for index, comment in enumerate(comments):
         normalized = normalized.replace(f"\x00RWCOMMENT{index}\x00", comment)
@@ -217,6 +259,11 @@ def _figure_argument_findings(markdown: str) -> list[dict[str, Any]]:
             issues.append("source_paper_identity_missing")
         if str(metadata.get("interpretation_basis") or "") != "source_caption":
             issues.append("paper_level_interpretation_missing")
+        if (
+            str(metadata.get("source_relationship") or "") == "source_attributed"
+            and str(metadata.get("permission_status") or "") != "verified"
+        ):
+            issues.append("source_reuse_permission_unverified")
         if issues:
             findings.append(
                 {
@@ -285,6 +332,385 @@ class FinalService:
         if not isinstance(value, dict):
             raise WorkflowConflict("The current workflow artifact is invalid.")
         return value, artifact
+
+    def _canonical_reference_section(
+        self,
+        principal: Principal,
+        paper_ids: list[str],
+        matrix_rows: list[dict[str, Any]],
+        *,
+        reference_numbers: dict[str, int] | None = None,
+    ) -> tuple[str, dict[str, str]]:
+        """Rebuild references from the latest canonical Library metadata.
+
+        Draft prose and citation numbers remain immutable, while a later
+        high-confidence bibliography correction can still reach the Final
+        manuscript without forcing scientific paragraphs to be regenerated.
+        """
+
+        explicit_numbers = {
+            str(paper_id).strip(): int(number)
+            for paper_id, number in (reference_numbers or {}).items()
+            if str(paper_id).strip() and int(number) > 0
+        }
+        ordered = list(dict.fromkeys(str(value) for value in paper_ids if str(value)))
+        if explicit_numbers:
+            ordered.sort(key=lambda paper_id: explicit_numbers.get(paper_id, 10**9))
+        if not ordered:
+            return "", {}
+        with database_session(self.repository.session_factory) as session:
+            rows = session.scalars(
+                select(LibraryPaper).where(
+                    LibraryPaper.user_id == uuid.UUID(principal.user_id),
+                    LibraryPaper.paper_id.in_(ordered),
+                    LibraryPaper.status == "active",
+                    LibraryPaper.deleted_at.is_(None),
+                )
+            ).all()
+        live = {row.paper_id: row for row in rows}
+        fallback = {
+            str(row.get("paper_id") or ""): row
+            for row in matrix_rows
+            if isinstance(row, dict) and str(row.get("paper_id") or "")
+        }
+        artifact_ids: dict[str, str] = {}
+        references = ["## References"]
+        for fallback_number, paper_id in enumerate(ordered, start=1):
+            number = explicit_numbers.get(paper_id, fallback_number)
+            library_row = live.get(paper_id)
+            metadata = (
+                dict(library_row.metadata_json or {})
+                if library_row is not None
+                else dict(fallback.get(paper_id) or {})
+            )
+
+            references.append(
+                f"[{number}] {reference_text(metadata, fallback=paper_id)}"
+            )
+            if library_row is not None:
+                metadata_artifact_id = str(
+                    ((library_row.metadata_json or {}).get("_artifact_ids") or {}).get(
+                        "metadata"
+                    )
+                    or ""
+                )
+                if metadata_artifact_id:
+                    artifact_ids[paper_id] = metadata_artifact_id
+        return "\n".join(references), artifact_ids
+
+    @staticmethod
+    def _reference_ledger(
+        draft_markdown: str,
+        quality: dict[str, Any],
+        section_index: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve numeric callouts to Paper IDs without guessing from section order."""
+
+        repaired = quality.get("reference_repair")
+        candidate = (
+            dict(repaired)
+            if isinstance(repaired, dict) and repaired.get("entries")
+            else citation_entries_from_draft(draft_markdown, section_index)
+        )
+        body = REFERENCES_HEADING.split(str(draft_markdown or ""), maxsplit=1)[0]
+        used = ordered_callouts(body)
+        by_number: dict[int, str] = {}
+        conflicts = [
+            dict(value)
+            for value in candidate.get("conflicts") or []
+            if isinstance(value, dict)
+        ]
+        for item in candidate.get("entries") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                number = int(item.get("callout"))
+            except (TypeError, ValueError):
+                continue
+            paper_id = str(item.get("paper_id") or "").strip()
+            if number <= 0 or not paper_id:
+                continue
+            previous = by_number.get(number)
+            if previous and previous != paper_id:
+                conflicts.append(
+                    {
+                        "callout": number,
+                        "paper_ids": [previous, paper_id],
+                        "reason": "callout_maps_to_multiple_papers",
+                    }
+                )
+                continue
+            by_number[number] = paper_id
+        paper_numbers: dict[str, list[int]] = {}
+        for number, paper_id in by_number.items():
+            paper_numbers.setdefault(paper_id, []).append(number)
+        for paper_id, numbers in paper_numbers.items():
+            if len(numbers) > 1:
+                conflicts.append(
+                    {
+                        "paper_id": paper_id,
+                        "callouts": sorted(numbers),
+                        "reason": "paper_maps_to_multiple_callouts",
+                    }
+                )
+        unresolved = sorted(
+            {
+                *(
+                    int(value)
+                    for value in candidate.get("unresolved_callouts") or []
+                    if str(value).isdigit()
+                ),
+                *(number for number in used if number not in by_number),
+            }
+        )
+        ordered_entries = [
+            {"callout": number, "paper_id": by_number[number]}
+            for number in used
+            if number in by_number
+        ]
+        complete = bool(used) and not unresolved and not conflicts and len(ordered_entries) == len(used)
+        return {
+            "status": "resolved" if complete else "unresolved",
+            "complete": complete,
+            "used_callouts": used,
+            "entries": ordered_entries,
+            "unresolved_callouts": unresolved,
+            "conflicts": conflicts,
+            "source": (
+                "draft_quality_reference_repair"
+                if isinstance(repaired, dict) and repaired.get("entries")
+                else "section_index_recovery"
+            ),
+        }
+
+    @staticmethod
+    def _render_final_citation_numbers(
+        markdown: str,
+        ledger: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        """Render display numbers from Paper IDs in final first-citation order."""
+
+        if not ledger.get("complete"):
+            return markdown, dict(ledger)
+        old_to_paper = {
+            int(item["callout"]): str(item["paper_id"])
+            for item in ledger.get("entries") or []
+            if isinstance(item, dict)
+            and str(item.get("callout") or "").isdigit()
+            and str(item.get("paper_id") or "").strip()
+        }
+        used = ordered_callouts(markdown)
+        if any(number not in old_to_paper for number in used):
+            unresolved = [number for number in used if number not in old_to_paper]
+            failed = dict(ledger)
+            failed.update(
+                {
+                    "status": "unresolved",
+                    "complete": False,
+                    "unresolved_callouts": unresolved,
+                }
+            )
+            return markdown, failed
+        paper_order: list[str] = []
+        for number in used:
+            paper_id = old_to_paper[number]
+            if paper_id not in paper_order:
+                paper_order.append(paper_id)
+        paper_to_number = {
+            paper_id: index for index, paper_id in enumerate(paper_order, start=1)
+        }
+        old_to_new = {
+            old: paper_to_number[paper_id] for old, paper_id in old_to_paper.items()
+        }
+
+        def replace_group(match: re.Match[str]) -> str:
+            rendered: list[int] = []
+            for old in expand_callouts(match.group(1)):
+                new = old_to_new.get(old)
+                if new is not None and new not in rendered:
+                    rendered.append(new)
+            return (
+                "[" + ", ".join(map(str, rendered)) + "]"
+                if rendered
+                else match.group(0)
+            )
+
+        updated = CITATION_CALLOUT.sub(replace_group, markdown)
+        rendered_ledger = dict(ledger)
+        rendered_ledger.update(
+            {
+                "status": "resolved",
+                "complete": True,
+                "numbering_basis": "final_first_citation_order",
+                "old_to_new": {str(key): value for key, value in old_to_new.items()},
+                "entries": [
+                    {
+                        "callout": paper_to_number[paper_id],
+                        "paper_id": paper_id,
+                        "source_callouts": sorted(
+                            old
+                            for old, mapped_paper in old_to_paper.items()
+                            if mapped_paper == paper_id
+                        ),
+                    }
+                    for paper_id in paper_order
+                ],
+                "used_callouts": list(range(1, len(paper_order) + 1)),
+            }
+        )
+        return updated, rendered_ledger
+
+    def _bibliography_identity_report(
+        self,
+        principal: Principal,
+        paper_ids: list[str],
+    ) -> dict[str, Any]:
+        """Summarize canonical publication-identity readiness for Final release."""
+
+        normalized = list(
+            dict.fromkeys(
+                str(value).strip() for value in paper_ids if str(value).strip()
+            )
+        )
+        if not normalized:
+            return {"papers": [], "unresolved_paper_ids": [], "verified_count": 0}
+        with database_session(self.repository.session_factory) as session:
+            rows = session.scalars(
+                select(LibraryPaper).where(
+                    LibraryPaper.user_id == uuid.UUID(principal.user_id),
+                    LibraryPaper.paper_id.in_(normalized),
+                    LibraryPaper.deleted_at.is_(None),
+                )
+            ).all()
+            report_rows: list[dict[str, Any]] = []
+            by_id = {row.paper_id: row for row in rows}
+            for paper_id in normalized:
+                row = by_id.get(paper_id)
+                audit = (
+                    dict(row.bibliography_audit_row.audit_json or {})
+                    if row is not None and row.bibliography_audit_row is not None
+                    else {}
+                )
+                status = str(audit.get("status") or "not_audited")
+                manually_resolved = str(audit.get("manual_review_status") or "") in {
+                    "approved",
+                    "resolved",
+                    "verified",
+                }
+                supporting_resolved = bool(
+                    str(audit.get("manual_review_status") or "") == "supporting_only"
+                    and audit.get("direct_claim_eligible") is True
+                    and not bool(audit.get("context_only"))
+                )
+                verified = bool(
+                    row is not None
+                    and (status == "verified" or manually_resolved or supporting_resolved)
+                )
+                report_rows.append(
+                    {
+                        "paper_id": paper_id,
+                        "status": status if row is not None else "missing",
+                        "verified": verified,
+                        "bibliography_role": str(
+                            audit.get("bibliography_role") or "primary"
+                        ),
+                        "direct_claim_eligible": bool(
+                            audit.get("direct_claim_eligible", True)
+                        ),
+                        "context_only": bool(audit.get("context_only", False)),
+                        "verification_method": str(audit.get("verification_method") or ""),
+                        "unresolved_conflict_count": len(audit.get("unresolved_conflicts") or []),
+                    }
+                )
+        unresolved = [row["paper_id"] for row in report_rows if not row["verified"]]
+        return {
+            "papers": report_rows,
+            "unresolved_paper_ids": unresolved,
+            "verified_count": len(report_rows) - len(unresolved),
+            "total_count": len(report_rows),
+        }
+
+    @staticmethod
+    def _claim_citation_mapping_report(
+        compatibility: dict[str, Any],
+        reference_ledger: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Validate Claim→evidence→paper identity independently of display numbers."""
+
+        evidence_registry = {
+            str(row.get("evidence_key") or ""): row
+            for row in (
+                (compatibility.get("section_evidence") or {}).get(
+                    "evidence_registry"
+                )
+                or []
+            )
+            if isinstance(row, dict) and str(row.get("evidence_key") or "")
+        }
+        ledger_papers = {
+            str(row.get("paper_id") or "")
+            for row in reference_ledger.get("entries") or []
+            if isinstance(row, dict) and str(row.get("paper_id") or "")
+        }
+        issues: list[dict[str, Any]] = []
+        claim_count = 0
+        for section in (
+            (compatibility.get("writing_plan") or {}).get("sections") or []
+        ):
+            if not isinstance(section, dict):
+                continue
+            section_id = str(section.get("section_id") or "")
+            for claim in section.get("claims") or []:
+                if not isinstance(claim, dict):
+                    continue
+                claim_count += 1
+                claim_id = str(claim.get("claim_id") or "")
+                cited = {
+                    str(value)
+                    for value in claim.get("citation_group") or []
+                    if str(value).strip()
+                }
+                evidence_keys = {
+                    str(ref.get("evidence_key") or "")
+                    for ref in claim.get("evidence_refs") or []
+                    if isinstance(ref, dict) and str(ref.get("evidence_key") or "")
+                }
+                missing_evidence_keys = sorted(evidence_keys - set(evidence_registry))
+                evidence_papers = {
+                    str(evidence_registry[key].get("paper_id") or "")
+                    for key in evidence_keys & set(evidence_registry)
+                    if str(evidence_registry[key].get("paper_id") or "")
+                }
+                unsupported_citations = sorted(cited - evidence_papers)
+                unrendered_papers = sorted(cited - ledger_papers)
+                claim_issues: list[str] = []
+                if not evidence_keys:
+                    claim_issues.append("claim_has_no_evidence_identity")
+                if missing_evidence_keys:
+                    claim_issues.append("claim_evidence_identity_missing")
+                if unsupported_citations:
+                    claim_issues.append("claim_cites_paper_outside_evidence")
+                if unrendered_papers:
+                    claim_issues.append("claim_paper_missing_from_reference_ledger")
+                if claim_issues:
+                    issues.append(
+                        {
+                            "section_id": section_id,
+                            "claim_id": claim_id,
+                            "issues": claim_issues,
+                            "citation_paper_ids": sorted(cited),
+                            "evidence_paper_ids": sorted(evidence_papers),
+                            "missing_evidence_keys": missing_evidence_keys,
+                            "unsupported_citation_paper_ids": unsupported_citations,
+                            "unrendered_paper_ids": unrendered_papers,
+                        }
+                    )
+        return {
+            "status": "pass" if not issues else "failed",
+            "claim_count": claim_count,
+            "issue_count": len(issues),
+            "issues": issues,
+        }
 
     def _publish_files(
         self,
@@ -387,6 +813,98 @@ class FinalService:
             value for value in (before, normalized_block, after) if value
         )
 
+    @staticmethod
+    def _remove_review_methods(markdown: str) -> str:
+        """Keep workflow provenance internal instead of publishing it as prose."""
+
+        body = str(markdown or "").rstrip()
+        heading = re.compile(
+            r"(?im)^\s*(#{1,6})\s*"
+            r"(?:\d+(?:\.\d+)*[.)]?\s*)?"
+            r"(?:review methods?|methods? of this review|综述方法|检索方法)\s*$"
+        )
+        while match := heading.search(body):
+            level = len(match.group(1))
+            next_heading = next(
+                (
+                    candidate
+                    for candidate in MARKDOWN_HEADING.finditer(body, match.end())
+                    if len(candidate.group(1)) <= level
+                ),
+                None,
+            )
+            end = next_heading.start() if next_heading is not None else len(body)
+            body = "\n\n".join(
+                value
+                for value in (
+                    body[: match.start()].rstrip(),
+                    body[end:].lstrip(),
+                )
+                if value
+            )
+        return body
+
+    @staticmethod
+    def _sanitize_internal_section_headings(markdown: str) -> str:
+        """Remove classification-workflow labels from legacy manuscript headings."""
+
+        def replace(match: re.Match[str]) -> str:
+            return (
+                f"{match.group(1)} "
+                f"{sanitize_internal_section_title(match.group(2))}"
+            )
+
+        return MARKDOWN_HEADING.sub(replace, str(markdown or ""))
+
+    @staticmethod
+    def _overview_semantic_report(
+        overview_text: dict[str, Any],
+        discovery: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Reject prompt/template residue without inventing domain labels."""
+
+        title = " ".join(str(overview_text.get("title") or "").split()).strip()
+        topic = " ".join(str(discovery.get("topic") or "").split()).strip()
+        labels = [
+            " ".join(str(value).split()).strip()
+            for value in overview_text.get("labels") or []
+            if str(value).strip()
+        ]
+        issues: list[str] = []
+        if title and generated_title_needs_rewrite(title, topic):
+            issues.append("overview_title_is_prompt_or_not_publication_ready")
+        subtitle = " ".join(
+            str(overview_text.get("subtitle") or "").split()
+        ).strip()
+        residue = re.compile(
+            r"(?:please\s+write\s+(?:an?\s+)?review|module[-_ ]cards?|"
+            r"crosscut[-_ ]sidebar|modern[-_ ]survey|review\s+writer|"
+            r"prompt\s*:|\b(?:reaction_type|group_by|layout_type|"
+            r"taxonomy_profile|catalyst_or_method)\b)",
+            re.I,
+        )
+        raw_topic_leaked = bool(
+            topic and len(topic) > 70 and topic.casefold() in " ".join(
+                [title, subtitle, *labels]
+            ).casefold()
+        )
+        if residue.search(" ".join([title, subtitle])) or raw_topic_leaked:
+            issues.append("overview_caption_contains_internal_residue")
+        unsupported_labels = [
+            value
+            for value in labels
+            if residue.search(value) or len(value) > 100 or len(value.split()) > 14
+        ]
+        if unsupported_labels:
+            issues.append("overview_unsupported_labels")
+        return {
+            "status": "invalid" if issues else "aligned",
+            "issues": issues,
+            "unsupported_labels": unsupported_labels,
+            "title": title,
+        }
+
+
     @classmethod
     def _apply_front_matter(
         cls, markdown: str, front_matter: dict[str, Any]
@@ -435,13 +953,14 @@ class FinalService:
     ) -> dict[str, Any]:
         title_match = re.search(r"(?m)^#\s+(.+?)\s*$", str(markdown or ""))
         author = " ".join(str(author_candidate or "").split()).strip()
+        manuscript_title = title_match.group(1).strip() if title_match else ""
+        title = build_publication_review_title(
+            fallback_title or manuscript_title,
+            manuscript_title=manuscript_title,
+        )
         return {
             "schema_version": 2,
-            "title": (
-                title_match.group(1).strip()
-                if title_match
-                else str(fallback_title or "Untitled review").strip()
-            ),
+            "title": title or "Untitled Review",
             "authors": [author] if author else [],
             "affiliations": [],
             "abstract": "",
@@ -731,12 +1250,29 @@ class FinalService:
         field_sources = dict(
             front_matter.get("field_source_draft_artifact_ids") or {}
         )
+        raw_topic = str(project.topic if project is not None else "")
+        suggested_title = build_publication_review_title(
+            raw_topic or front_matter.get("title") or "",
+            manuscript_title=front_matter.get("title") or "",
+        )
         generation_fields: list[str] = []
-        for field in ("abstract", "keywords"):
+        for field in ("title", "abstract", "keywords"):
             state = str(states.get(field) or "")
             if state in {"user_modified", "user_omitted"}:
                 continue
-            if not front_matter.get(field) or str(field_sources.get(field) or "") != draft.id:
+            needs_refresh = (
+                not front_matter.get(field)
+                or str(field_sources.get(field) or "") != draft.id
+            )
+            if field == "title":
+                needs_refresh = bool(
+                    front_matter_artifact is None
+                    or needs_refresh
+                    or generated_title_needs_rewrite(
+                        front_matter.get("title") or "", raw_topic
+                    )
+                )
+            if needs_refresh:
                 generation_fields.append(field)
         return {
             "project_id": project_id,
@@ -745,7 +1281,12 @@ class FinalService:
                 front_matter_artifact.id if front_matter_artifact else ""
             ),
             "expected_revision": self._revision(principal, project_id),
-            "title": str(front_matter.get("title") or ""),
+            "title": (
+                suggested_title
+                if "title" in generation_fields
+                else str(front_matter.get("title") or suggested_title)
+            ),
+            "review_topic": raw_topic,
             "front_matter": front_matter,
             "generation_fields": generation_fields,
             "abstract_source": self._abstract_source(text),
@@ -814,6 +1355,26 @@ class FinalService:
         requested = {
             str(field) for field in job_payload.get("generation_fields") or []
         }
+        if "title" in requested and states.get("title") != "user_modified":
+            raw_topic = str(
+                job_payload.get("review_topic")
+                or (project.topic if project is not None else "")
+            )
+            generated_title = " ".join(
+                str(result.get("title") or "").split()
+            ).strip("# \t")
+            if (
+                not generated_title_is_acceptable(generated_title)
+                or generated_title_needs_rewrite(generated_title, raw_topic)
+            ):
+                generated_title = build_publication_review_title(
+                    raw_topic or value.get("title") or "",
+                    manuscript_title=value.get("title") or "",
+                )
+                warnings.append("title_deterministic_fallback")
+            value["title"] = generated_title
+            states["title"] = "generated"
+            field_sources["title"] = draft.id
         if "abstract" in requested and states.get("abstract") not in {
             "user_modified", "user_omitted"
         }:
@@ -1296,6 +1857,101 @@ class FinalService:
             draft_text[reference_match.start() :].strip() if reference_match else ""
         )
         draft_body = self._apply_front_matter(draft_body, front_matter)
+        compatibility = self.drafts.compatibility_payload(principal, project_id)
+        discovery, _discovery_artifact = self._read_json(
+            principal, project_id, DISCOVERY_LOGICAL_NAME
+        )
+        blueprint, _blueprint_artifact = self._read_json(
+            principal, project_id, BLUEPRINT_LOGICAL_NAME
+        )
+        if overview and overview_text_needs_rewrite(
+            overview_text,
+            discovery.get("topic") or blueprint.get("review_topic") or "",
+        ):
+            basis = blueprint.get("classification_basis")
+            basis = basis if isinstance(basis, dict) else {}
+            query_plan = discovery.get("query_plan")
+            query_plan = query_plan if isinstance(query_plan, dict) else {}
+            overview_text = build_publication_overview_text(
+                discovery.get("topic") or blueprint.get("review_topic") or "",
+                manuscript_title=front_matter.get("title") or "",
+                group_by=query_plan.get("group_by") or discovery.get("group_by") or [],
+                classification_rule=(
+                    basis.get("description")
+                    or basis.get("primary_axis")
+                    or basis.get("overview_axis")
+                ),
+            )
+        matrix_rows = (
+            compatibility.get("matrix", {}).get("rows")
+            if isinstance(compatibility.get("matrix"), dict)
+            else []
+        )
+        quality, _quality_record = self._read_json(
+            principal, project_id, DRAFT_QUALITY
+        )
+        section_index = (
+            compatibility.get("section_index")
+            if isinstance(compatibility.get("section_index"), dict)
+            else {}
+        )
+        structured_source_paper_ids = [
+            str(paper_id)
+            for section in section_index.get("sections") or []
+            if isinstance(section, dict)
+            for paragraph in section.get("paragraphs") or []
+            if isinstance(paragraph, dict)
+            for paper_id in (
+                paragraph.get("cited_paper_ids")
+                or ([paragraph.get("paper_id")] if paragraph.get("paper_id") else [])
+            )
+            if str(paper_id).strip()
+        ]
+        reference_ledger = self._reference_ledger(
+            draft_text,
+            quality,
+            section_index,
+        )
+        draft_body, reference_ledger = self._render_final_citation_numbers(
+            draft_body,
+            reference_ledger,
+        )
+        ledger_paper_ids = [
+            str(item.get("paper_id") or "").strip()
+            for item in reference_ledger.get("entries") or []
+            if isinstance(item, dict) and str(item.get("paper_id") or "").strip()
+        ]
+        source_paper_ids = list(
+            dict.fromkeys(
+                ledger_paper_ids
+                if reference_ledger.get("complete")
+                else [*ledger_paper_ids, *structured_source_paper_ids]
+            )
+        )
+        source_reference_numbers = {
+            str(item.get("paper_id") or "").strip(): int(item.get("callout"))
+            for item in reference_ledger.get("entries") or []
+            if isinstance(item, dict)
+            and str(item.get("paper_id") or "").strip()
+            and str(item.get("callout") or "").isdigit()
+        }
+        reference_metadata_artifact_ids: dict[str, str] = {}
+        if reference_ledger.get("complete"):
+            canonical_references, reference_metadata_artifact_ids = (
+                self._canonical_reference_section(
+                    principal,
+                    source_paper_ids,
+                    [row for row in matrix_rows or [] if isinstance(row, dict)],
+                    reference_numbers=source_reference_numbers,
+                )
+            )
+            if canonical_references:
+                draft_references = canonical_references
+        # Search execution, query logs, Matrix counts, and model-assisted workflow
+        # provenance remain available in internal artifacts and audit views. They
+        # are not publication prose.
+        draft_body = self._sanitize_internal_section_headings(draft_body)
+        draft_body = self._remove_review_methods(draft_body)
         overview_block = ""
         if overview is not None:
             overview_lines = [
@@ -1317,7 +1973,7 @@ class FinalService:
             if labels:
                 caption = (caption + " — " if caption else "") + ", ".join(labels)
             if caption:
-                overview_lines.append(f"*Review overview. {caption}*")
+                overview_lines.append(f"*{caption.rstrip(' .')}.*")
             else:
                 overview_lines.append("*Review overview.*")
             overview_block = "\n".join(overview_lines)
@@ -1329,35 +1985,121 @@ class FinalService:
             parts.append(draft_references)
         markdown = "\n\n".join(parts).rstrip() + "\n"
         markdown = _normalize_publication_markup(markdown)
-        compatibility = self.drafts.compatibility_payload(principal, project_id)
-        source_paper_ids = [
-            str(paper_id)
-            for section in compatibility.get("section_index", {}).get("sections") or []
-            if isinstance(section, dict)
-            for paragraph in section.get("paragraphs") or []
-            if isinstance(paragraph, dict)
-            for paper_id in (
-                paragraph.get("cited_paper_ids")
-                or ([paragraph.get("paper_id")] if paragraph.get("paper_id") else [])
-            )
-            if str(paper_id).strip()
-        ]
-        matrix_reference_numbers = {
-            str(row.get("paper_id") or ""): index
-            for index, row in enumerate(
-                compatibility.get("matrix", {}).get("rows") or [], start=1
-            )
-            if isinstance(row, dict) and str(row.get("paper_id") or "").strip()
-        }
         validation = self._validate_markdown(
             principal,
             project_id,
             markdown,
             source_paper_ids=source_paper_ids,
-            source_reference_numbers=matrix_reference_numbers,
+            source_reference_numbers=source_reference_numbers,
         )
-        quality, _quality_record = self._read_json(
-            principal, project_id, DRAFT_QUALITY
+        validation["reference_ledger"] = reference_ledger
+        claim_citation_mapping = self._claim_citation_mapping_report(
+            compatibility, reference_ledger
+        )
+        validation["claim_citation_mapping"] = claim_citation_mapping
+        bibliography_identity = self._bibliography_identity_report(
+            principal, source_paper_ids
+        )
+        validation["bibliography_identity"] = bibliography_identity
+        taxonomy_report = (
+            blueprint.get("taxonomy_diagnostics")
+            if isinstance(blueprint.get("taxonomy_diagnostics"), dict)
+            else {}
+        )
+        validation["classification_contract"] = {
+            "status": str(
+                taxonomy_report.get("classification_contract_status") or "unknown"
+            ),
+            "missing_topic_partitions": list(
+                taxonomy_report.get("missing_topic_partitions") or []
+            ),
+            "boundary_section_ids": list(
+                taxonomy_report.get("boundary_section_ids") or []
+            ),
+        }
+        validation["coverage_diagnostics"] = dict(
+            discovery.get("coverage_diagnostics")
+            or blueprint.get("coverage_diagnostics")
+            or {}
+        )
+        search_record = (
+            discovery.get("search_record")
+            if isinstance(discovery.get("search_record"), dict)
+            else discovery_search_record(discovery)
+        )
+        validation["methods_execution"] = {
+            "status": "aligned",
+            "requested_sources": list(search_record.get("requested_sources") or []),
+            "executed_sources": list(search_record.get("executed_sources") or []),
+            "failed_sources": list(search_record.get("failed_sources") or []),
+            "publication_methods_section": "omitted",
+            "issues": [],
+        }
+        overview_semantics = self._overview_semantic_report(
+            overview_text if isinstance(overview_text, dict) else {},
+            discovery,
+        )
+        validation["overview_semantics"] = overview_semantics
+        release_integrity_issues: list[str] = []
+        if not reference_ledger.get("complete"):
+            release_integrity_issues.append("citation_identity_unresolved")
+        if claim_citation_mapping.get("issues"):
+            release_integrity_issues.append("claim_citation_mapping_failure")
+        if bibliography_identity.get("unresolved_paper_ids"):
+            release_integrity_issues.append("bibliography_identity_unresolved")
+        if taxonomy_report.get("classification_contract_status") == "drift":
+            release_integrity_issues.append("classification_contract_drift")
+        if overview_semantics.get("issues"):
+            release_integrity_issues.append("overview_semantics_invalid")
+        figure_findings = validation.get("figure_argument_findings") or []
+        if any(
+            "source_reuse_permission_unverified" in (row.get("issues") or [])
+            for row in figure_findings
+            if isinstance(row, dict)
+        ):
+            release_integrity_issues.append("figure_rights_unresolved")
+        if any(
+            set(row.get("issues") or [])
+            - {"source_reuse_permission_unverified"}
+            for row in figure_findings
+            if isinstance(row, dict)
+        ):
+            release_integrity_issues.append("figure_evidence_binding_incomplete")
+        blueprint_metadata_ids = (
+            blueprint.get("source_bibliography_metadata_artifact_ids")
+            if isinstance(
+                blueprint.get("source_bibliography_metadata_artifact_ids"), dict
+            )
+            else {}
+        )
+        changed_after_blueprint = sorted(
+            paper_id
+            for paper_id, artifact_id in reference_metadata_artifact_ids.items()
+            if str(blueprint_metadata_ids.get(paper_id) or "")
+            and str(blueprint_metadata_ids.get(paper_id) or "") != str(artifact_id)
+        )
+        if changed_after_blueprint:
+            release_integrity_issues.append(
+                "scope_selection_requires_recheck_after_metadata_change"
+            )
+        validation["metadata_changed_after_blueprint_paper_ids"] = changed_after_blueprint
+        release_integrity_warnings = {
+            "missing_references_section",
+            "empty_references_section",
+            "draft_has_no_citation_callouts",
+            "citation_reference_map_mismatch",
+            "citation_sources_missing_from_references",
+            "references_include_unmapped_sources",
+            "library_sources_unavailable",
+            "library_source_artifacts_missing",
+        }
+        if release_integrity_warnings.intersection(validation.get("warning_issues") or []):
+            release_integrity_issues.append("citation_or_source_integrity_failure")
+        validation["release_integrity_issues"] = list(
+            dict.fromkeys(release_integrity_issues)
+        )
+        validation["release_ready"] = bool(
+            validation["valid"] and not validation["release_integrity_issues"]
         )
         evidence_boundary = self._evidence_boundary(compatibility, quality)
         validation["evidence_boundary"] = evidence_boundary
@@ -1382,12 +2124,20 @@ class FinalService:
             )
         release = {
             "status": "released",
+            "publication_status": (
+                "release_ready" if validation["release_ready"] else "review_only"
+            ),
+            "release_ready": validation["release_ready"],
             "source_draft_artifact_id": draft.id,
             "source_paper_ids": validation["source_paper_ids"],
             "validation_blocking_issues": [],
+            "release_integrity_issues": validation["release_integrity_issues"],
             "validation_warning_issues": validation["warning_issues"],
             "unverified_manual_paragraph_ids": unverified_manual,
             "evidence_boundary": evidence_boundary,
+            "reference_metadata_artifact_ids": reference_metadata_artifact_ids,
+            "reference_ledger": reference_ledger,
+            "bibliography_identity": bibliography_identity,
             "released_at": utc_now().isoformat(),
         }
         source_ids = {
@@ -1435,7 +2185,11 @@ class FinalService:
                     ),
                 },
                 expected_revision=self._revision(principal, project_id),
-                metadata={"operation": "final-build", **source_ids},
+                metadata={
+                    "operation": "final-build",
+                    "reference_metadata_artifact_ids": reference_metadata_artifact_ids,
+                    **source_ids,
+                },
                 expected_current_artifacts=expected_currents,
                 expected_stage_states={
                     "draft": {
@@ -1890,6 +2644,7 @@ class FinalService:
             and release_artifact.metadata.get("source_draft_artifact_id")
             == current_draft_id
         )
+        release_ready = bool(release_current and release.get("release_ready"))
         docx_current = bool(
             docx
             and final_artifact
@@ -1988,11 +2743,14 @@ class FinalService:
                     "## Release report",
                     "",
                     f"- Status: {release.get('status', 'unknown')}",
+                    f"- Publication status: {release.get('publication_status', 'review_only')}",
+                    f"- Release ready: {'yes' if release.get('release_ready') else 'no'}",
                     f"- Draft artifact: {release.get('source_draft_artifact_id', '')}",
                     f"- Source papers: {', '.join(release.get('source_paper_ids') or []) or 'none'}",
                     f"- Coverage claim: {evidence_boundary.get('coverage_claim', 'selected_corpus_only')}",
                     f"- Unresolved primary papers: {len(evidence_boundary.get('unresolved_primary_paper_ids') or [])}",
                     f"- Question-level corpus gaps: {len(evidence_boundary.get('corpus_gap_questions') or [])}",
+                    f"- Release integrity issues: {', '.join(release.get('release_integrity_issues') or []) or 'none'}",
                     f"- Warnings: {', '.join(release.get('validation_warning_issues') or []) or 'none'}",
                     f"- Released at: {release.get('released_at', '')}",
                     "",
@@ -2037,6 +2795,7 @@ class FinalService:
             "evidence_boundary": evidence_boundary,
             "release_artifact_id": release_artifact.id if release_artifact else "",
             "release_current": release_current,
+            "release_ready": release_ready,
             "docx_artifact_id": docx.id if docx else "",
             "docx_url": docx_url,
             "final_draft_docx_path": docx_url,

@@ -7,15 +7,23 @@ import argparse
 import json
 from pathlib import Path
 
-from feedback_loop import deterministic_preflight
+from feedback_loop import (
+    CASE_PARAGRAPH_MAX_WORDS,
+    CASE_PARAGRAPH_MIN_WORDS,
+    deterministic_preflight,
+)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--review-root", default=".")
     parser.add_argument("--project-id", required=True)
-    parser.add_argument("--min-case-words", type=int, default=140)
-    parser.add_argument("--max-case-words", type=int, default=280)
+    parser.add_argument(
+        "--min-case-words", type=int, default=CASE_PARAGRAPH_MIN_WORDS
+    )
+    parser.add_argument(
+        "--max-case-words", type=int, default=CASE_PARAGRAPH_MAX_WORDS
+    )
     args = parser.parse_args()
     report = deterministic_preflight(
         Path(args.review_root).resolve(),

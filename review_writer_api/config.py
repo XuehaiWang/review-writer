@@ -31,6 +31,10 @@ class RetrievalTuning:
     subsection_top_k: int = 12
     subsection_per_paper_limit: int = 4
     rrf_constant: int = 60
+    semantic_top_k: int = 24
+    semantic_min_similarity: float = 0.35
+    embedding_batch_size: int = 24
+    semantic_backfill_paper_batch: int = 6
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,12 @@ class ApiSettings:
     image_provider_model: str = ""
     image_provider_wire_api: str = "images"
     image_provider_price_usd_per_image: Decimal = Decimal("0")
+    embedding_provider_api_key: str = ""
+    embedding_provider_base_url: str = "https://api.openai.com/v1"
+    embedding_provider_model: str = ""
+    embedding_provider_wire_api: str = "embeddings"
+    embedding_provider_dimension: int = 0
+    embedding_provider_price_usd_per_million: Decimal = Decimal("0")
     mineru_api_token: str = ""
     mineru_price_usd_per_page: Decimal = Decimal("0")
     mineru_max_concurrency: int = 2
@@ -81,6 +91,8 @@ class ApiSettings:
     model_gateway_user_concurrency: int = 1
     image_gateway_max_concurrency: int = 1
     image_gateway_user_concurrency: int = 1
+    embedding_gateway_max_concurrency: int = 2
+    embedding_gateway_user_concurrency: int = 1
     document_retrieval_enabled: bool = True
     vector_retrieval_enabled: bool = False
     retrieval_tuning: RetrievalTuning = field(default_factory=RetrievalTuning)
@@ -206,6 +218,27 @@ class ApiSettings:
         image_provider_price_usd_per_image = _environment_decimal(
             "REVIEW_WRITER_IMAGE_USD_PER_IMAGE", "0"
         )
+        embedding_provider_api_key = str(
+            os.environ.get("REVIEW_WRITER_EMBEDDING_API_KEY")
+            or text_provider_api_key
+            or ""
+        ).strip()
+        embedding_provider_base_url = str(
+            os.environ.get("REVIEW_WRITER_EMBEDDING_BASE_URL")
+            or text_provider_base_url
+        ).strip().rstrip("/")
+        embedding_provider_model = str(
+            os.environ.get("REVIEW_WRITER_EMBEDDING_MODEL") or ""
+        ).strip()
+        embedding_provider_wire_api = str(
+            os.environ.get("REVIEW_WRITER_EMBEDDING_WIRE_API") or "embeddings"
+        ).strip().casefold().replace("_", "-")
+        embedding_provider_dimension = _environment_integer(
+            "REVIEW_WRITER_EMBEDDING_DIMENSION", 1536, minimum=1, maximum=65535
+        )
+        embedding_provider_price_usd_per_million = _environment_decimal(
+            "REVIEW_WRITER_EMBEDDING_USD_PER_MILLION_TOKENS", "0"
+        )
         mineru_api_token = str(
             os.environ.get("REVIEW_WRITER_MINERU_API_TOKEN")
             or os.environ.get("MINERU_API_TOKEN")
@@ -238,6 +271,12 @@ class ApiSettings:
         )
         image_gateway_user_concurrency = _environment_integer(
             "REVIEW_WRITER_IMAGE_GATEWAY_USER_CONCURRENCY", 1, minimum=1, maximum=4
+        )
+        embedding_gateway_max_concurrency = _environment_integer(
+            "REVIEW_WRITER_EMBEDDING_GATEWAY_CONCURRENCY", 2, minimum=1, maximum=16
+        )
+        embedding_gateway_user_concurrency = _environment_integer(
+            "REVIEW_WRITER_EMBEDDING_GATEWAY_USER_CONCURRENCY", 1, minimum=1, maximum=8
         )
         document_retrieval_enabled = _environment_flag(
             "REVIEW_DOCUMENT_RETRIEVAL_ENABLED", True
@@ -323,6 +362,14 @@ class ApiSettings:
             image_provider_model=image_provider_model,
             image_provider_wire_api=image_provider_wire_api,
             image_provider_price_usd_per_image=image_provider_price_usd_per_image,
+            embedding_provider_api_key=embedding_provider_api_key,
+            embedding_provider_base_url=embedding_provider_base_url,
+            embedding_provider_model=embedding_provider_model,
+            embedding_provider_wire_api=embedding_provider_wire_api,
+            embedding_provider_dimension=embedding_provider_dimension,
+            embedding_provider_price_usd_per_million=(
+                embedding_provider_price_usd_per_million
+            ),
             mineru_api_token=mineru_api_token,
             mineru_price_usd_per_page=mineru_price_usd_per_page,
             mineru_max_concurrency=mineru_max_concurrency,
@@ -333,6 +380,8 @@ class ApiSettings:
             model_gateway_user_concurrency=model_gateway_user_concurrency,
             image_gateway_max_concurrency=image_gateway_max_concurrency,
             image_gateway_user_concurrency=image_gateway_user_concurrency,
+            embedding_gateway_max_concurrency=embedding_gateway_max_concurrency,
+            embedding_gateway_user_concurrency=embedding_gateway_user_concurrency,
             document_retrieval_enabled=document_retrieval_enabled,
             vector_retrieval_enabled=vector_retrieval_enabled,
         )

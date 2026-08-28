@@ -18,6 +18,12 @@ export function DraftJobStatus({ job, startingType = "draft.evaluate", publicati
   const acceptingRewrite = jobType === "draft.accept-rewrite";
   const result = (job?.result || {}) as Record<string, unknown>;
   const feedback = (result.feedback_status || {}) as Record<string, unknown>;
+  const evidenceRepair = (result.evidence_repair || {}) as Record<string, unknown>;
+  const referenceRepair = (result.reference_repair || {}) as Record<string, unknown>;
+  const repairTasks = Array.isArray(result.repair_tasks)
+    ? result.repair_tasks.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    : [];
+  const repairStatus = String(result.repair_status || "");
   const phase = String(feedback.phase || "");
   const iteration = Number(feedback.iteration || 0);
   const maxIterations = Number(feedback.max_iterations || 0);
@@ -39,6 +45,9 @@ export function DraftJobStatus({ job, startingType = "draft.evaluate", publicati
     : [];
   const bestScore = Number(feedback.best_score || result.score || 0);
   const bestScoreRestored = feedback.best_score_restored === true;
+  const repairedEvidenceCount = Number(evidenceRepair.added_evidence_count || 0);
+  const downgradedClaimCount = Number(evidenceRepair.downgraded_claim_count || 0);
+  const referenceRebuilt = referenceRepair.changed === true;
   const active = status === "submitting" || activeStatuses.has(status);
   const total = Math.max(0, Number(job?.progress_total || 0));
   const current = Math.max(0, Math.min(Number(job?.progress_current || 0), total || Number.MAX_SAFE_INTEGER));
@@ -65,7 +74,17 @@ export function DraftJobStatus({ job, startingType = "draft.evaluate", publicati
           : text("候选生成与评分任务已经提交，正在等待工作线程。", "The candidate generation and scoring job is waiting for a worker.");
   } else if (status === "running") {
     title = evaluating ? text("正在评估当前初稿", "Evaluating current draft") : optimizing ? text("正在批量安全优化", "Running batch safe optimization") : acceptingRewrite ? text("正在保存已评分候选", "Saving scored candidate") : text("正在生成并评分候选", "Generating and scoring candidate");
-    if ((evaluating || optimizing) && phase === "preflight") {
+    if (optimizing && phase === "diagnosing") {
+      detail = text("正在合并重复问题并定位共同根因。", "Grouping repeated findings and locating their shared root causes.");
+    } else if (optimizing && ["repairing_references", "repairing_deterministic"].includes(phase)) {
+      detail = text("正在按稳定的 Paper ID 核对引文，并准备重建连续参考文献编号。", "Checking citations against stable Paper IDs and preparing a consecutive reference rebuild.");
+    } else if (optimizing && phase === "repairing_evidence") {
+      detail = text("正在把逐段原文复核命中的片段写回版本化证据包，并记录证据不足 Claim 的降级轨迹。", "Persisting matched original-source passages into the versioned evidence package and recording downgraded evidence-gap claims.");
+    } else if (optimizing && phase === "validating_full_draft") {
+      detail = text("正在对组合后的候选全文重新执行一次完整评分与硬性校验。", "Re-evaluating the exact combined candidate as a full manuscript with all hard checks.");
+    } else if (optimizing && ["publishing", "validating"].includes(phase)) {
+      detail = text("正在执行完整终稿校验，并原子发布正文、证据包、参考文献和质量报告。", "Running final full-draft validation and atomically publishing the manuscript, evidence package, references, and quality report.");
+    } else if ((evaluating || optimizing) && phase === "preflight") {
       detail = text("正在执行确定性预检。", "Running deterministic preflight checks.");
     } else if ((evaluating || optimizing) && phase === "source_checking") {
       detail = text("正在逐段核对原始文献证据。", "Checking original-source evidence paragraph by paragraph.");
@@ -130,7 +149,12 @@ export function DraftJobStatus({ job, startingType = "draft.evaluate", publicati
         detail = evaluating
           ? text("最新分数和问题段落已经刷新。", "The latest score and paragraph issues have been refreshed.")
           : optimizing
-            ? text("优化结果已生成，请检查段落对比并人工确认后再写入正文。", "The optimization result is ready. Review the paragraph comparisons and confirm them before saving changes to the draft.")
+            ? draftChanged
+              ? text(
+                `安全修改已保存：新增 ${repairedEvidenceCount} 条直接证据，记录 ${downgradedClaimCount} 条 Claim 处置${referenceRebuilt ? "，并重建了参考文献编号" : ""}；仅有歧义候选继续留给人工确认。`,
+                `Safe changes were saved with ${repairedEvidenceCount} direct evidence addition(s), ${downgradedClaimCount} Claim disposition(s)${referenceRebuilt ? ", and rebuilt reference numbering" : ""}; only ambiguous candidates remain for manual review.`,
+              )
+              : text("优化结果已生成，请检查仍需人工确认的段落对比。", "The optimization result is ready. Review any paragraph comparisons that still require manual confirmation.")
             : acceptingRewrite
               ? text("已采用候选生成时的单段分数，并发布增量更新后的全文分数。", "The paragraph score computed with the candidate was reused and the incrementally updated overall score was published.")
               : text("候选分数已经显示。请比较原文、候选及分数，然后选择保存或放弃。", "The candidate score is ready. Compare the original, candidate, and scores, then save or discard it.");
@@ -172,6 +196,7 @@ export function DraftJobStatus({ job, startingType = "draft.evaluate", publicati
         <span style={percentage === undefined ? undefined : { width: `${percentage}%` }} />
       </div>
       <p>{detail}</p>
+      {repairTasks.length ? <details className="draft-repair-task-summary"><summary>{text(`修复任务 ${repairTasks.length} · ${repairStatus || "completed"}`, `${repairTasks.length} repair task(s) · ${repairStatus || "completed"}`)}</summary><ul>{repairTasks.map((task, index) => { const target = (task.target || {}) as Record<string, unknown>; const paragraphs = Array.isArray(target.paragraph_ids) ? target.paragraph_ids.map(String).filter(Boolean) : []; const sections = Array.isArray(target.section_ids) ? target.section_ids.map(String).filter(Boolean) : []; return <li key={String(task.task_id || index)}><strong>{String(task.repair_route || "repair")}</strong><span>{[...sections, ...paragraphs].join(" · ") || text("全文", "Full draft")}</span><em>{String(task.status || "queued")}</em></li>; })}</ul></details> : null}
     </section>
   );
 }

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from review_writer_api.gateway_client import GatewayTaskEnvironmentClient
+from review_writer_api.job_lease_context import bind_job_lease
 
 
 class _Response:
@@ -85,6 +86,45 @@ class GatewayTaskEnvironmentClientTests(unittest.TestCase):
 
         self.assertEqual(1, open_request.call_count)
         sleep.assert_not_called()
+
+    def test_embedding_call_uses_current_fenced_job_and_internal_endpoint(self) -> None:
+        client = GatewayTaskEnvironmentClient(
+            "http://model-gateway:8782/api/internal/v1/model-responses",
+            "worker-secret",
+            attempts=1,
+        )
+        seen_urls: list[str] = []
+
+        def open_request(request, timeout):
+            seen_urls.append(request.full_url)
+            if request.full_url.endswith("/task-token"):
+                return _Response({"task_token": "short-lived-token"})
+            self.assertTrue(request.full_url.endswith("/embeddings"))
+            self.assertGreaterEqual(timeout, 120.0)
+            return _Response(
+                {
+                    "model": "embedding-test-model",
+                    "dimension": 2,
+                    "embeddings": [[0.1, 0.2]],
+                }
+            )
+
+        with patch(
+            "review_writer_api.gateway_client.urllib.request.urlopen",
+            side_effect=open_request,
+        ), bind_job_lease(
+            self.context.job_id,
+            self.context.lease_token,
+            self.context.lease_generation,
+        ):
+            result = client.embed_for_active_job(
+                ["semantic query"],
+                request_key="query-1",
+                stage="matrix.enrich.embedding",
+            )
+
+        self.assertEqual(2, len(seen_urls))
+        self.assertEqual([[0.1, 0.2]], result["embeddings"])
 
 
 if __name__ == "__main__":

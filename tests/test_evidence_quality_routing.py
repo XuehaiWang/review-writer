@@ -42,7 +42,9 @@ class EvidenceQualityRoutingTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual("sections", routing["recommended_return_stage"])
+        # Section-evidence repair is now orchestrated from the Draft page so
+        # users do not have to jump backward and repair packages manually.
+        self.assertEqual("draft", routing["recommended_return_stage"])
         self.assertEqual("S02", issues[0]["section_id"])
         self.assertEqual(["P002"], issues[0]["unresolved_primary_papers"])
 

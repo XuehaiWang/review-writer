@@ -15,6 +15,8 @@ from review_writer_api.config import ApiSettings
 from review_writer_api.database import create_session_factory, database_session
 from review_writer_api.model_gateway import ModelGatewayError, ModelGatewayService
 from review_writer_api.schemas import (
+    EmbeddingGatewayRequest,
+    EmbeddingGatewayResponse,
     ImageGatewayRequest,
     ImageGatewayResponse,
     ModelGatewayRequest,
@@ -37,6 +39,13 @@ class LeaseTokenResponse(BaseModel):
 class ProviderTestRequest(BaseModel):
     provider_kind: str
     actor_user_id: str
+
+
+class EmbeddingProfileResponse(BaseModel):
+    profile: str
+    enabled: bool
+    model: str
+    dimension: int
 
 
 def _bearer_token(request: Request) -> str:
@@ -83,6 +92,7 @@ def create_gateway_app(settings: ApiSettings | None = None) -> FastAPI:
         is_model_call = request.url.path in {
             "/api/internal/v1/model-responses",
             "/api/internal/v1/image-generations",
+            "/api/internal/v1/embeddings",
         }
         if is_model_call:
             metrics["requests"] += 1
@@ -181,6 +191,38 @@ def create_gateway_app(settings: ApiSettings | None = None) -> FastAPI:
         except ModelGatewayError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         return ModelGatewayResponse.model_validate(result)
+
+    @app.get(
+        "/api/internal/v1/embedding-profile",
+        response_model=EmbeddingProfileResponse,
+        include_in_schema=False,
+    )
+    def embedding_profile(
+        worker_token: str = Header(default="", alias="X-Review-Writer-Worker-Token"),
+    ) -> EmbeddingProfileResponse:
+        expected = resolved.internal_worker_token
+        if not expected or not hmac.compare_digest(worker_token, expected):
+            raise HTTPException(status_code=401, detail="Service authentication failed.")
+        return EmbeddingProfileResponse.model_validate(gateway.embedding_profile())
+
+    @app.post(
+        "/api/internal/v1/embeddings",
+        response_model=EmbeddingGatewayResponse,
+        include_in_schema=False,
+    )
+    async def embeddings(
+        payload: EmbeddingGatewayRequest, request: Request
+    ) -> EmbeddingGatewayResponse:
+        try:
+            result = await gateway.complete_embeddings(
+                _bearer_token(request),
+                request_key=payload.request_key,
+                stage=payload.stage,
+                inputs=payload.inputs,
+            )
+        except ModelGatewayError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        return EmbeddingGatewayResponse.model_validate(result)
 
     @app.post(
         "/api/internal/v1/image-generations",

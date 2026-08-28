@@ -105,6 +105,129 @@ def normalized_heading(value: Any) -> str:
     return heading.strip(" .:：—–-_/\\")
 
 
+_CONTRACT_MATCH_STOPWORDS = {
+    "and",
+    "or",
+    "the",
+    "a",
+    "an",
+    "of",
+    "for",
+    "in",
+    "review",
+    "reviews",
+    "discussion",
+    "evidence",
+    "method",
+    "methods",
+    "study",
+    "studies",
+}
+
+
+def _normalized_contract_text(value: Any) -> str:
+    return re.sub(
+        r"[^a-z0-9\u3400-\u9fff]+",
+        " ",
+        normalized_heading(value),
+    ).strip()
+
+
+def _contract_text_values(value: Any) -> list[str]:
+    """Flatten section-contract prose without interpreting its discipline."""
+
+    if isinstance(value, dict):
+        return _unique(
+            text
+            for item in value.values()
+            for text in _contract_text_values(item)
+        )
+    if isinstance(value, (list, tuple, set)):
+        return _unique(
+            text
+            for item in value
+            for text in _contract_text_values(item)
+        )
+    return [_text(value)] if _text(value) else []
+
+
+def _partition_aliases(value: Any) -> list[str]:
+    """Build conservative aliases from the user's own label.
+
+    Parenthetical forms are treated as aliases, so a requirement such as
+    ``enantioselective ATA (EATA)`` can be traced by either the expanded label
+    or ``EATA``. No discipline-specific synonym list is introduced here.
+    """
+
+    raw = _text(value)
+    if not raw:
+        return []
+    parenthetical = re.findall(r"[（(]([^()（）]{2,40})[）)]", raw)
+    without_parenthetical = re.sub(r"\s*[（(][^()（）]{2,40}[）)]\s*", " ", raw)
+    return _unique(
+        normalized
+        for candidate in (raw, without_parenthetical, *parenthetical)
+        if (normalized := _normalized_contract_text(candidate))
+    )
+
+
+def _partition_trace(
+    partition: str,
+    body: list[dict[str, Any]],
+    *,
+    sibling_partitions: list[str],
+) -> list[str]:
+    aliases = _partition_aliases(partition)
+    if not aliases:
+        return []
+    sibling_tokens = [
+        {
+            token
+            for token in _normalized_contract_text(label).split()
+            if len(token) >= 3 and token not in _CONTRACT_MATCH_STOPWORDS
+        }
+        for label in sibling_partitions
+    ]
+    common_tokens = (
+        set.intersection(*sibling_tokens)
+        if len(sibling_tokens) > 1 and all(sibling_tokens)
+        else set()
+    )
+    wanted_tokens = {
+        token
+        for token in _normalized_contract_text(
+            re.sub(r"\s*[（(][^()（）]{2,40}[）)]\s*", " ", partition)
+        ).split()
+        if len(token) >= 3
+        and token not in _CONTRACT_MATCH_STOPWORDS
+        and token not in common_tokens
+    }
+    matches: list[str] = []
+    for item in body:
+        haystacks = [
+            _normalized_contract_text(value)
+            for value in item.get("contract_trace_values") or []
+            if _normalized_contract_text(value)
+        ]
+        represented = any(
+            alias == haystack
+            or (
+                len(alias) >= 4
+                and re.search(rf"(?:^|\s){re.escape(alias)}(?:$|\s)", haystack)
+            )
+            for alias in aliases
+            for haystack in haystacks
+        )
+        if not represented and len(wanted_tokens) >= 2:
+            represented = any(
+                len(wanted_tokens & set(haystack.split())) / len(wanted_tokens) >= 0.8
+                for haystack in haystacks
+            )
+        if represented:
+            matches.append(item["section_id"])
+    return matches
+
+
 def is_catch_all_heading(value: Any) -> bool:
     """Return whether a body heading is a catch-all rather than a real concept.
 
@@ -147,6 +270,29 @@ def _year(value: Any) -> int | None:
     return year if 1800 <= year <= 2199 else None
 
 
+def _row_publication_year(row: dict[str, Any]) -> int | None:
+    """Use first publication date for scope inclusion, then safe fallbacks."""
+
+    return (
+        _year(row.get("first_publication_date"))
+        or _year(row.get("bibliographic_year"))
+        or _year(row.get("year"))
+    )
+
+
+def _topic_year_range(topic: Any) -> tuple[int | None, int | None]:
+    text = _text(topic)
+    match = re.search(
+        r"(?<!\d)((?:18|19|20|21)\d{2})\s*(?:-|–|—|to|至)\s*((?:18|19|20|21)\d{2})(?!\d)",
+        text,
+        re.I,
+    )
+    if not match:
+        return None, None
+    start, end = int(match.group(1)), int(match.group(2))
+    return (start, end) if start <= end else (end, start)
+
+
 def derive_scope_contract(
     topic: Any,
     outline_style: Any,
@@ -160,11 +306,12 @@ def derive_scope_contract(
     style = _text(outline_style).casefold() or "custom"
     axis, axis_label = _STYLE_AXES.get(style, _STYLE_AXES["custom"])
     rows = list(matrix_rows)
+    explicit_year_from, explicit_year_to = _topic_year_range(review_topic)
     years = sorted(
         year
         for row in rows
         if isinstance(row, dict)
-        if (year := _year(row.get("year"))) is not None
+        if (year := _row_publication_year(row)) is not None
     )
     defaults: dict[str, Any] = {
         "schema_version": ACADEMIC_SCHEMA_VERSION,
@@ -179,10 +326,27 @@ def derive_scope_contract(
             "then identify transferable findings, boundaries and testable research directions."
         ),
         "time_span": {
+            "from": explicit_year_from if explicit_year_from is not None else years[0] if years else None,
+            "to": explicit_year_to if explicit_year_to is not None else years[-1] if years else None,
+            "basis": "user_topic" if explicit_year_from is not None else "selected_matrix",
+        },
+        "core_window": {
+            "from": explicit_year_from if explicit_year_from is not None else years[0] if years else None,
+            "to": explicit_year_to if explicit_year_to is not None else years[-1] if years else None,
+            "basis": "user_topic" if explicit_year_from is not None else "selected_matrix_default",
+        },
+        "historical_background": {
+            "allowed": True,
+            "counted_in_core_coverage": False,
+            "paper_ids": [],
+        },
+        "latest_update_cutoff": None,
+        "observed_corpus_range": {
             "from": years[0] if years else None,
             "to": years[-1] if years else None,
-            "basis": "selected_matrix",
         },
+        "time_range_date_field": "first_publication_date",
+        "coverage_mode": "local_bounded",
         "coverage_basis": {
             "kind": "selected_matrix",
             "selected_paper_count": len(rows),
@@ -284,7 +448,7 @@ def coverage_diagnostics(
     """Describe the selected corpus without claiming unknowable global coverage."""
 
     rows = [row for row in matrix_rows if isinstance(row, dict)]
-    years = [_year(row.get("year")) for row in rows]
+    years = [_row_publication_year(row) for row in rows]
     known_years = [year for year in years if year is not None]
     year_counts = Counter(str(year) for year in known_years)
     journals = Counter(
@@ -314,6 +478,43 @@ def coverage_diagnostics(
         else 0
     )
     warnings: list[dict[str, Any]] = []
+    time_span = (
+        scope.get("core_window")
+        if isinstance(scope.get("core_window"), dict)
+        else scope.get("time_span")
+        if isinstance(scope.get("time_span"), dict)
+        else {}
+    )
+    year_from = _year(time_span.get("from"))
+    year_to = _year(time_span.get("to"))
+    if year_from is not None and year_to is not None and year_from > year_to:
+        year_from, year_to = year_to, year_from
+    missing_years: list[int] = []
+    if year_from is not None and year_to is not None and year_to - year_from <= 40:
+        observed = set(known_years)
+        missing_years = [year for year in range(year_from, year_to + 1) if year not in observed]
+    outside_window: list[str] = []
+    foundational_outside_window: list[str] = []
+    if year_from is not None and year_to is not None:
+        for row in rows:
+            paper_id = _text(row.get("paper_id"))
+            paper_year = _row_publication_year(row)
+            if not paper_id or paper_year is None or year_from <= paper_year <= year_to:
+                continue
+            evidence_role = _text(
+                row.get("scope_role")
+                or row.get("evidence_role")
+                or row.get("role")
+            ).casefold()
+            if evidence_role in {
+                "background",
+                "foundational",
+                "historical_context",
+                "context",
+            }:
+                foundational_outside_window.append(paper_id)
+            else:
+                outside_window.append(paper_id)
     if rows and len(known_years) < len(rows):
         warnings.append(
             {
@@ -331,14 +532,56 @@ def coverage_diagnostics(
                 "message": "The search cutoff date has not been recorded.",
             }
         )
+    span = (year_to - year_from + 1) if year_from is not None and year_to is not None else 0
+    if span and len(missing_years) >= max(2, (span + 2) // 3):
+        warnings.append(
+            {
+                "rule_id": "coverage.explicit_year_range_sparse",
+                "severity": "advisory",
+                "missing_years": missing_years,
+                "message": "The selected corpus is sparse across the declared year range; consider an online supplementary search.",
+            }
+        )
+    if outside_window:
+        warnings.append(
+            {
+                "rule_id": "coverage.selected_papers_outside_declared_window",
+                "severity": "warning",
+                "paper_ids": outside_window,
+                "message": (
+                    "Some analytical papers fall outside the declared publication window. "
+                    "Re-evaluate their inclusion or explicitly assign a foundational/background role."
+                ),
+            }
+        )
+    coverage_mode = _text(scope.get("coverage_mode")) or "local_bounded"
     return {
         "schema_version": ACADEMIC_SCHEMA_VERSION,
-        "coverage_claim": "selected_corpus_only",
+        "coverage_mode": coverage_mode,
+        "coverage_claim": (
+            "selected_multi_source_corpus_only"
+            if coverage_mode == "multi_source"
+            else "selected_local_corpus_only"
+        ),
         "global_coverage_percentage": None,
         "selected_paper_count": len(rows),
         "search_cutoff_date": _text(scope.get("search_cutoff_date")) or None,
+        "latest_update_cutoff": _text(
+            scope.get("latest_update_cutoff") or scope.get("search_cutoff_date")
+        )
+        or None,
+        "core_window": {"from": year_from, "to": year_to},
+        "observed_corpus_range": {
+            "from": min(known_years) if known_years else None,
+            "to": max(known_years) if known_years else None,
+        },
         "year_distribution": dict(sorted(year_counts.items())),
         "year_unknown_count": len(rows) - len(known_years),
+        "declared_year_from": year_from,
+        "declared_year_to": year_to,
+        "missing_years": missing_years,
+        "outside_window_paper_ids": outside_window,
+        "foundational_outside_window_paper_ids": foundational_outside_window,
         "recent_paper_ratio": round(recent_count / len(known_years), 4) if known_years else None,
         "source_distribution": dict(journals.most_common(20)),
         "topic_clusters": [
@@ -349,6 +592,11 @@ def coverage_diagnostics(
         "limitations": [
             "Coverage is measured only against the user-selected Matrix and configured sources.",
             "No complete field benchmark corpus is assumed, so no global coverage percentage is reported.",
+            (
+                "Online topic search was not enabled; coverage is bounded to the local Library."
+                if coverage_mode == "local_bounded"
+                else "Online sources supplemented the local Library, but exhaustive global coverage is not claimed."
+            ),
         ],
     }
 
@@ -356,8 +604,15 @@ def coverage_diagnostics(
 def taxonomy_diagnostics(
     sections: Iterable[dict[str, Any]],
     matrix_paper_ids: Iterable[Any],
+    *,
+    classification_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Diagnose structural blockers without modifying a user outline."""
+    """Diagnose routing and classification-contract drift.
+
+    The contract check is intentionally explainable: it never infers a
+    discipline-specific taxonomy, but it does verify that the generated
+    sections still honor the axis and explicit partitions selected upstream.
+    """
 
     matrix_ids = _unique(matrix_paper_ids)
     matrix_set = set(matrix_ids)
@@ -365,6 +620,17 @@ def taxonomy_diagnostics(
     for index, source in enumerate(sections, start=1):
         if not isinstance(source, dict):
             continue
+        trace_values = _contract_text_values(
+            [
+                source.get("topic_partition"),
+                source.get("title"),
+                source.get("purpose"),
+                source.get("notes"),
+                source.get("section_thesis"),
+                source.get("review_problem"),
+                source.get("review_claims"),
+            ]
+        )
         normalized.append(
             {
                 "section_id": _text(source.get("section_id")) or f"S{index:02d}",
@@ -381,6 +647,9 @@ def taxonomy_diagnostics(
                     or source.get("context_papers")
                     or []
                 ),
+                "topic_partition": _text(source.get("topic_partition")),
+                "boundary_rationale": _text(source.get("boundary_rationale")),
+                "contract_trace_values": trace_values,
             }
         )
 
@@ -416,6 +685,92 @@ def taxonomy_diagnostics(
                 "message": (
                     "A residual boundary section owns too much of the selected corpus. "
                     "Reroute its papers into evidence-based academic categories before writing."
+                ),
+            }
+        )
+    contract = (
+        classification_contract
+        if isinstance(classification_contract, dict)
+        else {}
+    )
+    boundary_ids = [
+        item["section_id"]
+        for item in body
+        if is_boundary_heading(item["title"]) and item["paper_ids"]
+    ]
+    boundary_rationale_ids = [
+        item["section_id"]
+        for item in body
+        if item["section_id"] in boundary_ids and item["boundary_rationale"]
+    ]
+    unresolved_boundary_ids = [
+        section_id
+        for section_id in boundary_ids
+        if section_id not in boundary_rationale_ids
+    ]
+    if (
+        unresolved_boundary_ids
+        and contract.get("catch_all_sections_allowed") is False
+    ):
+        issues.append(
+            {
+                "rule_id": "taxonomy.boundary_section_outside_contract",
+                "severity": "warning",
+                "section_ids": unresolved_boundary_ids,
+                "message": (
+                    "A residual boundary section has no explicit evidence-based rationale. "
+                    "Reclassify its papers under the primary axis or record why a cross-category analysis is necessary."
+                ),
+            }
+        )
+
+    required_partitions = _unique(
+        contract.get("required_outline_partitions")
+        or contract.get("topic_partitions")
+        or []
+    )
+    raw_partition_boundaries = contract.get("topic_partition_coverage_boundaries")
+    if isinstance(raw_partition_boundaries, dict):
+        declared_partition_boundaries = {
+            _text(key).casefold(): value
+            for key, value in raw_partition_boundaries.items()
+            if _text(key) and value
+        }
+    elif isinstance(raw_partition_boundaries, (list, tuple, set)):
+        declared_partition_boundaries = {
+            _text(value).casefold(): True
+            for value in raw_partition_boundaries or []
+            if _text(value)
+        }
+    else:
+        declared_partition_boundaries = {}
+    partition_trace: dict[str, list[str]] = {}
+    route_gap_partitions: list[str] = []
+    bounded_partitions: list[str] = []
+    missing_partitions: list[str] = []
+    for partition in required_partitions:
+        section_ids = _partition_trace(
+            partition,
+            body,
+            sibling_partitions=required_partitions,
+        )
+        partition_trace[partition] = section_ids
+        if not section_ids:
+            route_gap_partitions.append(partition)
+            if partition.casefold() in declared_partition_boundaries:
+                bounded_partitions.append(partition)
+            else:
+                missing_partitions.append(partition)
+    if missing_partitions:
+        issues.append(
+            {
+                "rule_id": "taxonomy.required_topic_partitions_missing",
+                "severity": "warning",
+                "partitions": missing_partitions,
+                "message": (
+                    "One or more independently discussed partitions requested in the Topic "
+                    "are not traceable in a body heading or section contract. Add an "
+                    "evidence-backed route or record the resulting coverage boundary."
                 ),
             }
         )
@@ -492,6 +847,45 @@ def taxonomy_diagnostics(
         "warning_count": len(issues) - len(blockers),
         "catch_all_section_ids": catch_all_ids,
         "dominant_boundary_section_ids": dominant_boundary_ids,
+        "boundary_section_ids": boundary_ids,
+        "boundary_rationale_section_ids": boundary_rationale_ids,
+        "unresolved_boundary_section_ids": unresolved_boundary_ids,
+        "required_topic_partitions": required_partitions,
+        "missing_topic_partitions": missing_partitions,
+        "topic_partition_route_gaps": route_gap_partitions,
+        "bounded_topic_partitions": bounded_partitions,
+        "topic_partition_trace": partition_trace,
+        # These dimensions are intentionally informational: they must be
+        # compared or covered, but do not each need a top-level body section.
+        "topic_comparison_dimensions": _unique(
+            contract.get("topic_comparison_dimensions") or []
+        ),
+        "topic_axis_examples": dict(
+            contract.get("topic_axis_examples") or {}
+        ),
+        "topic_outcome_dimensions": _unique(
+            contract.get("topic_outcome_dimensions") or []
+        ),
+        "topic_focus_dimensions": _unique(
+            contract.get("topic_focus_dimensions")
+            or contract.get("topic_outcome_dimensions")
+            or []
+        ),
+        "classification_contract_status": (
+            "drift"
+            if (
+                catch_all_ids
+                or dominant_boundary_ids
+                or (
+                    unresolved_boundary_ids
+                    and contract.get("catch_all_sections_allowed") is False
+                )
+                or missing_partitions
+            )
+            else "aligned_with_boundaries"
+            if bounded_partitions
+            else "aligned"
+        ),
         "orphan_paper_ids": orphan_ids,
         "assigned_paper_count": len(set(assigned) & matrix_set),
         "contextual_paper_count": len(set(contextual) & matrix_set),
@@ -598,3 +992,50 @@ def evidence_level(content: Any) -> str:
     if re.search(r"\b(correlat|associated with|accompanied by)\b", text):
         return "correlated_observation"
     return "reported_result"
+
+
+def mechanism_evidence_types(content: Any) -> list[str]:
+    """Classify observable mechanism-support types without judging causality.
+
+    These labels describe what the source reports, not whether the proposed
+    mechanism is ultimately correct.  The writing layer can therefore compare
+    evidence strength without collapsing experiment, computation and author
+    interpretation into one generic disclaimer.
+    """
+
+    text = _text(content).casefold()
+    patterns = (
+        (
+            "intermediate_isolation_or_independent_synthesis",
+            r"\b(?:isolat(?:ed|ion)|independent(?:ly)? synthes(?:ized|is)|prepared intermediate|intermediate was synthesized)\b",
+        ),
+        (
+            "intermediate_conversion_or_control_experiment",
+            r"\b(?:control experiment|conversion experiment|converted? (?:to|into)|subjected to (?:the )?(?:standard|reaction) conditions)\b",
+        ),
+        (
+            "isotope_label_or_kie",
+            r"\b(?:kinetic isotope effect|\bkie\b|isotop(?:e|ic)(?:[- ]label| experiment)|deuterium label|deuterat)\b",
+        ),
+        (
+            "time_course_or_racemization",
+            r"\b(?:time[- ]course|reaction profile|racemi[sz]|epimeri[sz]|configurational stability|ee erosion)\b",
+        ),
+        (
+            "computational_chemistry",
+            r"\b(?:dft|density functional|transition[- ]state calculation|computational stud|calculated barrier|free[- ]energy profile)\b",
+        ),
+        (
+            "catalyst_state_or_speciation",
+            r"\b(?:xps|xanes|exafs|epr|nmr titration|mass spectrometr|catalyst speciation|oxidation state|resting state)\b",
+        ),
+        (
+            "stereochemical_assignment",
+            r"\b(?:absolute configuration|x[- ]ray|single[- ]crystal|ecd|vcd|mosher|stereochemical assignment|\br[_ ]?a\b|\bs[_ ]?a\b)\b",
+        ),
+        (
+            "author_proposed_mechanism_only",
+            r"\b(?:proposed mechanism|plausible mechanism|mechanism is proposed|may proceed via|was suggested to proceed)\b",
+        ),
+    )
+    return [label for label, pattern in patterns if re.search(pattern, text, re.I)]

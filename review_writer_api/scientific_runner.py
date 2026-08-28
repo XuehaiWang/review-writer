@@ -279,9 +279,13 @@ class ScientificRunner:
 
             last_stdout = self._redact(last_stdout, secret_values)
             last_stderr = self._redact(last_stderr, secret_values)
+            # A scientific script can write its final checkpoint immediately
+            # before exiting non-zero. Publish that terminal snapshot as well;
+            # otherwise the database/UI can remain one chapter behind even
+            # though the resumable checkpoint is safely present on disk.
+            if progress_callback is not None:
+                progress_callback()
             if not timed_out and process.returncode == 0:
-                if progress_callback is not None:
-                    progress_callback()
                 missing = [
                     path.relative_to(staging).as_posix()
                     for path in outputs

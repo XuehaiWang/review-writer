@@ -8,7 +8,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from review_writer_api.errors import LiteratureSearchFailed, WorkflowValidationError
-from review_writer_api.native_handlers import NativeWorkflowHandlers
+from review_writer_api.native_handlers import (
+    NativeWorkflowHandlers,
+    _bibliography_needs_bounded_agent,
+    _bibliography_source_names,
+    _matrix_live_payload,
+    _section_generation_timeout_seconds,
+)
 from review_writer_api.scientific_runner import ScientificRunFailed
 from review_writer_api.workspaces import HostedWorkspaceManager
 
@@ -29,6 +35,73 @@ class _Context:
 
     def report_partial_result(self, result: dict):
         self.partial_results.append(result)
+
+
+class BibliographySourceSelectionTests(unittest.TestCase):
+    def test_openalex_requires_server_api_key_for_batch_verification(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(("crossref",), _bibliography_source_names())
+        with patch.dict("os.environ", {"OPENALEX_API_KEY": "configured"}, clear=True):
+            self.assertEqual(
+                ("crossref", "openalex"), _bibliography_source_names()
+            )
+
+    def test_bounded_agent_runs_only_for_unresolved_automatic_audits(self) -> None:
+        self.assertTrue(
+            _bibliography_needs_bounded_agent(
+                {
+                    "status": "not_found",
+                    "automatic_resolution_missing_fields": ["authors"],
+                }
+            )
+        )
+        self.assertFalse(
+            _bibliography_needs_bounded_agent(
+                {
+                    "status": "verified",
+                    "automatic_resolution_missing_fields": [],
+                }
+            )
+        )
+        self.assertFalse(
+            _bibliography_needs_bounded_agent(
+                {
+                    "status": "not_found",
+                    "manual_review_status": "resolved",
+                    "automatic_resolution_missing_fields": ["authors"],
+                }
+            )
+        )
+
+
+class SectionGenerationTimeoutTests(unittest.TestCase):
+    def test_full_chapter_run_scales_beyond_fixed_fifteen_minutes(self) -> None:
+        tasks = [{"section_id": f"S{index:02d}"} for index in range(1, 10)]
+
+        self.assertEqual(59 * 60, _section_generation_timeout_seconds(tasks))
+
+    def test_resume_budget_counts_only_unfinished_chapters(self) -> None:
+        tasks = [{"section_id": f"S{index:02d}"} for index in range(1, 10)]
+        checkpoint = {
+            "entries": {
+                f"S{index:02d}": {"output": {}}
+                for index in range(1, 6)
+            }
+        }
+
+        self.assertEqual(
+            29 * 60,
+            _section_generation_timeout_seconds(tasks, checkpoint),
+        )
+
+    def test_empty_or_completed_run_keeps_a_bounded_minimum(self) -> None:
+        tasks = [{"section_id": "S01"}]
+        checkpoint = {"entries": {"S01": {"output": {}}}}
+
+        self.assertEqual(
+            15 * 60,
+            _section_generation_timeout_seconds(tasks, checkpoint),
+        )
 
 
 class _RecordingRunner:
@@ -796,6 +869,90 @@ class NativeWorkflowHandlerTests(unittest.TestCase):
                 context.partial_results[0]["section_progress"]["completed_sections"][0]["heading"],
             )
 
+    def test_matrix_progress_callback_publishes_live_fact_previews(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            status_file = Path(temporary) / "matrix-progress.json"
+            checkpoint_file = Path(temporary) / "matrix-checkpoint.json"
+            status_file.write_text(
+                json.dumps(
+                    {
+                        "phase": "extracting",
+                        "current": 1,
+                        "total": 2,
+                        "current_paper_id": "P002",
+                        "completed_papers": ["P001"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            checkpoint_file.write_text(
+                json.dumps(
+                    {
+                        "entries": {
+                            "P001": {
+                                "result": {
+                                    "status": "complete",
+                                    "facts": [
+                                        {
+                                            "fact_id": "F1",
+                                            "field_id": "reaction_type",
+                                            "value": "A phosphine-catalyzed cycloaddition was reported.",
+                                            "support_level": "direct",
+                                        }
+                                    ],
+                                    "evidence_backed_tags": {
+                                        "reaction_type": [{"partition_id": "cycloaddition"}]
+                                    },
+                                }
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            context = _Context(str(uuid.uuid4()))
+            callback = NativeWorkflowHandlers._matrix_progress_callback(
+                context, status_file, checkpoint_file
+            )
+
+            callback()
+            callback()
+
+            self.assertEqual([(1, 2)], context.progress_reports)
+            live = context.partial_results[0]["matrix_enrichment_live"]
+            self.assertEqual("P002", live["current_paper_id"])
+            self.assertEqual(1, live["items"][0]["fact_count"])
+            self.assertEqual(
+                "A phosphine-catalyzed cycloaddition was reported.",
+                live["items"][0]["facts_preview"][0]["value"],
+            )
+            self.assertIn(
+                "matrix_enrichment_checkpoint", context.partial_results[0]
+            )
+
+    def test_matrix_live_payload_bounds_long_fact_preview(self) -> None:
+        live = _matrix_live_payload(
+            {
+                "phase": "targeted_recheck",
+                "current": 0,
+                "total": 1,
+                "current_paper_id": "P001",
+                "completed_papers": ["P001"],
+            },
+            {
+                "entries": {
+                    "P001": {
+                        "result": {
+                            "status": "complete",
+                            "facts": [{"field_id": "scope", "value": "x" * 500}],
+                        }
+                    }
+                }
+            },
+        )
+
+        self.assertLessEqual(len(live["items"][0]["facts_preview"][0]["value"]), 261)
+
     def test_final_handlers_are_registered_and_return_publishable_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             workspaces = HostedWorkspaceManager(Path(temporary) / "users")
@@ -820,7 +977,14 @@ class NativeWorkflowHandlerTests(unittest.TestCase):
 
             self.assertIn("Conclusion", conclusion["markdown"])
             self.assertTrue(Path(overview["output_path"]).is_file())
-            self.assertEqual("project-1", overview["editable_text"]["title"])
+            self.assertEqual(
+                "Project-1",
+                overview["editable_text"]["title"],
+            )
+            self.assertNotIn(
+                "Mechanism overview", overview["editable_text"]["subtitle"]
+            )
+            self.assertEqual([], overview["editable_text"]["labels"])
             self.assertTrue(Path(exported["output_path"]).is_file())
             expected = {
                 "draft.evaluate",

@@ -33,10 +33,12 @@ from review_writer_api.routers.files import _byte_range, _read_range
 from review_writer_api.routers.jobs import _job_response
 from review_writer_api.security import Principal, Role
 from review_writer_api.workflow_schemas import (
+    BibliographyResolutionRequest,
     LiteratureDownloadRequest,
     LiteratureSearchRequest,
 )
 from review_writer_core.metadata_tags import structured_tags_are_verified
+from review_writer_core.bibliography_audit import bibliography_candidates
 
 
 def _paper_payload(
@@ -79,6 +81,7 @@ def _paper_payload(
         "embedding_status": resolved_index_status["semantic"],
         "index_status": resolved_index_status,
         "search_match": search_match,
+        "bibliography_audit": record.bibliography_audit,
     }
 
 
@@ -100,18 +103,223 @@ def build_library_router(
         return f"project:{normalized}"
     configured = dict(handlers or {})
 
+    def submit_discovery_refresh(
+        principal: Principal,
+        refresh: dict[str, Any],
+        paper_id: str,
+    ):
+        project_id = str(refresh.get("project_id") or "").strip()
+        candidate_id = str(refresh.get("candidate_id") or "").strip()
+        if not project_id or not candidate_id or not paper_id:
+            return None
+        try:
+            return job_service.submit(
+                principal,
+                scope="project",
+                project_id=project_id,
+                job_type="discovery.candidate-refresh",
+                idempotency_key=(
+                    f"candidate:{candidate_id}:paper:{paper_id}:"
+                    f"revision:{refresh.get('source_revision')}"
+                ),
+                payload={
+                    "project_id": project_id,
+                    "candidate_id": candidate_id,
+                    "paper_id": paper_id,
+                    "source_revision": refresh.get("source_revision"),
+                },
+                operation_key=f"candidate-refresh:{candidate_id}",
+            )
+        except WorkflowConflict:
+            return None
+
     def index_handler(context, payload):
         principal = Principal(context.user_id, frozenset({Role.USER}))
-        context.report_progress(1, 2)
-        result = library_index_service.build(
+        context.report_progress(1, 3)
+        paper_id = str(payload.get("paper_id") or "")
+        if bool(payload.get("semantic_only")):
+            status = library_index_service.status(principal, paper_id)
+            result = {
+                "paper_id": paper_id,
+                "index_id": status.get("index_id"),
+                "status": status.get("fulltext"),
+                "chunk_count": status.get("chunk_count", 0),
+                "source_lineage_hash": status.get("source_lineage_hash", ""),
+                "chunker_version": status.get("chunker_version", ""),
+            }
+        else:
+            result = library_index_service.build(
+                principal,
+                paper_id,
+                expected_lineage_hash=str(payload.get("source_lineage_hash") or ""),
+            )
+        context.repository.update_job_progress(context.job_id, 2, 3)
+        semantic = library_index_service.build_embeddings(
             principal,
-            str(payload.get("paper_id") or ""),
-            expected_lineage_hash=str(payload.get("source_lineage_hash") or ""),
+            paper_id,
+            index_id=str(result.get("index_id") or ""),
         )
-        context.repository.update_job_progress(context.job_id, 2, 2)
+        result["semantic"] = semantic
+        context.repository.update_job_progress(context.job_id, 3, 3)
+        refresh = payload.get("discovery_refresh")
+        if isinstance(refresh, dict):
+            refresh_job = submit_discovery_refresh(principal, refresh, paper_id)
+            result["discovery_refresh_job_id"] = (
+                refresh_job.id if refresh_job is not None else None
+            )
         return result
 
     job_service.register_handler("library.index", index_handler)
+
+    def semantic_backfill_handler(context, payload):
+        principal = Principal(context.user_id, frozenset({Role.USER}))
+        paper_ids = list(
+            dict.fromkeys(
+                str(item).strip()
+                for item in (payload.get("paper_ids") or [])
+                if str(item).strip()
+            )
+        )[:25]
+        total = len(paper_ids)
+        context.report_progress(0, total)
+        results: dict[str, dict[str, Any]] = {}
+        ready_count = 0
+        for position, paper_id in enumerate(paper_ids, start=1):
+            context.checkpoint()
+            result = dict(
+                library_index_service.build_embeddings(principal, paper_id) or {}
+            )
+            results[paper_id] = result
+            if result.get("status") == "ready":
+                ready_count += 1
+            if result.get("error_code") == "INSUFFICIENT_CREDIT":
+                remaining = paper_ids[position:]
+                library_index_service.mark_semantic_backfill_failed(
+                    principal,
+                    remaining,
+                    code="INSUFFICIENT_CREDIT",
+                    message=str(result.get("error") or "余额不足，语义索引回填已暂停。"),
+                )
+                for deferred_paper_id in remaining:
+                    results[deferred_paper_id] = {
+                        "status": "deferred",
+                        "error_code": "INSUFFICIENT_CREDIT",
+                    }
+                context.report_partial_result(
+                    {
+                        "paper_ids": paper_ids,
+                        "completed_count": total,
+                        "ready_count": ready_count,
+                        "credit_blocked": True,
+                        "results": results,
+                    }
+                )
+                context.report_progress(total, total)
+                break
+            context.report_partial_result(
+                {
+                    "paper_ids": paper_ids,
+                    "completed_count": position,
+                    "ready_count": ready_count,
+                    "results": results,
+                }
+            )
+            context.report_progress(position, total)
+        return {
+            "paper_ids": paper_ids,
+            "completed_count": total,
+            "ready_count": ready_count,
+            "credit_blocked": any(
+                result.get("error_code") == "INSUFFICIENT_CREDIT"
+                for result in results.values()
+            ),
+            "results": results,
+        }
+
+    job_service.register_handler(
+        "library.semantic-backfill", semantic_backfill_handler
+    )
+
+    def semantic_backfill_state(principal: Principal) -> dict[str, Any]:
+        plan = library_index_service.semantic_backfill_plan(principal)
+        if not plan.get("enabled") or plan.get("status") == "unavailable":
+            return plan
+
+        operation_key = "semantic-backfill"
+        current = job_service.repository.get_current_job(
+            principal.user_id,
+            scope="library",
+            project_id=None,
+            job_type="library.semantic-backfill",
+            operation_key=operation_key,
+        )
+        if current is not None and current.status in {
+            "queued",
+            "running",
+            "cancel_requested",
+        }:
+            return {
+                **plan,
+                "status": current.status,
+                "current_job": _job_response(current).model_dump(),
+            }
+
+        paper_ids = list(plan.get("paper_ids") or [])
+        if plan.get("status") != "pending" or not paper_ids:
+            return {**plan, "current_job": None}
+        try:
+            current = job_service.submit(
+                principal,
+                scope="library",
+                project_id=None,
+                job_type="library.semantic-backfill",
+                idempotency_key=f"auto:{uuid.uuid4()}",
+                payload={
+                    "paper_ids": paper_ids,
+                    "profile": plan.get("profile"),
+                    "model": plan.get("model"),
+                    "dimension": plan.get("dimension"),
+                },
+                operation_key=operation_key,
+            )
+        except WorkflowConflict:
+            current = job_service.repository.get_current_job(
+                principal.user_id,
+                scope="library",
+                project_id=None,
+                job_type="library.semantic-backfill",
+                operation_key=operation_key,
+            )
+            if current is None:
+                return {**plan, "current_job": None}
+        library_index_service.mark_semantic_backfill_queued(
+            principal,
+            paper_ids,
+            profile=str(plan.get("profile") or "retrieval_embedding"),
+            model=str(plan.get("model") or ""),
+            dimension=int(plan.get("dimension") or 0),
+        )
+        return {
+            **plan,
+            "status": current.status,
+            "current_job": _job_response(current).model_dump(),
+        }
+
+    bibliography_builder = configured.get("library.bibliography-audit")
+
+    if bibliography_builder is not None:
+
+        def bibliography_handler(context, payload):
+            built = dict(bibliography_builder(context, payload) or {})
+            principal = Principal(context.user_id, frozenset({Role.USER}))
+            current, built = library_service.apply_bibliography_audit_result(
+                principal,
+                str(payload.get("paper_id") or ""),
+                built,
+            )
+            return {**built, "paper_id": current.paper_id}
+
+        job_service.register_handler("library.bibliography-audit", bibliography_handler)
 
     def enqueue_index(
         principal: Principal,
@@ -119,11 +327,14 @@ def build_library_router(
         *,
         force: bool = False,
         suppress_active_conflict: bool = False,
+        discovery_refresh: dict[str, Any] | None = None,
     ):
         if not library_index_service.enabled:
             return None
         prepared = library_index_service.prepare(principal, paper_id, force=force)
         if not prepared.needs_job:
+            if discovery_refresh:
+                submit_discovery_refresh(principal, discovery_refresh, prepared.paper_id)
             return None
         try:
             return job_service.submit(
@@ -139,8 +350,56 @@ def build_library_router(
                 payload={
                     "paper_id": prepared.paper_id,
                     "source_lineage_hash": prepared.source_lineage_hash,
+                    "semantic_only": prepared.semantic_only,
+                    **(
+                        {"discovery_refresh": dict(discovery_refresh)}
+                        if discovery_refresh
+                        else {}
+                    ),
                 },
                 operation_key=f"index:{prepared.paper_id}",
+            )
+        except WorkflowConflict:
+            if suppress_active_conflict:
+                if discovery_refresh:
+                    submit_discovery_refresh(principal, discovery_refresh, paper_id)
+                return None
+            raise
+
+    def enqueue_bibliography_audit(
+        principal: Principal,
+        record: LibraryPaperRecord,
+        *,
+        suppress_active_conflict: bool = False,
+        force_network: bool = False,
+    ):
+        if bibliography_builder is None:
+            return None
+        try:
+            return job_service.submit(
+                principal,
+                scope="library",
+                project_id=None,
+                job_type="library.bibliography-audit",
+                idempotency_key=(
+                    f"manual:{uuid.uuid4()}"
+                    if force_network
+                    else (
+                        f"bibliography:{record.paper_id}:"
+                        f"{record.artifact_ids.get('metadata') or record.content_sha256}"
+                    )
+                ),
+                payload={
+                    "paper_id": record.paper_id,
+                    "metadata": record.metadata,
+                    "pdf_relative_path": record.pdf_relative_path,
+                    "markdown_relative_path": record.markdown_relative_path,
+                    "previous_audit": record.bibliography_audit,
+                    "network_mode": "force" if force_network else "fallback",
+                    "task_kind": "bibliography_verification",
+                    "adds_candidate_papers": False,
+                },
+                operation_key=f"bibliography-audit:{record.paper_id}",
             )
         except WorkflowConflict:
             if suppress_active_conflict:
@@ -157,10 +416,35 @@ def build_library_router(
             result = dict(download_handler(context, payload) or {})
             principal = Principal(context.user_id, frozenset({Role.USER}))
             records = library_service.reconcile_download_result(principal, result)
+            result_entries = {
+                str(entry.get("paper_id") or ""): entry
+                for entry in result.get("results") or []
+                if isinstance(entry, dict) and str(entry.get("paper_id") or "").strip()
+            }
+            acquisition_project_id = str(
+                payload.get("acquisition_project_id") or ""
+            ).strip()
             for record in records:
+                entry = result_entries.get(record.paper_id) or {}
+                candidate_id = str(entry.get("candidate_id") or "").strip()
+                refresh = (
+                    {
+                        "project_id": acquisition_project_id,
+                        "candidate_id": candidate_id,
+                        "source_revision": payload.get("discovery_revision"),
+                    }
+                    if acquisition_project_id and candidate_id
+                    else None
+                )
                 enqueue_index(
                     principal,
                     record.paper_id,
+                    suppress_active_conflict=True,
+                    discovery_refresh=refresh,
+                )
+                enqueue_bibliography_audit(
+                    principal,
+                    record,
                     suppress_active_conflict=True,
                 )
             return result
@@ -185,6 +469,9 @@ def build_library_router(
         index_job = enqueue_index(
             principal, record.paper_id, suppress_active_conflict=True
         )
+        bibliography_job = enqueue_bibliography_audit(
+            principal, record, suppress_active_conflict=True
+        )
         context.repository.update_job_progress(context.job_id, 3, 3)
         return {
             **_paper_payload(record),
@@ -192,6 +479,9 @@ def build_library_router(
             "mineru_ready": True,
             "library_count": library_service.count(principal),
             "index_job_id": index_job.id if index_job is not None else None,
+            "bibliography_audit_job_id": (
+                bibliography_job.id if bibliography_job is not None else None
+            ),
         }
 
     job_service.register_handler("library.upload", upload_handler)
@@ -213,6 +503,7 @@ def build_library_router(
             raise WorkflowValidationError(
                 "Library search mode must be metadata, fulltext, or hybrid."
             )
+        semantic_backfill = semantic_backfill_state(principal)
         if not str(q or "").strip():
             rows = library_service.list(principal)
             search_matches: dict[str, dict[str, Any]] = {}
@@ -283,6 +574,7 @@ def build_library_router(
             "query": q,
             "requested_mode": normalized_mode,
             "retrieval_mode": retrieval_mode,
+            "semantic_backfill": semantic_backfill,
         }
 
     @router.post("/papers")
@@ -328,12 +620,18 @@ def build_library_router(
             index_job = enqueue_index(
                 principal, record.paper_id, suppress_active_conflict=True
             )
+            bibliography_job = enqueue_bibliography_audit(
+                principal, record, suppress_active_conflict=True
+            )
             payload = {
                 **_paper_payload(record),
                 "status": outcome,
                 "mineru_ready": True,
                 "library_count": library_service.count(principal),
                 "index_job_id": index_job.id if index_job is not None else None,
+                "bibliography_audit_job_id": (
+                    bibliography_job.id if bibliography_job is not None else None
+                ),
             }
             return JSONResponse(
                 status_code=(status.HTTP_200_OK if outcome == "duplicate_file" else status.HTTP_201_CREATED),
@@ -508,6 +806,68 @@ def build_library_router(
         principal: Principal = Depends(principal_dependency),
     ) -> dict[str, Any]:
         return library_service.update_metadata(principal, paper_id, payload).metadata
+
+    @router.get("/papers/{paper_id}/bibliography-audit")
+    def bibliography_audit(
+        paper_id: str,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        record = library_service.get(principal, paper_id)
+        current_job = job_service.repository.get_current_job(
+            principal.user_id,
+            scope="library",
+            job_type="library.bibliography-audit",
+            operation_key=f"bibliography-audit:{record.paper_id}",
+        )
+        return {
+            "paper_id": record.paper_id,
+            "task_kind": "bibliography_verification",
+            "adds_candidate_papers": False,
+            "audit": record.bibliography_audit,
+            "candidates": bibliography_candidates(record.bibliography_audit),
+            "job": (
+                _job_response(current_job).model_dump()
+                if current_job is not None
+                else None
+            ),
+        }
+
+    @router.post(
+        "/papers/{paper_id}/bibliography-audit-jobs",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def start_bibliography_audit(
+        paper_id: str,
+        principal: Principal = Depends(principal_dependency),
+    ):
+        record = library_service.get(principal, paper_id)
+        # This endpoint is an explicit human request to consult the external
+        # provider even when the local PDF evidence was already sufficient.
+        job = enqueue_bibliography_audit(principal, record, force_network=True)
+        if job is None:
+            raise WorkflowValidationError(
+                "Bibliography verification is not configured on this server."
+            )
+        return _job_response(job)
+
+    @router.post("/papers/{paper_id}/bibliography-resolution")
+    def resolve_bibliography_record(
+        paper_id: str,
+        payload: BibliographyResolutionRequest,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        record, outcome = library_service.resolve_bibliography(
+            principal,
+            paper_id,
+            payload.model_dump(mode="json"),
+        )
+        return {
+            "paper": _paper_payload(record),
+            "audit": outcome["audit"],
+            "candidates": outcome["candidates"],
+            "changed_fields": outcome["changed_fields"],
+            "impact": outcome["impact"],
+        }
 
     @router.get("/papers/{paper_id}/markdown")
     def markdown(

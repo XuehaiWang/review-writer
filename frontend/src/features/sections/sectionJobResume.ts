@@ -17,6 +17,10 @@ function checkpointFor(job: Job): SectionCheckpoint | null {
     : null;
 }
 
+function jobTimestamp(job: Job): number {
+  return Date.parse(job.updated_at || job.created_at) || 0;
+}
+
 export function findResumableSectionJob(
   jobs: Job[],
   tasks: SectionTaskIdentity[],
@@ -31,7 +35,7 @@ export function findResumableSectionJob(
   );
 
   return [...jobs]
-    .sort((left, right) => Date.parse(right.updated_at || right.created_at) - Date.parse(left.updated_at || left.created_at))
+    .sort((left, right) => jobTimestamp(right) - jobTimestamp(left))
     .find((job) => {
       const retryable = (job.available_actions || []).includes("retry")
         || ["failed", "cancelled", "interrupted"].includes(job.status);
@@ -54,4 +58,30 @@ export function findResumableSectionJob(
         return !checkpointHeading || checkpointHeading === headings.get(sectionId);
       });
     });
+}
+
+export function findSectionJobForDisplay(
+  jobs: Job[],
+  tasks: SectionTaskIdentity[],
+  outputsCurrent: boolean,
+): Job | undefined {
+  const ordered = [...jobs].sort((left, right) => jobTimestamp(right) - jobTimestamp(left));
+  const active = ordered.find((job) => ["queued", "running", "cancel_requested"].includes(job.status));
+  if (active) return active;
+  if (outputsCurrent) return ordered[0];
+  return findResumableSectionJob(ordered, tasks);
+}
+
+export function replaceSectionJobSnapshot(
+  jobs: Job[],
+  current?: Job,
+): Job[] {
+  if (!current) return jobs;
+  let replaced = false;
+  const merged = jobs.map((job) => {
+    if (job.id !== current.id) return job;
+    replaced = true;
+    return current;
+  });
+  return replaced ? merged : [current, ...merged];
 }

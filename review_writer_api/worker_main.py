@@ -25,6 +25,15 @@ def main() -> None:
         ),
         help="Comma-separated worker queues: scientific,image,ingest,document.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help=(
+            "Maximum concurrent jobs in this worker process. Defaults to "
+            "REVIEW_WRITER_JOB_WORKERS for backward compatibility."
+        ),
+    )
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO,
@@ -40,14 +49,23 @@ def main() -> None:
     # but do not start its HTTP lifespan or compatibility executor.
     application = create_app(settings, model_gateway_override=gateway_client)
     job_service = application.state.job_service
+    queues = {item.strip() for item in args.queues.split(",") if item.strip()}
+    max_workers = args.workers if args.workers is not None else settings.job_worker_count
+    if max_workers < 1:
+        parser.error("--workers must be at least 1")
+    logging.getLogger(__name__).info(
+        "starting worker pool queues=%s max_workers=%s",
+        ",".join(sorted(queues)),
+        max_workers,
+    )
     worker = WorkerService(
         application.state.workflow_repository,
         job_service.handlers,
-        max_workers=settings.job_worker_count,
+        max_workers=max_workers,
         poll_seconds=settings.worker_poll_seconds,
         lease_seconds=settings.worker_lease_seconds,
         heartbeat_seconds=settings.worker_heartbeat_seconds,
-        queues={item.strip() for item in args.queues.split(",") if item.strip()},
+        queues=queues,
     )
 
     def request_stop(_signum, _frame) -> None:

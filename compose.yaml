@@ -2,7 +2,7 @@ name: review-writer
 
 services:
   postgres:
-    image: postgres:17-alpine
+    image: pgvector/pgvector:0.8.6-pg17
     environment:
       POSTGRES_DB: ${REVIEW_WRITER_POSTGRES_DB:-review_writer}
       POSTGRES_USER: ${REVIEW_WRITER_POSTGRES_USER:-review_writer}
@@ -103,10 +103,18 @@ services:
       REVIEW_WRITER_IMAGE_MODEL: ${REVIEW_WRITER_IMAGE_MODEL:-}
       REVIEW_WRITER_IMAGE_WIRE_API: ${REVIEW_WRITER_IMAGE_WIRE_API:-images}
       REVIEW_WRITER_IMAGE_USD_PER_IMAGE: ${REVIEW_WRITER_IMAGE_USD_PER_IMAGE:-0}
+      REVIEW_WRITER_EMBEDDING_API_KEY: "${REVIEW_WRITER_EMBEDDING_API_KEY:-}"
+      REVIEW_WRITER_EMBEDDING_BASE_URL: ${REVIEW_WRITER_EMBEDDING_BASE_URL:-https://api.openai.com/v1}
+      REVIEW_WRITER_EMBEDDING_MODEL: ${REVIEW_WRITER_EMBEDDING_MODEL:-}
+      REVIEW_WRITER_EMBEDDING_WIRE_API: ${REVIEW_WRITER_EMBEDDING_WIRE_API:-embeddings}
+      REVIEW_WRITER_EMBEDDING_DIMENSION: ${REVIEW_WRITER_EMBEDDING_DIMENSION:-1536}
+      REVIEW_WRITER_EMBEDDING_USD_PER_MILLION_TOKENS: ${REVIEW_WRITER_EMBEDDING_USD_PER_MILLION_TOKENS:-0}
       REVIEW_WRITER_MODEL_GATEWAY_CONCURRENCY: ${REVIEW_WRITER_MODEL_GATEWAY_CONCURRENCY:-2}
       REVIEW_WRITER_MODEL_GATEWAY_USER_CONCURRENCY: ${REVIEW_WRITER_MODEL_GATEWAY_USER_CONCURRENCY:-1}
       REVIEW_WRITER_IMAGE_GATEWAY_CONCURRENCY: ${REVIEW_WRITER_IMAGE_GATEWAY_CONCURRENCY:-1}
       REVIEW_WRITER_IMAGE_GATEWAY_USER_CONCURRENCY: ${REVIEW_WRITER_IMAGE_GATEWAY_USER_CONCURRENCY:-1}
+      REVIEW_WRITER_EMBEDDING_GATEWAY_CONCURRENCY: ${REVIEW_WRITER_EMBEDDING_GATEWAY_CONCURRENCY:-2}
+      REVIEW_WRITER_EMBEDDING_GATEWAY_USER_CONCURRENCY: ${REVIEW_WRITER_EMBEDDING_GATEWAY_USER_CONCURRENCY:-1}
       REVIEW_WRITER_HOSTED_WORKSPACE_ROOT: /app/.review-writer/hosted-workspaces
     expose:
       - "8782"
@@ -120,12 +128,25 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  worker:
+  # Keep the original service name for upgrade compatibility, but dedicate it
+  # to scientific writing so PDF parsing and image jobs cannot occupy its pool.
+  worker: &worker-common
     image: review-writer-api:${REVIEW_WRITER_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile.api
-    command: ["python", "-m", "review_writer_api.worker_main", "--review-root", "/app"]
+    command:
+      [
+        "python",
+        "-m",
+        "review_writer_api.worker_main",
+        "--review-root",
+        "/app",
+        "--queues",
+        "scientific",
+        "--workers",
+        "${REVIEW_WRITER_SCIENTIFIC_WORKERS:-2}",
+      ]
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -160,6 +181,7 @@ services:
       SEMANTIC_SCHOLAR_API_KEY: "${SEMANTIC_SCHOLAR_API_KEY:-}"
       REVIEW_DISCOVERY_SOURCES: ${REVIEW_DISCOVERY_SOURCES:-crossref,openalex,semantic_scholar,arxiv}
       REVIEW_DISCOVERY_MULTI_SOURCE_ENABLED: ${REVIEW_DISCOVERY_MULTI_SOURCE_ENABLED:-true}
+      REVIEW_DISCOVERY_SCREENING_CONCURRENCY: ${REVIEW_DISCOVERY_SCREENING_CONCURRENCY:-3}
       REVIEW_DOCUMENT_RETRIEVAL_ENABLED: ${REVIEW_DOCUMENT_RETRIEVAL_ENABLED:-true}
       REVIEW_VECTOR_RETRIEVAL_ENABLED: ${REVIEW_VECTOR_RETRIEVAL_ENABLED:-false}
       REVIEW_WRITER_ALLOW_PRIVATE_PROVIDER_URLS: ${REVIEW_WRITER_ALLOW_PRIVATE_PROVIDER_URLS:-false}
@@ -184,6 +206,40 @@ services:
       retries: 3
       start_period: 20s
     restart: unless-stopped
+
+  # Full-text extraction, semantic indexing, and document publication share a
+  # separate pool because these jobs are long-running and I/O heavy.
+  worker-ingest-document:
+    <<: *worker-common
+    command:
+      [
+        "python",
+        "-m",
+        "review_writer_api.worker_main",
+        "--review-root",
+        "/app",
+        "--queues",
+        "ingest,document",
+        "--workers",
+        "${REVIEW_WRITER_INGEST_DOCUMENT_WORKERS:-2}",
+      ]
+
+  # Image generation/editing has an independent low-concurrency pool so it
+  # neither blocks writing nor creates an uncontrolled provider burst.
+  worker-image:
+    <<: *worker-common
+    command:
+      [
+        "python",
+        "-m",
+        "review_writer_api.worker_main",
+        "--review-root",
+        "/app",
+        "--queues",
+        "image",
+        "--workers",
+        "${REVIEW_WRITER_IMAGE_WORKERS:-1}",
+      ]
 
   api:
     image: review-writer-api:${REVIEW_WRITER_IMAGE_TAG:-latest}
@@ -230,6 +286,12 @@ services:
       REVIEW_WRITER_IMAGE_MODEL: ${REVIEW_WRITER_IMAGE_MODEL:-}
       REVIEW_WRITER_IMAGE_WIRE_API: ${REVIEW_WRITER_IMAGE_WIRE_API:-images}
       REVIEW_WRITER_IMAGE_USD_PER_IMAGE: ${REVIEW_WRITER_IMAGE_USD_PER_IMAGE:-0}
+      REVIEW_WRITER_EMBEDDING_API_KEY: "${REVIEW_WRITER_EMBEDDING_API_KEY:-}"
+      REVIEW_WRITER_EMBEDDING_BASE_URL: ${REVIEW_WRITER_EMBEDDING_BASE_URL:-https://api.openai.com/v1}
+      REVIEW_WRITER_EMBEDDING_MODEL: ${REVIEW_WRITER_EMBEDDING_MODEL:-}
+      REVIEW_WRITER_EMBEDDING_WIRE_API: ${REVIEW_WRITER_EMBEDDING_WIRE_API:-embeddings}
+      REVIEW_WRITER_EMBEDDING_DIMENSION: ${REVIEW_WRITER_EMBEDDING_DIMENSION:-1536}
+      REVIEW_WRITER_EMBEDDING_USD_PER_MILLION_TOKENS: ${REVIEW_WRITER_EMBEDDING_USD_PER_MILLION_TOKENS:-0}
       REVIEW_WRITER_IMAGE_GATEWAY_CONCURRENCY: ${REVIEW_WRITER_IMAGE_GATEWAY_CONCURRENCY:-1}
       REVIEW_WRITER_IMAGE_GATEWAY_USER_CONCURRENCY: ${REVIEW_WRITER_IMAGE_GATEWAY_USER_CONCURRENCY:-1}
       REVIEW_WRITER_MINERU_API_TOKEN: "${REVIEW_WRITER_MINERU_API_TOKEN:-}"
@@ -238,6 +300,8 @@ services:
       REVIEW_WRITER_INTERNAL_GATEWAY_URL: http://model-gateway:8782/api/internal/v1/model-responses
       REVIEW_WRITER_MODEL_GATEWAY_CONCURRENCY: ${REVIEW_WRITER_MODEL_GATEWAY_CONCURRENCY:-2}
       REVIEW_WRITER_MODEL_GATEWAY_USER_CONCURRENCY: ${REVIEW_WRITER_MODEL_GATEWAY_USER_CONCURRENCY:-1}
+      REVIEW_WRITER_EMBEDDING_GATEWAY_CONCURRENCY: ${REVIEW_WRITER_EMBEDDING_GATEWAY_CONCURRENCY:-2}
+      REVIEW_WRITER_EMBEDDING_GATEWAY_USER_CONCURRENCY: ${REVIEW_WRITER_EMBEDDING_GATEWAY_USER_CONCURRENCY:-1}
       CROSSREF_MAILTO: ${CROSSREF_MAILTO:-}
       OPENALEX_API_KEY: "${OPENALEX_API_KEY:-}"
       SEMANTIC_SCHOLAR_API_KEY: "${SEMANTIC_SCHOLAR_API_KEY:-}"

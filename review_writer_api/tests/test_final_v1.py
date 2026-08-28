@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from review_writer_api.database import Project
 from review_writer_api.domain_services.final import (
+    FinalService,
     _clean_reference_affiliation_markup,
     _normalize_publication_markup,
 )
@@ -238,6 +239,25 @@ class FinalV1Tests(NativeFigureApiTestCase):
         self.assertEqual(409, blocked.status_code, blocked.text)
         self.assertEqual(200, ready.status_code, ready.text)
         self.assertTrue(ready.json()["draft_approval_current"])
+
+    def test_default_front_matter_summarizes_an_instruction_style_title(self) -> None:
+        topic = (
+            'Please write a review on the topic “allenation-of-terminal-alkynes (ATA)”, '
+            'focusing on different substrates. Organize the review by reaction type '
+            'and catalytic/promoting system.'
+        )
+
+        front_matter = FinalService._default_front_matter(
+            f"# {topic}\n\n## Introduction\n\nBody.",
+            fallback_title=topic,
+            source_draft_artifact_id="draft-1",
+        )
+
+        self.assertEqual(
+            "Allenation of Terminal Alkynes (ATA): Reaction Classes and Catalytic Strategies",
+            front_matter["title"],
+        )
+        self.assertEqual("generated", front_matter["field_states"]["title"])
 
     def test_final_build_job_reports_progress_and_is_recoverable(self) -> None:
         with TestClient(self.app) as client:

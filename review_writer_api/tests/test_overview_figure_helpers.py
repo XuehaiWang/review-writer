@@ -4,6 +4,11 @@ import importlib.util
 import unittest
 from pathlib import Path
 
+from review_writer_core.review_titles import (
+    build_publication_overview_text,
+    overview_text_needs_rewrite,
+)
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = (
@@ -20,6 +25,113 @@ SPEC.loader.exec_module(overview)
 
 
 class OverviewFigureHelperTests(unittest.TestCase):
+    def test_overview_title_rewrites_instruction_topic_as_academic_title(self) -> None:
+        topic = (
+            'Please write a review on the topic “allenation-of-terminal-alkynes (ATA)”, '
+            'focusing on the development of terminal alkyne allenation with different '
+            'substrates. Organize the review by reaction type and catalytic/promoting '
+            'system, and separately discuss racemic ATA and enantioselective ATA.'
+        )
+
+        title = overview.build_overview_display_title({"review_title": topic})
+
+        self.assertEqual(
+            "Allenation of Terminal Alkynes (ATA): Reaction Classes and Catalytic Strategies",
+            title,
+        )
+        self.assertNotIn("Please write", title)
+        self.assertLessEqual(len(title), 110)
+
+    def test_manuscript_title_wins_over_search_instruction(self) -> None:
+        title = overview.build_overview_display_title(
+            {
+                "review_title": "Please write a review about a long search query",
+                "manuscript_title": "Terminal Alkyne Allenation: Catalysis and Selectivity",
+            }
+        )
+
+        self.assertEqual(
+            "Terminal Alkyne Allenation: Catalysis and Selectivity", title
+        )
+
+    def test_image_prompt_never_contains_the_raw_search_instruction(self) -> None:
+        raw_topic = (
+            "Please write a review on terminal alkyne allenation, focusing on "
+            "reaction types and catalytic systems."
+        )
+        features = {
+            "review_title": raw_topic,
+            "display_title": overview.build_overview_display_title(
+                {"review_title": raw_topic}
+            ),
+            "taxonomy_profile": "allene",
+            "group_by": ["reaction_type"],
+            "metal_categories": ["Cu", "Zn", "Cd", "Ti", "Other"],
+            "classification_rule": "By reaction type",
+            "product_keywords": ["allenes"],
+            "substrate_keywords": ["terminal alkynes"],
+            "catalyst_keywords": ["Cu", "Zn", "Cd", "Ti"],
+            "has_chirality": True,
+            "has_reaction_focus": True,
+            "time_window": "recent years",
+            "_outline_text": "",
+            "_project_dir": None,
+        }
+
+        prompt = overview.build_adapted_prompt(
+            {"prompt": "", "layout_type": "module-cards-crosscut-sidebar"},
+            features,
+            composite_mode=True,
+        )
+
+        self.assertNotIn(raw_topic, prompt)
+        self.assertNotIn("Original topic", prompt)
+        self.assertIn(features["display_title"], prompt)
+
+    def test_publication_caption_never_exposes_topic_or_layout_contract(self) -> None:
+        raw_topic = (
+            'Please write a review on the topic “allenation-of-terminal-alkynes (ATA)”, '
+            'focusing on different substrates to access mono-, 1,3-di-, and '
+            'trisubstituted allenes. Organize the review by reaction type and '
+            'catalytic/promoting system, and separately discuss racemic ATA and EATA.'
+        )
+
+        caption = build_publication_overview_text(
+            raw_topic,
+            group_by=["reaction_type"],
+            classification_rule="By reaction type",
+            has_chirality=True,
+            has_reaction_focus=True,
+        )
+        rendered = " ".join(
+            [caption["title"], caption["subtitle"], *caption["labels"]]
+        )
+
+        self.assertNotIn("Please write", rendered)
+        self.assertNotIn("reaction_type", rendered)
+        self.assertNotIn("module-cards-crosscut-sidebar", rendered)
+        self.assertIn("reaction class", caption["subtitle"])
+        self.assertIn("catalytic or promoting system", caption["subtitle"])
+        self.assertIn("stereochemical control", caption["subtitle"])
+
+    def test_legacy_overview_caption_with_internal_residue_is_rewritten(self) -> None:
+        raw_topic = "Please write a review on catalytic transformations and their scope."
+        legacy = {
+            "title": raw_topic,
+            "subtitle": "module-cards-crosscut-sidebar",
+            "labels": ["Cu", "reaction_type"],
+        }
+
+        self.assertTrue(overview_text_needs_rewrite(legacy, raw_topic))
+
+    def test_footer_whitespace_is_not_a_structure_panel(self) -> None:
+        self.assertFalse(
+            overview._looks_like_structure_panel((724, 920, 1024, 1024), 1024, 1024)
+        )
+        self.assertTrue(
+            overview._looks_like_structure_panel((28, 120, 790, 370), 1024, 1024)
+        )
+
     def test_panel_refinement_is_bounded_to_requested_error_budget(self) -> None:
         from PIL import Image
 

@@ -58,6 +58,36 @@ class SourceFaithfulRenderTests(unittest.TestCase):
                 self.assertEqual(rendered.getpixel((7 * 4 + 2, 2)), 0)
 
 class OcrValidationTests(unittest.TestCase):
+    def test_gateway_moderation_detail_triggers_academic_safety_retry(self) -> None:
+        calls: list[str] = []
+        failure = redraw_figures.GatewayRequestError(
+            "图像服务请求失败，请稍后重试或联系管理员。",
+            status_code=422,
+            details={
+                "provider_message": "内容被安全审核拦截（疑似成人内容）"
+            },
+        )
+
+        def requester(prompt: str):
+            calls.append(prompt)
+            if len(calls) == 1:
+                raise failure
+            return {"data": [{"b64_json": "aW1hZ2U="}]}
+
+        audit: list[dict[str, object]] = []
+        result = redraw_figures.call_with_academic_safety_retry(
+            requester,
+            "primary prompt",
+            "academic chemistry safety prompt",
+            audit,
+        )
+
+        self.assertEqual("aW1hZ2U=", result["data"][0]["b64_json"])
+        self.assertEqual(
+            ["primary prompt", "academic chemistry safety prompt"], calls
+        )
+        self.assertEqual("succeeded", audit[0]["status"])
+
     def test_curl_image_edit_keeps_api_key_out_of_command_arguments(self) -> None:
         captured: dict[str, object] = {}
 

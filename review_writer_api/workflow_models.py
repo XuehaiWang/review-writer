@@ -160,6 +160,23 @@ class LibraryDocumentIndex(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
     is_current: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    semantic_status: Mapped[str] = mapped_column(
+        String(32), default="not_indexed", nullable=False
+    )
+    embedding_profile: Mapped[str] = mapped_column(
+        String(64), default="retrieval_embedding", nullable=False
+    )
+    embedding_model_snapshot: Mapped[str] = mapped_column(
+        String(255), default="", nullable=False
+    )
+    embedding_dimension: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    embedding_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    semantic_error_code: Mapped[str] = mapped_column(
+        String(96), default="", nullable=False
+    )
+    semantic_error_message: Mapped[str] = mapped_column(
+        Text, default="", nullable=False
+    )
     error_code: Mapped[str] = mapped_column(String(96), default="", nullable=False)
     error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -190,6 +207,7 @@ class LibraryDocumentChunk(Base):
     chunk_id: Mapped[str] = mapped_column(String(64), nullable=False)
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     normalized_content: Mapped[str] = mapped_column(Text, nullable=False)
     content_type: Mapped[str] = mapped_column(String(64), default="text", nullable=False)
     section_path_json: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)

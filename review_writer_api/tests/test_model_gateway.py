@@ -22,10 +22,12 @@ from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User, database_session, utc_now
 from review_writer_api.model_catalog import resolve_model_tier
 from review_writer_api.model_gateway import (
+    GatewaySafetyBlocked,
     InvalidTaskToken,
     ModelGatewayService,
     calculate_provider_cost,
 )
+from review_writer_api.job_queues import queue_for_job_type
 from review_writer_api.repositories import HostedProjectRepository
 from review_writer_api.workflow_models import WorkflowJob
 
@@ -47,6 +49,7 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.project_id = uuid.uuid4()
         self.job_id = uuid.uuid4()
         self.image_job_id = uuid.uuid4()
+        self.embedding_job_id = uuid.uuid4()
         with database_session(self.sessions) as session:
             session.add(
                 User(
@@ -77,6 +80,18 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
             )
             session.add(
                 WorkflowJob(
+                    id=self.embedding_job_id,
+                    user_id=self.user_id,
+                    project_id=self.project_id,
+                    scope="project",
+                    job_type="matrix.enrich",
+                    status="running",
+                    idempotency_scope_key=str(self.project_id),
+                    idempotency_key="gateway-embedding-test",
+                )
+            )
+            session.add(
+                WorkflowJob(
                     id=self.image_job_id,
                     user_id=self.user_id,
                     project_id=self.project_id,
@@ -98,6 +113,11 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
             image_provider_model="image-test-model",
             image_provider_wire_api="chat-completions",
             image_provider_price_usd_per_image=Decimal("0.125"),
+            embedding_provider_api_key="server-embedding-secret",
+            embedding_provider_base_url="https://embeddings.example/v1",
+            embedding_provider_model="embedding-test-model",
+            embedding_provider_dimension=3,
+            embedding_provider_price_usd_per_million=Decimal("0.10"),
             internal_gateway_url="http://127.0.0.1:8770/api/internal/v1/model-responses",
         )
         self.service = ModelGatewayService(self.sessions, self.settings)
@@ -125,6 +145,14 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
             job_type="figures.redraw",
         )
 
+    def embedding_token(self) -> str:
+        return self.service.issue_task_token(
+            job_id=str(self.embedding_job_id),
+            user_id=str(self.user_id),
+            project_id=str(self.project_id),
+            job_type="matrix.enrich",
+        )
+
     def test_cost_uses_cached_input_price(self) -> None:
         cost = calculate_provider_cost(
             resolve_model_tier("terra"),
@@ -148,6 +176,33 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("luna", updated.model_tier)
         self.assertEqual("luna", claims.model_tier)
+
+    def test_discovery_task_token_can_use_embedding_gateway(self) -> None:
+        token = self.service.issue_task_token(
+            job_id=str(self.job_id),
+            user_id=str(self.user_id),
+            project_id=str(self.project_id),
+            job_type="discovery.search",
+        )
+
+        claims = self.service.verify_task_token(token)
+
+        self.assertIn("text", claims.capabilities)
+        self.assertIn("embedding", claims.capabilities)
+
+    def test_semantic_backfill_uses_ingest_queue_and_embedding_capability(self) -> None:
+        token = self.service.issue_task_token(
+            job_id=str(self.embedding_job_id),
+            user_id=str(self.user_id),
+            project_id=str(self.project_id),
+            job_type="library.semantic-backfill",
+        )
+
+        claims = self.service.verify_task_token(token)
+
+        self.assertEqual("ingest", queue_for_job_type("library.semantic-backfill"))
+        self.assertIn("embedding", claims.capabilities)
+        self.assertNotIn("text", claims.capabilities)
 
     def test_worker_token_is_bound_to_current_lease_generation(self) -> None:
         lease_token = uuid.uuid4()
@@ -215,6 +270,69 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(30, len(timeline["items"]))
         self.assertEqual(150, timeline["items"][-1]["total_tokens"])
         self.assertEqual(1, timeline["items"][-1]["request_count"])
+
+    async def test_embedding_request_is_task_bound_metered_and_cached(self) -> None:
+        provider_result = {
+            "id": "emb_test",
+            "model": "embedding-test-model",
+            "data": [
+                {"index": 0, "embedding": [0.1, 0.2, 0.3]},
+                {"index": 1, "embedding": [0.4, 0.5, 0.6]},
+            ],
+            "usage": {"prompt_tokens": 8, "total_tokens": 8},
+        }
+        with mock.patch.object(
+            self.service,
+            "_provider_embedding_call",
+            new=mock.AsyncMock(return_value=provider_result),
+        ) as provider_call:
+            first = await self.service.complete_embeddings(
+                self.embedding_token(),
+                request_key="matrix-query-vectors",
+                stage="matrix.enrich.embedding",
+                inputs=["copper catalysis", "enantioselective allenation"],
+            )
+            second = await self.service.complete_embeddings(
+                self.embedding_token(),
+                request_key="matrix-query-vectors",
+                stage="matrix.enrich.embedding",
+                inputs=["copper catalysis", "enantioselective allenation"],
+            )
+
+        self.assertEqual(1, provider_call.await_count)
+        self.assertEqual(3, first["dimension"])
+        self.assertEqual(2, len(first["embeddings"]))
+        self.assertFalse(first["cached"])
+        self.assertTrue(second["cached"])
+        summary = self.service.usage_summary(str(self.user_id), str(self.project_id))
+        self.assertEqual(1, summary["request_count"])
+        self.assertEqual(8, summary["total_tokens"])
+
+    async def test_embedding_provider_requests_configured_dimension(self) -> None:
+        captured: dict[str, object] = {}
+
+        async def handler(request):
+            captured.update(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}],
+                    "usage": {"prompt_tokens": 1, "total_tokens": 1},
+                },
+            )
+
+        await self.service._provider_client.aclose()
+        self.service._provider_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+        result = await self.service._provider_embedding_call(
+            inputs=["retrieval query"],
+            idempotency_key="embedding-dimension-test",
+        )
+
+        self.assertEqual(3, captured["dimensions"])
+        self.assertEqual("embedding-test-model", captured["model"])
+        self.assertEqual(1, len(result["data"]))
 
     async def test_credit_is_reserved_settled_and_not_charged_again_on_cache_hit(self) -> None:
         billing = BillingService(self.sessions)
@@ -421,6 +539,39 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, summary["image_request_count"])
         self.assertEqual(1, summary["image_count"])
         self.assertEqual("0.12500000", summary["estimated_image_cost_usd"])
+
+    async def test_image_moderation_rejection_is_not_reported_as_transient_502(self) -> None:
+        calls = 0
+
+        def provider(_request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": "内容被安全审核拦截（疑似成人内容）",
+                        "type": "moderation_blocked",
+                    }
+                },
+            )
+
+        await self.service._provider_client.aclose()
+        self.service._provider_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(provider)
+        )
+
+        with self.assertRaises(GatewaySafetyBlocked):
+            await self.service.complete_image(
+                self.image_token(),
+                request_key="moderated-figure",
+                stage="figures.redraw",
+                operation="edit",
+                prompt="edit an academic chemistry diagram",
+                images=[{"mime_type": "image/png", "data_base64": "c291cmNl"}],
+            )
+
+        self.assertEqual(1, calls)
 
     async def test_text_task_token_cannot_use_image_gateway(self) -> None:
         with self.assertRaisesRegex(InvalidTaskToken, "not authorized for image"):

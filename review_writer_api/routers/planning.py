@@ -15,6 +15,7 @@ from review_writer_api.job_service import JobService
 from review_writer_api.routers.jobs import _job_response
 from review_writer_api.security import Principal, Role
 from review_writer_api.workflow_schemas import (
+    BlueprintRestoreRequest,
     BlueprintGenerateRequest,
     BlueprintConfirmRequest,
     MatrixLimitedModeRequest,
@@ -120,12 +121,21 @@ def build_planning_router(
     @router.post("/matrix/enrichment/jobs", status_code=status.HTTP_202_ACCEPTED)
     def enrich_matrix(
         project_id: str,
+        force: bool = False,
         idempotency_key: str = Header(default="", alias="Idempotency-Key"),
         principal: Principal = Depends(principal_dependency),
     ):
-        payload = planning_service.matrix_enrichment_payload(principal, project_id)
+        payload = planning_service.matrix_enrichment_payload(
+            principal,
+            project_id,
+            force=force,
+        )
         if not int(payload.get("pending_paper_count") or 0):
-            raise WorkflowConflict("Matrix scientific facts are already current.")
+            return {
+                "project_id": project_id,
+                "status": "current",
+                "message": "Matrix scientific facts are already current.",
+            }
         if not int(payload.get("fulltext_candidate_paper_count") or 0):
             raise WorkflowConflict(
                 "Build full-text indexes before extracting Matrix scientific facts."
@@ -199,6 +209,19 @@ def build_planning_router(
     ) -> dict[str, Any]:
         return planning_service.confirm_blueprint(
             principal, project_id, revision=payload.revision
+        )
+
+    @router.post("/blueprint/restore")
+    def restore_blueprint(
+        project_id: str,
+        payload: BlueprintRestoreRequest,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        return planning_service.restore_blueprint(
+            principal,
+            project_id,
+            revision=payload.revision,
+            artifact_id=payload.artifact_id,
         )
 
     return router

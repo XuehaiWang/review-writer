@@ -18,7 +18,7 @@ RUN apt-get update && \
 RUN python -m pip install --upgrade pip && \
     python -m pip install \
       "fastapi>=0.135,<1" "uvicorn[standard]>=0.40,<1" \
-      "pypdf>=6,<7" "Pillow>=12,<13"
+      "pypdf>=6,<7" "Pillow>=12,<13" "PyMuPDF>=1.26,<2"
 
 COPY review_writer_core ./review_writer_core
 COPY review_writer_pdf_renderer ./review_writer_pdf_renderer

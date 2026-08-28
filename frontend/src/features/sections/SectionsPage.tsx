@@ -11,7 +11,7 @@ import { jobIsActive, useJob } from "../../hooks/useJob";
 import { useUiText } from "../../i18n/useUiText";
 import { buildPaperDisplayLabels, replacePaperIdsForDisplay } from "../../utils/paperLabels";
 import { SectionJobProgress } from "./SectionJobProgress";
-import { findResumableSectionJob } from "./sectionJobResume";
+import { findSectionJobForDisplay, replaceSectionJobSnapshot } from "./sectionJobResume";
 
 type SectionTask = Record<string, unknown> & {
   section_id?: string;
@@ -277,11 +277,18 @@ export function SectionsPage() {
   const taskOnly = Boolean(payload?.handoff.drafts_stale || !payload?.section_files.length);
   const tasks = payload?.section_tasks || [];
   const files = payload?.section_files || [];
-  const activeReportJob = payload?.report.jobs.find((job) => jobIsActive(job.status));
-  const resumableReportJob = findResumableSectionJob(payload?.report.jobs || [], tasks);
-  const reportJob = activeReportJob || resumableReportJob;
+  const reportJob = findSectionJobForDisplay(
+    payload?.report.jobs || [],
+    tasks,
+    Boolean(payload?.handoff.current),
+  );
   const polledJob = useJob(jobId || reportJob?.id || "");
-  const currentJob = polledJob.data || reportJob;
+  const currentJob = payload?.handoff.current ? reportJob : polledJob.data || reportJob;
+  const currentJobActive = Boolean(currentJob && jobIsActive(currentJob.status));
+  const reportJobs = useMemo(
+    () => replaceSectionJobSnapshot(payload?.report.jobs || [], currentJob),
+    [currentJob, payload?.report.jobs],
+  );
   const canResumeCurrentJob = Boolean(
     currentJob
     && (
@@ -381,6 +388,7 @@ export function SectionsPage() {
       {sections.error ? <ErrorState error={sections.error} onRetry={() => sections.refetch()} /> : null}
       {payload ? <>
         {payload.handoff.drafts_stale ? <p className="message message-warning">{text("Blueprint已更新，旧章节草稿保留在磁盘但不会作为当前流程内容显示。请重新生成。", "The blueprint changed. Old section drafts remain on disk but are not current workflow content. Regenerate them.")}</p> : null}
+        {currentJob && currentJobActive && tab !== "report" ? <div className="section-live-progress-banner"><SectionJobProgress job={currentJob} /></div> : null}
         <div className="sections-grid-react">
           <section className="pane section-list-react"><div className="pane-head"><div><span className="step-label">{text("章节", "Sections")}</span><h2>{tasks.length} {text("个章节", "sections")}</h2></div></div><div className="paper-list">{(taskOnly ? tasks : files).map((item) => {
             const id = taskOnly ? taskId(item as SectionTask) : (item as SectionFile).name;
@@ -396,11 +404,11 @@ export function SectionsPage() {
             {tab === "evidence" ? <EvidenceView section={activeEvidence} paragraphs={activeDraftParagraphs} paperLabels={paperLabels} /> : null}
             {tab === "review" ? <ReviewView section={activeDraftState} /> : null}
             {tab === "tasks" ? <TaskRequirements task={activeTask} paperLabels={paperLabels} /> : null}
-            {tab === "report" ? <div className="job-report"><h2>{text("章节生成报告", "Section generation report")}</h2><p>{liveOutputCount}/{liveTaskCount} {currentJob && jobIsActive(currentJob.status) ? text("章已实时完成", "sections completed live") : text("个当前章节产物", "current section artifacts")}</p>{currentJob ? <SectionJobProgress job={currentJob} /> : <div className="empty-state">{text("尚未启动章节生成。", "Section generation has not started.")}</div>}{payload.report.jobs.map((job) => <details key={job.id}><summary>{job.status} · {job.id}</summary><p>{job.progress_current}/{job.progress_total} · {job.error_message || text("无错误", "No errors")}</p></details>)}</div> : null}
+            {tab === "report" ? <div className="job-report"><h2>{text("章节生成报告", "Section generation report")}</h2><p>{liveOutputCount}/{liveTaskCount} {currentJobActive ? text("章已实时完成", "sections completed live") : text("个当前章节产物", "current section artifacts")}</p>{currentJob ? <SectionJobProgress job={currentJob} /> : <div className="empty-state">{text("尚未启动章节生成。", "Section generation has not started.")}</div>}{reportJobs.map((job) => <details key={job.id}><summary>{job.status} · {job.id}</summary><p>{job.progress_current}/{job.progress_total} · {job.error_message || text("无错误", "No errors")}</p></details>)}</div> : null}
           </div></section>
           <aside className="pane section-gate-react"><div className="pane-head"><div><span className="step-label">{text("审核门", "Review gate")}</span><h2>{text("人工审核", "Human review")}</h2></div></div><div className="gate-body"><p>{payload.handoff.current ? text("当前草稿已生成，可审核后进入图像阶段。", "Current drafts are ready for review before the figure stage.") : currentJob && jobIsActive(currentJob.status) ? text("章节正在生成中。", "Sections are being generated.") : text("请从当前写作要求生成章节草稿。", "Generate section drafts from the current writing requirements.")}</p><ul><li>{text("每节是完整综述段落，不是提纲。", "Each section contains complete review prose, not outline fragments.")}</li><li>{text("引用来自该节允许论文。", "Citations come from papers allowed for that section.")}</li><li>{text("保留证据边界与不确定性。", "Evidence boundaries and uncertainty are preserved.")}</li><li>{text("图像需求与段落论证一致。", "Figure needs align with paragraph arguments.")}</li></ul></div></aside>
         </div>
-        <div className="stage-action-bar"><div><strong>{payload.handoff.current ? text("确认章节", "Confirm sections") : canResumeCurrentJob ? text("继续未完成章节", "Resume unfinished sections") : text("生成所有章节", "Generate all sections")}</strong><p>{payload.handoff.current ? text("确认当前版本后进入图像处理。", "Confirm the current version to enter figure processing.") : currentJob && jobIsActive(currentJob.status) ? text(`生成中 ${currentJob.progress_current}/${currentJob.progress_total}`, `Generating ${currentJob.progress_current}/${currentJob.progress_total}`) : canResumeCurrentJob ? text(`已保留 ${currentJob!.progress_current}/${currentJob!.progress_total} 个章节，重试时仅继续未完成章节。`, `${currentJob!.progress_current}/${currentJob!.progress_total} sections are checkpointed; retry resumes only unfinished sections.`) : text("根据当前Blueprint写作要求生成全部章节。", "Generate every section from the current blueprint requirements.")}</p></div>{payload.handoff.current ? <button className="button button-primary" type="button" disabled={confirm.isPending} onClick={() => confirm.mutate()}>{confirm.isPending ? text("确认中…", "Confirming…") : text("确认并进入图像处理", "Confirm and enter figure processing")}</button> : <button className="button button-primary" type="button" disabled={generate.isPending || Boolean(currentJob && jobIsActive(currentJob.status))} onClick={() => generate.mutate()}>{currentJob && jobIsActive(currentJob.status) ? text("正在生成…", "Generating…") : generate.isPending ? text("正在提交…", "Submitting…") : canResumeCurrentJob ? text("继续生成", "Resume generation") : text("生成所有章节草稿", "Generate all section drafts")}</button>}{error ? <span className="message message-error">{error.message}</span> : null}</div>
+        <div className="stage-action-bar"><div><strong>{payload.handoff.current ? text("确认章节", "Confirm sections") : canResumeCurrentJob ? text("继续未完成章节", "Resume unfinished sections") : text("生成所有章节", "Generate all sections")}</strong><p>{payload.handoff.current ? text("确认当前版本后进入图像处理。", "Confirm the current version to enter figure processing.") : currentJobActive ? text(`生成中 ${currentJob!.progress_current}/${currentJob!.progress_total}`, `Generating ${currentJob!.progress_current}/${currentJob!.progress_total}`) : canResumeCurrentJob ? text(`已保留 ${currentJob!.progress_current}/${currentJob!.progress_total} 个章节，重试时仅继续未完成章节。`, `${currentJob!.progress_current}/${currentJob!.progress_total} sections are checkpointed; retry resumes only unfinished sections.`) : text("根据当前Blueprint写作要求生成全部章节。", "Generate every section from the current blueprint requirements.")}</p></div>{payload.handoff.current ? <button className="button button-primary" type="button" disabled={confirm.isPending} onClick={() => confirm.mutate()}>{confirm.isPending ? text("确认中…", "Confirming…") : text("确认并进入图像处理", "Confirm and enter figure processing")}</button> : <button className="button button-primary" type="button" disabled={generate.isPending || currentJobActive} onClick={() => generate.mutate()}>{currentJobActive ? text("正在生成…", "Generating…") : generate.isPending ? text("正在提交…", "Submitting…") : canResumeCurrentJob ? text("继续生成", "Resume generation") : text("生成所有章节草稿", "Generate all section drafts")}</button>}{error ? <span className="message message-error">{error.message}</span> : null}</div>
       </> : null}
     </main>
   );

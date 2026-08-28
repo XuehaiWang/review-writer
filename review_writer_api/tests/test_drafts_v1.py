@@ -222,6 +222,58 @@ class DraftsV1Tests(NativeFigureApiTestCase):
         self.assertIn("[1] Study one", markdown)
         self.assertIn("[2] Study two", markdown)
 
+    def test_assembly_rebuilds_claim_citations_in_one_first_appearance_ledger(self) -> None:
+        markdown = self.app.state.drafts_service._assemble_markdown(
+            "Review",
+            {
+                "sections": [
+                    {
+                        "section_id": "S01",
+                        "heading": "Evidence comparison",
+                        "paragraphs": [
+                            {
+                                "paragraph_id": "S01-p1",
+                                "paper_id": "P002",
+                                "cited_paper_ids": ["P002", "P001"],
+                                "text": (
+                                    "Legacy first claim [16]. Legacy comparison [7, 11]."
+                                ),
+                                "claim_realizations": [
+                                    {
+                                        "claim_id": "S01-p1-C01",
+                                        "text": "The first study reports the transformation.",
+                                        "citation_group": ["P002"],
+                                    },
+                                    {
+                                        "claim_id": "S01-p1-C02",
+                                        "text": "The studies support a bounded comparison.",
+                                        "citation_group": ["P002", "P001"],
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+            {"figures": []},
+            {
+                "rows": [
+                    {"paper_id": "P001", "title": "Study one"},
+                    {"paper_id": "P002", "title": "Study two"},
+                ]
+            },
+        )
+
+        self.assertIn(
+            "The first study reports the transformation. [1] "
+            "The studies support a bounded comparison. [1, 2]",
+            markdown,
+        )
+        self.assertNotIn("[16]", markdown)
+        self.assertNotIn("[7, 11]", markdown)
+        self.assertIn("[1] Study two", markdown)
+        self.assertIn("[2] Study one", markdown)
+
     def test_figure_caption_is_normalized_without_leaking_conditions_into_prose(self) -> None:
         source_caption = (
             r"Scheme 1. $Pd_{2}(dba)_{3}\cdot CHCl_{3}$ , "

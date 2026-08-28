@@ -177,7 +177,8 @@ The reported systems support a bounded comparison [1, 2].
         chinese = render_tex(state, profile="zh-CN", template=self.template)
         self.assertIn("TeX Gyre Termes", english)
         self.assertIn("ctex", chinese)
-        self.assertIn(TEMPLATE_VERSION, english)
+        self.assertNotIn(TEMPLATE_VERSION, english)
+        self.assertNotIn("REVIEW WRITER", english)
         self.assertIn("twocolumn", english)
         self.assertIn("journalpanel", english)
         self.assertNotIn("titlepage", english)
@@ -199,6 +200,47 @@ The reported systems support a bounded comparison [1, 2].
         self.assertEqual(1, rendered.count("A bounded synthesis of the field"))
         self.assertEqual(1, rendered.count(r"\section{Introduction}"))
         self.assertNotIn(r"\section{Abstract}", rendered)
+        self.assertIn(r"\par\vspace{0.8em}\noindent", rendered)
+        self.assertIn(r"\textbf{Keywords:} synthesis; mechanism\par", rendered)
+
+    def test_keywords_are_split_from_abstract_without_blank_markdown_line(self) -> None:
+        state = build_manuscript_state(
+            "# Review\n\n## Abstract\n\n"
+            "Evidence-grounded synthesis.\n"
+            "Keywords: catalysis, selectivity\n\n"
+            "## Introduction\n\nBody.\n"
+        )
+
+        self.assertEqual(
+            "Evidence-grounded synthesis.", state["front_matter"]["abstract"]
+        )
+        self.assertEqual(
+            ["catalysis", "selectivity"], state["front_matter"]["keywords"]
+        )
+
+    def test_emphasized_authors_and_keywords_are_front_matter_fields(self) -> None:
+        state = build_manuscript_state(
+            "# Review\n"
+            "**Authors:** A. Author, B. Author\n"
+            "## Abstract\n"
+            "Evidence-grounded synthesis.\n\n"
+            "**Keywords:** catalysis, selectivity\n\n"
+            "## Introduction\n\nBody.\n"
+        )
+
+        self.assertEqual(
+            "Evidence-grounded synthesis.", state["front_matter"]["abstract"]
+        )
+        self.assertEqual(
+            ["catalysis", "selectivity"], state["front_matter"]["keywords"]
+        )
+        self.assertEqual(
+            ["A. Author", "B. Author"], state["front_matter"]["authors"]
+        )
+        rendered = render_tex(state, profile="en", template=self.template)
+        self.assertEqual(1, rendered.count("A. Author, B. Author"))
+        self.assertIn(r"\par\vspace{0.8em}\noindent", rendered)
+        self.assertIn(r"\textbf{Keywords:} catalysis; selectivity\par", rendered)
 
     def test_safe_math_is_preserved_but_tex_injection_is_escaped(self) -> None:
         value = latex_escape(r"The $S_N^2$ path differs from $\input{secret}$.")

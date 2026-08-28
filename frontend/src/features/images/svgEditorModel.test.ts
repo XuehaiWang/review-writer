@@ -5,6 +5,7 @@ import {
   buildSvgDocument,
   mergeSavedSvg,
   moveOperation,
+  moveSelection,
   normalizeAuditOperations,
   outputPixelSize,
   parseFullSvg,
@@ -35,10 +36,15 @@ describe("React SVG editor model", () => {
       dragDelta: { x: 2, y: 3 },
     });
     expect(interactive).toContain('data-select-key="trace:trace-0"');
-    expect(interactive).toContain("translate(8px,1px)");
-    expect(interactive).toContain("display:none");
-    const restored = mergeSavedSvg(initial, buildSvgDocument(edited), []);
+    expect(interactive).toContain('transform="translate(8 1)"');
+    expect(interactive).toContain('display="none"');
+    const saved = buildSvgDocument(edited);
+    const savedBase = parseFullSvg("P001-F01", "source", saved, 200, 100);
+    expect(savedBase.traceMarkup).not.toContain("data-editor-trace-materialized");
+    expect(savedBase.traceMarkup).not.toContain("translate(6 -2)");
+    const restored = mergeSavedSvg(savedBase, saved, []);
     expect(restored.traceEdits).toEqual([{ id: "trace-0", dx: 6, dy: -2, hidden: true }]);
+    expect(buildSvgDocument(restored)).toContain('transform="translate(6 -2)"');
   });
 
   it("serializes masks, editable objects, crop metadata, and a complete trace", () => {
@@ -53,7 +59,7 @@ describe("React SVG editor model", () => {
       ]),
       elements: [
         { id: "text-1", type: "text" as const, x: 12, y: 18, text: "R¹\nR²", color: "#111111", fontSize: 12 },
-        { id: "ket-1", type: "ketcher" as const, x: 50, y: 20, ket: "{}", svgMarkup: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><path d="M0 5L20 5"/></svg>' },
+        { id: "ket-1", type: "ketcher" as const, x: 50, y: 20, ket: "{}", svgMarkup: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><path d="M0 5L20 5"/></svg>', width: 20, height: 10, scale: .75 },
       ],
     };
     const markup = buildSvgDocument(state);
@@ -63,10 +69,23 @@ describe("React SVG editor model", () => {
     expect(documentNode.querySelector("#editor-erase-mask")).not.toBeNull();
     expect(documentNode.querySelector("[data-editor-element-type='text']")?.textContent).toContain("R¹");
     expect(documentNode.querySelector("[data-editor-element-type='ketcher'] svg")).not.toBeNull();
+    expect(documentNode.querySelector("[data-editor-element-type='ketcher']")?.getAttribute("data-editor-scale")).toBe("0.75");
     expect(documentNode.documentElement.getAttribute("data-content-crop")).toBe("true");
     expect(documentNode.documentElement.getAttribute("data-crop-x")).toBe("20");
     expect(documentNode.documentElement.getAttribute("data-crop-width")).toBe("160");
     expect(outputPixelSize(state)).toEqual({ width: 160, height: 80 });
+
+    const restored = mergeSavedSvg(initial, markup, []);
+    expect(restored.elements.find((item) => item.type === "ketcher")).toMatchObject({
+      width: 20,
+      height: 10,
+      scale: .75,
+    });
+
+    const interactive = buildSvgDocument(state, { interactive: true, selection: ["el:ket-1"] });
+    const interactiveDocument = new DOMParser().parseFromString(interactive, "image/svg+xml");
+    expect(interactiveDocument.querySelector('[data-ketcher-resize-id="ket-1"]')).not.toBeNull();
+    expect(interactiveDocument.querySelector('[data-ketcher-resize-overlay="ket-1"] rect')?.getAttribute("width")).toBe("15");
   });
 
   it("restores saved React elements and audit operations", () => {
@@ -101,5 +120,19 @@ describe("React SVG editor model", () => {
     if (arrow.type !== "arrow") throw new Error("Expected arrow");
     expect(arrowPath(arrow).d).toBe("M 1 2 L 1 20 L 10 20");
     expect(moveOperation(arrow, 5, -2)).toMatchObject({ start: { x: 6, y: 0 }, end: { x: 15, y: 18 } });
+  });
+
+  it("accumulates consecutive moves from the last committed position", () => {
+    const initial = parseFullSvg("P001-F01", "source", SOURCE_SVG, 200, 100);
+    const first = moveSelection(initial, ["trace:trace-0"], { x: 10, y: 5 });
+    const second = moveSelection(first, ["trace:trace-0"], { x: 5, y: 2 });
+
+    expect(second.traceEdits).toEqual([{
+      id: "trace-0",
+      dx: 15,
+      dy: 7,
+      hidden: undefined,
+    }]);
+    expect(buildSvgDocument(second)).toContain('transform="translate(15 7)"');
   });
 });

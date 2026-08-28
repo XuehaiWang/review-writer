@@ -126,6 +126,51 @@ class PdfRendererContractTests(unittest.TestCase):
         )
         self.assertEqual(["inserted_figure", "paragraph_id"], issue["markers"])
 
+    def test_pdf_extraction_replacement_character_is_a_warning(self) -> None:
+        class MediaBox:
+            width = 595.28
+            height = 841.89
+
+        class Page:
+            mediabox = MediaBox()
+
+            @staticmethod
+            def extract_text() -> str:
+                return "A visually rendered scientific glyph extracts as � here."
+
+            @staticmethod
+            def get(_key: str, default=None):
+                return default
+
+        class Reader:
+            pages = [Page()]
+
+        with patch.object(RENDER_SCRIPT, "PdfReader", return_value=Reader()):
+            qa = RENDER_SCRIPT.inspect_pdf(
+                Path("unused.pdf"),
+                "",
+                {"validation": {"warning_issues": []}},
+            )
+
+        self.assertFalse(
+            any(
+                item["type"] == "unicode_replacement_character"
+                for item in qa["blocking_issues"]
+            )
+        )
+        issue = next(
+            item
+            for item in qa["warning_issues"]
+            if item["type"] == "pdf_text_extraction_replacement_character"
+        )
+        self.assertEqual(1, issue["count"])
+
+    def test_source_replacement_character_is_sanitized_without_joining_tokens(self) -> None:
+        cleaned, count = RENDER_SCRIPT.sanitize_publication_markdown("Cu�catalysis")
+
+        self.assertEqual(1, count)
+        self.assertEqual("Cu catalysis", cleaned)
+
 
 if __name__ == "__main__":
     unittest.main()

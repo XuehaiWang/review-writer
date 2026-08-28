@@ -7,6 +7,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import random
 import time
 import uuid
@@ -57,6 +58,12 @@ class GatewayProviderError(ModelGatewayError):
     status_code = 502
 
 
+class GatewaySafetyBlocked(ModelGatewayError):
+    """A completed provider request rejected an academic image in moderation."""
+
+    status_code = 422
+
+
 @dataclass(frozen=True)
 class TaskClaims:
     job_id: str
@@ -73,6 +80,7 @@ class TaskClaims:
 TEXT_GATEWAY_JOB_TYPES = frozenset(
     {
         "discovery.search",
+        "library.bibliography-audit",
         "matrix.enrich",
         "sections.generate",
         "planning.reference-analyze",
@@ -85,6 +93,15 @@ TEXT_GATEWAY_JOB_TYPES = frozenset(
     }
 )
 IMAGE_GATEWAY_JOB_TYPES = frozenset({"figures.redraw", "final.overview"})
+EMBEDDING_GATEWAY_JOB_TYPES = frozenset(
+    {
+        "discovery.search",
+        "library.index",
+        "library.semantic-backfill",
+        "matrix.enrich",
+        "sections.generate",
+    }
+)
 
 
 def _b64encode(raw: bytes) -> str:
@@ -114,6 +131,19 @@ def calculate_provider_cost(
 
 class ModelGatewayService:
     TRANSIENT_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+    IMAGE_SAFETY_MARKERS = (
+        "内容被安全审核拦截",
+        "疑似成人内容",
+        "安全审核",
+        "adult content",
+        "sexual content",
+        "nsfw",
+        "content_filter",
+        "content filter",
+        "moderation_blocked",
+        "safety policy",
+        "safety review",
+    )
 
     def __init__(
         self,
@@ -140,6 +170,11 @@ class ModelGatewayService:
         self._image_global_slots = asyncio.Semaphore(settings.image_gateway_max_concurrency)
         self._image_user_slots: dict[str, asyncio.Semaphore] = {}
         self._image_user_slots_lock = asyncio.Lock()
+        self._embedding_global_slots = asyncio.Semaphore(
+            settings.embedding_gateway_max_concurrency
+        )
+        self._embedding_user_slots: dict[str, asyncio.Semaphore] = {}
+        self._embedding_user_slots_lock = asyncio.Lock()
         hosted_root = settings.hosted_workspace_root or (
             settings.review_root / ".review-writer" / "hosted-workspaces"
         )
@@ -171,6 +206,35 @@ class ModelGatewayService:
             "environment", "",
         )
 
+    def _embedding_runtime(self) -> ServerProviderRuntime:
+        if self.provider_settings is not None:
+            return self.provider_settings.runtime_config("embedding")
+        secret = self.settings.embedding_provider_api_key
+        model = self.settings.embedding_provider_model
+        return ServerProviderRuntime(
+            "embedding",
+            self.settings.embedding_provider_base_url,
+            model,
+            self.settings.embedding_provider_wire_api,
+            secret,
+            bool(secret and model),
+            "environment",
+            "",
+        )
+
+    def embedding_profile(self) -> dict[str, Any]:
+        runtime = self._embedding_runtime()
+        return {
+            "profile": "retrieval_embedding",
+            "enabled": bool(runtime.enabled),
+            "model": runtime.model_name if runtime.enabled else "",
+            "dimension": (
+                int(self.settings.embedding_provider_dimension)
+                if runtime.enabled
+                else 0
+            ),
+        }
+
     async def close(self) -> None:
         await self._provider_client.aclose()
 
@@ -197,6 +261,8 @@ class ModelGatewayService:
             capabilities.append("text")
         if job_type in IMAGE_GATEWAY_JOB_TYPES:
             capabilities.append("image")
+        if job_type in EMBEDDING_GATEWAY_JOB_TYPES:
+            capabilities.append("embedding")
         payload = {
             "v": 3,
             "job_id": str(uuid.UUID(job_id)),
@@ -244,7 +310,7 @@ class ModelGatewayService:
                 capabilities=tuple(
                     str(item)
                     for item in payload.get("capabilities") or []
-                    if str(item) in {"text", "image"}
+                    if str(item) in {"text", "image", "embedding"}
                 ),
                 expires_at=int(payload["exp"]),
                 lease_token=(
@@ -278,9 +344,17 @@ class ModelGatewayService:
             lease_token=getattr(context, "lease_token", None),
             lease_generation=getattr(context, "lease_generation", None),
         )
+        claims = self.verify_task_token(token)
         return (
             {
                 "REVIEW_WRITER_MODEL_GATEWAY_URL": self.settings.internal_gateway_url,
+                # This is model identity metadata, not a provider credential.
+                # Scientific subprocesses use it in cache fingerprints so a
+                # project model change cannot silently reuse an old Agent
+                # classification or extraction result.
+                "REVIEW_WRITING_MODEL": resolve_model_tier(
+                    claims.model_tier
+                ).model,
                 "REVIEW_WRITER_IMAGE_GATEWAY_URL": (
                     self.settings.internal_gateway_url.rsplit("/", 1)[0]
                     + "/image-generations"
@@ -367,6 +441,13 @@ class ModelGatewayService:
         async with self._image_user_slots_lock:
             return self._image_user_slots.setdefault(
                 user_id, asyncio.Semaphore(self.settings.image_gateway_user_concurrency)
+            )
+
+    async def _embedding_user_semaphore(self, user_id: str) -> asyncio.Semaphore:
+        async with self._embedding_user_slots_lock:
+            return self._embedding_user_slots.setdefault(
+                user_id,
+                asyncio.Semaphore(self.settings.embedding_gateway_user_concurrency),
             )
 
     @staticmethod
@@ -578,6 +659,96 @@ class ModelGatewayService:
             await asyncio.sleep(min(8.0, (2 ** (attempt - 1)) + random.random()))
         raise GatewayProviderError("Model provider request failed.")
 
+    async def _provider_embedding_call(
+        self,
+        *,
+        inputs: list[str],
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        runtime = self._embedding_runtime()
+        if not runtime.enabled:
+            raise GatewayConfigurationError(
+                "The server embedding provider is not configured."
+            )
+        endpoint = f"{runtime.base_url.rstrip('/')}/embeddings"
+        payload: dict[str, Any] = {"model": runtime.model_name, "input": inputs}
+        expected_dimension = int(self.settings.embedding_provider_dimension or 0)
+        if expected_dimension:
+            # Providers that support configurable output size perform the
+            # reduction themselves; the returned vectors are verified below.
+            payload["dimensions"] = expected_dimension
+        headers = {
+            "Authorization": f"Bearer {runtime.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Idempotency-Key": idempotency_key,
+        }
+        for attempt in range(1, 4):
+            try:
+                response = await self._provider_client.post(
+                    endpoint, json=payload, headers=headers
+                )
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if attempt >= 3:
+                    raise GatewayProviderError(
+                        f"Embedding provider transport failed after {attempt} attempts."
+                    ) from exc
+            else:
+                if response.status_code < 400:
+                    try:
+                        result = response.json()
+                    except ValueError as exc:
+                        raise GatewayProviderError(
+                            "Embedding provider returned invalid JSON."
+                        ) from exc
+                    if not isinstance(result, dict):
+                        raise GatewayProviderError(
+                            "Embedding provider returned an invalid payload."
+                        )
+                    return result
+                if (
+                    response.status_code not in self.TRANSIENT_STATUSES
+                    or attempt >= 3
+                ):
+                    detail = response.text[:500].replace("\n", " ")
+                    raise GatewayProviderError(
+                        f"Embedding provider returned HTTP {response.status_code}: {detail}"
+                    )
+            await asyncio.sleep(min(8.0, (2 ** (attempt - 1)) + random.random()))
+        raise GatewayProviderError("Embedding provider request failed.")
+
+    @staticmethod
+    def _embedding_vectors(data: dict[str, Any], expected_count: int) -> list[list[float]]:
+        rows = data.get("data") if isinstance(data.get("data"), list) else []
+        ordered: list[tuple[int, list[float]]] = []
+        for fallback_index, item in enumerate(rows):
+            if not isinstance(item, dict) or not isinstance(item.get("embedding"), list):
+                continue
+            try:
+                vector = [float(value) for value in item["embedding"]]
+                index = int(item.get("index", fallback_index))
+            except (TypeError, ValueError) as exc:
+                raise GatewayProviderError(
+                    "Embedding provider returned a non-numeric vector."
+                ) from exc
+            if not vector or any(not math.isfinite(value) for value in vector):
+                raise GatewayProviderError(
+                    "Embedding provider returned an empty or invalid vector."
+                )
+            ordered.append((index, vector))
+        ordered.sort(key=lambda item: item[0])
+        vectors = [vector for _index, vector in ordered]
+        if len(vectors) != expected_count:
+            raise GatewayProviderError(
+                "Embedding provider returned a different number of vectors than requested."
+            )
+        dimensions = {len(vector) for vector in vectors}
+        if len(dimensions) != 1:
+            raise GatewayProviderError(
+                "Embedding provider returned inconsistent vector dimensions."
+            )
+        return vectors
+
     def _finish_request(
         self,
         request_id: str,
@@ -755,6 +926,172 @@ class ModelGatewayService:
             prompt=prompt,
             response_format="json",
         )
+
+    async def complete_embeddings(
+        self,
+        token: str,
+        *,
+        request_key: str,
+        stage: str,
+        inputs: list[str],
+    ) -> dict[str, Any]:
+        """Create task-bound retrieval embeddings with independent concurrency."""
+
+        claims = self.verify_task_token(token)
+        self._require_capability(claims, "embedding")
+        self._validate_live_job(claims)
+        key = str(request_key or "").strip()
+        if not key or len(key) > 128:
+            raise GatewayRequestConflict(
+                "A request key of at most 128 characters is required."
+            )
+        normalized_stage = str(stage or claims.job_type).strip()[:96]
+        normalized_inputs = [str(item or "").strip() for item in inputs]
+        if (
+            not normalized_inputs
+            or len(normalized_inputs) > 64
+            or any(not item or len(item) > 120_000 for item in normalized_inputs)
+            or sum(len(item) for item in normalized_inputs) > 1_000_000
+        ):
+            raise GatewayRequestConflict(
+                "Embedding input must contain 1-64 non-empty bounded text items."
+            )
+        runtime = self._embedding_runtime()
+        if not runtime.enabled:
+            raise GatewayConfigurationError(
+                "The server embedding provider is not configured."
+            )
+        tier = ModelTier(
+            id="retrieval_embedding",
+            model=runtime.model_name,
+            label_zh="检索向量",
+            label_en="Retrieval embedding",
+            description_zh="服务器固定的检索向量模型。",
+            description_en="Server-fixed retrieval embedding model.",
+            input_usd_per_million=self.settings.embedding_provider_price_usd_per_million,
+            cached_input_usd_per_million=Decimal("0"),
+            output_usd_per_million=Decimal("0"),
+        )
+        expected_dimension = int(self.settings.embedding_provider_dimension or 0)
+        canonical_input = json.dumps(
+            {
+                "inputs": normalized_inputs,
+                "model": runtime.model_name,
+                "dimension": expected_dimension,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        digest = self._request_sha256(
+            normalized_stage, canonical_input, "embeddings"
+        )
+        request_id, cached, in_flight, attempt_number = self._begin_request(
+            claims,
+            request_key=key,
+            stage=normalized_stage,
+            request_sha256=digest,
+            tier=tier,
+        )
+        if in_flight:
+            cached = await self._join_running_request(request_id)
+        if cached is not None:
+            return {**cached, "cached": True}
+
+        user_slot = await self._embedding_user_semaphore(claims.user_id)
+        reservation_id: str | None = None
+        provider_completed = False
+        try:
+            estimated_input_tokens = max(
+                1,
+                (sum(len(item.encode("utf-8")) for item in normalized_inputs) + 3)
+                // 4,
+            )
+            estimated_cost = calculate_provider_cost(
+                tier,
+                input_tokens=estimated_input_tokens,
+                cached_input_tokens=0,
+                output_tokens=0,
+            )
+            if self.billing_service is not None and estimated_cost > 0:
+                reserve_amount = max(
+                    Decimal("0.00010000"),
+                    (estimated_cost * Decimal("1.20")).quantize(
+                        Decimal("0.00000001")
+                    ),
+                )
+                reservation = self.billing_service.reserve(
+                    user_id=claims.user_id,
+                    amount_usd=reserve_amount,
+                    reference_type="embedding_model",
+                    reference_id=request_id,
+                    attempt_number=attempt_number,
+                    job_id=claims.job_id,
+                    reason=f"语义检索向量调用冻结：{normalized_stage}",
+                    details={
+                        "profile": "retrieval_embedding",
+                        "model": runtime.model_name,
+                        "estimated_input_tokens": estimated_input_tokens,
+                    },
+                )
+                reservation_id = str(reservation.id)
+            async with self._embedding_global_slots, user_slot:
+                provider_data = await self._provider_embedding_call(
+                    inputs=normalized_inputs,
+                    idempotency_key=f"{claims.job_id}:{key}",
+                )
+            embeddings = self._embedding_vectors(
+                provider_data, len(normalized_inputs)
+            )
+            dimension = len(embeddings[0])
+            if expected_dimension and dimension != expected_dimension:
+                raise GatewayProviderError(
+                    "Embedding dimension does not match the server retrieval profile "
+                    f"({dimension} != {expected_dimension})."
+                )
+            usage = self._usage(provider_data)
+            if usage["input_tokens"] <= 0:
+                usage["input_tokens"] = estimated_input_tokens
+                usage["total_tokens"] = estimated_input_tokens
+            cost = calculate_provider_cost(
+                tier,
+                input_tokens=usage["input_tokens"],
+                cached_input_tokens=0,
+                output_tokens=0,
+            )
+            response = {
+                "request_id": request_id,
+                "provider_request_id": str(provider_data.get("id") or ""),
+                "profile": "retrieval_embedding",
+                "model": runtime.model_name,
+                "dimension": dimension,
+                "embeddings": embeddings,
+                "usage": usage,
+                "cost_usd": format(cost, "f"),
+                "cached": False,
+            }
+            self._finish_request(request_id, response_payload=response)
+            provider_completed = True
+            if self.billing_service is not None and reservation_id is not None:
+                self.billing_service.settle(
+                    reservation_id,
+                    actual_usd=cost,
+                    details={
+                        "profile": "retrieval_embedding",
+                        "model": runtime.model_name,
+                        "input_tokens": usage["input_tokens"],
+                    },
+                )
+            return response
+        except Exception as exc:
+            if not provider_completed:
+                if self.billing_service is not None and reservation_id is not None:
+                    self.billing_service.release(
+                        reservation_id,
+                        reason="语义检索向量调用失败，释放冻结额度",
+                        details={"error": str(exc)[:500]},
+                    )
+                self._finish_request(request_id, error_message=str(exc))
+            raise
 
     @staticmethod
     def _decode_image_inputs(images: list[dict[str, str]]) -> list[tuple[str, bytes]]:
@@ -1104,6 +1441,13 @@ class ModelGatewayService:
                         )
                 elif response.status_code not in self.TRANSIENT_STATUSES or attempt >= 3:
                     detail = response.text[:500].replace("\n", " ")
+                    if any(
+                        marker.casefold() in detail.casefold()
+                        for marker in self.IMAGE_SAFETY_MARKERS
+                    ):
+                        raise GatewaySafetyBlocked(
+                            "The image provider blocked this academic chemistry figure during safety review."
+                        )
                     raise GatewayProviderError(
                         f"Image provider returned HTTP {response.status_code}: {detail}"
                     )

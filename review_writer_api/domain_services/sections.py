@@ -35,12 +35,72 @@ from review_writer_api.workflow_repository import ArtifactRecord, JobRecord, Wor
 from review_writer_core.review_structure import (
     assign_primary_paper_sections,
     infer_section_role,
+    sanitize_internal_section_title,
 )
+from review_writer_core.writing_contracts import derive_writing_scope_contract
+
+
+_SUPPORT_LEVEL_RANK = {
+    "coverage_only": 0,
+    "context_only": 1,
+    "abstract_limited": 2,
+    "direct": 3,
+}
+
+
+def strongest_support_level(*levels: str) -> str:
+    values = [str(value or "coverage_only") for value in levels]
+    return max(values, key=lambda item: _SUPPORT_LEVEL_RANK.get(item, -1))
+
+
+def _merge_evidence_registry_row(
+    registry: dict[str, dict[str, Any]], hit: dict[str, Any]
+) -> None:
+    """Merge section-scoped identities for one canonical evidence key."""
+
+    evidence_key = str(hit.get("evidence_key") or "")
+    if not evidence_key:
+        return
+    existing = registry.get(evidence_key)
+    if existing is None:
+        registry[evidence_key] = dict(hit)
+        return
+
+    for field in (
+        "fact_ids",
+        "question_ids",
+        "retrieval_passes",
+        "asset_refs",
+        "mechanism_evidence_types",
+    ):
+        existing[field] = list(
+            dict.fromkeys(
+                str(value)
+                for value in [
+                    *(existing.get(field) or []),
+                    *(hit.get(field) or []),
+                ]
+                if str(value)
+            )
+        )
+    existing["support_level"] = strongest_support_level(
+        str(existing.get("support_level") or "coverage_only"),
+        str(hit.get("support_level") or "coverage_only"),
+    )
+    existing["claim_eligible"] = bool(
+        existing.get("claim_eligible") or hit.get("claim_eligible")
+    )
+    existing["counts_as_evidence"] = bool(
+        existing.get("counts_as_evidence") or hit.get("counts_as_evidence")
+    )
+
+
 from review_writer_api.domain_services.library_index import LibraryIndexService
 from review_writer_core.academic_contracts import (
     ACADEMIC_SCHEMA_VERSION,
     evidence_key as academic_evidence_key,
     evidence_level,
+    mechanism_evidence_types,
 )
 from review_writer_core.evidence_queries import build_question_query_plans
 
@@ -332,6 +392,13 @@ class SectionsService:
                 )
             )
             query_plans = self._evidence_queries(task, review_topic=review_topic)
+            if (
+                self.library_index is not None
+                and self.library_index.enabled
+                and bool(getattr(self.library_index, "vector_enabled", False))
+                and allowed
+            ):
+                self.library_index.ensure_embeddings(principal, allowed)
             index_summaries = (
                 self.library_index.summaries(principal, allowed)
                 if self.library_index is not None
@@ -339,9 +406,8 @@ class SectionsService:
                 and allowed
                 else {}
             )
-            indexed_mode = any(
-                str(summary.get("fulltext") or "") != "not_indexed"
-                for summary in index_summaries.values()
+            legacy_fallback_authorized = bool(
+                self.library_index is None or not self.library_index.enabled
             )
             merged_hits: dict[tuple[str, str], dict[str, Any]] = {}
             question_direct: dict[str, dict[str, set[str]]] = {
@@ -352,6 +418,7 @@ class SectionsService:
                 str(plan["question_id"]): {paper_id: False for paper_id in primary}
                 for plan in query_plans
             }
+            relaxed_recovery_anchors: set[tuple[str, str]] = set()
 
             def add_hits(found, *, question_id: str, retrieval_pass: str) -> None:
                 for hit in found:
@@ -409,20 +476,32 @@ class SectionsService:
                                 f'"{term}"' if " " in term else term
                                 for term in relaxed_terms
                             ) + ")"
-                            relaxed_scan_matches[question_id][paper_id] = bool(
-                                self.library_index.retrieve(
-                                    principal,
-                                    relaxed_query,
-                                    allowed_papers=[paper_id],
-                                    top_k=1,
-                                    per_paper_limit=1,
-                                    include_neighbors=False,
-                                    term_groups=relaxed_groups,
-                                    exact_phrases=[
-                                        term for term in relaxed_terms if " " in term
-                                    ],
-                                )
+                            relaxed_hits = self.library_index.retrieve(
+                                principal,
+                                relaxed_query,
+                                allowed_papers=[paper_id],
+                                top_k=1,
+                                per_paper_limit=1,
+                                include_neighbors=False,
+                                term_groups=relaxed_groups,
+                                exact_phrases=[
+                                    term for term in relaxed_terms if " " in term
+                                ],
                             )
+                            relaxed_scan_matches[question_id][paper_id] = bool(
+                                relaxed_hits
+                            )
+                            if relaxed_hits:
+                                add_hits(
+                                    relaxed_hits,
+                                    question_id=question_id,
+                                    retrieval_pass="question_terms_relaxed_recovery",
+                                )
+                                relaxed_recovery_anchors.update(
+                                    (hit.paper_id, hit.chunk_id)
+                                    for hit in relaxed_hits
+                                    if not hit.is_neighbor
+                                )
                     add_hits(
                         self.library_index.retrieve(
                             principal,
@@ -453,7 +532,13 @@ class SectionsService:
                         str(item[1]["hit"].chunk_id),
                     )
                 )
-                selected_direct: set[tuple[str, str]] = set()
+                # A relaxed recovery is useful only when its source passage is
+                # actually retained in the published evidence package.  Seed
+                # the dynamic budget with those recovered anchors before
+                # spending the remaining budget on general comparison hits.
+                selected_direct: set[tuple[str, str]] = set(
+                    relaxed_recovery_anchors
+                )
                 for paper_id in primary:
                     best = next(
                         (
@@ -497,6 +582,26 @@ class SectionsService:
                     for key, item in merged_hits.items()
                     if key in selected_direct or key in selected_neighbors
                 }
+
+                # The pre-budget retrieval maps may refer to a chunk that was
+                # legitimately removed by the evidence budget.  Recompute the
+                # question coverage from the passages that will really be
+                # published so status and evidence never diverge.
+                question_direct = {
+                    str(plan["question_id"]): {
+                        paper_id: set() for paper_id in primary
+                    }
+                    for plan in query_plans
+                }
+                for item in merged_hits.values():
+                    hit = item["hit"]
+                    if hit.is_neighbor or hit.paper_id not in primary:
+                        continue
+                    for question_id in item["question_ids"]:
+                        if hit.paper_id in question_direct.get(question_id, {}):
+                            question_direct[question_id][hit.paper_id].add(
+                                hit.chunk_id
+                            )
 
                 direct_primary = {
                     item["hit"].paper_id
@@ -551,6 +656,15 @@ class SectionsService:
                     else "direct"
                 )
                 claim_eligible = support_level == "direct"
+                assertion_ceiling = (
+                    "abstract_report_only"
+                    if source_channel == "abstract"
+                    else "direct_report_with_local_context"
+                    if source_channel in {"table", "figure_caption"}
+                    else "context_only"
+                    if support_level in {"context_only", "coverage_only"}
+                    else "direct_source_report"
+                )
                 hit_rows.append({
                     "evidence_id": f"EV-{stable_key.removeprefix('sha256:')[:12].upper()}",
                     "evidence_key": stable_key,
@@ -573,6 +687,7 @@ class SectionsService:
                     "is_neighbor": hit.is_neighbor,
                     "claim_eligible": claim_eligible,
                     "counts_as_evidence": claim_eligible,
+                    "assertion_ceiling": assertion_ceiling,
                     "question_ids": sorted(merged["question_ids"]),
                     "retrieval_passes": sorted(merged["retrieval_passes"]),
                     "index_id": hit.index_id,
@@ -580,6 +695,7 @@ class SectionsService:
                     "previous_chunk_id": hit.previous_chunk_id,
                     "next_chunk_id": hit.next_chunk_id,
                     "evidence_level": evidence_level(hit.content),
+                    "mechanism_evidence_types": mechanism_evidence_types(hit.content),
                 })
             by_evidence_key = {
                 str(row.get("evidence_key") or ""): row for row in hit_rows
@@ -631,15 +747,29 @@ class SectionsService:
                         fact_claim_eligible = fact_support == "direct"
                         existing = by_evidence_key.get(evidence_key)
                         if existing is not None:
-                            existing["match_type"] = "fact_card_evidence"
-                            existing["support_level"] = fact_support
-                            existing["source_channel"] = str(
-                                fact.get("source_channel")
-                                or existing.get("source_channel")
-                                or ("abstract" if abstract_fact else "body")
+                            existing_support = str(
+                                existing.get("support_level") or "coverage_only"
                             )
-                            existing["claim_eligible"] = fact_claim_eligible
-                            existing["counts_as_evidence"] = fact_claim_eligible
+                            strongest_support = strongest_support_level(
+                                existing_support,
+                                fact_support,
+                            )
+                            fact_is_at_least_as_strong = (
+                                _SUPPORT_LEVEL_RANK.get(fact_support, -1)
+                                >= _SUPPORT_LEVEL_RANK.get(existing_support, -1)
+                            )
+                            if fact_is_at_least_as_strong:
+                                existing["match_type"] = "fact_card_evidence"
+                            existing["support_level"] = strongest_support
+                            if fact_is_at_least_as_strong:
+                                existing["source_channel"] = str(
+                                    fact.get("source_channel")
+                                    or existing.get("source_channel")
+                                    or ("abstract" if abstract_fact else "body")
+                                )
+                            strongest_claim_eligible = strongest_support == "direct"
+                            existing["claim_eligible"] = strongest_claim_eligible
+                            existing["counts_as_evidence"] = strongest_claim_eligible
                             existing["question_ids"] = sorted(
                                 set(existing.get("question_ids") or [])
                                 | {question_id}
@@ -652,12 +782,16 @@ class SectionsService:
                                 str(fact.get("fact_id") or "")
                             )
                             existing["normalized_fact_value"] = fact.get("value")
-                            existing["epistemic_status"] = fact.get(
-                                "epistemic_status"
-                            )
-                            existing["evidence_ceiling"] = fact.get(
-                                "evidence_ceiling"
-                            )
+                            if fact_is_at_least_as_strong:
+                                existing["epistemic_status"] = fact.get(
+                                    "epistemic_status"
+                                )
+                                existing["evidence_ceiling"] = fact.get(
+                                    "evidence_ceiling"
+                                )
+                                existing["assertion_ceiling"] = fact.get(
+                                    "assertion_ceiling"
+                                ) or existing.get("assertion_ceiling")
                         else:
                             existing = {
                                 "evidence_id": f"EV-{evidence_key.removeprefix('sha256:')[:12].upper()}",
@@ -691,10 +825,17 @@ class SectionsService:
                                 "previous_chunk_id": "",
                                 "next_chunk_id": "",
                                 "evidence_level": evidence_level(excerpt),
+                                "mechanism_evidence_types": mechanism_evidence_types(excerpt),
                                 "fact_ids": [str(fact.get("fact_id") or "")],
                                 "epistemic_status": fact.get("epistemic_status"),
                                 "normalized_fact_value": fact.get("value"),
                                 "evidence_ceiling": fact.get("evidence_ceiling"),
+                                "assertion_ceiling": fact.get("assertion_ceiling")
+                                or (
+                                    "abstract_report_only"
+                                    if abstract_fact
+                                    else "direct_source_report"
+                                ),
                             }
                             hit_rows.append(existing)
                             by_evidence_key[evidence_key] = existing
@@ -741,6 +882,7 @@ class SectionsService:
                             "claim_eligible": False,
                             "counts_as_evidence": False,
                             "evidence_ceiling": "Only a broad, explicitly attributed summary is allowed; do not infer detailed methods, values, mechanisms, or limitations.",
+                            "assertion_ceiling": "abstract_report_only",
                         }
                     )
             primary_states: list[dict[str, Any]] = []
@@ -788,6 +930,21 @@ class SectionsService:
             corpus_gaps: list[str] = []
             for plan in query_plans:
                 question_id = str(plan["question_id"])
+                coverage_policy = str(
+                    plan.get("coverage_policy")
+                    or (
+                        "all_primary"
+                        if question_id == "section_focus"
+                        else "any_primary"
+                        if question_id.startswith("required_claim_")
+                        else "evidence_bearing"
+                    )
+                )
+                required_for_section = bool(
+                    plan.get("required_for_section")
+                    or question_id == "section_focus"
+                    or question_id.startswith("required_claim_")
+                )
                 direct_by_paper = question_direct.get(question_id, {})
                 matched_primary = [
                     paper_id for paper_id, chunks in direct_by_paper.items() if chunks
@@ -800,18 +957,35 @@ class SectionsService:
                         and question_id in row["question_ids"]
                     }
                 )
-                if primary and len(matched_primary) == len(primary):
+                if coverage_policy == "all_primary":
+                    if primary and len(matched_primary) == len(primary):
+                        sufficiency = "sufficient"
+                    elif not primary and global_matches:
+                        sufficiency = "sufficient"
+                    elif matched_primary:
+                        sufficiency = "partial"
+                    elif context_only_primary:
+                        sufficiency = "abstract_limited"
+                    else:
+                        sufficiency = "insufficient"
+                elif matched_primary or global_matches:
+                    # Scientific dimensions such as mechanism, scale, safety,
+                    # and limitations are not expected from every paper in a
+                    # section.  They are sufficient for claims explicitly
+                    # limited to the papers that actually report them.
                     sufficiency = "sufficient"
-                elif matched_primary or (not primary and global_matches):
-                    sufficiency = "partial"
-                elif context_only_primary:
+                elif required_for_section and context_only_primary:
                     sufficiency = "abstract_limited"
-                else:
+                elif required_for_section:
                     sufficiency = "insufficient"
+                else:
+                    sufficiency = "not_reported"
                 diagnostics = {
                     paper_id: (
                         "none"
                         if direct_by_paper.get(paper_id)
+                        else "not_required"
+                        if coverage_policy == "evidence_bearing"
                         else "index_incomplete"
                         if str((index_summaries.get(paper_id) or {}).get("fulltext") or "") != "ready"
                         else "query_miss"
@@ -823,25 +997,45 @@ class SectionsService:
                     )
                     for paper_id in primary
                 }
-                if primary and not matched_primary and all(
-                    value in {"query_miss", "not_in_paper"}
-                    for value in diagnostics.values()
+                if (
+                    required_for_section
+                    and primary
+                    and not matched_primary
+                    and not global_matches
+                    and all(
+                        value in {"query_miss", "not_in_paper"}
+                        for value in diagnostics.values()
+                    )
                 ):
                     corpus_gaps.append(question_id)
+                expected_primary = (
+                    list(primary)
+                    if coverage_policy == "all_primary"
+                    else list(matched_primary)
+                )
                 question_results.append(
                     {
                         **plan,
                         "status": sufficiency,
+                        "coverage_policy": coverage_policy,
+                        "required_for_section": required_for_section,
+                        "expected_primary_papers": expected_primary,
                         "matched_primary_papers": matched_primary,
                         "matched_papers": global_matches,
                         "diagnostics_by_primary_paper": diagnostics,
                         "retrieval_attempts": [
                             {
                                 "mode": "strict_boolean",
-                                "matched_primary_papers": matched_primary,
+                                "matched_primary_papers": [
+                                    paper_id
+                                    for paper_id in matched_primary
+                                    if not relaxed_scan_matches.get(
+                                        question_id, {}
+                                    ).get(paper_id)
+                                ],
                             },
                             {
-                                "mode": "question_terms_limited_scan",
+                                "mode": "question_terms_relaxed_recovery",
                                 "matched_primary_papers": [
                                     paper_id
                                     for paper_id, matched in relaxed_scan_matches.get(
@@ -853,13 +1047,56 @@ class SectionsService:
                         ],
                     }
                 )
+            question_state_by_paper: dict[str, list[dict[str, Any]]] = {
+                paper_id: [] for paper_id in allowed
+            }
+            for question in question_results:
+                question_id = str(question.get("question_id") or "")
+                matched = {
+                    str(value)
+                    for value in question.get("matched_papers") or []
+                }
+                diagnostics = question.get("diagnostics_by_primary_paper") or {}
+                for paper_id in allowed:
+                    diagnostic = str(
+                        diagnostics.get(paper_id)
+                        or ("none" if paper_id in matched else "not_required")
+                    )
+                    question_state_by_paper[paper_id].append(
+                        {
+                            "question_id": question_id,
+                            "status": (
+                                "direct"
+                                if paper_id in matched
+                                else "not_required"
+                                if diagnostic == "not_required"
+                                else "unresolved"
+                            ),
+                            "diagnostic": diagnostic,
+                            "required_for_section": bool(
+                                question.get("required_for_section")
+                            ),
+                            "coverage_policy": str(
+                                question.get("coverage_policy") or ""
+                            ),
+                        }
+                    )
+            for state in primary_states:
+                paper_id = str(state.get("paper_id") or "")
+                states = question_state_by_paper.get(paper_id, [])
+                state["question_states"] = states
+                state["writeable_question_ids"] = [
+                    item["question_id"]
+                    for item in states
+                    if item["status"] == "direct"
+                ]
             usable_hits = [row for row in hit_rows if row["claim_eligible"]]
             evidence_papers = sorted({row["paper_id"] for row in usable_hits})
             if usable_hits:
                 retrieval_mode = "lexical"
             elif abstract_context:
                 retrieval_mode = "abstract_only"
-            elif not indexed_mode:
+            elif legacy_fallback_authorized:
                 retrieval_mode = "fixed_prefix_fallback"
             else:
                 retrieval_mode = "insufficient_evidence"
@@ -871,7 +1108,11 @@ class SectionsService:
                 else:
                     section_status = "insufficient_evidence"
             else:
-                section_status = "ready" if usable_hits or not indexed_mode else "insufficient_evidence"
+                section_status = (
+                    "ready"
+                    if usable_hits or legacy_fallback_authorized
+                    else "insufficient_evidence"
+                )
             sections.append(
                 {
                     "section_id": str(task.get("section_id") or ""),
@@ -880,6 +1121,10 @@ class SectionsService:
                     "query_plans": question_results,
                     "allowed_papers": allowed,
                     "retrieval_mode": retrieval_mode,
+                    "legacy_fallback_authorized": bool(
+                        retrieval_mode == "fixed_prefix_fallback"
+                        and legacy_fallback_authorized
+                    ),
                     "status": section_status,
                     "hit_count": len(hit_rows),
                     "claim_eligible_hit_count": len(usable_hits),
@@ -891,6 +1136,8 @@ class SectionsService:
                     "unresolved_primary_papers": unresolved_primary,
                     "missing_primary_papers": unresolved_primary,
                     "primary_paper_states": primary_states,
+                    "evidence_status_granularity": "paper_section_question",
+                    "question_evidence_states": question_state_by_paper,
                     "corpus_gap_questions": sorted(set(corpus_gaps)),
                     "abstract_context": abstract_context,
                     "hits": hit_rows,
@@ -899,12 +1146,26 @@ class SectionsService:
         registry: dict[str, dict[str, Any]] = {}
         for section in sections:
             for hit in section.get("hits") or []:
-                if isinstance(hit, dict) and str(hit.get("evidence_key") or ""):
-                    registry.setdefault(str(hit["evidence_key"]), dict(hit))
+                if not isinstance(hit, dict):
+                    continue
+                # One source chunk can be retrieved under several section
+                # questions.  Preserve its canonical identity while merging
+                # every fact identity attached by those scoped retrievals.
+                # Keeping only the first occurrence makes a later conclusion
+                # appear to cite a fact outside the very same evidence key.
+                _merge_evidence_registry_row(registry, hit)
         return {
             "schema_version": ACADEMIC_SCHEMA_VERSION + 1,
             "project_id": project_id,
-            "retrieval_engine": "question_level_boolean+per_paper_targeted+global_comparison+postgresql_fulltext",
+            "retrieval_engine": (
+                "question_level_boolean+per_paper_targeted+global_comparison+"
+                + (
+                    "postgresql_fulltext+pgvector_rrf"
+                    if self.library_index is not None
+                    and bool(getattr(self.library_index, "vector_enabled", False))
+                    else "postgresql_fulltext"
+                )
+            ),
             "evidence_registry": list(registry.values()),
             "sections": sections,
         }
@@ -922,6 +1183,7 @@ class SectionsService:
             "blueprint_artifact_id",
             "matrix_artifact_id",
             "outline_artifact_id",
+            "writing_scope_contract_fingerprint",
         ):
             if str(previous_snapshot.get(key) or "") != str(current_snapshot.get(key) or ""):
                 return section_ids
@@ -937,10 +1199,105 @@ class SectionsService:
                 dirty.add(section_id)
         return [section_id for section_id in section_ids if section_id in dirty]
 
+    @staticmethod
+    def _apply_primary_evidence_roles(
+        tasks: list[dict[str, Any]],
+        evidence_by_section: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Turn evidence readiness into explicit, non-coercive paper roles.
+
+        Evidence retrieval already makes a targeted pass through each assigned
+        primary paper and the Matrix fact cards.  After that pass, papers with
+        no claim-eligible evidence must not remain mandatory citations merely
+        to satisfy Blueprint coverage.  They stay traceable as context while
+        directly supported papers retain the primary role.
+        """
+
+        output: list[dict[str, Any]] = []
+        for source in tasks:
+            task = dict(source)
+            section_id = str(task.get("section_id") or "")
+            package = evidence_by_section.get(section_id, {})
+            assigned_primary = list(
+                dict.fromkeys(str(item) for item in task.get("primary_papers") or [])
+            )
+            writeable = [
+                str(item)
+                for item in package.get("writeable_primary_papers") or []
+                if str(item) in assigned_primary
+            ]
+            context_only = [
+                str(item)
+                for item in package.get("context_only_primary_papers") or []
+                if str(item) in assigned_primary
+            ]
+            unresolved = [
+                str(item)
+                for item in package.get("unresolved_primary_papers") or []
+                if str(item) in assigned_primary
+            ]
+            state_by_paper = {
+                str(item.get("paper_id") or ""): dict(item)
+                for item in package.get("primary_paper_states") or []
+                if isinstance(item, dict) and item.get("paper_id")
+            }
+            downgraded = [
+                {
+                    "paper_id": paper_id,
+                    "from_role": "primary",
+                    "to_role": "context",
+                    "reason": str(
+                        state_by_paper.get(paper_id, {}).get("diagnostic")
+                        or "no_claim_eligible_evidence"
+                    ),
+                }
+                for paper_id in [*context_only, *unresolved]
+            ]
+            supporting = list(
+                dict.fromkeys(
+                    str(item)
+                    for item in task.get("supporting_papers") or []
+                    if str(item) not in writeable
+                )
+            )
+            context = list(
+                dict.fromkeys(
+                    [
+                        *(str(item) for item in task.get("context_papers") or []),
+                        *context_only,
+                        *unresolved,
+                    ]
+                )
+            )
+            allowed = list(dict.fromkeys([*writeable, *supporting, *context]))
+            task.update(
+                {
+                    "assigned_primary_papers": assigned_primary,
+                    "primary_papers": writeable,
+                    "supporting_papers": supporting,
+                    "context_papers": context,
+                    "allowed_papers": allowed,
+                    "writeable_primary_papers": writeable,
+                    "context_only_primary_papers": context_only,
+                    "unresolved_primary_papers": unresolved,
+                    "evidence_role_changes": downgraded,
+                    "writing_mode": (
+                        task.get("writing_mode")
+                        if writeable
+                        or str(task.get("section_role") or "body")
+                        in {"introduction", "conclusion"}
+                        else "bounded_context_synthesis"
+                    ),
+                }
+            )
+            output.append(task)
+        return output
+
     def generation_payload(
         self, principal: Principal, project_id: str
     ) -> dict[str, Any]:
         principal.require(Permission.PROJECT_WRITE)
+        project = self._owned_project(principal, project_id)
         blueprint, blueprint_artifact = self._read_json_artifact(
             principal, project_id, BLUEPRINT_LOGICAL_NAME
         )
@@ -958,6 +1315,9 @@ class SectionsService:
             principal, project_id, OUTLINE_LOGICAL_NAME
         )
         tasks = self.tasks_from_blueprint(blueprint)
+        writing_scope_contract = derive_writing_scope_contract(
+            blueprint.get("scope_contract")
+        )
         matrix_rows = matrix.get("rows") if isinstance(matrix, dict) else None
         if not isinstance(matrix_rows, list):
             raise WorkflowConflict("The current Matrix is invalid.")
@@ -997,27 +1357,10 @@ class SectionsService:
             str(item.get("section_id") or ""): item
             for item in evidence_package["sections"]
         }
+        tasks = self._apply_primary_evidence_roles(tasks, evidence_by_section)
         tasks = [
             {
                 **task,
-                "writeable_primary_papers": list(
-                    evidence_by_section.get(task["section_id"], {}).get(
-                        "writeable_primary_papers"
-                    )
-                    or []
-                ),
-                "context_only_primary_papers": list(
-                    evidence_by_section.get(task["section_id"], {}).get(
-                        "context_only_primary_papers"
-                    )
-                    or []
-                ),
-                "unresolved_primary_papers": list(
-                    evidence_by_section.get(task["section_id"], {}).get(
-                        "unresolved_primary_papers"
-                    )
-                    or []
-                ),
                 "evidence_status": {
                     key: evidence_by_section.get(task["section_id"], {}).get(key)
                     for key in (
@@ -1038,6 +1381,9 @@ class SectionsService:
             "blueprint_artifact_id": blueprint_artifact.id,
             "matrix_artifact_id": matrix_artifact.id,
             "outline_artifact_id": outline_artifact.id,
+            "writing_scope_contract_fingerprint": writing_scope_contract[
+                "fingerprint"
+            ],
             "section_ids": [str(task.get("section_id") or "") for task in tasks],
             "evidence_keys_by_section": {
                 str(section.get("section_id") or ""): sorted(
@@ -1063,7 +1409,17 @@ class SectionsService:
             "source_matrix_artifact_id": matrix_artifact.id,
             "source_outline_artifact_id": outline_artifact.id,
             "expected_sections_revision": state.revision if state else 0,
-            "blueprint": blueprint,
+            "blueprint": {
+                **blueprint,
+                "taxonomy_profile": str(
+                    project.taxonomy_profile or "general_academic"
+                ),
+                "writing_scope_contract": writing_scope_contract,
+            },
+            "writing_scope_contract": writing_scope_contract,
+            "taxonomy_profile": str(
+                project.taxonomy_profile or "general_academic"
+            ),
             "matrix": matrix,
             "outline_md": str(outline.get("outline_md") or ""),
             "tasks": tasks,
@@ -1154,6 +1510,16 @@ class SectionsService:
             "planning_mode": "legacy_adapter",
             "source_blueprint_artifact_id": payload.get("source_blueprint_artifact_id"),
             "source_evidence_registry": EVIDENCE_PACKAGE_LOGICAL_NAME,
+            "writing_scope_contract_fingerprint": str(
+                (payload.get("writing_scope_contract") or {}).get("fingerprint") or ""
+            ),
+            "provenance": {
+                "writing_scope_contract_fingerprint": str(
+                    (payload.get("writing_scope_contract") or {}).get("fingerprint")
+                    or ""
+                ),
+                "writing_scope_contract_source": "blueprint.scope_contract",
+            },
             "sections": sections,
         }
 
@@ -1275,7 +1641,7 @@ class SectionsService:
                         "theme": takeaway or str(task.get("heading") or section_id),
                         "argument_role": "synthesis" if len(cited) > 1 else "reported_evidence",
                         "objective": takeaway or "Realize the section's evidence-backed argument.",
-                        "target_words": {"min": 120, "max": 320},
+                        "target_words": {"min": 120, "max": 300},
                         "primary_papers": [item for item in cited if item in task.get("primary_papers", [])],
                         "supporting_papers": [item for item in cited if item in task.get("supporting_papers", [])],
                         "reader_takeaway": takeaway or "A bounded source-attributed finding.",
@@ -1298,6 +1664,16 @@ class SectionsService:
             "planning_mode": "legacy_derived_after_generation",
             "source_blueprint_artifact_id": payload.get("source_blueprint_artifact_id"),
             "source_evidence_registry": EVIDENCE_PACKAGE_LOGICAL_NAME,
+            "writing_scope_contract_fingerprint": str(
+                (payload.get("writing_scope_contract") or {}).get("fingerprint") or ""
+            ),
+            "provenance": {
+                "writing_scope_contract_fingerprint": str(
+                    (payload.get("writing_scope_contract") or {}).get("fingerprint")
+                    or ""
+                ),
+                "writing_scope_contract_source": "blueprint.scope_contract",
+            },
             "sections": output_sections,
         }
 
@@ -1309,6 +1685,35 @@ class SectionsService:
         writing_plan: dict[str, Any],
         evidence_package: dict[str, Any],
     ) -> None:
+        expected_scope_fingerprint = str(
+            (payload.get("writing_scope_contract") or {}).get("fingerprint") or ""
+        )
+        if expected_scope_fingerprint:
+            for artifact_name, artifact_payload in (
+                ("Synthesis State", synthesis_state),
+                ("Writing Plan", writing_plan),
+            ):
+                observed_scope_fingerprint = str(
+                    artifact_payload.get("writing_scope_contract_fingerprint")
+                    or (artifact_payload.get("provenance") or {}).get(
+                        "writing_scope_contract_fingerprint"
+                    )
+                    or ""
+                )
+                # Missing provenance remains readable for legacy/custom writers;
+                # once a writer declares the contract, however, it must match the
+                # exact Scope used to create this run payload.
+                if (
+                    observed_scope_fingerprint
+                    and observed_scope_fingerprint != expected_scope_fingerprint
+                ):
+                    raise WorkflowValidationError(
+                        f"{artifact_name} was generated against a different review Scope.",
+                        details={
+                            "expected_writing_scope_contract_fingerprint": expected_scope_fingerprint,
+                            "observed_writing_scope_contract_fingerprint": observed_scope_fingerprint,
+                        },
+                    )
         expected_sections = {
             str(task.get("section_id") or "") for task in payload.get("tasks") or []
         }
@@ -1363,6 +1768,18 @@ class SectionsService:
             for evidence_key, item in registry.items()
             if bool(item.get("claim_eligible", True))
         }
+        body_fact_ids_by_evidence_key: dict[str, set[str]] = {}
+        for body_section_id, body_registry in scoped_evidence.items():
+            if task_roles.get(body_section_id, "body") != "body":
+                continue
+            for evidence_key, item in body_registry.items():
+                if not bool(item.get("claim_eligible", True)):
+                    continue
+                body_fact_ids_by_evidence_key.setdefault(evidence_key, set()).update(
+                    str(fact_id)
+                    for fact_id in item.get("fact_ids") or []
+                    if str(fact_id)
+                )
         generated_by_section = {
             str(section.get("section_id") or ""): section
             for section in built.get("sections") or []
@@ -1422,6 +1839,8 @@ class SectionsService:
                         details={"claim_id": claim_id},
                     )
                 ref_papers: set[str] = set()
+                ref_fact_ids: set[str] = set()
+                ref_assertion_ceilings: list[str] = []
                 refs = [ref for ref in claim.get("evidence_refs") or [] if isinstance(ref, dict)]
                 for ref in claim.get("evidence_refs") or []:
                     key = str(ref.get("evidence_key") or "") if isinstance(ref, dict) else ""
@@ -1452,6 +1871,30 @@ class SectionsService:
                     ref_papers.add(
                         str((scoped_item or evidence_registry[key]).get("paper_id") or "")
                     )
+                    ref_fact_ids.update(
+                        str(fact_id)
+                        for fact_id in (
+                            (scoped_item or evidence_registry[key]).get("fact_ids") or []
+                        )
+                        if str(fact_id)
+                    )
+                    if section_role == "conclusion":
+                        # Conclusion Claims may only inherit evidence identities
+                        # already admitted by a body section.  Reuse the fact
+                        # identities bound to that exact evidence key instead
+                        # of requiring the conclusion's broader synthesis query
+                        # to rediscover and retag the same source chunk.
+                        ref_fact_ids.update(
+                            body_fact_ids_by_evidence_key.get(key, set())
+                        )
+                    ref_assertion_ceilings.append(
+                        str(
+                            (scoped_item or evidence_registry[key]).get(
+                                "assertion_ceiling"
+                            )
+                            or "direct_source_report"
+                        )
+                    )
                 if lexical and not refs:
                     raise WorkflowValidationError(
                         "An indexed-evidence Claim must reference at least one current evidence key.",
@@ -1471,6 +1914,39 @@ class SectionsService:
                             "evidence_papers": sorted(ref_papers),
                         },
                     )
+                planned_fact_ids = {
+                    str(fact_id)
+                    for fact_id in claim.get("fact_ids") or []
+                    if str(fact_id)
+                }
+                if not planned_fact_ids.issubset(ref_fact_ids):
+                    raise WorkflowValidationError(
+                        "A Claim references fact identities outside its evidence keys.",
+                        details={
+                            "claim_id": claim_id,
+                            "invalid_fact_ids": sorted(planned_fact_ids - ref_fact_ids),
+                        },
+                    )
+                if refs and claim.get("assertion_ceiling"):
+                    ceiling_rank = {
+                        "context_only": 0,
+                        "abstract_report_only": 1,
+                        "attributed_author_interpretation": 2,
+                        "direct_report_with_local_context": 3,
+                        "direct_source_report": 4,
+                    }
+                    expected_ceiling = min(
+                        ref_assertion_ceilings,
+                        key=lambda value: ceiling_rank.get(value, 0),
+                    )
+                    if str(claim.get("assertion_ceiling") or "") != expected_ceiling:
+                        raise WorkflowValidationError(
+                            "A Claim assertion ceiling does not match its source evidence.",
+                            details={
+                                "claim_id": claim_id,
+                                "expected_assertion_ceiling": expected_ceiling,
+                            },
+                        )
             if str(writing_plan.get("planning_mode") or "").startswith("evidence_first"):
                 realized_claim_ids = {
                     str(realization.get("claim_id") or "")
@@ -2193,7 +2669,15 @@ class SectionsService:
         _outline, outline_artifact = self._read_json_artifact(
             principal, project_id, OUTLINE_LOGICAL_NAME
         )
-        tasks = self.tasks_from_blueprint(blueprint)
+        public_blueprint = deepcopy(blueprint)
+        for section in public_blueprint.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            section["title"] = sanitize_internal_section_title(
+                section.get("title"),
+                topic_partition=section.get("topic_partition"),
+            )
+        tasks = self.tasks_from_blueprint(public_blueprint)
         assigned = list(
             dict.fromkeys(
                 paper_id for task in tasks for paper_id in task["allowed_papers"]
@@ -2308,7 +2792,7 @@ class SectionsService:
         )
         return {
             "project_id": project_id,
-            "section_blueprint": blueprint,
+            "section_blueprint": public_blueprint,
             "blueprint_artifact_id": blueprint_artifact.id,
             "section_tasks": tasks,
             "papers": papers,

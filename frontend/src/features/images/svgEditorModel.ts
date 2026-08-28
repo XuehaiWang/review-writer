@@ -52,6 +52,9 @@ export type KetcherElement = ElementBase & {
   type: "ketcher";
   ket: string;
   svgMarkup: string;
+  width: number;
+  height: number;
+  scale: number;
 };
 
 export type EditorElement = TextElement | KetcherElement;
@@ -154,11 +157,57 @@ function editableTraceMarkup(markup: string): string {
   }
   const used = new Set<string>();
   [...container.querySelectorAll<SVGElement>("[data-trace-object-id]")].forEach((node, index) => {
+    // Saved editor SVGs materialize trace offsets as SVG attributes so the
+    // browser cannot drop their position after a later click. Strip that
+    // materialized layer while loading; traceEdits metadata will reapply it
+    // exactly once when the workspace is reopened.
+    if (node.getAttribute("data-editor-trace-materialized") === "true") {
+      const baseTransform = node.getAttribute("data-editor-trace-base-transform") || "";
+      const baseDisplay = node.getAttribute("data-editor-trace-base-display") || "";
+      if (baseTransform) node.setAttribute("transform", baseTransform);
+      else node.removeAttribute("transform");
+      if (baseDisplay) node.setAttribute("display", baseDisplay);
+      else node.removeAttribute("display");
+      node.removeAttribute("data-editor-trace-materialized");
+      node.removeAttribute("data-editor-trace-base-transform");
+      node.removeAttribute("data-editor-trace-base-display");
+    }
     let id = node.getAttribute("data-trace-object-id") || `trace-${index}`;
     while (used.has(id)) id = `${id}-${index}`;
     used.add(id);
     node.setAttribute("data-trace-object-id", id);
     node.setAttribute("data-select-key", `trace:${id}`);
+  });
+  return container.innerHTML;
+}
+
+function materializedTraceMarkup(
+  state: SvgEditorState,
+  selected: Set<string>,
+  dragDelta?: Point | null,
+): string {
+  const documentNode = new DOMParser().parseFromString(
+    `<svg xmlns="http://www.w3.org/2000/svg"><g id="trace-root">${state.traceMarkup}</g></svg>`,
+    "image/svg+xml",
+  );
+  const container = documentNode.querySelector("#trace-root");
+  if (!container || documentNode.querySelector("parsererror")) return state.traceMarkup;
+  const edits = new Map(state.traceEdits.map((item) => [item.id, item]));
+  container.querySelectorAll<SVGElement>("[data-trace-object-id]").forEach((node) => {
+    const id = node.getAttribute("data-trace-object-id") || "";
+    const edit = edits.get(id);
+    const selectedNow = selected.has(`trace:${id}`);
+    const dx = (edit?.dx || 0) + (selectedNow ? dragDelta?.x || 0 : 0);
+    const dy = (edit?.dy || 0) + (selectedNow ? dragDelta?.y || 0 : 0);
+    const baseTransform = node.getAttribute("transform") || "";
+    const baseDisplay = node.getAttribute("display") || "";
+    node.setAttribute("data-editor-trace-materialized", "true");
+    node.setAttribute("data-editor-trace-base-transform", baseTransform);
+    node.setAttribute("data-editor-trace-base-display", baseDisplay);
+    if (dx || dy) {
+      node.setAttribute("transform", `translate(${dx} ${dy})${baseTransform ? ` ${baseTransform}` : ""}`);
+    }
+    if (edit?.hidden) node.setAttribute("display", "none");
   });
   return container.innerHTML;
 }
@@ -259,6 +308,11 @@ function parseTranslate(value: string | null): Point {
   return matches ? { x: number(matches[1]), y: number(matches[2]) } : { x: 0, y: 0 };
 }
 
+function parseScale(value: string | null): number {
+  const matches = String(value || "").match(/scale\(\s*([\d.]+)/i);
+  return matches ? positive(matches[1], 1) : 1;
+}
+
 function decodeBase64Utf8(value: string): string {
   try {
     const bytes = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
@@ -333,6 +387,15 @@ export function mergeSavedSvg(
     } else if (kind === "ketcher" || kind === "ketcher-structure") {
       const nested = node.querySelector("svg");
       if (!nested) return;
+      const nestedViewBox = (nested.getAttribute("viewBox") || "").trim().split(/[\s,]+/).map(Number);
+      const width = positive(
+        node.getAttribute("data-editor-width") || nested.getAttribute("width") || nestedViewBox[2],
+        120,
+      );
+      const height = positive(
+        node.getAttribute("data-editor-height") || nested.getAttribute("height") || nestedViewBox[3],
+        80,
+      );
       elements.push({
         id,
         type: "ketcher",
@@ -340,6 +403,9 @@ export function mergeSavedSvg(
         y: number(node.getAttribute("data-editor-y"), translated.y),
         ket: decodeBase64Utf8(node.getAttribute("data-ketcher-ket") || ""),
         svgMarkup: new XMLSerializer().serializeToString(nested),
+        width,
+        height,
+        scale: positive(node.getAttribute("data-editor-scale"), parseScale(node.getAttribute("transform"))),
       });
     }
   });
@@ -392,6 +458,41 @@ export function moveOperation(operation: EditorOperation, dx: number, dy: number
     end: move(operation.end),
     control: operation.control ? move(operation.control) : undefined,
     points: operation.points?.map(move),
+  };
+}
+
+export function moveSelection(
+  state: SvgEditorState,
+  keys: string[],
+  delta: Point,
+): SvgEditorState {
+  const selected = new Set(keys);
+  const traceEdits = new Map(state.traceEdits.map((item) => [item.id, item]));
+  keys
+    .filter((key) => key.startsWith("trace:"))
+    .map((key) => key.slice(6))
+    .forEach((id) => {
+      const current = traceEdits.get(id);
+      traceEdits.set(id, {
+        id,
+        dx: (current?.dx || 0) + delta.x,
+        dy: (current?.dy || 0) + delta.y,
+        hidden: current?.hidden,
+      });
+    });
+  return {
+    ...state,
+    traceEdits: [...traceEdits.values()],
+    operations: state.operations.map((item) => (
+      selected.has(`op:${item.id}`)
+        ? moveOperation(item, delta.x, delta.y)
+        : item
+    )),
+    elements: state.elements.map((item) => (
+      selected.has(`el:${item.id}`)
+        ? { ...item, x: item.x + delta.x, y: item.y + delta.y }
+        : item
+    )),
   };
 }
 
@@ -492,8 +593,16 @@ function ketcherMarkup(element: KetcherElement, interactive: boolean, selected: 
   const dy = delta && selected.has(key) ? delta.y : 0;
   const x = element.x + dx;
   const y = element.y + dy;
+  const width = positive(element.width, 120);
+  const height = positive(element.height, 80);
+  const scale = Math.max(.1, Math.min(5, positive(element.scale, 1)));
   const data = interactive ? ` data-select-key="${xml(key)}"` : "";
-  return `<g${data}${selectionFilter(key, selected)} data-editor-element-id="${xml(element.id)}" data-editor-element-type="ketcher" data-vector-kind="ketcher-structure" data-editor-x="${x}" data-editor-y="${y}" data-ketcher-ket="${encodeBase64Utf8(element.ket)}" transform="translate(${x} ${y})">${element.svgMarkup}</g>`;
+  const structure = `<g${data}${selectionFilter(key, selected)} data-editor-element-id="${xml(element.id)}" data-editor-element-type="ketcher" data-vector-kind="ketcher-structure" data-editor-x="${x}" data-editor-y="${y}" data-editor-width="${width}" data-editor-height="${height}" data-editor-scale="${scale}" data-ketcher-ket="${encodeBase64Utf8(element.ket)}" transform="translate(${x} ${y}) scale(${scale})">${element.svgMarkup}</g>`;
+  if (!interactive || !selected.has(key)) return structure;
+  const scaledWidth = width * scale;
+  const scaledHeight = height * scale;
+  const box = `<g data-ketcher-resize-overlay="${xml(element.id)}"><rect x="${x}" y="${y}" width="${scaledWidth}" height="${scaledHeight}" fill="none" stroke="#ef7d32" stroke-width="1.5" stroke-dasharray="5 3" pointer-events="none"/><circle data-ketcher-resize-id="${xml(element.id)}" cx="${x + scaledWidth}" cy="${y + scaledHeight}" r="8" fill="#fff" stroke="#ef7d32" stroke-width="2.5" cursor="nwse-resize"/></g>`;
+  return `${structure}${box}`;
 }
 
 function sourcePixelCrop(state: SvgEditorState): { x: number; y: number; width: number; height: number } {
@@ -530,37 +639,19 @@ export function buildSvgDocument(state: SvgEditorState, options: SvgRenderOption
       ? textMarkup(element, interactive, selected, options.dragDelta)
       : ketcherMarkup(element, interactive, selected, options.dragDelta)
   )).join("");
-  const transientErase = options.transientErase && options.transientErase.length > 1
-    ? `<polyline points="${options.transientErase.map((item) => `${item.x},${item.y}`).join(" ")}" fill="none" stroke="#ef7d32" stroke-opacity=".7" stroke-width="2" stroke-dasharray="4 3"/>`
+  const transientErasePoints = options.transientErase?.map((item) => `${item.x},${item.y}`).join(" ") || "";
+  const transientErase = interactive
+    ? `<polyline id="editor-transient-erase-overlay" points="${transientErasePoints}" fill="none" stroke="#ef7d32" stroke-opacity=".7" stroke-width="2" stroke-dasharray="4 3" pointer-events="none"${options.transientErase && options.transientErase.length > 1 ? "" : ' display="none"'}/>`
     : "";
   const marqueeBox = options.marquee;
   const marquee = interactive
     ? `<rect id="editor-marquee-overlay" x="${marqueeBox?.x || 0}" y="${marqueeBox?.y || 0}" width="${marqueeBox?.width || 0}" height="${marqueeBox?.height || 0}" fill="#1f6b5522" stroke="#1f6b55" stroke-width="1" stroke-dasharray="4 3" pointer-events="none"${marqueeBox ? "" : ' display="none"'}/>`
     : "";
-  const selectionDefs = interactive ? '<filter id="editor-selection-glow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="0" stdDeviation="2" flood-color="#ef7d32" flood-opacity="1"/></filter>' : "";
-  const traceEditMap = new Map(state.traceEdits.map((item) => [item.id, item]));
-  const traceIds = new Set([
-    ...state.traceEdits.map((item) => item.id),
-    ...(options.selection || []).filter((key) => key.startsWith("trace:")).map((key) => key.slice(6)),
-  ]);
-  const traceRules = [...traceIds].map((id) => {
-    const edit = traceEditMap.get(id);
-    const selectedNow = selected.has(`trace:${id}`);
-    const dx = (edit?.dx || 0) + (selectedNow ? options.dragDelta?.x || 0 : 0);
-    const dy = (edit?.dy || 0) + (selectedNow ? options.dragDelta?.y || 0 : 0);
-    const declarations = [
-      dx || dy ? `transform:translate(${dx}px,${dy}px)` : "",
-      edit?.hidden ? "display:none" : "",
-      interactive && selectedNow ? "filter:url(#editor-selection-glow)" : "",
-    ].filter(Boolean).join(";");
-    return declarations
-      ? `#full-image-vector-trace [data-trace-object-id="${xml(id)}"]{${declarations}}`
-      : "";
-  }).filter(Boolean).join("");
-  const traceStyle = traceRules ? `<style id="editor-trace-style">${traceRules}</style>` : "";
+  const selectionDefs = interactive ? '<filter id="editor-selection-glow" x="-35%" y="-35%" width="170%" height="170%" color-interpolation-filters="sRGB"><feDropShadow dx="0" dy="0" stdDeviation="2.4" flood-color="#ef7d32" flood-opacity="1" result="editor-selection-shadow"/><feMerge><feMergeNode in="editor-selection-shadow"/><feMergeNode in="SourceGraphic"/></feMerge></filter>' : "";
+  const traceMarkup = materializedTraceMarkup(state, selected, options.dragDelta);
   const persistedTraceEdits = state.traceEdits.filter((item) => item.hidden || item.dx || item.dy);
   const traceMetadata = `<metadata id="editor-trace-edits">${xml(JSON.stringify(persistedTraceEdits))}</metadata>`;
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${crop.width}" height="${crop.height}" viewBox="0 0 ${crop.width} ${crop.height}" data-vector-width="${state.vectorWidth}" data-vector-height="${state.vectorHeight}" data-original-width="${pixelCrop.width}" data-original-height="${pixelCrop.height}" data-source-width="${state.sourceWidth}" data-source-height="${state.sourceHeight}" data-content-crop="${cropped ? "true" : "false"}" data-crop-unit="source-px" data-crop-x="${pixelCrop.x}" data-crop-y="${pixelCrop.y}" data-crop-width="${pixelCrop.width}" data-crop-height="${pixelCrop.height}"><title>Full-image chemistry figure vector trace with React SVG edits</title>${traceMetadata}<defs>${selectionDefs}${mask}${traceStyle}</defs><g transform="translate(${-crop.x} ${-crop.y})"><rect width="${state.vectorWidth}" height="${state.vectorHeight}" fill="#fff"/><g id="full-image-vector-trace"${erasers.length ? ' mask="url(#editor-erase-mask)"' : ""}>${state.traceMarkup}</g><g id="editor-inserted-elements">${elements}</g><g id="editable-arrow-overlays" data-base-mode="${state.baseMode}">${operations}</g>${transientErase}${marquee}</g></svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${crop.width}" height="${crop.height}" viewBox="0 0 ${crop.width} ${crop.height}" data-vector-width="${state.vectorWidth}" data-vector-height="${state.vectorHeight}" data-original-width="${pixelCrop.width}" data-original-height="${pixelCrop.height}" data-source-width="${state.sourceWidth}" data-source-height="${state.sourceHeight}" data-content-crop="${cropped ? "true" : "false"}" data-crop-unit="source-px" data-crop-x="${pixelCrop.x}" data-crop-y="${pixelCrop.y}" data-crop-width="${pixelCrop.width}" data-crop-height="${pixelCrop.height}"><title>Full-image chemistry figure vector trace with React SVG edits</title>${traceMetadata}<defs>${selectionDefs}${mask}</defs><g transform="translate(${-crop.x} ${-crop.y})"><rect width="${state.vectorWidth}" height="${state.vectorHeight}" fill="#fff"/><g id="full-image-vector-trace"${erasers.length ? ' mask="url(#editor-erase-mask)"' : ""}>${traceMarkup}</g><g id="editor-inserted-elements">${elements}</g><g id="editable-arrow-overlays" data-base-mode="${state.baseMode}">${operations}</g>${transientErase}${marquee}</g></svg>`;
 }
 
 export function updateHandle(operation: EditorOperation, kind: string, value: Point): EditorOperation {

@@ -36,3 +36,51 @@ rules = [
     ("mechanistic study", "document_scope", ["mechanistic study", "mechanism investigation"]),
     ("computational study", "document_scope", ["computational study", "in silico study", "modeling study"]),
 ]
+
+# Verification-only vocabulary. The generic feedback engine loads this only
+# for chemistry projects; other disciplines do not inherit chemical guards.
+verification_profile = {
+    "chemical_suffixes": [
+        "acid", "alcohol", "aldehyde", "alkyne", "amine", "boronate",
+        "bromide", "carbonate", "carbene", "chloride", "ester", "ether",
+        "halide", "hydride", "ketone", "ligand", "oxide", "phosphine",
+        "reagent", "sulfide",
+    ],
+    "named_entities": [
+        "boron", "chromium", "cobalt", "copper", "fluorine", "indium",
+        "iron", "manganese", "nickel", "palladium", "phosphorus", "sulfur",
+        "titanium", "zinc",
+    ],
+    "explicit_symbols": [
+        "Ag", "Al", "Au", "Co", "Cr", "Cu", "Fe", "Li", "Mg", "Mn",
+        "Ni", "Pd", "Pt", "Sc", "Ti", "Zn",
+    ],
+    "soft_stereo_terms": [
+        "racemic", "enantioselective", "enantiospecific",
+        "diastereoselective", "stereoselective", "stereospecific",
+    ],
+    "cross_language_terms": [
+        ["gold", ["Au", "金催化", "金盐"]],
+        ["silver", ["Ag", "银催化", "银盐"]],
+        ["palladium", ["Pd", "钯催化", "零价钯", "二价钯"]],
+        ["pd(0)", ["Pd(0)", "零价钯"]],
+        ["pd(ii)", ["Pd(II)", "二价钯"]],
+        ["nickel", ["Ni", "镍催化", "镍盐"]],
+        ["copper", ["Cu", "铜催化", "铜盐"]],
+        ["water", ["水参与", "水合", "水"]],
+        ["three-component", ["三组分"]],
+        ["three component", ["三组分"]],
+        ["elimination", ["消除反应", "消除"]],
+        ["dimerization", ["二聚反应", "二聚"]],
+        ["cyclization", ["环化反应", "环化"]],
+        ["carbonylation", ["羰基化"]],
+        ["rearrangement", ["重排反应", "重排"]],
+        ["radical", ["自由基反应", "自由基"]],
+        ["dihydrofuran", ["二氢呋喃"]],
+        ["epoxide", ["环氧化物", "环氧"]],
+        ["allylic bromide", ["烯丙基溴"]],
+        ["aminative", ["胺化", "氨基化"]],
+        ["amination", ["胺化", "氨基化"]],
+        ["beta-hydrogen", ["β-氢", "beta hydrogen"]],
+    ],
+}

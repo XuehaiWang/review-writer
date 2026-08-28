@@ -1,6 +1,8 @@
 from review_writer_core.review_structure import (
     assign_primary_paper_sections,
     infer_section_role,
+    publication_section_title,
+    sanitize_internal_section_title,
 )
 
 
@@ -11,6 +13,27 @@ def test_section_role_inference_is_topic_agnostic() -> None:
     assert infer_section_role("Materials and device architectures") == "body"
     assert infer_section_role("Summary and outlook") == "conclusion"
     assert infer_section_role("参考文献") == "references"
+
+
+def test_internal_boundary_labels_do_not_become_publication_titles() -> None:
+    assert publication_section_title(
+        "Topic-partition boundary cases",
+        "Ketone-based three-component ATA",
+    ) == "Ketone-based three-component ATA"
+    assert publication_section_title(
+        "Enantioselective ATA (EATA)",
+        "Cross-category evidence and boundary cases",
+    ) == "Enantioselective ATA (EATA)"
+    assert sanitize_internal_section_title(
+        "Topic-partition boundary cases — Cross-category evidence and boundary cases"
+    ) == "Cross-category comparison"
+
+
+def test_identical_partition_and_category_are_not_repeated_in_public_title() -> None:
+    assert publication_section_title(
+        "Enantioselective allenation of terminal alkynes",
+        "Enantioselective allenation of terminal alkynes",
+    ) == "Enantioselective allenation of terminal alkynes"
 
 
 def test_papers_have_one_primary_owner_and_bounded_synthesis_roles() -> None:

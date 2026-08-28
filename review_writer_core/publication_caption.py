@@ -413,3 +413,56 @@ def publication_caption_fields(
         source_label=source_label,
         context_title=context_title,
     ).manifest_fields()
+
+
+def figure_rights_fields(source: dict[str, Any] | None) -> dict[str, Any]:
+    """Return conservative rights fields for a Figure Manifest row.
+
+    Attribution is not treated as permission.  A row is marked
+    ``license_verified`` only when an explicit verification flag and a stored
+    permission or licence record are both present.
+    """
+
+    row = dict(source or {})
+    origin = str(
+        row.get("figure_origin")
+        or row.get("source_relationship")
+        or row.get("render_mode")
+        or ""
+    ).casefold()
+    if origin in {"original_synthesis", "generated_overview", "overview"} or bool(
+        row.get("original_synthesis")
+    ):
+        return {
+            "rights_status": "original_synthesis",
+            "source_relationship": "original_synthesis",
+            "permission_status": "not_required_for_source_reuse",
+            "permission_record": None,
+        }
+
+    permission_record = str(
+        row.get("permission_record")
+        or row.get("permission_record_id")
+        or row.get("license_record")
+        or ""
+    ).strip()
+    if row.get("license_verified") is True and permission_record:
+        return {
+            "rights_status": "license_verified",
+            "source_relationship": "source_attributed",
+            "permission_status": "verified",
+            "permission_record": permission_record,
+        }
+
+    attributed = bool(
+        row.get("paper_id")
+        or row.get("source_label")
+        or row.get("source_artifact_id")
+        or row.get("source_image_artifact_id")
+    )
+    return {
+        "rights_status": "source_attributed" if attributed else "permission_unknown",
+        "source_relationship": "source_attributed" if attributed else "unknown",
+        "permission_status": "unknown",
+        "permission_record": None,
+    }

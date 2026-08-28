@@ -52,7 +52,7 @@ export type ProjectTaxonomyProfileUpdate = {
   downstream_stale: boolean;
 };
 
-export type ProviderKind = "text" | "image" | "mineru";
+export type ProviderKind = "text" | "image" | "embedding" | "mineru";
 
 export type ProviderSettings = {
   provider_kind: ProviderKind;
@@ -229,13 +229,18 @@ export type LibraryPaper = {
   index_status?: {
     mineru: "ready" | "unavailable";
     fulltext: "not_indexed" | "queued" | "building" | "ready" | "failed" | "rebuild_required";
-    semantic: "disabled" | "ready";
+    semantic: "disabled" | "not_indexed" | "queued" | "pending" | "building" | "ready" | "failed" | "unavailable";
     index_id?: string | null;
     chunk_count: number;
     chunker_version?: string;
     source_lineage_hash?: string;
     error_code?: string;
     error_message?: string;
+    embedding_model?: string;
+    embedding_dimension?: number;
+    embedding_count?: number;
+    semantic_error_code?: string;
+    semantic_error_message?: string;
     updated_at?: string | null;
   };
   search_match?: {
@@ -246,6 +251,55 @@ export type LibraryPaper = {
     content: string;
     match_reason?: string;
   } | null;
+  bibliography_audit?: BibliographyAudit;
+};
+
+export type BibliographyCandidate = {
+  candidate_id: string;
+  source: string;
+  status?: string;
+  match?: {
+    doi_exact?: boolean;
+    title_similarity?: number;
+    author_overlap?: number;
+    year_match?: boolean;
+  };
+  fields: Record<string, unknown>;
+};
+
+export type BibliographyAudit = {
+  status?: string;
+  manual_review_status?: string;
+  resolved_by?: string;
+  resolved_at?: string | null;
+  unresolved_conflicts?: Array<Record<string, unknown>>;
+  automatic_resolution_missing_fields?: string[];
+  bibliography_role?: string;
+  direct_claim_eligible?: boolean;
+  context_only?: boolean;
+  parent_paper_id?: string | null;
+  candidates?: BibliographyCandidate[];
+};
+
+export type BibliographyAuditResponse = {
+  paper_id: string;
+  task_kind: "bibliography_verification";
+  adds_candidate_papers: false;
+  audit: BibliographyAudit;
+  candidates: BibliographyCandidate[];
+  job?: Job | null;
+};
+
+export type BibliographyResolutionResponse = {
+  paper: LibraryPaper;
+  audit: BibliographyAudit;
+  candidates: BibliographyCandidate[];
+  changed_fields: string[];
+  impact: {
+    impact: string;
+    affected: string[];
+    changed_fields: string[];
+  };
 };
 
 export type LibraryList = {
@@ -253,7 +307,20 @@ export type LibraryList = {
   count: number;
   query: string;
   requested_mode?: "metadata" | "fulltext" | "hybrid";
-  retrieval_mode?: "metadata" | "lexical" | "lexical_only";
+  retrieval_mode?: "metadata" | "lexical" | "lexical_only" | "hybrid";
+  semantic_backfill?: {
+    enabled: boolean;
+    status: "disabled" | "unavailable" | "complete" | "pending" | "waiting_retry" | "blocked_credit" | "queued" | "running" | "cancel_requested";
+    batch_size: number;
+    total_count: number;
+    ready_count: number;
+    pending_count: number;
+    eligible_count: number;
+    profile?: string;
+    model?: string;
+    dimension?: number;
+    current_job?: Job | null;
+  };
 };
 
 export type Job = {

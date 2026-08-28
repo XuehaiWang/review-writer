@@ -47,10 +47,10 @@ function strongerRole(left: string, right: string): string {
 /**
  * Produces a deterministic, reviewable Matrix recommendation.
  *
- * Core/supporting candidates are recommended first. If an active query group
- * has no such representative, its strongest background paper is added for
- * coverage. Uncertain papers remain for human review and excluded/zero-score
- * papers are never selected automatically.
+ * Core/supporting candidates are recommended after paper-level deduplication.
+ * Query groups explain retrieval coverage only and therefore never cause a
+ * background paper to be selected. Uncertain/background papers remain for
+ * human review and excluded/zero-score papers are never selected automatically.
  */
 export function buildMatrixRecommendation(groups: MatrixRecommendationGroup[]): MatrixRecommendation {
   const activeGroups = groups.filter((group) => group.keep !== false);
@@ -82,18 +82,6 @@ export function buildMatrixRecommendation(groups: MatrixRecommendationGroup[]): 
       .filter((candidate) => candidate.bestScore > 0 && ["core_candidate", "supporting_candidate"].includes(candidate.bestRole))
       .map((candidate) => candidate.paperId),
   );
-
-  // Preserve query-facet coverage without admitting weak or uncertain papers.
-  for (const group of activeGroups) {
-    const groupIds = new Set((group.local_results || []).map(paperId).filter(Boolean));
-    if ([...groupIds].some((id) => recommendedIds.has(id))) continue;
-    const representative = [...groupIds]
-      .map((id) => candidates.get(id))
-      .filter((candidate): candidate is Candidate => Boolean(candidate))
-      .filter((candidate) => candidate.bestRole === "background" && candidate.bestScore >= 0.15)
-      .sort((left, right) => right.bestScore - left.bestScore || left.firstSeen - right.firstSeen)[0];
-    if (representative) recommendedIds.add(representative.paperId);
-  }
 
   const reviewIds = new Set<string>();
   const excludedIds = new Set<string>();

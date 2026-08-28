@@ -42,6 +42,14 @@ from review_writer_core.metadata_tags import (  # noqa: E402
     neutral_structured_tag_values,
     structured_tags_are_verified,
 )
+from review_writer_core.document_front_matter import (  # noqa: E402
+    extract_markdown_title,
+    looks_like_placeholder_title,
+)
+from review_writer_core.publication_metadata import (  # noqa: E402
+    extract_front_matter_doi,
+    extract_publication_metadata,
+)
 from review_writer_core.workspace import discover_review_root  # noqa: E402
 from review_writer_core.providers import (  # noqa: E402
     DEFAULT_OPENAI_BASE_URL,
@@ -269,30 +277,27 @@ def block_texts(blocks: list[dict[str, Any]], max_page: int = 1) -> list[str]:
     return out
 
 
-def markdown_head(path: Path | None, chars: int = 14000) -> str:
+MARKDOWN_FRONT_MATTER_CHARS = 30_000
+
+
+def markdown_head(path: Path | None, chars: int = MARKDOWN_FRONT_MATTER_CHARS) -> str:
     if not path or not path.exists():
         return ""
     return path.read_text(encoding="utf-8", errors="ignore")[:chars]
 
 
-def first_heading(md: str) -> str | None:
-    for line in md.splitlines():
-        line = line.strip()
-        if line.startswith("# "):
-            title = line[2:].strip()
-            title = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", title)
-            title = re.sub(r"\$([^$]+)\$", r"\1", title)
-            return clean_text(title)
-    return None
-
-
 def extract_title(blocks: list[dict[str, Any]], md: str, slug: str) -> dict[str, Any]:
-    heading = first_heading(md)
-    if heading and len(heading) > 20:
-        return scored(heading, "markdown_first_h1", 0.88)
+    heading = extract_markdown_title(md)
+    if heading is not None:
+        return heading
     for block in blocks[:12]:
         text = clean_text(str(block.get("text") or ""))
-        if block.get("text_level") == 1 and len(text) > 20 and not looks_like_section_heading(text):
+        if (
+            block.get("text_level") == 1
+            and len(text) > 8
+            and not looks_like_section_heading(text)
+            and not looks_like_placeholder_title(text)
+        ):
             return scored(text, "content_list_text_level_1", 0.86)
     return scored(slug.replace("-", " "), "slug_fallback", 0.35)
 
@@ -475,20 +480,8 @@ def extract_intro_work_summary(md: str) -> str:
     return summary if len(summary) > 120 else ""
 
 
-def extract_year(md: str, pdf_name: str) -> dict[str, Any]:
-    candidates = [int(m.group(0)) for m in YEAR_RE.finditer(pdf_name + "\n" + md[:8000])]
-    candidates = [y for y in candidates if 1800 <= y <= 2035]
-    if candidates:
-        # Prefer recent years in filename/front matter.
-        return scored(max(set(candidates), key=candidates.count), "filename_or_front_matter", 0.68)
-    return scored(None, "rule_not_found", 0.0)
-
-
 def extract_doi(md: str) -> dict[str, Any]:
-    m = DOI_RE.search(md[:20000])
-    if m:
-        return scored(m.group(0).rstrip(").,;"), "markdown_regex", 0.9)
-    return scored(None, "rule_not_found", 0.0)
+    return extract_front_matter_doi(md)
 
 
 def extract_journal(md: str, pdf_name: str) -> dict[str, Any]:
@@ -964,8 +957,9 @@ def build_metadata(
     authors = extract_authors(blocks, title["value"])
     keywords = extract_keywords(blocks, md)
     abstract = extract_abstract(blocks, md)
-    year = extract_year(md, job.get("pdf_name") or slug)
-    doi = extract_doi(md)
+    publication = extract_publication_metadata(md, job.get("pdf_name") or slug)
+    year = publication["year"]
+    doi_candidate = extract_doi(md)
     journal = extract_journal(md, job.get("pdf_name") or slug)
     # Reusable Library metadata must remain project-neutral. Previous versions
     # scanned title/abstract/body text and persisted one rule-selected label per
@@ -980,8 +974,12 @@ def build_metadata(
         "title": title,
         "authors": authors,
         "year": year,
+        "first_publication_date": publication["first_publication_date"],
+        "bibliographic_year": publication["bibliographic_year"],
+        "publication_status": publication["publication_status"],
         "journal": journal,
-        "doi": doi,
+        "doi": scored(None, "awaiting_bibliography_verification", 0.0),
+        "doi_candidate": doi_candidate,
         "abstract": abstract,
         "structured_tags": scored(
             structured_tags,
@@ -1006,7 +1004,7 @@ def build_metadata(
             "inputs": {
                 "manifest": str(review_root / "mineru-outputs" / "manifest.json"),
                 "content_blocks": len(blocks),
-                "markdown_chars_used": min(len(md), 14000),
+                "markdown_chars_used": min(len(md), MARKDOWN_FRONT_MATTER_CHARS),
                 "tag_policy": "project_neutral_until_human_verified",
             },
             "notes": [],

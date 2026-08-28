@@ -21,7 +21,12 @@ from sqlalchemy.exc import IntegrityError
 
 from review_writer_api.billing import BillingService
 from review_writer_api.database import MinerUUsageEvent, database_session, utc_now
-from review_writer_api.errors import WorkflowError, WorkflowNotFound, WorkflowValidationError
+from review_writer_api.errors import (
+    WorkflowConflict,
+    WorkflowError,
+    WorkflowNotFound,
+    WorkflowValidationError,
+)
 from review_writer_api.mineru_artifacts import mineru_storage_paths
 from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_models import (
@@ -36,6 +41,12 @@ from review_writer_api.scientific_runner import (
     ScientificRunner,
 )
 from review_writer_core.metadata_tags import verified_structured_tags
+from review_writer_core.bibliography_audit import (
+    BibliographyResolutionError,
+    apply_bibliography_updates,
+    bibliography_candidates,
+    resolve_bibliography,
+)
 
 
 class MinerUPreciseParseFailed(WorkflowError):
@@ -425,6 +436,30 @@ class LibraryService:
             temporary.unlink(missing_ok=True)
         return destination
 
+    @staticmethod
+    def _with_stable_identity(
+        metadata: dict[str, Any], paper_id: str
+    ) -> dict[str, Any]:
+        """Keep normal metadata edits from changing a paper's stable identity."""
+
+        stored = dict(metadata or {})
+        stored["paper_id"] = paper_id
+        canonical = str(stored.get("canonical_paper_id") or paper_id).strip()
+        stored["canonical_paper_id"] = canonical if canonical else paper_id
+        aliases = [
+            str(value).strip()
+            for value in stored.get("paper_aliases") or []
+            if str(value).strip() and str(value).strip() != stored["canonical_paper_id"]
+        ]
+        stored["paper_aliases"] = list(dict.fromkeys(aliases))
+        if str(stored.get("identity_status") or "") not in {
+            "verified",
+            "resolved_with_warning",
+            "unresolved",
+        }:
+            stored["identity_status"] = "unresolved"
+        return stored
+
     def _publish_library_triplet(
         self,
         principal: Principal,
@@ -463,8 +498,7 @@ class LibraryService:
 
         pdf_destination = publish_file("pdf", pdf_source, ".pdf")
         markdown_destination = publish_file("markdown", markdown_source, ".md")
-        stored_metadata = dict(metadata)
-        stored_metadata["paper_id"] = paper_id
+        stored_metadata = self._with_stable_identity(metadata, paper_id)
         source_paths = dict(stored_metadata.get("source_paths") or {})
         source_paths["pdf"] = str(pdf_destination)
         source_paths["markdown"] = str(markdown_destination)
@@ -585,8 +619,7 @@ class LibraryService:
         metadata_artifact_id = str(uuid.uuid4())
         version = self._new_artifact_version_root(paper_root)
         destination = version / f"{paper_id}.metadata.json"
-        stored = dict(metadata)
-        stored["paper_id"] = paper_id
+        stored = self._with_stable_identity(metadata, paper_id)
         source_paths = dict(stored.get("source_paths") or {})
         root = self.workspace_manager.user_root(principal.user_id)
         source_paths["pdf"] = str(
@@ -1325,8 +1358,14 @@ class LibraryService:
                 raise WorkflowNotFound("Library paper not found.")
             return self._record(row)
 
-    def update_metadata(
-        self, principal: Principal, paper_id: str, metadata: dict[str, Any]
+    def _persist_metadata_and_audit(
+        self,
+        principal: Principal,
+        paper_id: str,
+        metadata: dict[str, Any],
+        *,
+        bibliography_audit: dict[str, Any] | None = None,
+        expected_metadata_artifact_id: str = "",
     ) -> LibraryPaperRecord:
         principal.require(Permission.PROJECT_WRITE)
         if (
@@ -1342,14 +1381,27 @@ class LibraryService:
         )
         with database_session(self.session_factory) as session:
             row = session.scalar(
-                select(LibraryPaper).where(
+                select(LibraryPaper)
+                .where(
                     LibraryPaper.user_id == user_uuid,
                     LibraryPaper.paper_id == paper_id,
                     LibraryPaper.deleted_at.is_(None),
                 )
+                .with_for_update()
             )
             if row is None:
                 raise WorkflowNotFound("Library paper not found.")
+            current_metadata_artifact_id = str(
+                ((row.metadata_json or {}).get("_artifact_ids") or {}).get("metadata")
+                or ""
+            )
+            if (
+                expected_metadata_artifact_id
+                and current_metadata_artifact_id != expected_metadata_artifact_id
+            ):
+                raise WorkflowConflict(
+                    "Library metadata changed while bibliography resolution was being saved."
+                )
             session.add(metadata_artifact)
             title = _field_value(stored_metadata.get("title")) or row.title
             authors = _field_value(stored_metadata.get("authors")) or []
@@ -1360,49 +1412,142 @@ class LibraryService:
             row.tags_json = verified_structured_tags(stored_metadata)
             row.metadata_json = stored_metadata
             row.updated_at = utc_now()
+            if bibliography_audit is not None:
+                audit_row = row.bibliography_audit_row
+                if audit_row is None:
+                    audit_row = LibraryBibliographyAudit(
+                        user_id=user_uuid,
+                        library_paper_id=row.id,
+                        paper_id=row.paper_id,
+                        audit_json=dict(bibliography_audit),
+                    )
+                    session.add(audit_row)
+                    row.bibliography_audit_row = audit_row
+                else:
+                    audit_row.audit_json = dict(bibliography_audit)
+                    audit_row.updated_at = utc_now()
             session.flush()
             record = self._record(row)
         self._write_compatibility_metadata(principal, paper_id, stored_metadata)
         return record
 
-    def update_bibliography_audit(
+    def update_metadata(
+        self, principal: Principal, paper_id: str, metadata: dict[str, Any]
+    ) -> LibraryPaperRecord:
+        return self._persist_metadata_and_audit(principal, paper_id, metadata)
+
+    def resolve_bibliography(
+        self,
+        principal: Principal,
+        paper_id: str,
+        payload: dict[str, Any],
+    ) -> tuple[LibraryPaperRecord, dict[str, Any]]:
+        """Validate and atomically persist one canonical bibliography decision."""
+
+        principal.require(Permission.PROJECT_WRITE)
+        current = self.get(principal, paper_id)
+        parent_paper_id = str(payload.get("parent_paper_id") or "").strip()
+        parent_exists = False
+        if parent_paper_id:
+            try:
+                self.get(principal, parent_paper_id)
+            except WorkflowNotFound:
+                parent_exists = False
+            else:
+                parent_exists = True
+        try:
+            metadata, audit, outcome = resolve_bibliography(
+                current.metadata,
+                current.bibliography_audit,
+                payload,
+                parent_exists=parent_exists,
+            )
+        except BibliographyResolutionError as exc:
+            raise WorkflowValidationError(
+                str(exc), details={"fields": exc.fields}
+            ) from exc
+        record = self._persist_metadata_and_audit(
+            principal,
+            paper_id,
+            metadata,
+            bibliography_audit=audit,
+            expected_metadata_artifact_id=str(
+                current.artifact_ids.get("metadata") or ""
+            ),
+        )
+        return record, {
+            **outcome,
+            "audit": audit,
+            "candidates": bibliography_candidates(audit),
+        }
+
+    def apply_bibliography_audit_result(
         self,
         principal: Principal,
         paper_id: str,
         audit: dict[str, Any],
-    ) -> LibraryPaperRecord:
-        """Persist mutable provider-audit state without versioning canonical metadata."""
+    ) -> tuple[LibraryPaperRecord, dict[str, Any]]:
+        """Atomically apply safe automatic fields and the audit that justified them."""
 
-        principal.require(Permission.PROJECT_WRITE)
-        if not isinstance(audit, dict):
-            raise WorkflowValidationError("Bibliography audit must be a JSON object.")
-        user_uuid = uuid.UUID(principal.user_id)
-        paper_id = self._validated_paper_id(paper_id)
-        with database_session(self.session_factory) as session:
-            row = session.scalar(
-                select(LibraryPaper).where(
-                    LibraryPaper.user_id == user_uuid,
-                    LibraryPaper.paper_id == paper_id,
-                    LibraryPaper.deleted_at.is_(None),
-                )
+        for attempt in range(2):
+            current = self.get(principal, paper_id)
+            current_audit = dict(current.bibliography_audit or {})
+            current_manual_status = str(
+                current_audit.get("manual_review_status") or "not_reviewed"
             )
-            if row is None:
-                raise WorkflowNotFound("Library paper not found.")
-            audit_row = row.bibliography_audit_row
-            if audit_row is None:
-                audit_row = LibraryBibliographyAudit(
-                    user_id=user_uuid,
-                    library_paper_id=row.id,
-                    paper_id=row.paper_id,
-                    audit_json=dict(audit),
+            merged_audit = dict(audit)
+            if current_manual_status in {"resolved", "supporting_only", "rejected"}:
+                # A provider job may have started before a user decision. Preserve
+                # that newer decision instead of letting the stale job clear it.
+                for key in (
+                    "status",
+                    "manual_review_status",
+                    "resolved_by",
+                    "resolved_at",
+                    "resolved_fields",
+                    "selected_candidate_source",
+                    "selected_candidate_id",
+                    "bibliography_role",
+                    "parent_paper_id",
+                    "primary_reference_allowed",
+                    "direct_claim_eligible",
+                    "context_only",
+                    "manual_evidence",
+                    "resolution_reason",
+                    "unresolved_conflicts",
+                ):
+                    if key in current_audit:
+                        merged_audit[key] = current_audit[key]
+            updated_metadata, changed_fields = apply_bibliography_updates(
+                current.metadata, merged_audit
+            )
+            persisted_audit = {
+                **merged_audit,
+                "paper_id": current.paper_id,
+                "canonical_metadata_changed": bool(changed_fields),
+                "changed_fields": changed_fields,
+            }
+            try:
+                record = self._persist_metadata_and_audit(
+                    principal,
+                    current.paper_id,
+                    updated_metadata,
+                    bibliography_audit=persisted_audit,
+                    expected_metadata_artifact_id=str(
+                        current.artifact_ids.get("metadata") or ""
+                    ),
                 )
-                session.add(audit_row)
-                row.bibliography_audit_row = audit_row
-            else:
-                audit_row.audit_json = dict(audit)
-                audit_row.updated_at = utc_now()
-            session.flush()
-            return self._record(row)
+                break
+            except WorkflowConflict:
+                if attempt:
+                    raise
+        else:  # pragma: no cover - the loop either breaks or raises
+            raise WorkflowConflict("Bibliography audit could not be reconciled.")
+        response_audit = {
+            **persisted_audit,
+            "canonical_metadata_artifact_id": record.artifact_ids.get("metadata"),
+        }
+        return record, response_audit
 
     @staticmethod
     def _safe_stored_path(root: Path, relative_path: str) -> Path:

@@ -40,6 +40,7 @@ from review_writer_core.providers import (  # noqa: E402
     resolve_api_key as _shared_resolve_api_key,
 )
 from review_writer_core.model_gateway_client import (  # noqa: E402
+    GatewayRequestError,
     call_image_model as call_gateway_image,
     image_gateway_configured,
 )
@@ -1153,8 +1154,23 @@ def transient_retry_delay(details: str, attempt: int) -> int:
 
 def is_safety_moderation_rejection(error: BaseException | str) -> bool:
     """Recognize an explicit provider moderation rejection, not a generic 400."""
-    details = str(error or "").casefold()
+    diagnostic_parts = [str(error or "")]
+    if isinstance(error, GatewayRequestError):
+        diagnostic_parts.extend(
+            str(value or "") for value in error.details.values()
+        )
+        diagnostic_parts.append(error.code)
+    details = " ".join(diagnostic_parts).casefold()
     return any(marker.casefold() in details for marker in SAFETY_MODERATION_ERROR_MARKERS)
+
+
+def image_request_error_detail(error: BaseException | str) -> str:
+    """Return a bounded provider diagnostic without exposing credentials."""
+    if isinstance(error, GatewayRequestError):
+        provider_message = str(error.details.get("provider_message") or "").strip()
+        if provider_message:
+            return provider_message[:500]
+    return str(error or "")[-500:]
 
 
 def call_with_academic_safety_retry(
@@ -1181,10 +1197,11 @@ def call_with_academic_safety_retry(
             result = requester(safety_prompt)
         except RuntimeError as retry_error:
             audit["status"] = "failed"
-            audit["retry_error"] = str(retry_error)[-2000:]
+            audit["retry_error"] = image_request_error_detail(retry_error)
             raise RuntimeError(
                 "Image edit request was blocked by provider safety review and the concise "
-                f"academic-chemistry prompt retry also failed: {retry_error}"
+                "academic-chemistry prompt retry also failed: "
+                f"{image_request_error_detail(retry_error)}"
             ) from retry_error
         audit["status"] = "succeeded"
         return result
@@ -2877,8 +2894,16 @@ def run(args: argparse.Namespace) -> int:
         1 for row in redraw_rows if row.get("status") == "redrawn"
     )
     if args.require_redrawn and redrawn_count == 0:
+        failure_notes = [
+            str(row.get("notes") or "").strip()
+            for row in redraw_rows
+            if row.get("status") != "redrawn" and str(row.get("notes") or "").strip()
+        ]
+        diagnostic = f" Last redraw error: {failure_notes[0]}" if failure_notes else ""
         raise SystemExit(
-            "No figures were redrawn. Fix figure_candidates.json/source_image_path or rerun without --require-redrawn only if figures are explicitly skipped."
+            "No figures were redrawn."
+            + diagnostic
+            + " Verify the reported provider error and retry the figure."
         )
     print(f"Wrote redraw outputs to {out_dir}")
     return 0

@@ -21,6 +21,11 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from review_writer_core.model_gateway_client import call_json_model  # noqa: E402
+from review_writer_core.review_titles import (  # noqa: E402
+    build_publication_review_title,
+    generated_title_is_acceptable,
+    generated_title_needs_rewrite,
+)
 
 
 FORBIDDEN = re.compile(
@@ -48,12 +53,17 @@ def main() -> int:
     source = _read(Path(args.input))
     manuscript = str(source.get("abstract_source") or "").strip()
     title = str(source.get("title") or "").strip()
+    review_topic = str(source.get("review_topic") or "").strip()
     prompt = f"""Create publication front matter for an academic narrative review.
 
 Return exactly one JSON object with:
+- title: a concise, publication-style academic title of 8-18 words;
 - abstract: one self-contained paragraph of 120-250 words;
 - keywords: 5-8 concise strings.
 
+The title must summarize the scientific subject and the main organizational or comparative
+axis. It must not copy a user request, search query, or a sentence beginning with wording
+such as "Please write a review". Do not add unsupported claims, dates, or superlatives.
 The abstract may summarize only the review background, scope, organization axis, and
 evidence-supported synthesis present in the supplied manuscript body. It MUST NOT use or
 invent a Conclusion, Challenges, Future Directions, References, publication note, figure
@@ -72,6 +82,16 @@ Title: {title}
         timeout_seconds=330,
     )
     warnings: list[str] = []
+    generated_title = " ".join(str(generated.get("title") or "").split()).strip("# \t")
+    if (
+        not generated_title_is_acceptable(generated_title)
+        or generated_title_needs_rewrite(generated_title, review_topic)
+    ):
+        generated_title = build_publication_review_title(
+            review_topic or title,
+            manuscript_title=title,
+        )
+        warnings.append("title_deterministic_fallback")
     abstract = re.sub(r"\s+", " ", str(generated.get("abstract") or "")).strip()
     if not abstract:
         warnings.append("abstract_missing")
@@ -102,6 +122,7 @@ Title: {title}
         keywords = []
     output = {
         "schema_version": 1,
+        "title": generated_title,
         "abstract": abstract,
         "keywords": keywords,
         "warnings": list(dict.fromkeys(warnings)),

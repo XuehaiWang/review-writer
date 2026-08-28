@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import tempfile
 import unittest
+import uuid
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -15,6 +16,15 @@ from docx import Document
 from review_writer_api.app import create_app
 from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User
+from review_writer_api.domain_services.planning import (
+    MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION,
+    TOPIC_PARTITION_BOUNDARY_LABEL,
+    _matrix_classification_axes,
+    _topic_outline_intent,
+    _topic_partition_for_text,
+    _topic_partition_for_row,
+)
+from review_writer_api.domain_services.library_index import EvidenceHit
 from review_writer_api.security import Principal, Role
 from review_writer_api.workflow_models import LibraryPaper
 
@@ -190,6 +200,167 @@ class PlanningV1Tests(unittest.TestCase):
         )
         self.assertEqual(200, response.status_code, response.text)
         return response.json()
+
+    def test_fact_contract_version_invalidates_old_cache_and_force_can_reextract(self) -> None:
+        service = self.app.state.planning_service
+        source = service.matrix_enrichment_payload(self.first, self.project_id)
+        self.assertEqual(
+            MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION,
+            source["fact_enrichment_contract_version"],
+        )
+        service.publish_matrix_enrichment(
+            self.first,
+            self.project_id,
+            source,
+            {
+                "papers": [
+                    {
+                        "paper_id": paper["paper_id"],
+                        "status": "complete",
+                        "facts": [],
+                        "failed_fields": [],
+                    }
+                    for paper in source["papers"]
+                ]
+            },
+        )
+
+        current = service.matrix_enrichment_payload(self.first, self.project_id)
+        forced = service.matrix_enrichment_payload(
+            self.first,
+            self.project_id,
+            force=True,
+        )
+
+        self.assertEqual(0, current["pending_paper_count"])
+        self.assertEqual(source["paper_count"], forced["pending_paper_count"])
+        self.assertTrue(forced["force_refresh"])
+
+        with self.sessions.begin() as session:
+            project = session.get(Project, uuid.UUID(self.project_id))
+            project.model_tier = "luna"
+        changed_model = service.matrix_enrichment_payload(
+            self.first,
+            self.project_id,
+        )
+        self.assertEqual(
+            source["paper_count"], changed_model["pending_paper_count"]
+        )
+        self.assertEqual("gpt-5.6-luna", changed_model["actual_model_id"])
+
+    def test_matrix_extraction_axes_ignore_runtime_coverage_fields(self) -> None:
+        matrix = {
+            "classification_axes": [
+                {
+                    "axis_id": "axis_01",
+                    "label": "Method family",
+                    "axis_role": "primary_organization",
+                    "role_status": "evidence_confirmed",
+                    "evidence_coverage": {"paper_count": 12, "partition_count": 3},
+                    "partitions": [
+                        {"partition_id": "method_a", "label": "Method A"}
+                    ],
+                }
+            ]
+        }
+
+        axes = _matrix_classification_axes(matrix, [])
+
+        self.assertNotIn("role_status", axes[0])
+        self.assertNotIn("evidence_coverage", axes[0])
+        self.assertIn("role_status", matrix["classification_axes"][0])
+
+    def test_matrix_fact_retrieval_recovers_question_hits_inside_admitted_paper(self) -> None:
+        class RecoveryIndex:
+            enabled = True
+
+            @staticmethod
+            def summaries(_principal, paper_ids):
+                return {
+                    paper_id: {
+                        "fulltext": "ready",
+                        "chunker_version": "test-v1",
+                        "source_lineage_hash": f"lineage-{paper_id}",
+                    }
+                    for paper_id in paper_ids
+                    if paper_id == "P001"
+                }
+
+            @staticmethod
+            def retrieve(
+                _principal,
+                _query,
+                *,
+                allowed_papers,
+                term_groups=None,
+                **_kwargs,
+            ):
+                groups = list(term_groups or [])
+                if len(groups) != 1 or "substrate" not in groups[0]:
+                    return []
+                paper_id = allowed_papers[0]
+                return [
+                    EvidenceHit(
+                        paper_id=paper_id,
+                        chunk_id="results-001",
+                        content="The substrate scope included aromatic examples.",
+                        page_start=3,
+                        page_end=3,
+                        section_path=("Results",),
+                        content_type="text",
+                        asset_refs=(),
+                        score=1.0,
+                        match_reason="test",
+                        is_neighbor=False,
+                        index_id="index-001",
+                        source_lineage_hash=f"lineage-{paper_id}",
+                    )
+                ]
+
+        service = self.app.state.planning_service
+        previous = service.library_index
+        service.library_index = RecoveryIndex()
+        try:
+            payload = service.matrix_enrichment_payload(
+                self.first, self.project_id, force=True
+            )
+        finally:
+            service.library_index = previous
+
+        paper = next(
+            item for item in payload["papers"] if item["paper_id"] == "P001"
+        )
+        recovered = next(
+            item
+            for item in paper["evidence_candidates"]
+            if item.get("chunk_id") == "results-001"
+        )
+        self.assertIn("object_input", recovered["question_ids"])
+        self.assertIn(
+            "admitted_paper_question_recovery", recovered["retrieval_passes"]
+        )
+        self.assertGreater(
+            paper["retrieval_summary"]["relaxed_question_hit_count"], 0
+        )
+
+    def test_current_fact_refresh_is_an_idempotent_success_not_an_error(self) -> None:
+        service = self.app.state.planning_service
+        with patch.object(
+            service,
+            "matrix_enrichment_payload",
+            return_value={
+                "project_id": self.project_id,
+                "pending_paper_count": 0,
+                "fulltext_candidate_paper_count": 0,
+            },
+        ), TestClient(self.app) as client:
+            response = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/matrix/enrichment/jobs",
+                headers={**self.headers(), "Idempotency-Key": "current-facts"},
+            )
+
+        self.assertEqual(202, response.status_code, response.text)
+        self.assertEqual("current", response.json()["status"])
 
     def test_all_fact_failures_require_explicit_limited_mode(self) -> None:
         service = self.app.state.planning_service
@@ -428,11 +599,342 @@ class PlanningV1Tests(unittest.TestCase):
             "## Cross-category comparison and conclusion\nSection role: conclusion",
             selected["selected_outline_md"],
         )
-        self.assertIn("## 1. cross-coupling", selected["selected_outline_md"])
-        self.assertIn("## 2. addition reactions", selected["selected_outline_md"])
-        self.assertIn("## 3. cyclization and annulation", selected["selected_outline_md"])
+        self.assertIn("## 1. Cross-coupling", selected["selected_outline_md"])
+        self.assertIn("## 2. Addition reactions", selected["selected_outline_md"])
+        self.assertIn("## 3. Cyclization and annulation", selected["selected_outline_md"])
         self.assertTrue(selected["outline_complete"])
         self.assertEqual("reaction", selected["outline_style"])
+
+    def test_topic_outline_intent_uses_query_plan_and_explicit_partitions(self) -> None:
+        topic = (
+            "Please write a review on allenation-of-terminal-alkynes (ATA). "
+            "Focus on mono-, 1,3-di-, and trisubstituted allenes. "
+            "Organize the review by reaction type and catalytic/promoting system "
+            "(Cu, Zn, Cd, Ti, etc.), and separately discuss racemic ATA and "
+            "enantioselective ATA (EATA)."
+        )
+        discovery = {
+            "query_plan": {
+                "group_by": ["reaction_type", "catalyst_or_method"],
+            }
+        }
+
+        intent = _topic_outline_intent(topic, discovery)
+
+        self.assertTrue(intent["available"])
+        self.assertEqual("reaction_type", intent["primary_axis"])
+        self.assertEqual(["catalyst_or_method"], intent["secondary_axes"])
+        self.assertEqual(
+            ["racemic ATA", "enantioselective ATA (EATA)"],
+            intent["partitions"],
+        )
+        self.assertEqual(intent["partitions"], intent["required_partitions"])
+        self.assertEqual(["Cu", "Zn", "Cd", "Ti"], intent["named_systems"])
+        self.assertEqual(intent["named_systems"], intent["comparison_dimensions"])
+        self.assertEqual(
+            [
+                "mono-, 1,3-di-, and trisubstituted allenes",
+            ],
+            intent["focus_dimensions"],
+        )
+        self.assertEqual(intent["focus_dimensions"], intent["outcome_dimensions"])
+        self.assertEqual(
+            "source_bounded_model_or_section_contract",
+            intent["partition_trace_policy"],
+        )
+        self.assertEqual(
+            "reaction_type",
+            intent["classification_contract"]["primary_axis_id"],
+        )
+        self.assertEqual(
+            ["reaction_type", "catalyst_or_method"],
+            [
+                axis["axis_id"]
+                for axis in intent["classification_contract"]["axes"][:2]
+            ],
+        )
+        self.assertEqual(64, len(intent["classification_contract"]["fingerprint"]))
+
+    def test_topic_intent_keeps_comparison_examples_out_of_required_partitions(self) -> None:
+        topic = (
+            "Organize the review by intervention type and compare age groups "
+            "(children, adults, older adults), then separately discuss randomized "
+            "evidence and observational evidence."
+        )
+
+        intent = _topic_outline_intent(topic, None)
+
+        self.assertEqual(
+            ["randomized evidence", "observational evidence"],
+            intent["required_partitions"],
+        )
+        self.assertNotIn("children", intent["required_partitions"])
+        self.assertNotIn("adults", intent["required_partitions"])
+
+    def test_topic_intent_splits_repaired_stereochemistry_from_reaction_hierarchy(self) -> None:
+        intent = _topic_outline_intent(
+            (
+                "Organize the review by reaction type and separately discuss "
+                "racemic ATA and enantioselective ATA."
+            ),
+            {"query_plan": {"group_by": ["reaction_type"]}},
+            [
+                {
+                    "axis_id": "stereochemical_regime",
+                    "label": "Stereochemical regime",
+                    "source_surface": (
+                        "Organize the review by reaction type and separately "
+                        "discuss racemic ATA and enantioselective ATA"
+                    ),
+                    "source_type": "explicit_topic",
+                    "axis_role": "primary_organization",
+                    "heading_requirement": "primary_heading",
+                    "semantic_repair": {"status": "auto_repaired"},
+                    "partitions": [
+                        {"partition_id": "racemic", "label": "racemic ATA"},
+                        {
+                            "partition_id": "enantioselective",
+                            "label": "enantioselective ATA",
+                        },
+                    ],
+                }
+            ],
+        )
+
+        self.assertEqual("reaction_type", intent["primary_axis"])
+        self.assertEqual(
+            ["stereochemical_regime"], intent["secondary_axes"]
+        )
+        self.assertEqual(
+            ["racemic ATA", "enantioselective ATA"],
+            intent["required_partitions"],
+        )
+        self.assertEqual(
+            "required_independent_discussion",
+            intent["classification_axes"][1]["axis_role"],
+        )
+        self.assertEqual(
+            intent["classification_contract"]["axes"],
+            intent["classification_axes"],
+        )
+
+    def test_topic_intent_reads_examples_for_other_chemistry_axes(self) -> None:
+        topic = (
+            "Review the transformation categorized by substrates "
+            "(aryl halides, alkenes, organoboron reagents, etc.)."
+        )
+        discovery = {"query_plan": {"group_by": ["substrate"]}}
+
+        intent = _topic_outline_intent(topic, discovery)
+
+        self.assertEqual("substrate", intent["primary_axis"])
+        self.assertEqual(
+            ["aryl halides", "alkenes", "organoboron reagents"],
+            intent["axis_examples"]["substrate"],
+        )
+        self.assertEqual([], intent["required_partitions"])
+
+    def test_topic_guided_outline_supports_product_as_primary_axis(self) -> None:
+        service = self.app.state.planning_service
+        rows = [{"paper_id": "P001"}, {"paper_id": "P002"}]
+        intent = {
+            "available": True,
+            "primary_axis": "product",
+            "secondary_axes": ["catalyst_or_method"],
+            "required_partitions": [],
+        }
+
+        outline = service._topic_outline_document(
+            rows,
+            tags_by_paper={
+                "P001": {"product": "heterocycles"},
+                "P002": {"product": "pharmaceutical compounds"},
+            },
+            text_by_paper={
+                "P001": "Organocatalysis furnished a heterocyclic compound.",
+                "P002": "Enzymatic methods furnished a pharmaceutical product.",
+            },
+            taxonomy_profile="chemistry_general",
+            intent=intent,
+        )
+
+        self.assertIn("Primary structure: Topic-guided (product class", outline)
+        self.assertIn("Heterocycles", outline)
+        self.assertIn("Pharmaceutical compounds", outline)
+
+    def test_topic_partition_matching_uses_declared_terms_without_domain_defaults(self) -> None:
+        partitions = ["photochemical conditions", "electrochemical conditions"]
+
+        self.assertEqual(
+            "photochemical conditions",
+            _topic_partition_for_text(
+                "The reaction was performed under photochemical conditions.",
+                partitions,
+            ),
+        )
+        self.assertEqual(
+            "",
+            _topic_partition_for_text(
+                "The source reports thermal activation but no requested partition.",
+                partitions,
+            ),
+        )
+
+    def test_topic_guided_outline_combines_partitions_and_matrix_axis(self) -> None:
+        service = self.app.state.planning_service
+        rows = [{"paper_id": f"P{index:03d}"} for index in range(1, 5)]
+        tags_by_paper = {
+            "P001": {"reaction_type": "three-component coupling"},
+            "P002": {"reaction_type": "three-component coupling"},
+            "P003": {"reaction_type": "homologation"},
+            "P004": {"reaction_type": "homologation"},
+        }
+        text_by_paper = {
+            "P001": "Racemic Cu-promoted terminal alkyne allenation afforded an allene.",
+            "P002": "Enantioselective Cu-catalyzed ATA afforded 95% ee.",
+            "P003": "Racemic zinc-promoted homologation of a terminal alkyne.",
+            "P004": "Asymmetric homologation gave an enantioenriched allene.",
+        }
+        intent = {
+            "available": True,
+            "primary_axis": "reaction_type",
+            "secondary_axes": ["catalyst_or_method"],
+            "required_partitions": ["racemic ATA", "enantioselective ATA (EATA)"],
+            "comparison_dimensions": ["Cu", "Zn", "Cd", "Ti"],
+            "focus_dimensions": [
+                "monosubstituted allenes",
+                "1,3-disubstituted allenes",
+                "trisubstituted allenes",
+            ],
+        }
+
+        outline = service._topic_outline_document(
+            rows,
+            tags_by_paper=tags_by_paper,
+            text_by_paper=text_by_paper,
+            taxonomy_profile="chemistry_general",
+            intent=intent,
+        )
+
+        self.assertIn(
+            "Racemic ATA — Three-component coupling",
+            outline,
+        )
+        self.assertIn(
+            "Enantioselective ATA (EATA) — Three-component coupling",
+            outline,
+        )
+        self.assertIn("Assigned papers: P001.", outline)
+        self.assertIn("Assigned papers: P002.", outline)
+        self.assertIn("catalytic or promoting system", outline)
+        self.assertIn(
+            "Focus dimensions: monosubstituted allenes, "
+            "1,3-disubstituted allenes, trisubstituted allenes.",
+            outline,
+        )
+
+    def test_topic_guided_outline_prefers_evidence_bound_model_partition(self) -> None:
+        service = self.app.state.planning_service
+        rows = [
+            {
+                "paper_id": "P001",
+                "topic_partition_classification": {
+                    "status": "classified",
+                    "partition": "randomized evidence",
+                    "confidence": 0.92,
+                    "evidence_refs": [{"evidence_key": "sha256:source"}],
+                },
+            }
+        ]
+        outline = service._topic_outline_document(
+            rows,
+            tags_by_paper={"P001": {"reaction_type": "controlled comparison"}},
+            text_by_paper={
+                "P001": "The title and abstract use no literal partition label."
+            },
+            taxonomy_profile="general",
+            intent={
+                "available": True,
+                "primary_axis": "reaction_type",
+                "secondary_axes": [],
+                "required_partitions": [
+                    "randomized evidence",
+                    "observational evidence",
+                ],
+            },
+        )
+
+        self.assertIn(
+            "Randomized evidence — Controlled comparison",
+            outline,
+        )
+        self.assertIn("Topic partition: randomized evidence.", outline)
+
+    def test_completed_model_boundary_is_not_overruled_by_keyword_match(self) -> None:
+        routed = _topic_partition_for_row(
+            {
+                "topic_partition_classification": {
+                    "status": "boundary",
+                    "partition": "",
+                    "confidence": 0.42,
+                    "evidence_refs": [],
+                }
+            },
+            ["randomized evidence", "observational evidence"],
+            "The related-work paragraph mentions randomized evidence.",
+        )
+
+        self.assertEqual("", routed)
+
+    def test_formal_matrix_tag_routes_before_legacy_topic_text_match(self) -> None:
+        routed = _topic_partition_for_row(
+            {
+                "evidence_backed_tags": {
+                    "study_design": [
+                        {
+                            "partition_label": "randomized evidence",
+                            "confidence": 0.93,
+                            "fact_ids": ["MF-1"],
+                            "evidence_refs": [{"evidence_key": "sha256:formal"}],
+                        }
+                    ]
+                }
+            },
+            ["randomized evidence", "observational evidence"],
+            "The background mentions observational evidence.",
+        )
+        self.assertEqual("randomized evidence", routed)
+
+    def test_topic_guided_outline_uses_configured_taxonomy_without_topic_branch(self) -> None:
+        service = self.app.state.planning_service
+        rows = [{"paper_id": f"P{index:03d}"} for index in range(1, 4)]
+        text_by_paper = {
+            "P001": "Transition metal catalysis enabled a cross-coupling reaction.",
+            "P002": "Visible light photochemical conditions enabled a cycloaddition.",
+            "P003": "An electrochemical oxidation furnished the target product.",
+        }
+        intent = {
+            "available": True,
+            "primary_axis": "reaction_type",
+            "secondary_axes": ["catalyst_or_method"],
+            "partitions": [],
+            "comparison_dimensions": ["operating conditions"],
+        }
+
+        outline = service._topic_outline_document(
+            rows,
+            tags_by_paper={},
+            text_by_paper=text_by_paper,
+            taxonomy_profile="chemistry_general",
+            intent=intent,
+        )
+
+        self.assertIn("Cross-coupling", outline)
+        self.assertIn("Cyclization and annulation", outline)
+        self.assertIn("Oxidation and reduction", outline)
+        self.assertIn("transition-metal catalysis", outline)
+        self.assertIn("photochemical methods", outline)
+        self.assertIn("electrochemical methods", outline)
 
     def test_reselecting_current_outline_is_idempotent(self) -> None:
         with TestClient(self.app) as client:
@@ -456,9 +958,9 @@ class PlanningV1Tests(unittest.TestCase):
             substrate = self.choose_outline(client, "substrate")["selected_outline_md"]
             catalyst = self.choose_outline(client, "catalyst")["selected_outline_md"]
             reaction = self.choose_outline(client, "reaction")["selected_outline_md"]
-        self.assertIn("## 1. aromatic substrates", substrate)
-        self.assertIn("## 1. transition-metal catalysis", catalyst)
-        self.assertIn("## 1. cross-coupling", reaction)
+        self.assertIn("## 1. Aromatic substrates", substrate)
+        self.assertIn("## 1. Transition-metal catalysis", catalyst)
+        self.assertIn("## 1. Cross-coupling", reaction)
         self.assertNotEqual(substrate, catalyst)
         self.assertNotEqual(catalyst, reaction)
 
@@ -508,10 +1010,10 @@ class PlanningV1Tests(unittest.TestCase):
 
         self.assertNotIn("Routing required", outline)
         self.assertIn("Context papers: P002.", outline)
-        self.assertIn("## 1. alkynoates", outline)
-        self.assertIn("preformed substituted allenes", outline)
-        self.assertIn("silyl-substituted diene precursors", outline)
-        self.assertIn("enynes", outline)
+        self.assertIn("## 1. Alkynoates", outline)
+        self.assertIn("Preformed substituted allenes", outline)
+        self.assertIn("Silyl-substituted diene precursors", outline)
+        self.assertIn("Enynes", outline)
 
     def test_chemistry_outline_routes_resolution_and_enynamide_titles(self) -> None:
         service = self.app.state.planning_service
@@ -606,6 +1108,63 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertEqual(["P002"], by_title["enynes"]["paper_ids"])
         self.assertEqual(2, len(adjustments))
 
+    def test_unresolved_primary_study_is_not_relabelled_as_introduction_context(self) -> None:
+        service = self.app.state.planning_service
+        repaired, adjustments = service._auto_repair_generated_routing_sections(
+            [
+                {
+                    "title": "Introduction",
+                    "section_role": "introduction",
+                    "paper_ids": [],
+                    "context_paper_ids": [],
+                },
+                {
+                    "title": "Routing required — reassign these papers",
+                    "section_role": "body",
+                    "paper_ids": ["P001"],
+                },
+                {
+                    "title": "Conclusion",
+                    "section_role": "conclusion",
+                    "paper_ids": [],
+                },
+            ],
+            [{"paper_id": "P001"}],
+            {"P001": "A selected primary experiment with no supported route."},
+            outline_style="reaction",
+            taxonomy_profile="general_academic",
+        )
+
+        introduction = next(
+            section
+            for section in repaired
+            if section["section_role"] == "introduction"
+        )
+        self.assertEqual([], introduction["context_paper_ids"])
+        self.assertEqual("unresolved_classification_retained", adjustments[0]["method"])
+        self.assertEqual(["P001"], adjustments[0]["paper_ids"])
+
+    def test_topic_guided_repair_preserves_non_default_primary_axis(self) -> None:
+        service = self.app.state.planning_service
+        repaired, _adjustments = service._auto_repair_generated_routing_sections(
+            [
+                {
+                    "title": "Routing required — reassign these papers",
+                    "section_role": "body",
+                    "paper_ids": ["P001"],
+                }
+            ],
+            [{"paper_id": "P001"}],
+            {"P001": "The reaction furnished a heterocyclic compound."},
+            outline_style="topic-guided",
+            taxonomy_profile="chemistry_general",
+            tag_key_override="product",
+            axis_label_override="product class",
+        )
+
+        self.assertEqual("heterocycles", repaired[0]["title"])
+        self.assertIn("product class", repaired[0]["purpose"])
+
     def test_account_language_is_contextual_evidence(self) -> None:
         contextual = self.app.state.planning_service._contextual_outline_paper_ids(
             [{"paper_id": "P001"}, {"paper_id": "P002"}],
@@ -657,7 +1216,90 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertEqual(["P001"], by_title["enynes"]["paper_ids"])
         self.assertEqual("scientific_object_reassignment", adjustments[0]["method"])
 
-    def test_outline_sources_prefer_confirmed_or_automatic_project_tags(self) -> None:
+    def test_topic_partition_survives_scientific_object_realignment(self) -> None:
+        repaired, _adjustments = (
+            self.app.state.planning_service._realign_generated_body_sections(
+                [
+                    {
+                        "title": "Randomized evidence — Allenoates",
+                        "section_role": "body",
+                        "topic_partition": "randomized evidence",
+                        "paper_ids": ["P001"],
+                    }
+                ],
+                [
+                    {
+                        "paper_id": "P001",
+                        "scientific_facts": [
+                            {
+                                "field_id": "object_input",
+                                "value": "activated enynes",
+                            }
+                        ],
+                    }
+                ],
+                {
+                    "P001": (
+                        "activated enynes furnished an axially chiral allene product"
+                    )
+                },
+                outline_style="topic-guided",
+                taxonomy_profile="chemistry_general",
+                tag_key_override="substrate",
+                axis_label_override="substrate class",
+            )
+        )
+
+        self.assertEqual(1, len(repaired))
+        self.assertEqual("randomized evidence", repaired[0]["topic_partition"])
+        self.assertEqual(
+            "Randomized evidence — Enynes",
+            repaired[0]["title"],
+        )
+
+    def test_topic_boundary_rationale_survives_primary_axis_realignment(self) -> None:
+        rationale = (
+            "The source does not positively establish one requested Topic partition."
+        )
+        repaired, _adjustments = (
+            self.app.state.planning_service._realign_generated_body_sections(
+                [
+                    {
+                        "title": "Topic-partition boundary cases — ATA",
+                        "section_role": "body",
+                        "topic_partition": TOPIC_PARTITION_BOUNDARY_LABEL,
+                        "boundary_rationale": rationale,
+                        "paper_ids": ["P001"],
+                    }
+                ],
+                [
+                    {
+                        "paper_id": "P001",
+                        "scientific_facts": [
+                            {
+                                "field_id": "transformation",
+                                "value": "terminal alkyne allenation",
+                            }
+                        ],
+                    }
+                ],
+                {"P001": "terminal alkyne allenation furnished an allene"},
+                outline_style="topic-guided",
+                taxonomy_profile="chemistry_general",
+                tag_key_override="reaction_type",
+                axis_label_override="reaction type",
+            )
+        )
+
+        self.assertEqual(1, len(repaired))
+        self.assertEqual(
+            TOPIC_PARTITION_BOUNDARY_LABEL,
+            repaired[0]["topic_partition"],
+        )
+        self.assertEqual("Topic-partition boundary cases — ATA", repaired[0]["title"])
+        self.assertEqual(rationale, repaired[0]["boundary_rationale"])
+
+    def test_outline_sources_prefer_confirmed_and_ignore_legacy_automatic_tags(self) -> None:
         service = self.app.state.planning_service
         confirmed_tags, _ = service._outline_sources(
             self.first,
@@ -698,9 +1340,32 @@ class PlanningV1Tests(unittest.TestCase):
             confirmed_tags["P001"]["reaction_type"],
         )
         self.assertEqual("cross-coupling", pending_tags["P001"]["reaction_type"])
+        self.assertEqual("cross-coupling", automatic_tags["P001"]["reaction_type"])
+
+    def test_outline_sources_use_evidence_bounded_agent_routing_as_fallback(self) -> None:
+        with patch(
+            "review_writer_api.domain_services.planning.verified_structured_tags",
+            return_value={},
+        ):
+            tags, _ = self.app.state.planning_service._outline_sources(
+                self.first,
+                [
+                    {
+                        "paper_id": "P001",
+                        "routing_recommendation": {
+                            "axis_id": "reaction_type",
+                            "status": "classified",
+                            "label": "aldehyde-based three-component ATA",
+                            "confidence": 0.96,
+                            "evidence_refs": [{"evidence_key": "sha256:route"}],
+                        },
+                    }
+                ],
+            )
+
         self.assertEqual(
-            ["automatically assessed transformation"],
-            automatic_tags["P001"]["reaction_type"],
+            ["aldehyde-based three-component ATA"],
+            tags["P001"]["reaction_type"],
         )
 
     def test_outline_sources_ignore_unverified_library_tags(self) -> None:
@@ -881,6 +1546,14 @@ class PlanningV1Tests(unittest.TestCase):
             ]
         )
         self.assertEqual(selected["outline_artifact_id"], blueprint["source_outline_artifact_id"])
+        self.assertEqual(
+            blueprint["classification_contract"]["fingerprint"],
+            blueprint["classification_basis"]["axis_contract_fingerprint"],
+        )
+        self.assertEqual(
+            blueprint["classification_contract"]["fingerprint"],
+            blueprint["classification_contract_lineage"]["effective_fingerprint"],
+        )
 
     def test_planning_bundle_exposes_scope_and_synthesis_requirements(self) -> None:
         with TestClient(self.app) as client:
@@ -1025,6 +1698,46 @@ class PlanningV1Tests(unittest.TestCase):
             project = client.get(f"/api/v1/projects/{self.project_id}").json()
         self.assertEqual(200, confirmed.status_code, confirmed.text)
         self.assertEqual("sections", project["current_stage"])
+
+    def test_previous_blueprint_can_be_restored_as_a_new_review_version(self) -> None:
+        with TestClient(self.app) as client:
+            self.choose_outline(client, "reaction")
+            first = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/blueprint",
+                json={"revision": 0},
+                headers=self.headers(),
+            )
+            self.assertEqual(200, first.status_code, first.text)
+            first_payload = first.json()
+            second = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/blueprint",
+                json={"revision": first_payload["blueprint_revision"]},
+                headers=self.headers(),
+            )
+            self.assertEqual(200, second.status_code, second.text)
+            restored = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/blueprint/restore",
+                json={
+                    "revision": second.json()["blueprint_revision"],
+                    "artifact_id": first_payload["blueprint_artifact_id"],
+                },
+                headers=self.headers(),
+            )
+            planning = self.planning(client)
+
+        self.assertEqual(200, restored.status_code, restored.text)
+        restored_payload = restored.json()
+        self.assertEqual("review", restored_payload["status"])
+        self.assertNotEqual(
+            first_payload["blueprint_artifact_id"],
+            restored_payload["blueprint_artifact_id"],
+        )
+        self.assertEqual(
+            first_payload["blueprint_artifact_id"],
+            planning["section_blueprint"]["restructure_record"][
+                "restored_from_artifact_id"
+            ],
+        )
 
     def test_planning_contract_exposes_composite_tabs(self) -> None:
         with TestClient(self.app) as client:

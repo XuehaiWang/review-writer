@@ -14,6 +14,10 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from review_writer_core.writing_contracts import (
+    CASE_PARAGRAPH_MAX_WORDS,
+    CASE_PARAGRAPH_MIN_WORDS,
+)
 
 
 class WorkflowRequest(BaseModel):
@@ -36,6 +40,32 @@ class LiteratureSearchRequest(WorkflowRequest):
 
 class LiteratureDownloadRequest(WorkflowRequest):
     candidates: list[dict[str, Any]] = Field(min_length=1, max_length=1_000)
+    discovery_revision: StrictInt | None = Field(default=None, ge=0)
+
+
+class BibliographyManualEvidence(BaseModel):
+    evidence_type: Literal[
+        "pdf_page", "first_page", "formal_url", "catalog_record", "other"
+    ]
+    location: StrictStr = Field(min_length=1, max_length=4_000)
+    note: StrictStr = Field(default="", max_length=10_000)
+
+
+class BibliographyResolutionRequest(BaseModel):
+    action: Literal["accept_candidate", "save_manual", "supporting_only", "reject"]
+    candidate_id: StrictStr | None = Field(default=None, max_length=256)
+    fields: dict[str, Any] = Field(default_factory=dict)
+    document_type: Literal[
+        "journal_article",
+        "book_chapter",
+        "thesis",
+        "patent",
+        "supporting_information",
+        "other",
+    ] = "journal_article"
+    parent_paper_id: StrictStr | None = Field(default=None, max_length=96)
+    manual_evidence: BibliographyManualEvidence | None = None
+    reason: StrictStr = Field(default="", max_length=10_000)
 
 
 class DiscoverySearchRequest(WorkflowRequest):
@@ -55,6 +85,7 @@ class DiscoverySearchRequest(WorkflowRequest):
 class DiscoveryReviewSaveRequest(BaseModel):
     revision: StrictInt = Field(ge=0)
     results: list[dict[str, Any]]
+    coverage_decision: Literal["keep_local"] | None = None
 
 
 class DiscoverySelectionRequest(BaseModel):
@@ -100,6 +131,11 @@ class BlueprintGenerateRequest(BaseModel):
 
 class BlueprintConfirmRequest(BaseModel):
     revision: StrictInt = Field(ge=0)
+
+
+class BlueprintRestoreRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+    artifact_id: StrictStr = Field(min_length=36, max_length=36)
 
 
 class SectionsGenerateRequest(BaseModel):
@@ -176,9 +212,13 @@ class DraftRestoreRequest(BaseModel):
 class DraftEvaluationRequest(BaseModel):
     goal: float = Field(default=90.0, ge=90, le=100)
     paragraph_goal: float = Field(default=85.0, ge=0, le=100)
-    max_iterations: StrictInt = Field(default=3, ge=1, le=10)
-    min_case_words: StrictInt = Field(default=140, ge=1, le=10_000)
-    max_case_words: StrictInt = Field(default=280, ge=1, le=10_000)
+    max_iterations: StrictInt = Field(default=2, ge=1, le=10)
+    min_case_words: StrictInt = Field(
+        default=CASE_PARAGRAPH_MIN_WORDS, ge=1, le=10_000
+    )
+    max_case_words: StrictInt = Field(
+        default=CASE_PARAGRAPH_MAX_WORDS, ge=1, le=10_000
+    )
 
     @model_validator(mode="after")
     def validate_case_word_range(self):
@@ -188,7 +228,7 @@ class DraftEvaluationRequest(BaseModel):
 
 
 class DraftOptimizationRequest(DraftEvaluationRequest):
-    pass
+    auto_apply_safe: StrictBool = True
 
 
 class DraftRewriteRequest(BaseModel):

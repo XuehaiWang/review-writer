@@ -55,4 +55,23 @@ describe("SectionJobProgress", () => {
     expect(screen.getByText("章节正文已全部生成")).toBeInTheDocument();
     expect(screen.getByText("正在整理章节报告和图像候选。")).toBeInTheDocument();
   });
+
+  it("distinguishes standard, repaired, and safe fallback sections", () => {
+    render(<SectionJobProgress job={job({
+      result: {
+        section_progress: {
+          phase: "generating",
+          completed_sections: [
+            { section_id: "S01", heading: "Introduction", generation_mode: "standard" },
+            { section_id: "S02", heading: "Methods", generation_mode: "evidence_repaired" },
+            { section_id: "S03", heading: "Outlook", generation_mode: "safe_evidence_fallback" },
+          ],
+        },
+      },
+      progress_current: 3,
+    })} />);
+
+    expect(screen.getByText("标准生成 1 · 自动修复 1 · 安全保底 1")).toBeInTheDocument();
+    expect(screen.getByText("安全保底")).toBeInTheDocument();
+  });
 });

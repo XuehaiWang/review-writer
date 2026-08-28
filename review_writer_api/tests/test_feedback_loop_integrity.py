@@ -19,6 +19,16 @@ SPEC.loader.exec_module(feedback_loop)
 
 
 class FeedbackLoopIntegrityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        feedback_loop.apply_verification_profile(
+            feedback_loop.load_taxonomy_verification_profile(
+                Path(__file__).resolve().parents[2],
+                profile="chemistry_general",
+                topic_text="allene chemistry",
+            )
+        )
+
     def validate(
         self,
         original: str,
@@ -260,6 +270,24 @@ Second scientific paragraph gave 90% yield [2].
             prompt,
         )
         self.assertIn("do not resolve", prompt.casefold())
+
+    def test_unsupported_claim_with_local_full_text_uses_bounded_cleanup(self) -> None:
+        mode = feedback_loop.automatic_rewrite_mode(
+            {
+                "paragraph_id": "S01-p1",
+                "score": 60,
+                "route": "section_rewrite",
+                "source_check_status": "unsupported",
+                "unsupported_claims": ["The catalyst universally gives 99% ee."],
+            },
+            {
+                "paper_ids": ["P001"],
+                "evidence": [{"original_text_available": True}],
+            },
+            paragraph_goal=85,
+        )
+
+        self.assertEqual("source_recheck_cleanup", mode)
 
 
 if __name__ == "__main__":

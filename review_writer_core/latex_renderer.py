@@ -196,20 +196,20 @@ def _front_matter(state: dict[str, Any], profile: str) -> str:
     if keywords:
         lines.extend(
             [
-                r"\vspace{0.55em}",
-                rf"{{\footnotesize\color{{AcademicInk}}\textbf{{{latex_escape(keyword_label)}:}} {latex_escape('; '.join(keywords))}\par}}",
+                r"\par\vspace{0.8em}\noindent",
+                rf"{{\footnotesize\color{{AcademicInk}}\RaggedRight\sloppy\textbf{{{latex_escape(keyword_label)}:}} {latex_escape('; '.join(keywords))}\par}}",
             ]
         )
-    footer_parts = ["Review Writer", TEMPLATE_VERSION]
+    # Publication output must not expose internal product or template names.
+    footer_parts: list[str] = []
     if released_date:
         footer_parts.append(released_date)
-    lines.extend(
-        [
+    if footer_parts:
+        lines.extend([
             r"\vspace{0.55em}",
             rf"{{\sffamily\fontsize{{7.5}}{{8.5}}\selectfont\color{{AcademicMuted}} {latex_escape(' | '.join(footer_parts))}\par}}",
-            r"\end{tcolorbox}",
-        ]
-    )
+        ])
+    lines.append(r"\end{tcolorbox}")
     return "\n".join(lines)
 
 

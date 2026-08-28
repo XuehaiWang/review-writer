@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { ApiError, apiRequest, jsonBody } from "../../api/client";
 import { useUiText } from "../../i18n/useUiText";
@@ -18,7 +18,7 @@ import {
   clampPoint,
   cloneSnapshot,
   mergeSavedSvg,
-  moveOperation,
+  moveSelection,
   operationForSave,
   outputPixelSize,
   parseFullSvg,
@@ -97,8 +97,9 @@ type PointerSession =
   | { kind: "erase"; points: Point[] }
   | { kind: "line"; id: string; start: Point }
   | { kind: "arrow"; id: string; start: Point }
-  | { kind: "move"; start: Point; selection: string[] }
+  | { kind: "move"; start: Point; selection: string[]; delta: Point }
   | { kind: "handle"; id: string; handle: string }
+  | { kind: "resize-ketcher"; id: string; anchor: Point; width: number; height: number; scale: number }
   | { kind: "marquee"; start: Point; clientStart: Point }
   | { kind: "text"; start: Point };
 
@@ -149,6 +150,7 @@ const EDITOR_STATUS_EN: Record<string, string> = {
   "直线已添加。": "Line added.",
   "箭头已添加；选择后可继续调整端点。": "Arrow added; select it to adjust its endpoints.",
   "端点位置已更新。": "Endpoint position updated.",
+  "请先选择一个 Ketcher 结构。": "Select a Ketcher structure first.",
   "请先选择一个文本对象。": "Select a text object first.",
   "文字颜色和字号已应用。": "Text color and size applied.",
   "正在加载本地 Ketcher…": "Loading local Ketcher…",
@@ -157,6 +159,7 @@ const EDITOR_STATUS_EN: Record<string, string> = {
   "正在导出化学结构 SVG…": "Exporting chemistry structure SVG…",
   "Ketcher 化学结构已更新。": "Ketcher chemistry structure updated.",
   "Ketcher 化学结构已插入；可直接选择并移动。": "Ketcher chemistry structure inserted and ready to select or move.",
+  "Ketcher 化学结构已插入；可移动并拖动右下角调整大小。": "Ketcher chemistry structure inserted; move it or drag the lower-right handle to resize it.",
   "正在计算当前可见内容边界…": "Calculating visible content bounds…",
   "当前内容已经贴合画布。": "The current content already fits the canvas.",
   "已恢复到当前底图的初始状态。": "Restored the initial state of the current base image.",
@@ -184,8 +187,14 @@ function localizeEditorStatus(value: string, english: boolean): string {
   if (EDITOR_STATUS_EN[value]) return EDITOR_STATUS_EN[value];
   let match = /^已删除 (\d+) 个对象。$/.exec(value);
   if (match) return `Deleted ${match[1]} objects.`;
+  match = /^已选择 (\d+) 个对象，可拖动或删除。$/.exec(value);
+  if (match) return `Selected ${match[1]} objects; drag or delete them.`;
+  match = /^已框选 (\d+) 个对象，可直接删除。$/.exec(value);
+  if (match) return `Selected ${match[1]} objects; they are ready to delete.`;
   match = /^已框选 (\d+) 个对象。$/.exec(value);
   if (match) return `Selected ${match[1]} objects.`;
+  match = /^结构尺寸已更新为 (\d+)%。$/.exec(value);
+  if (match) return `Structure size updated to ${match[1]}%.`;
   match = /^画布已裁剪为 (.+)；可撤回或保存。$/.exec(value);
   if (match) return `Canvas cropped to ${match[1]}; undo or save the result.`;
   match = /^React SVG 工作区已就绪；底图：(.+)；保存分辨率 (.+)。$/.exec(value);
@@ -219,6 +228,84 @@ function normalizeBox(start: Point, end: Point): CropBox {
     width: Math.abs(end.x - start.x),
     height: Math.abs(end.y - start.y),
   };
+}
+
+function clampKetcherScale(value: number): number {
+  return Math.max(.1, Math.min(5, Number.isFinite(value) ? value : 1));
+}
+
+function ketcherScaleAtPoint(
+  anchor: Point,
+  width: number,
+  height: number,
+  current: Point,
+): number {
+  const denominator = width * width + height * height;
+  if (denominator <= 0) return 1;
+  const projected = ((current.x - anchor.x) * width + (current.y - anchor.y) * height) / denominator;
+  return clampKetcherScale(projected);
+}
+
+const TRACE_HIT_RADIUS = 4;
+const MARQUEE_EDGE_PADDING = 2;
+
+function selectableKey(value: Element | null): string {
+  return value?.closest<SVGElement>("[data-select-key]")?.getAttribute("data-select-key") || "";
+}
+
+/**
+ * Raster-to-SVG tracing can leave text and thin bonds narrower than one CSS
+ * pixel after the editor scales the figure. Keep Ketcher and inserted-element
+ * hit testing unchanged, but sample a small area around a missed click so the
+ * original trace remains practical to select.
+ */
+export function traceKeyNearClientPoint(
+  root: Element,
+  clientX: number,
+  clientY: number,
+  radius = TRACE_HIT_RADIUS,
+): string {
+  const documentNode = root.ownerDocument;
+  if (typeof documentNode.elementsFromPoint !== "function") return "";
+  const offsets = [
+    [0, 0],
+    [-radius / 2, 0], [radius / 2, 0], [0, -radius / 2], [0, radius / 2],
+    [-radius, 0], [radius, 0], [0, -radius], [0, radius],
+    [-radius, -radius], [radius, -radius], [-radius, radius], [radius, radius],
+  ];
+  for (const [dx, dy] of offsets) {
+    for (const node of documentNode.elementsFromPoint(clientX + dx, clientY + dy)) {
+      if (!root.contains(node)) continue;
+      const key = selectableKey(node);
+      // The tolerance is intentionally limited to the vectorized source layer.
+      // Inserted text, lines and Ketcher structures retain exact hit testing.
+      if (key.startsWith("trace:")) return key;
+    }
+  }
+  return "";
+}
+
+export function selectableKeysInClientBox(
+  root: Element,
+  box: { left: number; right: number; top: number; bottom: number },
+  padding = MARQUEE_EDGE_PADDING,
+): string[] {
+  const left = box.left - padding;
+  const right = box.right + padding;
+  const top = box.top - padding;
+  const bottom = box.bottom + padding;
+  const keys = [...root.querySelectorAll<SVGElement>("[data-select-key]")]
+    .filter((node) => {
+      const style = globalThis.getComputedStyle?.(node);
+      if (style?.display === "none" || style?.visibility === "hidden") return false;
+      const bounds = node.getBoundingClientRect();
+      return (bounds.width > 0 || bounds.height > 0)
+        && bounds.right >= left && bounds.left <= right
+        && bounds.bottom >= top && bounds.top <= bottom;
+    })
+    .map((node) => node.getAttribute("data-select-key") || "")
+    .filter(Boolean);
+  return [...new Set(keys)];
 }
 
 function materializeTextDraft(
@@ -411,15 +498,21 @@ export function SvgKetcherEditor({
               apiRequest<string>(savedSvgUrl),
               apiRequest<{ operations?: unknown }>(auditUrl),
             ]);
-            next = mergeSavedSvg(next, saved, audit.operations);
+            // Reopen the saved vector workspace itself instead of vectorizing
+            // the materialized PNG and overlaying edits again. This preserves
+            // Ketcher elements as independently movable/resizable structures
+            // across save and refresh cycles.
+            const savedWorkspace = parseFullSvg(figureId, baseMode, saved);
+            next = mergeSavedSvg(savedWorkspace, saved, audit.operations);
           } catch {
             setStatus({ text: "已加载底图；旧编辑记录不可读，本次从干净画布继续。", error: true });
           }
         }
         if (cancelled) return;
         setModel(next);
+        const saveSize = outputPixelSize(next);
         setStatus({
-          text: `React SVG 工作区已就绪；底图：${baseMode === "redrawn" ? "AI 重绘图" : "原图"}；保存分辨率 ${next.sourceWidth}×${next.sourceHeight}。`,
+          text: `React SVG 工作区已就绪；底图：${baseMode === "redrawn" ? "AI 重绘图" : "原图"}；保存分辨率 ${saveSize.width}×${saveSize.height}。`,
         });
       } catch (error) {
         if (!cancelled) setStatus({ text: errorMessage(error), error: true });
@@ -498,11 +591,67 @@ export function SvgKetcherEditor({
     return () => document.removeEventListener("keydown", keydown);
   }, [deleteSelection, undo]);
 
+  // Trace/text/Ketcher selection is rendered imperatively below. Rebuilding a
+  // large raster-traced SVG for every click makes browser paint updates lag or
+  // disappear. Only operation selection changes the markup because arrows and
+  // lines need their editable handles materialized.
+  const structuralSelectionKey = selection.filter((key) => {
+    if (key.startsWith("op:")) return true;
+    if (!key.startsWith("el:")) return false;
+    const id = key.slice(3);
+    return model?.elements.some((item) => item.id === id && item.type === "ketcher");
+  }).join("|");
   const displaySvg = useMemo(() => model ? buildSvgDocument(model, {
     interactive: true,
-    selection,
-    transientErase,
-  }) : "", [model, selection, transientErase]);
+    selection: structuralSelectionKey ? structuralSelectionKey.split("|") : [],
+  }) : "", [model, structuralSelectionKey]);
+
+  useLayoutEffect(() => {
+    const root = canvasRef.current;
+    if (!root || !model) return;
+    const selected = new Set(selection);
+    root.querySelectorAll<SVGElement>("[data-select-key]").forEach((node) => {
+      // `translate` is used only for the in-flight drag preview. Once React
+      // renders committed model coordinates it must not survive into the next
+      // drag, otherwise the next preview starts from the original DOM offset.
+      node.style.removeProperty("translate");
+      const key = node.getAttribute("data-select-key") || "";
+      if (selected.has(key)) {
+        node.setAttribute("filter", "url(#editor-selection-glow)");
+        node.setAttribute("data-editor-selected", "true");
+      } else {
+        node.removeAttribute("filter");
+        node.removeAttribute("data-editor-selected");
+      }
+    });
+    const traceEdits = new Map(model.traceEdits.map((item) => [item.id, item]));
+    root.querySelectorAll<SVGElement>("[data-trace-object-id]").forEach((node) => {
+      const edit = traceEdits.get(node.getAttribute("data-trace-object-id") || "");
+      if (edit?.hidden) {
+        node.setAttribute("display", "none");
+        node.style.display = "none";
+      } else {
+        node.removeAttribute("display");
+        node.style.removeProperty("display");
+      }
+      // Committed source-object positions now live on the SVG `transform`
+      // attribute generated from the model. Do not mirror them into mutable
+      // inline CSS: Chromium can drop that CSS when the object is clicked
+      // again, which made it visibly jump back despite intact metadata.
+      node.style.removeProperty("transform");
+    });
+  }, [displaySvg, model, selection]);
+
+  useLayoutEffect(() => {
+    const node = canvasRef.current?.querySelector<SVGPolylineElement>("#editor-transient-erase-overlay");
+    if (!node) return;
+    if (transientErase.length > 1) {
+      node.setAttribute("points", transientErase.map((point) => `${point.x},${point.y}`).join(" "));
+      node.removeAttribute("display");
+    } else {
+      node.setAttribute("display", "none");
+    }
+  }, [displaySvg, transientErase]);
 
   const canvasPoint = useCallback((event: React.PointerEvent): Point | null => {
     if (!model || !canvasRef.current) return null;
@@ -551,25 +700,36 @@ export function SvgKetcherEditor({
     });
   }, []);
 
-  const applyMove = useCallback((state: SvgEditorState, keys: string[], delta: Point): SvgEditorState => {
-    const selected = new Set(keys);
-    const selectedTraceIds = keys.filter((key) => key.startsWith("trace:")).map((key) => key.slice(6));
-    const traceEdits = new Map(state.traceEdits.map((item) => [item.id, item]));
-    selectedTraceIds.forEach((id) => {
-      const current = traceEdits.get(id);
-      traceEdits.set(id, {
-        id,
-        dx: (current?.dx || 0) + delta.x,
-        dy: (current?.dy || 0) + delta.y,
-        hidden: current?.hidden,
+  const clearMovePreview = useCallback((keys: string[]) => {
+    const root = canvasRef.current;
+    if (!root) return;
+    keys.forEach((key) => {
+      root.querySelectorAll<SVGElement>(`[data-select-key="${key}"]`).forEach((node) => {
+        node.style.removeProperty("translate");
       });
     });
-    return {
-      ...state,
-      traceEdits: [...traceEdits.values()],
-      operations: state.operations.map((item) => selected.has(`op:${item.id}`) ? moveOperation(item, delta.x, delta.y) : item),
-      elements: state.elements.map((item) => selected.has(`el:${item.id}`) ? { ...item, x: item.x + delta.x, y: item.y + delta.y } : item),
-    };
+  }, []);
+
+  const previewKetcherScale = useCallback((id: string, scale: number, width: number, height: number, anchor: Point) => {
+    const root = canvasRef.current;
+    if (!root) return;
+    const structure = [...root.querySelectorAll<SVGElement>("[data-editor-element-id]")]
+      .find((node) => node.getAttribute("data-editor-element-id") === id);
+    if (structure) {
+      structure.setAttribute("transform", `translate(${anchor.x} ${anchor.y}) scale(${scale})`);
+      structure.setAttribute("data-editor-scale", String(scale));
+    }
+    const overlay = [...root.querySelectorAll<SVGGElement>("[data-ketcher-resize-overlay]")]
+      .find((node) => node.getAttribute("data-ketcher-resize-overlay") === id);
+    if (!overlay) return;
+    const scaledWidth = width * scale;
+    const scaledHeight = height * scale;
+    const box = overlay.querySelector("rect");
+    const handle = overlay.querySelector("circle");
+    box?.setAttribute("width", String(scaledWidth));
+    box?.setAttribute("height", String(scaledHeight));
+    handle?.setAttribute("cx", String(anchor.x + scaledWidth));
+    handle?.setAttribute("cy", String(anchor.y + scaledHeight));
   }, []);
 
   const openTextEditor = useCallback((element: TextElement) => {
@@ -591,8 +751,11 @@ export function SvgKetcherEditor({
     if (!current) return;
     const target = event.target as Element;
     const handle = target.closest<SVGElement>("[data-handle-key]");
-    const selectedNode = target.closest<SVGElement>("[data-select-key]");
-    const key = selectedNode?.getAttribute("data-select-key") || "";
+    const ketcherResizeHandle = target.closest<SVGElement>("[data-ketcher-resize-id]");
+    const directKey = selectableKey(target);
+    const key = directKey || (tool === "select"
+      ? traceKeyNearClientPoint(event.currentTarget, event.clientX, event.clientY)
+      : "");
     if (tool === "text" && key.startsWith("el:")) {
       const element = model.elements.find((item) => `el:${item.id}` === key);
       if (element?.type === "text") {
@@ -601,7 +764,21 @@ export function SvgKetcherEditor({
         return;
       }
     }
-    if (tool === "select" && handle) {
+    if (tool === "select" && ketcherResizeHandle) {
+      const id = ketcherResizeHandle.getAttribute("data-ketcher-resize-id") || "";
+      const element = model.elements.find((item): item is KetcherElement => item.id === id && item.type === "ketcher");
+      if (!element) return;
+      pushHistory(model);
+      setSelection([`el:${id}`]);
+      pointerRef.current = {
+        kind: "resize-ketcher",
+        id,
+        anchor: { x: element.x, y: element.y },
+        width: element.width,
+        height: element.height,
+        scale: element.scale,
+      };
+    } else if (tool === "select" && handle) {
       const handleKey = handle.getAttribute("data-handle-key") || "";
       const operationId = handleKey.replace(/^op:/, "");
       pushHistory(model);
@@ -612,8 +789,14 @@ export function SvgKetcherEditor({
         ? selection.includes(key) ? selection.filter((item) => item !== key) : [...selection, key]
         : selection.includes(key) ? selection : [key];
       setSelection(nextSelection);
+      setStatus({ text: nextSelection.length ? `已选择 ${nextSelection.length} 个对象，可拖动或删除。` : "未选择对象。" });
       pushHistory(model);
-      pointerRef.current = { kind: "move", start: current, selection: nextSelection };
+      pointerRef.current = {
+        kind: "move",
+        start: current,
+        selection: nextSelection,
+        delta: { x: 0, y: 0 },
+      };
     } else if (tool === "select") {
       setSelection([]);
       setStatus({ text: "未选择对象。" });
@@ -679,13 +862,20 @@ export function SvgKetcherEditor({
         };
       }) });
     } else if (session.kind === "move") {
-      previewMove(session.selection, { x: current.x - session.start.x, y: current.y - session.start.y });
+      session.delta = {
+        x: current.x - session.start.x,
+        y: current.y - session.start.y,
+      };
+      previewMove(session.selection, session.delta);
     } else if (session.kind === "handle") {
       setModel({ ...model, operations: model.operations.map((item) => item.id === session.id ? updateHandle(item, session.handle, current) : item) });
+    } else if (session.kind === "resize-ketcher") {
+      session.scale = ketcherScaleAtPoint(session.anchor, session.width, session.height, current);
+      previewKetcherScale(session.id, session.scale, session.width, session.height, session.anchor);
     } else if (session.kind === "marquee" || session.kind === "text") {
       showMarquee(normalizeBox(session.start, current));
     }
-  }, [canvasPointAt, model, previewMove, showMarquee]);
+  }, [canvasPointAt, model, previewKetcherScale, previewMove, showMarquee]);
 
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     pendingPointerMoveRef.current = { x: event.clientX, y: event.clientY };
@@ -716,30 +906,31 @@ export function SvgKetcherEditor({
       }
       setTransientErase([]);
     } else if (session.kind === "move") {
-      const delta = { x: current.x - session.start.x, y: current.y - session.start.y };
+      const delta = session.delta;
       if (Math.hypot(delta.x, delta.y) > 0.5) {
-        setModel(applyMove(model, session.selection, delta));
+        // Keep the transient preview in place until React has committed the
+        // same coordinates to the SVG model. Clearing it before setModel makes
+        // the source object visibly flash back to its old position for one
+        // browser paint. The layout effect removes `translate` immediately
+        // after the committed SVG is installed.
+        setModel((currentModel) => currentModel
+          ? moveSelection(currentModel, session.selection, delta)
+          : currentModel);
         setDirty(true);
         setStatus({ text: "对象位置已更新。" });
       } else {
-        previewMove(session.selection, { x: 0, y: 0 });
+        clearMovePreview(session.selection);
       }
     } else if (session.kind === "marquee") {
       const left = Math.min(session.clientStart.x, event.clientX);
       const right = Math.max(session.clientStart.x, event.clientX);
       const top = Math.min(session.clientStart.y, event.clientY);
       const bottom = Math.max(session.clientStart.y, event.clientY);
-      const nodes = [...(canvasRef.current?.querySelectorAll<SVGElement>("[data-select-key]") || [])]
-        .filter((node) => {
-          const bounds = node.getBoundingClientRect();
-          return (bounds.width > 0 || bounds.height > 0)
-            && bounds.right >= left && bounds.left <= right
-            && bounds.bottom >= top && bounds.top <= bottom;
-        })
-        .map((node) => node.getAttribute("data-select-key") || "")
-        .filter(Boolean);
-      setSelection([...new Set(nodes)]);
-      setStatus({ text: nodes.length ? `已框选 ${new Set(nodes).size} 个对象。` : "框选区域内没有可编辑对象。" });
+      const keys = canvasRef.current
+        ? selectableKeysInClientBox(canvasRef.current, { left, right, top, bottom })
+        : [];
+      setSelection(keys);
+      setStatus({ text: keys.length ? `已框选 ${keys.length} 个对象，可直接删除。` : "框选区域内没有可编辑对象。" });
       showMarquee(null);
     } else if (session.kind === "text") {
       const box = normalizeBox(session.start, current);
@@ -764,6 +955,16 @@ export function SvgKetcherEditor({
     } else if (session.kind === "handle") {
       setDirty(true);
       setStatus({ text: "端点位置已更新。" });
+    } else if (session.kind === "resize-ketcher") {
+      const scale = clampKetcherScale(session.scale);
+      setModel({
+        ...model,
+        elements: model.elements.map((item) => item.id === session.id && item.type === "ketcher"
+          ? { ...item, scale }
+          : item),
+      });
+      setDirty(true);
+      setStatus({ text: `结构尺寸已更新为 ${Math.round(scale * 100)}%。` });
     }
     pointerRef.current = null;
     try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* Ignore unsupported capture. */ }
@@ -802,6 +1003,24 @@ export function SvgKetcherEditor({
     item.type === "ketcher" && selection.includes(`el:${item.id}`)
   ));
 
+  const updateSelectedKetcherScale = (value: number) => {
+    if (!model || !selectedKetcher) {
+      setStatus({ text: "请先选择一个 Ketcher 结构。", error: true });
+      return;
+    }
+    const scale = clampKetcherScale(value);
+    if (Math.abs(scale - selectedKetcher.scale) < .001) return;
+    pushHistory(model);
+    setModel({
+      ...model,
+      elements: model.elements.map((item) => item.id === selectedKetcher.id && item.type === "ketcher"
+        ? { ...item, scale }
+        : item),
+    });
+    setDirty(true);
+    setStatus({ text: `结构尺寸已更新为 ${Math.round(scale * 100)}%。` });
+  };
+
   const openKetcher = (target: string | null) => {
     setKetcherTarget(target);
     setKetcherOpen(true);
@@ -838,14 +1057,15 @@ export function SvgKetcherEditor({
       const api = (ketcherFrameRef.current?.contentWindow as (Window & { ketcher?: KetcherApi }) | null)?.ketcher;
       if (!api) throw new Error("Ketcher 尚未完成初始化。");
       const ket = await api.getKet();
+      const target = model.elements.find((item): item is KetcherElement => item.id === ketcherTarget && item.type === "ketcher");
       const generated = await generatedSvg(
         await api.generateImage(ket, { outputFormat: "svg" }),
-        Math.max(24, model.crop.width * .38),
-        Math.max(24, model.crop.height * .38),
+        target?.width || Math.max(24, model.crop.width * .2),
+        target?.height || Math.max(24, model.crop.height * .2),
       );
       pushHistory(model);
       if (ketcherTarget) {
-        setModel({ ...model, elements: model.elements.map((item) => item.id === ketcherTarget && item.type === "ketcher" ? { ...item, ket, svgMarkup: generated.markup } : item) });
+        setModel({ ...model, elements: model.elements.map((item) => item.id === ketcherTarget && item.type === "ketcher" ? { ...item, ket, svgMarkup: generated.markup, width: generated.width, height: generated.height } : item) });
         setSelection([`el:${ketcherTarget}`]);
         setStatus({ text: "Ketcher 化学结构已更新。" });
       } else {
@@ -857,10 +1077,13 @@ export function SvgKetcherEditor({
           y: model.crop.y + Math.max(0, (model.crop.height - generated.height) / 2),
           ket,
           svgMarkup: generated.markup,
+          width: generated.width,
+          height: generated.height,
+          scale: 1,
         };
         setModel({ ...model, elements: [...model.elements, element] });
         setSelection([`el:${id}`]);
-        setStatus({ text: "Ketcher 化学结构已插入；可直接选择并移动。" });
+        setStatus({ text: "Ketcher 化学结构已插入；可移动并拖动右下角调整大小。" });
       }
       setDirty(true);
       setKetcherOpen(false);
@@ -1025,7 +1248,7 @@ export function SvgKetcherEditor({
         <aside className="svg-react-toolbar">
           <section><h3>{text("编辑工具", "Editing tools")}</h3><div className="svg-tool-grid-react">{TOOL_META.map((item) => <button key={item.value} className={tool === item.value ? "active" : ""} type="button" onClick={() => setTool(item.value)} title={`${text(item.hintZh, item.hintEn)} (${item.key})`}><span>{item.icon}</span><strong>{text(item.labelZh, item.labelEn)}</strong><small>{item.key}</small></button>)}</div><p className="svg-tool-hint-react">{text(currentTool.hintZh, currentTool.hintEn)}</p></section>
           <section className="svg-property-grid"><h3>{text("样式", "Style")}</h3>{tool === "arrow" ? <label>{text("箭头样式", "Arrow style")}<select value={arrowStyle} onChange={(event) => setArrowStyle(event.target.value as ArrowStyle)}><option value="straight">{text("直线箭头", "Straight arrow")}</option><option value="orthogonal">{text("自适应直角箭头", "Adaptive orthogonal arrow")}</option><option value="arc">{text("圆弧箭头", "Arc arrow")}</option></select></label> : null}<label>{text("颜色", "Color")}<input type="color" value={color} onChange={(event) => setColor(event.target.value)} /></label><label>{text("线宽", "Line width")}<input type="number" min="1" max="12" value={lineWidth} onChange={(event) => setLineWidth(Math.max(1, Number(event.target.value) || 2))} /></label>{tool === "erase" ? <label>{text("橡皮擦宽度", "Eraser width")}<input type="number" min="2" max="80" value={eraseWidth} onChange={(event) => setEraseWidth(Math.max(2, Number(event.target.value) || 8))} /></label> : null}{tool === "text" || selection.some((item) => item.startsWith("el:")) ? <><label>{text("字号", "Font size")}<input type="number" min="6" max="160" value={fontSize} onChange={(event) => setFontSize(Math.max(6, Number(event.target.value) || 16))} /></label><button className="button button-secondary" type="button" onClick={applySelectedTextStyle}>{text("应用文字样式", "Apply text style")}</button></> : null}</section>
-          <section><h3>{text("化学结构", "Chemical structure")}</h3><button className="button button-secondary" type="button" onClick={() => openKetcher(null)}>{text("Ketcher 添加结构", "Add structure with Ketcher")}</button><button className="button button-secondary" type="button" disabled={!selectedKetcher} onClick={() => selectedKetcher && openKetcher(selectedKetcher.id)}>{text("编辑所选结构", "Edit selected structure")}</button></section>
+          <section><h3>{text("化学结构", "Chemical structure")}</h3><button className="button button-secondary" type="button" onClick={() => openKetcher(null)}>{text("Ketcher 添加结构", "Add structure with Ketcher")}</button><button className="button button-secondary" type="button" disabled={!selectedKetcher} onClick={() => selectedKetcher && openKetcher(selectedKetcher.id)}>{text("编辑所选结构", "Edit selected structure")}</button>{selectedKetcher ? <div className="ketcher-size-controls"><label>{text("结构大小", "Structure size")}<input key={`${selectedKetcher.id}:${Math.round(selectedKetcher.scale * 100)}`} aria-label={text("Ketcher 结构大小百分比", "Ketcher structure size percentage")} type="number" min="10" max="500" step="5" defaultValue={Math.round(selectedKetcher.scale * 100)} onBlur={(event) => updateSelectedKetcherScale((Number(event.currentTarget.value) || 100) / 100)} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /></label><div><button className="button button-secondary" type="button" onClick={() => updateSelectedKetcherScale(selectedKetcher.scale - .1)}>−10%</button><button className="button button-secondary" type="button" onClick={() => updateSelectedKetcherScale(1)}>{text("重置", "Reset")}</button><button className="button button-secondary" type="button" onClick={() => updateSelectedKetcherScale(selectedKetcher.scale + .1)}>+10%</button></div><p>{text("也可拖动画布中结构右下角的圆形手柄等比例缩放。", "You can also drag the circular lower-right handle on the canvas for proportional resizing.")}</p></div> : null}</section>
           <section><h3>{text("画布和历史", "Canvas and history")}</h3><div className="svg-inline-field"><label>{text("裁剪留白", "Crop padding")}<input type="number" min="0" max="100" value={cropPadding} onChange={(event) => setCropPadding(Math.max(0, Math.min(100, Number(event.target.value) || 0)))} /></label><button className="button button-secondary" type="button" disabled={!model || cropping} onClick={() => void cropCanvas()}>{cropping ? text("计算中…", "Calculating…") : text("裁剪画布", "Crop canvas")}</button></div><button className="button button-secondary" type="button" disabled={!history.length} onClick={undo}>{text("撤回一步", "Undo")} Ctrl+Z</button><button className="button button-secondary" type="button" disabled={!selection.length} onClick={deleteSelection}>{text("删除所选", "Delete selected")} Delete</button><button className="button button-quiet" type="button" disabled={!model} onClick={resetEditor}>{text("恢复底图", "Restore base image")}</button></section>
         </aside>
         <main className="svg-react-main">

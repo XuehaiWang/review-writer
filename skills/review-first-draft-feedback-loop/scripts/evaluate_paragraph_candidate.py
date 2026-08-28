@@ -178,8 +178,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--paragraph-id", required=True)
     parser.add_argument("--goal", type=float, default=90.0)
     parser.add_argument("--paragraph-goal", type=float, default=85.0)
-    parser.add_argument("--min-case-words", type=int, default=140)
-    parser.add_argument("--max-case-words", type=int, default=280)
+    parser.add_argument(
+        "--min-case-words", type=int, default=loop.CASE_PARAGRAPH_MIN_WORDS
+    )
+    parser.add_argument(
+        "--max-case-words", type=int, default=loop.CASE_PARAGRAPH_MAX_WORDS
+    )
     return parser.parse_args()
 
 

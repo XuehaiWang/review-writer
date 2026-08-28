@@ -10,6 +10,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from threading import Event
@@ -27,8 +28,10 @@ from review_writer_api.database import (
     MinerUUsageEvent,
     Project,
     User,
+    UserCreditAccount,
     create_session_factory,
     database_session,
+    utc_now,
 )
 from review_writer_api.domain_services.library import LibraryService
 from review_writer_api.errors import WorkflowValidationError
@@ -266,6 +269,65 @@ class LibraryV1Tests(unittest.TestCase):
         self.assertEqual({}, papers["items"][0]["structured_tags"])
         self.assertFalse(papers["items"][0]["structured_tags_verified"])
 
+    def test_bibliography_resolution_updates_metadata_and_survives_audit_job(self) -> None:
+        with TestClient(self.app) as client:
+            admitted = self.upload(client, "resolved.pdf", fake_pdf(b"R"))
+            self.assertEqual(201, admitted.status_code, admitted.text)
+            body = admitted.json()
+            paper_id = body["paper_id"]
+            resolved = client.post(
+                f"/api/v1/library/papers/{paper_id}/bibliography-resolution",
+                json={
+                    "action": "save_manual",
+                    "document_type": "journal_article",
+                    "fields": {
+                        "title": "Manually verified title",
+                        "authors": ["A. Author"],
+                        "journal": "Verified Journal",
+                        "year": 2024,
+                        "doi": "10.1000/resolved",
+                    },
+                    "manual_evidence": {
+                        "evidence_type": "first_page",
+                        "location": "PDF page 1",
+                        "note": "Verified from the publisher header.",
+                    },
+                },
+            )
+            self.assertEqual(200, resolved.status_code, resolved.text)
+            audit_job_id = str(body.get("bibliography_audit_job_id") or "")
+            if audit_job_id:
+                completed = self.wait_job(client, audit_job_id)
+                self.assertEqual("succeeded", completed["status"], completed)
+            audit = client.get(
+                f"/api/v1/library/papers/{paper_id}/bibliography-audit"
+            ).json()
+            metadata = client.get(
+                f"/api/v1/library/papers/{paper_id}/metadata"
+            ).json()
+
+        self.assertEqual("resolved", audit["audit"]["manual_review_status"])
+        self.assertEqual("human", audit["audit"]["resolved_by"])
+        self.assertEqual("Manually verified title", metadata["title"]["value"])
+        self.assertTrue(metadata["title"]["human_checked"])
+        self.assertEqual("10.1000/resolved", metadata["doi"]["value"])
+
+    def test_supporting_only_resolution_without_evidence_is_rejected(self) -> None:
+        with TestClient(self.app) as client:
+            admitted = self.upload(client, "supporting.pdf", fake_pdf(b"S"))
+            paper_id = admitted.json()["paper_id"]
+            rejected = client.post(
+                f"/api/v1/library/papers/{paper_id}/bibliography-resolution",
+                json={
+                    "action": "supporting_only",
+                    "document_type": "other",
+                    "fields": {},
+                },
+            )
+
+        self.assertEqual(422, rejected.status_code, rejected.text)
+        self.assertIn("manual bibliography resolution", rejected.text.lower())
+
     def test_upload_job_persists_status_and_links_mineru_usage(self) -> None:
         batch_id = str(uuid.uuid4())
         with TestClient(self.app) as client:
@@ -286,14 +348,16 @@ class LibraryV1Tests(unittest.TestCase):
             completed = self.wait_job(client, submitted_job["id"])
             self.assertEqual("succeeded", completed["status"])
             recent = client.get("/api/v1/library/upload-jobs/recent?limit=10")
-            removed_audit_route = client.get(
+            audit_route = client.get(
                 f"/api/v1/library/papers/{completed['result']['paper_id']}/bibliography-audit"
             )
 
         self.assertEqual(200, recent.status_code)
         self.assertEqual(submitted_job["id"], recent.json()["items"][0]["id"])
         self.assertEqual("persistent.pdf", recent.json()["items"][0]["filename"])
-        self.assertEqual(404, removed_audit_route.status_code)
+        self.assertEqual(200, audit_route.status_code)
+        self.assertEqual("bibliography_verification", audit_route.json()["task_kind"])
+        self.assertFalse(audit_route.json()["adds_candidate_papers"])
         self.assertEqual(
             {
                 "batch_id": batch_id,
@@ -329,7 +393,13 @@ class LibraryV1Tests(unittest.TestCase):
                 )
             ).all()
         self.assertIsNotNone(usage)
-        self.assertEqual([], audit_jobs)
+        self.assertEqual(1, len(audit_jobs))
+        self.assertEqual(
+            "bibliography_verification", audit_jobs[0].payload_json["task_kind"]
+        )
+        self.assertFalse(audit_jobs[0].payload_json["adds_candidate_papers"])
+        self.assertEqual("fallback", audit_jobs[0].payload_json["network_mode"])
+        self.assertTrue(audit_jobs[0].payload_json["markdown_relative_path"])
         self.assertEqual(uuid.UUID(submitted_job["id"]), usage.job_id)
         staging = (
             self.settings.hosted_workspace_root
@@ -372,6 +442,238 @@ class LibraryV1Tests(unittest.TestCase):
         with self.sessions() as session:
             self.assertEqual(1, session.query(LibraryDocumentIndex).count())
             self.assertGreater(session.query(LibraryDocumentChunk).count(), 0)
+
+        relevance = self.app.state.library_index_service.retrieve_paper_relevance(
+            self.first,
+            [
+                {
+                    "query_id": "topic_core",
+                    "kind": "topic_core",
+                    "label": "Core topic",
+                    "query": "allene keyword",
+                }
+            ],
+            [admitted.json()["paper_id"]],
+        )
+        paper_id = admitted.json()["paper_id"]
+        self.assertIn(paper_id, relevance["papers"])
+        self.assertIn(
+            "fulltext_lexical",
+            relevance["papers"][paper_id]["retrieval_channels"],
+        )
+        self.assertEqual("disabled", relevance["semantic_status"])
+
+        partition_cannot_admit = self.app.state.library_index_service.retrieve_paper_relevance(
+            self.first,
+            [
+                {
+                    "query_id": "partition_01",
+                    "kind": "topic_partition",
+                    "label": "Allene partition",
+                    "query": "allene keyword",
+                },
+                {
+                    "query_id": "topic_core",
+                    "kind": "topic_core",
+                    "label": "Core topic",
+                    "query": "definitely_missing_topic_token",
+                },
+            ],
+            [paper_id],
+        )
+        self.assertNotIn(paper_id, partition_cannot_admit["papers"])
+
+        partition_annotated = self.app.state.library_index_service.retrieve_paper_relevance(
+            self.first,
+            [
+                {
+                    "query_id": "partition_01",
+                    "kind": "topic_partition",
+                    "label": "Allene partition",
+                    "query": "allene keyword",
+                },
+                {
+                    "query_id": "topic_core",
+                    "kind": "topic_core",
+                    "label": "Core topic",
+                    "query": "allene keyword",
+                },
+            ],
+            [paper_id],
+        )
+        self.assertEqual(
+            relevance["papers"][paper_id]["rrf_score"],
+            partition_annotated["papers"][paper_id]["rrf_score"],
+        )
+        self.assertEqual(
+            ["partition_01"],
+            partition_annotated["papers"][paper_id]["matched_partitions"],
+        )
+
+    def test_semantic_backfill_plan_is_user_scoped_bounded_and_detects_model_drift(self) -> None:
+        class EmbeddingProfile:
+            @staticmethod
+            def embedding_profile() -> dict[str, object]:
+                return {
+                    "profile": "retrieval_embedding",
+                    "enabled": True,
+                    "model": "embedding-current",
+                    "dimension": 3,
+                }
+
+        with TestClient(self.app) as client:
+            admitted = self.upload(client, "semantic-history.pdf", fake_pdf(b"S"))
+            self.wait_job(client, admitted.json()["index_job_id"])
+        paper_id = admitted.json()["paper_id"]
+        service = self.app.state.library_index_service
+        service.vector_enabled = True
+        service.embedding_profile_provider = EmbeddingProfile()
+
+        plan = service.semantic_backfill_plan(self.first, limit=1)
+
+        self.assertEqual("pending", plan["status"])
+        self.assertEqual([paper_id], plan["paper_ids"])
+        self.assertEqual(1, plan["pending_count"])
+        self.assertEqual(0, plan["ready_count"])
+        self.assertEqual(0, service.semantic_backfill_plan(self.second)["total_count"])
+        marked = service.mark_semantic_backfill_queued(
+            self.first,
+            [paper_id],
+            profile="retrieval_embedding",
+            model="embedding-current",
+            dimension=3,
+        )
+        self.assertEqual(1, marked)
+        with self.sessions.begin() as session:
+            index = session.scalar(
+                select(LibraryDocumentIndex).where(
+                    LibraryDocumentIndex.user_id == uuid.UUID(self.first.user_id),
+                    LibraryDocumentIndex.paper_id == paper_id,
+                    LibraryDocumentIndex.is_current.is_(True),
+                )
+            )
+            self.assertIsNotNone(index)
+            self.assertEqual("queued", index.semantic_status)
+            index.semantic_status = "ready"
+            index.embedding_profile = "retrieval_embedding"
+            index.embedding_model_snapshot = "embedding-obsolete"
+            index.embedding_dimension = 3
+        self.assertEqual(
+            "pending", service.semantic_backfill_plan(self.first)["status"]
+        )
+        with self.sessions.begin() as session:
+            index = session.scalar(
+                select(LibraryDocumentIndex).where(
+                    LibraryDocumentIndex.user_id == uuid.UUID(self.first.user_id),
+                    LibraryDocumentIndex.paper_id == paper_id,
+                    LibraryDocumentIndex.is_current.is_(True),
+                )
+            )
+            index.embedding_model_snapshot = "embedding-current"
+        complete = service.semantic_backfill_plan(self.first)
+        self.assertEqual("complete", complete["status"])
+        self.assertEqual(1, complete["ready_count"])
+
+        with self.sessions.begin() as session:
+            index = session.scalar(
+                select(LibraryDocumentIndex).where(
+                    LibraryDocumentIndex.user_id == uuid.UUID(self.first.user_id),
+                    LibraryDocumentIndex.paper_id == paper_id,
+                    LibraryDocumentIndex.is_current.is_(True),
+                )
+            )
+            blocked_at = utc_now()
+            index.semantic_status = "failed"
+            index.semantic_error_code = "INSUFFICIENT_CREDIT"
+            index.updated_at = blocked_at
+            account = session.get(
+                UserCreditAccount, uuid.UUID(self.first.user_id)
+            )
+            if account is None:
+                account = UserCreditAccount(
+                    user_id=uuid.UUID(self.first.user_id),
+                    balance_usd=Decimal("0"),
+                )
+                session.add(account)
+            account.updated_at = blocked_at - timedelta(minutes=1)
+        blocked = service.semantic_backfill_plan(self.first)
+        self.assertEqual("blocked_credit", blocked["status"])
+        self.assertEqual([], blocked["paper_ids"])
+        with self.sessions.begin() as session:
+            account = session.get(
+                UserCreditAccount, uuid.UUID(self.first.user_id)
+            )
+            account.balance_usd = Decimal("1")
+            account.updated_at = utc_now() + timedelta(seconds=1)
+        resumed = service.semantic_backfill_plan(self.first)
+        self.assertEqual("pending", resumed["status"])
+        self.assertEqual([paper_id], resumed["paper_ids"])
+
+    def test_library_query_automatically_submits_semantic_backfill_batch(self) -> None:
+        class EmbeddingProfile:
+            @staticmethod
+            def embedding_profile() -> dict[str, object]:
+                return {
+                    "profile": "retrieval_embedding",
+                    "enabled": True,
+                    "model": "embedding-current",
+                    "dimension": 3,
+                }
+
+        with TestClient(self.app) as client:
+            admitted = self.upload(client, "semantic-auto.pdf", fake_pdf(b"V"))
+            self.wait_job(client, admitted.json()["index_job_id"])
+            service = self.app.state.library_index_service
+            service.vector_enabled = True
+            service.embedding_profile_provider = EmbeddingProfile()
+            listing = client.get("/api/v1/library/papers")
+
+        self.assertEqual(200, listing.status_code, listing.text)
+        backfill = listing.json()["semantic_backfill"]
+        self.assertTrue(backfill["enabled"])
+        self.assertEqual(
+            "library.semantic-backfill", backfill["current_job"]["job_type"]
+        )
+        self.assertIn(backfill["status"], {"queued", "running", "succeeded"})
+
+    def test_semantic_embedding_credit_failure_is_sanitized_and_not_retryable_until_balance_changes(self) -> None:
+        class InsufficientCreditGateway:
+            @staticmethod
+            def embedding_profile() -> dict[str, object]:
+                return {
+                    "profile": "retrieval_embedding",
+                    "enabled": True,
+                    "model": "embedding-current",
+                    "dimension": 3,
+                }
+
+            @staticmethod
+            def embed_for_active_job(*_args, **_kwargs):
+                raise RuntimeError(
+                    'HTTP 402: {"code":"INSUFFICIENT_CREDIT","message":"余额不足"}'
+                )
+
+        with TestClient(self.app) as client:
+            admitted = self.upload(client, "semantic-credit.pdf", fake_pdf(b"C"))
+            self.wait_job(client, admitted.json()["index_job_id"])
+        paper_id = admitted.json()["paper_id"]
+        service = self.app.state.library_index_service
+        service.vector_enabled = True
+        service.embedding_gateway = InsufficientCreditGateway()
+        service.embedding_profile_provider = service.embedding_gateway
+        service._vector_available = True
+
+        result = service.build_embeddings(self.first, paper_id)
+
+        self.assertEqual("failed", result["status"])
+        self.assertEqual("INSUFFICIENT_CREDIT", result["error_code"])
+        self.assertNotIn("HTTP 402", result["error"])
+        status_payload = service.status(self.first, paper_id)
+        self.assertEqual("INSUFFICIENT_CREDIT", status_payload["semantic_error_code"])
+        self.assertNotIn("HTTP 402", status_payload["semantic_error_message"])
+        self.assertEqual(
+            "blocked_credit", service.semantic_backfill_plan(self.first)["status"]
+        )
 
     def test_metadata_update_does_not_rebuild_document_chunks(self) -> None:
         with TestClient(self.app) as client:

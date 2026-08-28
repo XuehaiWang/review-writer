@@ -131,7 +131,7 @@ docker compose --env-file .env.hosted ps
 - 应用：<http://127.0.0.1:8770/>
 - 健康检查：<http://127.0.0.1:8770/api/v1/health>
 
-Compose 会同时启动 PostgreSQL、迁移任务、API、Worker、模型网关和 PDF 渲染器。
+Compose 会同时启动 PostgreSQL、迁移任务、API、模型网关、PDF 渲染器，以及三个相互隔离的 Worker 池：科学写作、文献索引/文档发布、图片处理。默认并发分别为 `2 / 2 / 1`，可通过 `.env.hosted` 中的 `REVIEW_WRITER_SCIENTIFIC_WORKERS`、`REVIEW_WRITER_INGEST_DOCUMENT_WORKERS` 和 `REVIEW_WRITER_IMAGE_WORKERS` 调整。
 
 ### 4. 局域网访问
 
@@ -164,7 +164,7 @@ docker compose --env-file .env.hosted up -d --build
 查看日志：
 
 ```powershell
-docker compose --env-file .env.hosted logs -f api worker model-gateway
+docker compose --env-file .env.hosted logs -f api worker worker-ingest-document worker-image model-gateway
 ```
 
 停止服务：

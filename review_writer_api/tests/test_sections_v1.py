@@ -26,6 +26,7 @@ from review_writer_api.workflow_models import (
     LibraryPaper,
 )
 from review_writer_api.domain_services.planning import BLUEPRINT_LOGICAL_NAME
+from review_writer_api.domain_services.sections import _merge_evidence_registry_row
 
 
 TEST_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("=")
@@ -461,6 +462,28 @@ class SectionsV1Tests(unittest.TestCase):
         ]
         self.assertEqual(len(primary_occurrences), len(set(primary_occurrences)))
 
+    def test_generation_payload_carries_executable_scope_and_fingerprint(self) -> None:
+        payload = self.app.state.sections_service.generation_payload(
+            self.first, self.project_id
+        )
+
+        contract = payload["writing_scope_contract"]
+        self.assertEqual("active", contract["status"])
+        self.assertTrue(contract["target_question"])
+        self.assertTrue(contract["review_objective"])
+        self.assertTrue(contract["target_readers"])
+        self.assertTrue(contract["required_reader_outcomes"])
+        self.assertEqual(
+            contract,
+            payload["blueprint"]["writing_scope_contract"],
+        )
+        self.assertEqual(
+            contract["fingerprint"],
+            payload["run_input_snapshot"][
+                "writing_scope_contract_fingerprint"
+            ],
+        )
+
     def test_legacy_blueprint_is_normalized_before_section_generation(self) -> None:
         tasks = self.app.state.sections_service.tasks_from_blueprint(
             {
@@ -638,6 +661,14 @@ class SectionsV1Tests(unittest.TestCase):
             all(section["retrieval_mode"] == "lexical" for section in package["sections"])
         )
         self.assertTrue(
+            all(
+                section["evidence_status_granularity"] == "paper_section_question"
+                and section["question_evidence_states"]
+                for section in package["sections"]
+                if section["primary_paper_count"]
+            )
+        )
+        self.assertTrue(
             any(
                 hit["page_start"] >= 80
                 for section in package["sections"]
@@ -723,6 +754,130 @@ class SectionsV1Tests(unittest.TestCase):
             all(len(plan["websearch_query"]) < 1000 for plan in section["query_plans"])
         )
 
+    def test_relaxed_question_match_is_retained_as_claim_eligible_evidence(self) -> None:
+        self._seed_document_indexes()
+        with self.sessions.begin() as session:
+            chunks = {
+                chunk.paper_id: chunk
+                for chunk in session.query(LibraryDocumentChunk).all()
+            }
+            chunks["P002"].content = (
+                "A control experiment supports a stepwise mechanism through an "
+                "observable intermediate."
+            )
+            chunks["P002"].normalized_content = chunks["P002"].content.casefold()
+
+        service = self.app.state.sections_service
+        catalog = service._catalog(self.first, ["P002"])
+        package = service._evidence_package(
+            self.first,
+            self.project_id,
+            [
+                {
+                    "section_id": "S02",
+                    "heading": "Selective allene anchor",
+                    "core_argument": "Compare the primary evidence.",
+                    "must_cover_points": [],
+                    "primary_papers": ["P002"],
+                    "supporting_papers": [],
+                    "allowed_papers": ["P002"],
+                }
+            ],
+            catalog,
+        )
+
+        section = package["sections"][0]
+        recovered = next(
+            hit
+            for hit in section["hits"]
+            if hit["paper_id"] == "P002"
+            and "question_terms_relaxed_recovery" in hit["retrieval_passes"]
+        )
+        self.assertTrue(recovered["claim_eligible"])
+        self.assertEqual("direct", recovered["support_level"])
+        self.assertIn("mechanism", recovered["question_ids"])
+        mechanism = next(
+            plan
+            for plan in section["query_plans"]
+            if plan["question_id"] == "mechanism"
+        )
+        self.assertEqual("sufficient", mechanism["status"])
+        self.assertEqual(["P002"], mechanism["matched_primary_papers"])
+        relaxed_attempt = next(
+            item
+            for item in mechanism["retrieval_attempts"]
+            if item["mode"] == "question_terms_relaxed_recovery"
+        )
+        self.assertEqual(["P002"], relaxed_attempt["matched_primary_papers"])
+
+    def test_optional_question_requires_only_evidence_bearing_primary_papers(self) -> None:
+        self._seed_document_indexes()
+        with self.sessions.begin() as session:
+            chunks = {
+                chunk.paper_id: chunk
+                for chunk in session.query(LibraryDocumentChunk).all()
+            }
+            chunks["P001"].content = (
+                "Selective allene anchor evidence establishes substrate scope and "
+                "functional group tolerance."
+            )
+            chunks["P001"].normalized_content = chunks["P001"].content.casefold()
+            for paper_id in ("P002", "P003"):
+                chunks[paper_id].content = (
+                    f"Selective allene anchor evidence for {paper_id}."
+                )
+                chunks[paper_id].normalized_content = chunks[
+                    paper_id
+                ].content.casefold()
+
+        service = self.app.state.sections_service
+        paper_ids = ["P001", "P002", "P003"]
+        catalog = service._catalog(self.first, paper_ids)
+        package = service._evidence_package(
+            self.first,
+            self.project_id,
+            [
+                {
+                    "section_id": "S02",
+                    "heading": "Selective allene anchor",
+                    "core_argument": "Compare the primary evidence.",
+                    "must_cover_points": [],
+                    "primary_papers": paper_ids,
+                    "supporting_papers": [],
+                    "allowed_papers": paper_ids,
+                }
+            ],
+            catalog,
+        )
+
+        section = package["sections"][0]
+        focus = next(
+            plan
+            for plan in section["query_plans"]
+            if plan["question_id"] == "section_focus"
+        )
+        scope = next(
+            plan
+            for plan in section["query_plans"]
+            if plan["question_id"] == "scope"
+        )
+        limitations = next(
+            plan
+            for plan in section["query_plans"]
+            if plan["question_id"] == "limitations"
+        )
+        self.assertEqual("all_primary", focus["coverage_policy"])
+        self.assertEqual("sufficient", focus["status"])
+        self.assertEqual("evidence_bearing", scope["coverage_policy"])
+        self.assertFalse(scope["required_for_section"])
+        self.assertEqual("sufficient", scope["status"])
+        self.assertEqual(["P001"], scope["expected_primary_papers"])
+        self.assertEqual(["P001"], scope["matched_primary_papers"])
+        self.assertEqual("not_required", scope["diagnostics_by_primary_paper"]["P002"])
+        self.assertEqual("not_required", scope["diagnostics_by_primary_paper"]["P003"])
+        self.assertEqual("not_reported", limitations["status"])
+        self.assertNotIn("limitations", section["corpus_gap_questions"])
+
     def test_academic_validation_uses_section_scoped_evidence_role(self) -> None:
         evidence_key = "sha256:" + "a" * 64
         payload = {
@@ -803,6 +958,156 @@ class SectionsV1Tests(unittest.TestCase):
                 payload, built, synthesis_state, writing_plan, evidence_package
             )
 
+        payload["writing_scope_contract"] = {"fingerprint": "sha256:expected"}
+        writing_plan["writing_scope_contract_fingerprint"] = "sha256:different"
+        with self.assertRaisesRegex(
+            WorkflowValidationError,
+            "different review Scope",
+        ):
+            self.app.state.sections_service._validate_academic_bundle(
+                payload, built, synthesis_state, writing_plan, evidence_package
+            )
+
+    def test_evidence_registry_merges_fact_identities_across_sections(self) -> None:
+        evidence_key = "sha256:" + "b" * 64
+        registry: dict[str, dict] = {}
+
+        _merge_evidence_registry_row(
+            registry,
+            {
+                "evidence_key": evidence_key,
+                "paper_id": "P001",
+                "support_level": "context_only",
+                "claim_eligible": False,
+                "counts_as_evidence": False,
+                "question_ids": ["section_focus"],
+                "fact_ids": [],
+            },
+        )
+        _merge_evidence_registry_row(
+            registry,
+            {
+                "evidence_key": evidence_key,
+                "paper_id": "P001",
+                "support_level": "direct",
+                "claim_eligible": True,
+                "counts_as_evidence": True,
+                "question_ids": ["scope"],
+                "fact_ids": ["MF-1", "MF-2"],
+            },
+        )
+
+        merged = registry[evidence_key]
+        self.assertEqual(["MF-1", "MF-2"], merged["fact_ids"])
+        self.assertEqual(["section_focus", "scope"], merged["question_ids"])
+        self.assertEqual("direct", merged["support_level"])
+        self.assertTrue(merged["claim_eligible"])
+
+    def test_conclusion_claim_inherits_body_fact_identity_for_same_evidence_key(
+        self,
+    ) -> None:
+        evidence_key = "sha256:" + "c" * 64
+        payload = {
+            "tasks": [
+                {"section_id": "S02", "section_role": "body"},
+                {"section_id": "S03", "section_role": "conclusion"},
+            ]
+        }
+        built = {
+            "sections": [
+                {
+                    "section_id": section_id,
+                    "paragraphs": [
+                        {
+                            "paragraph_id": f"{section_id}-p1",
+                            "claim_realizations": [
+                                {"claim_id": f"{section_id}-p1-C01"}
+                            ],
+                        }
+                    ],
+                }
+                for section_id in ("S02", "S03")
+            ]
+        }
+
+        def planned_section(section_id: str) -> dict:
+            return {
+                "section_id": section_id,
+                "paragraphs": [{"paragraph_id": f"{section_id}-p1"}],
+                "claims": [
+                    {
+                        "claim_id": f"{section_id}-p1-C01",
+                        "paragraph_id": f"{section_id}-p1",
+                        "support_status": "supported",
+                        "citation_group": ["P001"],
+                        "evidence_refs": [{"evidence_key": evidence_key}],
+                        "fact_ids": ["MF-1"],
+                    }
+                ],
+            }
+
+        writing_plan = {
+            "planning_mode": "evidence_first",
+            "sections": [planned_section("S02"), planned_section("S03")],
+        }
+        synthesis_state = {
+            "sections": [
+                {"section_id": "S02", "components": []},
+                {"section_id": "S03", "components": []},
+            ]
+        }
+        evidence_package = {
+            "evidence_registry": [
+                {
+                    "evidence_key": evidence_key,
+                    "paper_id": "P001",
+                    "claim_eligible": True,
+                    "fact_ids": ["MF-1"],
+                }
+            ],
+            "sections": [
+                {
+                    "section_id": "S02",
+                    "retrieval_mode": "lexical",
+                    "hits": [
+                        {
+                            "evidence_key": evidence_key,
+                            "paper_id": "P001",
+                            "claim_eligible": True,
+                            "fact_ids": ["MF-1"],
+                        }
+                    ],
+                },
+                {
+                    "section_id": "S03",
+                    "retrieval_mode": "lexical",
+                    "hits": [
+                        {
+                            "evidence_key": evidence_key,
+                            "paper_id": "P001",
+                            "claim_eligible": True,
+                            # The synthesis query found the same chunk but did
+                            # not independently retag its body fact identity.
+                            "fact_ids": [],
+                        }
+                    ],
+                },
+            ],
+        }
+
+        self.app.state.sections_service._validate_academic_bundle(
+            payload, built, synthesis_state, writing_plan, evidence_package
+        )
+
+        writing_plan["sections"][1]["claims"][0]["fact_ids"] = ["MF-OTHER"]
+        with self.assertRaisesRegex(
+            WorkflowValidationError,
+            "fact identities outside its evidence keys",
+        ):
+            self.app.state.sections_service._validate_academic_bundle(
+                payload, built, synthesis_state, writing_plan, evidence_package
+            )
+
     def test_conclusion_inherits_only_claim_eligible_body_chunks(self) -> None:
         tasks = {
             "S01": {"section_id": "S01", "section_role": "introduction"},
@@ -869,6 +1174,30 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertEqual(2, len(scope["term_groups"]))
         self.assertIn(" OR ", scope["websearch_query"])
         self.assertNotIn("Compare scope and mechanisms", scope["websearch_query"])
+
+    def test_question_query_plan_expands_quoted_compounds_and_focus_terms(self) -> None:
+        service = self.app.state.sections_service
+        plans = service._evidence_queries(
+            {
+                "section_id": "S02",
+                "section_role": "body",
+                "heading": "",
+                "core_argument": "",
+                "must_cover_points": [],
+            },
+            review_topic=(
+                'Write a review on "allenation-of-terminal-alkynes (ATA)", '
+                "focusing on terminal alkyne methods that form substituted allenes."
+            ),
+        )
+
+        core_group = plans[0]["term_groups"][0]
+        self.assertIn("alkyne", core_group)
+        self.assertIn("allenes", core_group)
+        self.assertIn("allene", core_group)
+        self.assertNotEqual(
+            ["allenation-of-terminal-alkynes (ata)", "ata"], core_group
+        )
 
     def test_unknown_chunk_citation_is_rejected_before_publish(self) -> None:
         self._seed_document_indexes()

@@ -28,7 +28,7 @@ type ProviderDraft = {
   enabled: boolean;
 };
 
-const providerOrder: ProviderKind[] = ["text", "image", "mineru"];
+const providerOrder: ProviderKind[] = ["text", "image", "embedding", "mineru"];
 
 function draftFrom(record: ProviderSettings): ProviderDraft {
   return {
@@ -101,7 +101,9 @@ function ProviderEditor({ record }: { record: ProviderSettings }) {
     ? text("文本生成服务", "Text generation")
     : record.provider_kind === "image"
       ? text("图像生成服务", "Image generation")
-      : text("MinerU 文档解析", "MinerU parsing");
+      : record.provider_kind === "embedding"
+        ? text("语义检索向量服务", "Semantic retrieval embeddings")
+        : text("MinerU 文档解析", "MinerU parsing");
 
   return (
     <article className="admin-provider-card">
@@ -136,14 +138,15 @@ function ProviderEditor({ record }: { record: ProviderSettings }) {
               onChange={(event) => setDraft({ ...draft, wire_api: event.target.value })}
             >
               {record.provider_kind === "text" ? <option value="responses">Responses</option> : null}
-              <option value="chat-completions">Chat Completions</option>
+              {record.provider_kind !== "embedding" ? <option value="chat-completions">Chat Completions</option> : null}
               {record.provider_kind === "image" ? <option value="images">Images API</option> : null}
+              {record.provider_kind === "embedding" ? <option value="embeddings">Embeddings API</option> : null}
             </select>
           </label>
         ) : null}
-        {record.provider_kind === "image" ? (
+        {record.provider_kind === "image" || record.provider_kind === "embedding" ? (
           <label>
-            <span>{text("图像模型", "Image model")}</span>
+            <span>{record.provider_kind === "embedding" ? text("向量模型", "Embedding model") : text("图像模型", "Image model")}</span>
             <input
               value={draft.model_name}
               disabled={busy}

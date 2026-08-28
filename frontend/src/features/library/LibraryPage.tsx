@@ -227,6 +227,16 @@ function DocumentIndexStatus({ paper }: { paper: LibraryPaper }) {
     failed: text("失败", "Failed"),
     rebuild_required: text("需要重建", "Rebuild required"),
   };
+  const semanticLabels: Record<string, string> = {
+    disabled: text("未启用", "Disabled"),
+    not_indexed: text("未建立", "Not indexed"),
+    queued: text("等待中", "Queued"),
+    pending: text("等待构建", "Pending"),
+    building: text("构建中", "Building"),
+    ready: text("已就绪", "Ready"),
+    failed: text("构建失败，已回退全文", "Failed; lexical fallback"),
+    unavailable: text("服务不可用，已回退全文", "Unavailable; lexical fallback"),
+  };
   return (
     <div className="document-index-status" aria-live="polite">
       <span className={index?.mineru === "ready" ? "ready" : "disabled"}>
@@ -235,7 +245,14 @@ function DocumentIndexStatus({ paper }: { paper: LibraryPaper }) {
       <span className={index?.fulltext === "ready" ? "ready" : ["failed", "rebuild_required"].includes(index?.fulltext || "") ? "failed" : "pending"} title={index?.error_message || ""}>
         <b>{text("全文索引", "Full-text index")}</b>{fulltextLabels[index?.fulltext || "not_indexed"]}{index?.fulltext === "ready" ? ` · ${index.chunk_count} chunks` : ""}
       </span>
-      <span className="disabled"><b>{text("语义索引", "Semantic index")}</b>{text("未启用", "Disabled")}</span>
+      <span
+        className={index?.semantic === "ready" ? "ready" : ["failed", "unavailable"].includes(index?.semantic || "") ? "failed" : index?.semantic === "disabled" ? "disabled" : "pending"}
+        title={index?.semantic_error_message || ""}
+      >
+        <b>{text("语义索引", "Semantic index")}</b>
+        {semanticLabels[index?.semantic || "disabled"]}
+        {index?.semantic === "ready" ? ` · ${index.embedding_count || 0} vectors` : ""}
+      </span>
     </div>
   );
 }
@@ -406,6 +423,7 @@ export function LibraryPage() {
   }, [localUploads, uploadJobs.data?.items, uploadStatusNow]);
   const library = useQuery(libraryQuery(query));
   const libraryIndex = useQuery(libraryQuery(""));
+  const semanticBackfill = libraryIndex.data?.semantic_backfill || library.data?.semantic_backfill;
   const paperLabels = useMemo(
     () => buildPaperDisplayLabels(libraryIndex.data?.items || library.data?.items || []),
     [library.data?.items, libraryIndex.data?.items],
@@ -576,7 +594,32 @@ export function LibraryPage() {
         <section className="pane list-pane">
           <div className="pane-head"><div><span className="step-label">{text("论文", "Papers")}</span><h2>{text("文献", "Papers")} <span aria-live="polite">{libraryIndex.data?.count ?? library.data?.count ?? 0}</span></h2></div></div>
           <input className="pane-search" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={text("检索标题、作者、关键词或正文", "Search title, author, keyword, or full text")} />
-          {library.error ? <ErrorState error={library.error} onRetry={() => library.refetch()} /> : null}
+          <div className="list-pane-notices" aria-live="polite">
+            {library.error ? <ErrorState error={library.error} onRetry={() => library.refetch()} /> : null}
+            {semanticBackfill?.enabled && semanticBackfill.total_count > 0 && semanticBackfill.status !== "complete" ? (
+              <p className="message">
+                {["queued", "running", "cancel_requested"].includes(semanticBackfill.status)
+                  ? text(
+                    `正在后台补齐语义索引：${semanticBackfill.ready_count}/${semanticBackfill.total_count}`,
+                    `Completing semantic indexes in the background: ${semanticBackfill.ready_count}/${semanticBackfill.total_count}`,
+                  )
+                  : semanticBackfill.status === "blocked_credit"
+                    ? text(
+                      `余额不足，语义索引回填已暂停；充值后会自动继续。`,
+                      `Semantic indexing is paused because the balance is insufficient; it will continue automatically after a top-up.`,
+                    )
+                    : semanticBackfill.status === "waiting_retry"
+                    ? text(
+                      `语义索引将自动稍后重试：${semanticBackfill.ready_count}/${semanticBackfill.total_count}`,
+                      `Semantic indexing will retry automatically later: ${semanticBackfill.ready_count}/${semanticBackfill.total_count}`,
+                    )
+                    : text(
+                      `语义索引待后台处理：${semanticBackfill.pending_count} 篇`,
+                      `${semanticBackfill.pending_count} semantic indexes are waiting for background processing`,
+                    )}
+              </p>
+            ) : null}
+          </div>
           <div className="paper-list">{library.data?.items.map((paper) => <PaperListItem key={paper.paper_id} paper={paper} displayLabel={paperLabels.get(paper.paper_id) || paper.paper_id} selected={paper.paper_id === selectedPaper?.paper_id} onSelect={() => setSelectedId(paper.paper_id)} />)}</div>
         </section>
         <section className="pane detail-pane">

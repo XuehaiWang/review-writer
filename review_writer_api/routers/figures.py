@@ -285,6 +285,13 @@ def build_figures_router(
     ) -> dict[str, Any]:
         return figures_service.approve_successful(principal, project_id)
 
+    @router.post("/preserve-sources")
+    def preserve_sources(
+        project_id: str,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        return figures_service.preserve_all_sources(principal, project_id)
+
     @router.post("/confirm")
     def confirm_figures(
         project_id: str,

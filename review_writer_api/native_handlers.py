@@ -14,7 +14,8 @@ import uuid
 import urllib.error
 import urllib.request
 import zipfile
-from pathlib import Path
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from review_writer_api.model_gateway import ModelGatewayService
@@ -22,7 +23,15 @@ from review_writer_api.errors import LiteratureSearchFailed, WorkflowValidationE
 from review_writer_api.scientific_runner import ScientificRunFailed, ScientificRunner
 from review_writer_api.security import Principal, Role
 from review_writer_api.workspaces import HostedWorkspaceManager
+from review_writer_core.draft_bibliography import repair_numbered_references
 from review_writer_core.providers import DEFAULT_IMAGE_MODEL
+from review_writer_core.bibliography_audit import audit_bibliography
+from review_writer_core.paper_sources.service import default_connectors
+from review_writer_core.review_titles import build_publication_overview_text
+from review_writer_core.writing_contracts import (
+    CASE_PARAGRAPH_MAX_WORDS,
+    CASE_PARAGRAPH_MIN_WORDS,
+)
 
 
 SENSITIVE_KEY = re.compile(r"(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)", re.I)
@@ -50,6 +59,132 @@ EVALUATE_DRAFT_TIMEOUT_SECONDS = 30 * 60
 OPTIMIZE_DRAFT_MIN_TIMEOUT_SECONDS = 2 * 60 * 60
 OPTIMIZE_DRAFT_TIMEOUT_PER_ITERATION_SECONDS = 45 * 60
 OPTIMIZE_DRAFT_MAX_TIMEOUT_SECONDS = 6 * 60 * 60
+SECTION_GENERATION_MIN_TIMEOUT_SECONDS = 15 * 60
+SECTION_GENERATION_BASE_TIMEOUT_SECONDS = 5 * 60
+SECTION_GENERATION_TIMEOUT_PER_PENDING_SECTION_SECONDS = 6 * 60
+SECTION_GENERATION_MAX_TIMEOUT_SECONDS = 90 * 60
+
+
+def _matrix_live_payload(
+    status: dict[str, Any], checkpoint: dict[str, Any]
+) -> dict[str, Any]:
+    """Build a bounded, UI-safe view of completed Matrix extraction results."""
+
+    entries = checkpoint.get("entries")
+    entries = entries if isinstance(entries, dict) else {}
+    completed = status.get("completed_papers")
+    completed_ids = (
+        [str(item) for item in completed if str(item)]
+        if isinstance(completed, list)
+        else [str(item) for item in entries]
+    )
+    items: list[dict[str, Any]] = []
+    for paper_id in completed_ids:
+        entry = entries.get(paper_id)
+        result = entry.get("result") if isinstance(entry, dict) else None
+        if not isinstance(result, dict):
+            continue
+        facts = [item for item in result.get("facts") or [] if isinstance(item, dict)]
+        tags = result.get("evidence_backed_tags")
+        tag_count = (
+            sum(len(value) for value in tags.values() if isinstance(value, list))
+            if isinstance(tags, dict)
+            else 0
+        )
+        previews = []
+        for fact in facts[:3]:
+            value = str(fact.get("value") or "").strip()
+            previews.append(
+                {
+                    "fact_id": str(fact.get("fact_id") or ""),
+                    "field_id": str(fact.get("field_id") or "fact"),
+                    "value": value[:260] + ("…" if len(value) > 260 else ""),
+                    "support_level": str(fact.get("support_level") or ""),
+                }
+            )
+        automatic = result.get("automatic_resolution")
+        items.append(
+            {
+                "paper_id": paper_id,
+                "status": str(result.get("status") or "complete"),
+                "fact_count": len(facts),
+                "classification_count": tag_count,
+                "automatic_resolution_status": str(
+                    automatic.get("status") or ""
+                    if isinstance(automatic, dict)
+                    else ""
+                ),
+                "facts_preview": previews,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "phase": str(status.get("phase") or "extracting"),
+        "current": max(0, int(status.get("current") or 0)),
+        "total": max(0, int(status.get("total") or 0)),
+        "current_paper_id": str(status.get("current_paper_id") or ""),
+        "target_axis_ids": [
+            str(item) for item in status.get("target_axis_ids") or [] if str(item)
+        ],
+        "items": items,
+    }
+
+
+def _bibliography_source_names() -> tuple[str, ...]:
+    """Use public Crossref by default and keyed sources only when configured."""
+
+    names = ["crossref"]
+    if str(os.environ.get("OPENALEX_API_KEY") or "").strip():
+        names.append("openalex")
+    return tuple(names)
+
+
+def _bibliography_needs_bounded_agent(audit: Any) -> bool:
+    """Use one role-reading fallback only while automatic resolution is incomplete."""
+
+    if not isinstance(audit, dict):
+        return True
+    if str(audit.get("manual_review_status") or "") in {
+        "resolved",
+        "supporting_only",
+        "rejected",
+    }:
+        return False
+    missing = audit.get("automatic_resolution_missing_fields")
+    return str(audit.get("status") or "") != "verified" or bool(
+        isinstance(missing, list) and missing
+    )
+
+
+def _section_generation_timeout_seconds(
+    tasks: Any, resume_checkpoint: Any = None
+) -> int:
+    """Scale the subprocess budget to unfinished chapters, preserving resume gains."""
+
+    task_ids = {
+        str(task.get("section_id") or "").strip()
+        for task in tasks or []
+        if isinstance(task, dict) and str(task.get("section_id") or "").strip()
+    }
+    entries = (
+        resume_checkpoint.get("entries")
+        if isinstance(resume_checkpoint, dict)
+        else None
+    )
+    completed_ids = {
+        str(section_id)
+        for section_id, entry in (entries or {}).items()
+        if str(section_id) in task_ids and isinstance(entry, dict)
+    }
+    pending_count = max(1, len(task_ids - completed_ids))
+    calculated = (
+        SECTION_GENERATION_BASE_TIMEOUT_SECONDS
+        + pending_count * SECTION_GENERATION_TIMEOUT_PER_PENDING_SECTION_SECONDS
+    )
+    return min(
+        SECTION_GENERATION_MAX_TIMEOUT_SECONDS,
+        max(SECTION_GENERATION_MIN_TIMEOUT_SECONDS, calculated),
+    )
 
 
 def _literature_search_failure_message(error: ScientificRunFailed) -> str:
@@ -94,6 +229,7 @@ class NativeWorkflowHandlers:
         return {
             "library.search": self.library_search,
             "library.download": self.library_download,
+            "library.bibliography-audit": self.library_bibliography_audit,
             "discovery.search": self.discovery_search,
             "matrix.enrich": self.matrix_enrich,
             "sections.generate": self.sections_generate,
@@ -145,6 +281,147 @@ class NativeWorkflowHandlers:
             if str(os.environ.get(key) or "").strip()
         }
         return normal, secrets
+
+    def library_bibliography_audit(self, context, payload):
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            raise WorkflowValidationError("Bibliography audit requires current metadata.")
+
+        def library_file(raw_path: Any, label: str) -> Path:
+            root = self.workspaces.user_root(context.user_id).resolve()
+            relative = PurePosixPath(str(raw_path or ""))
+            if (
+                relative.is_absolute()
+                or not relative.parts
+                or any(part in {"", ".", ".."} for part in relative.parts)
+            ):
+                raise WorkflowValidationError(f"Bibliography audit {label} path is invalid.")
+            resolved = (root / Path(*relative.parts)).resolve()
+            try:
+                resolved.relative_to(root)
+            except ValueError as exc:
+                raise WorkflowValidationError(
+                    f"Bibliography audit {label} path is invalid."
+                ) from exc
+            if not resolved.is_file():
+                raise WorkflowValidationError(
+                    f"Bibliography audit {label} is unavailable."
+                )
+            return resolved
+
+        pdf_path = library_file(payload.get("pdf_relative_path"), "PDF")
+        markdown_path = library_file(payload.get("markdown_relative_path"), "Markdown")
+        staging = self._staging(context.user_id, context.job_id)
+        local_output = staging / "publication-date-extraction.json"
+        normal, secrets = self._text_gateway_environment(context)
+        context.report_progress(1, 6)
+        self.runner.run(
+            [
+                sys.executable,
+                "-m",
+                "review_writer_api.scientific_tasks",
+                "publication-date-extract",
+                "--pdf",
+                str(pdf_path),
+                "--markdown",
+                str(markdown_path),
+                "--filename",
+                str(pdf_path.name),
+                "--output",
+                str(local_output),
+            ],
+            cwd=self.root,
+            staging_directory=staging,
+            expected_outputs=("publication-date-extraction.json",),
+            env=normal,
+            secret_env=secrets,
+            cancel_requested=context.cancellation_requested,
+            timeout_seconds=5 * 60,
+        )
+        local_extraction = json.loads(local_output.read_text(encoding="utf-8"))
+        if not isinstance(local_extraction, dict):
+            raise WorkflowValidationError(
+                "Bibliography audit local publication extraction is invalid."
+            )
+        context.report_progress(2, 6)
+        result = audit_bibliography(
+            metadata,
+            connectors=default_connectors(_bibliography_source_names()),
+            pdf_path=pdf_path,
+            local_extraction=local_extraction,
+            network_mode=str(payload.get("network_mode") or "fallback"),
+            previous_audit=(
+                payload.get("previous_audit")
+                if isinstance(payload.get("previous_audit"), dict)
+                else None
+            ),
+        )
+        context.report_progress(3, 6)
+        agent_gateway_available = bool(
+            str(normal.get("REVIEW_WRITER_MODEL_GATEWAY_URL") or "").strip()
+            and str(secrets.get("REVIEW_WRITER_TASK_TOKEN") or "").strip()
+        )
+        if _bibliography_needs_bounded_agent(result) and agent_gateway_available:
+            metadata_input = staging / "bibliography-role-metadata.json"
+            role_output = staging / "bibliography-role-extraction.json"
+            self._write_json(metadata_input, metadata)
+            self.runner.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "review_writer_api.scientific_tasks",
+                    "bibliography-role-extract",
+                    "--markdown",
+                    str(markdown_path),
+                    "--metadata",
+                    str(metadata_input),
+                    "--output",
+                    str(role_output),
+                ],
+                cwd=self.root,
+                staging_directory=staging,
+                expected_outputs=("bibliography-role-extraction.json",),
+                env=normal,
+                secret_env=secrets,
+                cancel_requested=context.cancellation_requested,
+                timeout_seconds=5 * 60,
+            )
+            agent_extraction = json.loads(role_output.read_text(encoding="utf-8"))
+            if not isinstance(agent_extraction, dict):
+                raise WorkflowValidationError(
+                    "Bibliography role extraction result is invalid."
+                )
+            context.report_progress(4, 6)
+            if agent_extraction.get("fields"):
+                result = audit_bibliography(
+                    metadata,
+                    connectors=default_connectors(_bibliography_source_names()),
+                    pdf_path=pdf_path,
+                    local_extraction=local_extraction,
+                    document_agent_extraction=agent_extraction,
+                    network_mode=str(payload.get("network_mode") or "fallback"),
+                    previous_audit=result,
+                )
+                context.report_progress(5, 6)
+            else:
+                result = {
+                    **result,
+                    "document_agent_extraction": agent_extraction,
+                }
+        elif _bibliography_needs_bounded_agent(result):
+            result = {
+                **result,
+                "document_agent_extraction": {
+                    "schema_version": 1,
+                    "status": "unavailable",
+                    "method": "bounded_document_agent",
+                    "fields": {},
+                    "model_attempted": False,
+                    "model_error": "The internal model gateway is unavailable.",
+                },
+            }
+        context.repository.update_job_progress(context.job_id, 6, 6)
+        return result
 
     def _image_gateway_environment(self, context) -> tuple[dict[str, str], dict[str, str]]:
         if self.model_gateway is not None:
@@ -242,6 +519,24 @@ class NativeWorkflowHandlers:
         )
         section_index = dict(payload.get("section_index") or {})
         self._write_json(sections / "section_drafts.json", section_index)
+        self._write_json(
+            sections / "section_evidence.json",
+            dict(payload.get("section_evidence") or {}),
+        )
+        self._write_json(
+            sections / "writing_plan.json",
+            dict(payload.get("writing_plan") or {}),
+        )
+        self._write_json(
+            project / "project_config.json",
+            {
+                "schema_version": 1,
+                "project_id": project_id,
+                "taxonomy_profile": str(
+                    payload.get("taxonomy_profile") or "general_academic"
+                ),
+            },
+        )
         section_markdown = str(payload.get("section_drafts_md") or "").strip()
         if not section_markdown:
             section_markdown = str(payload.get(markdown_key) or "")
@@ -267,19 +562,41 @@ class NativeWorkflowHandlers:
         draft_text = self._replace_artifact_urls(
             str(payload.get(markdown_key) or ""), artifact_paths
         )
+        citation_identity = (
+            dict(payload.get("citation_identity") or {})
+            if isinstance(payload.get("citation_identity"), dict)
+            else {"entries": [], "unresolved_callouts": [], "conflicts": []}
+        )
+        reference_repair = {
+            "status": "not_requested",
+            "changed": False,
+            "entries": list(citation_identity.get("entries") or []),
+            "unresolved_callouts": list(
+                citation_identity.get("unresolved_callouts") or []
+            ),
+            "conflicts": list(citation_identity.get("conflicts") or []),
+        }
+        if bool(payload.get("repair_references")):
+            draft_text, reference_repair = repair_numbered_references(
+                draft_text,
+                citation_identity,
+                matrix,
+            )
+        self._write_json(first / "reference_repair.json", reference_repair)
+        (first / "deterministic_base_draft.md").write_text(
+            draft_text.rstrip() + "\n", encoding="utf-8"
+        )
         (first / "first_draft.md").write_text(
             draft_text.rstrip() + "\n", encoding="utf-8"
         )
         rewrite_overlays = payload.get("rewrite_overlays")
         if isinstance(rewrite_overlays, dict) and rewrite_overlays:
             self._write_json(first / "feedback_loop_rewrites.json", rewrite_overlays)
-        citations = []
-        for index, row in enumerate(matrix.get("rows") or matrix.get("papers") or [], 1):
-            if not isinstance(row, dict) or not row.get("paper_id"):
-                continue
-            citations.append(
-                {"paper_id": str(row["paper_id"]), "callout": index}
-            )
+        citations = list(
+            reference_repair.get("entries")
+            or citation_identity.get("entries")
+            or []
+        )
         self._write_json(first / "citations.json", {"entries": citations})
 
         metadata_directory = workspace / "review-library" / "metadata" / "papers"
@@ -388,6 +705,16 @@ class NativeWorkflowHandlers:
 
     def discovery_search(self, context, payload):
         staging = self._staging(context.user_id, context.job_id)
+        project_slug = self.workspaces.project_path(
+            context.user_id, str(payload["project_id"])
+        ).name
+        screening_cache_dir = self.workspaces.trusted_user_directory(
+            context.user_id,
+            ".review-writer",
+            "cache",
+            "discovery-screening",
+        )
+        query_plan_cache_file = screening_cache_dir / f"{project_slug}.query-plan.json"
         normal, secrets = self._text_gateway_environment(context)
         source_normal, source_secrets = self._paper_source_environment()
         normal.update(source_normal)
@@ -395,7 +722,7 @@ class NativeWorkflowHandlers:
         source_status_file = staging / "source-search-status.json"
         report_progress = getattr(context, "report_progress", None)
         if callable(report_progress):
-            report_progress(1, 4)
+            report_progress(1, 6)
         command = [
             sys.executable,
             str(
@@ -414,6 +741,8 @@ class NativeWorkflowHandlers:
             "--keywords",
             str(payload.get("keywords") or ""),
             "--auto-query-plan",
+            "--query-plan-cache",
+            str(query_plan_cache_file),
             "--output-project-dir",
             str(staging),
             "--source-status-file",
@@ -428,13 +757,13 @@ class NativeWorkflowHandlers:
             ).strip().casefold() in {"0", "false", "no", "off"}:
                 command.extend(["--sources", "crossref"])
         if callable(report_progress):
-            report_progress(2, 4)
+            report_progress(2, 6)
         previous_source_progress = ""
 
         def publish_discovery_progress() -> None:
             nonlocal previous_source_progress
             if callable(report_progress):
-                report_progress(2, 4)
+                report_progress(2, 6)
             if not source_status_file.is_file():
                 return
             try:
@@ -465,7 +794,7 @@ class NativeWorkflowHandlers:
             ),
         )
         if callable(report_progress):
-            report_progress(3, 4)
+            report_progress(3, 6)
         return self._result(staging, "00_discovery/combined_results_by_keyword.json")
 
     @staticmethod
@@ -506,6 +835,55 @@ class NativeWorkflowHandlers:
             except Exception:
                 # Progress reporting is observational and must never invalidate
                 # a scientifically valid result that is ready to publish.
+                return
+
+        return callback
+
+    @staticmethod
+    def _matrix_progress_callback(context, status_file: Path, checkpoint_file: Path):
+        """Publish live Matrix facts without exposing mutable staging paths."""
+
+        previous = ""
+
+        def callback() -> None:
+            nonlocal previous
+            try:
+                if not status_file.is_file():
+                    return
+                status = json.loads(status_file.read_text(encoding="utf-8"))
+                if not isinstance(status, dict):
+                    return
+                checkpoint = {}
+                if checkpoint_file.is_file():
+                    loaded = json.loads(checkpoint_file.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        checkpoint = loaded
+                fingerprint = json.dumps(
+                    {"status": status, "checkpoint": checkpoint},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                if fingerprint == previous:
+                    return
+                previous = fingerprint
+                current = max(0, int(status.get("current") or 0))
+                total = max(0, int(status.get("total") or 0))
+                if total:
+                    current = min(current, total)
+                if hasattr(context, "report_progress"):
+                    context.report_progress(current, total)
+                if hasattr(context, "report_partial_result"):
+                    result = {
+                        "matrix_enrichment_progress": status,
+                        "matrix_enrichment_live": _matrix_live_payload(
+                            status, checkpoint
+                        ),
+                    }
+                    if checkpoint:
+                        result["matrix_enrichment_checkpoint"] = checkpoint
+                    context.report_partial_result(result)
+            except Exception:
+                # Live reporting is observational and must never fail extraction.
                 return
 
         return callback
@@ -589,6 +967,9 @@ class NativeWorkflowHandlers:
             )
         else:
             checkpoint_file.unlink(missing_ok=True)
+        section_timeout_seconds = _section_generation_timeout_seconds(
+            payload.get("tasks"), resume_checkpoint
+        )
         self.runner.run(
             [
                 sys.executable,
@@ -619,7 +1000,7 @@ class NativeWorkflowHandlers:
             progress_callback=self._section_progress_callback(
                 context, progress_file, checkpoint_file
             ),
-            timeout_seconds=15 * 60,
+            timeout_seconds=section_timeout_seconds,
         )
         drafts = json.loads(
             (section_stage / "section_drafts.json").read_text(encoding="utf-8")
@@ -883,16 +1264,16 @@ class NativeWorkflowHandlers:
                 "--paragraph-goal",
                 str(float(payload.get("paragraph_goal") or 85)),
                 "--max-iterations",
-                str(int(payload.get("max_iterations") or 3)),
+                str(int(payload.get("max_iterations") or 2)),
                 "--min-case-words",
-                str(int(payload.get("min_case_words") or 140)),
+                str(int(payload.get("min_case_words") or CASE_PARAGRAPH_MIN_WORDS)),
                 "--max-case-words",
-                str(int(payload.get("max_case_words") or 280)),
+                str(int(payload.get("max_case_words") or CASE_PARAGRAPH_MAX_WORDS)),
             ]
         if evaluate_only:
             command.append("--evaluate-only")
         first = project / "04_first_draft"
-        max_iterations = int(payload.get("max_iterations") or 3)
+        max_iterations = int(payload.get("max_iterations") or 2)
         timeout_seconds = (
             EVALUATE_DRAFT_TIMEOUT_SECONDS
             if evaluate_only
@@ -925,6 +1306,79 @@ class NativeWorkflowHandlers:
             ),
             timeout_seconds=timeout_seconds,
         )
+        # The optimizer retains the best safe candidate per paragraph across
+        # iterations.  Their combined manuscript is a new composition, so the
+        # incremental candidate score is not authoritative.  Evaluate those
+        # exact bytes once as a complete draft before the API can auto-apply
+        # the proposal.
+        batch_review_file = first / "batch_review_candidates.json"
+        if not evaluate_only and batch_review_file.is_file():
+            batch_review = json.loads(
+                batch_review_file.read_text(encoding="utf-8")
+            )
+            review_changes = (
+                list(batch_review.get("changes") or [])
+                if isinstance(batch_review, dict)
+                else []
+            )
+            review_candidate = (
+                str(batch_review.get("candidate_draft_text") or "")
+                if isinstance(batch_review, dict)
+                else ""
+            )
+            if review_changes and review_candidate.strip():
+                status_path = first / "feedback_loop_status.json"
+                saved_status = (
+                    status_path.read_bytes() if status_path.is_file() else b""
+                )
+                (first / "first_draft.md").write_text(
+                    review_candidate.rstrip() + "\n", encoding="utf-8"
+                )
+                if hasattr(context, "report_partial_result"):
+                    context.report_partial_result(
+                        {
+                            "feedback_status": {
+                                "phase": "validating_full_draft",
+                                "review_candidate_count": len(review_changes),
+                            }
+                        }
+                    )
+                self.runner.run(
+                    [*command, "--evaluate-only"],
+                    cwd=self.root,
+                    staging_directory=staging,
+                    expected_outputs=(
+                        (relative_first / "rubric_evaluation.json").as_posix(),
+                        (relative_first / "reviewer_findings.json").as_posix(),
+                        (relative_first / "first_draft_gate_status.json").as_posix(),
+                        (relative_first / "first_draft_preflight.json").as_posix(),
+                        (relative_first / "original_source_check.json").as_posix(),
+                    ),
+                    env=normal,
+                    secret_env=secrets,
+                    cancel_requested=context.cancellation_requested,
+                    progress_callback=self._feedback_progress_callback(
+                        context,
+                        status_path,
+                        optimize=True,
+                    ),
+                    timeout_seconds=EVALUATE_DRAFT_TIMEOUT_SECONDS,
+                )
+                exact_evaluation = json.loads(
+                    (first / "rubric_evaluation.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                batch_review["candidate_score"] = round(
+                    float(exact_evaluation.get("total_score") or 0), 2
+                )
+                batch_review["full_draft_evaluated"] = True
+                batch_review["full_draft_evaluated_at"] = datetime.now(
+                    timezone.utc
+                ).isoformat()
+                self._write_json(batch_review_file, batch_review)
+                if saved_status:
+                    status_path.write_bytes(saved_status)
         evaluation = json.loads(
             (first / "rubric_evaluation.json").read_text(encoding="utf-8")
         )
@@ -975,6 +1429,21 @@ class NativeWorkflowHandlers:
             if status_file.is_file()
             else {}
         )
+        reference_repair_file = first / "reference_repair.json"
+        reference_repair = (
+            json.loads(reference_repair_file.read_text(encoding="utf-8"))
+            if reference_repair_file.is_file()
+            else {"status": "not_requested", "changed": False}
+        )
+        deterministic_base_file = first / "deterministic_base_draft.md"
+        deterministic_base_draft_text = (
+            self._restore_artifact_urls(
+                deterministic_base_file.read_text(encoding="utf-8"),
+                dict(payload.get("figure_artifact_paths") or {}),
+            )
+            if deterministic_base_file.is_file()
+            else str(payload.get("draft_text") or "")
+        )
         overlay_file = first / "feedback_loop_rewrites.json"
         rewrite_overlays = (
             json.loads(overlay_file.read_text(encoding="utf-8"))
@@ -1003,6 +1472,8 @@ class NativeWorkflowHandlers:
             "source_check": source_check,
             "gate": gate,
             "feedback_status": feedback_status,
+            "reference_repair": reference_repair,
+            "deterministic_base_draft_text": deterministic_base_draft_text,
         }
         if not evaluate_only:
             result["draft_text"] = self._restore_artifact_urls(
@@ -1023,6 +1494,9 @@ class NativeWorkflowHandlers:
                 )
                 result["review_excluded"] = list(
                     batch_review.get("excluded") or []
+                )
+                result["review_candidate_full_draft_evaluated"] = bool(
+                    batch_review.get("full_draft_evaluated")
                 )
         return result
 
@@ -1093,8 +1567,12 @@ class NativeWorkflowHandlers:
             or quality.get("paragraph_goal")
             or 85
         )
-        min_case_words = int(payload.get("min_case_words") or 140)
-        max_case_words = int(payload.get("max_case_words") or 280)
+        min_case_words = int(
+            payload.get("min_case_words") or CASE_PARAGRAPH_MIN_WORDS
+        )
+        max_case_words = int(
+            payload.get("max_case_words") or CASE_PARAGRAPH_MAX_WORDS
+        )
         raw_issues = payload.get("issues")
         if not isinstance(raw_issues, list):
             raw_issues = quality.get("issues") or []
@@ -1388,7 +1866,7 @@ class NativeWorkflowHandlers:
             env=normal,
             secret_env=secrets,
             cancel_requested=context.cancellation_requested,
-            progress_callback=self._section_progress_callback(
+            progress_callback=self._matrix_progress_callback(
                 context, progress_path, checkpoint_path
             ),
             timeout_seconds=max(
@@ -1462,9 +1940,9 @@ class NativeWorkflowHandlers:
                 "--paragraph-goal",
                 str(float(payload.get("paragraph_goal") or 85)),
                 "--min-case-words",
-                str(int(payload.get("min_case_words") or 140)),
+                str(int(payload.get("min_case_words") or CASE_PARAGRAPH_MIN_WORDS)),
                 "--max-case-words",
-                str(int(payload.get("max_case_words") or 280)),
+                str(int(payload.get("max_case_words") or CASE_PARAGRAPH_MAX_WORDS)),
             ],
             cwd=self.root,
             staging_directory=staging,
@@ -1607,30 +2085,33 @@ class NativeWorkflowHandlers:
         report = json.loads(report_path.read_text(encoding="utf-8"))
         features = report.get("features") if isinstance(report, dict) else {}
         features = features if isinstance(features, dict) else {}
-        labels: list[str] = []
-        for key in ("metal_categories", "group_by", "time_window"):
-            value = features.get(key)
-            values = value if isinstance(value, list) else [value]
-            labels.extend(str(item) for item in values if str(item or "").strip())
-        template = report.get("template")
-        template_name = str(report.get("selected_template_name") or "")
-        if not template_name and isinstance(template, dict):
-            template_name = str(template.get("name") or "")
         blueprint = payload.get("blueprint")
         blueprint = blueprint if isinstance(blueprint, dict) else {}
-        title = str(
+        raw_topic = str(
             blueprint.get("review_topic")
             or blueprint.get("topic")
             or blueprint.get("review_question")
+            or features.get("review_title")
             or project_id
+        )
+        basis = blueprint.get("classification_basis")
+        basis = basis if isinstance(basis, dict) else {}
+        editable_text = build_publication_overview_text(
+            raw_topic,
+            manuscript_title=features.get("display_title") or features.get("manuscript_title"),
+            group_by=features.get("group_by") or [],
+            classification_rule=(
+                features.get("classification_rule")
+                or basis.get("description")
+                or basis.get("primary_axis")
+                or basis.get("overview_axis")
+            ),
+            has_chirality=bool(features.get("has_chirality")),
+            has_reaction_focus=bool(features.get("has_reaction_focus")),
         )
         return {
             "output_path": str(output),
-            "editable_text": {
-                "title": title,
-                "subtitle": template_name,
-                "labels": list(dict.fromkeys(labels)),
-            },
+            "editable_text": editable_text,
             "report": report,
         }
 

@@ -448,6 +448,110 @@ class FiguresV1Tests(NativeFigureApiTestCase):
             ).all()
         self.assertEqual(1, len(approvals))
 
+    def test_preserve_all_sources_uses_originals_without_ai_redraw(self) -> None:
+        with TestClient(self.app) as client:
+            self.confirm_review(client)
+            preserved = client.post(
+                f"/api/v1/projects/{self.project_id}/figures/preserve-sources",
+                headers=self.headers("preserve-all-sources"),
+            )
+            current = client.get(
+                f"/api/v1/projects/{self.project_id}/figures"
+            ).json()
+            confirmed = client.post(
+                f"/api/v1/projects/{self.project_id}/figures/confirm",
+                json={"revision": current["revision"]},
+                headers=self.headers("confirm-preserved-sources"),
+            )
+
+        self.assertEqual(200, preserved.status_code, preserved.text)
+        self.assertEqual(1, preserved.json()["preserved_count"])
+        self.assertEqual(0, self.redraw_calls)
+        self.assertTrue(current["source_preservation"]["all_selected"])
+        self.assertEqual(1, current["source_preservation"]["preserved_count"])
+        row = current["redrawn_manifest"]["figures"][0]
+        self.assertTrue(row["source_preserved"])
+        self.assertFalse(row["ai_redraw_performed"])
+        self.assertEqual("source-original", row["render_mode"])
+        self.assertEqual(row["source_artifact_id"], row["output_artifact_id"])
+        self.assertEqual(
+            current["figure_candidates"][0]["source_image_url"],
+            row["redrawn_image_url"],
+        )
+        self.assertTrue(row["usable"])
+        self.assertEqual(200, confirmed.status_code, confirmed.text)
+        self.assertEqual("draft", confirmed.json()["next_stage"])
+
+    def test_preserve_all_sources_is_idempotent(self) -> None:
+        with TestClient(self.app) as client:
+            self.confirm_review(client)
+            first = client.post(
+                f"/api/v1/projects/{self.project_id}/figures/preserve-sources",
+                headers=self.headers("preserve-all-sources-first"),
+            )
+            second = client.post(
+                f"/api/v1/projects/{self.project_id}/figures/preserve-sources",
+                headers=self.headers("preserve-all-sources-second"),
+            )
+
+        self.assertEqual(200, first.status_code, first.text)
+        self.assertEqual(200, second.status_code, second.text)
+        self.assertEqual(0, second.json()["preserved_count"])
+        self.assertEqual(1, second.json()["already_preserved_count"])
+        self.assertEqual(
+            first.json()["manifest_artifact_id"],
+            second.json()["manifest_artifact_id"],
+        )
+
+    def test_preserve_sources_keeps_existing_ai_redraw_unchanged(self) -> None:
+        with TestClient(self.app) as client:
+            self.confirm_review(client)
+            self.add_second_confirmed_figure()
+            redraw = client.post(
+                f"/api/v1/projects/{self.project_id}/figures/P001-F02/jobs",
+                json={},
+                headers=self.headers("redraw-before-source-fill"),
+            )
+            self.assertEqual(202, redraw.status_code, redraw.text)
+            self.assertEqual(
+                "succeeded",
+                self.wait_job(client, redraw.json()["id"])["status"],
+            )
+            before = client.get(
+                f"/api/v1/projects/{self.project_id}/figures"
+            ).json()
+            before_rows = {
+                row["figure_id"]: row
+                for row in before["redrawn_manifest"]["figures"]
+            }
+            ai_output_id = before_rows["P001-F02"]["output_artifact_id"]
+
+            preserved = client.post(
+                f"/api/v1/projects/{self.project_id}/figures/preserve-sources",
+                headers=self.headers("fill-only-unprocessed-sources"),
+            )
+            after = client.get(
+                f"/api/v1/projects/{self.project_id}/figures"
+            ).json()
+
+        self.assertEqual(200, preserved.status_code, preserved.text)
+        self.assertEqual(1, preserved.json()["preserved_count"])
+        self.assertEqual(1, preserved.json()["retained_generated_count"])
+        after_rows = {
+            row["figure_id"]: row
+            for row in after["redrawn_manifest"]["figures"]
+        }
+        self.assertEqual(ai_output_id, after_rows["P001-F02"]["output_artifact_id"])
+        self.assertFalse(after_rows["P001-F02"].get("source_preserved", False))
+        self.assertTrue(after_rows["P001-F01"]["source_preserved"])
+        self.assertEqual(
+            after_rows["P001-F01"]["source_artifact_id"],
+            after_rows["P001-F01"]["output_artifact_id"],
+        )
+        self.assertEqual(1, after["source_preservation"]["generated_count"])
+        self.assertEqual(1, after["source_preservation"]["preserved_count"])
+        self.assertEqual(0, after["source_preservation"]["unprocessed_count"])
+
     def test_approval_audit_rolls_back_when_manifest_promotion_conflicts(self) -> None:
         self.integrity_status = "failed"
         with TestClient(self.app) as client:

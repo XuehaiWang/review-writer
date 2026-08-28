@@ -37,6 +37,7 @@ from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
 from review_writer_core.publication_caption import (
     canonical_figure_role,
+    figure_rights_fields,
     infer_figure_role,
     publication_caption_fields,
 )
@@ -1145,6 +1146,7 @@ class FiguresService:
                     context_title=item["figure"].get("section_heading"),
                 )
             )
+            row.update(figure_rights_fields(row))
             rows = [
                 old
                 for old in manifest.get("figures") or []
@@ -1213,6 +1215,8 @@ class FiguresService:
             if not isinstance(raw_row, dict):
                 continue
             row = deepcopy(raw_row)
+            for key, value in figure_rights_fields(row).items():
+                row.setdefault(key, value)
             figure_id = str(row.get("figure_id") or "")
             figure = selected.get(figure_id)
             if not figure:
@@ -1470,6 +1474,24 @@ class FiguresService:
             and row.get("manuscript_selected") is not False
             and str(row.get("figure_id") or "") not in excluded_ids
         }
+        source_preserved_ids = {
+            str(row.get("figure_id") or "")
+            for row in (manifest or {}).get("figures") or []
+            if isinstance(row, dict)
+            and row.get("source_preserved")
+            and row.get("source_artifact_id") == row.get("output_artifact_id")
+            and row.get("source_current")
+            and row.get("output_current")
+            and row.get("status") == "redrawn"
+        }
+        current_output_ids = {
+            str(row.get("figure_id") or "")
+            for row in (manifest or {}).get("figures") or []
+            if isinstance(row, dict)
+            and row.get("source_current")
+            and row.get("output_current")
+            and row.get("status") == "redrawn"
+        }
         return {
             "project_id": project_id,
             "figure_candidates": public_figures,
@@ -1504,6 +1526,15 @@ class FiguresService:
                 {"value": "scientific-plot", "label": "Scientific plot"},
                 {"value": "general-scientific", "label": "Overview"},
             ],
+            "source_preservation": {
+                "preserved_count": len(selected_ids & source_preserved_ids),
+                "generated_count": len(
+                    selected_ids & (current_output_ids - source_preserved_ids)
+                ),
+                "unprocessed_count": len(selected_ids - current_output_ids),
+                "all_selected": bool(selected_ids)
+                and selected_ids.issubset(source_preserved_ids),
+            },
             "freshness": {
                 "source_stale": False,
                 "redraw_stale": bool(selected_ids - usable),
@@ -1869,6 +1900,7 @@ class FiguresService:
                 "requires_human_chemistry_approval": True,
                 "updated_at": utc_now().isoformat(),
             }
+            row.update(figure_rights_fields(row))
             rows = [
                 old
                 for old in manifest.get("figures") or []
@@ -2150,6 +2182,215 @@ class FiguresService:
             "already_approved_count": len(already_approved),
             "skipped_count": len(skipped),
             "generation_failed_count": len(skipped),
+        }
+
+    def preserve_all_sources(
+        self, principal: Principal, project_id: str
+    ) -> dict[str, Any]:
+        """Keep existing outputs and use source artifacts for unprocessed figures."""
+
+        principal.require(Permission.PROJECT_WRITE)
+        with self._write_lock:
+            active_jobs = [
+                job
+                for job in self.repository.list_project_jobs(
+                    principal.user_id, project_id, job_type="figures.redraw"
+                )
+                if job.status in {"queued", "running", "cancel_requested"}
+            ]
+            if active_jobs:
+                raise WorkflowConflict(
+                    "Stop active figure generation before preserving all source images."
+                )
+
+            figures, inputs_artifact = self._selected_inputs(principal, project_id)
+            if not figures:
+                raise FigureReviewIncomplete(
+                    "Select at least one source figure before preserving originals."
+                )
+            manifest, manifest_artifact = self._current_manifest(
+                principal, project_id, inputs_artifact.id
+            )
+            current_rows = {
+                str(row.get("figure_id") or ""): row
+                for row in manifest.get("figures") or []
+                if isinstance(row, dict) and str(row.get("figure_id") or "")
+            }
+            preserved_rows: list[dict[str, Any]] = []
+            approval_events: list[dict[str, Any]] = []
+            preserved_count = 0
+            already_preserved_count = 0
+            retained_generated_count = 0
+            now = utc_now()
+
+            for figure in figures:
+                figure_id = str(figure.get("figure_id") or "").strip()
+                if not figure_id:
+                    continue
+                source_artifact, source_path = self._validate_candidate(
+                    principal, project_id, figure
+                )
+                existing = current_rows.get(figure_id) or {}
+                existing_output_id = str(
+                    existing.get("output_artifact_id") or ""
+                ).strip()
+                existing_output_current = False
+                if (
+                    existing.get("status") == "redrawn"
+                    and existing.get("source_artifact_id") == source_artifact.id
+                    and existing_output_id
+                ):
+                    try:
+                        self._artifact_path(
+                            principal, project_id, existing_output_id
+                        )
+                        existing_output_current = True
+                    except (WorkflowNotFound, WorkflowValidationError):
+                        existing_output_current = False
+                already_preserved = bool(
+                    existing_output_current
+                    and existing.get("source_preserved")
+                    and existing.get("source_artifact_id") == source_artifact.id
+                    and existing.get("output_artifact_id") == source_artifact.id
+                )
+                if already_preserved:
+                    preserved_rows.append(deepcopy(existing))
+                    already_preserved_count += 1
+                    continue
+                if existing_output_current:
+                    # An AI redraw or a manual edit already exists for this
+                    # current source. Keep it byte-for-byte and only fill the
+                    # figures that have no output yet.
+                    preserved_rows.append(deepcopy(existing))
+                    retained_generated_count += 1
+                    continue
+
+                source_size = image_size(source_path)
+                approval_id = str(uuid.uuid4())
+                approval_events.append(
+                    {
+                        "id": approval_id,
+                        "stage_id": "figures",
+                        "subject_type": "figure-output",
+                        "subject_id": figure_id,
+                        "decision": "selected_original",
+                        "details": {
+                            "source_artifact_id": source_artifact.id,
+                            "output_artifact_id": source_artifact.id,
+                            "render_mode": "source-original",
+                            "ai_redraw_performed": False,
+                        },
+                        "created_at": now,
+                    }
+                )
+                row = {
+                    **deepcopy(figure),
+                    "figure_id": figure_id,
+                    "source_artifact_id": source_artifact.id,
+                    "output_artifact_id": source_artifact.id,
+                    # Downstream manuscript assembly accepts current figure
+                    # outputs through this stable status contract. The explicit
+                    # render mode records that the bytes were never redrawn.
+                    "status": "redrawn",
+                    "render_mode": "source-original",
+                    "source_preserved": True,
+                    "ai_redraw_performed": False,
+                    "output_disposition": "original_source_selected_for_manuscript",
+                    "aspect_ratio_integrity": aspect_ratio_integrity(
+                        source_size, source_size
+                    ),
+                    "edge_check": _edge_check(source_path),
+                    "chemistry_integrity": {
+                        "status": "pass",
+                        "method": "unchanged_source_artifact",
+                        "failures": [],
+                    },
+                    "requires_human_chemistry_approval": False,
+                    "human_approval": {
+                        "id": approval_id,
+                        "status": "approved",
+                        "approved_at": now.isoformat(),
+                        "source_artifact_id": source_artifact.id,
+                        "output_artifact_id": source_artifact.id,
+                        "manual_canvas_override": False,
+                        "acknowledgement": (
+                            "The user selected the unchanged source image; no AI redraw was performed."
+                        ),
+                    },
+                    "updated_at": now.isoformat(),
+                }
+                row.update(
+                    publication_caption_fields(
+                        figure.get("source_caption_text"),
+                        representative_role=figure.get("representative_role"),
+                        source_label=figure.get("source_label"),
+                        context_title=figure.get("section_heading"),
+                    )
+                )
+                row.update(figure_rights_fields(row))
+                preserved_rows.append(row)
+                preserved_count += 1
+
+            if preserved_count == 0:
+                state = self.repository.get_stage_state(
+                    principal.user_id, project_id, "figures"
+                )
+                return {
+                    "preserved_count": 0,
+                    "already_preserved_count": already_preserved_count,
+                    "retained_generated_count": retained_generated_count,
+                    "selected_count": len(preserved_rows),
+                    "revision": state.revision if state else 0,
+                    "manifest_artifact_id": (
+                        manifest_artifact.id if manifest_artifact else None
+                    ),
+                }
+
+            manifest["figures"] = preserved_rows
+            manifest["source_preservation"] = {
+                "mode": "all_selected_sources",
+                "saved_at": now.isoformat(),
+                "ai_redraw_performed": False,
+            }
+            manifest["updated_at"] = now.isoformat()
+            state = self.repository.get_stage_state(
+                principal.user_id, project_id, "figures"
+            )
+            published, next_state = self._publish_files(
+                principal,
+                project_id,
+                stage_id="figures",
+                files={
+                    FIGURE_MANIFEST: (
+                        (
+                            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+                        ).encode(),
+                        "json",
+                    )
+                },
+                expected_revision=state.revision if state else 0,
+                status="review",
+                invalidate_stages=("draft", "final"),
+                metadata={
+                    "source_preservation": "all_selected_sources",
+                    "figure_ids": [
+                        str(row.get("figure_id") or "") for row in preserved_rows
+                    ],
+                },
+                approval_events=approval_events,
+                expected_current_artifacts=(
+                    {FIGURE_MANIFEST: manifest_artifact.id}
+                    if manifest_artifact is not None
+                    else None
+                ),
+            )
+        return {
+            "preserved_count": preserved_count,
+            "already_preserved_count": already_preserved_count,
+            "retained_generated_count": retained_generated_count,
+            "selected_count": len(preserved_rows),
+            "revision": next_state.revision,
+            "manifest_artifact_id": published[FIGURE_MANIFEST].id,
         }
 
     def confirm(
