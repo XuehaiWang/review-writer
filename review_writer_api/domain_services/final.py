@@ -24,8 +24,6 @@ from review_writer_api.domain_services.drafts import (
     DRAFT_DOCUMENT,
     DRAFT_QUALITY,
     DraftsService,
-    _clean_reference_doi,
-    _clean_reference_field,
 )
 from review_writer_api.domain_services.discovery import discovery_search_record
 from review_writer_api.errors import (

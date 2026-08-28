@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from review_writer_api.artifact_service import ArtifactService
 from review_writer_api.database import database_session, utc_now
+from review_writer_api.domain_services.base import OwnedProjectService
 from review_writer_api.domain_services.planning import (
     BLUEPRINT_LOGICAL_NAME,
     MATRIX_LOGICAL_NAME,
@@ -153,7 +154,7 @@ def _job_payload(job: JobRecord) -> dict[str, Any]:
     }
 
 
-class SectionsService:
+class SectionsService(OwnedProjectService):
     def __init__(
         self,
         repository: WorkflowRepository,
@@ -164,13 +165,6 @@ class SectionsService:
         self.artifacts = artifacts
         self.library_index = library_index
         self._write_lock = threading.RLock()
-
-    def _owned_project(self, principal: Principal, project_id: str):
-        principal.require(Permission.PROJECT_READ)
-        project = self.repository.get_owned_project(principal.user_id, project_id)
-        if project is None:
-            raise WorkflowNotFound("Project not found.")
-        return project
 
     def _read_json_artifact(
         self,

@@ -1,4 +1,4 @@
-import { Component, type ErrorInfo, type ReactNode } from "react";
+import { Component, lazy, Suspense, type ErrorInfo, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 
@@ -7,20 +7,45 @@ import { authConfigQuery, meQuery } from "../api/queries";
 import { AppShell } from "../components/AppShell";
 import { ErrorState } from "../components/ErrorState";
 import { LoadingView } from "../components/LoadingView";
-import { AuthPage } from "../features/auth/AuthPage";
-import { AdminPage } from "../features/admin/AdminPage";
 import { safeReturnPath } from "../features/auth/paths";
-import { DiscoveryPage } from "../features/discovery/DiscoveryPage";
-import { DraftPage } from "../features/draft/DraftPage";
-import { FinalPage } from "../features/final/FinalPage";
-import { LibraryPage } from "../features/library/LibraryPage";
-import { LandingPage } from "../features/landing/LandingPage";
-import { ImagesPage } from "../features/images/ImagesPage";
-import { PlanningPage } from "../features/planning/PlanningPage";
-import { ProjectsPage } from "../features/projects/ProjectsPage";
-import { SectionsPage } from "../features/sections/SectionsPage";
-import { SettingsPage } from "../features/settings/SettingsPage";
 import { useUiText } from "../i18n/useUiText";
+
+const AdminPage = lazy(async () => ({
+  default: (await import("../features/admin/AdminPage")).AdminPage,
+}));
+const AuthPage = lazy(async () => ({
+  default: (await import("../features/auth/AuthPage")).AuthPage,
+}));
+const DiscoveryPage = lazy(async () => ({
+  default: (await import("../features/discovery/DiscoveryPage")).DiscoveryPage,
+}));
+const DraftPage = lazy(async () => ({
+  default: (await import("../features/draft/DraftPage")).DraftPage,
+}));
+const FinalPage = lazy(async () => ({
+  default: (await import("../features/final/FinalPage")).FinalPage,
+}));
+const ImagesPage = lazy(async () => ({
+  default: (await import("../features/images/ImagesPage")).ImagesPage,
+}));
+const LandingPage = lazy(async () => ({
+  default: (await import("../features/landing/LandingPage")).LandingPage,
+}));
+const LibraryPage = lazy(async () => ({
+  default: (await import("../features/library/LibraryPage")).LibraryPage,
+}));
+const PlanningPage = lazy(async () => ({
+  default: (await import("../features/planning/PlanningPage")).PlanningPage,
+}));
+const ProjectsPage = lazy(async () => ({
+  default: (await import("../features/projects/ProjectsPage")).ProjectsPage,
+}));
+const SectionsPage = lazy(async () => ({
+  default: (await import("../features/sections/SectionsPage")).SectionsPage,
+}));
+const SettingsPage = lazy(async () => ({
+  default: (await import("../features/settings/SettingsPage")).SettingsPage,
+}));
 
 class ApplicationErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state: { error: Error | null } = { error: null };
@@ -66,32 +91,59 @@ function AppRoutes() {
   const postLoginTarget = safeReturnPath(new URLSearchParams(location.search).get("next"));
 
   return (
-    <Routes>
-      <Route path="/" element={<LandingPage authConfig={authConfig.data} identity={principal} />} />
-      <Route path="/login" element={principal ? <Navigate to={postLoginTarget} replace /> : <AuthPage config={authConfig.data} />} />
-      <Route
-        element={principal ? (
-          <AppShell authConfig={authConfig.data} identity={principal}><Outlet /></AppShell>
-        ) : (
-          <Navigate to={loginTarget} replace />
-        )}
-      >
-        <Route path="/workspace" element={<ProjectsPage />} />
-        <Route path="/library" element={<LibraryPage />} />
-        <Route path="/discovery" element={<DiscoveryPage />} />
-        <Route path="/planning" element={<PlanningPage />} />
-        <Route path="/sections" element={<SectionsPage />} />
-        <Route path="/images" element={<ImagesPage />} />
-        <Route path="/draft" element={<DraftPage />} />
-        <Route path="/final" element={<FinalPage />} />
-        <Route path="/settings" element={<SettingsPage />} />
+    <Suspense fallback={<LoadingView />}>
+      <Routes>
         <Route
-          path="/admin"
-          element={principal?.permissions.includes("provider:manage") ? <AdminPage /> : <Navigate to="/settings" replace />}
+          path="/"
+          element={<LandingPage authConfig={authConfig.data} identity={principal} />}
         />
-      </Route>
-      <Route path="*" element={<Navigate to={principal ? "/workspace" : "/"} replace />} />
-    </Routes>
+        <Route
+          path="/login"
+          element={
+            principal ? (
+              <Navigate to={postLoginTarget} replace />
+            ) : (
+              <AuthPage config={authConfig.data} />
+            )
+          }
+        />
+        <Route
+          element={
+            principal ? (
+              <AppShell authConfig={authConfig.data} identity={principal}>
+                <Outlet />
+              </AppShell>
+            ) : (
+              <Navigate to={loginTarget} replace />
+            )
+          }
+        >
+          <Route path="/workspace" element={<ProjectsPage />} />
+          <Route path="/library" element={<LibraryPage />} />
+          <Route path="/discovery" element={<DiscoveryPage />} />
+          <Route path="/planning" element={<PlanningPage />} />
+          <Route path="/sections" element={<SectionsPage />} />
+          <Route path="/images" element={<ImagesPage />} />
+          <Route path="/draft" element={<DraftPage />} />
+          <Route path="/final" element={<FinalPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route
+            path="/admin"
+            element={
+              principal?.permissions.includes("provider:manage") ? (
+                <AdminPage />
+              ) : (
+                <Navigate to="/settings" replace />
+              )
+            }
+          />
+        </Route>
+        <Route
+          path="*"
+          element={<Navigate to={principal ? "/workspace" : "/"} replace />}
+        />
+      </Routes>
+    </Suspense>
   );
 }
 

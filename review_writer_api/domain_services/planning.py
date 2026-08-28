@@ -18,6 +18,7 @@ from typing import Any
 from sqlalchemy import select
 
 from review_writer_api.artifact_service import ArtifactService
+from review_writer_api.domain_services.base import OwnedProjectService
 from review_writer_api.credentials import (
     ProviderKind,
     ProviderSettingsError,
@@ -1107,7 +1108,7 @@ def _blueprint_restructure_record(
     }
 
 
-class PlanningService:
+class PlanningService(OwnedProjectService):
     def __init__(
         self,
         repository: WorkflowRepository,
@@ -1169,13 +1170,6 @@ class PlanningService:
             row.error_code = "" if succeeded else "REFERENCE_ANALYSIS_FAILED"
             row.error_message = "" if succeeded else error_message[:2000]
             row.finished_at = utc_now()
-
-    def _owned_project(self, principal: Principal, project_id: str):
-        principal.require(Permission.PROJECT_READ)
-        project = self.repository.get_owned_project(principal.user_id, project_id)
-        if project is None:
-            raise WorkflowNotFound("Project not found.")
-        return project
 
     @staticmethod
     def _reference_candidate_is_isolated(candidate: Any) -> bool:

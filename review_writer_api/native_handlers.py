@@ -23,6 +23,7 @@ from review_writer_api.errors import LiteratureSearchFailed, WorkflowValidationE
 from review_writer_api.scientific_runner import ScientificRunFailed, ScientificRunner
 from review_writer_api.security import Principal, Role
 from review_writer_api.workspaces import HostedWorkspaceManager
+from review_writer_core.atomic_io import atomic_write_json
 from review_writer_core.draft_bibliography import repair_numbered_references
 from review_writer_core.providers import DEFAULT_IMAGE_MODEL
 from review_writer_core.bibliography_audit import audit_bibliography
@@ -446,11 +447,7 @@ class NativeWorkflowHandlers:
 
     @staticmethod
     def _write_json(path: Path, payload: Any) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        atomic_write_json(path, payload)
 
     @staticmethod
     def _assert_safe_project_id(project_id: str) -> str:

@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from review_writer_api.artifact_service import ArtifactService
 from review_writer_api.database import database_session, utc_now
+from review_writer_api.domain_services.base import OwnedProjectService
 from review_writer_api.domain_services.planning import (
     BLUEPRINT_LOGICAL_NAME,
     MATRIX_LOGICAL_NAME,
@@ -30,6 +31,7 @@ from review_writer_api.workflow_models import LibraryPaper
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
 from review_writer_core.draft_bibliography import (
     citation_entries_from_draft,
+    reference_text,
     strip_numeric_callouts,
 )
 from review_writer_core.paragraph_markers import ensure_prose_paragraph_markers
@@ -57,25 +59,6 @@ FIGURE_MANIFEST = "figures/manifest.json"
 PARAGRAPH_MARKER = re.compile(
     r"<!--\s*paragraph_id:\s*([A-Za-z0-9_.:-]+)\s*-->"
 )
-_REFERENCE_WEB_RESIDUE = re.compile(
-    r"\b(?:Cite\s+This|Read\s+Online|Article\s+Recommendations?|Supporting\s+Information)\b.*$",
-    re.I,
-)
-
-
-def _clean_reference_field(value: Any) -> str:
-    text = " ".join(str(value or "").replace("\u00ad", "").split()).strip()
-    text = _REFERENCE_WEB_RESIDUE.sub("", text).strip(" .;,|")
-    text = re.sub(r"\s*[★☆*]+\s*", " ", text)
-    return " ".join(text.split()).strip(" .;,|")
-
-
-def _clean_reference_doi(value: Any) -> str:
-    text = _clean_reference_field(value)
-    text = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", text, flags=re.I)
-    return text.rstrip(".,;)")
-
-
 class DraftNotReady(WorkflowConflict):
     code = "DRAFT_NOT_READY"
 
@@ -84,18 +67,11 @@ class DraftApprovalBlocked(WorkflowConflict):
     code = "DRAFT_APPROVAL_BLOCKED"
 
 
-class DraftsService:
+class DraftsService(OwnedProjectService):
     def __init__(self, repository: WorkflowRepository, artifacts: ArtifactService):
         self.repository = repository
         self.artifacts = artifacts
         self._write_lock = threading.RLock()
-
-    def _owned_project(self, principal: Principal, project_id: str):
-        principal.require(Permission.PROJECT_READ)
-        project = self.repository.get_owned_project(principal.user_id, project_id)
-        if project is None:
-            raise WorkflowNotFound("Project not found.")
-        return project
 
     def _artifact(self, principal: Principal, project_id: str, logical_name: str):
         self._owned_project(principal, project_id)
@@ -658,33 +634,7 @@ class DraftsService:
             for paper_id in sorted(cited_paper_ids, key=citation_numbers.__getitem__):
                 number = citation_numbers[paper_id]
                 row = matrix_by_id.get(paper_id, {})
-
-                def value(field: str) -> Any:
-                    raw = row.get(field)
-                    return raw.get("value") if isinstance(raw, dict) else raw
-
-                raw_authors = value("authors")
-                authors = (
-                    ", ".join(
-                        _clean_reference_field(item)
-                        for item in raw_authors
-                        if _clean_reference_field(item)
-                    )
-                    if isinstance(raw_authors, list)
-                    else _clean_reference_field(raw_authors)
-                )
-                reference_parts = [
-                    authors,
-                    _clean_reference_field(value("title")),
-                    _clean_reference_field(value("journal")),
-                    _clean_reference_field(
-                        value("bibliographic_year") or value("year")
-                    ),
-                    _clean_reference_doi(value("doi")),
-                ]
-                reference = ". ".join(part.rstrip(".") for part in reference_parts if part)
-                if not reference:
-                    reference = f"Paper P{number:03d}"
+                reference = reference_text(row, fallback=f"Paper P{number:03d}")
                 references.append(f"[{number}] {reference}")
             parts.append("\n".join(references))
         return "\n\n".join(part.strip() for part in parts if part.strip()) + "\n"

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import uuid
@@ -23,16 +22,7 @@ from review_writer_api.workflow_migration import (
     migrate_legacy_workflows,
 )
 from review_writer_api.workflow_models import WorkflowSystemState
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path = path.expanduser().resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    temporary.replace(path)
+from review_writer_core.atomic_io import atomic_write_json
 
 
 def _inventory_sources(inventory: MigrationInventory) -> list[dict[str, Any]]:
@@ -79,7 +69,7 @@ def run_legacy_migration(
     run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
     inventory_payload = asdict(inventory)
     inventory_payload["source_count"] = inventory.source_count
-    _write_json(report_root / f"{run_id}-inventory.json", inventory_payload)
+    atomic_write_json(report_root / f"{run_id}-inventory.json", inventory_payload)
 
     if not inventory.sources:
         result = {
@@ -88,7 +78,7 @@ def run_legacy_migration(
             "source_count": 0,
             "workspace_root": str(workspace_root.expanduser().resolve()),
         }
-        _write_json(report_root / "latest.json", result)
+        atomic_write_json(report_root / "latest.json", result)
         return result
 
     if _already_ready(session_factory, inventory):
@@ -98,7 +88,7 @@ def run_legacy_migration(
             "source_count": inventory.source_count,
             "workspace_root": inventory.workspace_root,
         }
-        _write_json(report_root / "latest.json", result)
+        atomic_write_json(report_root / "latest.json", result)
         return result
 
     dry_run = migrate_legacy_workflows(
@@ -110,7 +100,7 @@ def run_legacy_migration(
         accept_missing_files=accept_missing_files,
         accept_file_drift=accept_file_drift,
     )
-    _write_json(report_root / f"{run_id}-dry-run.json", asdict(dry_run))
+    atomic_write_json(report_root / f"{run_id}-dry-run.json", asdict(dry_run))
 
     report = migrate_legacy_workflows(
         workspace_root,
@@ -122,8 +112,8 @@ def run_legacy_migration(
     )
     payload = asdict(report)
     payload["status"] = "migrated" if report.ready else "blocked"
-    _write_json(report_root / f"{run_id}-migration.json", payload)
-    _write_json(report_root / "latest.json", payload)
+    atomic_write_json(report_root / f"{run_id}-migration.json", payload)
+    atomic_write_json(report_root / "latest.json", payload)
     if not report.ready:
         if report.missing_files and not accept_missing_files:
             raise WorkflowMigrationError(

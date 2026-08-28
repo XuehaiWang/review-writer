@@ -17,6 +17,7 @@ from PIL import Image as PILImage, UnidentifiedImageError
 
 from review_writer_api.artifact_service import ArtifactService
 from review_writer_api.database import utc_now
+from review_writer_api.domain_services.base import OwnedProjectService
 from review_writer_api.errors import (
     WorkflowConflict,
     WorkflowNotFound,
@@ -116,7 +117,7 @@ class FigureOutputUnavailable(WorkflowConflict):
     code = "FIGURE_OUTPUT_UNAVAILABLE"
 
 
-class FiguresService:
+class FiguresService(OwnedProjectService):
     def __init__(
         self,
         repository: WorkflowRepository,
@@ -125,13 +126,6 @@ class FiguresService:
         self.repository = repository
         self.artifacts = artifacts
         self._write_lock = threading.RLock()
-
-    def _owned_project(self, principal: Principal, project_id: str):
-        principal.require(Permission.PROJECT_READ)
-        project = self.repository.get_owned_project(principal.user_id, project_id)
-        if project is None:
-            raise WorkflowNotFound("Project not found.")
-        return project
 
     def _read_json(
         self,

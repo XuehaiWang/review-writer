@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from review_writer_api.artifact_service import ArtifactService
 from review_writer_api.database import Project, database_session, utc_now
+from review_writer_api.domain_services.base import OwnedProjectService
 from review_writer_api.errors import WorkflowConflict, WorkflowNotFound, WorkflowValidationError
 from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_repository import WorkflowRepository
@@ -25,11 +26,13 @@ from review_writer_core.metadata_tags import (
     structured_tags_are_verified,
     verified_structured_tags,
 )
+from review_writer_core.metadata_fields import unwrap_metadata_value
 from review_writer_core.paper_sources.normalize import normalize_doi, normalize_title
 from review_writer_core.classification_axes import (
     CLASSIFICATION_CONTRACT_VERSION,
     canonical_classification_contract,
 )
+from review_writer_core.atomic_io import atomic_write_json
 
 
 DISCOVERY_LOGICAL_NAME = "discovery/review.json"
@@ -75,12 +78,8 @@ def _selected(row: dict[str, Any]) -> bool:
     return bool(row.get("selected_for_matrix")) and str(row.get("role") or "") != "excluded"
 
 
-def _field_value(value: Any) -> Any:
-    return value.get("value") if isinstance(value, dict) and "value" in value else value
-
-
 def _publication_year(value: Any) -> int | None:
-    raw = _field_value(value)
+    raw = unwrap_metadata_value(value)
     match = re.search(r"(?:18|19|20|21)\d{2}", str(raw or ""))
     return int(match.group(0)) if match else None
 
@@ -480,7 +479,7 @@ def statistics(review: dict[str, Any]) -> dict[str, int]:
     }
 
 
-class DiscoveryService:
+class DiscoveryService(OwnedProjectService):
     def __init__(
         self,
         repository: WorkflowRepository,
@@ -495,7 +494,7 @@ class DiscoveryService:
     @staticmethod
     def _paper_metadata_value(paper: LibraryPaper, key: str, default: Any = None) -> Any:
         metadata = paper.metadata_json if isinstance(paper.metadata_json, dict) else {}
-        value = _field_value(metadata.get(key))
+        value = unwrap_metadata_value(metadata.get(key))
         return default if value in (None, "") else value
 
     def _active_library_catalog(self, principal: Principal) -> dict[str, LibraryPaper]:
@@ -1287,13 +1286,6 @@ class DiscoveryService:
                 raise
         raise WorkflowConflict("Discovery candidate refresh conflicted repeatedly.")
 
-    def _owned_project(self, principal: Principal, project_id: str):
-        principal.require(Permission.PROJECT_READ)
-        project = self.repository.get_owned_project(principal.user_id, project_id)
-        if project is None:
-            raise WorkflowNotFound("Project not found.")
-        return project
-
     def _write_json_artifact(
         self,
         principal: Principal,
@@ -1313,9 +1305,7 @@ class DiscoveryService:
         )
         staging = self.artifacts.stage_run_directory(principal.user_id, project_id, run.id)
         filename = Path(logical_name).name
-        (staging / filename).write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
+        atomic_write_json(staging / filename, payload)
         return self.artifacts.publish(
             principal.user_id,
             project_id,
@@ -1701,7 +1691,7 @@ class DiscoveryService:
 
         def metadata_value(row: LibraryPaper, key: str, default: Any) -> Any:
             value = row.metadata_json.get(key)
-            return _field_value(value) if value is not None else default
+            return unwrap_metadata_value(value) if value is not None else default
 
         def reusable_base_tags(row: LibraryPaper) -> dict[str, str]:
             metadata = row.metadata_json if isinstance(row.metadata_json, dict) else {}

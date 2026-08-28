@@ -40,6 +40,7 @@ from review_writer_api.scientific_runner import (
     ScientificRunError,
     ScientificRunner,
 )
+from review_writer_core.metadata_fields import unwrap_metadata_value
 from review_writer_core.metadata_tags import verified_structured_tags
 from review_writer_core.bibliography_audit import (
     BibliographyResolutionError,
@@ -70,10 +71,6 @@ class LibraryPaperRecord:
     markdown_relative_path: str
     artifact_ids: dict[str, str]
     updated_at: str
-
-
-def _field_value(value: Any) -> Any:
-    return value.get("value") if isinstance(value, dict) and "value" in value else value
 
 
 def _scientific_failure_diagnostic(exc: ScientificRunError) -> str:
@@ -992,12 +989,12 @@ class LibraryService:
                     )
                 )
                 title = str(
-                    _field_value(metadata.get("title"))
+                    unwrap_metadata_value(metadata.get("title"))
                     or result.get("title")
                     or paper_id
                 )
-                authors = _field_value(metadata.get("authors")) or []
-                keywords = _field_value(metadata.get("keywords")) or []
+                authors = unwrap_metadata_value(metadata.get("authors")) or []
+                keywords = unwrap_metadata_value(metadata.get("keywords")) or []
                 tags = verified_structured_tags(metadata)
                 session.add_all(artifact_rows)
                 if reusable is None:
@@ -1138,15 +1135,15 @@ class LibraryService:
             markdown_source = root / Path(
                 *PurePosixPath(source_markdown_relative).parts
             )
-            authors = _field_value(metadata.get("authors")) or []
-            keywords = _field_value(metadata.get("keywords")) or []
+            authors = unwrap_metadata_value(metadata.get("authors")) or []
+            keywords = unwrap_metadata_value(metadata.get("keywords")) or []
             prepared.append(
                 {
                     "entry": entry,
                     "suggested_paper_id": paper_id,
                     "content_sha256": self._digest(pdf_source),
                     "original_filename": pdf_source.name,
-                    "title": str(_field_value(metadata.get("title")) or paper_id),
+                    "title": str(unwrap_metadata_value(metadata.get("title")) or paper_id),
                     "authors": authors if isinstance(authors, list) else [authors],
                     "keywords": (
                         keywords if isinstance(keywords, list) else [keywords]
@@ -1403,9 +1400,9 @@ class LibraryService:
                     "Library metadata changed while bibliography resolution was being saved."
                 )
             session.add(metadata_artifact)
-            title = _field_value(stored_metadata.get("title")) or row.title
-            authors = _field_value(stored_metadata.get("authors")) or []
-            keywords = _field_value(stored_metadata.get("keywords")) or []
+            title = unwrap_metadata_value(stored_metadata.get("title")) or row.title
+            authors = unwrap_metadata_value(stored_metadata.get("authors")) or []
+            keywords = unwrap_metadata_value(stored_metadata.get("keywords")) or []
             row.title = str(title)
             row.authors_json = authors if isinstance(authors, list) else [authors]
             row.keywords_json = keywords if isinstance(keywords, list) else [keywords]

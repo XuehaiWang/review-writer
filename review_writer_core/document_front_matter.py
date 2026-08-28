@@ -14,6 +14,8 @@ import html
 import re
 from typing import Any, Iterable, Mapping
 
+from .metadata_fields import unwrap_metadata_value
+
 
 _MARKDOWN_HEADING = re.compile(r"(?m)^\s{0,3}(#{1,3})\s+(.+?)\s*$")
 _PLACEHOLDER_TITLE = re.compile(
@@ -32,10 +34,6 @@ _BOILERPLATE_HEADINGS = (
     re.compile(r"^(?:notes?|references?|bibliography|supporting\s+information)$", re.I),
     re.compile(r"^(?:article\s+info(?:rmation)?|graphical\s+abstract)$", re.I),
 )
-
-
-def _field_value(value: Any) -> Any:
-    return value.get("value") if isinstance(value, Mapping) and "value" in value else value
 
 
 def clean_markdown_heading(value: Any) -> str:
@@ -59,7 +57,7 @@ def clean_markdown_heading(value: Any) -> str:
 def looks_like_placeholder_title(value: Any) -> bool:
     """Identify extraction slugs and generic PDF titles, including ``p001``."""
 
-    title = clean_markdown_heading(_field_value(value))
+    title = clean_markdown_heading(unwrap_metadata_value(value))
     if not title:
         return True
     if _PLACEHOLDER_TITLE.fullmatch(title):

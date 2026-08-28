@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .metadata_fields import metadata_value
+
 
 PARAGRAPH_MARKER = re.compile(
     r"<!--\s*paragraph_id:\s*([A-Za-z0-9_.:-]+)\s*-->"
@@ -17,22 +19,17 @@ REFERENCE_WEB_RESIDUE = re.compile(
 )
 
 
-def _clean_reference_field(value: Any) -> str:
+def clean_reference_field(value: Any) -> str:
     text = " ".join(str(value or "").replace("\u00ad", "").split()).strip()
     text = REFERENCE_WEB_RESIDUE.sub("", text).strip(" .;,|")
     text = re.sub(r"\s*[★☆*]+\s*", " ", text)
     return " ".join(text.split()).strip(" .;,|")
 
 
-def _clean_reference_doi(value: Any) -> str:
-    text = _clean_reference_field(value)
+def clean_reference_doi(value: Any) -> str:
+    text = clean_reference_field(value)
     text = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", text, flags=re.I)
     return text.rstrip(".,;)")
-
-
-def _metadata_value(row: dict[str, Any], field: str) -> Any:
-    value = row.get(field)
-    return value.get("value") if isinstance(value, dict) else value
 
 
 def reference_text(
@@ -47,29 +44,29 @@ def reference_text(
     identity (journal, year, volume/issue, pages, and DOI) in one stable order.
     """
 
-    raw_authors = _metadata_value(row, "authors")
+    raw_authors = metadata_value(row, "authors")
     authors = (
         ", ".join(
             cleaned
             for item in raw_authors
-            if (cleaned := _clean_reference_field(item))
+            if (cleaned := clean_reference_field(item))
         )
         if isinstance(raw_authors, list)
-        else _clean_reference_field(raw_authors)
+        else clean_reference_field(raw_authors)
     )
-    journal = _clean_reference_field(_metadata_value(row, "journal"))
-    year = _clean_reference_field(
-        _metadata_value(row, "bibliographic_year")
-        or _metadata_value(row, "year")
+    journal = clean_reference_field(metadata_value(row, "journal"))
+    year = clean_reference_field(
+        metadata_value(row, "bibliographic_year")
+        or metadata_value(row, "year")
     )
-    volume = _clean_reference_field(_metadata_value(row, "volume"))
-    issue = _clean_reference_field(
-        _metadata_value(row, "issue") or _metadata_value(row, "number")
+    volume = clean_reference_field(metadata_value(row, "volume"))
+    issue = clean_reference_field(
+        metadata_value(row, "issue") or metadata_value(row, "number")
     )
-    pages = _clean_reference_field(
-        _metadata_value(row, "pages")
-        or _metadata_value(row, "page")
-        or _metadata_value(row, "article_number")
+    pages = clean_reference_field(
+        metadata_value(row, "pages")
+        or metadata_value(row, "page")
+        or metadata_value(row, "article_number")
     )
     publication = journal
     if year:
@@ -80,17 +77,17 @@ def reference_text(
         publication = f"{publication}({issue})".strip()
     if pages:
         publication = f"{publication}, {pages}".strip(" ,")
-    doi = _clean_reference_doi(_metadata_value(row, "doi"))
+    doi = clean_reference_doi(metadata_value(row, "doi"))
     if doi:
         doi = f"https://doi.org/{doi}"
     parts = [
         authors,
-        _clean_reference_field(_metadata_value(row, "title")),
+        clean_reference_field(metadata_value(row, "title")),
         publication,
         doi,
     ]
     rendered = ". ".join(part.rstrip(".") for part in parts if part)
-    return rendered or _clean_reference_field(fallback) or "Unresolved paper"
+    return rendered or clean_reference_field(fallback) or "Unresolved paper"
 
 
 def expand_callouts(value: str) -> list[int]:

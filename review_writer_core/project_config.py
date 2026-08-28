@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .atomic_io import atomic_write_json
 from .taxonomy import DEFAULT_TAXONOMY_PROFILE, validate_taxonomy_profile
 from .workspace import WorkspacePaths
 
@@ -63,10 +64,7 @@ def save_project_config(
     )
     if updates:
         current.update(updates)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_json(path, current)
     return current
 
 

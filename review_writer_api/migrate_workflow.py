@@ -19,6 +19,7 @@ from review_writer_api.workflow_migration import (
     migrate_legacy_workflows,
     validate_migrated_workflows,
 )
+from review_writer_core.atomic_io import atomic_write_json
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -46,14 +47,6 @@ def _parser() -> argparse.ArgumentParser:
     validate.add_argument("--workspace-root", required=True, type=Path)
     validate.add_argument("--report", required=True, type=Path)
     return parser
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path = path.expanduser().resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
 
 
 def _database() -> tuple[Any, Any]:
@@ -91,7 +84,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             inventory = inventory_legacy_workflows(arguments.workspace_root)
             payload = asdict(inventory)
             payload["source_count"] = inventory.source_count
-            _write_json(arguments.report, payload)
+            atomic_write_json(arguments.report, payload)
             return 0
 
         if arguments.command == "migrate":
@@ -110,7 +103,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 accept_missing_files=arguments.accept_missing_files,
                 accept_file_drift=arguments.accept_file_drift,
             )
-            _write_json(arguments.report, asdict(report))
+            atomic_write_json(arguments.report, asdict(report))
             completed = report.success and (report.dry_run or report.ready)
             return 0 if completed else 2
 
