@@ -198,4 +198,4 @@ Compose 使用两个持久卷：
 
 正式使用时应同时备份这两个卷，并长期保存 `REVIEW_WRITER_CREDENTIAL_ENCRYPTION_KEY`。更换或丢失该密钥后，已有加密凭据可能无法读取。
 
-更详细的技术设计保存在 [docs](docs/) 目录中。
+数据库部署、迁移与回滚操作见 [PostgreSQL 工作流迁移手册](docs/postgresql-workflow-migration.md)。
