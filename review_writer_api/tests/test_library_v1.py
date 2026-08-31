@@ -398,7 +398,7 @@ class LibraryV1Tests(unittest.TestCase):
             "bibliography_verification", audit_jobs[0].payload_json["task_kind"]
         )
         self.assertFalse(audit_jobs[0].payload_json["adds_candidate_papers"])
-        self.assertEqual("fallback", audit_jobs[0].payload_json["network_mode"])
+        self.assertEqual("disabled", audit_jobs[0].payload_json["network_mode"])
         self.assertTrue(audit_jobs[0].payload_json["markdown_relative_path"])
         self.assertEqual(uuid.UUID(submitted_job["id"]), usage.job_id)
         staging = (
@@ -508,6 +508,60 @@ class LibraryV1Tests(unittest.TestCase):
         self.assertEqual(
             ["partition_01"],
             partition_annotated["papers"][paper_id]["matched_partitions"],
+        )
+
+    def test_screening_lexical_candidates_keep_per_paper_coverage(self) -> None:
+        with TestClient(self.app) as client:
+            first = self.upload(client, "coverage-first.pdf", fake_pdf(b"C"))
+            second = self.upload(client, "coverage-second.pdf", fake_pdf(b"D"))
+            self.assertEqual(201, first.status_code, first.text)
+            self.assertEqual(201, second.status_code, second.text)
+            self.assertEqual(
+                "succeeded",
+                self.wait_job(client, first.json()["index_job_id"])["status"],
+            )
+            self.assertEqual(
+                "succeeded",
+                self.wait_job(client, second.json()["index_job_id"])["status"],
+            )
+
+        first_paper_id = first.json()["paper_id"]
+        second_paper_id = second.json()["paper_id"]
+        with self.sessions.begin() as session:
+            first_index = session.scalar(
+                select(LibraryDocumentIndex).where(
+                    LibraryDocumentIndex.paper_id == first_paper_id,
+                    LibraryDocumentIndex.is_current.is_(True),
+                )
+            )
+            self.assertIsNotNone(first_index)
+            session.add_all(
+                [
+                    LibraryDocumentChunk(
+                        index_id=first_index.id,
+                        user_id=uuid.UUID(self.first.user_id),
+                        paper_id=first_paper_id,
+                        chunk_id=f"000-coverage-{index}",
+                        ordinal=100 + index,
+                        content="allene keyword",
+                        normalized_content="allene keyword",
+                        block_start=0,
+                        block_end=0,
+                    )
+                    for index in range(2)
+                ]
+            )
+
+        chunks = self.app.state.library_index_service._screening_lexical_chunks(
+            self.first,
+            "allene keyword",
+            allowed_papers=[first_paper_id, second_paper_id],
+            limit=2,
+            per_paper_limit=1,
+        )
+        self.assertEqual(
+            {first_paper_id, second_paper_id},
+            {str(item["paper_id"]) for item in chunks},
         )
 
     def test_semantic_backfill_plan_is_user_scoped_bounded_and_detects_model_drift(self) -> None:

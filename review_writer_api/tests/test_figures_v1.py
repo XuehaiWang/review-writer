@@ -16,6 +16,7 @@ class FiguresV1Tests(NativeFigureApiTestCase):
             )
         self.assertEqual(200, response.status_code, response.text)
         payload = response.json()
+        self.assertFalse(payload["freshness"]["redraw_inputs_in_sync"])
         paper = payload["papers"][0]
         self.assertEqual("P001", payload["paper_display_labels"][paper["paper_id"]])
         self.assertEqual(1, paper["selected_candidate_index"])
@@ -45,6 +46,9 @@ class FiguresV1Tests(NativeFigureApiTestCase):
                 json={"revision": first.json()["revision"]},
                 headers=self.headers("sync-default-selection-again"),
             )
+            synchronized_review = client.get(
+                f"/api/v1/projects/{self.project_id}/figures/review"
+            )
         self.assertEqual(200, figures.status_code, figures.text)
         self.assertEqual(1, len(figures.json()["figure_candidates"]))
         figure = figures.json()["figure_candidates"][0]
@@ -54,6 +58,10 @@ class FiguresV1Tests(NativeFigureApiTestCase):
         )
         self.assertFalse(first.json()["unchanged"])
         self.assertTrue(second.json()["unchanged"])
+        self.assertEqual(200, synchronized_review.status_code, synchronized_review.text)
+        self.assertTrue(
+            synchronized_review.json()["freshness"]["redraw_inputs_in_sync"]
+        )
         self.assertEqual(
             first.json()["selected_figures_artifact_id"],
             second.json()["selected_figures_artifact_id"],

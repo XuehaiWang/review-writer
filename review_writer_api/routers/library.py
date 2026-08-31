@@ -395,7 +395,10 @@ def build_library_router(
                     "pdf_relative_path": record.pdf_relative_path,
                     "markdown_relative_path": record.markdown_relative_path,
                     "previous_audit": record.bibliography_audit,
-                    "network_mode": "force" if force_network else "fallback",
+                    # Automatic ingest is intentionally MinerU-first. Public
+                    # provider lookup remains available only through the
+                    # explicit bibliography verification action below.
+                    "network_mode": "force" if force_network else "disabled",
                     "task_kind": "bibliography_verification",
                     "adds_candidate_papers": False,
                 },
@@ -838,12 +841,18 @@ def build_library_router(
     )
     def start_bibliography_audit(
         paper_id: str,
+        use_network: bool = False,
         principal: Principal = Depends(principal_dependency),
     ):
         record = library_service.get(principal, paper_id)
-        # This endpoint is an explicit human request to consult the external
-        # provider even when the local PDF evidence was already sufficient.
-        job = enqueue_bibliography_audit(principal, record, force_network=True)
+        # Re-running verification stays MinerU-first by default. Network lookup
+        # is an explicit opt-in for the uncommon record that local evidence and
+        # the bounded document agent cannot resolve.
+        job = enqueue_bibliography_audit(
+            principal,
+            record,
+            force_network=bool(use_network),
+        )
         if job is None:
             raise WorkflowValidationError(
                 "Bibliography verification is not configured on this server."

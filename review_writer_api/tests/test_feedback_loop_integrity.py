@@ -44,6 +44,54 @@ class FeedbackLoopIntegrityTests(unittest.TestCase):
             allowed_unsupported_claims=unsupported,
         )
 
+    def test_claim_fact_binding_requires_exact_original_excerpt_and_numbers(self) -> None:
+        evidence = {
+            "paper_ids": ["P001"],
+            "evidence": [
+                {
+                    "paper_id": "P001",
+                    "original_passages": [
+                        {
+                            "ref": "P001:p2:b3",
+                            "text": "The reaction afforded 3aa in 82% yield at 25 °C.",
+                        }
+                    ],
+                }
+            ],
+        }
+        accepted = feedback_loop.validated_claim_fact_bindings(
+            [
+                {
+                    "claim_text": "The reaction afforded 3aa in 82% yield.",
+                    "paper_id": "P001",
+                    "source_ref": "P001:p2:b3",
+                    "support_excerpt": "The reaction afforded 3aa in 82% yield at 25 °C.",
+                    "subject": "the reaction",
+                    "predicate": "afforded",
+                    "value": "3aa in 82% yield",
+                    "confidence": 0.96,
+                },
+                {
+                    "claim_text": "The reaction afforded 3aa in 99% yield.",
+                    "paper_id": "P001",
+                    "source_ref": "P001:p2:b3",
+                    "support_excerpt": "The reaction afforded 3aa in 82% yield at 25 °C.",
+                    "subject": "the reaction",
+                    "predicate": "afforded",
+                    "value": "3aa in 99% yield",
+                    "confidence": 0.99,
+                },
+            ],
+            paragraph_text=(
+                "The reaction afforded 3aa in 82% yield. "
+                "The reaction afforded 3aa in 99% yield."
+            ),
+            paragraph_evidence=evidence,
+        )
+
+        self.assertEqual(1, len(accepted))
+        self.assertEqual("3aa in 82% yield", accepted[0]["value"])
+
     def test_ordinary_int_prefix_words_are_not_required_labels(self) -> None:
         signature = feedback_loop.protected_signature(
             "This interpretation places intermolecular products into context."
@@ -288,6 +336,115 @@ Second scientific paragraph gave 90% yield [2].
         )
 
         self.assertEqual("source_recheck_cleanup", mode)
+
+    def test_needs_human_review_is_not_requeued_by_batch_optimizer(self) -> None:
+        mode = feedback_loop.automatic_rewrite_mode(
+            {
+                "paragraph_id": "S01-p1",
+                "score": 60,
+                "route": "local_source_recheck",
+                "source_check_status": "needs_human_review",
+                "unsupported_claims": ["Ambiguous catalyst identity."],
+            },
+            {
+                "paper_ids": ["P001"],
+                "evidence": [{"original_text_available": True}],
+            },
+            paragraph_goal=85,
+        )
+
+        self.assertEqual("", mode)
+
+    def test_unqualified_negative_is_narrowed_instead_of_sent_to_human(self) -> None:
+        mode = feedback_loop.automatic_rewrite_mode(
+            {
+                "paragraph_id": "S01-p1",
+                "score": 60,
+                "route": "local_source_recheck",
+                "source_check_status": "needs_human_review",
+                "unsupported_claims": [
+                    "The publication does not establish the catalyst role."
+                ],
+                "negative_claim_policies": {
+                    "The publication does not establish the catalyst role.": (
+                        "scope_limited_rewrite"
+                    )
+                },
+                "evidence_problem_type": "unqualified_negative_claim",
+            },
+            {
+                "paper_ids": ["P001"],
+                "evidence": [{"original_text_available": True}],
+            },
+            paragraph_goal=85,
+        )
+
+        self.assertEqual("negative_claim_scope_narrowing", mode)
+
+    def test_evaluation_prompt_excludes_placement_callouts_from_source_check(self) -> None:
+        prompt = feedback_loop.evaluation_prompt(
+            {"name": "rubric", "dimensions": []},
+            [
+                {
+                    "paragraph_id": "S01-p1",
+                    "heading": "Results",
+                    "text": "Figure 1 summarizes the representative reactions.",
+                }
+            ],
+            {"S01-p1": {"paper_ids": [], "evidence": []}},
+            {"paragraph_checks": [], "paragraph_findings": []},
+            85,
+            85,
+        )
+
+        self.assertIn("is not a paper-level scientific claim", prompt)
+
+    def test_writing_plan_roles_do_not_all_become_case_paragraphs(self) -> None:
+        self.assertEqual(
+            "anchor_case",
+            feedback_loop.paragraph_argument_role(
+                {"argument_role": "anchor_case", "paper_ids": ["P001"]}
+            ),
+        )
+        self.assertEqual(
+            "cross_study_comparison",
+            feedback_loop.paragraph_argument_role(
+                {
+                    "argument_role": "cross_study_comparison",
+                    "paper_ids": ["P001", "P002"],
+                }
+            ),
+        )
+
+    def test_evaluation_prompt_includes_role_and_prior_claim_closure(self) -> None:
+        prompt = feedback_loop.evaluation_prompt(
+            {"dimensions": [{"id": "P01", "weight": 100}]},
+            [{"paragraph_id": "S01-p2", "heading": "Scope", "text": "Text [1]."}],
+            {"S01-p2": {"paper_ids": ["P001"], "evidence": []}},
+            {
+                "paragraph_checks": [
+                    {
+                        "paragraph_id": "S01-p2",
+                        "paragraph_role": "scope_limitation",
+                        "word_range_applicable": False,
+                    }
+                ]
+            },
+            90,
+            85,
+            prior_quality_context={
+                "claim_dispositions": {
+                    "C1": {
+                        "paragraph_id": "S01-p2",
+                        "outcome": "narrowed",
+                        "original_unsupported_claim": "Old overclaim",
+                    }
+                }
+            },
+        )
+
+        self.assertIn('"paragraph_role": "scope_limitation"', prompt)
+        self.assertIn("Old overclaim", prompt)
 
 
 if __name__ == "__main__":

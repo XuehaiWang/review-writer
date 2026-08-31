@@ -27,6 +27,11 @@ from review_writer_core.atomic_io import atomic_write_json
 from review_writer_core.draft_bibliography import repair_numbered_references
 from review_writer_core.providers import DEFAULT_IMAGE_MODEL
 from review_writer_core.bibliography_audit import audit_bibliography
+from review_writer_core.mineru_bibliography import (
+    as_document_audit_extraction,
+    extract_mineru_bibliography,
+)
+from review_writer_core.publication_metadata import read_pdf_first_page_text
 from review_writer_core.paper_sources.service import default_connectors
 from review_writer_core.review_titles import build_publication_overview_text
 from review_writer_core.writing_contracts import (
@@ -145,7 +150,9 @@ def _bibliography_needs_bounded_agent(audit: Any) -> bool:
 
     if not isinstance(audit, dict):
         return True
-    if str(audit.get("manual_review_status") or "") in {
+    if str(audit.get("resolved_by") or "") == "human" and str(
+        audit.get("manual_review_status") or ""
+    ) in {
         "resolved",
         "supporting_only",
         "rejected",
@@ -345,11 +352,21 @@ class NativeWorkflowHandlers:
                 "Bibliography audit local publication extraction is invalid."
             )
         context.report_progress(2, 6)
+        markdown_text = markdown_path.read_text(encoding="utf-8", errors="replace")
+        mineru_document_extraction = as_document_audit_extraction(
+            extract_mineru_bibliography(
+                [],
+                markdown_text,
+                filename=str(pdf_path.name),
+                pdf_first_page_text=read_pdf_first_page_text(pdf_path),
+            )
+        )
         result = audit_bibliography(
             metadata,
             connectors=default_connectors(_bibliography_source_names()),
             pdf_path=pdf_path,
             local_extraction=local_extraction,
+            document_agent_extraction=mineru_document_extraction,
             network_mode=str(payload.get("network_mode") or "fallback"),
             previous_audit=(
                 payload.get("previous_audit")
@@ -394,12 +411,22 @@ class NativeWorkflowHandlers:
                 )
             context.report_progress(4, 6)
             if agent_extraction.get("fields"):
+                combined_extraction = {
+                    **mineru_document_extraction,
+                    "status": "reliable",
+                    "method": "mineru_deterministic+bounded_document_agent",
+                    "model_attempted": True,
+                    "fields": {
+                        **dict(mineru_document_extraction.get("fields") or {}),
+                        **dict(agent_extraction.get("fields") or {}),
+                    },
+                }
                 result = audit_bibliography(
                     metadata,
                     connectors=default_connectors(_bibliography_source_names()),
                     pdf_path=pdf_path,
                     local_extraction=local_extraction,
-                    document_agent_extraction=agent_extraction,
+                    document_agent_extraction=combined_extraction,
                     network_mode=str(payload.get("network_mode") or "fallback"),
                     previous_audit=result,
                 )
@@ -589,6 +616,11 @@ class NativeWorkflowHandlers:
         rewrite_overlays = payload.get("rewrite_overlays")
         if isinstance(rewrite_overlays, dict) and rewrite_overlays:
             self._write_json(first / "feedback_loop_rewrites.json", rewrite_overlays)
+        prior_quality_context = payload.get("prior_quality_context")
+        if isinstance(prior_quality_context, dict) and prior_quality_context:
+            self._write_json(
+                first / "prior_quality_context.json", prior_quality_context
+            )
         citations = list(
             reference_repair.get("entries")
             or citation_identity.get("entries")
@@ -2105,6 +2137,24 @@ class NativeWorkflowHandlers:
             ),
             has_chirality=bool(features.get("has_chirality")),
             has_reaction_focus=bool(features.get("has_reaction_focus")),
+        )
+        overview_contract = (
+            features.get("overview_content_contract")
+            if isinstance(features.get("overview_content_contract"), dict)
+            else {}
+        )
+        editable_text["labels"] = list(
+            dict.fromkeys(
+                str(value).strip()
+                for value in overview_contract.get("modules") or []
+                if str(value or "").strip()
+            )
+        )
+        editable_text["primary_axis"] = str(
+            overview_contract.get("primary_axis") or ""
+        )
+        editable_text["evidence_bindings"] = dict(
+            overview_contract.get("evidence_bindings") or {}
         )
         return {
             "output_path": str(output),

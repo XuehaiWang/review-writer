@@ -42,6 +42,7 @@ from review_writer_api.workflow_repository import ArtifactRecord, JobRecord, Wor
 from review_writer_core.taxonomy import TaxonomyConfigurationError, load_taxonomy_rules
 from review_writer_core.metadata_tags import verified_structured_tags
 from review_writer_core.bibliography_audit import bibliography_candidates
+from review_writer_core.evidence_integrity import source_contains_excerpt
 from review_writer_core.academic_contracts import (
     ACADEMIC_SCHEMA_VERSION,
     classification_basis,
@@ -57,6 +58,10 @@ from review_writer_core.evidence_queries import (
     COMPARISON_FIELD_IDS,
     build_question_query_plans,
 )
+from review_writer_core.review_fact_readiness import (
+    fact_readiness_report,
+    required_fact_roles,
+)
 from review_writer_core.review_structure import (
     assign_primary_paper_sections,
     infer_section_role,
@@ -68,6 +73,10 @@ from review_writer_core.classification_axes import (
     canonical_classification_contract,
     classification_contract_from_document,
     normalize_classification_axes_semantics,
+)
+from review_writer_core.section_narrative_contracts import (
+    derive_scientific_thesis,
+    derive_section_depth_contract,
 )
 
 
@@ -81,7 +90,16 @@ CROSS_CATEGORY_BOUNDARY_LABEL = "Cross-category evidence and boundary cases"
 # Bump this whenever retrieval/query or source-validation semantics change.
 # It is part of every per-paper fingerprint, so previously cached facts are
 # re-extracted once under the new scientific contract.
-MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION = 7
+MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION = 11
+MATRIX_FACT_PROMPT_VERSION = "fact-extraction/3"
+
+# MinerU image blocks may contain only an extracted asset path.  A file path is
+# useful for figure workflows, but it is not scientific prose and must not
+# count as a successful Matrix fact-retrieval hit.
+_PATH_ONLY_FACT_CANDIDATE = re.compile(
+    r"^\s*(?:(?:images?|figures?|assets?)[/\\])?[^\r\n]+\.(?:png|jpe?g|webp|gif|svg)\s*$",
+    re.IGNORECASE,
+)
 
 
 def _planning_job_payload(job: JobRecord) -> dict[str, Any]:
@@ -373,6 +391,37 @@ def _matrix_classification_axes(
             ],
         }
     ])
+
+
+def _matrix_required_fact_roles(
+    review_topic: Any,
+    classification_axes: list[dict[str, Any]] | None,
+) -> list[str]:
+    """Derive one fact-role contract shared by retrieval and publication."""
+
+    axis_requirement_text: list[Any] = []
+    for axis in classification_axes or []:
+        if not isinstance(axis, dict):
+            continue
+        axis_requirement_text.append(axis.get("label"))
+        axis_requirement_text.extend(
+            partition.get("label")
+            for partition in axis.get("partitions") or []
+            if isinstance(partition, dict)
+        )
+    return required_fact_roles(review_topic, *axis_requirement_text)
+
+
+def _usable_fact_candidate(content_type: Any, content: Any) -> bool:
+    """Reject retrieval hits that contain no human-readable source evidence."""
+
+    kind = str(content_type or "").strip().casefold()
+    text = str(content or "").strip()
+    if not text or kind in {"header", "footer", "page_number"}:
+        return False
+    if _PATH_ONLY_FACT_CANDIDATE.fullmatch(text.replace("\\", "/")):
+        return False
+    return True
 
 
 def _split_topic_examples(value: Any) -> list[str]:
@@ -721,6 +770,16 @@ def _basis_with_axis_contract(
     updated["required_route_axis_ids"] = list(
         contract.get("required_route_axis_ids") or []
     )
+    updated["section_partition_policy"] = str(
+        contract.get("section_partition_policy") or "single_primary_axis"
+    )
+    updated["minimum_body_papers"] = int(
+        contract.get("minimum_body_papers") or 2
+    )
+    updated["single_paper_section_policy"] = str(
+        contract.get("single_paper_section_policy")
+        or "merge_unless_scientifically_justified"
+    )
     updated["classification_axes"] = axes
     return updated
 
@@ -867,6 +926,111 @@ def _topic_partition_for_row(
     return _topic_partition_for_text(fallback_text, partitions)
 
 
+def _required_topic_partitions_from_outline(
+    outline: dict[str, Any],
+) -> list[str]:
+    """Read independent-discussion partitions from current and legacy outlines."""
+
+    intent = (
+        outline.get("topic_outline_intent")
+        if isinstance(outline.get("topic_outline_intent"), dict)
+        else {}
+    )
+    basis = (
+        outline.get("classification_basis")
+        if isinstance(outline.get("classification_basis"), dict)
+        else {}
+    )
+    values: list[Any] = [
+        *(intent.get("required_partitions") or []),
+        *(basis.get("required_outline_partitions") or []),
+        *(basis.get("topic_partitions") or []),
+    ]
+    contract = (
+        outline.get("classification_contract")
+        if isinstance(outline.get("classification_contract"), dict)
+        else {}
+    )
+    for axis in contract.get("axes") or []:
+        if not isinstance(axis, dict) or str(axis.get("axis_role") or "") != (
+            "required_independent_discussion"
+        ):
+            continue
+        values.extend(
+            partition.get("label")
+            for partition in axis.get("partitions") or []
+            if isinstance(partition, dict)
+        )
+    return list(
+        dict.fromkeys(
+            label
+            for value in values
+            if (label := _clean_topic_partition(value))
+        )
+    )
+
+
+def _topic_partition_routes(
+    sections: list[dict[str, Any]],
+    rows_by_id: dict[str, dict[str, Any]],
+    partitions: list[str],
+    text_by_paper: dict[str, str],
+) -> tuple[dict[str, dict[str, list[str]]], dict[str, list[str]]]:
+    """Resolve evidence-backed Topic partitions into body-section contracts.
+
+    The primary outline hierarchy is left untouched. A secondary partition is
+    traceable when a source-supported Matrix classification points to a paper
+    owned by that body section. The second return value retains Matrix-wide
+    support so a genuine scope/routing boundary can be distinguished from a
+    missing classification.
+    """
+
+    supported_papers: dict[str, list[str]] = {
+        partition: [] for partition in partitions
+    }
+    partition_by_paper: dict[str, str] = {}
+    for paper_id, row in rows_by_id.items():
+        partition = _topic_partition_for_row(
+            row,
+            partitions,
+            text_by_paper.get(paper_id, ""),
+        )
+        if not partition:
+            continue
+        partition_by_paper[paper_id] = partition
+        supported_papers.setdefault(partition, []).append(paper_id)
+
+    routes: dict[str, dict[str, list[str]]] = {}
+    for section in sections:
+        if infer_section_role(
+            section.get("title"), section.get("section_role")
+        ) != "body":
+            continue
+        section_id = str(section.get("section_id") or "").strip()
+        if not section_id:
+            continue
+        section_routes: dict[str, list[str]] = {}
+        for paper_id in (
+            section.get("primary_papers")
+            or section.get("paper_ids")
+            or section.get("major_papers")
+            or []
+        ):
+            normalized_paper_id = str(paper_id or "").strip()
+            partition = partition_by_paper.get(normalized_paper_id, "")
+            if partition:
+                section_routes.setdefault(partition, []).append(normalized_paper_id)
+        if section_routes:
+            routes[section_id] = {
+                partition: list(dict.fromkeys(paper_ids))
+                for partition, paper_ids in section_routes.items()
+            }
+    return routes, {
+        partition: list(dict.fromkeys(paper_ids))
+        for partition, paper_ids in supported_papers.items()
+    }
+
+
 def _json_bytes(payload: Any) -> bytes:
     return (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
@@ -902,6 +1066,7 @@ def _outline_sections(markdown: str) -> list[dict[str, Any]]:
                 "title": title,
                 "paper_ids": [],
                 "context_paper_ids": [],
+                "excluded_papers": [],
                 "section_role": infer_section_role(title),
                 "purpose": "",
                 "notes": "",
@@ -936,6 +1101,23 @@ def _outline_sections(markdown: str) -> list[dict[str, Any]]:
                     if paper_id.strip()
                 )
             )
+            continue
+        exclusion = re.match(
+            r"^(?:excluded papers?|排除论文)\s*[:：]\s*(.+?)\s*$",
+            line,
+            re.I,
+        )
+        if current is not None and exclusion:
+            raw_exclusion = exclusion.group(1).strip().rstrip(".。")
+            parts = re.split(r"\s+(?:—|–)\s+", raw_exclusion, maxsplit=1)
+            paper_part = parts[0].strip()
+            reason = parts[1].strip() if len(parts) == 2 else ""
+            for paper_id in re.split(r"[,，;；]", paper_part):
+                normalized_id = paper_id.strip()
+                if normalized_id:
+                    current["excluded_papers"].append(
+                        {"paper_id": normalized_id, "reason": reason}
+                    )
             continue
         if current is not None and line.casefold().startswith("purpose:"):
             current["purpose"] = line.split(":", 1)[1].strip()
@@ -994,6 +1176,17 @@ def _outline_markdown_from_sections(
         context_ids = list(dict.fromkeys(section.get("context_paper_ids") or []))
         if context_ids:
             lines.append(f"Context papers: {', '.join(context_ids)}.")
+        for exclusion in section.get("excluded_papers") or []:
+            if not isinstance(exclusion, dict):
+                continue
+            paper_id = str(exclusion.get("paper_id") or "").strip()
+            reason = str(exclusion.get("reason") or "").strip()
+            if paper_id:
+                lines.append(
+                    f"Excluded paper: {paper_id}"
+                    + (f" — {reason}" if reason else "")
+                    + "."
+                )
         purpose = str(section.get("purpose") or "").strip()
         if purpose:
             lines.append(f"Purpose: {purpose}")
@@ -1372,6 +1565,102 @@ class PlanningService(OwnedProjectService):
         normalized = " ".join(str(abstract or "").split()).strip()
         return "" if "unavailable or unreliable" in normalized.casefold() else normalized
 
+    def _user_fact_cache(
+        self,
+        principal: Principal,
+        *,
+        exclude_project_id: str,
+    ) -> dict[str, dict[str, Any]]:
+        """Read reusable validated facts from this user's other current Matrices."""
+
+        cached: dict[str, dict[str, Any]] = {}
+        for artifact in self.repository.list_current_artifacts_for_user(
+            principal.user_id,
+            MATRIX_LOGICAL_NAME,
+            exclude_project_id=exclude_project_id,
+        ):
+            try:
+                resolved = self.artifacts.resolve_owned_artifact(
+                    principal.user_id, artifact.id
+                )
+                payload = json.loads(resolved.path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, WorkflowNotFound):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            for row in payload.get("rows") or []:
+                if not isinstance(row, dict):
+                    continue
+                enrichment = dict(row.get("fact_enrichment") or {})
+                cache_key = str(enrichment.get("fact_cache_key") or "")
+                if not cache_key or int(enrichment.get("contract_version") or 0) != (
+                    MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION
+                ):
+                    continue
+                facts = [
+                    deepcopy(fact)
+                    for fact in row.get("scientific_facts") or []
+                    if isinstance(fact, dict)
+                    and str(fact.get("fact_id") or "")
+                    and str(fact.get("field_id") or "") != "topic_partition"
+                    and fact.get("evidence_refs")
+                ]
+                if not facts:
+                    continue
+                cached.setdefault(
+                    cache_key,
+                    {
+                        "facts": facts,
+                        "source_project_id": artifact.project_id,
+                        "source_matrix_artifact_id": artifact.id,
+                    },
+                )
+        return cached
+
+    def _prior_matrix_facts(
+        self,
+        principal: Principal,
+        matrix: dict[str, Any],
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Read the immediate predecessor's source-addressable fact cards.
+
+        Matrix artifacts are immutable. A refresh must therefore carry a
+        validated predecessor forward as a fallback before contacting the
+        provider; otherwise a temporary 503 converts an already usable paper
+        into a false extraction failure.
+        """
+
+        artifact_id = str(
+            (matrix.get("fact_enrichment_summary") or {}).get(
+                "source_matrix_artifact_id"
+            )
+            or ""
+        ).strip()
+        if not artifact_id:
+            return {}
+        try:
+            resolved = self.artifacts.resolve_owned_artifact(
+                principal.user_id,
+                artifact_id,
+            )
+            payload = json.loads(resolved.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, WorkflowNotFound):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return {
+            str(row.get("paper_id") or ""): [
+                deepcopy(fact)
+                for fact in row.get("scientific_facts") or []
+                if isinstance(fact, dict)
+                and str(fact.get("fact_id") or "")
+                and str(fact.get("field_id") or "") != "topic_partition"
+                and fact.get("evidence_refs")
+            ]
+            for row in payload.get("rows") or []
+            if isinstance(row, dict) and str(row.get("paper_id") or "")
+        }
+
     def matrix_enrichment_payload(
         self,
         principal: Principal,
@@ -1417,6 +1706,10 @@ class PlanningService(OwnedProjectService):
             source="matrix_fact_extraction",
         )
         classification_axes = list(classification_contract["axes"])
+        topic_required_roles = _matrix_required_fact_roles(
+            topic,
+            classification_axes,
+        )
         routing_axis_id = str(
             classification_contract.get("primary_axis_id")
             or next(
@@ -1550,6 +1843,12 @@ class PlanningService(OwnedProjectService):
                     }
                 )
         papers: list[dict[str, Any]] = []
+        user_fact_cache = (
+            {} if force else self._user_fact_cache(
+                principal, exclude_project_id=project_id
+            )
+        )
+        prior_facts_by_paper = self._prior_matrix_facts(principal, matrix)
         for row in rows:
             paper_id = str(row.get("paper_id") or "")
             summary = dict(summaries.get(paper_id) or {})
@@ -1602,6 +1901,23 @@ class PlanningService(OwnedProjectService):
                     separators=(",", ":"),
                 ).encode("utf-8")
             ).hexdigest()
+            fact_cache_key = hashlib.sha256(
+                json.dumps(
+                    {
+                        "contract_version": MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION,
+                        "fact_schema_version": "scientific-fact/2",
+                        "prompt_version": MATRIX_FACT_PROMPT_VERSION,
+                        "source_lineage_hash": lineage,
+                        "source_content_sha256": summary.get("content_sha256") or "",
+                        "chunker_version": summary.get("chunker_version") or "",
+                        "taxonomy_profile": project.taxonomy_profile,
+                        "actual_model_id": resolve_model_tier(project.model_tier).model,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
             existing = dict(row.get("fact_enrichment") or {})
             if (
                 not force
@@ -1614,6 +1930,7 @@ class PlanningService(OwnedProjectService):
                 heading="",
                 core_argument=topic,
                 section_role="body",
+                required_fact_roles=topic_required_roles,
             )
             candidates: dict[str, dict[str, Any]] = {}
             partition_candidates: dict[str, dict[str, Any]] = {}
@@ -1632,7 +1949,10 @@ class PlanningService(OwnedProjectService):
                 ) -> int:
                     added = 0
                     for hit in hits:
-                        if hit.is_neighbor:
+                        if hit.is_neighbor or not _usable_fact_candidate(
+                            hit.content_type,
+                            hit.content,
+                        ):
                             continue
                         added += 1
                         key = academic_evidence_key(
@@ -1735,6 +2055,11 @@ class PlanningService(OwnedProjectService):
                         include_neighbors=True,
                     )
                     for hit in hits:
+                        if not _usable_fact_candidate(
+                            hit.content_type,
+                            hit.content,
+                        ):
+                            continue
                         key = academic_evidence_key(
                             hit.paper_id, hit.chunk_id, hit.source_lineage_hash
                         )
@@ -1802,6 +2127,38 @@ class PlanningService(OwnedProjectService):
                         "matched_partitions": [],
                     },
                 )
+            reusable_candidates = set(candidates) | set(partition_candidates)
+            cross_project_cache = dict(user_fact_cache.get(fact_cache_key) or {})
+            fallback_facts_by_id: dict[str, dict[str, Any]] = {}
+            for fact in [
+                *(
+                    fact
+                    for fact in row.get("scientific_facts") or []
+                    if isinstance(fact, dict)
+                    and str(fact.get("field_id") or "") != "topic_partition"
+                ),
+                *(prior_facts_by_paper.get(paper_id) or []),
+                *(cross_project_cache.get("facts") or []),
+            ]:
+                if not isinstance(fact, dict):
+                    continue
+                fact_id = str(fact.get("fact_id") or "")
+                refs = [
+                    ref
+                    for ref in fact.get("evidence_refs") or []
+                    if isinstance(ref, dict)
+                ]
+                if (
+                    not fact_id
+                    or not refs
+                    or any(
+                        str(ref.get("evidence_key") or "")
+                        not in reusable_candidates
+                        for ref in refs
+                    )
+                ):
+                    continue
+                fallback_facts_by_id.setdefault(fact_id, deepcopy(fact))
             papers.append(
                 {
                     "paper_id": paper_id,
@@ -1809,7 +2166,9 @@ class PlanningService(OwnedProjectService):
                     "abstract": abstract,
                     "index_summary": summary,
                     "source_fingerprint": source_fingerprint,
+                    "fact_cache_key": fact_cache_key,
                     "taxonomy_profile": project.taxonomy_profile,
+                    "required_fact_roles": topic_required_roles,
                     "deterministic_routing_label": deterministic_routing_by_paper.get(
                         paper_id, ""
                     ),
@@ -1829,6 +2188,27 @@ class PlanningService(OwnedProjectService):
                     "partition_evidence_candidates": list(
                         partition_candidates.values()
                     ),
+                    "reused_fact_cache": {
+                        **cross_project_cache,
+                        "facts": list(fallback_facts_by_id.values()),
+                        "source_project_id": (
+                            project_id
+                            if fallback_facts_by_id
+                            else str(
+                                cross_project_cache.get("source_project_id") or ""
+                            )
+                        ),
+                        "source_matrix_artifact_id": (
+                            matrix_artifact.id
+                            if fallback_facts_by_id
+                            else str(
+                                cross_project_cache.get(
+                                    "source_matrix_artifact_id"
+                                )
+                                or ""
+                            )
+                        ),
+                    },
                 }
             )
         return {
@@ -1839,6 +2219,7 @@ class PlanningService(OwnedProjectService):
             "force_refresh": bool(force),
             "project_id": project_id,
             "review_topic": topic,
+            "required_fact_roles": topic_required_roles,
             "topic_partitions": topic_partitions,
             "classification_axes": classification_axes,
             "classification_contract": classification_contract,
@@ -1907,6 +2288,14 @@ class PlanningService(OwnedProjectService):
             for item in payload.get("routing_categories") or []
             if isinstance(item, dict) and str(item.get("label") or "").strip()
         }
+        topic_required_roles = _matrix_required_fact_roles(
+            updated.get("review_topic"),
+            [
+                axis
+                for axis in payload.get("classification_axes") or []
+                if isinstance(axis, dict)
+            ],
+        )
         for row in updated.get("rows") or []:
             if not isinstance(row, dict):
                 continue
@@ -1944,21 +2333,18 @@ class PlanningService(OwnedProjectService):
                     continue
                 excerpt = " ".join(
                     str(fact.get("support_excerpt") or "").split()
-                ).casefold()
+                )
                 if not excerpt or not str(fact.get("value") or "").strip():
                     continue
                 if not str(fact.get("evidence_ceiling") or "").strip():
                     continue
                 if not all(
-                    excerpt
-                    in " ".join(
-                        str(
-                            fact_candidates[str(ref.get("evidence_key") or "")].get(
-                                "content"
-                            )
-                            or ""
-                        ).split()
-                    ).casefold()
+                    source_contains_excerpt(
+                        fact_candidates[str(ref.get("evidence_key") or "")].get(
+                            "content"
+                        ),
+                        excerpt,
+                    )
                     for ref in raw_refs
                 ):
                     continue
@@ -1966,12 +2352,15 @@ class PlanningService(OwnedProjectService):
                 if not field_id or any(
                     field_id != "topic_partition"
                     and field_id
-                    not in {
-                        str(value).casefold()
-                        for value in fact_candidates[
-                            str(ref.get("evidence_key") or "")
-                        ].get("question_ids") or []
-                    }
+                    not in (
+                        {
+                            str(value).casefold()
+                            for value in fact_candidates[
+                                str(ref.get("evidence_key") or "")
+                            ].get("question_ids") or []
+                        }
+                        | set(topic_required_roles)
+                    )
                     for ref in raw_refs
                 ):
                     continue
@@ -2039,15 +2428,12 @@ class PlanningService(OwnedProjectService):
                     support_excerpt
                     and partition_refs
                     and all(
-                        support_excerpt.casefold()
-                        in " ".join(
-                            str(
-                                partition_candidates[
-                                    str(ref.get("evidence_key") or "")
-                                ].get("content")
-                                or ""
-                            ).split()
-                        ).casefold()
+                        source_contains_excerpt(
+                            partition_candidates[
+                                str(ref.get("evidence_key") or "")
+                            ].get("content"),
+                            support_excerpt,
+                        )
                         for ref in partition_refs
                     )
                 )
@@ -2276,15 +2662,12 @@ class PlanningService(OwnedProjectService):
                 routing_excerpt
                 and routing_refs
                 and all(
-                    routing_excerpt.casefold()
-                    in " ".join(
-                        str(
-                            fact_candidates[
-                                str(ref.get("evidence_key") or "")
-                            ].get("content")
-                            or ""
-                        ).split()
-                    ).casefold()
+                    source_contains_excerpt(
+                        fact_candidates[
+                            str(ref.get("evidence_key") or "")
+                        ].get("content"),
+                        routing_excerpt,
+                    )
                     for ref in routing_refs
                 )
             )
@@ -2385,6 +2768,12 @@ class PlanningService(OwnedProjectService):
                 "human_checked",
             }:
                 review_status = "needs_review"
+            readiness = fact_readiness_report(
+                facts=facts,
+                required_roles=topic_required_roles,
+                extraction_status=status,
+                failed_fields=result.get("failed_fields") or [],
+            )
             row["fact_enrichment"] = {
                 "schema_version": 2,
                 "contract_version": int(
@@ -2392,16 +2781,25 @@ class PlanningService(OwnedProjectService):
                     or MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION
                 ),
                 "status": status,
+                "extraction_status": status,
+                **readiness,
                 "review_status": review_status,
                 "source_fingerprint": str(source.get("source_fingerprint") or ""),
+                "fact_cache_key": str(source.get("fact_cache_key") or ""),
                 "source_lineage_hash": str(
                     (source.get("index_summary") or {}).get("source_lineage_hash") or ""
                 ),
                 "fact_count": len(facts),
                 "failed_fields": list(result.get("failed_fields") or []),
+                "failed_field_details": deepcopy(
+                    result.get("failed_field_details") or []
+                ),
                 "error": str(result.get("error") or "")[:1000],
                 "automatic_resolution": deepcopy(
                     result.get("automatic_resolution") or {}
+                ),
+                "fact_extraction_profile": deepcopy(
+                    result.get("fact_extraction_profile") or {}
                 ),
                 "updated_at": utc_now().isoformat(),
             }
@@ -2505,7 +2903,19 @@ class PlanningService(OwnedProjectService):
             CLASSIFICATION_CONTRACT_VERSION
         )
         published_statuses = [
-            str((row.get("fact_enrichment") or {}).get("status") or "pending")
+            str(
+                (row.get("fact_enrichment") or {}).get("extraction_status")
+                or (row.get("fact_enrichment") or {}).get("status")
+                or "pending"
+            )
+            for row in updated.get("rows") or []
+            if isinstance(row, dict)
+        ]
+        readiness_statuses = [
+            str(
+                (row.get("fact_enrichment") or {}).get("review_readiness")
+                or "source_not_established"
+            )
             for row in updated.get("rows") or []
             if isinstance(row, dict)
         ]
@@ -2521,6 +2931,11 @@ class PlanningService(OwnedProjectService):
             "limited_count": published_statuses.count("limited"),
             "failed_count": published_statuses.count("failed"),
             "pending_count": published_statuses.count("pending"),
+            "review_ready_count": readiness_statuses.count("complete"),
+            "review_partial_count": readiness_statuses.count("partial"),
+            "source_not_established_count": readiness_statuses.count(
+                "source_not_established"
+            ),
             "needs_review_count": sum(
                 1
                 for row in updated.get("rows") or []
@@ -2945,16 +3360,26 @@ class PlanningService(OwnedProjectService):
                 "transformation": 2,
                 "method_family": 3,
             }
-            fact_parts = [
-                str(item.get("value") or "").strip()
-                for item in sorted(
-                    scientific_facts,
-                    key=lambda item: fact_priority.get(
-                        str(item.get("field_id") or ""), 10
-                    ),
-                )
-                if str(item.get("value") or "").strip()
-            ]
+            fact_parts: list[str] = []
+            for item in sorted(
+                scientific_facts,
+                key=lambda item: fact_priority.get(
+                    str(item.get("field_id") or ""), 10
+                ),
+            ):
+                # A normalized fact may intentionally omit the reagent or
+                # substrate phrase that disambiguates the paper's primary
+                # analytical route.  Include only the bounded supporting
+                # excerpt (not the full source page) so routing can use that
+                # explicit evidence without admitting unrelated-work text.
+                for value in (
+                    item.get("value"),
+                    item.get("normalized_value"),
+                    item.get("support_excerpt"),
+                ):
+                    text = str(value or "").strip()
+                    if text and text not in fact_parts:
+                        fact_parts.append(text)
             parts = [
                 " ".join(fact_parts),
                 row.get("title"),
@@ -3199,15 +3624,7 @@ class PlanningService(OwnedProjectService):
             )
         )
         if still_unresolved:
-            adjustments.append(
-                {
-                    "source_section": ", ".join(source_titles),
-                    "target_section": "Matrix routing unresolved",
-                    "paper_ids": list(still_unresolved),
-                    "method": "unresolved_classification_retained",
-                    "created_section": False,
-                }
-            )
+            grouped[CROSS_CATEGORY_BOUNDARY_LABEL] = list(still_unresolved)
         for label, paper_ids in grouped.items():
             public_label = publication_section_title("", label)
             target = existing_by_title.get(public_label.casefold())
@@ -3240,10 +3657,223 @@ class PlanningService(OwnedProjectService):
                     "source_section": ", ".join(source_titles),
                     "target_section": public_label,
                     "paper_ids": list(paper_ids),
-                    "method": "taxonomy_evidence_match",
+                    "method": (
+                        "unresolved_classification_retained"
+                        if label == CROSS_CATEGORY_BOUNDARY_LABEL
+                        else "taxonomy_evidence_match"
+                    ),
                     "created_section": created,
                 }
             )
+        return repaired, adjustments
+
+    def _reconcile_generated_outline_coverage(
+        self,
+        sections: list[dict[str, Any]],
+        rows: list[dict[str, Any]],
+        tags_by_paper: dict[str, dict[str, Any]],
+        text_by_paper: dict[str, str],
+        *,
+        outline_style: str,
+        taxonomy_profile: str,
+        tag_key_override: str = "",
+        axis_label_override: str = "",
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Give every selected paper a visible, evidence-bounded disposition.
+
+        Generated outlines used to drop the internal ``Routing required``
+        group before saving.  That made a minority or cross-category paper an
+        orphan even though it remained selected in the Matrix.  This pass is
+        deliberately topic-agnostic: it first retries the configured primary
+        axis from bounded fact excerpts, then keeps genuinely unresolved
+        primary studies in an explicit boundary-analysis section.  Reviews,
+        perspectives, and source-confirmed out-of-scope papers remain context
+        evidence rather than being forced into a scientific category.
+        """
+
+        style = str(outline_style or "").casefold()
+        definition = OUTLINE_STYLES.get(style)
+        if definition is None:
+            return deepcopy(sections), []
+        routing_tag_key = str(tag_key_override or definition["tag_key"])
+        routing_axis_label = str(axis_label_override or definition["axis"])
+        repaired = deepcopy(sections)
+        matrix_order = list(
+            dict.fromkeys(
+                str(row.get("paper_id") or "").strip()
+                for row in rows
+                if str(row.get("paper_id") or "").strip()
+            )
+        )
+        disposed = {
+            str(paper_id)
+            for section in repaired
+            for paper_id in [
+                *(section.get("paper_ids") or []),
+                *(section.get("context_paper_ids") or []),
+                *(
+                    exclusion.get("paper_id")
+                    for exclusion in section.get("excluded_papers") or []
+                    if isinstance(exclusion, dict)
+                    and str(exclusion.get("reason") or "").strip()
+                ),
+            ]
+            if str(paper_id or "").strip()
+        }
+        missing_ids = [paper_id for paper_id in matrix_order if paper_id not in disposed]
+        if not missing_ids:
+            return repaired, []
+
+        missing_set = set(missing_ids)
+        missing_rows = [
+            row
+            for row in rows
+            if str(row.get("paper_id") or "").strip() in missing_set
+        ]
+        contextual_ids = self._contextual_outline_paper_ids(
+            missing_rows,
+            tags_by_paper,
+            text_by_paper,
+        )
+        contextual_set = set(contextual_ids)
+        introduction = next(
+            (
+                section
+                for section in repaired
+                if infer_section_role(
+                    section.get("title"), section.get("section_role")
+                )
+                == "introduction"
+            ),
+            None,
+        )
+        adjustments: list[dict[str, Any]] = []
+        if introduction is not None and contextual_ids:
+            target_context = introduction.setdefault("context_paper_ids", [])
+            target_context.extend(
+                paper_id for paper_id in contextual_ids if paper_id not in target_context
+            )
+            adjustments.append(
+                {
+                    "source_section": "Unassigned selected papers",
+                    "target_section": str(introduction.get("title") or "Introduction"),
+                    "paper_ids": contextual_ids,
+                    "method": "contextual_source_disposition",
+                    "created_section": False,
+                }
+            )
+
+        analytical_rows = [
+            row
+            for row in missing_rows
+            if str(row.get("paper_id") or "").strip() not in contextual_set
+        ]
+        groups = self._outline_groups(
+            analytical_rows,
+            tags_by_paper,
+            text_by_paper,
+            tag_key=routing_tag_key,
+            taxonomy_profile=taxonomy_profile,
+        )
+        unresolved_ids = list(groups.pop(ROUTING_REQUIRED_LABEL, []) or [])
+        existing_by_title = {
+            str(section.get("title") or "").strip().casefold(): section
+            for section in repaired
+            if infer_section_role(
+                section.get("title"), section.get("section_role")
+            )
+            == "body"
+        }
+        insert_at = next(
+            (
+                index
+                for index, section in enumerate(repaired)
+                if infer_section_role(
+                    section.get("title"), section.get("section_role")
+                )
+                == "conclusion"
+            ),
+            len(repaired),
+        )
+
+        def route_group(
+            label: str,
+            paper_ids: list[str],
+            *,
+            method: str,
+            boundary_rationale: str = "",
+        ) -> None:
+            nonlocal insert_at
+            if not paper_ids:
+                return
+            display_label = (
+                publication_section_title("", CROSS_CATEGORY_BOUNDARY_LABEL)
+                if boundary_rationale
+                else publication_section_title(
+                    "", _capitalize_outline_heading(label)
+                )
+            )
+            target = existing_by_title.get(display_label.casefold())
+            created = target is None
+            if target is None:
+                target = {
+                    "title": display_label,
+                    "paper_ids": [],
+                    "context_paper_ids": [],
+                    "excluded_papers": [],
+                    "section_role": "body",
+                    "purpose": (
+                        "compare the selected boundary evidence without assigning an "
+                        f"unsupported {routing_axis_label} label."
+                        if boundary_rationale
+                        else (
+                            f"compare the selected papers within this {routing_axis_label} "
+                            "category and state its evidence boundaries."
+                        )
+                    ),
+                    "notes": (
+                        "Automatically retained after the primary-axis route could not be "
+                        "resolved from the current source-addressable evidence."
+                        if boundary_rationale
+                        else "Automatically routed from source-addressable paper evidence."
+                    ),
+                }
+                if boundary_rationale:
+                    target["boundary_rationale"] = boundary_rationale
+                repaired.insert(insert_at, target)
+                insert_at += 1
+                existing_by_title[display_label.casefold()] = target
+            target_papers = target.setdefault("paper_ids", [])
+            target_papers.extend(
+                paper_id for paper_id in paper_ids if paper_id not in target_papers
+            )
+            adjustments.append(
+                {
+                    "source_section": "Unassigned selected papers",
+                    "target_section": display_label,
+                    "paper_ids": list(paper_ids),
+                    "method": method,
+                    "created_section": created,
+                }
+            )
+
+        for label, paper_ids in groups.items():
+            route_group(
+                label,
+                list(dict.fromkeys(paper_ids)),
+                method="coverage_reconciliation_evidence_route",
+            )
+        route_group(
+            CROSS_CATEGORY_BOUNDARY_LABEL,
+            list(dict.fromkeys(unresolved_ids)),
+            method="coverage_reconciliation_boundary_route",
+            boundary_rationale=(
+                "The selected primary study is relevant to the review scope, but its current "
+                "source-addressable evidence does not justify one declared primary-axis "
+                "category. Retain it for explicit cross-category comparison until stronger "
+                "routing evidence is available."
+            ),
+        )
         return repaired, adjustments
 
     @classmethod
@@ -3314,6 +3944,77 @@ class PlanningService(OwnedProjectService):
                     "target_section": public,
                     "paper_ids": list(section.get("paper_ids") or []),
                     "method": "publication_title_sanitization",
+                    "created_section": False,
+                }
+            )
+        return repaired, adjustments
+
+    @staticmethod
+    def _merge_equivalent_generated_body_sections(
+        sections: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Merge only provably equivalent system-generated body categories.
+
+        A one-paper section is not automatically evidence that two scientific
+        categories are interchangeable. This pass therefore merges exact
+        normalized category identities and leaves merely similar categories as
+        reviewable suggestions in ``taxonomy_diagnostics``.
+        """
+
+        repaired: list[dict[str, Any]] = []
+        by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+        adjustments: list[dict[str, Any]] = []
+        for source in deepcopy(sections):
+            role = infer_section_role(
+                source.get("title"), source.get("section_role")
+            )
+            if role != "body":
+                repaired.append(source)
+                continue
+            title_key = re.sub(
+                r"[^a-z0-9\u3400-\u9fff]+",
+                " ",
+                str(source.get("title") or "").casefold(),
+            ).strip()
+            partition_key = re.sub(
+                r"[^a-z0-9\u3400-\u9fff]+",
+                " ",
+                str(source.get("topic_partition") or "").casefold(),
+            ).strip()
+            identity = (title_key, partition_key)
+            target = by_identity.get(identity) if title_key else None
+            if target is None:
+                repaired.append(source)
+                if title_key:
+                    by_identity[identity] = source
+                continue
+            moved = [
+                str(paper_id)
+                for paper_id in source.get("paper_ids") or []
+                if str(paper_id or "").strip()
+            ]
+            target_papers = target.setdefault("paper_ids", [])
+            target_papers.extend(
+                paper_id for paper_id in moved if paper_id not in target_papers
+            )
+            target_context = target.setdefault("context_paper_ids", [])
+            target_context.extend(
+                str(paper_id)
+                for paper_id in source.get("context_paper_ids") or []
+                if str(paper_id or "").strip()
+                and str(paper_id) not in target_context
+            )
+            for field in ("boundary_rationale", "single_paper_justification"):
+                if not str(target.get(field) or "").strip() and str(
+                    source.get(field) or ""
+                ).strip():
+                    target[field] = source[field]
+            adjustments.append(
+                {
+                    "source_section": str(source.get("title") or ""),
+                    "target_section": str(target.get("title") or ""),
+                    "paper_ids": moved,
+                    "method": "equivalent_primary_axis_category_merge",
                     "created_section": False,
                 }
             )
@@ -3414,13 +4115,11 @@ class PlanningService(OwnedProjectService):
                 if not target_category:
                     continue
                 display_category = target_category
+                # Re-routing follows the selected primary axis only.  A Topic
+                # partition remains a comparison requirement and must not be
+                # multiplied into another set of top-level sections.
                 target_title = publication_section_title(
-                    _capitalize_outline_heading(source_partition),
-                    (
-                        _capitalize_outline_heading(display_category)
-                        if source_partition
-                        else display_category
-                    ),
+                    "", display_category
                 )
                 if not target_title or target_title.casefold() == source_title.casefold():
                     continue
@@ -3548,18 +4247,11 @@ class PlanningService(OwnedProjectService):
             for row in rows
             if str(row.get("paper_id") or "").strip() not in contextual_set
         ]
-        partitioned_rows: dict[str, list[dict[str, Any]]] = {}
-        if partitions:
-            for row in analytical_rows:
-                paper_id = str(row.get("paper_id") or "").strip()
-                label = _topic_partition_for_row(
-                    row,
-                    partitions,
-                    text_by_paper.get(paper_id, ""),
-                )
-                partitioned_rows.setdefault(label, []).append(row)
-        else:
-            partitioned_rows[""] = analytical_rows
+        # A Topic may request that a secondary distinction be discussed
+        # independently, but that does not make it a second top-level axis.
+        # Build body sections once from the declared primary axis; preserve
+        # Topic partitions as traceable within-section requirements below.
+        partitioned_rows: dict[str, list[dict[str, Any]]] = {"": analytical_rows}
 
         primary_label = str(
             intent.get("primary_axis_label")
@@ -3579,13 +4271,10 @@ class PlanningService(OwnedProjectService):
         if secondary_labels:
             structure_description += ", with " + ", ".join(secondary_labels) + " as secondary axes"
         if partitions:
-            structure_description += "; separate " + " versus ".join(partitions)
+            structure_description += "; track " + " versus ".join(partitions) + " within the primary structure"
         if focus_dimensions:
             structure_description += "; cover " + ", ".join(focus_dimensions)
-        ordered_partitions = [
-            *[label for label in partitions if label in partitioned_rows],
-            *[label for label in partitioned_rows if label not in partitions],
-        ]
+        ordered_partitions = [""]
         groups_by_partition: dict[str, dict[str, list[str]]] = {}
         for partition in ordered_partitions:
             groups = self._outline_groups(
@@ -3596,9 +4285,12 @@ class PlanningService(OwnedProjectService):
                 taxonomy_profile=taxonomy_profile,
             )
             # An unresolved primary-study route is not evidence that the paper
-            # is a review or an Introduction-only source. Keep its Matrix
-            # routing status explicit instead of silently changing its role.
-            groups.pop(ROUTING_REQUIRED_LABEL, None)
+            # is a review or an Introduction-only source. Retain it in a
+            # visible boundary-analysis route instead of silently dropping it
+            # from the selected corpus.
+            unresolved = list(groups.pop(ROUTING_REQUIRED_LABEL, []) or [])
+            if unresolved:
+                groups[CROSS_CATEGORY_BOUNDARY_LABEL] = unresolved
             groups_by_partition[partition] = groups
         lines = [
             "# Selected Outline",
@@ -3677,6 +4369,22 @@ class PlanningService(OwnedProjectService):
                         for label, assigned in secondary_groups.items()
                         if assigned and label != ROUTING_REQUIRED_LABEL
                     ]
+                represented_partitions = list(
+                    dict.fromkeys(
+                        label
+                        for row in group_rows
+                        if (
+                            label := _topic_partition_for_row(
+                                row,
+                                partitions,
+                                text_by_paper.get(
+                                    str(row.get("paper_id") or ""), ""
+                                ),
+                            )
+                        )
+                        and label in partitions
+                    )
+                )
                 lines.extend(
                     [
                         f"## {body_index}. {title}",
@@ -3690,7 +4398,21 @@ class PlanningService(OwnedProjectService):
                         "Purpose: " + "; ".join(purpose_parts) + ".",
                     ]
                 )
+                if group == CROSS_CATEGORY_BOUNDARY_LABEL:
+                    lines.append(
+                        "Boundary rationale: The selected primary studies are relevant to "
+                        "the review scope, but their current source-addressable evidence "
+                        "does not justify one declared primary-axis category. Retain them "
+                        "for explicit cross-category comparison until stronger routing "
+                        "evidence is available."
+                    )
                 notes: list[str] = []
+                if represented_partitions:
+                    notes.append(
+                        "Topic-requested independent discussion represented by assigned evidence: "
+                        + ", ".join(represented_partitions)
+                        + "."
+                    )
                 for secondary_axis, represented in represented_secondary.items():
                     if represented:
                         notes.append(
@@ -3748,8 +4470,11 @@ class PlanningService(OwnedProjectService):
             taxonomy_profile=taxonomy_profile,
         )
         # Only document-scope evidence may create an Introduction context
-        # source. Failed taxonomy routing remains an explicit Matrix state.
-        groups.pop(ROUTING_REQUIRED_LABEL, None)
+        # source. Failed taxonomy routing remains a visible boundary-analysis
+        # route and is never silently omitted from the generated outline.
+        unresolved = list(groups.pop(ROUTING_REQUIRED_LABEL, []) or [])
+        if unresolved:
+            groups[CROSS_CATEGORY_BOUNDARY_LABEL] = unresolved
         lines = [
             "# Selected Outline",
             "",
@@ -3778,6 +4503,13 @@ class PlanningService(OwnedProjectService):
                 f"Assigned papers: {', '.join(paper_ids)}.",
                 f"Purpose: compare the selected papers within this {definition['axis']} category.",
             ]
+            if label == CROSS_CATEGORY_BOUNDARY_LABEL:
+                block.append(
+                    "Boundary rationale: The selected primary studies are relevant to the "
+                    "review scope, but their current source-addressable evidence does not "
+                    "justify one declared primary-axis category. Retain them for explicit "
+                    "cross-category comparison until stronger routing evidence is available."
+                )
             lines.extend([*block, ""])
         lines.extend(
             [
@@ -3820,6 +4552,11 @@ class PlanningService(OwnedProjectService):
                 for paper_id in [
                     *section["paper_ids"],
                     *section.get("context_paper_ids", []),
+                    *(
+                        exclusion.get("paper_id")
+                        for exclusion in section.get("excluded_papers", [])
+                        if isinstance(exclusion, dict)
+                    ),
                 ]
                 if paper_id not in matrix_ids
             }
@@ -4020,6 +4757,22 @@ class PlanningService(OwnedProjectService):
             )
             for status in ("pending", "complete", "partial", "limited", "failed")
         }
+        enrichment_counts.update(
+            {
+                f"readiness_{status}": sum(
+                    1
+                    for row in rows
+                    if str(
+                        (row.get("fact_enrichment") or {}).get(
+                            "review_readiness"
+                        )
+                        or "source_not_established"
+                    )
+                    == status
+                )
+                for status in ("complete", "partial", "source_not_established")
+            }
+        )
         enrichment_summary = dict(matrix.get("fact_enrichment_summary") or {})
         all_enrichment_failed = bool(rows) and enrichment_counts["failed"] == len(rows)
         latest_enrichment_job = enrichment_jobs[0] if enrichment_jobs else None
@@ -4321,6 +5074,38 @@ class PlanningService(OwnedProjectService):
             required=False,
         )
         parsed_sections = _outline_sections(markdown) if complete else []
+        if complete and not manual and style in OUTLINE_STYLES:
+            generated_tags, generated_text = self._outline_sources(principal, rows)
+            if not topic_text_by_paper:
+                topic_text_by_paper = generated_text
+            routing_tag_key = ""
+            routing_axis_label = ""
+            if style == TOPIC_GUIDED_STYLE:
+                primary_axis = str(topic_intent.get("primary_axis") or "")
+                if primary_axis in TOPIC_AXIS_LABELS:
+                    routing_tag_key = primary_axis
+                    routing_axis_label = TOPIC_AXIS_LABELS[primary_axis]["en"]
+            parsed_sections, coverage_adjustments = (
+                self._reconcile_generated_outline_coverage(
+                    parsed_sections,
+                    rows,
+                    generated_tags,
+                    generated_text,
+                    outline_style=style,
+                    taxonomy_profile=project.taxonomy_profile,
+                    tag_key_override=routing_tag_key,
+                    axis_label_override=routing_axis_label,
+                )
+            )
+            if coverage_adjustments:
+                markdown = self._validate_outline(
+                    _outline_markdown_from_sections(
+                        parsed_sections,
+                        outline_style=style,
+                        automatically_adjusted=True,
+                    ),
+                    matrix_ids,
+                )
         previous_scope = (
             (current_outline or {}).get("scope_contract")
             if isinstance(current_outline, dict)
@@ -4872,6 +5657,7 @@ class PlanningService(OwnedProjectService):
         parsed = _outline_sections(str(outline["outline_md"]))
         matrix_order = _paper_ids(matrix["rows"])
         auto_routing_adjustments: list[dict[str, Any]] = []
+        structure_change_suggestions: list[dict[str, Any]] = []
         resolved_outline_md = str(outline["outline_md"])
         outline_style = str(outline.get("outline_style") or "")
         routing_style = outline_style
@@ -4891,7 +5677,7 @@ class PlanningService(OwnedProjectService):
             tags_by_paper, text_by_paper = self._outline_sources(
                 principal, matrix["rows"]
             )
-            parsed, auto_routing_adjustments = (
+            parsed, placeholder_adjustments = (
                 self._auto_repair_generated_routing_sections(
                     parsed,
                     matrix["rows"],
@@ -4902,6 +5688,20 @@ class PlanningService(OwnedProjectService):
                     axis_label_override=routing_axis_label,
                 )
             )
+            auto_routing_adjustments.extend(placeholder_adjustments)
+            parsed, coverage_adjustments = (
+                self._reconcile_generated_outline_coverage(
+                    parsed,
+                    matrix_rows,
+                    tags_by_paper,
+                    text_by_paper,
+                    outline_style=routing_style,
+                    taxonomy_profile=project.taxonomy_profile,
+                    tag_key_override=routing_tag_key,
+                    axis_label_override=routing_axis_label,
+                )
+            )
+            auto_routing_adjustments.extend(coverage_adjustments)
             parsed, evidence_realignments = self._realign_generated_body_sections(
                 parsed,
                 matrix_rows,
@@ -4916,6 +5716,10 @@ class PlanningService(OwnedProjectService):
                 parsed
             )
             auto_routing_adjustments.extend(title_adjustments)
+            parsed, equivalent_merge_adjustments = (
+                self._merge_equivalent_generated_body_sections(parsed)
+            )
+            auto_routing_adjustments.extend(equivalent_merge_adjustments)
             contextual_ids = self._contextual_outline_paper_ids(
                 matrix_rows, tags_by_paper, text_by_paper
             )
@@ -4963,6 +5767,72 @@ class PlanningService(OwnedProjectService):
                             "created_section": False,
                         }
                     )
+            if auto_routing_adjustments:
+                resolved_outline_md = _outline_markdown_from_sections(
+                    parsed,
+                    outline_style=outline_style,
+                    automatically_adjusted=True,
+                )
+        else:
+            # Preserve a user's grouping and ordering.  If every paper in one
+            # manually edited section resolves to exactly the same supported
+            # primary-axis category, correcting only that factual heading is
+            # safe; splits, merges and moves remain suggestions.
+            _tags, text_by_paper = self._outline_sources(
+                principal, matrix["rows"]
+            )
+            candidate, candidate_adjustments = self._realign_generated_body_sections(
+                parsed,
+                matrix_rows,
+                text_by_paper,
+                outline_style=routing_style,
+                taxonomy_profile=project.taxonomy_profile,
+                tag_key_override=routing_tag_key,
+                axis_label_override=routing_axis_label,
+            )
+            candidate_by_papers = {
+                frozenset(str(value) for value in section.get("paper_ids") or []): section
+                for section in candidate
+                if infer_section_role(
+                    section.get("title"), section.get("section_role")
+                )
+                == "body"
+                and section.get("paper_ids")
+            }
+            for section in parsed:
+                if infer_section_role(
+                    section.get("title"), section.get("section_role")
+                ) != "body":
+                    continue
+                paper_set = frozenset(
+                    str(value) for value in section.get("paper_ids") or []
+                )
+                corrected = candidate_by_papers.get(paper_set)
+                corrected_title = str((corrected or {}).get("title") or "").strip()
+                current_title = str(section.get("title") or "").strip()
+                if corrected_title and corrected_title.casefold() != current_title.casefold():
+                    section["title"] = corrected_title
+                    auto_routing_adjustments.append(
+                        {
+                            "source_section": current_title,
+                            "target_section": corrected_title,
+                            "paper_ids": sorted(paper_set),
+                            "method": "manual_outline_factual_title_correction",
+                            "created_section": False,
+                        }
+                    )
+            structure_change_suggestions = [
+                row
+                for row in candidate_adjustments
+                if isinstance(row, dict)
+                and str(row.get("method") or "")
+                == "scientific_object_reassignment"
+                and not any(
+                    set(row.get("paper_ids") or [])
+                    == set(applied.get("paper_ids") or [])
+                    for applied in auto_routing_adjustments
+                )
+            ]
             if auto_routing_adjustments:
                 resolved_outline_md = _outline_markdown_from_sections(
                     parsed,
@@ -5145,7 +6015,22 @@ class PlanningService(OwnedProjectService):
                 "context_papers": list(context_papers),
             }
 
+        # Resolve the one authoritative classification contract before section
+        # contracts are built. Thesis and paragraph-depth derivation consume
+        # this existing contract; no parallel taxonomy state is introduced.
+        basis = dict(
+            outline.get("classification_basis")
+            or classification_basis(outline.get("outline_style"))
+        )
+        selected_axis_contract = classification_contract_from_document(
+            outline,
+            primary_axis_hint=str(basis.get("primary_axis") or ""),
+            source="blueprint_from_selected_outline",
+        )
+        basis = _basis_with_axis_contract(basis, selected_axis_contract)
+
         sections: list[dict[str, Any]] = []
+        topic_required_partitions = _required_topic_partitions_from_outline(outline)
         for section in normalized:
             role = section["section_role"]
             primary = list(section["primary_papers"])
@@ -5183,7 +6068,7 @@ class PlanningService(OwnedProjectService):
                 figure_need = "None unless a cross-section synthesis figure adds new comparative value."
                 target_words = 900
             else:
-                thesis = str(section.get("purpose") or "").strip() or f"Synthesize evidence for {section['title']}."
+                thesis = str(section.get("purpose") or "").strip()
                 problem = f"What does the current evidence establish about {section['title']}?"
                 if primary:
                     claim = (
@@ -5197,6 +6082,60 @@ class PlanningService(OwnedProjectService):
                     )
                 figure_need = f"Support the comparison in {section['title']} where source evidence permits."
                 target_words = max(700, 350 * max(1, len(primary)))
+            thesis_contract = derive_scientific_thesis(
+                {
+                    **section,
+                    "section_role": role,
+                    "purpose": thesis,
+                    "primary_papers": primary,
+                    "supporting_papers": supporting,
+                    "target_words": target_words,
+                },
+                rows_by_id,
+                selected_axis_contract,
+            )
+            if role == "body":
+                thesis = str(thesis_contract.get("text") or thesis).strip()
+            depth_contract = derive_section_depth_contract(
+                {
+                    "section_role": role,
+                    "primary_papers": primary,
+                    "target_words": target_words,
+                }
+            )
+            minimum_fact_roles = (
+                ("object_input", "method_conditions", "limitations")
+                if role == "introduction"
+                else ("quantitative_results", "scope", "limitations")
+                if role == "conclusion"
+                else ("object_input", "method_conditions", "quantitative_results", "scope")
+            )
+            section_required_roles = required_fact_roles(
+                matrix.get("review_topic") or (discovery or {}).get("topic"),
+                section.get("title"),
+                thesis,
+                problem,
+                claim,
+                minimum_roles=minimum_fact_roles,
+            )
+            targeted_fact_gaps: dict[str, list[str]] = {}
+            for paper_id in primary:
+                row = rows_by_id.get(paper_id) or {}
+                enrichment = dict(row.get("fact_enrichment") or {})
+                readiness = fact_readiness_report(
+                    facts=row.get("scientific_facts") or [],
+                    required_roles=section_required_roles,
+                    extraction_status=str(
+                        enrichment.get("extraction_status")
+                        or enrichment.get("status")
+                        or "pending"
+                    ),
+                    failed_fields=enrichment.get("failed_fields") or [],
+                )
+                if readiness["missing_fact_roles"]:
+                    targeted_fact_gaps[paper_id] = list(
+                        readiness["missing_fact_roles"]
+                    )
             sections.append(
                 {
                     "section_id": section["section_id"],
@@ -5209,12 +6148,40 @@ class PlanningService(OwnedProjectService):
                         section.get("boundary_rationale") or ""
                     ).strip(),
                     "section_thesis": thesis,
+                    "scientific_thesis": thesis_contract,
+                    "thesis_status": str(
+                        thesis_contract.get("status") or "provisional"
+                    ),
                     "review_problem": problem,
                     "major_papers": primary,
                     "primary_papers": primary,
                     "supporting_papers": supporting,
                     "context_papers": context_papers,
-                    "review_claims": [{"claim": claim}],
+                    # ``claim`` is an authoring operation, not a proposition
+                    # expected to occur in a source paper.  Keep the legacy
+                    # field for old renderers, but make its role explicit and
+                    # publish the executable contract separately.
+                    "review_claims": [
+                        {
+                            "claim": claim,
+                            "legacy_role": "writing_requirement",
+                        }
+                    ],
+                    "scientific_claims": [],
+                    "writing_requirements": [
+                        {
+                            "requirement_id": f"WR-{section['section_id']}-01",
+                            "type": (
+                                "framing_synthesis"
+                                if role == "introduction"
+                                else "cross_section_synthesis"
+                                if role == "conclusion"
+                                else "cross_study_synthesis"
+                            ),
+                            "instruction": claim,
+                            "source": "native_blueprint",
+                        }
+                    ],
                     "figure_or_table_needs": [
                         {
                             "type": "Figure or table",
@@ -5229,14 +6196,38 @@ class PlanningService(OwnedProjectService):
                     ],
                     "section_transition": "Connect this evidence to the next comparison axis.",
                     "target_words": target_words,
+                    "depth_contract": depth_contract,
+                    "required_fact_roles": section_required_roles,
+                    "targeted_fact_gaps": targeted_fact_gaps,
+                    "secondary_axis_routes": {},
+                    "targeted_fact_extraction": {
+                        "mode": "evidence_package_question_retrieval",
+                        "paper_count": len(targeted_fact_gaps),
+                        "missing_role_count": sum(
+                            len(values) for values in targeted_fact_gaps.values()
+                        ),
+                        "negative_claim_policy": (
+                            "retrieval_not_found cannot be written as source_not_reported"
+                        ),
+                    },
                     "evidence_readiness": evidence_readiness(
                         role, primary, context_papers
                     ),
                 }
             )
-            sections[-1]["academic_contract"] = section_academic_contract(sections[-1])
-            sections[-1]["synthesis_requirements"] = synthesis_requirements(
-                sections[-1], taxonomy_profile=project.taxonomy_profile
+        partition_routes, partition_support = _topic_partition_routes(
+            sections,
+            rows_by_id,
+            topic_required_partitions,
+            text_by_paper,
+        )
+        for section in sections:
+            section_id = str(section.get("section_id") or "")
+            section["secondary_axis_routes"] = partition_routes.get(section_id, {})
+            # The section academic contract must include the repaired route.
+            section["academic_contract"] = section_academic_contract(section)
+            section["synthesis_requirements"] = synthesis_requirements(
+                section, taxonomy_profile=project.taxonomy_profile
             )
         if not sections:
             raise WorkflowValidationError("The selected outline contains no usable sections.")
@@ -5249,16 +6240,39 @@ class PlanningService(OwnedProjectService):
         )
         scope_report = scope_diagnostics(scope)
         coverage_report = coverage_diagnostics(scope, matrix["rows"])
-        basis = dict(
-            outline.get("classification_basis")
-            or classification_basis(outline.get("outline_style"))
-        )
-        selected_axis_contract = classification_contract_from_document(
-            outline,
-            primary_axis_hint=str(basis.get("primary_axis") or ""),
-            source="blueprint_from_selected_outline",
-        )
-        basis = _basis_with_axis_contract(basis, selected_axis_contract)
+        if topic_required_partitions:
+            represented_partitions = {
+                partition
+                for routes in partition_routes.values()
+                for partition, paper_ids in routes.items()
+                if paper_ids
+            }
+            raw_boundaries = basis.get("topic_partition_coverage_boundaries")
+            partition_boundaries = (
+                deepcopy(raw_boundaries) if isinstance(raw_boundaries, dict) else {}
+            )
+            for partition in topic_required_partitions:
+                if partition in represented_partitions:
+                    partition_boundaries.pop(partition, None)
+                    continue
+                supported = list(partition_support.get(partition) or [])
+                partition_boundaries.setdefault(
+                    partition,
+                    {
+                        "reason": (
+                            "Source-supported Matrix evidence exists, but it is not owned "
+                            "by an in-scope body section in the current outline."
+                            if supported
+                            else "No selected Matrix paper currently has a source-supported, "
+                            "high-confidence route to this independently requested partition."
+                        ),
+                        "source": "blueprint_matrix_partition_route_audit",
+                        "paper_ids": supported,
+                    },
+                )
+            basis["topic_partitions"] = list(topic_required_partitions)
+            basis["required_outline_partitions"] = list(topic_required_partitions)
+            basis["topic_partition_coverage_boundaries"] = partition_boundaries
         diagnostics = taxonomy_diagnostics(
             sections,
             matrix_order,
@@ -5369,6 +6383,7 @@ class PlanningService(OwnedProjectService):
             "source_bibliography_metadata_artifact_ids": bibliography_metadata_artifact_ids,
             "resolved_outline_md": resolved_outline_md,
             "auto_routing_adjustments": auto_routing_adjustments,
+            "structure_change_suggestions": structure_change_suggestions,
             "restructure_record": restructure_record,
             "rule_pack": "general",
             "rule_pack_path": "references/rule_packs/general",

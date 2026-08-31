@@ -7,7 +7,14 @@ from review_writer_core.bibliography_audit import (
     BibliographyResolutionError,
     apply_bibliography_updates,
     audit_bibliography,
+    bibliography_field_readiness,
     resolve_bibliography,
+)
+from review_writer_core.evidence_queries import build_question_query_plans
+from review_writer_core.review_fact_readiness import (
+    fact_readiness_report,
+    negative_claim_eligibility,
+    required_fact_roles,
 )
 from review_writer_core.paper_sources.base import PaperSearchRequest, SourceSearchResult
 from review_writer_core.publication_metadata import extract_front_matter_doi
@@ -222,6 +229,7 @@ class QualityOptimizationUnitTests(unittest.TestCase):
         )
         self.assertEqual("source_attributed", fields["rights_status"])
         self.assertEqual("unknown", fields["permission_status"])
+        self.assertEqual("verified", fields["source_identity_status"])
 
         verified = figure_rights_fields(
             {
@@ -232,6 +240,95 @@ class QualityOptimizationUnitTests(unittest.TestCase):
         )
         self.assertEqual("license_verified", verified["rights_status"])
         self.assertEqual("verified", verified["permission_status"])
+        self.assertEqual("unresolved", verified["source_identity_status"])
+
+    def test_fact_readiness_is_independent_from_worker_completion(self) -> None:
+        roles = required_fact_roles(
+            "Compare catalyst roles, mechanism evidence, yield, and scope"
+        )
+        report = fact_readiness_report(
+            facts=[
+                {
+                    "field_id": "quantitative_results",
+                    "value": "The reported yield was 82%.",
+                    "support_level": "direct",
+                    "evidence_refs": [{"evidence_key": "sha256:result"}],
+                }
+            ],
+            required_roles=roles,
+            extraction_status="complete",
+            failed_fields=["intervention_role", "mechanism"],
+        )
+        self.assertEqual("partial", report["review_readiness"])
+        self.assertEqual(
+            "retrieval_not_found", report["field_states"]["mechanism"]
+        )
+
+    def test_question_plan_uses_only_blueprint_required_fact_roles(self) -> None:
+        plans = build_question_query_plans(
+            review_topic="A review of intervention systems",
+            heading="Comparative systems",
+            required_fact_roles=["intervention_role", "limitations"],
+        )
+        ids = {row["question_id"] for row in plans}
+        self.assertIn("section_focus", ids)
+        self.assertIn("intervention_role", ids)
+        self.assertIn("limitations", ids)
+        self.assertNotIn("mechanism", ids)
+
+    def test_negative_source_claim_needs_verified_absence_and_checked_source(self) -> None:
+        self.assertFalse(
+            negative_claim_eligibility("retrieval_not_found", ["main_article"])
+        )
+        self.assertFalse(
+            negative_claim_eligibility("source_verified_not_reported", [])
+        )
+        self.assertTrue(
+            negative_claim_eligibility(
+                "source_verified_not_reported", ["main_article", "table"]
+            )
+        )
+
+    def test_bibliography_field_readiness_rejects_residue_and_missing_locator(self) -> None:
+        report = bibliography_field_readiness(
+            {
+                "document_type": "journal_article",
+                "title": "A canonical paper",
+                "authors": ["A. Author Received 2 May"],
+                "journal": "Journal",
+                "year": 2024,
+            },
+            {"status": "verified"},
+        )
+        self.assertFalse(report["ready"])
+        self.assertIn("authors", report["polluted_fields"])
+        self.assertIn("pages_or_article_number", report["missing_fields"])
+
+    def test_bibliography_field_readiness_rejects_markup_only_author_items(self) -> None:
+        report = bibliography_field_readiness(
+            {
+                "document_type": "journal_article",
+                "title": "A canonical paper",
+                "authors": ["A. Author", "<sup></sup>", "Vol., No. –"],
+                "journal": "Journal",
+                "year": 2024,
+                "pages": "1-9",
+            },
+            {"status": "verified"},
+        )
+        self.assertFalse(report["ready"])
+        self.assertIn("authors", report["polluted_fields"])
+        self.assertIn(
+            "authors_contain_rejected_items", report["author_quality_issues"]
+        )
+
+    def test_publication_voice_detects_retrieval_boundary_language(self) -> None:
+        issues = publication_voice_issues(
+            "The locally bounded selected Matrix and available excerpts were used."
+        )
+        self.assertIn(
+            "retrieval_boundary_leak", {row["code"] for row in issues}
+        )
 
     def test_missing_direct_evidence_downgrades_primary_without_forcing_citation(self) -> None:
         tasks = [

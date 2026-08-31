@@ -7,12 +7,14 @@ from dataclasses import asdict
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from review_writer_api.billing import BillingService
 from review_writer_api.config import ApiSettings
 from review_writer_api.database import create_session_factory, database_session
+from review_writer_api.errors import WorkflowError
 from review_writer_api.model_gateway import ModelGatewayError, ModelGatewayService
 from review_writer_api.schemas import (
     EmbeddingGatewayRequest,
@@ -86,6 +88,13 @@ def create_gateway_app(settings: ApiSettings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     metrics = {"requests": 0, "active": 0, "failures": 0}
+
+    @app.exception_handler(WorkflowError)
+    async def workflow_error(_request: Request, exc: WorkflowError):
+        # Billing and other workflow-domain errors originate below the model
+        # gateway boundary.  Preserve their stable status/code so workers can
+        # distinguish insufficient credit from a transient provider outage.
+        return JSONResponse(status_code=exc.status_code, content=exc.payload())
 
     @app.middleware("http")
     async def gateway_metrics(request: Request, call_next):

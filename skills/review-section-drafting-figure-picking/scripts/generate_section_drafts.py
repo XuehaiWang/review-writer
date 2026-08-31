@@ -49,6 +49,27 @@ from review_writer_core.model_gateway_client import (  # noqa: E402
     gateway_configured,
     parse_json_object_text as _parse_json_object_text,
 )
+from review_writer_core.review_fact_readiness import (  # noqa: E402
+    negative_claim_eligibility,
+)
+from review_writer_core.claim_contracts import (  # noqa: E402
+    claim_support_coverage,
+    derive_section_readiness,
+)
+from review_writer_core.section_narrative_contracts import (  # noqa: E402
+    CANONICAL_PARAGRAPH_ROLES,
+    canonical_argument_role,
+    derive_narrative_diagnostics,
+)
+
+
+NEGATIVE_SOURCE_STATEMENT_RE = re.compile(
+    r"\b(?:the\s+(?:study|paper|report|article|source)\s+)?"
+    r"(?:does\s+not|did\s+not|doesn't|didn't|was\s+not|were\s+not)\s+"
+    r"(?:report|provide|specify|define|describe|disclose)\b|"
+    r"\b(?:not|never)\s+(?:reported|provided|specified|defined|described|disclosed)\b",
+    re.I,
+)
 
 
 def write_generation_progress(
@@ -59,8 +80,8 @@ def write_generation_progress(
     phase: str,
     current_section_id: str = "",
     current_heading: str = "",
-    completed_sections: list[dict[str, str]] | None = None,
-    failed_sections: list[dict[str, str]] | None = None,
+    completed_sections: list[dict[str, Any]] | None = None,
+    failed_sections: list[dict[str, Any]] | None = None,
     evidence_hit_count: int = 0,
     evidence_paper_count: int = 0,
 ) -> None:
@@ -248,6 +269,22 @@ def load_blueprint_rule_pack(_review_root: Path, blueprint: dict[str, Any]) -> s
         if remaining <= 0:
             break
     return "".join(chunks).strip()
+
+
+def load_cross_study_synthesis_skill() -> str:
+    """Load the single reusable synthesis policy used by planning and prose."""
+
+    path = (
+        _BOOTSTRAP_ROOT
+        / "skills"
+        / "review-cross-study-synthesis"
+        / "SKILL.md"
+    )
+    if not path.is_file():
+        raise RuntimeError(f"Cross-study synthesis skill is missing: {path}")
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    text = re.sub(r"\A---\s*\n.*?\n---\s*\n", "", text, flags=re.DOTALL)
+    return text.strip()[:6000]
 
 
 def value(item: Any) -> Any:
@@ -513,11 +550,50 @@ SUPPORT_STATUSES = {"supported", "partially_supported", "blocked"}
 ARGUMENT_ROLES = {
     "definition", "foundation", "mechanism", "comparison", "extension",
     "limitation", "synthesis", "transition", "reported_evidence",
+    *CANONICAL_PARAGRAPH_ROLES,
 }
 
 
 def compact_text(value: Any, *, limit: int = 4000) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+
+
+def manuscript_word_count(value: Any) -> int:
+    """Count Latin tokens and CJK characters without counting Markdown syntax."""
+
+    return len(
+        re.findall(
+            r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*|[\u3400-\u4dbf\u4e00-\u9fff]",
+            str(value or ""),
+        )
+    )
+
+
+def target_word_floor(value: Any) -> int:
+    """Read a conservative lower depth bound from current and legacy specs."""
+
+    if isinstance(value, dict):
+        for key in ("min", "minimum", "lower"):
+            try:
+                candidate = int(value.get(key) or 0)
+            except (TypeError, ValueError):
+                continue
+            if candidate > 0:
+                return candidate
+        return 0
+    if isinstance(value, (int, float)):
+        return max(0, int(float(value) * 0.7))
+    match = re.search(
+        r"\b(\d{2,6})\s*(?:[-–—~]|to)\s*\d{2,6}\b",
+        str(value or ""),
+        re.I,
+    )
+    if match:
+        return int(match.group(1))
+    try:
+        return max(0, int(str(value or "").strip()) * 7 // 10)
+    except ValueError:
+        return 0
 
 
 def bounded_evidence_payload(
@@ -709,6 +785,7 @@ def synthesis_contract_gaps(
     requirements: list[dict[str, Any]],
     comparison_table: dict[str, Any],
     mechanism_table: dict[str, Any],
+    depth_contract: dict[str, Any] | None = None,
 ) -> list[str]:
     required = {
         str(item.get("component") or "")
@@ -747,7 +824,230 @@ def synthesis_contract_gaps(
             continue
         if component not in supported_components:
             gaps.append(f"required_{component}_component_not_supported")
+    narrative = derive_narrative_diagnostics(writing_section, depth_contract)
+    for missing in narrative.get("missing_requirements") or []:
+        gaps.append(f"narrative_{missing}_missing")
+    writing_section["depth_contract"] = dict(depth_contract or {})
+    writing_section["narrative_diagnostics"] = narrative
     return list(dict.fromkeys(gaps))
+
+
+def ensure_evidence_bound_comparison_plan(
+    writing_section: dict[str, Any],
+    synthesis_section: dict[str, Any],
+    comparison_table: dict[str, Any],
+    evidence: list[dict[str, Any]],
+) -> bool:
+    """Add one conservative comparison when the model omitted an available one.
+
+    This fallback uses only source-addressable Matrix cells whose evidence keys
+    are present in the current section evidence registry. It never fills a
+    missing cell or turns a retrieval miss into a negative scientific claim.
+    """
+
+    existing = [
+        claim
+        for claim in writing_section.get("claims") or []
+        if isinstance(claim, dict)
+        and str(claim.get("claim_kind") or "")
+        in {"cross_study_comparison", "review_synthesis"}
+        and len(set(claim.get("citation_group") or [])) >= 2
+    ]
+    if existing:
+        return False
+    evidence_by_key = {
+        str(item.get("evidence_key") or ""): item
+        for item in evidence
+        if isinstance(item, dict)
+        and str(item.get("evidence_key") or "")
+        and bool(item.get("claim_eligible", True))
+    }
+    chosen_field = ""
+    chosen_cells: list[tuple[dict[str, Any], str]] = []
+    for field_id in comparison_table.get("comparable_fields") or []:
+        candidates: list[tuple[dict[str, Any], str]] = []
+        seen_papers: set[str] = set()
+        for cell in comparison_table.get("cells") or []:
+            if not isinstance(cell, dict) or str(cell.get("field_id") or "") != str(field_id):
+                continue
+            paper_id = str(cell.get("paper_id") or "")
+            if not paper_id or paper_id in seen_papers:
+                continue
+            key = next(
+                (
+                    str(ref.get("evidence_key") or "")
+                    for ref in cell.get("evidence_refs") or []
+                    if isinstance(ref, dict)
+                    and str(ref.get("evidence_key") or "") in evidence_by_key
+                ),
+                "",
+            )
+            if key:
+                candidates.append((cell, key))
+                seen_papers.add(paper_id)
+            if len(candidates) >= 2:
+                break
+        if len(candidates) >= 2:
+            chosen_field = str(field_id)
+            chosen_cells = candidates[:2]
+            break
+    if len(chosen_cells) < 2:
+        return False
+
+    section_id = str(writing_section.get("section_id") or "S00")
+    paragraph_number = len(
+        [row for row in writing_section.get("paragraphs") or [] if isinstance(row, dict)]
+    ) + 1
+    paragraph_id = f"{section_id}-p{paragraph_number}"
+    claim_id = f"{paragraph_id}-C01"
+    papers = [str(cell.get("paper_id") or "") for cell, _key in chosen_cells]
+    keys = [key for _cell, key in chosen_cells]
+    fact_ids = list(
+        dict.fromkeys(
+            str(fact_id)
+            for cell, _key in chosen_cells
+            for fact_id in cell.get("fact_ids") or []
+            if str(fact_id)
+        )
+    )
+    values = [compact_text(cell.get("value"), limit=800) for cell, _key in chosen_cells]
+    ceiling_order = {
+        "context_only": 0,
+        "abstract_report_only": 1,
+        "attributed_author_interpretation": 2,
+        "direct_report_with_local_context": 3,
+        "direct_source_report": 4,
+    }
+    ceilings = [
+        str(evidence_by_key[key].get("assertion_ceiling") or "context_only")
+        for key in keys
+    ]
+    assertion_ceiling = min(
+        ceilings,
+        key=lambda value: ceiling_order.get(value, 0),
+        default="context_only",
+    )
+    writing_section.setdefault("claims", []).append(
+        {
+            "claim_id": claim_id,
+            "paragraph_id": paragraph_id,
+            "sequence": 1,
+            "claim": (
+                f"The source-reported {chosen_field.replace('_', ' ')} differs "
+                "across the compared studies under their respective reported contexts."
+            ),
+            "claim_kind": "cross_study_comparison",
+            "synthesis_subtype": "descriptive_source_bounded_comparison",
+            "epistemic_status": "direct_source_report",
+            "support_status": "supported",
+            "citation_group": papers,
+            "evidence_refs": [
+                {
+                    "evidence_id": evidence_by_key[key].get("evidence_id"),
+                    "evidence_key": key,
+                    "relationship": "supports",
+                }
+                for key in keys
+            ],
+            "fact_ids": fact_ids,
+            "allowed_assertion": " | ".join(values),
+            "assertion_ceiling": assertion_ceiling,
+            "ceiling_explanation": (
+                "Compare only the two source-reported values and retain their "
+                "study-specific contexts; do not infer a universal ranking."
+            ),
+            "evidence_ceiling": "Descriptive cross-study comparison only.",
+            "semantic_constraints": [
+                "Do not generalize beyond the two cited source contexts.",
+                "Do not fill missing comparison cells or infer causality.",
+            ],
+            **claim_support_coverage(
+                {
+                    "proposition": (
+                        f"The source-reported {chosen_field.replace('_', ' ')} differs "
+                        "across the compared studies under their respective reported contexts."
+                    ),
+                    "paper_ids": papers,
+                    "fact_ids": fact_ids,
+                    "evidence_refs": [
+                        {"evidence_key": key, "paper_id": paper_id}
+                        for key, paper_id in zip(keys, papers)
+                    ],
+                },
+                evidence_texts=[
+                    " ".join(
+                        str(value or "")
+                        for value in (
+                            evidence_by_key[key].get("content")
+                            or evidence_by_key[key].get("evidence")
+                            or "",
+                            evidence_by_key[key].get("normalized_fact_value") or "",
+                        )
+                    )
+                    for key in keys
+                ],
+                available_fact_ids=fact_ids,
+                evidence_paper_ids=papers,
+            ),
+        }
+    )
+    comparison_paragraph = {
+            "paragraph_id": paragraph_id,
+            "theme": f"Source-bounded comparison of {chosen_field.replace('_', ' ')}",
+            "argument_role": "cross_study_comparison",
+            "objective": "Contrast two directly source-addressable reports without ranking them universally.",
+            "target_words": {
+                "min": CASE_PARAGRAPH_MIN_WORDS,
+                "max": CASE_PARAGRAPH_MAX_WORDS,
+            },
+            "primary_papers": papers,
+            "supporting_papers": [],
+            "paper_ids": papers,
+            "opening_function": "Introduce the shared comparison field.",
+            "closing_function": "State the study-specific evidence boundary.",
+            "reader_takeaway": "The studies differ on a comparable reported field, but the contexts remain distinct.",
+            "positive_synthesis": "A direct source-bounded comparison is available.",
+            "caveat_policy": "diagnostic_only",
+            "knowledge_component_refs": [],
+            "claim_ids": [claim_id],
+        }
+    paragraph_rows = writing_section.setdefault("paragraphs", [])
+    insert_at = (
+        len(paragraph_rows) - 1
+        if paragraph_rows
+        and str(paragraph_rows[-1].get("argument_role") or "")
+        == "section_synthesis_exit"
+        else len(paragraph_rows)
+    )
+    paragraph_rows.insert(insert_at, comparison_paragraph)
+    components = synthesis_section.setdefault("components", [])
+    comparison_component = next(
+        (
+            row
+            for row in components
+            if isinstance(row, dict)
+            and str(row.get("component_type") or "") == "comparison"
+        ),
+        None,
+    )
+    if comparison_component is None:
+        comparison_component = {
+            "component_id": f"{section_id}-comparison-{len(components) + 1:02d}",
+            "component_type": "comparison",
+            "necessity": "required",
+            "purpose": "Compare source-addressable study fields.",
+            "provenance": "deterministic_evidence_bound_fallback",
+        }
+        components.append(comparison_component)
+    comparison_component.update(
+        {
+            "status": "supported",
+            "summary": f"Compared {chosen_field.replace('_', ' ')} across two source reports.",
+            "evidence_keys": keys,
+            "provenance": "deterministic_evidence_bound_fallback",
+        }
+    )
+    return True
 
 
 def normalize_section_plan(
@@ -761,6 +1061,7 @@ def normalize_section_plan(
     retrieval_mode: str,
     generated: dict[str, Any],
     synthesis_requirements: list[dict[str, Any]],
+    depth_contract: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Convert a model proposal into a deterministic evidence-bound contract."""
 
@@ -851,9 +1152,12 @@ def normalize_section_plan(
     paragraph_plans: list[dict[str, Any]] = []
     claim_plans: list[dict[str, Any]] = []
     covered_primary: set[str] = set()
-    for paragraph_index, raw_paragraph in enumerate(
-        (generated.get("paragraphs") or [])[:8], start=1
-    ):
+    raw_paragraphs = [
+        item
+        for item in (generated.get("paragraphs") or [])[:8]
+        if isinstance(item, dict)
+    ]
+    for paragraph_index, raw_paragraph in enumerate(raw_paragraphs, start=1):
         if not isinstance(raw_paragraph, dict):
             continue
         paragraph_id = f"{section_id}-p{paragraph_index}"
@@ -907,6 +1211,17 @@ def normalize_section_plan(
             claim_text = compact_text(raw_claim.get("claim"))
             if not claim_text:
                 continue
+            if NEGATIVE_SOURCE_STATEMENT_RE.search(claim_text) and not any(
+                negative_claim_eligibility(
+                    evidence_by_key[key].get("fact_state"),
+                    evidence_by_key[key].get("checked_sources") or [],
+                )
+                for key in keys
+            ):
+                # Retrieval misses are workflow diagnostics, not evidence that
+                # a publication omitted a scientific fact.  Dropping the
+                # proposal sends the plan through its normal repair path.
+                continue
             claim_kind = compact_text(raw_claim.get("claim_kind"), limit=80).casefold()
             if claim_kind not in CLAIM_KINDS:
                 claim_kind = "reported_finding"
@@ -952,6 +1267,37 @@ def normalize_section_plan(
                 )
                 or "Do not generalize beyond the cited source evidence."
             )
+            coverage_report = claim_support_coverage(
+                {
+                    "proposition": claim_text,
+                    "paper_ids": citation_group,
+                    "fact_ids": fact_ids,
+                    "evidence_refs": [
+                        {"evidence_key": key} for key in keys
+                    ],
+                },
+                evidence_texts=[
+                    " ".join(
+                        str(value or "")
+                        for value in (
+                            evidence_by_key[key].get("content")
+                            or evidence_by_key[key].get("evidence")
+                            or "",
+                            evidence_by_key[key].get("normalized_fact_value") or "",
+                        )
+                    )
+                    for key in keys
+                ],
+                available_fact_ids=fact_ids,
+                evidence_paper_ids=[
+                    evidence_by_key[key].get("paper_id") for key in keys
+                ],
+            )
+            if (
+                support_status == "supported"
+                and coverage_report["support_status"] != "supported"
+            ):
+                support_status = "partially_supported"
             claim_plans.append(
                 {
                     "claim_id": claim_id,
@@ -976,6 +1322,10 @@ def normalize_section_plan(
                         "Do not introduce uncited quantitative, causal, or mechanistic detail.",
                         "Preserve source attribution and the declared evidence ceiling.",
                     ],
+                    "coverage": coverage_report["coverage"],
+                    "failed_coverage_fields": coverage_report[
+                        "failed_coverage_fields"
+                    ],
                 }
             )
             paragraph_claim_ids.append(claim_id)
@@ -991,16 +1341,14 @@ def normalize_section_plan(
             for claim in claim_plans
             if claim.get("claim_id") in paragraph_claim_ids
         }
-        if (
-            len(set(paragraph_papers)) > 1
-            and paragraph_claim_kinds
-            & {"cross_study_comparison", "review_synthesis"}
-        ):
-            argument_role = "comparison"
-        elif "mechanism_interpretation" in paragraph_claim_kinds:
-            argument_role = "mechanism"
-        if argument_role not in ARGUMENT_ROLES:
-            argument_role = "synthesis" if len(set(paragraph_papers)) > 1 else "reported_evidence"
+        argument_role = canonical_argument_role(
+            argument_role,
+            claim_kinds=paragraph_claim_kinds,
+            paper_count=len(set(paragraph_papers)),
+            paragraph_index=paragraph_index - 1,
+            paragraph_count=len(raw_paragraphs),
+            section_role=role,
+        )
         knowledge_refs = [
             f"synthesis_state:{component['component_type']}:{component['component_id']}"
             for component in components
@@ -1024,6 +1372,7 @@ def normalize_section_plan(
                     paper_id for paper_id in dict.fromkeys(paragraph_papers)
                     if paper_id in supporting
                 ],
+                "paper_ids": list(dict.fromkeys(paragraph_papers)),
                 "opening_function": "Advance from the preceding analytical question.",
                 "closing_function": "State the evidence boundary and next implication.",
                 "reader_takeaway": compact_text(raw_paragraph.get("reader_takeaway")),
@@ -1035,6 +1384,16 @@ def normalize_section_plan(
         )
     if not paragraph_plans:
         raise RuntimeError(f"The academic planner produced no supported paragraph for {section_id}.")
+    # The first and final responsibilities are structural properties of the
+    # plan, not scientific assertions. Normalize their labels deterministically
+    # so later validation can distinguish framing from evidence synthesis.
+    if role == "body":
+        paragraph_plans[0]["argument_role"] = "section_frame"
+    if (
+        (depth_contract or {}).get("requires_section_synthesis_exit")
+        and len(paragraph_plans) > 1
+    ):
+        paragraph_plans[-1]["argument_role"] = "section_synthesis_exit"
     missing_primary = [paper_id for paper_id in primary if paper_id not in covered_primary]
     if missing_primary:
         raise RuntimeError(
@@ -1053,7 +1412,12 @@ def normalize_section_plan(
         "overview_intent": compact_text(generated.get("overview_intent")),
         "paragraphs": paragraph_plans,
         "claims": claim_plans,
+        "depth_contract": dict(depth_contract or {}),
     }
+    writing_section["narrative_diagnostics"] = derive_narrative_diagnostics(
+        writing_section,
+        depth_contract,
+    )
     return synthesis_section, writing_section
 
 
@@ -1116,6 +1480,10 @@ def prior_body_synthesis_context(
                         claim.get("ceiling_explanation")
                     ),
                     "evidence_ceiling": compact_text(claim.get("evidence_ceiling")),
+                    "coverage": dict(claim.get("coverage") or {}),
+                    "failed_coverage_fields": list(
+                        claim.get("failed_coverage_fields") or []
+                    ),
                 }
             )
         context.append(
@@ -1169,6 +1537,7 @@ def validate_and_realize_section(
     paragraphs: list[dict[str, Any]] = []
     validations: list[dict[str, Any]] = []
     anchor_failures: list[str] = []
+    narrowed_claims: list[dict[str, Any]] = []
     all_realized_claims: set[str] = set()
     for paragraph_id, paragraph_plan in plans.items():
         raw = realized_by_id[paragraph_id]
@@ -1236,6 +1605,54 @@ def validate_and_realize_section(
                 anchor_failures.append(
                     f"Claim {claim_id} introduced unsupported evidence anchors: {details}."
                 )
+            # Planning coverage describes the original proposed Claim.  It is
+            # not an immutable verdict on a safer realization.  In particular,
+            # a plan may record ``value=False`` because the proposed sentence
+            # contained an unsupported number; the deterministic fallback then
+            # deliberately removes that number.  Carrying the old coverage map
+            # into the realization check made the repaired sentence fail
+            # forever, so one defective Claim could prevent an otherwise valid
+            # section from ever completing.  Recompute semantic/value coverage
+            # from the exact realized sentence while still enforcing immutable
+            # fact IDs, evidence references, and paper identity below.
+            planned_coverage = dict(claim_plan.get("coverage") or {})
+            planned_failed_coverage_fields = list(
+                claim_plan.get("failed_coverage_fields") or []
+            )
+            realization_coverage = claim_support_coverage(
+                {
+                    **claim_plan,
+                    "coverage": {},
+                    "proposition": sentence,
+                    "paper_ids": cited,
+                },
+                evidence_texts=cited_evidence_texts,
+                available_fact_ids=claim_plan.get("fact_ids") or [],
+                evidence_paper_ids=[
+                    evidence_by_key[str(ref["evidence_key"])].get("paper_id")
+                    for ref in refs
+                ],
+                domain_terms=domain_terms or [],
+            )
+            hard_coverage_failures = [
+                value
+                for value in realization_coverage["failed_coverage_fields"]
+                if value in {"paper_identity", "fact_ids", "value"}
+            ]
+            if hard_coverage_failures:
+                anchor_failures.append(
+                    f"Claim {claim_id} failed coverage fields: "
+                    + ", ".join(hard_coverage_failures)
+                    + "."
+                )
+            elif planned_failed_coverage_fields:
+                narrowed_claims.append(
+                    {
+                        "claim_id": claim_id,
+                        "planned_failed_coverage_fields": planned_failed_coverage_fields,
+                        "realized_as_supported_boundary": sentence,
+                    }
+                )
             for paper_id in cited:
                 chunks = list(
                     dict.fromkeys(
@@ -1260,6 +1677,14 @@ def validate_and_realize_section(
                     "text": sentence,
                     "citation_group": cited,
                     "evidence_refs": refs,
+                    "fact_ids": list(claim_plan.get("fact_ids") or []),
+                    "support_status": realization_coverage["support_status"],
+                    "coverage": realization_coverage["coverage"],
+                    "planned_coverage": planned_coverage,
+                    "planned_failed_coverage_fields": planned_failed_coverage_fields,
+                    "failed_coverage_fields": realization_coverage[
+                        "failed_coverage_fields"
+                    ],
                 }
             )
             all_realized_claims.add(claim_id)
@@ -1293,6 +1718,18 @@ def validate_and_realize_section(
         for phrase in defensive_phrases
     )
     issues: list[dict[str, Any]] = []
+    if narrowed_claims:
+        issues.append(
+            {
+                "type": "planned_claim_scope_narrowed",
+                "severity": "warning",
+                "reason": (
+                    "One or more proposed Claims exceeded their cited evidence; "
+                    "the realized prose was narrowed to a source-supported boundary."
+                ),
+                "claims": narrowed_claims,
+            }
+        )
     if defensive_count > max(1, len(paragraphs)):
         issues.append(
             {
@@ -1567,7 +2004,7 @@ def main() -> int:
             for key in ("output", "synthesis", "writing")
         )
     }
-    completed_progress: list[dict[str, str]] = [
+    completed_progress: list[dict[str, Any]] = [
         {
             "section_id": section_id,
             "heading": str((checkpoint_entries.get(section_id) or {}).get("heading") or section_id),
@@ -1576,6 +2013,12 @@ def main() -> int:
                     "generation_mode"
                 )
                 or "standard"
+            ),
+            "section_readiness": dict(
+                ((checkpoint_entries.get(section_id) or {}).get("output") or {}).get(
+                    "section_readiness"
+                )
+                or {}
             ),
         }
         for section_id in task_ids
@@ -1616,6 +2059,7 @@ def main() -> int:
     selected_outline_path = project / "01_matrix_outline" / "selected_outline.md"
     selected_outline = selected_outline_path.read_text(encoding="utf-8", errors="ignore")[:12000] if selected_outline_path.exists() else ""
     rules = load_blueprint_rule_pack(root, blueprint)
+    synthesis_rules = load_cross_study_synthesis_skill()
     section_specs = {str(item.get("section_id")): item for item in blueprint.get("sections", []) if isinstance(item, dict)}
     selected_papers = {
         str(pid)
@@ -1649,7 +2093,7 @@ def main() -> int:
         if isinstance(checkpoint_entries.get(section_id), dict)
         and isinstance(checkpoint_entries[section_id].get("writing"), dict)
     ]
-    failed_progress: list[dict[str, str]] = []
+    failed_progress: list[dict[str, Any]] = []
 
     def record_section_failure(section_id: str, heading: str, error: str) -> None:
         failed_progress.append(
@@ -1722,6 +2166,38 @@ def main() -> int:
             )
         )
         section_evidence = evidence_sections.get(section_id, {})
+        scientific_claim_states = [
+            dict(item)
+            for item in section_evidence.get("scientific_claim_states") or []
+            if isinstance(item, dict)
+        ]
+        claim_state_by_id = {
+            str(item.get("claim_id") or ""): item
+            for item in scientific_claim_states
+            if str(item.get("claim_id") or "")
+        }
+        declared_scientific_claims = [
+            dict(item)
+            for item in task.get("scientific_claims") or []
+            if isinstance(item, dict)
+        ]
+        supported_scientific_claims = [
+            claim
+            for claim in declared_scientific_claims
+            if not claim_state_by_id
+            or str(
+                (claim_state_by_id.get(str(claim.get("claim_id") or "")) or {}).get(
+                    "status"
+                )
+                or ""
+            )
+            in {"evidence_supported", "partially_supported"}
+        ]
+        writing_requirements = [
+            dict(item)
+            for item in task.get("writing_requirements") or []
+            if isinstance(item, dict)
+        ]
         primary = list(
             dict.fromkeys(
                 str(pid)
@@ -1833,6 +2309,7 @@ def main() -> int:
             evidence_paper_count=evidence_paper_count,
         )
         spec = section_specs.get(section_id, {})
+        depth_contract = dict(spec.get("depth_contract") or task.get("depth_contract") or {})
         comparison_table = build_matrix_comparison_table(
             section_id, assigned_primary, rows
         )
@@ -1877,8 +2354,9 @@ Selected review outline (preserve its ordering and heading intent):
 Section title: {task.get('heading')}
 Section role: {role}
 Section thesis: {task.get('core_argument')}
-Required claims: {json.dumps(task.get('must_cover_points') or [], ensure_ascii=False)}
-Comparison axes and constraints: {json.dumps(spec.get('review_claims') or [], ensure_ascii=False)[:10000]}
+Source-testable scientific claims permitted by current evidence: {json.dumps(supported_scientific_claims, ensure_ascii=False)[:10000]}
+Scientific claim evidence states (missing claims are boundaries, not prose obligations): {json.dumps(scientific_claim_states, ensure_ascii=False)[:10000]}
+Writing requirements (authoring operations, never treat these as source propositions): {json.dumps(writing_requirements, ensure_ascii=False)[:10000]}
 Assigned primary paper IDs: {', '.join(assigned_primary) or 'none'}
 Writeable primary paper IDs (the only papers that must be covered): {', '.join(primary) or 'none'}
 Context-only primary paper IDs (optional broad attribution only): {', '.join(context_only_primary) or 'none'}
@@ -1887,6 +2365,8 @@ Supporting paper IDs (brief comparison or synthesis only): {', '.join(supporting
 Context paper IDs (framing only; never substitute for primary evidence): {', '.join(contextual) or 'none'}
 Allowed paper IDs only: {', '.join(allowed)}
 Required synthesis components: {json.dumps(spec.get('synthesis_requirements') or [], ensure_ascii=False)}
+Narrative depth contract (diagnostic targets, not permission to invent filler): {json.dumps(depth_contract, ensure_ascii=False)}
+Use only these paragraph responsibility labels: {', '.join(CANONICAL_PARAGRAPH_ROLES)}.
 Source-addressable Matrix comparison table (empty cells are unknown, never negative findings):
 {json.dumps(comparison_table, ensure_ascii=False)}
 Mechanism-evidence inventory (describes evidence type, not mechanistic truth):
@@ -1911,6 +2391,8 @@ evidence. A limitation must follow a positive supported takeaway instead of repl
 Do not return blocked Claims as publishable content.
 
 Academic rules:\n{rules}
+
+Cross-study synthesis policy:\n{synthesis_rules}
 
 Source evidence (only use claims supported here):\n{serialized_plan_evidence}
 """
@@ -1965,6 +2447,7 @@ Source evidence (only use claims supported here):\n{serialized_plan_evidence}
                 retrieval_mode=retrieval_mode,
                 generated=proposed_plan,
                 synthesis_requirements=list(spec.get("synthesis_requirements") or []),
+                depth_contract=depth_contract,
             )
             synthesis_section["comparison_table"] = comparison_table
             synthesis_section["mechanism_evidence_table"] = mechanism_table
@@ -1975,6 +2458,7 @@ Source evidence (only use claims supported here):\n{serialized_plan_evidence}
                 list(spec.get("synthesis_requirements") or []),
                 comparison_table,
                 mechanism_table,
+                depth_contract,
             )
             if contract_gaps:
                 initial_synthesis = synthesis_section
@@ -2006,6 +2490,7 @@ Source evidence (only use claims supported here):\n{serialized_plan_evidence}
                         synthesis_requirements=list(
                             spec.get("synthesis_requirements") or []
                         ),
+                        depth_contract=depth_contract,
                     )
                     synthesis_section["comparison_table"] = comparison_table
                     synthesis_section["mechanism_evidence_table"] = mechanism_table
@@ -2015,6 +2500,7 @@ Source evidence (only use claims supported here):\n{serialized_plan_evidence}
                         list(spec.get("synthesis_requirements") or []),
                         comparison_table,
                         mechanism_table,
+                        depth_contract,
                     )
                     synthesis_section["planning_contract_repair"] = {
                         "attempted": True,
@@ -2039,6 +2525,40 @@ Source evidence (only use claims supported here):\n{serialized_plan_evidence}
                     "remaining_gaps": [],
                     "status": "not_needed",
                 }
+            remaining_gaps = synthesis_contract_gaps(
+                writing_section,
+                synthesis_section,
+                list(spec.get("synthesis_requirements") or []),
+                comparison_table,
+                mechanism_table,
+                depth_contract,
+            )
+            deterministic_comparison_added = False
+            if any("comparison" in gap for gap in remaining_gaps):
+                deterministic_comparison_added = ensure_evidence_bound_comparison_plan(
+                    writing_section,
+                    synthesis_section,
+                    comparison_table,
+                    evidence,
+                )
+                remaining_gaps = synthesis_contract_gaps(
+                    writing_section,
+                    synthesis_section,
+                    list(spec.get("synthesis_requirements") or []),
+                    comparison_table,
+                    mechanism_table,
+                    depth_contract,
+                )
+            repair_record = dict(
+                synthesis_section.get("planning_contract_repair") or {}
+            )
+            repair_record["deterministic_comparison_added"] = (
+                deterministic_comparison_added
+            )
+            repair_record["remaining_gaps"] = remaining_gaps
+            if deterministic_comparison_added and not remaining_gaps:
+                repair_record["status"] = "repaired_with_evidence_bound_fallback"
+            synthesis_section["planning_contract_repair"] = repair_record
         except RuntimeError as exc:
             message = str(exc)
             if "transport failed" in message.casefold():
@@ -2128,6 +2648,9 @@ Selected source evidence only:
 
 Writing rules:
 {rules}
+
+Cross-study synthesis policy:
+{synthesis_rules}
 """
         write_generation_progress(
             stage,
@@ -2305,6 +2828,50 @@ Writing rules:
             ])
         section_text = make_xml_compatible("\n".join(markdown).strip() + "\n")[0]
         (sections_dir / f"{section_id}.md").write_text(section_text, encoding="utf-8")
+        actual_word_count = manuscript_word_count(
+            " ".join(
+                [overview, *(str(item.get("text") or "") for item in paragraphs)]
+            )
+        )
+        minimum_word_count = int(
+            depth_contract.get("target_word_min")
+            or target_word_floor(spec.get("target_words"))
+            or 0
+        )
+        depth_sufficient = bool(
+            not minimum_word_count or actual_word_count >= minimum_word_count
+        )
+        planning_repair = (
+            dict(synthesis_section.get("planning_contract_repair") or {})
+            if isinstance(synthesis_section, dict)
+            else {}
+        )
+        structure_gaps = list(planning_repair.get("remaining_gaps") or [])
+        narrative_diagnostics = derive_narrative_diagnostics(
+            writing_section,
+            depth_contract,
+        )
+        structure_gaps.extend(
+            f"narrative_{value}"
+            for value in narrative_diagnostics.get("missing_requirements") or []
+        )
+        structure_gaps = list(dict.fromkeys(structure_gaps))
+        section_readiness = derive_section_readiness(
+            generation_mode=generation_mode,
+            required_claim_states=scientific_claim_states,
+            structure_gaps=structure_gaps,
+            depth_sufficient=depth_sufficient,
+        )
+        depth_diagnostics = {
+            "actual_word_count": actual_word_count,
+            "minimum_word_count": minimum_word_count,
+            "sufficient": depth_sufficient,
+            "derived_from": "section_text_and_blueprint_depth_contract",
+            "target_word_max": int(depth_contract.get("target_word_max") or 0),
+            "target_paragraph_count": int(
+                depth_contract.get("target_paragraph_count") or 0
+            ),
+        }
         synthesis_sections.append(synthesis_section)
         writing_sections.append(writing_section)
         output_sections.append(
@@ -2314,6 +2881,10 @@ Writing rules:
                 "section_role": role,
                 "writing_mode": task.get("writing_mode"),
                 "generation_mode": generation_mode,
+                "section_readiness": section_readiness,
+                "depth_diagnostics": depth_diagnostics,
+                "narrative_diagnostics": narrative_diagnostics,
+                "scientific_claim_states": scientific_claim_states,
                 "fallback_reason": fallback_reason if generation_mode == "safe_evidence_fallback" else "",
                 "primary_papers": primary,
                 "supporting_papers": supporting,
@@ -2346,6 +2917,7 @@ Writing rules:
                 "section_id": section_id,
                 "heading": str(task.get("heading") or section_id),
                 "generation_mode": generation_mode,
+                "section_readiness": section_readiness,
             }
         )
         write_generation_progress(
@@ -2390,6 +2962,17 @@ Writing rules:
         for paragraph in comparable_paragraphs
         if len({str(value) for value in paragraph.get("paper_ids") or [] if str(value)}) >= 2
     ]
+    narrative_by_section = {
+        str(section.get("section_id") or ""): dict(
+            section.get("narrative_diagnostics")
+            or derive_narrative_diagnostics(
+                section,
+                section.get("depth_contract") if isinstance(section.get("depth_contract"), dict) else {},
+            )
+        )
+        for section in writing_sections
+        if str(section.get("section_id") or "")
+    }
     synthesis_diagnostics = {
         "schema_version": 1,
         "comparison_paragraph_count": len(comparison_paragraphs),
@@ -2397,6 +2980,17 @@ Writing rules:
         "comparison_coverage": round(
             len(comparison_paragraphs) / max(1, len(comparable_paragraphs)), 4
         ),
+        "narrative_complete_section_count": sum(
+            1
+            for diagnostic in narrative_by_section.values()
+            if str(diagnostic.get("status") or "") == "complete"
+        ),
+        "narrative_shallow_section_ids": [
+            section_id
+            for section_id, diagnostic in narrative_by_section.items()
+            if str(diagnostic.get("status") or "") != "complete"
+        ],
+        "section_narrative_diagnostics": narrative_by_section,
         "papers_with_multiple_primary_sections": {
             paper_id: section_ids
             for paper_id, section_ids in primary_sections_by_paper.items()

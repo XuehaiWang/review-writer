@@ -142,6 +142,186 @@ class OverviewSkeletonGateTests(unittest.TestCase):
                 )
                 self.assertLess(math.dist(molecule_center, target_center), 12)
 
+    def test_composite_uses_verified_square_layout_panel_and_centers_content(self) -> None:
+        from PIL import Image, ImageDraw
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            figure_path = root / "overview.png"
+            skeleton_path = root / "skeleton.png"
+
+            figure = Image.new("RGB", (1024, 1024), (237, 240, 242))
+            draw = ImageDraw.Draw(figure)
+            draw.rounded_rectangle(
+                (20, 118, 399, 476),
+                radius=18,
+                fill="white",
+                outline=(186, 194, 202),
+                width=2,
+            )
+            # Pale cards are intentionally close to white; the calibrated
+            # panel must remain the neutral left panel rather than these cards.
+            for x, color in ((424, (252, 237, 228)), (595, (250, 244, 224))):
+                draw.rounded_rectangle(
+                    (x, 170, x + 150, 370), radius=12, fill=color
+                )
+            figure.save(figure_path)
+
+            skeleton = Image.new("RGB", (300, 120), "white")
+            sk_draw = ImageDraw.Draw(skeleton)
+            sk_draw.rounded_rectangle((20, 45, 280, 75), radius=14, fill=(210, 20, 20))
+            skeleton.save(skeleton_path)
+
+            ok, reason, panel_source = overview.composite_skeleton_into_figure(
+                figure_path, skeleton_path, "module-cards-crosscut-sidebar"
+            )
+
+            self.assertTrue(ok, reason)
+            self.assertEqual("calibrated", panel_source)
+            with Image.open(figure_path) as result:
+                red_pixels = [
+                    (x, y)
+                    for y in range(result.height)
+                    for x in range(result.width)
+                    if (
+                        (pixel := result.getpixel((x, y)))[0] > 170
+                        and pixel[0] > pixel[1] * 2
+                        and pixel[0] > pixel[2] * 2
+                    )
+                ]
+                self.assertTrue(red_pixels)
+                red_center_x = sum(x for x, _y in red_pixels) / len(red_pixels)
+                expected_panel_center_x = (20 + 399) / 2
+                self.assertLess(abs(red_center_x - expected_panel_center_x), 4)
+                self.assertGreater(min(y for _x, y in red_pixels), 160)
+                self.assertLess(max(y for _x, y in red_pixels), 465)
+
+    def test_composite_uses_compact_left_panel_instead_of_blank_evidence_table(self) -> None:
+        from PIL import Image, ImageDraw
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            figure_path = root / "overview.png"
+            skeleton_path = root / "skeleton.png"
+
+            figure = Image.new("RGB", (1024, 1024), "white")
+            draw = ImageDraw.Draw(figure)
+            # Match the compact provider variant from the reported regression.
+            draw.rounded_rectangle(
+                (30, 143, 389, 394),
+                radius=18,
+                fill="white",
+                outline=(186, 194, 202),
+                width=2,
+            )
+            # Heading/caption make the older taller calibration fail.
+            draw.rectangle((70, 88, 350, 128), fill=(18, 49, 94))
+            draw.rectangle((150, 405, 280, 430), fill=(18, 49, 94))
+            # A large neutral blank table on the right must never win merely
+            # because its whitespace is larger than the structure panel.
+            draw.rounded_rectangle(
+                (520, 145, 840, 425),
+                radius=14,
+                fill="white",
+                outline=(205, 210, 216),
+                width=2,
+            )
+            figure.save(figure_path)
+
+            skeleton = Image.new("RGB", (300, 120), "white")
+            sk_draw = ImageDraw.Draw(skeleton)
+            sk_draw.rounded_rectangle((20, 45, 280, 75), radius=14, fill=(210, 20, 20))
+            skeleton.save(skeleton_path)
+
+            ok, reason, panel_source = overview.composite_skeleton_into_figure(
+                figure_path, skeleton_path, "module-cards-crosscut-sidebar"
+            )
+
+            self.assertTrue(ok, reason)
+            self.assertEqual("calibrated", panel_source)
+            with Image.open(figure_path) as result:
+                red_pixels = [
+                    (x, y)
+                    for y in range(result.height)
+                    for x in range(result.width)
+                    if (
+                        (pixel := result.getpixel((x, y)))[0] > 170
+                        and pixel[0] > pixel[1] * 2
+                        and pixel[0] > pixel[2] * 2
+                    )
+                ]
+                self.assertTrue(red_pixels)
+                red_center_x = sum(x for x, _y in red_pixels) / len(red_pixels)
+                red_center_y = sum(y for _x, y in red_pixels) / len(red_pixels)
+                self.assertLess(abs(red_center_x - (30 + 389) / 2), 4)
+                self.assertGreater(red_center_y, 190)
+                self.assertLess(red_center_y, 380)
+                self.assertLess(max(x for x, _y in red_pixels), 389)
+                # The compositor must not add a second inset frame around the
+                # molecule; this point lies on the old synthetic frame path.
+                self.assertEqual((255, 255, 255), result.getpixel((37, 150)))
+
+    def test_module_cards_auto_detection_rejects_right_hand_table(self) -> None:
+        self.assertFalse(
+            overview._panel_matches_layout_zone(
+                "module-cards-crosscut-sidebar", (520, 145, 840, 425), 1024, 1024
+            )
+        )
+        self.assertFalse(
+            overview._panel_matches_layout_zone(
+                "module-cards-crosscut-sidebar", (214, 128, 384, 442), 1024, 1024
+            )
+        )
+        self.assertTrue(
+            overview._panel_matches_layout_zone(
+                "module-cards-crosscut-sidebar", (30, 143, 389, 394), 1024, 1024
+            )
+        )
+
+    def test_pastel_card_is_not_a_neutral_structure_panel(self) -> None:
+        from PIL import Image
+
+        image = Image.new("RGB", (400, 300), (252, 236, 226))
+        self.assertGreater(overview._panel_whiteness(image, (20, 20, 380, 280)), 0.95)
+        self.assertLess(overview._panel_neutrality(image, (20, 20, 380, 280)), 0.1)
+
+    def test_programmatic_skeleton_png_has_transparent_background(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "skeleton.png"
+            rendered = overview.render_smiles_ball_and_stick(
+                "CCO", output_path, img_size=(420, 300)
+            )
+            self.assertEqual(output_path, rendered)
+            with Image.open(output_path) as image:
+                self.assertEqual("RGBA", image.mode)
+                self.assertEqual((0, 255), image.getchannel("A").getextrema())
+
+    def test_legacy_white_skeleton_background_becomes_transparent(self) -> None:
+        from PIL import Image, ImageDraw
+
+        image = Image.new("RGB", (120, 80), "white")
+        ImageDraw.Draw(image).ellipse((40, 20, 80, 60), fill=(20, 40, 80))
+        rgba = overview._skeleton_rgba(image)
+
+        self.assertEqual(0, rgba.getpixel((0, 0))[3])
+        self.assertEqual(255, rgba.getpixel((60, 40))[3])
+
+    def test_wide_skeleton_rotates_to_fit_portrait_panel(self) -> None:
+        from PIL import Image, ImageDraw
+
+        layer = Image.new("RGBA", (600, 100), (255, 255, 255, 0))
+        ImageDraw.Draw(layer).rounded_rectangle(
+            (20, 20, 580, 80), radius=25, fill=(20, 40, 80, 255)
+        )
+        fitted, rotated = overview._fit_skeleton_layer(layer, 220, 300)
+
+        self.assertTrue(rotated)
+        self.assertLessEqual(fitted.width, 220)
+        self.assertLessEqual(fitted.height, 300)
+        self.assertGreater(fitted.height, fitted.width)
+
 
 if __name__ == "__main__":
     unittest.main()

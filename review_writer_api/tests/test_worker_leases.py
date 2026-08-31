@@ -6,6 +6,7 @@ import time
 import tempfile
 import unittest
 import uuid
+from unittest import mock
 from datetime import timedelta
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from review_writer_api.config import ApiSettings
+from review_writer_api.billing import InsufficientCredit
 from review_writer_api.database import Base, Project, User, utc_now
 from review_writer_api.gateway_app import create_gateway_app
 from review_writer_api.worker_service import WorkerService
@@ -272,6 +274,43 @@ class WorkerLeaseTests(unittest.TestCase):
                 },
             )
             self.assertEqual(401, stale.status_code)
+
+    def test_private_gateway_preserves_insufficient_credit_status(self) -> None:
+        settings = ApiSettings(
+            review_root=Path(self.temporary.name),
+            database_url=str(self.engine.url),
+            credential_encryption_key=base64.urlsafe_b64encode(b"x" * 32).decode(
+                "ascii"
+            ),
+            hosted_workspace_root=Path(self.temporary.name) / "workspaces",
+            internal_worker_token="private-worker-secret",
+        )
+        app = create_gateway_app(settings)
+        with (
+            mock.patch.object(
+                app.state.model_gateway,
+                "complete",
+                new=mock.AsyncMock(
+                    side_effect=InsufficientCredit(
+                        "余额不足，无法开始本次外部模型调用。",
+                        details={"available_usd": "0.01"},
+                    )
+                ),
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.post(
+                "/api/internal/v1/model-responses",
+                json={
+                    "request_key": "section-S05",
+                    "stage": "section-academic-planning",
+                    "prompt": "plan",
+                    "response_format": "json",
+                },
+            )
+
+        self.assertEqual(402, response.status_code)
+        self.assertEqual("INSUFFICIENT_CREDIT", response.json()["error"]["code"])
 
 
 if __name__ == "__main__":

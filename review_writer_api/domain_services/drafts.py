@@ -34,6 +34,7 @@ from review_writer_core.draft_bibliography import (
     reference_text,
     strip_numeric_callouts,
 )
+from review_writer_core.draft_issue_routing import route_draft_issue
 from review_writer_core.paragraph_markers import ensure_prose_paragraph_markers
 from review_writer_core.publication_caption import (
     figure_rights_fields,
@@ -349,10 +350,24 @@ class DraftsService(OwnedProjectService):
             if str(row.get("paper_id") or "") and str(row.get("chunk_id") or "")
         }
         figures_by_paragraph: dict[str, list[dict[str, Any]]] = {}
+        insertion_plan = {
+            str(row.get("figure_id") or ""): row
+            for row in figure_manifest.get("insertion_plan") or []
+            if isinstance(row, dict) and str(row.get("figure_id") or "")
+        }
         for row in figure_manifest.get("figures") or []:
             if not isinstance(row, dict) or row.get("status") != "redrawn":
                 continue
-            paragraph_id = str(row.get("target_paragraph_id") or "")
+            decision = insertion_plan.get(str(row.get("figure_id") or ""))
+            if insertion_plan and decision is None:
+                continue
+            if decision is not None and not bool(decision.get("include")):
+                continue
+            paragraph_id = str(
+                (decision or {}).get("target_paragraph_id")
+                or row.get("target_paragraph_id")
+                or ""
+            )
             output_id = str(row.get("output_artifact_id") or "")
             if paragraph_id and output_id:
                 figures_by_paragraph.setdefault(paragraph_id, []).append(row)
@@ -604,6 +619,11 @@ class DraftsService(OwnedProjectService):
                             "caption_quality": figure.get("caption_quality")
                             or normalized_caption.manifest_fields().get("caption_quality"),
                             "source_reference_number": source_reference_number,
+                            "source_identity_status": rights.get(
+                                "source_identity_status"
+                            ),
+                            "source_paper_id": rights.get("source_paper_id"),
+                            "source_label": rights.get("source_label"),
                             "rights_status": rights.get("rights_status"),
                             "source_relationship": rights.get("source_relationship"),
                             "permission_status": rights.get("permission_status"),
@@ -753,6 +773,81 @@ class DraftsService(OwnedProjectService):
             "stale": upstream_stale,
         }
 
+    @staticmethod
+    def _navigation_stage_for_repair(repair_stage: str) -> str:
+        """Map a precise repair owner to the existing page navigation stage."""
+
+        return {
+            "discovery": "discovery",
+            "planning": "planning",
+            "library_matrix": "planning",
+            "writing_plan": "sections",
+            "evidence_package": "draft",
+            "figures": "draft",
+            "bibliography": "draft",
+            "final": "draft",
+        }.get(str(repair_stage or "draft"), "draft")
+
+    @classmethod
+    def _public_issue_repair_metadata(
+        cls, issue: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Backfill repair routing for immutable quality artifacts from older releases.
+
+        Current evaluations already persist these fields. Historical artifacts must
+        remain immutable, so the API decorates only the response returned to the UI.
+        """
+
+        if int(issue.get("repair_routing_version") or 0) >= 2:
+            return dict(issue)
+        legacy_route = str(issue.get("repair_route") or "")
+        if str(issue.get("repair_stage") or "").strip() and legacy_route not in {
+            "manual_online_retrieval_decision",
+            "targeted_evidence_then_paragraph_rewrite",
+            "claim_downgrade_then_paragraph_rewrite",
+            "synthesis_plan_repair",
+        }:
+            return dict(issue)
+        source_status = str(issue.get("source_check_status") or "not_assessed")
+        evaluator_route = str(issue.get("route") or "")
+        searchable = " ".join(
+            [
+                evaluator_route,
+                source_status,
+                *[
+                    str(value)
+                    for value in issue.get("failed_dimensions") or []
+                ],
+                str(issue.get("diagnosis") or issue.get("message") or ""),
+            ]
+        ).casefold()
+        reference_map_problem = any(
+            marker in searchable
+            for marker in (
+                "citation_reference_map_mismatch",
+                "citation-map mismatch",
+                "citation map mismatch",
+                "unlisted bibliography",
+                "callout",
+            )
+        )
+        repair = route_draft_issue(
+            issue,
+            source_status=source_status,
+            evaluator_route=evaluator_route,
+            has_original_passages=bool(issue.get("source_evidence_refs")),
+            reference_map_problem=reference_map_problem,
+            source_evidence_refs=list(issue.get("source_evidence_refs") or []),
+        )
+        repair_stage = str(repair.get("repair_stage") or "draft")
+        return {
+            **issue,
+            "recommended_return_stage": cls._navigation_stage_for_repair(
+                repair_stage
+            ),
+            **repair,
+        }
+
     def get(self, principal: Principal, project_id: str) -> dict[str, Any]:
         text, draft_artifact = self._read_text(
             principal, project_id, DRAFT_DOCUMENT, required=False
@@ -824,6 +919,7 @@ class DraftsService(OwnedProjectService):
         for issue in public_quality.get("issues") or []:
             if not isinstance(issue, dict):
                 continue
+            issue = self._public_issue_repair_metadata(issue)
             paragraph_id = str(issue.get("paragraph_id") or "")
             paragraph = paragraph_by_id.get(paragraph_id) or {
                 "paragraph_id": paragraph_id,
@@ -891,6 +987,8 @@ class DraftsService(OwnedProjectService):
             # server-side review data.  The UI only needs paragraph-level diffs.
             proposal.pop("candidate_draft_text", None)
             proposal.pop("candidate_quality", None)
+            proposal.pop("candidate_matrix", None)
+            proposal.pop("candidate_evidence_package", None)
             proposal.pop("rewrite_overlays", None)
             proposal.pop("source_quality", None)
             proposal.pop("source_overlays", None)
@@ -1117,8 +1215,12 @@ class DraftsService(OwnedProjectService):
         target_overlay_id = str(
             artifact.metadata.get("source_rewrite_overlay_artifact_id") or ""
         )
+        target_matrix_id = str(
+            artifact.metadata.get("source_matrix_artifact_id") or ""
+        )
         current_evidence = self._artifact(principal, project_id, SECTION_EVIDENCE)
         current_overlay = self._artifact(principal, project_id, DRAFT_OVERLAYS)
+        current_matrix = self._artifact(principal, project_id, MATRIX_LOGICAL_NAME)
         bundle_restore_needed = bool(
             target_evidence_id
             and (
@@ -1127,6 +1229,9 @@ class DraftsService(OwnedProjectService):
         ) or bool(
             target_overlay_id
             and (current_overlay is None or current_overlay.id != target_overlay_id)
+        ) or bool(
+            target_matrix_id
+            and (current_matrix is None or current_matrix.id != target_matrix_id)
         )
         event = {
             "id": str(uuid.uuid4()),
@@ -1146,6 +1251,21 @@ class DraftsService(OwnedProjectService):
                 tuple[bytes | Callable[[dict[str, ArtifactRecord]], bytes], str],
             ] = {}
             expected_currents = {DRAFT_DOCUMENT: current.id}
+            if target_matrix_id:
+                target_matrix = self.artifacts.resolve_owned_artifact(
+                    principal.user_id, target_matrix_id
+                )
+                if (
+                    target_matrix.artifact.project_id != project_id
+                    or target_matrix.artifact.logical_name != MATRIX_LOGICAL_NAME
+                ):
+                    raise WorkflowNotFound("Draft Matrix version not found.")
+                files[MATRIX_LOGICAL_NAME] = (
+                    target_matrix.path.read_bytes(),
+                    target_matrix.artifact.artifact_type,
+                )
+                if current_matrix is not None:
+                    expected_currents[MATRIX_LOGICAL_NAME] = current_matrix.id
             if target_evidence_id:
                 target_evidence = self.artifacts.resolve_owned_artifact(
                     principal.user_id, target_evidence_id
@@ -1193,6 +1313,10 @@ class DraftsService(OwnedProjectService):
             ) -> dict[str, Any]:
                 value = dict(restore_metadata)
                 if logical_name == DRAFT_DOCUMENT:
+                    if MATRIX_LOGICAL_NAME in published_so_far:
+                        value["source_matrix_artifact_id"] = published_so_far[
+                            MATRIX_LOGICAL_NAME
+                        ].id
                     if SECTION_EVIDENCE in published_so_far:
                         value["source_section_evidence_artifact_id"] = (
                             published_so_far[SECTION_EVIDENCE].id
@@ -1221,6 +1345,11 @@ class DraftsService(OwnedProjectService):
                     published[SECTION_EVIDENCE].id
                     if SECTION_EVIDENCE in published
                     else target_evidence_id
+                ),
+                "matrix_artifact_id": (
+                    published[MATRIX_LOGICAL_NAME].id
+                    if MATRIX_LOGICAL_NAME in published
+                    else target_matrix_id
                 ),
                 "rewrite_overlay_artifact_id": (
                     published[DRAFT_OVERLAYS].id
@@ -1292,6 +1421,11 @@ class DraftsService(OwnedProjectService):
                 "The maximum case word count must not be lower than the minimum."
             )
         compatibility = self.compatibility_payload(principal, project_id)
+        current_quality = (
+            dict(payload.get("quality") or {})
+            if bool((payload.get("quality") or {}).get("current"))
+            else {}
+        )
         return {
             **compatibility,
             "project_id": project_id,
@@ -1309,6 +1443,19 @@ class DraftsService(OwnedProjectService):
                 payload["first_draft_md"],
                 dict(compatibility.get("section_index") or {}),
             ),
+            "prior_quality_context": {
+                "source_quality_artifact_id": payload["quality_artifact_id"],
+                "claim_dispositions": dict(
+                    current_quality.get("claim_dispositions") or {}
+                ),
+                "manual_issue_fingerprints": [
+                    str(issue.get("issue_fingerprint") or "")
+                    for issue in current_quality.get("issues") or []
+                    if isinstance(issue, dict)
+                    and not bool(issue.get("auto_repairable", True))
+                    and str(issue.get("issue_fingerprint") or "")
+                ],
+            },
         }
 
     def compatibility_payload(
@@ -1557,6 +1704,8 @@ class DraftsService(OwnedProjectService):
         }
         dispositions: dict[str, Any] = {}
         added: list[dict[str, Any]] = []
+        promoted_facts: list[dict[str, Any]] = []
+        promoted_fact_ids: set[str] = set()
         affected_sections: set[str] = set()
         affected_paragraphs: set[str] = set()
         for paragraph_id, entry in source_entries.items():
@@ -1579,6 +1728,13 @@ class DraftsService(OwnedProjectService):
                 or entry.get("unsupported_claims")
                 or []
                 if str(value).strip()
+            ]
+            claim_fact_bindings = [
+                dict(value)
+                for value in score.get("claim_fact_bindings")
+                or entry.get("claim_fact_bindings")
+                or []
+                if isinstance(value, dict)
             ]
             if unsupported:
                 for unsupported_text in unsupported:
@@ -1677,6 +1833,88 @@ class DraftsService(OwnedProjectService):
                                 "paper_id": paper_id,
                                 "evidence_key": evidence_key,
                                 "source_ref": source_ref,
+                            }
+                        )
+                    for binding in claim_fact_bindings:
+                        if (
+                            str(binding.get("paper_id") or "") != paper_id
+                            or str(binding.get("source_ref") or "") != source_ref
+                            or float(binding.get("confidence") or 0.0) < 0.8
+                        ):
+                            continue
+                        fact_value = " ".join(
+                            str(binding.get("value") or "").split()
+                        ).strip()
+                        support_excerpt = " ".join(
+                            str(binding.get("support_excerpt") or "").split()
+                        ).strip()
+                        if not fact_value or not support_excerpt:
+                            continue
+                        fact_digest = hashlib.sha256(
+                            (
+                                f"{paper_id}\0claim_targeted\0{evidence_key}\0"
+                                f"{fact_value}"
+                            ).encode("utf-8")
+                        ).hexdigest()
+                        fact_id = f"MF-{fact_digest[:16].upper()}"
+                        if fact_id in promoted_fact_ids:
+                            continue
+                        promoted_fact_ids.add(fact_id)
+                        promoted_facts.append(
+                            {
+                                "paper_id": paper_id,
+                                "fact": {
+                                    "fact_id": fact_id,
+                                    "paper_id": paper_id,
+                                    "fact_schema_version": "scientific-fact/2",
+                                    "field_id": "claim_targeted_fact",
+                                    "fact_type": str(
+                                        binding.get("fact_type") or "claim_support"
+                                    ),
+                                    "subject": str(binding.get("subject") or ""),
+                                    "predicate": str(binding.get("predicate") or ""),
+                                    "value": fact_value,
+                                    "normalized_value": str(
+                                        binding.get("normalized_value") or fact_value
+                                    ),
+                                    "unit": str(binding.get("unit") or ""),
+                                    "qualifiers": dict(
+                                        binding.get("qualifiers") or {}
+                                    ),
+                                    "support_excerpt": support_excerpt,
+                                    "epistemic_status": "direct_source_report",
+                                    "confidence": round(
+                                        float(binding.get("confidence") or 0.0), 4
+                                    ),
+                                    "human_checked": False,
+                                    "review_status": "not_required",
+                                    "source_channel": "body",
+                                    "support_level": "direct",
+                                    "assertion_ceiling": "direct_source_report",
+                                    "evidence_refs": [
+                                        {
+                                            "evidence_key": evidence_key,
+                                            "chunk_id": source_ref,
+                                            "page_start": passage.get("page"),
+                                            "page_end": passage.get("page"),
+                                            "source_lineage_hash": digest,
+                                        }
+                                    ],
+                                    "source_span": {
+                                        "evidence_key": evidence_key,
+                                        "source_type": "body",
+                                        "block_id": source_ref,
+                                        "page_start": passage.get("page"),
+                                        "page_end": passage.get("page"),
+                                        "source_lineage_hash": digest,
+                                    },
+                                    "extraction": {
+                                        "method": "draft_targeted_claim_binding",
+                                        "prompt_version": "claim-evidence-matching/1",
+                                    },
+                                    "claim_ids": claim_ids,
+                                    "origin_paragraph_id": paragraph_id,
+                                },
                             }
                         )
                     affected_paragraphs.add(paragraph_id)
@@ -1859,7 +2097,7 @@ class DraftsService(OwnedProjectService):
                 elif coverage_policy == "any_primary":
                     plan["status"] = "insufficient"
                 else:
-                    plan["status"] = "not_reported"
+                    plan["status"] = "retrieval_not_found"
                 diagnostics = dict(plan.get("diagnostics_by_primary_paper") or {})
                 for paper_id in primary_ids:
                     if paper_id in matched_primary:
@@ -1917,6 +2155,8 @@ class DraftsService(OwnedProjectService):
             "affected_section_ids": sorted(affected_sections),
             "affected_paragraph_ids": sorted(affected_paragraphs),
             "added_evidence": added,
+            "promoted_fact_count": len(promoted_facts),
+            "promoted_facts": promoted_facts,
         }
         history = list(package.get("draft_repair_history") or [])
         history.append(summary)
@@ -1933,6 +2173,124 @@ class DraftsService(OwnedProjectService):
         return package, summary, dispositions
 
     @staticmethod
+    def _matrix_with_promoted_facts(
+        matrix: dict[str, Any], evidence_repair: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Add only hard-validated Draft repair facts to their current paper.
+
+        This helper intentionally cannot alter paper identity, classifications,
+        assignments, or an existing Fact's scientific value.  It therefore
+        remains safe to publish in the same atomic unit as Evidence/Draft.
+        """
+
+        candidate = deepcopy(matrix or {})
+        rows = [dict(row) for row in candidate.get("rows") or [] if isinstance(row, dict)]
+        by_paper = {
+            str(row.get("paper_id") or ""): row
+            for row in rows
+            if str(row.get("paper_id") or "")
+        }
+        applied: list[dict[str, Any]] = []
+        for promotion in evidence_repair.get("promoted_facts") or []:
+            if not isinstance(promotion, dict):
+                continue
+            paper_id = str(promotion.get("paper_id") or "")
+            fact = dict(promotion.get("fact") or {})
+            fact_id = str(fact.get("fact_id") or "")
+            row = by_paper.get(paper_id)
+            if (
+                row is None
+                or not fact_id
+                or str(fact.get("field_id") or "") == "topic_partition"
+                or not str(fact.get("support_excerpt") or "").strip()
+                or not list(fact.get("evidence_refs") or [])
+            ):
+                continue
+            facts = [
+                dict(value)
+                for value in row.get("scientific_facts") or []
+                if isinstance(value, dict)
+            ]
+            existing = next(
+                (value for value in facts if str(value.get("fact_id") or "") == fact_id),
+                None,
+            )
+            if existing is not None:
+                if str(existing.get("value") or "") != str(fact.get("value") or ""):
+                    continue
+            else:
+                facts.append(fact)
+                row["scientific_facts"] = facts
+                applied.append({"paper_id": paper_id, "fact_id": fact_id})
+        candidate["rows"] = rows
+        if applied:
+            history = [
+                dict(value)
+                for value in candidate.get("fact_repair_history") or []
+                if isinstance(value, dict)
+            ]
+            history.append(
+                {
+                    "operation": "draft_targeted_fact_promotion",
+                    "promoted_facts": applied,
+                    "updated_at": utc_now().isoformat(),
+                }
+            )
+            candidate["fact_repair_history"] = history[-50:]
+        return candidate, applied
+
+    @classmethod
+    def _single_paragraph_evidence_repair(
+        cls,
+        job_payload: dict[str, Any],
+        candidate_evaluation: dict[str, Any],
+        source_paragraph_evaluation: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Build a deterministic Evidence Package patch for one scored candidate.
+
+        Candidate generation already performs a paragraph-scoped MinerU source
+        recheck.  Reuse that exact result instead of calling a model again.  The
+        returned package is published only if the user accepts the candidate.
+        """
+
+        paragraph_score = dict(candidate_evaluation.get("paragraph_score") or {})
+        source_entry = candidate_evaluation.get("source_check_entry")
+        source_entry = dict(source_entry) if isinstance(source_entry, dict) else {}
+        source_score = dict(
+            (source_paragraph_evaluation or {}).get("paragraph_score") or {}
+        )
+        paragraph_id = str(
+            candidate_evaluation.get("paragraph_id")
+            or paragraph_score.get("paragraph_id")
+            or source_score.get("paragraph_id")
+            or ""
+        )
+        repair_input: dict[str, Any] = {
+            "paragraph_scores": [paragraph_score] if paragraph_score else [],
+            "source_check": {
+                "entries": [source_entry] if source_entry else [],
+            },
+            "review_changes": [
+                {
+                    "paragraph_id": paragraph_id,
+                    "unsupported_claims_before": list(
+                        source_score.get("unsupported_claims") or []
+                    ),
+                    "unsupported_claims_after": list(
+                        paragraph_score.get("unsupported_claims") or []
+                    ),
+                    "source_check_status_before": str(
+                        source_score.get("source_check_status") or ""
+                    ),
+                    "source_check_status_after": str(
+                        paragraph_score.get("source_check_status") or ""
+                    ),
+                }
+            ],
+        }
+        return cls._repair_evidence_package(job_payload, repair_input)
+
+    @staticmethod
     def _quality_routing(
         built: dict[str, Any], job_payload: dict[str, Any]
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -1943,6 +2301,15 @@ class DraftsService(OwnedProjectService):
                 section.get("section_id") or ""
             )
             for section in (job_payload.get("section_index") or {}).get("sections") or []
+            if isinstance(section, dict)
+            for paragraph in section.get("paragraphs") or []
+            if isinstance(paragraph, dict) and paragraph.get("paragraph_id")
+        }
+        paragraph_roles = {
+            str(paragraph.get("paragraph_id") or ""): str(
+                paragraph.get("argument_role") or ""
+            )
+            for section in (job_payload.get("writing_plan") or {}).get("sections") or []
             if isinstance(section, dict)
             for paragraph in section.get("paragraphs") or []
             if isinstance(paragraph, dict) and paragraph.get("paragraph_id")
@@ -1969,20 +2336,6 @@ class DraftsService(OwnedProjectService):
             "sections": "Repair affected section evidence inside Draft optimization",
             "draft": "Revise wording in the current Draft",
         }
-        discovery_terms = {
-            "search", "retrieval", "coverage", "corpus", "literature",
-            "missing_primary", "recall", "sampling", "publication_bias",
-        }
-        planning_terms = {
-            "taxonomy", "classification", "matrix", "outline", "organization",
-            "section_structure", "category", "comparison_axis",
-        }
-        section_terms = {
-            "source", "evidence", "citation", "factual", "fact", "mechanism",
-            "result", "quantitative", "support", "claim", "reference",
-            "scope",
-        }
-
         routed_issues: list[dict[str, Any]] = []
         by_stage: dict[str, list[str]] = {stage: [] for stage in stage_priority}
         for index, raw_issue in enumerate(built.get("issues") or [], 1):
@@ -1999,31 +2352,27 @@ class DraftsService(OwnedProjectService):
                 or "not_assessed"
             ).casefold()
             route = str(score.get("route") or issue.get("route") or "").casefold()
-            failed_dimensions = [
-                str(value) for value in score.get("failed_dimensions")
-                or issue.get("failed_dimensions") or []
-                if str(value).strip()
-            ]
-            searchable = " ".join(
-                [
-                    route,
-                    source_status,
-                    *failed_dimensions,
-                    str(issue.get("diagnosis") or issue.get("message") or ""),
-                ]
-            ).casefold()
             source_entry = source_checks.get(paragraph_id, {})
             has_original_passages = any(
                 paper.get("passages")
                 for paper in source_entry.get("papers") or []
                 if isinstance(paper, dict)
             )
-            issue_type = "draft_wording"
-            repair_route = "paragraph_rewrite"
-            auto_repairable = True
-            internal_repair_stage = "draft"
             reference_map_problem = any(
-                marker in searchable
+                marker
+                in " ".join(
+                    [
+                        route,
+                        source_status,
+                        *[
+                            str(value)
+                            for value in score.get("failed_dimensions")
+                            or issue.get("failed_dimensions")
+                            or []
+                        ],
+                        str(issue.get("diagnosis") or issue.get("message") or ""),
+                    ]
+                ).casefold()
                 for marker in (
                     "citation_reference_map_mismatch",
                     "citation-map mismatch",
@@ -2032,62 +2381,41 @@ class DraftsService(OwnedProjectService):
                     "callout",
                 )
             )
-            has_term = lambda terms: any(
-                re.search(
-                    rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])",
-                    searchable,
-                )
-                for term in terms
+            repair = route_draft_issue(
+                {
+                    **issue,
+                    "section_id": section_id,
+                    "paragraph_role": paragraph_roles.get(paragraph_id, ""),
+                    "failed_dimensions": list(
+                        score.get("failed_dimensions")
+                        or issue.get("failed_dimensions")
+                        or []
+                    ),
+                },
+                source_status=source_status,
+                evaluator_route=route,
+                has_original_passages=has_original_passages,
+                reference_map_problem=reference_map_problem,
+                source_evidence_refs=list(
+                    score.get("source_evidence_refs")
+                    or issue.get("source_evidence_refs")
+                    or []
+                ),
+                source_ready=bool(source_entry),
+                evidence_texts=[
+                    str(passage.get("text") or "")
+                    for paper in source_entry.get("papers") or []
+                    if isinstance(paper, dict)
+                    for passage in paper.get("passages") or []
+                    if isinstance(passage, dict) and str(passage.get("text") or "").strip()
+                ],
             )
-            if has_term(discovery_terms):
-                stage = "discovery"
-                action = "Broaden or correct the retrieval scope, then refresh Matrix evidence."
-                issue_type = "literature_coverage_gap"
-                repair_route = "manual_online_retrieval_decision"
-                auto_repairable = False
-                internal_repair_stage = "discovery"
-            elif has_term(planning_terms):
-                stage = "planning"
-                action = "Correct the Matrix classification or section structure before rewriting."
-                issue_type = "planning_structure"
-                repair_route = "planning_revision"
-                auto_repairable = False
-                internal_repair_stage = "planning"
-            elif reference_map_problem and source_status in {
-                "verified",
-                "not_applicable",
-                "not_assessed",
-            }:
-                stage = "draft"
-                action = "Rebuild the citation and reference map automatically after paragraph rewriting."
-                issue_type = "citation_reference_mapping"
-                repair_route = "deterministic_reference_rebuild"
-                internal_repair_stage = "draft"
-            elif (
-                source_status
-                in {"partially_supported", "unsupported", "needs_human_review"}
-                or route == "local_source_recheck"
-                or has_term(section_terms)
-            ):
-                # Evidence repair is executed by the one-click Draft optimizer;
-                # the user does not need to navigate back to Sections.
-                stage = "draft"
-                internal_repair_stage = "sections"
-                issue_type = "claim_evidence_gap"
-                repair_route = (
-                    "targeted_evidence_then_paragraph_rewrite"
-                    if has_original_passages
-                    else "claim_downgrade_then_paragraph_rewrite"
-                )
-                auto_repairable = source_status != "needs_human_review"
-                action = (
-                    "Automatically attach the matching local-source passages and rewrite only this paragraph."
-                    if has_original_passages
-                    else "Keep the Claim trace, lower unsupported detail, and rewrite only this paragraph."
-                )
-            else:
-                stage = "draft"
-                action = "Revise this paragraph without changing supported scientific claims."
+            actual_stage = str(repair.get("repair_stage") or "draft")
+            # The existing Draft page can execute local Evidence and
+            # bibliography repairs itself.  Keep navigation compatibility
+            # while exposing the precise workflow owner in ``repair_stage``.
+            stage = DraftsService._navigation_stage_for_repair(actual_stage)
+            action = str(repair.get("recommended_action") or "")
             question_diagnostics = [
                 {
                     "question_id": str(question.get("question_id") or ""),
@@ -2106,14 +2434,12 @@ class DraftsService(OwnedProjectService):
                 {
                     "issue_id": issue_id,
                     "section_id": section_id,
+                    "paragraph_role": paragraph_roles.get(paragraph_id, ""),
                     "source_check_status": source_status,
                     "source_evidence_refs": list(score.get("source_evidence_refs") or []),
                     "recommended_return_stage": stage,
                     "recommended_action": action,
-                    "internal_repair_stage": internal_repair_stage,
-                    "issue_type": issue_type,
-                    "repair_route": repair_route,
-                    "auto_repairable": auto_repairable,
+                    **repair,
                     "section_evidence_status": str(section_evidence.get("status") or ""),
                     "unresolved_primary_papers": list(
                         section_evidence.get("unresolved_primary_papers") or []
@@ -2152,11 +2478,7 @@ class DraftsService(OwnedProjectService):
                 "manual_online_retrieval_decision",
             }:
                 scope = "global"
-            elif route in {
-                "targeted_evidence_then_paragraph_rewrite",
-                "claim_downgrade_then_paragraph_rewrite",
-                "planning_revision",
-            }:
+            elif route == "planning_revision":
                 scope = section_id or "unassigned-section"
             else:
                 scope = str(issue.get("paragraph_id") or issue_id or "unknown")
@@ -2228,6 +2550,40 @@ class DraftsService(OwnedProjectService):
             for root in roots
         ]
         return roots, tasks
+
+    @staticmethod
+    def _routing_summary_from_issues(
+        issues: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Rebuild the routing aggregate after a paragraph-only evaluation."""
+
+        priority = {"discovery": 0, "planning": 1, "sections": 2, "draft": 3}
+        labels = {
+            "discovery": "Return to literature retrieval",
+            "planning": "Return to Matrix and outline",
+            "sections": "Repair the affected synthesis or writing plan",
+            "draft": "Revise wording in the current Draft",
+        }
+        by_stage: dict[str, list[str]] = {stage: [] for stage in priority}
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            stage = str(issue.get("recommended_return_stage") or "draft")
+            if stage not in by_stage:
+                stage = "draft"
+            issue_id = str(issue.get("issue_id") or issue.get("id") or "")
+            if issue_id:
+                by_stage[stage].append(issue_id)
+        active = [stage for stage, values in by_stage.items() if values]
+        recommended = min(active, key=priority.get) if active else "draft"
+        return {
+            "recommended_return_stage": recommended,
+            "recommended_action": labels[recommended],
+            "issues_by_stage": by_stage,
+            "counts_by_stage": {
+                stage: len(issue_ids) for stage, issue_ids in by_stage.items()
+            },
+        }
 
     @staticmethod
     def _repair_summary(
@@ -2374,16 +2730,28 @@ class DraftsService(OwnedProjectService):
         current = self._artifact(principal, project_id, DRAFT_DOCUMENT)
         if current is None or current.id != job_payload["source_draft_artifact_id"]:
             raise WorkflowConflict("Draft changed while evaluation was running.")
+        prior_quality, prior_quality_artifact = self._read_json(
+            principal, project_id, DRAFT_QUALITY, required=False
+        )
+        expected_quality_id = str(job_payload.get("source_quality_artifact_id") or "")
+        if expected_quality_id and (
+            prior_quality_artifact is None
+            or prior_quality_artifact.id != expected_quality_id
+        ):
+            raise WorkflowConflict("Draft evaluation changed while evaluation was running.")
         score = max(0.0, min(float(built.get("score") or 0), 100.0))
         routed_issues, routing = self._quality_routing(built, job_payload)
         root_causes, repair_tasks = self._quality_root_causes(routed_issues)
         manual_review = self._manual_claim_review(current, built)
+        claim_dispositions = dict(prior_quality.get("claim_dispositions") or {})
         quality = {
             **{key: value for key, value in built.items() if key != "source_draft_artifact_id"},
             "issues": routed_issues,
             "routing": routing,
             "root_causes": root_causes,
-            "repair_summary": self._repair_summary({}, root_causes),
+            "repair_tasks": repair_tasks,
+            "repair_summary": self._repair_summary(prior_quality, root_causes),
+            "claim_dispositions": claim_dispositions,
             "manual_claim_review": manual_review,
             "verified_manual_paragraph_ids": manual_review[
                 "verified_manual_paragraph_ids"
@@ -2453,6 +2821,16 @@ class DraftsService(OwnedProjectService):
         repaired_evidence, evidence_repair, claim_dispositions = (
             self._repair_evidence_package(job_payload, built)
         )
+        candidate_matrix, matrix_fact_promotions = self._matrix_with_promoted_facts(
+            dict(job_payload.get("matrix") or {}), evidence_repair
+        )
+        evidence_repair["matrix_fact_promotions"] = matrix_fact_promotions
+        evidence_repair["matrix_fact_promotion_count"] = len(matrix_fact_promotions)
+        merged_claim_dispositions = dict(
+            current_quality.get("claim_dispositions") or {}
+        )
+        merged_claim_dispositions.update(claim_dispositions)
+        claim_dispositions = merged_claim_dispositions
         deterministic_base_text = str(
             built.get("deterministic_base_draft_text") or current_text
         ).rstrip() + "\n"
@@ -2536,6 +2914,7 @@ class DraftsService(OwnedProjectService):
                 "issues": routed_issues,
                 "routing": routing,
                 "root_causes": root_causes,
+                "repair_tasks": repair_tasks,
                 "repair_summary": repair_summary,
                 "score": score,
                 "total_score": score,
@@ -2685,6 +3064,9 @@ class DraftsService(OwnedProjectService):
             "source_section_evidence_artifact_id": str(
                 job_payload.get("source_section_evidence_artifact_id") or ""
             ),
+            "source_matrix_artifact_id": str(
+                job_payload.get("source_matrix_artifact_id") or ""
+            ),
             "source_writing_plan_artifact_id": str(
                 job_payload.get("source_writing_plan_artifact_id") or ""
             ),
@@ -2695,6 +3077,7 @@ class DraftsService(OwnedProjectService):
             "deterministic_base_draft_text": deterministic_base_text,
             "reference_repair": reference_repair,
             "candidate_evidence_package": repaired_evidence,
+            "candidate_matrix": candidate_matrix if matrix_fact_promotions else {},
             "evidence_repair": evidence_repair,
             "claim_dispositions": claim_dispositions,
             "candidate_quality": quality_base,
@@ -2725,6 +3108,7 @@ class DraftsService(OwnedProjectService):
         for logical_name, payload_key in (
             (DRAFT_QUALITY, "source_quality_artifact_id"),
             (SECTION_EVIDENCE, "source_section_evidence_artifact_id"),
+            (MATRIX_LOGICAL_NAME, "source_matrix_artifact_id"),
             (SECTION_WRITING_PLAN, "source_writing_plan_artifact_id"),
             (DRAFT_OVERLAYS, "source_rewrite_overlay_artifact_id"),
         ):
@@ -2961,6 +3345,7 @@ class DraftsService(OwnedProjectService):
         has_automatic_repairs = bool(
             reference_repair.get("changed")
             or evidence_repair.get("added_evidence_count")
+            or evidence_repair.get("matrix_fact_promotion_count")
         )
         if decision == "accept":
             selected_ids = set(requested_ids or sorted(available_ids))
@@ -3019,19 +3404,36 @@ class DraftsService(OwnedProjectService):
             )
         }
         if decision == "accept":
-            candidate_evidence = dict(
-                proposal.get("candidate_evidence_package") or {}
-            )
-            if evidence_repair.get("added_evidence_count") and candidate_evidence:
-                files[SECTION_EVIDENCE] = (
+            candidate_matrix = dict(proposal.get("candidate_matrix") or {})
+            if (
+                evidence_repair.get("matrix_fact_promotion_count")
+                and candidate_matrix
+            ):
+                files[MATRIX_LOGICAL_NAME] = (
                     (
-                        json.dumps(
-                            candidate_evidence, ensure_ascii=False, indent=2
-                        )
+                        json.dumps(candidate_matrix, ensure_ascii=False, indent=2)
                         + "\n"
                     ).encode(),
                     "json",
                 )
+            candidate_evidence = dict(
+                proposal.get("candidate_evidence_package") or {}
+            )
+            if evidence_repair.get("added_evidence_count") and candidate_evidence:
+                def evidence_content(
+                    published: dict[str, ArtifactRecord],
+                    source: dict[str, Any] = candidate_evidence,
+                ) -> bytes:
+                    value = deepcopy(source)
+                    if MATRIX_LOGICAL_NAME in published:
+                        value["source_matrix_artifact_id"] = published[
+                            MATRIX_LOGICAL_NAME
+                        ].id
+                    return (
+                        json.dumps(value, ensure_ascii=False, indent=2) + "\n"
+                    ).encode()
+
+                files[SECTION_EVIDENCE] = (evidence_content, "json")
             deterministic_base = str(
                 proposal.get("deterministic_base_draft_text") or current_text
             )
@@ -3175,6 +3577,10 @@ class DraftsService(OwnedProjectService):
                 value["source_section_evidence_artifact_id"] = (
                     published_so_far[SECTION_EVIDENCE].id
                 )
+            if MATRIX_LOGICAL_NAME in published_so_far:
+                value["source_matrix_artifact_id"] = published_so_far[
+                    MATRIX_LOGICAL_NAME
+                ].id
             if DRAFT_DOCUMENT in published_so_far and logical_name in {
                 DRAFT_QUALITY,
                 DRAFT_OVERLAYS,
@@ -3191,6 +3597,7 @@ class DraftsService(OwnedProjectService):
         for logical_name, source_key in (
             (DRAFT_QUALITY, "source_quality_artifact_id"),
             (SECTION_EVIDENCE, "source_section_evidence_artifact_id"),
+            (MATRIX_LOGICAL_NAME, "source_matrix_artifact_id"),
             (SECTION_WRITING_PLAN, "source_writing_plan_artifact_id"),
             (DRAFT_OVERLAYS, "source_rewrite_overlay_artifact_id"),
         ):
@@ -3227,6 +3634,11 @@ class DraftsService(OwnedProjectService):
                 published[SECTION_EVIDENCE].id
                 if SECTION_EVIDENCE in published
                 else str(proposal.get("source_section_evidence_artifact_id") or "")
+            ),
+            "matrix_artifact_id": (
+                published[MATRIX_LOGICAL_NAME].id
+                if MATRIX_LOGICAL_NAME in published
+                else str(proposal.get("source_matrix_artifact_id") or "")
             ),
             "evidence_repair": evidence_repair,
             "reference_repair": reference_repair,
@@ -3452,6 +3864,17 @@ class DraftsService(OwnedProjectService):
         ]
         if not matching_issues:
             raise DraftNotReady("This paragraph is not in the current issue queue.")
+        if not any(issue.get("rewrite_eligible", True) for issue in matching_issues):
+            repair_stages = sorted(
+                {
+                    str(issue.get("repair_stage") or "upstream")
+                    for issue in matching_issues
+                }
+            )
+            raise DraftNotReady(
+                "This issue cannot be fixed safely by rewriting prose. "
+                "Use the routed repair stage instead: " + ", ".join(repair_stages)
+            )
         preflight = quality.get("preflight")
         preflight = preflight if isinstance(preflight, dict) else {}
         paragraph_check = next(
@@ -3560,6 +3983,13 @@ class DraftsService(OwnedProjectService):
             raise WorkflowValidationError(
                 "AI rewrite made no normalized content change; it was not accepted as a candidate."
             )
+        _candidate_evidence, evidence_repair_preview, claim_dispositions_preview = (
+            self._single_paragraph_evidence_repair(
+                job_payload,
+                candidate_evaluation,
+                source_paragraph_evaluation,
+            )
+        )
         store, _artifact = self._read_json(
             principal, project_id, DRAFT_REWRITES, required=False
         )
@@ -3586,6 +4016,14 @@ class DraftsService(OwnedProjectService):
             ),
             "source_paragraph_evaluation": source_paragraph_evaluation,
             "candidate_evaluation": candidate_evaluation,
+            "source_section_evidence_artifact_id": str(
+                job_payload.get("source_section_evidence_artifact_id") or ""
+            ),
+            "source_matrix_artifact_id": str(
+                job_payload.get("source_matrix_artifact_id") or ""
+            ),
+            "evidence_repair_preview": evidence_repair_preview,
+            "claim_dispositions_preview": claim_dispositions_preview,
             "source_paragraph_score": round(source_paragraph_score, 2),
             "candidate_paragraph_score": round(candidate_paragraph_score, 2),
             "status": "pending",
@@ -3607,6 +4045,30 @@ class DraftsService(OwnedProjectService):
                 expected_current_artifacts={
                     DRAFT_DOCUMENT: current.id,
                     DRAFT_QUALITY: current_quality.id,
+                    **(
+                        {
+                            MATRIX_LOGICAL_NAME: str(
+                                job_payload.get("source_matrix_artifact_id") or ""
+                            )
+                        }
+                        if str(job_payload.get("source_matrix_artifact_id") or "")
+                        else {}
+                    ),
+                    **(
+                        {
+                            SECTION_EVIDENCE: str(
+                                job_payload.get(
+                                    "source_section_evidence_artifact_id"
+                                )
+                                or ""
+                            )
+                        }
+                        if str(
+                            job_payload.get("source_section_evidence_artifact_id")
+                            or ""
+                        )
+                        else {}
+                    ),
                 },
                 invalidate_final=False,
             )
@@ -3616,6 +4078,7 @@ class DraftsService(OwnedProjectService):
             "paragraph_id": paragraph_id,
             "source_paragraph_score": round(source_paragraph_score, 2),
             "candidate_paragraph_score": round(candidate_paragraph_score, 2),
+            "evidence_repair_preview": evidence_repair_preview,
             "revision": state.revision,
         }
 
@@ -3726,8 +4189,27 @@ class DraftsService(OwnedProjectService):
                 CASE_PARAGRAPH_MIN_WORDS,
                 CASE_PARAGRAPH_MAX_WORDS,
             )
+        compatibility = self.compatibility_payload(principal, project_id)
+        source_evidence_id = str(
+            candidate.get("source_section_evidence_artifact_id") or ""
+        )
+        current_evidence_id = str(
+            compatibility.get("source_section_evidence_artifact_id") or ""
+        )
+        if source_evidence_id and current_evidence_id != source_evidence_id:
+            raise WorkflowConflict(
+                "The section Evidence Package changed after candidate generation. "
+                "Generate the paragraph candidate again against the current evidence."
+            )
+        source_matrix_id = str(candidate.get("source_matrix_artifact_id") or "")
+        current_matrix_id = str(compatibility.get("source_matrix_artifact_id") or "")
+        if source_matrix_id and current_matrix_id != source_matrix_id:
+            raise WorkflowConflict(
+                "The Matrix changed after candidate generation. Generate the "
+                "paragraph candidate again against the current facts."
+            )
         return {
-            **self.compatibility_payload(principal, project_id),
+            **compatibility,
             "project_id": project_id,
             "candidate_id": candidate_id,
             "paragraph_id": paragraph_id,
@@ -3737,6 +4219,17 @@ class DraftsService(OwnedProjectService):
             # this immutable evaluation directly; the legacy evaluator is only
             # a compatibility fallback for candidates created by older builds.
             "candidate_evaluation": candidate_evaluation,
+            "source_paragraph_evaluation": dict(
+                candidate.get("source_paragraph_evaluation") or {}
+            ),
+            "source_section_evidence_artifact_id": source_evidence_id,
+            "source_matrix_artifact_id": source_matrix_id or current_matrix_id,
+            "evidence_repair_preview": dict(
+                candidate.get("evidence_repair_preview") or {}
+            ),
+            "claim_dispositions_preview": dict(
+                candidate.get("claim_dispositions_preview") or {}
+            ),
             "candidate_draft_text": candidate_draft,
             "source_draft_artifact_id": payload["draft_artifact_id"],
             "source_quality_artifact_id": payload["quality_artifact_id"],
@@ -3833,16 +4326,72 @@ class DraftsService(OwnedProjectService):
             current_quality.get("issues"), paragraph_id, []
         )
         if paragraph_score in paragraph_failures:
-            issues.append(
-                {
-                    **paragraph_score,
-                    "issue_id": f"incremental-{paragraph_id}-{uuid.uuid4().hex[:8]}",
-                    "message": str(
-                        paragraph_score.get("diagnosis")
-                        or "Review this paragraph."
-                    ),
-                }
+            previous_issue = next(
+                (
+                    dict(item)
+                    for item in current_quality.get("issues") or []
+                    if isinstance(item, dict)
+                    and str(item.get("paragraph_id") or "") == paragraph_id
+                ),
+                {},
             )
+            issue = {
+                **previous_issue,
+                **paragraph_score,
+                "issue_id": f"incremental-{paragraph_id}-{uuid.uuid4().hex[:8]}",
+                "message": str(
+                    paragraph_score.get("diagnosis") or "Review this paragraph."
+                ),
+            }
+            source_entry = built.get("source_check_entry")
+            source_entry = source_entry if isinstance(source_entry, dict) else {}
+            has_original_passages = any(
+                paper.get("passages")
+                for paper in source_entry.get("papers") or []
+                if isinstance(paper, dict)
+            )
+            source_status = str(
+                paragraph_score.get("source_check_status")
+                or issue.get("source_check_status")
+                or "not_assessed"
+            )
+            evaluator_route = str(
+                paragraph_score.get("route") or issue.get("route") or ""
+            )
+            issue.update(
+                route_draft_issue(
+                    issue,
+                    source_status=source_status,
+                    evaluator_route=evaluator_route,
+                    has_original_passages=has_original_passages,
+                    reference_map_problem=(
+                        str(issue.get("issue_type") or "")
+                        == "citation_reference_mapping"
+                    ),
+                    source_evidence_refs=list(
+                        paragraph_score.get("source_evidence_refs")
+                        or issue.get("source_evidence_refs")
+                        or []
+                    ),
+                    source_ready=bool(source_entry),
+                    evidence_texts=[
+                        str(passage.get("text") or "")
+                        for paper in source_entry.get("papers") or []
+                        if isinstance(paper, dict)
+                        for passage in paper.get("passages") or []
+                        if isinstance(passage, dict)
+                        and str(passage.get("text") or "").strip()
+                    ],
+                )
+            )
+            repair_stage = str(issue.get("repair_stage") or "draft")
+            issue["recommended_return_stage"] = {
+                "discovery": "discovery",
+                "planning": "planning",
+                "library_matrix": "planning",
+                "writing_plan": "sections",
+            }.get(repair_stage, "draft")
+            issues.append(issue)
         source_check = dict(current_quality.get("source_check") or {})
         source_entry = built.get("source_check_entry")
         if isinstance(source_entry, dict) and source_entry:
@@ -3912,6 +4461,8 @@ class DraftsService(OwnedProjectService):
                 "evaluated_at": str(built.get("evaluated_at") or utc_now().isoformat()),
             }
         )
+        root_causes, repair_tasks = self._quality_root_causes(issues)
+        routing = self._routing_summary_from_issues(issues)
         return {
             **current_quality,
             "score": updated_score,
@@ -3922,6 +4473,12 @@ class DraftsService(OwnedProjectService):
             "paragraph_failures": paragraph_failures,
             "blocking_paragraph_failures": blocking,
             "issues": issues,
+            "routing": routing,
+            "root_causes": root_causes,
+            "repair_tasks": repair_tasks,
+            "repair_summary": self._repair_summary(
+                current_quality, root_causes
+            ),
             "hard_gate_failures": hard_gate_failures,
             "source_check": source_check,
             "preflight": preflight,
@@ -3986,11 +4543,73 @@ class DraftsService(OwnedProjectService):
         if not candidate_draft.strip() or candidate_draft == current_text:
             raise WorkflowConflict("Rewrite candidate contains no applicable change.")
 
+        source_evidence_id = str(
+            job_payload.get("source_section_evidence_artifact_id") or ""
+        )
+        source_matrix_id = str(job_payload.get("source_matrix_artifact_id") or "")
+        if source_matrix_id:
+            current_matrix = self._artifact(
+                principal, project_id, MATRIX_LOGICAL_NAME
+            )
+            if current_matrix is None or current_matrix.id != source_matrix_id:
+                raise WorkflowConflict(
+                    "The Matrix changed while the paragraph candidate was awaiting "
+                    "acceptance. Generate the candidate again."
+                )
+        if source_evidence_id:
+            current_evidence = self._artifact(
+                principal, project_id, SECTION_EVIDENCE
+            )
+            if current_evidence is None or current_evidence.id != source_evidence_id:
+                raise WorkflowConflict(
+                    "The section Evidence Package changed while the paragraph "
+                    "candidate was awaiting acceptance."
+                )
+            repaired_evidence, evidence_repair, claim_dispositions = (
+                self._single_paragraph_evidence_repair(
+                    job_payload,
+                    built,
+                    dict(job_payload.get("source_paragraph_evaluation") or {}),
+                )
+            )
+        else:
+            repaired_evidence = {}
+            evidence_repair = {
+                "status": "not_applicable",
+                "added_evidence_count": 0,
+                "downgraded_claim_count": 0,
+                "affected_section_ids": [],
+                "affected_paragraph_ids": [],
+                "added_evidence": [],
+            }
+            claim_dispositions = {}
+
+        candidate_matrix, matrix_fact_promotions = self._matrix_with_promoted_facts(
+            dict(job_payload.get("matrix") or {}), evidence_repair
+        )
+        evidence_repair["matrix_fact_promotions"] = matrix_fact_promotions
+        evidence_repair["matrix_fact_promotion_count"] = len(matrix_fact_promotions)
+
         updated_quality = self._incremental_quality(
             current_quality,
             built,
             paragraph_id=paragraph_id,
             source_quality_artifact_id=quality_artifact.id,
+        )
+        merged_dispositions = dict(
+            current_quality.get("claim_dispositions") or {}
+        )
+        merged_dispositions.update(claim_dispositions)
+        updated_quality.update(
+            {
+                "evidence_repair": evidence_repair,
+                "claim_dispositions": merged_dispositions,
+                "repair_summary": self._repair_summary(
+                    current_quality,
+                    list(updated_quality.get("root_causes") or []),
+                    evidence_repair=evidence_repair,
+                ),
+            }
         )
         manual_review = self._manual_claim_review(current, updated_quality)
         updated_quality.update(
@@ -4023,6 +4642,8 @@ class DraftsService(OwnedProjectService):
                     "score"
                 ),
                 "overall_score_after": updated_quality["score"],
+                "evidence_repair": evidence_repair,
+                "claim_dispositions": claim_dispositions,
             }
         )
         entries[candidate_id] = candidate
@@ -4058,9 +4679,34 @@ class DraftsService(OwnedProjectService):
         files: dict[
             str,
             tuple[bytes | Callable[[dict[str, ArtifactRecord]], bytes], str],
-        ] = {
-            DRAFT_DOCUMENT: ((candidate_draft.rstrip() + "\n").encode(), "markdown")
-        }
+        ] = {}
+        if matrix_fact_promotions:
+            files[MATRIX_LOGICAL_NAME] = (
+                (
+                    json.dumps(candidate_matrix, ensure_ascii=False, indent=2)
+                    + "\n"
+                ).encode(),
+                "json",
+            )
+        if evidence_repair.get("added_evidence_count") and repaired_evidence:
+            def evidence_content(
+                published: dict[str, ArtifactRecord],
+                source: dict[str, Any] = repaired_evidence,
+            ) -> bytes:
+                value = deepcopy(source)
+                if MATRIX_LOGICAL_NAME in published:
+                    value["source_matrix_artifact_id"] = published[
+                        MATRIX_LOGICAL_NAME
+                    ].id
+                return (
+                    json.dumps(value, ensure_ascii=False, indent=2) + "\n"
+                ).encode()
+
+            files[SECTION_EVIDENCE] = (evidence_content, "json")
+        files[DRAFT_DOCUMENT] = (
+            (candidate_draft.rstrip() + "\n").encode(),
+            "markdown",
+        )
 
         def quality_content(published: dict[str, ArtifactRecord]) -> bytes:
             quality_was_current = (
@@ -4112,6 +4758,10 @@ class DraftsService(OwnedProjectService):
             DRAFT_QUALITY: quality_artifact.id,
             DRAFT_REWRITES: store_artifact.id,
         }
+        if source_evidence_id:
+            expected_currents[SECTION_EVIDENCE] = source_evidence_id
+        if source_matrix_id:
+            expected_currents[MATRIX_LOGICAL_NAME] = source_matrix_id
         if overlay_artifact is not None:
             expected_currents[DRAFT_OVERLAYS] = overlay_artifact.id
         event = {
@@ -4126,22 +4776,50 @@ class DraftsService(OwnedProjectService):
                 "evaluation_scope": "single_paragraph",
                 "paragraph_score_after": candidate.get("paragraph_score_after"),
                 "overall_score_after": updated_quality["score"],
+                "added_evidence_count": int(
+                    evidence_repair.get("added_evidence_count") or 0
+                ),
             },
             "created_at": utc_now(),
         }
+        common_metadata = {
+            **dict(current.metadata),
+            "operation": "rewrite-accept-pre-evaluated-candidate",
+            "candidate_id": candidate_id,
+            "paragraph_id": paragraph_id,
+            "previous_draft_artifact_id": current.id,
+            "evidence_repair": evidence_repair,
+        }
+
+        def artifact_metadata(
+            logical_name: str, published_so_far: dict[str, ArtifactRecord]
+        ) -> dict[str, Any]:
+            value = dict(common_metadata)
+            if SECTION_EVIDENCE in published_so_far:
+                value["source_section_evidence_artifact_id"] = (
+                    published_so_far[SECTION_EVIDENCE].id
+                )
+            if MATRIX_LOGICAL_NAME in published_so_far:
+                value["source_matrix_artifact_id"] = published_so_far[
+                    MATRIX_LOGICAL_NAME
+                ].id
+            if DRAFT_DOCUMENT in published_so_far and logical_name in {
+                DRAFT_QUALITY,
+                DRAFT_OVERLAYS,
+            }:
+                value["source_draft_artifact_id"] = (
+                    published_so_far[DRAFT_DOCUMENT].id
+                )
+            return value
+
         with self._write_lock:
             published, state = self._publish_files(
                 principal,
                 project_id,
                 files,
                 expected_revision=int(job_payload["expected_revision"]),
-                metadata={
-                    **dict(current.metadata),
-                    "operation": "rewrite-accept-pre-evaluated-candidate",
-                    "candidate_id": candidate_id,
-                    "paragraph_id": paragraph_id,
-                    "previous_draft_artifact_id": current.id,
-                },
+                metadata=common_metadata,
+                metadata_builder=artifact_metadata,
                 approval_events=[event],
                 expected_current_artifacts=expected_currents,
                 invalidate_final=True,
@@ -4155,6 +4833,17 @@ class DraftsService(OwnedProjectService):
             "paragraph_score": dict(built.get("paragraph_score") or {}).get("score"),
             "score": updated_quality["score"],
             "evaluation_scope": "single_paragraph",
+            "section_evidence_artifact_id": (
+                published[SECTION_EVIDENCE].id
+                if SECTION_EVIDENCE in published
+                else source_evidence_id
+            ),
+            "matrix_artifact_id": (
+                published[MATRIX_LOGICAL_NAME].id
+                if MATRIX_LOGICAL_NAME in published
+                else source_matrix_id
+            ),
+            "evidence_repair": evidence_repair,
             "revision": state.revision,
         }
 

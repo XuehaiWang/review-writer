@@ -1938,6 +1938,54 @@ class WorkflowRepository:
             )
             return self._artifact_record(artifact) if artifact else None
 
+    def list_current_artifacts_for_user(
+        self,
+        user_id: str,
+        logical_name: str,
+        *,
+        exclude_project_id: str = "",
+        limit: int = 100,
+    ) -> list[ArtifactRecord]:
+        """List user-isolated current artifacts for a reusable computation cache.
+
+        Returned artifacts remain ordinary project artifacts; callers may reuse
+        validated computation results but cannot move a current pointer or
+        treat another project's artifact as the current project's truth.
+        """
+
+        user_uuid = self._uuid(user_id, not_found_message="Artifact not found.")
+        excluded_uuid = (
+            self._uuid(exclude_project_id, not_found_message="Project not found.")
+            if exclude_project_id
+            else None
+        )
+        with database_session(self.session_factory) as session:
+            statement = (
+                select(WorkflowArtifact)
+                .join(
+                    WorkflowCurrentArtifact,
+                    WorkflowCurrentArtifact.artifact_id == WorkflowArtifact.id,
+                )
+                .join(Project, Project.id == WorkflowArtifact.project_id)
+                .where(
+                    WorkflowCurrentArtifact.logical_name == str(logical_name),
+                    Project.user_id == user_uuid,
+                    Project.deleted_at.is_(None),
+                    WorkflowArtifact.availability == "available",
+                )
+                .order_by(
+                    WorkflowCurrentArtifact.updated_at.desc(),
+                    WorkflowArtifact.created_at.desc(),
+                )
+                .limit(max(1, min(int(limit), 500)))
+            )
+            if excluded_uuid is not None:
+                statement = statement.where(Project.id != excluded_uuid)
+            return [
+                self._artifact_record(artifact)
+                for artifact in session.scalars(statement).all()
+            ]
+
     def list_artifacts(
         self,
         user_id: str,

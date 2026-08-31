@@ -42,6 +42,11 @@ type MatrixPaper = Record<string, unknown> & {
   }>;
   fact_enrichment?: {
     status?: string;
+    extraction_status?: string;
+    review_readiness?: "complete" | "partial" | "source_not_established";
+    required_fact_roles?: string[];
+    supported_fact_roles?: string[];
+    missing_fact_roles?: string[];
     review_status?: string;
     fact_count?: number;
     error?: string;
@@ -112,6 +117,19 @@ type BlueprintSection = Record<string, unknown> & {
   section_id?: string;
   title?: string;
   section_thesis?: string;
+  thesis_status?: "evidence_grounded" | "provisional" | "structural_synthesis" | string;
+  scientific_thesis?: {
+    text?: string;
+    status?: string;
+    missing_components?: string[];
+  };
+  depth_contract?: {
+    target_paragraph_count?: number;
+    target_word_min?: number;
+    target_word_max?: number;
+    minimum_comparison_paragraphs?: number;
+    requires_section_synthesis_exit?: boolean;
+  };
   section_goal?: string;
   assigned_papers?: unknown[];
   major_papers?: unknown[];
@@ -260,8 +278,9 @@ function displayText(value: unknown): string {
 
 function factStatusLabel(status: string, text: (zh: string, en: string) => string): string {
   return ({
-    complete: text("完整", "Complete"),
-    partial: text("部分", "Partial"),
+    complete: text("事实齐全", "Review facts ready"),
+    partial: text("事实部分", "Review facts partial"),
+    source_not_established: text("来源未建立", "Source not established"),
     limited: text("仅摘要", "Abstract only"),
     failed: text("失败", "Failed"),
     pending: text("待处理", "Pending"),
@@ -272,6 +291,7 @@ function factStatusClass(status: string): string {
   if (status === "complete") return "ok";
   if (status === "failed") return "danger";
   if (status === "pending") return "pending";
+  if (status === "source_not_established") return "danger";
   return "warning";
 }
 
@@ -317,12 +337,20 @@ function MatrixWorkspace({ payload, projectId, refresh }: { payload: PlanningPay
     enrichmentJob?.result?.matrix_enrichment_checkpoint
     || enrichmentJob?.result?.section_checkpoint,
   );
+  const enrichmentCounts = payload.matrix_enrichment?.counts || {};
+  const hasReadinessCounts = enrichmentCounts.readiness_complete !== undefined;
+  const unresolvedReadyState = Math.max(
+    0,
+    (enrichmentCounts.readiness_source_not_established || 0)
+      - (enrichmentCounts.pending || 0)
+      - (enrichmentCounts.failed || 0),
+  );
   const factCounts = {
-    complete: payload.matrix_enrichment?.counts?.complete || 0,
-    partial: payload.matrix_enrichment?.counts?.partial || 0,
-    limited: payload.matrix_enrichment?.counts?.limited || 0,
-    pending: payload.matrix_enrichment?.counts?.pending || 0,
-    failed: payload.matrix_enrichment?.counts?.failed || 0,
+    complete: hasReadinessCounts ? enrichmentCounts.readiness_complete || 0 : enrichmentCounts.complete || 0,
+    partial: hasReadinessCounts ? (enrichmentCounts.readiness_partial || 0) + unresolvedReadyState : enrichmentCounts.partial || 0,
+    limited: hasReadinessCounts ? 0 : enrichmentCounts.limited || 0,
+    pending: enrichmentCounts.pending || 0,
+    failed: enrichmentCounts.failed || 0,
   };
   useEffect(() => {
     setNote(selected?.main_content || "");
@@ -387,11 +415,11 @@ function MatrixWorkspace({ payload, projectId, refresh }: { payload: PlanningPay
   const formalClassificationTags = Object.values(selected?.evidence_backed_tags || {}).flat();
   const provisionalClassificationTags = selected?.provisional_screening_tags || [];
   const classificationOutcomes = selected?.classification_outcomes || [];
-  const selectedFactStatus = String(selected?.fact_enrichment?.status || "pending");
+  const selectedFactStatus = String(selected?.fact_enrichment?.review_readiness || selected?.fact_enrichment?.status || "pending");
   const actionRequiredOutcomes = classificationOutcomes.filter((outcome) => outcome.user_action_required === true);
   const automaticallyHandledOutcomes = classificationOutcomes.filter((outcome) => outcome.user_action_required !== true);
   const automaticResolution = selected?.fact_enrichment?.automatic_resolution;
-  const userFactReviewRequired = selectedFactStatus === "failed" || automaticResolution?.user_action_required === true;
+  const userFactReviewRequired = selected?.fact_enrichment?.extraction_status === "failed" || selectedFactStatus === "source_not_established" || automaticResolution?.user_action_required === true;
   const unresolvedTopicPartition = ["boundary", "insufficient_evidence", "cross_category", "out_of_scope"].includes(String(selected?.topic_partition_classification?.status || ""));
   const bibliographyIssueCount = papers.filter((paper) => paper.bibliography_identity?.verified === false).length;
   const emptyFactMessage = enrichmentActive
@@ -520,7 +548,7 @@ function BlueprintWorkspace({
       <section className="pane blueprint-section-list"><div className="pane-head"><div><span className="step-label">{text("Blueprint章节", "Blueprint sections")}</span><h2>{sections.length} {text("个章节", "sections")}</h2></div></div><div className="keyword-list">{sections.map((item) => { const papers = item.primary_papers || item.major_papers || item.assigned_papers || []; const claims = item.review_claims || item.paragraph_plan || []; const role = String(item.section_role || "body"); const synthesisOnly = role === "introduction" || role === "conclusion"; const missing = !claims.length || (!synthesisOnly && !papers.length); const readiness = item.evidence_readiness?.status; const readinessLabel = missing || readiness === "insufficient" ? text("需要检查", "Needs review") : readiness === "partial" ? text("部分证据", "Partial evidence") : readiness === "synthesis" || synthesisOnly ? text("综合章节", "Synthesis section") : text("就绪", "Ready"); return <button key={String(item.section_id)} type="button" className={item === section ? "active" : ""} onClick={() => setSelectedId(String(item.section_id))}><strong>{String(item.section_id || "")} · {String(item.title || text("无标题", "Untitled"))}</strong><small>{papers.length} {text("篇主要论文", "primary papers")} · {claims.length} {text("个论证计划", "argument plans")} · {readinessLabel}</small></button>; })}</div></section>
       <section className="pane blueprint-detail-react"><div className="pane-head blueprint-detail-head"><div><span className="step-label">{text("Blueprint摘要", "Blueprint summary")}</span><h2>{section?.title || "Blueprint"}</h2></div></div>{issues.length ? <div className="planning-diagnostics">{issues.map((issue) => <p className={issue.severity === "planning_blocker" ? "message message-error" : "message message-warning"} key={`${issue.rule_id}-${issue.message}`}>{issue.message}</p>)}</div> : <div className="blueprint-health-row"><span className="blueprint-health-status"><i />{text("自动检查通过", "Automatic checks passed")}</span>{adjustments.length ? <details className="blueprint-routing-details"><summary><strong>{text(`${adjustedPaperCount} 篇论文路由已调整`, `${adjustedPaperCount} paper routes adjusted`)}</strong><span>{text("查看记录", "View log")}</span></summary><div className="blueprint-routing-detail-body"><p>{text("系统依据可定位的科学事实完成调整，无需逐项确认。", "Routes were adjusted from source-addressable scientific facts; no separate confirmation is required.")}</p><div>{adjustedTargets.map((target) => <span key={target}>{target}</span>)}</div></div></details> : <span className="blueprint-routing-none">{text("无需调整论文路由", "No route adjustments needed")}</span>}</div>}
         {restructure?.is_restructure ? <details className="blueprint-restructure-note"><summary>{text("本版本包含结构调整", "This version contains structural changes")}</summary><p>{restructure.application_mode === "auto_applied_before_section_generation" ? text("章节尚未生成，系统已安全应用新结构；旧 Blueprint 仍可回滚。", "No section prose existed, so the new structure was applied safely; the prior Blueprint remains available for rollback.") : text("旧结构和章节映射已保存。存在下游内容时，本版本仍使用现有 Blueprint 确认流程，不会静默覆盖人工内容。", "The old structure and section map were retained. When downstream content exists, the existing Blueprint confirmation flow is used and manual content is not silently overwritten.")}</p><ul>{(restructure.section_mapping || []).filter((item) => item.previous_section_id || item.current_section_id).map((item, index) => <li key={`${item.previous_section_id || "new"}-${item.current_section_id || "retired"}-${index}`}>{item.previous_title || text("新增章节", "New section")} → {item.current_title || text("已撤销", "Retired")}</li>)}</ul>{restructure.rollback_supported && restructure.previous_blueprint_artifact_id && onRestorePrevious ? <button className="button button-secondary" type="button" disabled={restoring} onClick={() => onRestorePrevious(restructure.previous_blueprint_artifact_id!)}>{restoring ? text("正在恢复…", "Restoring…") : text("恢复上一版本", "Restore previous version")}</button> : null}</details> : null}
-        {section ? <div className="blueprint-summary-grid"><section><h3>{text("核心论点", "Core argument")}</h3><p>{displayText(section.section_thesis || section.section_goal) || "—"}</p></section><section><h3>{text("主要论文", "Primary papers")}</h3><strong>{(section.primary_papers || section.major_papers || section.assigned_papers || []).length}</strong></section><section><h3>{text("论证计划", "Argument plan")}</h3><strong>{(section.review_claims || section.paragraph_plan || []).length}</strong></section><section><h3>{text("证据状态", "Evidence status")}</h3><strong>{section.evidence_readiness?.status === "partial" ? text("部分论文仅可作背景", "Some papers are context only") : section.evidence_readiness?.status === "insufficient" ? text("证据不足", "Insufficient evidence") : section.evidence_readiness?.status === "synthesis" ? text("综合正文证据", "Synthesizes body evidence") : text("可进入写作", "Ready for writing")}</strong></section></div> : <div className="empty-state">{text("请先生成Blueprint。", "Generate a blueprint first.")}</div>}
+        {section ? <><div className="blueprint-summary-grid"><section><h3>{text("核心论点", "Core argument")}</h3><p>{displayText(section.scientific_thesis?.text || section.section_thesis || section.section_goal) || "—"}</p></section><section><h3>{text("主要论文", "Primary papers")}</h3><strong>{(section.primary_papers || section.major_papers || section.assigned_papers || []).length}</strong></section><section><h3>{text("论点依据", "Thesis basis")}</h3><strong>{section.thesis_status === "provisional" ? text("暂定，需补证据", "Provisional; evidence repair needed") : section.thesis_status === "evidence_grounded" ? text("结构化事实支持", "Grounded in structured facts") : text("结构综合", "Structural synthesis")}</strong></section><section><h3>{text("证据状态", "Evidence status")}</h3><strong>{section.evidence_readiness?.status === "partial" ? text("部分论文仅可作背景", "Some papers are context only") : section.evidence_readiness?.status === "insufficient" ? text("证据不足", "Insufficient evidence") : section.evidence_readiness?.status === "synthesis" ? text("综合正文证据", "Synthesizes body evidence") : text("可进入写作", "Ready for writing")}</strong></section></div>{section.depth_contract ? <p className="message message-info">{text(`目标 ${section.depth_contract.target_paragraph_count || 0} 段，${section.depth_contract.target_word_min || 0}–${section.depth_contract.target_word_max || 0} 词；至少 ${section.depth_contract.minimum_comparison_paragraphs || 0} 个比较段落${section.depth_contract.requires_section_synthesis_exit ? "，并包含章节收束" : ""}。`, `Target ${section.depth_contract.target_paragraph_count || 0} paragraphs and ${section.depth_contract.target_word_min || 0}–${section.depth_contract.target_word_max || 0} words; at least ${section.depth_contract.minimum_comparison_paragraphs || 0} comparison paragraphs${section.depth_contract.requires_section_synthesis_exit ? " plus a section synthesis exit" : ""}.`)}</p> : null}</> : <div className="empty-state">{text("请先生成Blueprint。", "Generate a blueprint first.")}</div>}
         <details className="advanced-panel blueprint-advanced-detail"><summary>{text("查看完整 Blueprint 与生成依据", "View full blueprint and generation inputs")}</summary><div className="advanced-panel-body"><nav className="advanced-tab-list"><button type="button" className={advancedDetail === "raw" ? "active" : ""} onClick={() => setAdvancedDetail("raw")}>{text("完整字段", "Full fields")}</button><button type="button" className={advancedDetail === "plan" ? "active" : ""} onClick={() => setAdvancedDetail("plan")}>{text("写作计划", "Writing plan")}</button><button type="button" className={advancedDetail === "outline" ? "active" : ""} onClick={() => setAdvancedDetail("outline")}>{text("选定大纲", "Selected outline")}</button></nav>{advancedDetail === "raw" ? <div className="blueprint-json-fields">{section ? Object.entries(section).filter(([, value]) => value !== null && value !== "" && (!Array.isArray(value) || value.length)).map(([key, value]) => <section key={key}><h3>{key.replaceAll("_", " ")}</h3><pre>{typeof value === "string" ? value : JSON.stringify(value, null, 2)}</pre></section>) : null}</div> : <pre className="markdown-preview">{advancedDetail === "plan" ? payload.section_writing_plan_md : resolvedOutline}</pre>}</div></details>
       </section>
     </div>
@@ -589,7 +617,11 @@ export function PlanningPage() {
   const autoRepairableRouting = Boolean(
     planning.data?.blueprint_current
     && planning.data?.outline_selection?.manually_edited !== true
-    && planning.data?.taxonomy_diagnostics?.issues?.some((issue) => ["taxonomy.catch_all_body_section", "taxonomy.dominant_boundary_section"].includes(String(issue.rule_id)))
+    && planning.data?.taxonomy_diagnostics?.issues?.some((issue) => [
+      "taxonomy.catch_all_body_section",
+      "taxonomy.dominant_boundary_section",
+      "taxonomy.orphan_papers",
+    ].includes(String(issue.rule_id)))
   );
 
   return (

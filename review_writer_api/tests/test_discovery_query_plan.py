@@ -185,6 +185,50 @@ class DiscoveryQueryPlanTests(unittest.TestCase):
             self.assertEqual("topic_core", query["admission_query_id"])
             self.assertTrue(query.get("axis_id"))
 
+    def test_core_admission_queries_are_compact_and_independent(self) -> None:
+        queries = discover.build_semantic_queries(
+            {
+                "resolved_concepts": [
+                    {
+                        "surface": "terminal alkyne allenation",
+                        "expanded_name": "terminal alkyne allenation",
+                    },
+                    {
+                        "surface": "terminal allene synthesis",
+                        "expanded_name": "terminal allene synthesis",
+                    },
+                ],
+                "keywords": [
+                    {
+                        "keyword": "alkyne to allene conversion",
+                        "category": "reaction_type",
+                        "source": "user",
+                    },
+                    {
+                        "keyword": "aldehyde alkyne amine coupling",
+                        "category": "reaction_type",
+                        "source": "user",
+                    },
+                ],
+                "classification_axes": [],
+                "group_by": [],
+            }
+        )
+
+        core_queries = [item for item in queries if item["kind"] == "topic_core"]
+        self.assertEqual(
+            ["topic_core", "topic_core_02", "topic_core_03", "topic_core_04"],
+            [item["query_id"] for item in core_queries],
+        )
+        self.assertTrue(all(" ; " not in item["query"] for item in core_queries))
+        expected_groups = []
+        for item in core_queries:
+            expected_groups.append([[item["query"]]])
+        self.assertEqual(
+            expected_groups,
+            [item["lexical_term_groups"] for item in core_queries],
+        )
+
     def test_empty_optional_year_filters_are_removed(self) -> None:
         topic = "Syntheses of axial-chiral allenes categorized by substrate"
         for empty_value in (None, "", "   "):
@@ -705,7 +749,7 @@ class DiscoveryQueryPlanTests(unittest.TestCase):
         self.assertEqual("discovery-query-plan", gateway.call_args.kwargs["label"])
         self.assertIn("electrochemical catalysis", gateway.call_args.args[0])
 
-    def test_unclassified_keyword_searches_across_structured_fields(self) -> None:
+    def test_verified_library_tags_do_not_affect_discovery_scoring(self) -> None:
         rules = {
             **EMPTY_RULES,
             "catalyst_or_method": {"photoredox catalysis": ["photoredox"]},
@@ -726,8 +770,8 @@ class DiscoveryQueryPlanTests(unittest.TestCase):
             [],
             rules,
         )
-        self.assertGreater(scored["direct_raw_score"], 0)
-        self.assertIn("catalyst_or_method", scored["matched_fields"])
+        self.assertEqual(0, scored["direct_raw_score"])
+        self.assertNotIn("catalyst_or_method", scored["matched_fields"])
 
         meta["structured_tags"]["human_checked"] = False
         ignored = discover.score_local_paper(
@@ -769,119 +813,6 @@ class DiscoveryQueryPlanTests(unittest.TestCase):
         self.assertNotIn(
             "stereochemical mode: racemic versus enantioselective",
             validated["group_by"],
-        )
-
-    def test_project_tag_assessment_preserves_base_tags_and_syncs_duplicate_hits(self) -> None:
-        papers = {
-            "P001": {
-                "paper_id": "P001",
-                "structured_tags": {
-                    "value": {
-                        "catalyst_or_method": "copper catalysis",
-                        "reaction_type": "allenation",
-                    },
-                    "human_checked": True,
-                },
-            }
-        }
-        grouped = [
-            {
-                "keyword": "copper catalysis",
-                "category": "catalyst_or_method",
-                "local_results": [
-                    {
-                        "paper_id": "P001",
-                        "score": 0.91,
-                        "matched_fields": ["catalyst_or_method"],
-                        "reason": "structured tag match",
-                    }
-                ],
-            },
-            {
-                "keyword": "allenation",
-                "category": "reaction_type",
-                "local_results": [
-                    {
-                        "paper_id": "P001",
-                        "score": 0.83,
-                        "matched_fields": ["reaction_type"],
-                        "reason": "structured tag match",
-                    }
-                ],
-            },
-        ]
-
-        discover.attach_project_tag_assessments(
-            grouped,
-            papers,
-            topic="Copper-catalyzed allenation",
-            query_plan_source="dashboard_llm",
-            taxonomy={"profile": "default"},
-        )
-
-        first = grouped[0]["local_results"][0]
-        duplicate = grouped[1]["local_results"][0]
-        self.assertEqual("copper catalysis", first["base_tags"]["catalyst_or_method"])
-        self.assertEqual("allenation", first["base_tags"]["reaction_type"])
-        self.assertTrue(first["base_tags_verified"])
-        self.assertEqual(
-            {
-                "catalyst_or_method": ["copper catalysis"],
-                "reaction_type": ["allenation"],
-            },
-            first["project_tag_assessment"]["suggested_tags"],
-        )
-        self.assertEqual(first["project_tag_assessment"], duplicate["project_tag_assessment"])
-        self.assertFalse(first["project_tag_assessment"]["review_required"])
-        self.assertEqual(
-            "retrieval_hint_only",
-            first["project_tag_assessment"]["application_mode"],
-        )
-        self.assertEqual("deferred_to_matrix", first["classification_status"])
-        self.assertEqual([], first["provisional_screening_tags"])
-        self.assertEqual({}, first["screening_classification"])
-        self.assertEqual({}, first["confirmed_project_tags"])
-        self.assertEqual("pending", first["tag_review_status"])
-
-    def test_unverified_base_tags_are_hidden_from_project_assessment(self) -> None:
-        papers = {
-            "P001": {
-                "paper_id": "P001",
-                "structured_tags": {
-                    "value": {"catalyst_or_method": "copper catalysis"},
-                    "human_checked": False,
-                },
-            }
-        }
-        grouped = [
-            {
-                "keyword": "gold catalysis",
-                "category": "catalyst_or_method",
-                "local_results": [
-                    {
-                        "paper_id": "P001",
-                        "score": 0.9,
-                        "matched_fields": ["primary_evidence"],
-                        "reason": "title evidence",
-                    }
-                ],
-            }
-        ]
-
-        discover.attach_project_tag_assessments(
-            grouped,
-            papers,
-            topic="Gold-catalyzed allene synthesis",
-            query_plan_source="dashboard_llm",
-            taxonomy={"profile": "allene"},
-        )
-
-        row = grouped[0]["local_results"][0]
-        self.assertFalse(row["base_tags_verified"])
-        self.assertEqual("not specified", row["base_tags"]["catalyst_or_method"])
-        self.assertEqual(
-            ["gold catalysis"],
-            row["project_tag_assessment"]["suggested_tags"]["catalyst_or_method"],
         )
 
     def test_screening_classification_requires_contribution_and_exact_quote(self) -> None:

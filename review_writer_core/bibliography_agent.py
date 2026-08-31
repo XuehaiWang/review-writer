@@ -14,6 +14,7 @@ import html
 import re
 from typing import Any, Mapping
 
+from .author_metadata import authors_are_publication_ready, clean_author_names
 from .document_front_matter import clean_markdown_heading
 from .paper_sources.normalize import normalize_doi, normalize_title
 
@@ -27,7 +28,19 @@ _ROLE_LABEL = re.compile(
 )
 _DOI = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", re.I)
 _YEAR = re.compile(r"(?<!\d)(?:18|19|20|21)\d{2}(?!\d)")
-_ALLOWED_FIELDS = frozenset({"title", "authors", "journal", "year", "doi"})
+_ALLOWED_FIELDS = frozenset(
+    {
+        "title",
+        "authors",
+        "journal",
+        "year",
+        "volume",
+        "issue",
+        "pages",
+        "article_number",
+        "doi",
+    }
+)
 _AUTHOR_ROLES = frozenset({"authors", "article_authors", "submitted_by"})
 _EXCLUDED_AUTHOR_LABEL = re.compile(
     r"\b(?:checked\s+by|edited\s+by|reviewed\s+by|prepared\s+for)\b", re.I
@@ -142,11 +155,15 @@ article authors unless the same document explicitly identifies them as authors.
 
 Return one JSON object only:
 {
-  "fields": {
+    "fields": {
     "title": {"value": "...", "role": "article_title", "source_excerpt": "exact quote", "source_location": "region id", "confidence": 0.0},
     "authors": {"value": ["Name One", "Name Two"], "role": "article_authors", "source_excerpt": "exact quote", "source_location": "region id", "confidence": 0.0},
     "journal": {"value": "...", "role": "journal", "source_excerpt": "exact quote", "source_location": "region id", "confidence": 0.0},
     "year": {"value": 2024, "role": "publication_year", "source_excerpt": "exact quote", "source_location": "region id", "confidence": 0.0},
+    "volume": {"value": "42", "role": "volume", "source_excerpt": "exact quote", "source_location": "region id", "confidence": 0.0},
+    "issue": {"value": "7", "role": "issue", "source_excerpt": "exact quote", "source_location": "region id", "confidence": 0.0},
+    "pages": {"value": "1234-1242", "role": "pages", "source_excerpt": "exact quote", "source_location": "region id", "confidence": 0.0},
+    "article_number": {"value": "e12345", "role": "article_number", "source_excerpt": "exact quote", "source_location": "region id", "confidence": 0.0},
     "doi": {"value": "10.xxxx/...", "role": "doi", "source_excerpt": "exact quote", "source_location": "region id", "confidence": 0.0}
   },
   "excluded_people": [
@@ -188,9 +205,13 @@ def _field_row(
     role = str(raw.get("role") or "").strip().casefold()
     value = raw.get("value")
     if field == "authors":
-        authors = value if isinstance(value, list) else []
-        authors = [_compact_text(item) for item in authors if _compact_text(item)]
-        if not authors or role not in _AUTHOR_ROLES or _EXCLUDED_AUTHOR_LABEL.search(compact_excerpt):
+        authors = clean_author_names(value if isinstance(value, list) else [])
+        if (
+            not authors
+            or not authors_are_publication_ready(authors)
+            or role not in _AUTHOR_ROLES
+            or _EXCLUDED_AUTHOR_LABEL.search(compact_excerpt)
+        ):
             return None
         normalized_excerpt = normalize_title(compact_excerpt)
         if any(normalize_title(author) not in normalized_excerpt for author in authors):
@@ -207,6 +228,21 @@ def _field_row(
         if not match or match.group(0) not in _YEAR.findall(compact_excerpt):
             return None
         value = int(match.group(0))
+    elif field in {"volume", "issue", "pages", "article_number"}:
+        value = _compact_text(value)
+        normalized_value = re.sub(r"[\s−–]", lambda match: "-" if match.group(0) in {"−", "–"} else "", value)
+        normalized_excerpt = re.sub(
+            r"[\s−–]",
+            lambda match: "-" if match.group(0) in {"−", "–"} else "",
+            compact_excerpt,
+        )
+        if (
+            not value
+            or len(value) > 64
+            or normalized_value.casefold() not in normalized_excerpt.casefold()
+            or not re.search(r"\d", value)
+        ):
+            return None
     elif field in {"title", "journal"}:
         value = clean_markdown_heading(value)
         if not value or normalize_title(value) not in normalize_title(compact_excerpt):

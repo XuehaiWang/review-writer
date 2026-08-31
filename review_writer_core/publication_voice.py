@@ -12,6 +12,14 @@ FENCED_CODE = re.compile(r"```.*?```", re.DOTALL)
 INLINE_CODE = re.compile(r"`[^`\n]+`")
 LEAK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("evidence_package", re.compile(r"\b(?:supplied|provided) evidence\b", re.I)),
+    (
+        "retrieval_boundary_leak",
+        re.compile(
+            r"\b(?:available|provided|supplied) (?:excerpt|material|passage)s?\b|"
+            r"\blocally bounded\b|\bselected matrix\b|\bindexed evidence\b",
+            re.I,
+        ),
+    ),
     ("workflow_artifact", re.compile(r"\b(?:evidence|source|workflow) (?:package|artifact|registry)\b", re.I)),
     ("internal_gate", re.compile(r"\b(?:integrity|quality|review) gate\b", re.I)),
     ("model_instruction", re.compile(r"\b(?:the model|the prompt|the workflow) (?:must|should|was instructed)\b", re.I)),

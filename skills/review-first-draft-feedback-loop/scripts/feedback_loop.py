@@ -41,12 +41,21 @@ from review_writer_core.paragraph_markers import (  # noqa: E402
 )
 from review_writer_core.text_safety import make_xml_compatible  # noqa: E402
 from review_writer_core.publication_voice import publication_voice_issues  # noqa: E402
+from review_writer_core.section_narrative_contracts import (  # noqa: E402
+    canonical_argument_role,
+)
 from review_writer_core.writing_contracts import (  # noqa: E402
     CASE_PARAGRAPH_MAX_WORDS,
     CASE_PARAGRAPH_MIN_WORDS,
 )
 from review_writer_core.taxonomy_verification import (  # noqa: E402
     load_taxonomy_verification_profile,
+)
+from review_writer_core.review_fact_readiness import (  # noqa: E402
+    evidence_problem_type,
+    is_figure_callout_only,
+    is_strong_negative_claim,
+    negative_claim_policy,
 )
 
 
@@ -403,6 +412,115 @@ def clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def normalized_contains_text(container: Any, excerpt: Any) -> bool:
+    """Return whether an exact, whitespace-normalized source excerpt exists."""
+
+    haystack = clean_text(container).casefold()
+    needle = clean_text(excerpt).casefold()
+    return bool(needle) and needle in haystack
+
+
+def numeric_tokens(value: Any) -> set[str]:
+    return set(re.findall(r"(?<![A-Za-z])[-+]?\d+(?:\.\d+)?", clean_text(value)))
+
+
+def validated_claim_fact_bindings(
+    raw_bindings: Any,
+    *,
+    paragraph_text: str,
+    paragraph_evidence: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Validate model-proposed Claim→Fact bindings against original passages.
+
+    This is deliberately stricter than ordinary source checking.  A passage
+    may repair the Evidence Package without becoming a Matrix Fact; promotion
+    is allowed only when the model supplies an exact excerpt, the paper and
+    reference are in the paragraph contract, and every numeric value is
+    present in that excerpt.
+    """
+
+    passage_by_ref: dict[str, dict[str, str]] = {}
+    for paper in paragraph_evidence.get("evidence") or []:
+        if not isinstance(paper, dict):
+            continue
+        paper_id = clean_text(paper.get("paper_id"))
+        for passage in paper.get("original_passages") or []:
+            if not isinstance(passage, dict):
+                continue
+            ref = clean_text(passage.get("ref"))
+            text = clean_text(passage.get("text"))
+            if ref and paper_id and text:
+                passage_by_ref[ref] = {"paper_id": paper_id, "text": text}
+
+    paragraph_normalized = clean_text(paragraph_text).casefold()
+    accepted: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for raw in raw_bindings or []:
+        if not isinstance(raw, dict):
+            continue
+        claim_text = clean_text(raw.get("claim_text"))
+        paper_id = clean_text(raw.get("paper_id"))
+        source_ref = clean_text(raw.get("source_ref"))
+        excerpt = clean_text(raw.get("support_excerpt"))
+        subject = clean_text(raw.get("subject"))
+        predicate = clean_text(raw.get("predicate"))
+        value = clean_text(raw.get("value") or raw.get("normalized_value"))
+        source = passage_by_ref.get(source_ref)
+        if (
+            not claim_text
+            or claim_text.casefold() not in paragraph_normalized
+            or source is None
+            or source["paper_id"] != paper_id
+            or not normalized_contains_text(source["text"], excerpt)
+            or not subject
+            or not predicate
+            or not value
+        ):
+            continue
+        # Numbers are high-risk anchors.  Do not allow the model to promote a
+        # value that cannot be found verbatim in the cited original excerpt.
+        if not numeric_tokens(value).issubset(numeric_tokens(excerpt)):
+            continue
+        if is_strong_negative_claim(claim_text) and negative_claim_policy(
+            claim_text, evidence_texts=[excerpt]
+        ) != "explicit_negative_supported":
+            continue
+        qualifiers = raw.get("qualifiers")
+        qualifiers = qualifiers if isinstance(qualifiers, dict) else {}
+        safe_qualifiers = {
+            clean_text(key): clean_text(item)
+            for key, item in qualifiers.items()
+            if clean_text(key)
+            and clean_text(item)
+            and normalized_contains_text(excerpt, item)
+        }
+        key = (paper_id, source_ref, value.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            confidence = max(0.0, min(1.0, float(raw.get("confidence") or 0.0)))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        accepted.append(
+            {
+                "claim_text": claim_text,
+                "paper_id": paper_id,
+                "source_ref": source_ref,
+                "support_excerpt": excerpt,
+                "fact_type": clean_text(raw.get("fact_type") or "claim_support"),
+                "subject": subject,
+                "predicate": predicate,
+                "value": value,
+                "normalized_value": clean_text(raw.get("normalized_value") or value),
+                "unit": clean_text(raw.get("unit")),
+                "qualifiers": safe_qualifiers,
+                "confidence": confidence,
+            }
+        )
+    return accepted
+
+
 def metadata_value(value: Any) -> Any:
     return value.get("value") if isinstance(value, dict) and "value" in value else value
 
@@ -468,7 +586,46 @@ def paragraph_metadata(project: Path) -> dict[str, dict[str, Any]]:
         for paragraph in section.get("paragraphs") or []:
             if isinstance(paragraph, dict) and paragraph.get("paragraph_id"):
                 result[str(paragraph["paragraph_id"])] = paragraph
+    writing = read_json(project / "02_section_drafting" / "writing_plan.json", {})
+    for section in writing.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for index, paragraph in enumerate(section.get("paragraphs") or []):
+            if not isinstance(paragraph, dict) or not paragraph.get("paragraph_id"):
+                continue
+            paragraph_id = str(paragraph["paragraph_id"])
+            current = dict(result.get(paragraph_id) or {})
+            current.update(
+                {
+                    key: value
+                    for key, value in paragraph.items()
+                    if value not in (None, "", [], {})
+                }
+            )
+            current["argument_role"] = canonical_argument_role(
+                current.get("argument_role"),
+                paragraph_index=index,
+                paragraph_count=len(section.get("paragraphs") or []),
+                paper_count=len(current.get("paper_ids") or []),
+            )
+            result[paragraph_id] = current
     return result
+
+
+def paragraph_argument_role(structured_paragraph: dict[str, Any]) -> str:
+    """Return the Writing Plan role without treating all prose as a case."""
+
+    if not structured_paragraph:
+        return "supporting"
+    declared = str(structured_paragraph.get("argument_role") or "").strip()
+    if not declared:
+        # Legacy section artifacts predate role-aware Writing Plans.  Preserve
+        # their previous case-paragraph behavior until they are regenerated.
+        return "anchor_case"
+    return canonical_argument_role(
+        declared,
+        paper_count=len(structured_paragraph.get("paper_ids") or []),
+    )
 
 
 def claim_evidence_contract(project: Path) -> dict[str, Any]:
@@ -1062,7 +1219,8 @@ def deterministic_preflight(
         text = clean_text(paragraph["text"])
         words = len(text.split())
         structured_paragraph = structured.get(paragraph_id, {})
-        word_range_applicable = bool(structured_paragraph)
+        argument_role = paragraph_argument_role(structured_paragraph)
+        word_range_applicable = argument_role == "anchor_case"
         evidence = source_evidence(
             review_root,
             project,
@@ -1166,7 +1324,7 @@ def deterministic_preflight(
             {
                 "paragraph_id": paragraph_id,
                 "word_count": words,
-                "paragraph_role": "case" if word_range_applicable else "supporting",
+                "paragraph_role": argument_role,
                 "word_range_applicable": word_range_applicable,
                 "issues": issues,
                 "paper_ids": evidence["paper_ids"],
@@ -1624,18 +1782,36 @@ def evaluation_prompt(
     batch_index: int = 1,
     batch_total: int = 1,
     draft_structure: list[dict[str, str]] | None = None,
+    prior_quality_context: dict[str, Any] | None = None,
 ) -> str:
     paragraph_ids = {str(item["paragraph_id"]) for item in paragraphs}
+    preflight_roles = {
+        str(item.get("paragraph_id") or ""): str(
+            item.get("paragraph_role") or "supporting"
+        )
+        for item in preflight.get("paragraph_checks") or []
+        if isinstance(item, dict)
+    }
     compact_paragraphs = [
         {
             "paragraph_id": item["paragraph_id"],
             "heading": item.get("heading", ""),
+            "paragraph_role": preflight_roles.get(
+                str(item["paragraph_id"]), "supporting"
+            ),
             "text": clean_text(item["text"]),
             "source_evidence": compact_evidence_for_prompt(
                 evidence.get(str(item["paragraph_id"]), {})
             ),
         }
         for item in paragraphs
+    ]
+    prior_quality_context = prior_quality_context or {}
+    relevant_dispositions = [
+        dict(item)
+        for item in (prior_quality_context.get("claim_dispositions") or {}).values()
+        if isinstance(item, dict)
+        and str(item.get("paragraph_id") or "") in paragraph_ids
     ]
     return (
         "Act as a detect-first scientific review evaluator. Do not rewrite text. "
@@ -1651,19 +1827,35 @@ def evaluation_prompt(
         "provided passage refs, and unsupported_claims. Treat absence from retrieved excerpts as needs_human_review, not "
         "as contradiction. Use local_source_recheck only when original text is unavailable or the retrieved passages are "
         "insufficient; otherwise route wording corrections to section_rewrite or final_polish. "
+        "Figure, Scheme, or Table placement/callout prose such as 'Figure 2 summarizes ...' is not a paper-level scientific "
+        "claim and must not be listed in unsupported_claims; evaluate any separate scientific interpretation of that visual "
+        "normally. A retrieval miss never proves that a publication did not report or establish something. Unless the supplied "
+        "passage explicitly makes the negative statement, identify an over-strong negative as a wording problem that can be "
+        "narrowed to the checked-source boundary, not as a contradiction or a mandatory human review. "
         "The configured case-paragraph word range applies only where deterministic preflight marks "
         "word_range_applicable=true. Supporting, transition, caption-adjacent, introduction, and synthesis prose must not "
         "fail P01 solely because it is shorter than a case paragraph. "
+        "Respect paragraph_role from the Writing Plan: section_frame, cross_study_comparison, mechanism_boundary, "
+        "scope_limitation, and section_synthesis_exit are synthesis roles, not single-study case paragraphs. "
+        "Prior claim dispositions are accepted closure records. Do not reopen a narrowed or removed unsupported claim "
+        "when that claim is absent from the current paragraph. If a different problem remains, identify its exact current "
+        "claim instead of repeating the closed diagnosis. "
         "Return JSON with dimension_scores and paragraph_scores. dimension_scores must include every supplied rubric id exactly once "
         "with id, level, evidence. paragraph_scores must include every paragraph exactly once with paragraph_id, score, "
         "failed_dimensions, severity (none|minor|major|critical), diagnosis, route "
         "(pass|section_rewrite|local_source_recheck|final_polish|human_confirmation), source_check_status, "
         "source_evidence_refs, and unsupported_claims. Keep each dimension evidence under 30 words, each diagnosis under "
-        "60 words, and unsupported_claims to at most four concise items.\n\n"
+        "60 words, and unsupported_claims to at most four concise items. Also return claim_fact_bindings only for factual "
+        "claims that are visibly present in the paragraph and directly supported by one supplied original passage. Each "
+        "binding must contain claim_text, paper_id, source_ref, an exact support_excerpt copied from that passage, fact_type, "
+        "subject, predicate, value, normalized_value, unit, qualifiers, and confidence. Do not create a binding for figure "
+        "callouts, review-author inference, weak contextual support, or a negative claim that the passage does not explicitly "
+        "state. An empty list is correct when no new directly supported Fact is needed.\n\n"
         f"Overall goal: {goal}; paragraph goal: {paragraph_goal}.\n"
         f"Draft structure index: {json.dumps(draft_structure or [], ensure_ascii=False)}\n"
         f"Rubric: {json.dumps(rubric, ensure_ascii=False)}\n"
         f"Deterministic preflight: {json.dumps(compact_preflight_for_prompt(preflight, paragraph_ids), ensure_ascii=False)}\n"
+        f"Prior accepted claim dispositions: {json.dumps(relevant_dispositions, ensure_ascii=False)}\n"
         f"Paragraphs and evidence: {json.dumps(compact_paragraphs, ensure_ascii=False)}"
     )
 
@@ -1896,6 +2088,11 @@ def normalize_evaluation(
         preflight_by_id.setdefault(str(finding.get("paragraph_id") or ""), []).append(finding)
     paragraph_scores: list[dict[str, Any]] = []
     paragraph_failures: list[dict[str, Any]] = []
+    paragraph_by_id = {
+        str(paragraph.get("paragraph_id") or ""): paragraph
+        for paragraph in paragraphs
+        if isinstance(paragraph, dict)
+    }
     for paragraph_id in paragraph_ids:
         item = score_by_id[paragraph_id]
         score = max(0.0, min(100.0, float(item.get("score", 0))))
@@ -1945,11 +2142,17 @@ def normalize_evaluation(
             for value in item.get("source_evidence_refs") or []
             if clean_text(value)
         ][:12]
-        unsupported_claims = [
+        raw_unsupported_claims = [
             clean_text(value)
             for value in item.get("unsupported_claims") or []
             if clean_text(value)
         ][:12]
+        excluded_figure_callouts = [
+            value for value in raw_unsupported_claims if is_figure_callout_only(value)
+        ]
+        unsupported_claims = [
+            value for value in raw_unsupported_claims if not is_figure_callout_only(value)
+        ]
         paragraph_evidence = evidence.get(paragraph_id, {})
         paper_ids = [str(value) for value in paragraph_evidence.get("paper_ids") or [] if value]
         valid_source_refs = {
@@ -1961,8 +2164,50 @@ def normalize_evaluation(
         }
         source_evidence_refs = [value for value in source_evidence_refs if value in valid_source_refs]
         source_ready = bool(paragraph_evidence.get("original_source_ready"))
+        evidence_texts = [
+            clean_text(passage.get("text"))
+            for paper in paragraph_evidence.get("evidence") or []
+            if isinstance(paper, dict)
+            for passage in paper.get("original_passages") or []
+            if isinstance(passage, dict) and clean_text(passage.get("text"))
+        ]
+        negative_policies = {
+            claim: negative_claim_policy(claim, evidence_texts=evidence_texts)
+            for claim in unsupported_claims
+            if is_strong_negative_claim(claim)
+        }
+        scope_limited_negatives = [
+            claim
+            for claim, policy in negative_policies.items()
+            if policy == "scope_limited_rewrite"
+        ]
+        figure_only_source_issue = bool(raw_unsupported_claims) and not unsupported_claims
+        negative_scope_only = bool(unsupported_claims) and len(scope_limited_negatives) == len(
+            unsupported_claims
+        )
         if not paper_ids:
             source_check_status = "not_applicable"
+        elif figure_only_source_issue and source_check_status in {
+            "partially_supported",
+            "unsupported",
+            "needs_human_review",
+            "not_assessed",
+        }:
+            # Figure placement/callout integrity is checked by the Figures
+            # stage. Do not manufacture a paper-source failure for that prose.
+            source_check_status = "not_applicable"
+            if route in {"local_source_recheck", "human_confirmation"}:
+                route = "section_rewrite" if score < paragraph_goal else "pass"
+            if route == "pass":
+                severity = "none"
+        elif negative_scope_only:
+            # A no-hit negative is repairable by narrowing the wording to the
+            # actually checked source boundary. It is not a contradiction and
+            # does not require the user to prove an absolute absence.
+            source_check_status = "partially_supported"
+            route = "section_rewrite"
+            severity = "major"
+            score = min(score, 79.0)
         elif source_ready and (
             source_check_status in {"not_assessed", "verified", "partially_supported", "unsupported"}
             and not source_evidence_refs
@@ -1980,6 +2225,20 @@ def normalize_evaluation(
             route = "section_rewrite"
             severity = "major"
             score = min(score, 79.0)
+        problem_type = evidence_problem_type(
+            unsupported_claims=unsupported_claims,
+            source_check_status=source_check_status,
+            source_evidence_refs=source_evidence_refs,
+            source_ready=source_ready,
+            evidence_texts=evidence_texts,
+        )
+        claim_fact_bindings = validated_claim_fact_bindings(
+            item.get("claim_fact_bindings") or [],
+            paragraph_text=str(
+                paragraph_by_id.get(paragraph_id, {}).get("text") or ""
+            ),
+            paragraph_evidence=paragraph_evidence,
+        )
         record = {
             "paragraph_id": paragraph_id,
             "score": round(score, 2),
@@ -1990,6 +2249,15 @@ def normalize_evaluation(
             "source_check_status": source_check_status,
             "source_evidence_refs": source_evidence_refs,
             "unsupported_claims": unsupported_claims,
+            "excluded_figure_callouts": excluded_figure_callouts,
+            "negative_claim_policies": negative_policies,
+            "evidence_problem_type": problem_type,
+            "claim_fact_bindings": claim_fact_bindings,
+            "failed_coverage_fields": [
+                clean_text(value)
+                for value in item.get("failed_coverage_fields") or []
+                if clean_text(value)
+            ],
         }
         paragraph_scores.append(record)
         if route != "pass" or severity in {"critical", "major"}:
@@ -2115,6 +2383,12 @@ def rewrite_prompt(
         )
     )
     mode_instruction = {
+        "negative_claim_scope_narrowing": (
+            "The listed unsupported claim is an over-strong paper-level negative. Do not state that the publication did "
+            "not report, establish, define, or discuss the point unless the supplied passage explicitly says so. Recast it "
+            "as a bounded statement such as 'the checked source passages do not directly establish ...' or omit it when it "
+            "does not advance the argument. Preserve all supported positive facts and citations."
+        ),
         "source_recheck_cleanup": (
             "This paragraph is in original-source recheck. Retain claims supported by the supplied passages and remove "
             "or explicitly qualify only the listed unsupported_claims. Absence from a passage is not evidence that a "
@@ -2409,6 +2683,7 @@ def update_best_paragraph_candidates(
             ),
             "source_evidence_refs": score.get("source_evidence_refs") or [],
             "unsupported_claims": score.get("unsupported_claims") or [],
+            "claim_fact_bindings": score.get("claim_fact_bindings") or [],
             "route": score.get("route"),
         }
     excluded: list[dict[str, Any]] = []
@@ -2815,6 +3090,9 @@ def evaluate_current_draft(
     rows = matrix_rows(project)
     source_cache: dict[str, dict[str, Any]] = {}
     academic_contract = claim_evidence_contract(project)
+    prior_quality_context = read_json(
+        first / "prior_quality_context.json", {}
+    )
     update_status(project, phase="source_checking")
     evidence = {
         str(paragraph["paragraph_id"]): source_evidence(
@@ -2892,6 +3170,7 @@ def evaluate_current_draft(
                     batch_index=display_index,
                     batch_total=len(batches),
                     draft_structure=draft_structure,
+                    prior_quality_context=prior_quality_context,
                 ),
                 label=f"First-draft rubric evaluation batch {display_index}/{len(batches)}",
             )
@@ -2990,6 +3269,23 @@ def automatic_rewrite_mode(
     source_status = str(finding.get("source_check_status") or "")
     paper_ids = paragraph_evidence.get("paper_ids") or []
     unsupported_claims = finding.get("unsupported_claims") or []
+    if (
+        str(finding.get("evidence_problem_type") or "")
+        == "unqualified_negative_claim"
+        or (
+            unsupported_claims
+            and all(is_strong_negative_claim(value) for value in unsupported_claims)
+            and all(
+                str(policy) == "scope_limited_rewrite"
+                for policy in (finding.get("negative_claim_policies") or {}).values()
+            )
+        )
+    ):
+        return "negative_claim_scope_narrowing"
+    if source_status == "needs_human_review" or route == "human_confirmation":
+        # A source ambiguity that survived local retrieval is terminal for the
+        # automatic batch. Rewriting it again cannot add scientific evidence.
+        return ""
     if source_status == "not_applicable" and not paper_ids and unsupported_claims:
         return "review_synthesis_cleanup"
     original_text_available = any(
@@ -3002,7 +3298,6 @@ def automatic_rewrite_mode(
         and source_status in {
             "partially_supported",
             "unsupported",
-            "needs_human_review",
         }
         and original_text_available
     ):

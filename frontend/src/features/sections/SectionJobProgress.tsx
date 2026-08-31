@@ -1,10 +1,12 @@
 import type { Job } from "../../api/types";
 import { useUiText } from "../../i18n/useUiText";
+import { sectionGenerationLabel, sectionReadinessLabel } from "./sectionStatusLabels";
 
 type CompletedSection = {
   section_id?: string;
   heading?: string;
   generation_mode?: "standard" | "evidence_repaired" | "safe_evidence_fallback" | string;
+  section_readiness?: { status?: string } | string;
 };
 
 type FailedSection = CompletedSection & { error?: string };
@@ -38,6 +40,16 @@ export function SectionJobProgress({ job }: { job: Job }) {
   const repairedCount = completed.filter((section) => section.generation_mode === "evidence_repaired").length;
   const fallbackCount = completed.filter((section) => section.generation_mode === "safe_evidence_fallback").length;
   const active = ["queued", "running", "cancel_requested"].includes(job.status);
+  const readinessLabel = (section: CompletedSection) => {
+    const readiness = typeof section.section_readiness === "string"
+      ? section.section_readiness
+      : section.section_readiness?.status;
+    return sectionReadinessLabel(readiness, text);
+  };
+  const generationLabel = (section: CompletedSection) => sectionGenerationLabel(
+    section.generation_mode,
+    text,
+  );
 
   let title = text("章节任务正在排队", "Section job queued");
   let detail = text("正在等待可用的写作工作线程。", "Waiting for an available writing worker.");
@@ -95,7 +107,7 @@ export function SectionJobProgress({ job }: { job: Job }) {
       ><span style={percentage === undefined ? undefined : { width: `${percentage}%` }} /></div>
       <p>{detail}</p>
       {completed.length ? <p className="section-progress-summary">{text(`标准生成 ${standardCount} · 自动修复 ${repairedCount} · 安全保底 ${fallbackCount}`, `Standard ${standardCount} · repaired ${repairedCount} · safe fallback ${fallbackCount}`)}</p> : null}
-      {completed.length ? <ol className="section-progress-completed">{completed.map((section, index) => <li key={`${section.section_id || "section"}-${index}`}><span>{section.heading || section.section_id || text(`章节 ${index + 1}`, `Section ${index + 1}`)}</span><small>{section.generation_mode === "safe_evidence_fallback" ? text("安全保底", "Safe fallback") : section.generation_mode === "evidence_repaired" ? text("自动修复", "Repaired") : text("标准生成", "Standard")}</small></li>)}</ol> : null}
+      {completed.length ? <ol className="section-progress-completed">{completed.map((section, index) => <li key={`${section.section_id || "section"}-${index}`}><span>{section.heading || section.section_id || text(`章节 ${index + 1}`, `Section ${index + 1}`)}</span><small>{[generationLabel(section), readinessLabel(section)].filter(Boolean).join(" · ")}</small></li>)}</ol> : null}
       {failed.length ? <ol className="section-progress-completed failed">{failed.map((section, index) => <li key={`failed-${section.section_id || "section"}-${index}`}><span>{section.heading || section.section_id || text(`章节 ${index + 1}`, `Section ${index + 1}`)}</span><small title={section.error || ""}>{text("失败，重试时仅恢复此章", "Failed; retry resumes this section")}</small></li>)}</ol> : null}
     </section>
   );

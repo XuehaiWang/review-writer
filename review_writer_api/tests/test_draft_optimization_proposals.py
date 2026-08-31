@@ -63,6 +63,32 @@ class DraftOptimizationProposalTests(unittest.TestCase):
         self.assertTrue(roots[0]["requires_user_decision"])
         self.assertEqual("requires_user_input", tasks[0]["status"])
 
+    def test_evidence_roots_are_tracked_per_paragraph_not_hidden_by_section(self) -> None:
+        issues = [
+            {
+                "issue_id": "E-1",
+                "paragraph_id": "S02-p1",
+                "section_id": "S02",
+                "repair_route": "targeted_evidence_then_paragraph_rewrite",
+                "issue_type": "claim_evidence_gap",
+                "auto_repairable": True,
+            },
+            {
+                "issue_id": "E-2",
+                "paragraph_id": "S02-p3",
+                "section_id": "S02",
+                "repair_route": "targeted_evidence_then_paragraph_rewrite",
+                "issue_type": "claim_evidence_gap",
+                "auto_repairable": True,
+            },
+        ]
+
+        roots, tasks = DraftsService._quality_root_causes(issues)
+
+        self.assertEqual(2, len(roots))
+        self.assertEqual({"S02-p1", "S02-p3"}, {root["scope"] for root in roots})
+        self.assertEqual(2, len(tasks))
+
     def test_candidate_contains_only_reviewable_paragraph_body_changes(self) -> None:
         current = (
             "# Current title\n\n"
@@ -765,6 +791,177 @@ class DraftOptimizationProposalTests(unittest.TestCase):
         )
         self.assertEqual([], section["corpus_gap_questions"])
 
+    def test_validated_targeted_binding_is_promoted_to_same_paper_matrix(self) -> None:
+        job_payload = {
+            "matrix": {
+                "rows": [
+                    {
+                        "paper_id": "P001",
+                        "title": "Study",
+                        "scientific_facts": [],
+                        "topic_classifications": [{"axis_id": "substrate"}],
+                    }
+                ]
+            },
+            "section_index": {
+                "sections": [
+                    {
+                        "section_id": "S01",
+                        "paragraphs": [
+                            {
+                                "paragraph_id": "S01-p1",
+                                "cited_paper_ids": ["P001"],
+                                "claim_realizations": [
+                                    {"claim_id": "C01", "question_id": "scope"}
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+            "section_evidence": {
+                "schema_version": 2,
+                "evidence_registry": [],
+                "sections": [
+                    {"section_id": "S01", "hits": [], "query_plans": []}
+                ],
+            },
+        }
+        built = {
+            "paragraph_scores": [
+                {
+                    "paragraph_id": "S01-p1",
+                    "source_check_status": "verified",
+                    "source_evidence_refs": ["P001:p2:b3"],
+                    "claim_fact_bindings": [
+                        {
+                            "paper_id": "P001",
+                            "source_ref": "P001:p2:b3",
+                            "support_excerpt": "The reaction afforded 3aa in 82% yield.",
+                            "fact_type": "outcome",
+                            "subject": "the reaction",
+                            "predicate": "afforded",
+                            "value": "3aa in 82% yield",
+                            "normalized_value": "82%",
+                            "qualifiers": {},
+                            "confidence": 0.96,
+                        }
+                    ],
+                }
+            ],
+            "source_check": {
+                "entries": [
+                    {
+                        "paragraph_id": "S01-p1",
+                        "papers": [
+                            {
+                                "paper_id": "P001",
+                                "passages": [
+                                    {
+                                        "ref": "P001:p2:b3",
+                                        "page": 2,
+                                        "text": "The reaction afforded 3aa in 82% yield.",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+
+        _evidence, repair, _dispositions = DraftsService._repair_evidence_package(
+            job_payload, built
+        )
+        candidate, applied = DraftsService._matrix_with_promoted_facts(
+            job_payload["matrix"], repair
+        )
+
+        self.assertEqual(1, repair["promoted_fact_count"])
+        self.assertEqual(1, len(applied))
+        self.assertEqual("P001", applied[0]["paper_id"])
+        facts = candidate["rows"][0]["scientific_facts"]
+        self.assertEqual("P001", facts[0]["paper_id"])
+        self.assertEqual("claim_targeted_fact", facts[0]["field_id"])
+        self.assertEqual(
+            [{"axis_id": "substrate"}],
+            candidate["rows"][0]["topic_classifications"],
+        )
+        self.assertTrue(applied[0]["fact_id"].startswith("MF-"))
+
+    def test_accepting_fact_repair_publishes_matrix_before_evidence_and_draft(self) -> None:
+        service = self._drafts_service()
+        current_text = "# Draft\n\nParagraph.\n\n<!-- paragraph_id: S01-p1 -->\n"
+        current = SimpleNamespace(id="draft-v1", metadata={})
+        store_artifact = SimpleNamespace(id="proposal-store-v1")
+        proposal = {
+            "proposal_id": "proposal-1",
+            "source_draft_artifact_id": "draft-v1",
+            "source_matrix_artifact_id": "matrix-v1",
+            "source_section_evidence_artifact_id": "evidence-v1",
+            "candidate_matrix": {"rows": [{"paper_id": "P001"}]},
+            "candidate_evidence_package": {"schema_version": 2, "sections": []},
+            "evidence_repair": {
+                "added_evidence_count": 1,
+                "matrix_fact_promotion_count": 1,
+            },
+            "reference_repair": {"changed": False},
+            "candidate_quality": {"score": 90, "hard_gate_failures": []},
+            "candidate_draft_text": current_text,
+            "deterministic_base_draft_text": current_text,
+            "changes": [],
+            "status": "pending",
+        }
+        service._read_text = lambda *_args, **_kwargs: (current_text, current)  # type: ignore[method-assign]
+        service._read_json = lambda *_args, **_kwargs: (  # type: ignore[method-assign]
+            {"entries": {"proposal-1": proposal}}, store_artifact
+        )
+        captured: dict[str, object] = {}
+
+        def publish_files(_principal, _project_id, files, **kwargs):
+            order = list(files)
+            captured["order"] = order
+            captured["expected"] = kwargs["expected_current_artifacts"]
+            published = {
+                DRAFT_OPTIMIZATIONS: SimpleNamespace(id="proposal-store-v2")
+            }
+            for logical_name in order:
+                content, _kind = files[logical_name]
+                if callable(content):
+                    content(published)
+                published[logical_name] = SimpleNamespace(
+                    id={
+                        "matrix/literature_matrix.json": "matrix-v2",
+                        SECTION_EVIDENCE: "evidence-v2",
+                        DRAFT_DOCUMENT: "draft-v2",
+                        DRAFT_QUALITY: "quality-v2",
+                        DRAFT_OVERLAYS: "overlays-v2",
+                    }.get(logical_name, "proposal-store-v2")
+                )
+            captured["draft_metadata"] = kwargs["metadata_builder"](
+                DRAFT_DOCUMENT, published
+            )
+            return published, SimpleNamespace(revision=9)
+
+        service._publish_files = publish_files  # type: ignore[method-assign]
+        result = service.decide_optimization_proposal(
+            SimpleNamespace(),
+            "project-1",
+            "proposal-1",
+            decision="accept",
+            revision=8,
+        )
+
+        order = captured["order"]
+        self.assertLess(order.index("matrix/literature_matrix.json"), order.index(SECTION_EVIDENCE))
+        self.assertLess(order.index(SECTION_EVIDENCE), order.index(DRAFT_DOCUMENT))
+        self.assertEqual(
+            "matrix-v1", captured["expected"]["matrix/literature_matrix.json"]
+        )
+        self.assertEqual(
+            "matrix-v2", captured["draft_metadata"]["source_matrix_artifact_id"]
+        )
+        self.assertEqual("matrix-v2", result["matrix_artifact_id"])
 
 if __name__ == "__main__":
     unittest.main()

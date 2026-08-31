@@ -21,6 +21,10 @@ describe("PendingRewrite", () => {
         status: "pending",
         source_paragraph_score: 61.25,
         candidate_paragraph_score: 91.5,
+        evidence_repair_preview: {
+          added_evidence_count: 2,
+          downgraded_claim_count: 1,
+        },
       }}
       decide={decide}
       disabled={false}
@@ -30,6 +34,8 @@ describe("PendingRewrite", () => {
     expect(screen.getByText("91.5")).toBeInTheDocument();
     expect(screen.getByText("候选已自动完成单段评分")).toBeInTheDocument();
     expect(screen.getByText(/不再调用模型复评/)).toBeInTheDocument();
+    expect(screen.getByText(/新增 2 条本地全文证据/)).toBeInTheDocument();
+    expect(screen.getByText(/记录 1 条证据不足声明/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "保存此候选" }));
     expect(decide).toHaveBeenCalledWith("candidate-1", "accept");

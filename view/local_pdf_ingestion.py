@@ -641,9 +641,10 @@ def ingest_local_pdf(review_root: Path, original_filename: object, staged_pdf: P
             title = title or _title_from_text(extracted_text, filename) or Path(filename).stem
             if title_field_needs_repair(metadata.get("title")) and not _looks_like_generated_title(title):
                 metadata["title"] = _field(title, "mineru_markdown_front_matter", 0.82)
-            authors = _authors_from_info(info.get("author", ""))
-            if authors and not (metadata.get("authors") or {}).get("value"):
-                metadata["authors"] = _field(authors, "pdf_document_info", 0.72)
+            # PDF document-info author strings are frequently stale creator
+            # metadata or publisher boilerplate. Keep the canonical author
+            # field MinerU-grounded and let the bounded document agent resolve
+            # only a genuinely missing/uncertain byline.
             if "doi" not in metadata:
                 metadata["doi"] = _field(None, "awaiting_bibliography_verification", 0.0)
             abstract = _abstract_from_text(extracted_text)
@@ -676,9 +677,11 @@ def ingest_local_pdf(review_root: Path, original_filename: object, staged_pdf: P
                     "content_list": str(content_path),
                     "extracted_dir": str(mineru["extracted_dir"]),
                     "manifest": str(mineru["manifest_path"]),
+                    "bibliography_policy": "mineru_primary_agent_on_low_confidence",
                 },
                 "notes": [
                     "mineru_precise_parse_completed_before_library_admission",
+                    "network_bibliography_lookup_not_required_for_ingest",
                     *(
                         ["mineru_precise_parse_auto_chunked"]
                         if int(mineru.get("mineru_part_count") or 1) > 1

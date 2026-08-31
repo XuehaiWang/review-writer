@@ -29,7 +29,8 @@ review-projects/<project_id>/03_figure_redraw/redrawn_figure_manifest.json
 Keep the selected outline order.
 Merge all section files.
 Polish transitions and terminology.
-Preserve paper-to-paragraph and figure-to-paragraph links.
+Preserve paper-to-paragraph evidence links and the reviewed figure asset pool.
+Only the current insertion plan creates figure-to-paragraph manuscript links.
 Do not delete caveats or no_figure_reason notes silently.
 Do not invent new papers, claims, or figures.
 ```
@@ -76,10 +77,12 @@ citations.json
 ordered list per `[n]` slot. It is consumed by the final audit to cross-check
 inline `[n]` callouts and the References section against `literature_matrix.json`.
 
-Figure insertion is paragraph-anchored: read `target_paragraph_id` from
-`02_section_drafting/figure_candidates.json` and insert each figure right after
-its anchor paragraph. Do not fall back to heading-only matching when
-`target_paragraph_id` exists.
+Figure insertion is paragraph-anchored but asset selection is paper-level.
+Read `insertion_plan` from the current figure manifest and insert only decisions
+whose `include` value is true, right after their `target_paragraph_id`. Figures
+without a safe current target remain in the reviewed pool rather than blocking
+the draft. Never infer placement from paper order. For legacy manifests without
+an insertion plan, use the recorded target conservatively.
 
 ## Figure Numbering and Paragraph References
 

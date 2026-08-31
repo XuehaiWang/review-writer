@@ -152,6 +152,8 @@ def build_question_query_plans(
     core_argument: str = "",
     section_role: str = "body",
     must_cover_points: list[Any] | None = None,
+    scientific_claims: list[Any] | None = None,
+    required_fact_roles: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Build short Boolean groups without turning prose into one long query."""
 
@@ -193,19 +195,100 @@ def build_question_query_plans(
         "introduction": {"object_input", "method_conditions", "limitations"},
         "conclusion": {"quantitative_results", "scope", "limitations"},
     }.get(role, {item[0] for item in QUESTION_TERMS})
-    definitions: list[tuple[str, list[str]]] = [("section_focus", [])]
+    declared_roles = {
+        str(value or "").strip()
+        for value in required_fact_roles or []
+        if str(value or "").strip()
+    }
+    if declared_roles:
+        applicable &= declared_roles
+    definitions: list[dict[str, Any]] = [
+        {
+            "question_id": "section_focus",
+            "terms": [],
+            "coverage_policy": "all_primary",
+            "required_for_section": True,
+            "query_route": "focus",
+        }
+    ]
     definitions.extend(
-        (question_id, list(terms))
+        {
+            "question_id": question_id,
+            "terms": list(terms),
+            "coverage_policy": "evidence_bearing",
+            "required_for_section": False,
+            "query_route": "fact_role",
+        }
         for question_id, terms in QUESTION_TERMS
         if question_id in applicable
     )
-    for index, point in enumerate(must_cover_points or [], start=1):
-        terms = query_terms(point, limit=7)
-        if terms:
-            definitions.append((f"required_claim_{index:02d}", terms))
+
+    # Only explicitly structured scientific claims can create required Claim
+    # queries.  Legacy prose instructions in ``must_cover_points`` used to be
+    # treated as scientific propositions, which created impossible evidence
+    # gaps such as searching source papers for "develop claim-centered
+    # synthesis".  Structured legacy rows remain readable; plain strings are
+    # deliberately ignored here and stay authoring constraints.
+    claim_rows: list[dict[str, Any]] = []
+    if scientific_claims is not None:
+        claim_rows.extend(
+            dict(item) if isinstance(item, dict) else {"proposition": str(item)}
+            for item in scientific_claims
+        )
+    else:
+        claim_rows.extend(
+            dict(item)
+            for item in must_cover_points or []
+            if isinstance(item, dict)
+            and (
+                item.get("proposition")
+                or item.get("scientific_proposition") is True
+                or item.get("fact_ids")
+                or item.get("evidence_refs")
+                or item.get("required_fact_roles")
+            )
+        )
+
+    limitation_terms = list(dict(QUESTION_TERMS).get("limitations") or ())
+    for index, claim in enumerate(claim_rows, start=1):
+        proposition = (
+            claim.get("proposition")
+            or claim.get("claim")
+            or claim.get("text")
+            or ""
+        )
+        terms = query_terms(proposition, limit=7)
+        if not terms:
+            continue
+        claim_id = str(claim.get("claim_id") or f"claim_{index:02d}")
+        required = bool(claim.get("required_for_section", True))
+        definitions.append(
+            {
+                "question_id": f"required_claim_{index:02d}",
+                "terms": terms,
+                "coverage_policy": "any_primary",
+                "required_for_section": required,
+                "query_route": "support",
+                "claim_id": claim_id,
+                "proposition": str(proposition),
+            }
+        )
+        definitions.append(
+            {
+                "question_id": f"claim_boundary_{index:02d}",
+                "terms": list(dict.fromkeys([*terms, *limitation_terms]))[:14],
+                "coverage_policy": "evidence_bearing",
+                "required_for_section": False,
+                "query_route": "boundary",
+                "claim_id": claim_id,
+                "proposition": str(proposition),
+            }
+        )
 
     plans: list[dict[str, Any]] = []
-    for question_id, question_terms in definitions:
+    for definition in definitions:
+        question_id = str(definition["question_id"])
+        question_terms = list(definition.get("terms") or [])
         groups = [core_group]
         if question_terms:
             groups.append(question_terms)
@@ -226,18 +309,12 @@ def build_question_query_plans(
         )
         plans.append(
             {
+                **{
+                    key: value
+                    for key, value in definition.items()
+                    if key not in {"terms"}
+                },
                 "question_id": question_id,
-                "coverage_policy": (
-                    "all_primary"
-                    if question_id == "section_focus"
-                    else "any_primary"
-                    if question_id.startswith("required_claim_")
-                    else "evidence_bearing"
-                ),
-                "required_for_section": bool(
-                    question_id == "section_focus"
-                    or question_id.startswith("required_claim_")
-                ),
                 "natural_query": (
                     f"Find evidence about {heading_phrase or topic_phrase}"
                     + (f" for {question_id.replace('_', ' ')}" if question_terms else "")

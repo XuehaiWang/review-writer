@@ -38,6 +38,7 @@ from review_writer_core.review_structure import (
     infer_section_role,
     sanitize_internal_section_title,
 )
+from review_writer_core.claim_contracts import normalize_section_claim_contract
 from review_writer_core.writing_contracts import derive_writing_scope_contract
 
 
@@ -240,7 +241,9 @@ class SectionsService(OwnedProjectService):
         for section in normalized_sections:
             if not isinstance(section, dict) or not str(section.get("section_id") or ""):
                 continue
-            claims = section.get("review_claims") or []
+            claim_contract = normalize_section_claim_contract(section)
+            scientific_claims = list(claim_contract["scientific_claims"])
+            writing_requirements = list(claim_contract["writing_requirements"])
             if policy_mode == "single_primary_section_with_supporting_cross_references":
                 primary_source = [
                     *(section.get("primary_papers") or []),
@@ -278,16 +281,21 @@ class SectionsService(OwnedProjectService):
                     and str(paper_id) not in context_papers
                 )
             )
+            scientific_thesis = section.get("scientific_thesis")
+            if isinstance(scientific_thesis, dict):
+                scientific_thesis = scientific_thesis.get("text")
+            core_argument = str(
+                scientific_thesis
+                or section.get("section_thesis")
+                or section.get("review_problem")
+                or ""
+            )
             tasks.append(
                 {
                     "section_id": str(section["section_id"]),
                     "heading": str(section.get("title") or section["section_id"]),
                     "section_role": str(section.get("section_role") or "body"),
-                    "core_argument": str(
-                        section.get("section_thesis")
-                        or section.get("review_problem")
-                        or ""
-                    ),
+                    "core_argument": core_argument,
                     "primary_papers": primary_papers,
                     "supporting_papers": supporting_papers,
                     "context_papers": context_papers,
@@ -307,10 +315,45 @@ class SectionsService(OwnedProjectService):
                         if primary_papers
                         else "cross_section_synthesis"
                     ),
+                    "scientific_thesis": (
+                        dict(section.get("scientific_thesis"))
+                        if isinstance(section.get("scientific_thesis"), dict)
+                        else {
+                            "text": core_argument,
+                            "status": str(
+                                section.get("thesis_status") or "provisional"
+                            ),
+                        }
+                    ),
+                    "thesis_status": str(
+                        section.get("thesis_status")
+                        or (
+                            (section.get("scientific_thesis") or {}).get("status")
+                            if isinstance(section.get("scientific_thesis"), dict)
+                            else "provisional"
+                        )
+                    ),
+                    "depth_contract": (
+                        dict(section.get("depth_contract"))
+                        if isinstance(section.get("depth_contract"), dict)
+                        else {}
+                    ),
+                    "scientific_claims": scientific_claims,
+                    "writing_requirements": writing_requirements,
+                    "legacy_unclassified_claims": list(
+                        claim_contract["legacy_unclassified_claims"]
+                    ),
+                    # Kept for old script consumers, but now contains only
+                    # source-testable propositions.
                     "must_cover_points": [
-                        str(claim.get("claim") or "")
-                        for claim in claims
-                        if isinstance(claim, dict) and claim.get("claim")
+                        str(claim.get("proposition") or "")
+                        for claim in scientific_claims
+                        if str(claim.get("proposition") or "").strip()
+                    ],
+                    "required_fact_roles": [
+                        str(value)
+                        for value in section.get("required_fact_roles") or []
+                        if str(value or "").strip()
                     ],
                     "avoid_points": [
                         str(item) for item in section.get("avoid_patterns") or []
@@ -332,15 +375,29 @@ class SectionsService(OwnedProjectService):
     ) -> dict[str, LibraryPaper]:
         user_uuid = uuid.UUID(principal.user_id)
         with database_session(self.repository.session_factory) as session:
-            papers = session.scalars(
+            papers = list(session.scalars(
                 select(LibraryPaper).where(
                     LibraryPaper.user_id == user_uuid,
-                    LibraryPaper.paper_id.in_(paper_ids),
                     LibraryPaper.deleted_at.is_(None),
                     LibraryPaper.status == "active",
                 )
-            ).all()
-        return {paper.paper_id: paper for paper in papers}
+            ).all())
+        requested = set(paper_ids)
+
+        def metadata_value(paper: LibraryPaper, key: str) -> Any:
+            value = dict(paper.metadata_json or {}).get(key)
+            return value.get("value") if isinstance(value, dict) else value
+
+        return {
+            paper.paper_id: paper
+            for paper in papers
+            if paper.paper_id in requested
+            or (
+                str(metadata_value(paper, "document_type") or "")
+                == "supporting_information"
+                and str(metadata_value(paper, "parent_paper_id") or "") in requested
+            )
+        }
 
     @staticmethod
     def _evidence_queries(
@@ -355,6 +412,12 @@ class SectionsService(OwnedProjectService):
             core_argument=str(task.get("core_argument") or ""),
             section_role=str(task.get("section_role") or "body"),
             must_cover_points=list(task.get("must_cover_points") or []),
+            scientific_claims=(
+                list(task.get("scientific_claims") or [])
+                if "scientific_claims" in task
+                else None
+            ),
+            required_fact_roles=list(task.get("required_fact_roles") or []),
         )
 
     @staticmethod
@@ -378,6 +441,37 @@ class SectionsService(OwnedProjectService):
         sections: list[dict[str, Any]] = []
         for task in tasks:
             allowed = [str(item) for item in task.get("allowed_papers") or []]
+            si_parent_by_id: dict[str, str] = {}
+            for source_id, paper in catalog.items():
+                metadata = dict(paper.metadata_json or {})
+                document_type = metadata.get("document_type")
+                parent_id = metadata.get("parent_paper_id")
+                if isinstance(document_type, dict):
+                    document_type = document_type.get("value")
+                if isinstance(parent_id, dict):
+                    parent_id = parent_id.get("value")
+                parent_id = str(parent_id or "").strip()
+                if (
+                    str(document_type or "") == "supporting_information"
+                    and parent_id in allowed
+                ):
+                    si_parent_by_id[source_id] = parent_id
+            retrieval_allowed = list(
+                dict.fromkeys([*allowed, *si_parent_by_id.keys()])
+            )
+
+            def citation_paper_id(source_id: str) -> str:
+                return si_parent_by_id.get(str(source_id), str(source_id))
+
+            def retrieval_ids_for(paper_id: str) -> list[str]:
+                return [
+                    paper_id,
+                    *[
+                        source_id
+                        for source_id, parent_id in si_parent_by_id.items()
+                        if parent_id == paper_id
+                    ],
+                ]
             primary = list(
                 dict.fromkeys(
                     str(item)
@@ -392,9 +486,9 @@ class SectionsService(OwnedProjectService):
                 and bool(getattr(self.library_index, "vector_enabled", False))
                 and allowed
             ):
-                self.library_index.ensure_embeddings(principal, allowed)
+                self.library_index.ensure_embeddings(principal, retrieval_allowed)
             index_summaries = (
-                self.library_index.summaries(principal, allowed)
+                self.library_index.summaries(principal, retrieval_allowed)
                 if self.library_index is not None
                 and self.library_index.enabled
                 and allowed
@@ -426,8 +520,9 @@ class SectionsService(OwnedProjectService):
                         }
                     merged_hits[key]["question_ids"].add(question_id)
                     merged_hits[key]["retrieval_passes"].add(retrieval_pass)
-                    if not hit.is_neighbor and hit.paper_id in question_direct.get(question_id, {}):
-                        question_direct[question_id][hit.paper_id].add(hit.chunk_id)
+                    canonical_id = citation_paper_id(hit.paper_id)
+                    if not hit.is_neighbor and canonical_id in question_direct.get(question_id, {}):
+                        question_direct[question_id][canonical_id].add(hit.chunk_id)
 
             if (
                 self.library_index is not None
@@ -449,7 +544,7 @@ class SectionsService(OwnedProjectService):
                             self.library_index.retrieve(
                                 principal,
                                 str(plan["websearch_query"]),
-                                allowed_papers=[paper_id],
+                                allowed_papers=retrieval_ids_for(paper_id),
                                 top_k=2,
                                 per_paper_limit=2,
                                 include_neighbors=True,
@@ -473,7 +568,7 @@ class SectionsService(OwnedProjectService):
                             relaxed_hits = self.library_index.retrieve(
                                 principal,
                                 relaxed_query,
-                                allowed_papers=[paper_id],
+                                allowed_papers=retrieval_ids_for(paper_id),
                                 top_k=1,
                                 per_paper_limit=1,
                                 include_neighbors=False,
@@ -500,7 +595,7 @@ class SectionsService(OwnedProjectService):
                         self.library_index.retrieve(
                             principal,
                             str(plan["websearch_query"]),
-                            allowed_papers=allowed,
+                            allowed_papers=retrieval_allowed,
                             top_k=global_limit,
                             include_neighbors=True,
                             term_groups=plan["term_groups"],
@@ -538,7 +633,7 @@ class SectionsService(OwnedProjectService):
                         (
                             key
                             for key, item in direct_candidates
-                            if item["hit"].paper_id == paper_id
+                            if citation_paper_id(item["hit"].paper_id) == paper_id
                         ),
                         None,
                     )
@@ -589,18 +684,20 @@ class SectionsService(OwnedProjectService):
                 }
                 for item in merged_hits.values():
                     hit = item["hit"]
-                    if hit.is_neighbor or hit.paper_id not in primary:
+                    canonical_id = citation_paper_id(hit.paper_id)
+                    if hit.is_neighbor or canonical_id not in primary:
                         continue
                     for question_id in item["question_ids"]:
-                        if hit.paper_id in question_direct.get(question_id, {}):
-                            question_direct[question_id][hit.paper_id].add(
+                        if canonical_id in question_direct.get(question_id, {}):
+                            question_direct[question_id][canonical_id].add(
                                 hit.chunk_id
                             )
 
                 direct_primary = {
-                    item["hit"].paper_id
+                    citation_paper_id(item["hit"].paper_id)
                     for item in merged_hits.values()
-                    if not item["hit"].is_neighbor and item["hit"].paper_id in primary
+                    if not item["hit"].is_neighbor
+                    and citation_paper_id(item["hit"].paper_id) in primary
                 }
                 unresolved_for_coverage = [
                     paper_id for paper_id in primary if paper_id not in direct_primary
@@ -618,6 +715,7 @@ class SectionsService(OwnedProjectService):
             hit_rows = []
             for merged in merged_hits.values():
                 hit = merged["hit"]
+                canonical_id = citation_paper_id(hit.paper_id)
                 stable_key = academic_evidence_key(
                     hit.paper_id, hit.chunk_id, hit.source_lineage_hash
                 )
@@ -662,10 +760,18 @@ class SectionsService(OwnedProjectService):
                 hit_rows.append({
                     "evidence_id": f"EV-{stable_key.removeprefix('sha256:')[:12].upper()}",
                     "evidence_key": stable_key,
-                    "paper_id": hit.paper_id,
-                    "paper_title": catalog[hit.paper_id].title
-                    if hit.paper_id in catalog
-                    else hit.paper_id,
+                    "paper_id": canonical_id,
+                    "paper_title": catalog[canonical_id].title
+                    if canonical_id in catalog
+                    else canonical_id,
+                    "source_type": (
+                        "supporting_information"
+                        if hit.paper_id in si_parent_by_id
+                        else "main_article"
+                    ),
+                    "source_file_id": (
+                        hit.paper_id if hit.paper_id in si_parent_by_id else None
+                    ),
                     "chunk_id": hit.chunk_id,
                     "content": hit.content,
                     "page_start": hit.page_start,
@@ -776,6 +882,14 @@ class SectionsService(OwnedProjectService):
                                 str(fact.get("fact_id") or "")
                             )
                             existing["normalized_fact_value"] = fact.get("value")
+                            existing["fact_state"] = str(
+                                fact.get("source_status")
+                                or fact.get("field_state")
+                                or "supported"
+                            )
+                            existing["checked_sources"] = list(
+                                fact.get("checked_sources") or []
+                            )
                             if fact_is_at_least_as_strong:
                                 existing["epistemic_status"] = fact.get(
                                     "epistemic_status"
@@ -823,6 +937,14 @@ class SectionsService(OwnedProjectService):
                                 "fact_ids": [str(fact.get("fact_id") or "")],
                                 "epistemic_status": fact.get("epistemic_status"),
                                 "normalized_fact_value": fact.get("value"),
+                                "fact_state": str(
+                                    fact.get("source_status")
+                                    or fact.get("field_state")
+                                    or "supported"
+                                ),
+                                "checked_sources": list(
+                                    fact.get("checked_sources") or []
+                                ),
                                 "evidence_ceiling": fact.get("evidence_ceiling"),
                                 "assertion_ceiling": fact.get("assertion_ceiling")
                                 or (
@@ -900,7 +1022,7 @@ class SectionsService(OwnedProjectService):
                     elif int(summary.get("chunk_count") or 0) <= 0:
                         diagnostic = "parse_quality_low"
                     else:
-                        diagnostic = "not_in_paper"
+                        diagnostic = "retrieval_not_found"
                 primary_states.append(
                     {
                         "paper_id": paper_id,
@@ -934,10 +1056,13 @@ class SectionsService(OwnedProjectService):
                         else "evidence_bearing"
                     )
                 )
-                required_for_section = bool(
-                    plan.get("required_for_section")
-                    or question_id == "section_focus"
-                    or question_id.startswith("required_claim_")
+                required_for_section = (
+                    bool(plan.get("required_for_section"))
+                    if "required_for_section" in plan
+                    else bool(
+                        question_id == "section_focus"
+                        or question_id.startswith("required_claim_")
+                    )
                 )
                 direct_by_paper = question_direct.get(question_id, {})
                 matched_primary = [
@@ -973,7 +1098,7 @@ class SectionsService(OwnedProjectService):
                 elif required_for_section:
                     sufficiency = "insufficient"
                 else:
-                    sufficiency = "not_reported"
+                    sufficiency = "retrieval_not_found"
                 diagnostics = {
                     paper_id: (
                         "none"
@@ -984,7 +1109,7 @@ class SectionsService(OwnedProjectService):
                         if str((index_summaries.get(paper_id) or {}).get("fulltext") or "") != "ready"
                         else "query_miss"
                         if relaxed_scan_matches.get(question_id, {}).get(paper_id)
-                        else "not_in_paper"
+                        else "retrieval_not_found"
                         if question_id != "section_focus"
                         and question_direct.get("section_focus", {}).get(paper_id)
                         else "query_miss"
@@ -997,7 +1122,7 @@ class SectionsService(OwnedProjectService):
                     and not matched_primary
                     and not global_matches
                     and all(
-                        value in {"query_miss", "not_in_paper"}
+                        value in {"query_miss", "retrieval_not_found"}
                         for value in diagnostics.values()
                     )
                 ):
@@ -1041,6 +1166,55 @@ class SectionsService(OwnedProjectService):
                         ],
                     }
                 )
+            boundary_questions_by_claim = {
+                str(question.get("claim_id") or ""): question
+                for question in question_results
+                if str(question.get("query_route") or "") == "boundary"
+                and str(question.get("claim_id") or "")
+            }
+            scientific_claim_states = [
+                {
+                    "claim_id": str(question.get("claim_id") or ""),
+                    "proposition": str(question.get("proposition") or ""),
+                    "question_id": str(question.get("question_id") or ""),
+                    "required_for_section": bool(
+                        question.get("required_for_section")
+                    ),
+                    "status": (
+                        "evidence_supported"
+                        if str(question.get("status") or "") == "sufficient"
+                        else "partially_supported"
+                        if str(question.get("status") or "")
+                        in {"partial", "abstract_limited"}
+                        else "evidence_missing"
+                    ),
+                    "matched_primary_papers": list(
+                        question.get("matched_primary_papers") or []
+                    ),
+                    "matched_papers": list(question.get("matched_papers") or []),
+                    "boundary_status": str(
+                        (
+                            boundary_questions_by_claim.get(
+                                str(question.get("claim_id") or "")
+                            )
+                            or {}
+                        ).get("status")
+                        or "retrieval_not_found"
+                    ),
+                    "boundary_matched_papers": list(
+                        (
+                            boundary_questions_by_claim.get(
+                                str(question.get("claim_id") or "")
+                            )
+                            or {}
+                        ).get("matched_papers")
+                        or []
+                    ),
+                }
+                for question in question_results
+                if str(question.get("query_route") or "") == "support"
+                and str(question.get("claim_id") or "")
+            ]
             question_state_by_paper: dict[str, list[dict[str, Any]]] = {
                 paper_id: [] for paper_id in allowed
             }
@@ -1132,6 +1306,11 @@ class SectionsService(OwnedProjectService):
                     "primary_paper_states": primary_states,
                     "evidence_status_granularity": "paper_section_question",
                     "question_evidence_states": question_state_by_paper,
+                    "scientific_claims": list(task.get("scientific_claims") or []),
+                    "writing_requirements": list(
+                        task.get("writing_requirements") or []
+                    ),
+                    "scientific_claim_states": scientific_claim_states,
                     "corpus_gap_questions": sorted(set(corpus_gaps)),
                     "abstract_context": abstract_context,
                     "hits": hit_rows,

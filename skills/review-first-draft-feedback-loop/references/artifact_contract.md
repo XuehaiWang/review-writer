@@ -39,9 +39,19 @@ paragraph_scores[]:
 ```
 
 Each paragraph score also records `source_check_status`, validated
-`source_evidence_refs`, and `unsupported_claims`. `original_source_check.json`
+`source_evidence_refs`, `unsupported_claims`, `evidence_problem_type`,
+`failed_coverage_fields`, and hard-validated `claim_fact_bindings`. A binding
+contains the paragraph's exact `claim_text`, `paper_id`, original `source_ref`,
+an exact `support_excerpt`, and normalized Fact semantics. It is optional: an
+ordinary Evidence hit must not be promoted to a Matrix Fact merely because it
+was retrieved. `original_source_check.json`
 stores the page-anchored MinerU/PDF passages used by the optimization run and
 their paragraph/paper mapping. Passage refs have the form `P001:p5:b2`.
+
+When the host accepts a repair containing validated bindings, it publishes the
+incremental Matrix, repaired Evidence Package, Draft, Quality, and repair
+history in one atomic version switch. Rejecting the candidate changes none of
+those current pointers.
 
 Every dimension in `unified_rubric.json` must appear exactly once and the
 weights must total 100.

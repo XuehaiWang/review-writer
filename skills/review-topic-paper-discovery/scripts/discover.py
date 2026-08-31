@@ -58,10 +58,6 @@ from review_writer_core.model_gateway_client import (  # noqa: E402
     call_json_model as call_gateway_json,
     gateway_configured,
 )
-from review_writer_core.metadata_tags import (  # noqa: E402
-    structured_tags_are_verified,
-    verified_structured_tags,
-)
 from review_writer_core.document_front_matter import (  # noqa: E402
     bounded_admission_text,
     title_field_needs_repair,
@@ -348,14 +344,20 @@ def build_semantic_queries(plan: dict[str, Any]) -> list[dict[str, Any]]:
     if not core_terms:
         return []
 
-    queries: list[dict[str, str]] = [
+    # Keep admission queries compact. Embedding one long string containing the
+    # topic, every product class, every catalyst, and every stereochemical mode
+    # dilutes the relation that a relevant paper actually expresses. Multiple
+    # compact queries are still evaluated in one bounded retrieval pass and do
+    # not create one model call per paper.
+    queries: list[dict[str, Any]] = [
         {
-            "query_id": "topic_core",
+            "query_id": "topic_core" if index == 1 else f"topic_core_{index:02d}",
             "kind": "topic_core",
-            "label": "Core topic",
-            "query": " ; ".join(core_terms),
-            "lexical_term_groups": [core_terms],
+            "label": "Core topic" if index == 1 else f"Core topic {index}",
+            "query": term,
+            "lexical_term_groups": [[term]],
         }
+        for index, term in enumerate(core_terms[:4], start=1)
     ]
     seen_partition_terms: set[tuple[str, str]] = set()
     partition_number = 0
@@ -1700,7 +1702,7 @@ def write_cached_query_plan(
     )
 
 
-STRUCTURED_TAG_WEIGHTS = {
+DISCOVERY_CATEGORY_WEIGHTS = {
     "product": 5.0,
     "substrate": 5.0,
     "catalyst_or_method": 4.4,
@@ -1710,15 +1712,6 @@ STRUCTURED_TAG_WEIGHTS = {
     "reaction_type": 4.8,
     "document_scope": 1.5,
 }
-
-
-def structured_tag_text(meta: dict[str, Any], tag_key: str, classification_rules: dict[str, dict[str, list[str]]]) -> str:
-    structured = verified_structured_tags(meta)
-    value = str(structured.get(tag_key) or "")
-    if value.strip().lower() == "not specified":
-        return ""
-    aliases = classification_rules.get(tag_key, {}).get(value, [])
-    return " ".join([value] + aliases)
 
 
 def _normalize_scientific_match_text(text: str) -> str:
@@ -2057,9 +2050,7 @@ def paper_anchor_score(
 ) -> float:
     if not anchor_keywords:
         return 0.0
-    title_text = str(field_value(meta.get("title"), ""))
     source_text = primary_evidence_text(meta)
-    product_text = structured_tag_text(meta, "product", classification_rules)
     best = 0.0
     for anchor in anchor_keywords:
         canonical, category = canonical_taxonomy_keyword(
@@ -2072,11 +2063,7 @@ def paper_anchor_score(
             ):
                 source_signal = max(source_signal, 1.0)
         source_signal = max(source_signal, scientific_family_signal(anchor, source_text))
-        tag_signal = match_score(anchor, product_text)
-        # A product Tag can strengthen source evidence, but cannot establish a
-        # core-topic anchor on its own because historical Tags may be stale.
-        supported_tag_signal = tag_signal if source_signal > 0 else 0.0
-        best = max(best, source_signal, supported_tag_signal)
+        best = max(best, source_signal)
     return best
 
 
@@ -2147,61 +2134,14 @@ def score_local_paper(
         primary_signal = max(primary_signal, restricted_signal)
     bounded_promoted = restricted_admitted and restricted_signal > metadata_primary_signal
 
-    if keyword_category == "unclassified":
-        field_matches = []
-        domain_rules_enabled = any(
-            labels for labels in classification_rules.values()
-        )
-        if domain_rules_enabled:
-            for tag_key in STRUCTURED_TAG_KEYS:
-                tag_text = structured_tag_text(meta, tag_key, classification_rules)
-                tag_score = match_score(keyword, tag_text)
-                if tag_score > 0:
-                    if primary_signal <= 0:
-                        tag_score *= 0.2 if parsed_signal > 0 else 0.15
-                    field_matches.append(
-                        (tag_score * STRUCTURED_TAG_WEIGHTS[tag_key], tag_key, tag_text)
-                    )
-        field_matches.sort(reverse=True)
-        if field_matches:
-            contribution, matched_key, text = field_matches[0]
-            raw += contribution
-            direct_raw += contribution
-            matched_fields.append(matched_key)
-            matched_terms.append(keyword)
-            reasons.append(f"structured_tags.{matched_key} matched unclassified keyword")
-            s = contribution / STRUCTURED_TAG_WEIGHTS[matched_key]
-        else:
-            text = ""
-            s = 0.0
-    else:
-        text = structured_tag_text(meta, keyword_category, classification_rules)
-        s = match_score(keyword, text)
-        if s > 0 and primary_signal <= 0 and not primary_supports_canonical:
-            # Base Tags generated by older extractors can be stale or plainly
-            # wrong. Canonical labels require title/abstract/keyword support.
-            # A body mention remains weak because it may be related-work prose.
-            if canonical_label:
-                s = 0.0
-            elif parsed_signal > 0:
-                s *= 0.2
-            else:
-                s *= 0.15
-    if s > 0 and keyword_category != "unclassified":
-        contribution = s * STRUCTURED_TAG_WEIGHTS[keyword_category]
-        raw += contribution
-        direct_raw += contribution
-        matched_fields.append(keyword_category)
-        matched_terms.append(keyword)
-        reasons.append(f"structured_tags.{keyword_category} matched keyword")
     topic_hits = sum(1 for term in topic_terms if match_score(term, primary_text) > 0)
-    if topic_hits and s > 0:
+    if topic_hits and primary_signal > 0:
         raw += min(topic_hits * 0.15, 0.9)
     if primary_signal > 0:
         source_contribution = primary_signal * (
             4.0
             if keyword_category == "unclassified"
-            else STRUCTURED_TAG_WEIGHTS[keyword_category]
+            else DISCOVERY_CATEGORY_WEIGHTS[keyword_category]
         )
         if source_contribution > direct_raw:
             raw += source_contribution - direct_raw
@@ -2224,7 +2164,7 @@ def score_local_paper(
         body_contribution = parsed_signal * (
             4.0
             if keyword_category == "unclassified"
-            else STRUCTURED_TAG_WEIGHTS[keyword_category]
+            else DISCOVERY_CATEGORY_WEIGHTS[keyword_category]
         ) * 0.25
         if body_contribution > direct_raw:
             raw += body_contribution - direct_raw
@@ -2379,14 +2319,6 @@ def local_search_by_keyword(
         results.sort(key=lambda r: (r["score"], r["raw_score"], r.get("year") or 0), reverse=True)
         grouped.append({"keyword": keyword, "category": keyword_category, "keep": True, "local_results": results})
     return grouped, filter_stats
-
-
-def base_tags_snapshot(meta: dict[str, Any]) -> dict[str, str]:
-    structured = verified_structured_tags(meta)
-    return {
-        key: str(structured.get(key) or "not specified").strip() or "not specified"
-        for key in STRUCTURED_TAG_KEYS
-    }
 
 
 def _normalized_excerpt_contains(content: Any, excerpt: Any) -> bool:
@@ -2894,124 +2826,6 @@ def classify_screening_candidates(
     return output
 
 
-def attach_project_tag_assessments(
-    local_grouped: list[dict[str, Any]],
-    papers: dict[str, dict[str, Any]],
-    *,
-    topic: str,
-    query_plan_source: str,
-    taxonomy: dict[str, Any],
-) -> None:
-    """Attach one synchronized, project-scoped Tag assessment per paper.
-
-    Suggestions are retrieval hints derived from the query plan and the fields
-    used to match each paper.  Stage 02 never assigns evidence-backed paper
-    partitions: selected papers are classified only after source-addressable
-    scientific facts have been extracted in the Matrix stage.
-    """
-
-    aggregates: dict[str, dict[str, Any]] = {}
-    for group in local_grouped:
-        keyword = str(group.get("keyword") or "").strip()
-        keyword_category = str(group.get("category") or "unclassified")
-        for row in group.get("local_results") or []:
-            paper_id = str(row.get("paper_id") or "").strip()
-            if not paper_id:
-                continue
-            aggregate = aggregates.setdefault(
-                paper_id,
-                {
-                    "suggested_tags": {},
-                    "unclassified_terms": [],
-                    "evidence": [],
-                    "relevance_score": 0.0,
-                },
-            )
-            aggregate["relevance_score"] = max(
-                float(aggregate["relevance_score"]), float(row.get("score") or 0)
-            )
-            matched_fields = [
-                str(value)
-                for value in row.get("matched_fields") or []
-                if str(value) in STRUCTURED_TAG_KEYS
-            ]
-            target_categories = (
-                [keyword_category]
-                if keyword_category in STRUCTURED_TAG_KEYS
-                else matched_fields
-            )
-            if target_categories:
-                for category in dedupe(target_categories):
-                    aggregate["suggested_tags"].setdefault(category, []).append(keyword)
-            elif keyword:
-                aggregate["unclassified_terms"].append(keyword)
-            aggregate["evidence"].append(
-                {
-                    "keyword": keyword,
-                    "query_category": keyword_category,
-                    "matched_fields": matched_fields or [
-                        str(value) for value in row.get("matched_fields") or []
-                    ],
-                    "score": float(row.get("score") or 0),
-                    "reason": str(row.get("reason") or ""),
-                }
-            )
-
-    topic_fingerprint = hashlib.sha256(
-        re.sub(r"\s+", " ", topic.strip()).casefold().encode("utf-8")
-    ).hexdigest()
-    for paper_id, aggregate in aggregates.items():
-        base_tags = base_tags_snapshot(papers.get(paper_id, {}))
-        base_tags_verified = structured_tags_are_verified(papers.get(paper_id, {}))
-        lexical_suggested_tags = {
-            category: dedupe([str(value) for value in values if str(value).strip()])
-            for category, values in aggregate["suggested_tags"].items()
-            if category in STRUCTURED_TAG_KEYS
-        }
-        evidence = sorted(
-            aggregate["evidence"],
-            key=lambda item: float(item.get("score") or 0),
-            reverse=True,
-        )
-        assessment = {
-            "schema_version": 1,
-            "topic": topic,
-            "topic_fingerprint": topic_fingerprint,
-            "base_tags_fingerprint": hashlib.sha256(
-                json.dumps(base_tags, ensure_ascii=False, sort_keys=True).encode("utf-8")
-            ).hexdigest(),
-            "base_tags_verified": base_tags_verified,
-            "taxonomy": taxonomy,
-            "generated_by": query_plan_source,
-            "suggested_tags": lexical_suggested_tags,
-            "legacy_rule_suggestions": lexical_suggested_tags,
-            "provisional_screening_tags": [],
-            "screening_classification": {},
-            "classification_status": "deferred_to_matrix",
-            "classification_stage": "matrix_after_selection",
-            "unclassified_terms": dedupe(aggregate["unclassified_terms"]),
-            "relevance_score": round(float(aggregate["relevance_score"]), 4),
-            "evidence": evidence[:24],
-            "review_required": False,
-            "application_mode": "retrieval_hint_only",
-        }
-        for group in local_grouped:
-            for row in group.get("local_results") or []:
-                if str(row.get("paper_id") or "") != paper_id:
-                    continue
-                row["base_tags"] = dict(base_tags)
-                row["base_tags_verified"] = base_tags_verified
-                row["project_tag_assessment"] = json.loads(
-                    json.dumps(assessment, ensure_ascii=False)
-                )
-                row["screening_classification"] = {}
-                row["provisional_screening_tags"] = []
-                row["classification_status"] = "deferred_to_matrix"
-                row["classification_stage"] = "matrix_after_selection"
-                row["confirmed_project_tags"] = {}
-                row["tag_review_status"] = "pending"
-
-
 def web_search(keyword: str, topic: str, limit: int = 8) -> list[dict[str, Any]]:
     query = f"{keyword} {topic} review paper DOI"
     url = "https://api.crossref.org/works?" + urllib.parse.urlencode({"query.bibliographic": query, "rows": str(limit)})
@@ -3302,36 +3116,6 @@ def selected_from_combined(combined: list[dict[str, Any]]) -> dict[str, Any]:
     return selected
 
 
-def group_selected_papers(
-    selected: dict[str, Any],
-    papers: dict[str, dict[str, Any]],
-    group_by: list[str],
-) -> dict[str, Any]:
-    grouped: dict[str, Any] = {}
-    selected_ids = {
-        row.get("paper_id")
-        for row in selected.get("local_papers", [])
-        if row.get("paper_id")
-    }
-    for field in group_by:
-        buckets: dict[str, set[str]] = {}
-        for paper_id in selected_ids:
-            meta = papers.get(paper_id, {})
-            structured_tags = verified_structured_tags(meta)
-            raw_value = structured_tags.get(field)
-            value = str(raw_value).strip() if raw_value is not None else ""
-            value = value or "not specified"
-            buckets.setdefault(value, set()).add(paper_id)
-        grouped[field] = {
-            value: {
-                "count": len(paper_ids),
-                "paper_ids": sorted(paper_ids),
-            }
-            for value, paper_ids in sorted(buckets.items())
-        }
-    return grouped
-
-
 def role_rank(role: str | None) -> int:
     order = {"core_candidate": 0, "supporting_candidate": 1, "background": 2, "uncertain": 3, "excluded": 4}
     return order.get(role or "uncertain", 3)
@@ -3610,13 +3394,6 @@ def run(args: argparse.Namespace) -> int:
         year_to=filters.get("year_to"),
         anchor_keywords=anchor_keywords,
     )
-    attach_project_tag_assessments(
-        local_grouped,
-        papers,
-        topic=args.topic,
-        query_plan_source=query_plan_source,
-        taxonomy=query_context["taxonomy"],
-    )
     sciatlas_requested = bool(args.sciatlas_search)
     crossref_requested = bool(args.web_search)
     sciatlas_client: SciAtlasClient | None = None
@@ -3852,12 +3629,13 @@ def run(args: argparse.Namespace) -> int:
     web_grouped = external_grouped
     combined = combine_results(local_grouped, web_grouped)
     selected = selected_from_combined(combined)
-    groups = group_selected_papers(selected, papers, group_by)
     output_context = {
         **query_context,
         "anchor_keywords": anchor_keywords,
         "filter_stats": filter_stats,
-        "groups": groups,
+        # Stage 02 does not classify papers. Formal, evidence-backed grouping is
+        # produced only after selected papers enter the Matrix stage.
+        "groups": {},
     }
     keyword_set.update(output_context)
     write_json(out_dir / "keyword_set.draft.json", keyword_set)

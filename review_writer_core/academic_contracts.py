@@ -151,7 +151,11 @@ def _contract_text_values(value: Any) -> list[str]:
     return [_text(value)] if _text(value) else []
 
 
-def _partition_aliases(value: Any) -> list[str]:
+def _partition_aliases(
+    value: Any,
+    *,
+    declared_aliases: Iterable[Any] = (),
+) -> list[str]:
     """Build conservative aliases from the user's own label.
 
     Parenthetical forms are treated as aliases, so a requirement such as
@@ -166,9 +170,64 @@ def _partition_aliases(value: Any) -> list[str]:
     without_parenthetical = re.sub(r"\s*[（(][^()（）]{2,40}[）)]\s*", " ", raw)
     return _unique(
         normalized
-        for candidate in (raw, without_parenthetical, *parenthetical)
+        for candidate in (
+            raw,
+            without_parenthetical,
+            *parenthetical,
+            *declared_aliases,
+        )
         if (normalized := _normalized_contract_text(candidate))
     )
+
+
+def _declared_partition_aliases(
+    contract: dict[str, Any],
+    required_partitions: list[str],
+) -> dict[str, list[str]]:
+    """Return model-declared aliases keyed by the canonical Topic label.
+
+    Query planning and Matrix fact extraction may preserve a user's wording as
+    a partition label while adding a shorter scientific alias.  Blueprint
+    headings are allowed to use that alias, so diagnostics must carry the same
+    contract vocabulary instead of matching only the literal Topic phrase.
+    """
+
+    axes = contract.get("classification_axes") or []
+    nested_contract = contract.get("classification_contract")
+    if not axes and isinstance(nested_contract, dict):
+        axes = nested_contract.get("axes") or []
+    required_by_alias: dict[str, str] = {}
+    for label in required_partitions:
+        for alias in _partition_aliases(label):
+            required_by_alias.setdefault(alias, label)
+    result: dict[str, list[str]] = {label: [] for label in required_partitions}
+    for axis in axes:
+        if not isinstance(axis, dict) or _text(axis.get("axis_role")) not in {
+            "primary_organization",
+            "required_independent_discussion",
+        }:
+            continue
+        for partition in axis.get("partitions") or []:
+            if not isinstance(partition, dict):
+                continue
+            candidates = _unique(
+                [
+                    partition.get("label"),
+                    *(partition.get("aliases") or []),
+                ]
+            )
+            canonical = next(
+                (
+                    required_by_alias[normalized]
+                    for candidate in candidates
+                    if (normalized := _normalized_contract_text(candidate))
+                    in required_by_alias
+                ),
+                "",
+            )
+            if canonical:
+                result[canonical] = _unique([*result[canonical], *candidates])
+    return result
 
 
 def _partition_trace(
@@ -176,8 +235,9 @@ def _partition_trace(
     body: list[dict[str, Any]],
     *,
     sibling_partitions: list[str],
+    declared_aliases: Iterable[Any] = (),
 ) -> list[str]:
-    aliases = _partition_aliases(partition)
+    aliases = _partition_aliases(partition, declared_aliases=declared_aliases)
     if not aliases:
         return []
     sibling_tokens = [
@@ -620,6 +680,12 @@ def taxonomy_diagnostics(
     for index, source in enumerate(sections, start=1):
         if not isinstance(source, dict):
             continue
+        secondary_routes = source.get("secondary_axis_routes")
+        secondary_route_labels = (
+            list(secondary_routes)
+            if isinstance(secondary_routes, dict)
+            else []
+        )
         trace_values = _contract_text_values(
             [
                 source.get("topic_partition"),
@@ -629,6 +695,7 @@ def taxonomy_diagnostics(
                 source.get("section_thesis"),
                 source.get("review_problem"),
                 source.get("review_claims"),
+                secondary_route_labels,
             ]
         )
         normalized.append(
@@ -647,8 +714,28 @@ def taxonomy_diagnostics(
                     or source.get("context_papers")
                     or []
                 ),
+                "excluded_papers": [
+                    {
+                        "paper_id": _text(exclusion.get("paper_id")),
+                        "reason": _text(exclusion.get("reason")),
+                    }
+                    for exclusion in source.get("excluded_papers") or []
+                    if isinstance(exclusion, dict)
+                    and _text(exclusion.get("paper_id"))
+                ],
                 "topic_partition": _text(source.get("topic_partition")),
                 "boundary_rationale": _text(source.get("boundary_rationale")),
+                "single_paper_justification": _text(
+                    source.get("single_paper_justification")
+                ),
+                "thesis_status": _text(
+                    source.get("thesis_status")
+                    or (
+                        (source.get("scientific_thesis") or {}).get("status")
+                        if isinstance(source.get("scientific_thesis"), dict)
+                        else ""
+                    )
+                ),
                 "contract_trace_values": trace_values,
             }
         )
@@ -693,6 +780,37 @@ def taxonomy_diagnostics(
         if isinstance(classification_contract, dict)
         else {}
     )
+    contract_axes = [
+        axis
+        for axis in (
+            contract.get("classification_axes")
+            or contract.get("axes")
+            or []
+        )
+        if isinstance(axis, dict) and _text(axis.get("axis_id"))
+    ]
+    primary_axis_ids = _unique(
+        axis.get("axis_id")
+        for axis in contract_axes
+        if _text(axis.get("axis_role")) == "primary_organization"
+    )
+    enforce_single_primary_axis = bool(
+        _text(contract.get("primary_axis_id"))
+        or _text(contract.get("section_partition_policy"))
+        == "single_primary_axis"
+    )
+    if contract_axes and enforce_single_primary_axis and len(primary_axis_ids) != 1:
+        issues.append(
+            {
+                "rule_id": "taxonomy.primary_axis_contract_invalid",
+                "severity": "planning_blocker",
+                "axis_ids": primary_axis_ids,
+                "message": (
+                    "The classification contract must declare exactly one primary organization "
+                    "axis. Secondary axes may guide subheadings and comparisons only."
+                ),
+            }
+        )
     boundary_ids = [
         item["section_id"]
         for item in body
@@ -729,6 +847,7 @@ def taxonomy_diagnostics(
         or contract.get("topic_partitions")
         or []
     )
+    partition_aliases = _declared_partition_aliases(contract, required_partitions)
     raw_partition_boundaries = contract.get("topic_partition_coverage_boundaries")
     if isinstance(raw_partition_boundaries, dict):
         declared_partition_boundaries = {
@@ -753,6 +872,7 @@ def taxonomy_diagnostics(
             partition,
             body,
             sibling_partitions=required_partitions,
+            declared_aliases=partition_aliases.get(partition) or [],
         )
         partition_trace[partition] = section_ids
         if not section_ids:
@@ -777,7 +897,31 @@ def taxonomy_diagnostics(
     contextual = _unique(
         paper_id for item in normalized for paper_id in item["context_paper_ids"]
     )
-    routed_ids = set(assigned) | set(contextual)
+    exclusions = [
+        exclusion
+        for item in normalized
+        for exclusion in item["excluded_papers"]
+    ]
+    excluded = _unique(
+        exclusion["paper_id"]
+        for exclusion in exclusions
+        if exclusion["reason"]
+    )
+    exclusion_reason_missing_ids = _unique(
+        exclusion["paper_id"]
+        for exclusion in exclusions
+        if not exclusion["reason"]
+    )
+    if exclusion_reason_missing_ids:
+        issues.append(
+            {
+                "rule_id": "taxonomy.paper_exclusion_reason_missing",
+                "severity": "planning_blocker",
+                "paper_ids": exclusion_reason_missing_ids,
+                "message": "An excluded selected paper needs a specific scientific or scope reason.",
+            }
+        )
+    routed_ids = set(assigned) | set(contextual) | set(excluded)
     orphan_ids = [paper_id for paper_id in matrix_ids if paper_id not in routed_ids]
     if orphan_ids:
         issues.append(
@@ -793,7 +937,11 @@ def taxonomy_diagnostics(
         {
             paper_id
             for item in normalized
-            for paper_id in [*item["paper_ids"], *item["context_paper_ids"]]
+            for paper_id in [
+                *item["paper_ids"],
+                *item["context_paper_ids"],
+                *(exclusion["paper_id"] for exclusion in item["excluded_papers"]),
+            ]
             if paper_id not in matrix_set
         }
     )
@@ -813,6 +961,70 @@ def taxonomy_diagnostics(
                 "rule_id": "taxonomy.no_analytical_body",
                 "severity": "planning_blocker",
                 "message": "The outline needs at least one analytical body section.",
+            }
+        )
+
+    # A minimum section size is a project classification policy, not a
+    # universal property of every taxonomy diagnostic call.  Older callers
+    # intentionally omit a classification contract, so they must not acquire
+    # a new warning merely by upgrading the shared helper.  Current Planning
+    # contracts provide this value explicitly (normally ``2``).
+    minimum_body_papers = max(
+        1,
+        int(
+            contract.get("minimum_body_papers")
+            or (2 if contract.get("single_paper_section_policy") else 1)
+        ),
+    )
+    single_paper_ids = [
+        item["section_id"]
+        for item in body
+        if len(set(item["paper_ids"]) & matrix_set) == 1
+    ]
+    unjustified_single_paper_ids = [
+        item["section_id"]
+        for item in body
+        if item["section_id"] in single_paper_ids
+        and not item["single_paper_justification"]
+        and not item["boundary_rationale"]
+    ]
+    single_paper_merge_suggestions: list[dict[str, Any]] = []
+    if unjustified_single_paper_ids and minimum_body_papers > 1:
+        for index, item in enumerate(body):
+            if item["section_id"] not in unjustified_single_paper_ids:
+                continue
+            candidates: list[tuple[int, dict[str, Any]]] = []
+            for other_index, other in enumerate(body):
+                if other is item:
+                    continue
+                distance = abs(other_index - index)
+                title_tokens = set(re.findall(r"[\w-]+", item["title"].casefold()))
+                other_tokens = set(re.findall(r"[\w-]+", other["title"].casefold()))
+                overlap = len(title_tokens & other_tokens)
+                score = overlap * 100 - distance
+                candidates.append((score, other))
+            if not candidates:
+                continue
+            _score, target = max(candidates, key=lambda pair: pair[0])
+            single_paper_merge_suggestions.append(
+                {
+                    "source_section_id": item["section_id"],
+                    "target_section_id": target["section_id"],
+                    "method": "nearest_semantic_or_adjacent_section",
+                    "requires_confirmation": True,
+                }
+            )
+        issues.append(
+            {
+                "rule_id": "taxonomy.single_paper_section_unjustified",
+                "severity": "warning",
+                "section_ids": unjustified_single_paper_ids,
+                "message": (
+                    "A one-paper body section needs an independent scientific thesis and an "
+                    "explicit justification, or it should be merged with the nearest compatible "
+                    "primary-axis section. Suggested repairs require confirmation and never "
+                    "silently merge scientifically distinct categories."
+                ),
             }
         )
 
@@ -850,6 +1062,9 @@ def taxonomy_diagnostics(
         "boundary_section_ids": boundary_ids,
         "boundary_rationale_section_ids": boundary_rationale_ids,
         "unresolved_boundary_section_ids": unresolved_boundary_ids,
+        "single_paper_section_ids": single_paper_ids,
+        "unjustified_single_paper_section_ids": unjustified_single_paper_ids,
+        "single_paper_merge_suggestions": single_paper_merge_suggestions,
         "required_topic_partitions": required_partitions,
         "missing_topic_partitions": missing_partitions,
         "topic_partition_route_gaps": route_gap_partitions,
@@ -871,11 +1086,20 @@ def taxonomy_diagnostics(
             or contract.get("topic_outcome_dimensions")
             or []
         ),
+        "primary_axis_ids": primary_axis_ids,
+        "section_partition_policy": str(
+            contract.get("section_partition_policy") or "single_primary_axis"
+        ),
         "classification_contract_status": (
             "drift"
             if (
                 catch_all_ids
                 or dominant_boundary_ids
+                or (
+                    contract_axes
+                    and enforce_single_primary_axis
+                    and len(primary_axis_ids) != 1
+                )
                 or (
                     unresolved_boundary_ids
                     and contract.get("catch_all_sections_allowed") is False
@@ -887,8 +1111,13 @@ def taxonomy_diagnostics(
             else "aligned"
         ),
         "orphan_paper_ids": orphan_ids,
+        "excluded_paper_ids": list(excluded),
+        "paper_exclusions": [
+            exclusion for exclusion in exclusions if exclusion["reason"]
+        ],
         "assigned_paper_count": len(set(assigned) & matrix_set),
         "contextual_paper_count": len(set(contextual) & matrix_set),
+        "excluded_paper_count": len(set(excluded) & matrix_set),
         "selected_paper_count": len(matrix_ids),
         "issues": issues,
     }

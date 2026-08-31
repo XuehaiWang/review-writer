@@ -42,12 +42,18 @@ from review_writer_core.draft_bibliography import (
     ordered_callouts,
     reference_text,
 )
+from review_writer_core.bibliography_audit import bibliography_field_readiness
+from review_writer_core.final_issue_details import final_issue_details
 from review_writer_core.manuscript_state import build_manuscript_state
 from review_writer_core.markdown_images import (
     malformed_markdown_image_lines,
     parse_markdown_image,
 )
 from review_writer_core.publication_voice import publication_voice_issues
+from review_writer_core.publication_scope import (
+    methods_execution_report,
+    public_scope_statement,
+)
 from review_writer_core.review_titles import (
     build_publication_overview_text,
     build_publication_review_title,
@@ -255,6 +261,11 @@ def _figure_argument_findings(markdown: str) -> list[dict[str, Any]]:
             issues.append("visible_callout_or_interpretation_missing")
         if not str(metadata.get("paper_id") or "").strip():
             issues.append("source_paper_identity_missing")
+        if str(metadata.get("source_identity_status") or "") == "unresolved" or (
+            str(metadata.get("source_relationship") or "") == "source_attributed"
+            and not str(metadata.get("source_label") or "").strip()
+        ):
+            issues.append("source_figure_identity_unresolved")
         if str(metadata.get("interpretation_basis") or "") != "source_caption":
             issues.append("paper_level_interpretation_missing")
         if (
@@ -600,9 +611,14 @@ class FinalService:
                     and audit.get("direct_claim_eligible") is True
                     and not bool(audit.get("context_only"))
                 )
+                field_readiness = bibliography_field_readiness(
+                    dict((row.metadata_json if row is not None else {}) or {}),
+                    audit,
+                )
                 verified = bool(
                     row is not None
                     and (status == "verified" or manually_resolved or supporting_resolved)
+                    and field_readiness["ready"]
                 )
                 report_rows.append(
                     {
@@ -618,6 +634,14 @@ class FinalService:
                         "context_only": bool(audit.get("context_only", False)),
                         "verification_method": str(audit.get("verification_method") or ""),
                         "unresolved_conflict_count": len(audit.get("unresolved_conflicts") or []),
+                        "field_status": (
+                            "verified" if field_readiness["ready"] else "incomplete"
+                        ),
+                        "missing_fields": field_readiness["missing_fields"],
+                        "polluted_fields": field_readiness["polluted_fields"],
+                        "unresolved_conflicts": field_readiness[
+                            "unresolved_conflicts"
+                        ],
                     }
                 )
         unresolved = [row["paper_id"] for row in report_rows if not row["verified"]]
@@ -812,6 +836,65 @@ class FinalService:
         )
 
     @staticmethod
+    def _insert_after_introduction_heading(markdown: str, block: str) -> str:
+        """Insert public scope prose inside Introduction, never as a new stage heading."""
+
+        body = str(markdown or "").rstrip()
+        normalized_block = str(block or "").strip()
+        if not normalized_block:
+            return body
+        for match in MARKDOWN_HEADING.finditer(body):
+            title = re.sub(
+                r"^\s*\d+(?:\.\d+)*[.)]?\s*", "", match.group(2)
+            ).strip().casefold()
+            if any(
+                title == candidate
+                or any(
+                    title.startswith(f"{candidate}{separator}")
+                    for separator in (" ", ":", "：", "与", "和")
+                )
+                for candidate in INTRODUCTION_TITLES
+            ):
+                before = body[: match.end()].rstrip()
+                after = body[match.end() :].lstrip()
+                existing_intro = after[:1800].casefold()
+                if "literature search" in existing_intro and any(
+                    marker in existing_intro
+                    for marker in ("screening", "retrieved", "database", "sources were retained")
+                ):
+                    return body
+                return "\n\n".join(
+                    value for value in (before, normalized_block, after) if value
+                )
+        return body
+
+    @staticmethod
+    def _public_scope_selection_paragraph(
+        discovery: dict[str, Any], blueprint: dict[str, Any]
+    ) -> str:
+        """Render only observed search facts as reader-facing Introduction prose."""
+
+        record = (
+            discovery.get("search_record")
+            if isinstance(discovery.get("search_record"), dict)
+            else discovery_search_record(discovery)
+        )
+        scope = (
+            blueprint.get("scope_contract")
+            if isinstance(blueprint.get("scope_contract"), dict)
+            else {}
+        )
+        return public_scope_statement(
+            search_record=record,
+            coverage_diagnostics=(
+                discovery.get("coverage_diagnostics")
+                if isinstance(discovery.get("coverage_diagnostics"), dict)
+                else {"coverage_mode": discovery.get("coverage_mode")}
+            ),
+            scope_contract=scope,
+        )
+
+    @staticmethod
     def _remove_review_methods(markdown: str) -> str:
         """Keep workflow provenance internal instead of publishing it as prose."""
 
@@ -858,8 +941,11 @@ class FinalService:
     def _overview_semantic_report(
         overview_text: dict[str, Any],
         discovery: dict[str, Any],
+        blueprint: dict[str, Any] | None = None,
+        *,
+        overview_present: bool = True,
     ) -> dict[str, Any]:
-        """Reject prompt/template residue without inventing domain labels."""
+        """Validate editable overview labels against the current manuscript axis."""
 
         title = " ".join(str(overview_text.get("title") or "").split()).strip()
         topic = " ".join(str(discovery.get("topic") or "").split()).strip()
@@ -869,6 +955,10 @@ class FinalService:
             if str(value).strip()
         ]
         issues: list[str] = []
+        if overview_present and not title:
+            issues.append("overview_title_missing")
+        if overview_present and not labels:
+            issues.append("overview_labels_missing")
         if title and generated_title_needs_rewrite(title, topic):
             issues.append("overview_title_is_prompt_or_not_publication_ready")
         subtitle = " ".join(
@@ -895,10 +985,73 @@ class FinalService:
         ]
         if unsupported_labels:
             issues.append("overview_unsupported_labels")
+        blueprint = blueprint if isinstance(blueprint, dict) else {}
+        supported_phrases = [
+            str(section.get("title") or section.get("heading") or "").strip()
+            for section in blueprint.get("sections") or []
+            if isinstance(section, dict)
+            and str(section.get("section_role") or "body") == "body"
+        ]
+        basis = dict(blueprint.get("classification_basis") or {})
+        supported_phrases.extend(
+            str(value).strip()
+            for value in (
+                basis.get("primary_axis"),
+                basis.get("overview_axis"),
+                (blueprint.get("classification_contract") or {}).get(
+                    "primary_axis_label"
+                ),
+            )
+            if str(value or "").strip()
+        )
+        supported_tokens = {
+            token.casefold()
+            for phrase in [topic, *supported_phrases]
+            for token in re.findall(r"[A-Za-z][A-Za-z0-9-]{3,}", phrase)
+            if token.casefold()
+            not in {"review", "methods", "method", "section", "overview"}
+        }
+        normalized_supported_phrases = {
+            re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", phrase.casefold())
+            for phrase in [topic, *supported_phrases]
+            if str(phrase).strip()
+        }
+        traceable_labels = [
+            label
+            for label in labels
+            if (
+                supported_tokens.intersection(
+                    token.casefold()
+                    for token in re.findall(r"[A-Za-z][A-Za-z0-9-]{3,}", label)
+                )
+                or any(
+                    normalized_label
+                    and (
+                        normalized_label in phrase
+                        or phrase in normalized_label
+                    )
+                    for phrase in normalized_supported_phrases
+                    if len(phrase) >= 2
+                    for normalized_label in [
+                        re.sub(
+                            r"[^a-z0-9\u3400-\u9fff]+",
+                            "",
+                            label.casefold(),
+                        )
+                    ]
+                )
+            )
+        ]
+        if overview_present and labels and supported_tokens and not traceable_labels:
+            issues.append("overview_labels_not_traceable_to_current_axis")
         return {
             "status": "invalid" if issues else "aligned",
             "issues": issues,
             "unsupported_labels": unsupported_labels,
+            "traceable_labels": traceable_labels,
+            "supported_axis_phrases": [
+                value for value in supported_phrases if value
+            ],
             "title": title,
         }
 
@@ -1950,6 +2103,12 @@ class FinalService:
         # are not publication prose.
         draft_body = self._sanitize_internal_section_headings(draft_body)
         draft_body = self._remove_review_methods(draft_body)
+        scope_selection = self._public_scope_selection_paragraph(
+            discovery, blueprint
+        )
+        draft_body = self._insert_after_introduction_heading(
+            draft_body, scope_selection
+        )
         overview_block = ""
         if overview is not None:
             overview_lines = [
@@ -2025,17 +2184,12 @@ class FinalService:
             if isinstance(discovery.get("search_record"), dict)
             else discovery_search_record(discovery)
         )
-        validation["methods_execution"] = {
-            "status": "aligned",
-            "requested_sources": list(search_record.get("requested_sources") or []),
-            "executed_sources": list(search_record.get("executed_sources") or []),
-            "failed_sources": list(search_record.get("failed_sources") or []),
-            "publication_methods_section": "omitted",
-            "issues": [],
-        }
+        validation["methods_execution"] = methods_execution_report(search_record)
         overview_semantics = self._overview_semantic_report(
             overview_text if isinstance(overview_text, dict) else {},
             discovery,
+            blueprint,
+            overview_present=overview is not None,
         )
         validation["overview_semantics"] = overview_semantics
         release_integrity_issues: list[str] = []
@@ -2116,6 +2270,7 @@ class FinalService:
                 )
             )
             validation["unverified_manual_paragraph_ids"] = unverified_manual
+        validation["pending_issue_details"] = final_issue_details(validation)
         if not validation["valid"]:
             raise FinalNotReady(
                 "Final manuscript contains publication-blocking markup or an invalid artifact reference."
@@ -2131,6 +2286,7 @@ class FinalService:
             "validation_blocking_issues": [],
             "release_integrity_issues": validation["release_integrity_issues"],
             "validation_warning_issues": validation["warning_issues"],
+            "pending_issue_details": validation["pending_issue_details"],
             "unverified_manual_paragraph_ids": unverified_manual,
             "evidence_boundary": evidence_boundary,
             "reference_metadata_artifact_ids": reference_metadata_artifact_ids,
@@ -2734,8 +2890,34 @@ class FinalService:
                     "",
                 )
             )
+        effective_issue_details = list(
+            release.get("pending_issue_details")
+            or validation.get("pending_issue_details")
+            or final_issue_details(
+                {
+                    **validation,
+                    "release_integrity_issues": list(
+                        dict.fromkeys(
+                            [
+                                *list(validation.get("release_integrity_issues") or []),
+                                *list(release.get("release_integrity_issues") or []),
+                                *list(release.get("validation_warning_issues") or []),
+                            ]
+                        )
+                    ),
+                }
+            )
+        )
         release_report = ""
         if release:
+            issue_detail_lines = [
+                "- "
+                + f"[{row.get('target_type', 'target')}] "
+                + f"{row.get('target_id', '')}: "
+                + ", ".join(row.get("issues") or [])
+                for row in effective_issue_details
+                if isinstance(row, dict)
+            ]
             release_report = "\n".join(
                 (
                     "## Release report",
@@ -2752,8 +2934,22 @@ class FinalService:
                     f"- Warnings: {', '.join(release.get('validation_warning_issues') or []) or 'none'}",
                     f"- Released at: {release.get('released_at', '')}",
                     "",
+                    "### Target-level issue details",
+                    "",
+                    *(issue_detail_lines or ["- none"]),
+                    "",
                 )
             )
+        pending_issue_details = effective_issue_details
+        pending_issues = list(
+            dict.fromkeys(
+                str(issue).strip()
+                for row in pending_issue_details
+                if isinstance(row, dict)
+                for issue in row.get("issues") or []
+                if str(issue or "").strip()
+            )
+        )
         return {
             "project_id": project_id,
             "revision": state.revision if state else 0,
@@ -2794,6 +2990,9 @@ class FinalService:
             "release_artifact_id": release_artifact.id if release_artifact else "",
             "release_current": release_current,
             "release_ready": release_ready,
+            "pending_issue_count": len(pending_issue_details),
+            "pending_issues": pending_issues,
+            "pending_issue_details": pending_issue_details,
             "docx_artifact_id": docx.id if docx else "",
             "docx_url": docx_url,
             "final_draft_docx_path": docx_url,

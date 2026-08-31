@@ -1,480 +1,539 @@
-# 审稿意见驱动的泛化内容质量优化方案
+# 审稿意见驱动的证据链与内容质量优化实施方案
 
 ## 1. 文档定位
 
-本文基于 `last` 项目的实际阶段产物及对应审稿意见，提出一套面向不同综述主题和不同学科的内容质量改进方案。
+本文依据 `zzz` 项目的真实阶段产物、最终 PDF 以及审稿意见，对当前综述生成流程进行复核，并给出可直接落到现有代码结构中的通用优化方案。
 
-本方案只解决以下问题：
+方案不针对联烯、ATA、Cu、Zn、Cd 等当前主题写死规则。主题差异继续由 Topic、Taxonomy Profile、Outline、Blueprint 和论文事实表达；通用代码只负责身份、证据、依赖和一致性约束。
 
-- 检索范围与稿件范围不一致；
-- 书目信息不可靠；
-- 科学事实提取完成但关键字段缺失；
-- Matrix、Outline、Blueprint 和正文之间的分类路由不一致；
-- 章节过度拆分，缺少跨研究综合；
-- 内部工作语言进入公开稿件；
-- 图像选择、图注、正文论证和来源信息不一致；
-- 参考文献和最终稿未使用同一份规范数据。
+本轮目标不是再建一套质量系统，而是解决一个核心问题：
 
-本方案暂不讨论任务重试、超时恢复、断点续跑、服务降级和其他运行健壮性问题，也不增加新的工作流阶段。
+> 项目已经能够发现许多问题，但诊断结果没有稳定地驱动上游补检、重路由、重写、图像重排和导出修复，导致错误仍可一路传播到最终稿。
 
-本方案不针对 ATA、联烯、Cu、Zn 或 Cd 写死规则。领域差异由 Topic、项目分类配置、Taxonomy Profile 和当前论文事实动态表达。
+### 1.1 本轮优化范围
 
-## 2. 对 `last` 项目的阶段产物复核结论
+- 如实表达检索范围，禁止把工作流时间写成文献检索截止日期；
+- 修复全文已索引但关键证据未进入 Evidence Package 的召回断点；
+- 区分“来源没有报告”和“系统没有检索/提取到”；
+- 让 Outline、Blueprint、章节标题和总览图使用同一主分类轴；
+- 强制执行项目已有的跨研究综合要求，减少逐篇摘要；
+- 从规范 Metadata 重建参考文献，禁止继续修补污染字符串；
+- 将候选图片池与最终插图计划分开，修复图文错位和强制全插入；
+- 让现有 Draft、Final 和 PDF QA 诊断触发自动修复，而不只生成报告；
+- 保持现有七阶段、现有阶段接口和现有人工编辑能力。
 
-### 2.1 核心证据链已经存在
+### 1.2 明确不做
 
-当前系统已经具备以下基础能力，不需要重新建设第二套证据平台：
+- 不新增工作流阶段；
+- 不新增质量中心、通用修复巨型接口或新的领域服务；
+- 不新建第二套 Metadata、Matrix、Manifest 或稿件就绪真相；
+- 不新增“投稿模式”“质量模式”或新的用户可见发布状态；
+- 不新建跨研究综合 Skill，复用现有 `review-cross-study-synthesis`；
+- 不要求用户逐篇确认事实或逐图确认默认操作；
+- 不静默接受模型改写，保留现有候选比较与人工接受；
+- 不把“选中的论文代表图”永久绑定到某一个正文段落。
 
-- MinerU 全文解析与正文定位；
-- PostgreSQL 全文索引和向量索引；
-- Matrix 科学事实及来源片段；
-- Blueprint、问题级 Evidence Package 和 Writing Plan；
-- Claim、论文身份、证据键与引用组绑定；
-- Final 引用账本与发布检查。
+## 2. `zzz` 项目的事实复核
 
-因此，本轮重点不是增加知识图谱、新向量数据库或新的质量中心，而是修复现有产物之间的内容传递和质量判定。
+### 2.1 检索范围并非稿件所宣称的范围
 
-### 2.2 已确认的主要断点
+`zzz` 的 Discovery 产物显示：
 
-1. `last` 共选择 16 篇论文，但正文结构被拆成大量单论文章节。15 篇主论文对应的正文主题中，有 8 个章节只有 1 篇主论文，跨研究比较天然不足。
-2. Matrix 已将一篇论文识别为 ZnI₂ 体系，但旧 Outline/Blueprint 没有随事实刷新重新路由，最终章节标题仍是 Cadmium systems。
-3. Writing Plan 已经发现该章节标题与证据不一致，却只能在正文中解释“实际为 Zn”，不能修正上游章节标题。
-4. Matrix 的“科学事实完整”主要表示提取任务已完成，不代表综述所需字段完整。16 篇论文中，组分作用类事实明显不足，无法支持催化剂、促进剂、胺和添加剂角色的系统比较。
-5. Discovery 已检测到部分查询组无结果，并建议联网补检，但本次使用了限定本地语料；该范围事实没有被转换成适合公开发表的范围说明。
-6. 当前书目核验把“能关联到本地 PDF”误当成“全部字段已经准确”，导致错误期刊、污染作者字段和缺失卷页仍进入参考文献。
-7. 图像选择接近“一篇论文一张图”，装置照片、表格截图、损坏图注和非代表性图片也进入候选或终稿。
-8. 正文中出现 `locally bounded Matrix`、`available excerpt`、`indexed evidence` 等项目内部术语，不符合正式综述的公开写作语体。
+- `selection_mode=explicit`；
+- Crossref、OpenAlex、Semantic Scholar 和 arXiv 均未实际执行；
+- 外部命中数为 0；
+- 本地初始候选 39 篇，去重并选择后为 16 篇；
+- 实际文献年份范围为 1979–2021；
+- 覆盖类型为 `local_bounded`。
 
-## 3. 总体改进原则
+但 Final 公开文字把工作流运行日期拼接成了“筛选截至 2026-08-28”，并使用了容易让读者理解为系统检索的表述。这不是文献不足本身造成的，而是范围生成逻辑把“运行时间”错误解释成“检索截止日期”。
 
-### 3.1 单一事实来源
+审稿人列出的三篇关键文献在当前用户文献库中也不存在：
 
-书目信息、科学事实、章节归属、证据身份和图像来源分别只保留一个规范来源。下游只能读取规范字段，不能重新从 OCR 原文或旧阶段产物拼装另一份事实。
+- `10.1021/acs.accounts.9b00023`；
+- `10.1021/acsomega.1c03092`；
+- `10.1002/anie.202112427`。
 
-### 3.2 一个主分类轴，多个比较轴
+因此，系统可以生成“基于当前本地语料的选择性综述”，但不能自动宣称已经完成系统、全面或截至某日的外部检索。
 
-正文标题只使用一个主要分类轴。其他维度通过小节、段落、比较表和综合章节表达，不能把多个轴直接交叉组合成大量章节。
+### 2.2 Matrix 的“完成”不等于科学事实足够
 
-### 3.3 Agent 负责语义判断，代码负责事实约束
+本次 Matrix 有 16 行，顶部统计为 16 篇完成，但 16 篇的 `review_readiness` 实际均为 `partial`。在 176 个字段状态中：
 
-- Agent 可以判断字段角色、提出章节组织、归纳跨论文关系和改善公开写作语言；
-- 代码负责 DOI、年份、论文身份、证据键、引用编号、章节归属条件和图像来源的一致性；
-- Agent 输出不能直接成为规范事实，必须绑定来源并通过确定性检查。
+- `supported`：63；
+- `retrieval_not_found`：58；
+- `not_requested`：55。
 
-### 3.4 自动修正优先，不增加常规人工确认
+其中方法条件仅 4/16 有充分支持，研究对象/输入 6/16，定量结果 6/16，范围信息 11/16。当前“提取任务完成”被界面和后续流程误读成“已具备完整综述写作条件”。
 
-本轮不增加新的用户确认阶段。只有“是否扩大联网检索范围”以及“是否覆盖人工编辑过的 Outline”继续由用户决定，其他质量改进在现有阶段内部完成。
+### 2.3 关键机理证据存在于全文索引，却没有进入章节证据包
 
-## 4. 目标内容流程
+对于审稿人指出的 CuI/ZnBr₂/Ti(OEt)₄ 体系，PostgreSQL 已索引到明确证据：
+
+- Ti(OEt)₄ 和 CuI 参与炔丙胺形成；
+- ZnBr₂ 更有效地促进炔丙胺向丙二烯转化；
+- Ti(OEt)₄ 并不负责第二步转化。
+
+这些关键 chunk 没有进入 `sections/evidence_package.json`。章节生成器于是把“证据包没有召回”写成“原论文没有分配各组分功能”。根因是：
+
+```text
+全文已索引
+  → 章节检索未召回关键片段
+  → Evidence Package 缺项
+  → 写作模型把检索缺项误写成来源事实缺失
+```
+
+这是证据链中最需要优先修复的通用问题。
+
+### 2.4 章节分类轴交叉，导致重复与错位
+
+Outline 声明主轴为 `reaction_type`，辅助轴为金属和立体化学，但实际章节同时使用：
+
+- 亲电试剂/底物类别；
+- 推测机理类型；
+- 金属平台；
+- 手性控制方式。
+
+同一级标题因此出现 Aldehyde ATA、Isomerization/Rearrangement、Gold-catalyzed、Ketone ATA 和泛化的 Terminal Alkyne Allenation 等不同维度，同一反应也可能在不同章节重复承担主论证。
+
+### 2.5 已有综合规则，但没有成为生成门槛
+
+项目已有：
+
+- `skills/review-cross-study-synthesis/SKILL.md`；
+- Blueprint 中的 synthesis requirements；
+- Sections 中的 synthesis state 和 diagnostics。
+
+然而 `zzz` 的 27 个规划段落中，比较段落为 0，比较覆盖率为 0.0，流程仍继续完成。因此缺口不是“没有综合 Skill”，而是已有规则只被记录，没有参与生成后的自动补写和质量判定。
+
+### 2.6 书目身份和字段没有完成规范化
+
+最终参考文献仅 4/16 完成身份核验，12/16 仍未解决。多篇文献期刊字段错误地继承为 `Green Chemistry`，作者字段还混入页眉和稿件流程文字。当前系统将“本地 PDF 可关联”过度解释为“书目信息已验证”。
+
+### 2.7 图像选择、插入与论证没有分层
+
+当前 Manifest 保留 16 张所选来源图，并倾向于全部插入。结果包括：
+
+- 来源论文身份基本可追踪，但图片不一定支撑所在章节的当前论点；
+- 3 张图角色未知；
+- 部分图注退化为通用候选名称；
+- 正文缺少可见的图号调用和解释；
+- 图片漂移到 Conclusion、References 或空白页附近；
+- 来源身份、科学作用、版权状态和排版位置混在同一个“已选”状态中。
+
+用户对图片的业务定义是合理的：Stage 5 人工选择的图片代表该论文总体反应或核心贡献，不必在选择时绑定某一个段落。但“属于某篇论文”不等于“必须全部插入全文”。最终插入仍需要独立的编辑计划。
+
+### 2.8 总览图通过了形式校验，却没有科学内容
+
+总览图结构数据中的 `labels=[]`，实际图片仍出现 Cu、Au、Fe、Others 等模板分类，其中 Fe 并未被正文系统支持，Selectivity、Supported feature 等区域为空。现有语义检查主要拦截提示词残留和超长标签；空标签集合会因为没有可比较项而被错误视为通过。
+
+### 2.9 终审发现了问题，但没有驱动修复
+
+现有产物已经发现：
+
+- Draft 评分 82.21，目标 90；
+- 15 个阻断性段落问题；
+- bibliography 未完全解析；
+- figure evidence binding 和 rights 未解决；
+- PDF 有替代字符、低 DPI、图文错位和过度空白页。
+
+但人工 `below_goal_override` 之后仍可构建并下载一个被界面称作 Final 的文件。问题不在于“需要增加更多阻断”，而在于：可自动修复的问题没有被自动修复，内部的结构 `valid=true` 又容易被误解为学术内容已经可靠。
+
+## 3. 优化后的总体逻辑
 
 ```mermaid
 flowchart TD
-    A[Topic 与综述范围] --> B[题录、全文和向量混合召回]
-    B --> C[覆盖缺口诊断与可选定向补检]
-    C --> D[规范书目与 Matrix 科学事实]
-    D --> E[事实完整度与关键字段补提取]
-    E --> F[单主轴分类与 Blueprint]
-    F --> G[章节问题与 Evidence Package]
-    G --> H[Writing Plan 与跨研究综合]
-    H --> I[论证驱动的图像和比较表]
-    I --> J[公开写作语言与术语统一]
-    J --> K[引用、书目和图文终检]
-    K --> L[Final Manuscript]
+    A[Topic 与真实检索范围] --> B[本地全文 + 可用外部题录检索]
+    B --> C[规范 Metadata 与覆盖诊断]
+    C --> D[Matrix 通用事实提取]
+    D --> E[Outline / Blueprint 单一主轴组织]
+    E --> F[按章节问题定向补检全文和 SI]
+    F --> G[Evidence Package 证据充分性检查]
+    G --> H[章节生成 + 已有跨研究综合规则]
+    H --> I[比较覆盖不足则局部补写]
+    I --> J[论文级已批准图片池]
+    J --> K[正文级插图与图号调用计划]
+    K --> L[Draft 评估与安全候选修复]
+    L --> M[Conclusion / Overview / Final]
+    M --> N[引用、书目、图文、PDF 自动修复]
+    N --> O[下载当前工作稿并显示仍未解决的问题]
 ```
 
-## 5. 详细功能改进
+核心原则：
 
-### 5.1 Discovery：把覆盖诊断转化为可执行的范围决策
+1. 范围表述只描述真实执行过的动作；
+2. 事实缺失先补检，不能直接变成论文缺点；
+3. 一级结构只有一个分类主轴；
+4. 论文级代表图和段落级插入计划分开；
+5. 诊断优先触发既有阶段内的局部修复；
+6. 无法自动解决的问题仍可随工作稿导出，但不得被隐藏或伪装成已验证事实。
 
-保留当前“检索覆盖不足时由用户决定是否联网补检”的原则，不把联网检索设为硬性步骤。
+## 4. 分阶段功能优化
 
-在现有 `coverage_diagnostics` 中补充：
+### 4.1 Library 与 Discovery：真实范围和可恢复的补检
 
-- Topic 明确要求的时间、对象、方法和独立讨论维度；
-- 每个 Topic 分区的候选论文数量；
-- 无结果或证据稀疏的查询组；
-- 代表性综述、奠基研究和近期研究是否有候选；
-- 当前语料更适合完整综述、选择性综述还是限定语料综述。
+复用现有 Discovery 产物，不新增 `review_scope.json`。
 
-页面只增加一个现有范围内的动作：`定向补检缺失主题`。用户不启用时，后续稿件不得宣称系统性或完整覆盖。
+需要修改：
 
-终稿不增加独立的内部“Review Method”章节，但应在 Introduction 中生成 2–4 句公开可读的 `Scope and literature selection` 说明，只描述真实执行过的数据库、检索截止日期、时间范围和纳入原则，不出现 Matrix、索引、模型或工作流名称。
+1. `coverage_diagnostics` 明确记录每个 provider 的 `requested/executed/succeeded/failed/disabled`；
+2. 只有实际成功执行的来源才能进入公开方法说明；
+3. 检索截止日期来自用户范围或成功检索的明确时间边界，不得使用工作流 `retrieved_at`；
+4. 外部来源不可用时，自动降为 `local_bounded`，继续允许工作，但公开文字必须说明“基于当前纳入语料”；
+5. 对缺失主题生成定向补检建议，联网失败不清空已有结果；
+6. 对 DOI、引用网络和代表性综述只做候选补充，不把“未找到全球全部文献”变成程序阻断。
 
-### 5.2 Library/Matrix：建立字段级规范书目
+建议公开文字由同一个纯函数生成，输入仅为真实执行记录和用户范围，禁止在 `final.py` 中临时拼接日期。
 
-书目核验从论文级 `verified=true` 改为字段级状态：
+### 4.2 Metadata：规范值和审计过程分开
+
+复用现有 Library Metadata 和 bibliography audit，不新增第二套书目真相。
+
+规范顺序：
+
+1. DOI/出版社或 Crossref/OpenAlex 的匹配记录；
+2. PDF 首页和明确书目信息区域；
+3. 本地文件名与全文线索；
+4. 限定区域模型判别仅用于处理仍有冲突的字段。
+
+每个字段保留来源、置信度和冲突信息，但下游只读取 `canonical_metadata`。原始 OCR 书目不能直接进入 References。
+
+外部核验失败时保留当前规范值并标记字段未核验；不能把整个文献处理任务判定失败，也不能伪造期刊、作者、卷页或 DOI。
+
+### 4.3 Matrix 与事实状态：统一使用现有 readiness helper
+
+复用 `review_writer_core/review_fact_readiness.py` 中已有的事实状态，不在各脚本重复判断逻辑。
+
+需要明确区分：
+
+- `supported`：有可定位原文支持；
+- `reported_but_incomplete`：来源涉及该事实，但不足以完成比较；
+- `retrieval_not_found`：当前检索未找到，不能公开写成来源未报告；
+- `source_verified_not_reported`：已核查相关正文、图表和必要 SI，可谨慎写成来源未报告；
+- `not_requested`：当前问题不需要该字段。
+
+新增一个共享的确定性函数 `negative_claim_eligibility(fact_state, checked_sources)`，由章节生成、Draft 重写和 Final 清洗共同调用。只有 `source_verified_not_reported` 可以形成公开否定性结论。
+
+### 4.4 Blueprint：单一主轴和自动修复 catch-all 章节
+
+复用现有 scope contract、classification basis 和 taxonomy diagnostics。
+
+生成顺序调整为：
+
+1. 从 Topic 提取一级主轴候选；
+2. 用论文事实评估互斥性、覆盖率和章节可综合性；
+3. 选择一个一级主轴；
+4. 金属、机制、手性、年代等作为二级比较轴；
+5. 对 `Others`、`Miscellaneous`、`Terminal alkyne allenation` 等 catch-all 章节自动提出可辩护名称或合并建议；
+6. 在 Blueprint 按钮前自动应用不涉及用户人工结构的安全修复，而不是只显示错误并禁用按钮；
+7. 用户人工修改过的标题/顺序不被静默覆盖，但确定性的事实冲突必须显式提示并给出一键修复。
+
+每篇论文原则上只有一个主章节归属。允许在其他章节作为比较证据被调用，但不应再次用逐篇摘要方式完整介绍。
+
+### 4.5 Evidence Package：关键证据缺失时定向补召回
+
+Evidence Package 构建不只按段落相似度取 top-k，还要结合 Blueprint 的 `required_fact_roles`。
+
+对于每个计划 Claim：
+
+1. 先检索该论文的规范事实卡；
+2. 再在主文、表格、图注和已关联 SI 中按事实角色检索；
+3. 对 catalyst role、conditions、quantitative results、scope、limitations、mechanism evidence 等关键字段做覆盖检查；
+4. 关键字段为 `retrieval_not_found` 时，执行一次目标明确的全文补召回；
+5. 找到证据则更新 Evidence Package；仍找不到则删除或降级该 Claim，而不是生成“原文未报告”的句子。
+
+这一步应直接修复 `zzz` 中“全文有证据、章节包没证据”的根因。
+
+### 4.6 Sections：让已有综合 Skill 真正生效
+
+不新增 Skill。继续使用：
+
+- `skills/review-cross-study-synthesis/SKILL.md`；
+- Blueprint synthesis requirements；
+- `sections/synthesis_state.json`；
+- 已有 synthesis diagnostics。
+
+修改为生成后的局部闭环：
+
+1. 多论文主体章节必须至少有一个承担横向比较的段落；
+2. 比较段落必须包含共同点、差异、对应条件/证据、适用边界或意义中的至少三项；
+3. `comparison_coverage=0` 时，只补写相应章节的综合段，不重生成全部章节；
+4. 不能比较的定量结果不得强行排名；
+5. 单论文案例可以没有跨论文比较，但需要说明其为何承担独立科学问题；
+6. 同一论文在多个章节重复承担主介绍时，保留最符合主轴的一处，其他位置改成简短交叉比较。
+
+### 4.7 Draft：修复内部语言和“缺证据即否定”
+
+复用现有 paragraph evaluation、candidate rewrite、integrity gate 和用户接受流程。
+
+增加/强化以下规则：
+
+- 清除 `supplied evidence`、`available excerpt`、`indexed evidence`、Matrix、工作流状态等内部语言；
+- 将 `retrieval_not_found` 句子返回上游补检或删除，不用语言润色掩盖；
+- 保护数字、化学式、引用身份、图片元数据；
+- 批量安全优化继续逐段执行，失败段落不停止后续段落；
+- 接受候选后只复评该段，并增量更新总分；
+- 自动修复后仍达不到目标分数时保留候选差异，不静默覆盖用户文本。
+
+### 4.8 Figures：论文级图片池与正文插入计划分离
+
+Stage 5 人工选择的图片表示“该图可以代表这篇论文”，形成 `approved_asset_pool`。该选择只锁定：
+
+- `source_paper_id`；
+- 原始 Figure/Scheme 身份；
+- 当前来源文件和版本哈希；
+- 人工选择/重绘/编辑状态。
+
+Final 插图计划再根据正文论证选择其中一部分图片，并确定：
+
+- 插入章节与相邻论点；
+- 正文可见调用，例如“如图 4 所示”；
+- 当前图在论证中的作用；
+- 图注、来源和版权措辞；
+- 不插入时的 `skip_reason`。
+
+因此：选图不需要先绑定段落；正文也不再默认插入所有已选图。
+
+图像保存逻辑继续使用来源/输出哈希，避免候选图变化后误用旧重绘。图像科学来源和版权状态分开记录；版权未验证不妨碍内部预览，但不得自动生成 `Reproduced with permission`。
+
+### 4.9 Overview：空语义和模板漂移必须被拒绝并自动回退
+
+复用现有 overview 结构和生成脚本，不新增总览图服务。
+
+生成前必须形成非空结构：
 
 ```json
 {
-  "bibliography_fields": {
-    "title": {"value": "...", "status": "verified", "source": "doi_registry"},
-    "authors": {"value": [], "status": "conflict", "source": "pdf_front_matter"},
-    "journal": {"value": "...", "status": "verified", "source": "publisher"},
-    "publication_year": {"value": 2021, "status": "verified", "source": "publisher"},
-    "volume": {"value": "...", "status": "verified", "source": "doi_registry"},
-    "pages_or_article_number": {"value": "...", "status": "missing", "source": null},
-    "doi": {"value": "...", "status": "verified", "source": "pdf_and_registry"}
-  }
-}
-```
-
-规范字段处理顺序：
-
-1. 从 PDF 首页和明确书目信息区域抽取候选；
-2. DOI 与标题、作者一致时，采用出版社或 DOI 注册机构的规范记录；
-3. 自动清除 `Received`、`Accepted`、`Cite This`、网页按钮、HTML 标签、卷期提示和脚注符号等污染；
-4. 仍无法确认时，调用一次 Agent 阅读限定区域并判断字段角色；
-5. Final References 只读取规范字段，不读取原始 OCR 字符串。
-
-“找到了本地 PDF”只能证明论文身份可追踪，不能直接把全部书目字段标记为已核验。
-
-### 5.3 Matrix：把“提取完成”与“事实足够”分开
-
-科学事实状态调整为：
-
-- `extraction_complete`：提取任务已完成；
-- `review_fields_complete`：当前 Topic 和比较任务所需字段完整；
-- `review_fields_partial`：存在可写事实，但部分关键比较字段缺失；
-- `source_not_established`：原文没有提供或无法确认。
-
-关键字段不固定为化学字段，而由通用比较角色组成：
-
-- 研究对象或输入；
-- 方法、干预或反应体系；
-- 各组成部分的作用；
-- 条件；
-- 结果和定量指标；
-- 适用范围；
-- 局限；
-- 机制或因果证据；
-- 验证方式；
-- 实用性、安全性、成本或可持续性。
-
-化学 Taxonomy Profile 可把这些角色映射为底物、催化剂、促进剂、胺、添加剂、产物、产率、ee/dr 和机理证据；其他学科使用自己的字段映射。
-
-当 Topic 或 Blueprint 要求比较某个字段，而现有事实卡缺失时，只对相关论文执行一次定向事实补提取。Agent 必须返回 `fact_id`、规范字段、原文片段和位置；无法定位原文的内容不能进入事实卡。
-
-### 5.4 Outline/Blueprint：修复分类轴交叉和旧路由残留
-
-#### 5.4.1 主轴选择
-
-根据以下条件选择唯一主轴：
-
-- Topic 是否明确要求按该轴组织；
-- 分类是否互斥或具有稳定主归属；
-- 每类是否有足够论文形成综合；
-- 该轴能否贯穿标题、正文、比较表和总览图。
-
-辅助轴可以是催化/干预体系、年代、机制、结果等级或立体化学模式，但默认不直接与主轴交叉生成章节。
-
-Topic 中的“分别讨论”不等于必须生成独立一级章节。该要求可以通过一级章节、小节、比较表或明确的综合段落满足，并在 contract 中记录其可追踪位置。
-
-#### 5.4.2 防止单论文碎片章节
-
-系统不设置机械的最少论文硬门槛，但应计算：
-
-- 每节主论文数量；
-- 与相邻章节的对象和问题重合度；
-- 同一论文跨章节重复承担主要论证的比例；
-- 章节是否只有方法复述而没有比较任务。
-
-只有具有独立科学问题的代表性研究才保留为单论文案例。其他单论文章节优先合并到同一主轴章节中作为方法分支、历史节点或例外。
-
-#### 5.4.3 事实变化后的路由更新
-
-当规范事实中的分类字段发生变化时，系统必须重新计算受影响论文的章节建议，例如：
-
-- 体系或干预对象变化；
-- 输入、产物或研究对象变化；
-- 立体选择性模式变化；
-- 论文类型由原始研究变为综述或方法说明；
-- Topic partition 发生变化。
-
-系统生成的 Outline/Blueprint 可自动更新相关归属；用户人工编辑过的结构只生成差异建议。Writing Plan 不得通过正文解释来容忍已经确定的错误章节标题。
-
-#### 5.4.4 Agent 的使用位置
-
-只在 Blueprint 组织阶段增加一次受约束的语义判断：
-
-1. Agent 根据 Matrix 事实提出主轴、辅助轴、章节合并和论文归属；
-2. 代码检查每个标题和归属是否能被规范事实支持；
-3. 不受支持的金属、方法、对象或性能标签被删除或退回待分类；
-4. 生成最终 Blueprint。
-
-不为每个分类轴分别创建 Agent，也不增加新的分类服务。
-
-### 5.5 Evidence Package：围绕科学问题组织证据
-
-Blueprint 中的每个科学问题应声明所需的事实角色，例如：
-
-```json
-{
-  "question": "不同体系中的组分分别承担什么作用？",
-  "required_fact_roles": [
-    "system_component",
-    "component_role",
-    "mechanism_evidence",
-    "reported_limitation"
-  ]
-}
-```
-
-证据构建时：
-
-- 只要求与该问题有关的论文回答该问题；
-- 不要求所有主论文回答章节内所有问题；
-- 直接事实、作者解释和综述层推断保持不同证据等级；
-- 向量和全文命中只负责发现候选片段，事实卡和 Claim 必须使用可定位原文；
-- 缺失某个比较字段时，不得把“未提取到”写成“原论文没有报告”。
-
-这样可以避免把检索能力不足误写成科学结论。
-
-### 5.6 写作：增加一个通用跨研究综合 Skill
-
-本轮最多增加一个 `cross-study-synthesis` Skill，并确保 Blueprint 根据项目类型实际加载该规则。该 Skill 不保存事实，不产生新的引用，只使用 Writing Plan 中已经批准的 Claim 和证据。
-
-每个综合单元优先形成：
-
-```text
-共同趋势
-  → 可比较的差异
-  → 差异对应的条件、机制证据或研究设计
-  → 例外和适用边界
-  → 对方法选择或后续研究的意义
-```
-
-约束包括：
-
-- 一篇论文不能生成跨研究排名；
-- 不同口径的产率、选择性或指标不能直接比较；
-- 可以指出证据层级不同，但不能连续重复免责声明；
-- 不用“证据不足”替代对已知差异的分析；
-- 结论只综合正文中已经成立的关系；
-- 不得新增证据包外的数字、实体、机理或性能评价。
-
-### 5.7 公开写作语言与术语统一
-
-在现有 Draft 评估中增加 `publication_voice`，清理：
-
-- Matrix、Evidence Package、indexed evidence；
-- available excerpt、provided material、locally bounded；
-- 模型任务、内部阶段、提示词和系统状态；
-- 重复的防御性模板句。
-
-内部限制需要转换为科学表达。例如：
-
-```text
-内部：The available excerpt does not specify the catalyst loading.
-公开：The reported study does not provide a sufficiently detailed basis for comparing catalyst loading across the selected systems.
-```
-
-同时建立由项目领域配置提供的术语表，统一对象名称、缩写、取代模式、指标和符号。通用代码只执行一致性检查，不写死某个化学主题词表。
-
-摘要采用固定内容结构：研究对象、范围、组织主轴、主要讨论内容和本文增量，不罗列系统限制，不写成 Conclusion 的重复版本。
-
-### 5.8 图像：从“按论文选图”改为“按论证选图”
-
-每张图必须声明 `argument_role`：
-
-- 核心转化或研究框架；
-- 代表性底物/对象范围；
-- 机制证据；
-- 跨研究比较；
-- 总览分类。
-
-默认排除：
-
-- 装置照片；
-- 表格截图和优化条件截图；
-- 与当前章节主张无关的局部图；
-- OCR 图注严重损坏的候选；
-- 重复表达同一研究结论的图片；
-- 无法确认来源或公开使用条件的图片。
-
-图注不直接复用 MinerU 原始文字，应根据以下结构生成：
-
-```text
-图中展示的科学对象或转化
-  + 本图在当前论证中的作用
-  + 来源论文身份
-  + Adapted/Reproduced/Source 状态
-```
-
-催化剂、促进剂、底物、产物和性能描述必须与 Matrix 规范事实一致。版权或许可未确认时，不能自动写 `Reproduced with permission`。
-
-### 5.9 总览图：先生成受控内容，再生成视觉
-
-总览图不能直接把完整 Topic 交给图像模型自由发挥。应先生成结构化内容：
-
-```json
-{
-  "title": "概括性标题",
-  "primary_axis": "...",
+  "primary_axis": "与 Blueprint 相同的一级主轴",
   "modules": [],
-  "comparison_dimensions": [],
   "approved_labels": [],
   "evidence_bindings": {}
 }
 ```
 
-处理规则：
+校验要求：
 
-- 标题是对综述内容的概括，不复制用户提示词；
-- 中性分类标签可以来自 Blueprint；
-- `high ee`、`broad scope`、`sustainable` 等评价必须绑定定量或明确原文证据；
-- 未进入正文的体系、金属和方法不得进入总览图；
-- 生成后提取可见文字，与 `approved_labels` 对照；
-- 总览图优先采用统一的二维反应与分类结构，不把装饰性球棍模型作为无归属的漂浮元素。
+- `modules` 和 `approved_labels` 不得为空；
+- 每个模块能映射到 Blueprint 的实际章节或综合分支；
+- Fe、metal-free、high ee、broad scope 等未被正文和事实支持的标签不得出现；
+- 空面板、占位文字和模板分类不是合法结果；
+- 视觉模型失败时，回退到确定性的结构化 SVG/HTML 图，而不是输出空模板；
+- 总览图插入 Introduction 正文之前或 Introduction 开头的约定位置，不放在 Conclusion/References 之后。
 
-### 5.10 Final：引用、参考文献和内容状态使用同一身份链
+### 4.10 Final、References 与 PDF：让现有诊断触发局部修复
 
-终稿继续按论文身份而不是模型生成的临时编号建立引用账本：
+不增加新的 `manuscript_readiness_report.json` 或用户可见“投稿状态”。继续复用：
 
-```text
-Claim
-  → evidence_key / fact_id
-  → paper_id
-  → 终稿首次引用顺序
-  → 正文编号
-  → 规范参考文献条目
+- Draft quality；
+- Final validation；
+- bibliography audit；
+- figure validation；
+- PDF QA 与 render manifest；
+- 现有 manuscript/release 内部字段。
+
+生成 Final 时依次执行：
+
+1. 从规范 Metadata 重建 References，不读取 OCR 拼接串；
+2. 用 `paper_id` 对齐正文 callout、图注来源和参考文献；
+3. 自动清除 HTML、MinerU LaTeX 残留、XML 非法字符和内部标记；
+4. 检查图片是否有正文调用和解释，没有则自动补写调用或移出插入计划；
+5. 检查总览图位置、Figure 浮动、低 DPI、空白页和文字越界；
+6. 可确定修复的问题只重建相应产物；
+7. 无法确定修复的问题继续在现有问题明细中展示。
+
+保持用户可以生成和下载当前工作稿，避免大量人工阻断；但文件界面必须如实显示仍未解决的引用、图像或事实问题，不能只显示笼统的“成功”。是否继续将这种文件称为“最终稿”，见文末待确认问题。
+
+## 5. 自动修复路由：复用阶段接口，不建通用修复巨石
+
+不实现通用 `/quality/issues/{id}/repair` 动作分发服务。问题项只携带：
+
+```json
+{
+  "issue_type": "evidence_role_missing",
+  "target_type": "paragraph",
+  "target_id": "S06-p2",
+  "source_stage": "sections",
+  "recommended_action": "targeted_evidence_refresh"
+}
 ```
 
-Final 检查至少包括：
+前端或 Job orchestrator 根据 `source_stage + recommended_action` 调用现有阶段接口：
 
-- 正文引用的论文是否存在于规范参考文献；
-- 参考文献是否真的在正文中被使用；
-- 作者、期刊、年份、卷页和 DOI 是否来自规范字段；
-- 图注引用与图像来源论文是否一致；
-- 标题、摘要、Introduction 和 Conclusion 的范围声明是否一致；
-- 是否残留内部术语、原论文 Scheme 编号、网页抓取文字和损坏 LaTeX。
+| 问题 | 调用现有能力 |
+|---|---|
+| 检索范围不实 | Discovery coverage/method refresh |
+| 书目字段冲突 | Library metadata resolve |
+| 关键事实未召回 | Matrix/Sections targeted evidence refresh |
+| 分类标题冲突 | Planning Blueprint repair |
+| 缺少横向比较 | Sections local synthesis rewrite |
+| 内部语言残留 | Draft paragraph candidate rewrite |
+| 图文不匹配 | Figures insertion-plan refresh |
+| References 缺项 | Final bibliography rebuild |
+| 页面空白/图漂移 | Final render/PDF rebuild |
 
-界面应区分：
+这和子 Agent 不同：它不是创建自治智能体，而是把问题路由到拥有该数据的原阶段服务，继续通过统一模型网关调用模型。FastAPI 仍负责权限、项目隔离、请求校验和 Job 创建；Worker 执行实际任务；模型网关只负责模型协议、密钥、限流、重试和 provider 路由。
 
-- 结构和文件可生成；
-- 证据身份一致；
-- 书目字段完整；
-- 图像来源和内容绑定完整；
-- 可正式发布。
+## 6. 代码复用与冗余控制
 
-不能用一个笼统的 `valid=true` 表示稿件已经具备学术发表质量。
+### 6.1 只扩展现有产物
 
-## 6. Agent、Skill 与确定性代码的职责
-
-| 能力 | 推荐实现 | 原因 |
+| 需求 | 复用/扩展位置 | 不采用的重复方案 |
 |---|---|---|
-| DOI、年份、期刊、卷页一致性 | 确定性代码和权威书目来源 | 必须可复核，不能依赖写作判断 |
-| OCR 字段角色仍无法确定 | 限定区域 Agent | 需要理解版面和语义角色 |
-| 主轴选择、章节合并建议 | 一次 Blueprint Agent | 属于全局语义组织问题 |
-| 论文最终归属合法性 | 确定性事实校验 | 防止 Agent 引入不存在的类别 |
-| 组分作用与机理证据补提取 | 定向 Agent + 原文定位 | 需要理解上下文，但必须有来源 |
-| 跨论文综合写作 | 一个通用 Skill | 需要稳定的综述写作策略 |
-| 引用编号与参考文献映射 | 确定性代码 | 不能交给模型 |
-| 图像候选过滤 | 确定性规则 | 可按类型、清晰度、来源和重复度判断 |
-| 图像科学意义和图注 | Agent 生成，代码核对事实 | 兼顾语义质量与事实约束 |
-| 总览图内容 | Blueprint/Matrix 结构化生成 | 防止视觉模型自由添加结论 |
+| 检索范围 | Discovery `coverage_diagnostics` | 新建 `review_scope.json` |
+| 分类一致性 | classification basis、scope contract、taxonomy diagnostics | 新建 taxonomy 服务和第二份 contract |
+| 事实状态 | `review_writer_core/review_fact_readiness.py` | 各脚本复制状态判断 |
+| 综合覆盖 | Blueprint synthesis requirements、Sections synthesis state | 新建综合 Skill/报告 |
+| 图像关系 | 当前 selection/manifest 行 | 新建 figure relevance 真相文件 |
+| 书目核验 | canonical metadata + bibliography audit | Final 再解析 OCR 书目 |
+| 终稿问题 | Draft quality、Final validation、PDF QA | 新建 readiness 报告和质量中心 |
+| 修复动作 | 现有阶段 API/Job | 通用 repair 巨型端点 |
 
-不建议为书目、分类、写作、图像分别新增多个 Agent 或多个 Skill。当前项目只需要复用现有阶段服务，并补充一个跨研究综合 Skill。
+### 6.2 建议抽出的共享纯函数
 
-## 7. 对现有七阶段的影响
+只抽取无状态、可测试的 helper，不拆新的领域服务：
 
-| 当前阶段 | 主要改动 | 是否增加页面步骤 |
-|---|---|---|
-| 文献库 | 字段级规范书目和污染清理 | 否 |
-| Topic 检索 | 覆盖缺口与定向补检建议 | 否 |
-| Matrix/Blueprint | 事实完整度、单主轴分类、事实变化重路由 | 否 |
-| 章节生成 | 问题所需字段、跨研究综合 Skill | 否 |
-| 图像 | 论证驱动选图、受控图注和总览内容 | 否 |
-| 初稿评估与重写 | publication voice、术语和综合质量 | 否 |
-| Final | 规范参考文献、范围一致性和图文终检 | 否 |
+- `public_scope_statement(execution_record, user_scope)`；
+- `negative_claim_eligibility(fact_state, checked_sources)`；
+- `canonical_bibliography_entry(metadata)`；
+- `classification_axis_consistency(outline, blueprint, matrix)`；
+- `comparison_coverage(section_plan, paragraphs)`；
+- `figure_argument_binding(manifest_row, manuscript)`；
+- `overview_semantic_coverage(overview_spec, blueprint)`；
+- `sanitize_publication_text(text)`。
 
-## 8. 实施优先级
+这些 helper 应放入现有 `review_writer_core` 的相应模块，由 API、Skill 脚本和 Worker 共同导入，避免在 `final.py`、章节脚本和导出脚本中分别实现。
 
-### P0：先消除事实性错误的传播
+### 6.3 代码改动落点
 
-1. 书目字段级规范化，Final 禁止读取原始 OCR 书目；
-2. Matrix 分类事实变化后重新计算论文路由；
-3. Blueprint 采用单主轴，避免多个轴交叉生成章节；
-4. 组分作用、研究对象、结果类型和立体选择性等关键事实按 Topic 补提取；
-5. 引用、图注和参考文献统一使用 `paper_id` 身份链。
+| 代码位置 | 主要调整 |
+|---|---|
+| `review_writer_api/domain_services/final.py` | 删除工作流日期冒充检索截止日；methods execution 读取真实 provider 执行记录；强化 overview 空语义校验；现有诊断驱动局部重建 |
+| `review_writer_core/review_fact_readiness.py` | 统一否定性 Claim 资格与事实状态判断 |
+| `review_writer_core/bibliography_audit.py` | 字段级规范化和冲突来源；为 Final 提供唯一书目入口 |
+| `skills/review-section-drafting-figure-picking/scripts/generate_section_drafts.py` | required fact roles 定向补召回；比较覆盖为 0 时局部补写；保底输出不伪造事实 |
+| `skills/review-cross-study-synthesis/SKILL.md` | 原则基本保留，只补充可检测的输出约束，不复制成新 Skill |
+| `review_writer_api/domain_services/figures.py` | 区分 approved asset pool 与 insertion plan；不默认全插入 |
+| `skills/review-figure-style-redraw/scripts/generate_overview_figure.py` | 非空结构约束、Blueprint 标签白名单和确定性回退 |
+| Final 导出与 PDF QA 代码 | 清洗、图文调用、空白页、低 DPI 和漂浮体自动修复闭环 |
 
-### P1：提高综述逻辑和批判性综合
+## 7. 实施顺序
 
-1. 增加一个通用跨研究综合 Skill；
-2. 合并没有独立科学问题的单论文碎片章节；
-3. 增加公开写作语言检查；
-4. 生成比较表所需的统一事实字段；
-5. Introduction 中加入简短、真实的公开范围与文献选择说明。
+### P0：先阻止错误事实继续传播
 
-### P2：提高图表和最终呈现质量
+1. 修复范围说明和 methods execution 的真实来源；
+2. 统一事实 readiness，并禁止 `retrieval_not_found` 生成公开否定结论；
+3. 为关键 fact roles 增加定向全文/SI 补召回；
+4. Final References 只从 canonical metadata 重建；
+5. 已有综合诊断为 0 时执行章节局部补写；
+6. Draft/Final 的现有问题列表能够定位到具体段落、图片或文献。
 
-1. 按论证选择图片并减少图片数量；
-2. 优先统一重绘核心反应图；
-3. 总览图采用证据绑定的结构化内容；
-4. 清理原论文编号、OCR 损坏文字和未经确认的版权措辞；
-5. 检查标题、摘要、正文、图表和参考文献的范围与术语一致性。
+### P1：修复结构、图文和总览图
 
-## 9. 验收标准
+1. Blueprint 单主轴校验和 catch-all 自动修复；
+2. 同一论文的主介绍去重，保留跨章节比较引用；
+3. 图片池与插入计划分离；
+4. 自动生成正文图号调用和论证性图注；
+5. 总览图非空语义校验、正文范围白名单和确定性回退。
 
-### 9.1 检索与范围
+### P2：形成最终呈现的自动修复闭环
 
-- Topic 要求的每个重要分区都有明确的候选数量或缺口说明；
-- 没有执行联网补检时，稿件不会宣称系统性完整覆盖；
-- 稿件中的范围说明只包含真实执行过的检索信息，不暴露系统内部实现。
+1. PDF 页面级空白、低 DPI、越界和浮动体修复；
+2. References、图注和正文 callout 的统一身份重排；
+3. 对历史项目执行兼容迁移，不强制重建未受影响的阶段；
+4. 增加覆盖典型失败链路的回归测试。
 
-### 9.2 书目与事实
+## 8. 验收标准
 
-- 本地 PDF 存在不再等价于全部书目字段已核验；
-- DOI、期刊、年份、卷页和作者污染能够定位到具体字段；
-- 参考文献不再出现网页按钮、Received/Accepted、HTML 标签等抓取残片；
-- “未提取到事实”不会被写成“原论文没有报告”。
+### 8.1 范围与证据
 
-### 9.3 分类与章节
+- 未执行外部检索时，公开稿件不会声称系统筛选至工作流运行日期；
+- 当前语料不足时可以继续生成限定语料工作稿；
+- 全文索引中存在的关键 catalyst role 证据能进入对应 Evidence Package；
+- `retrieval_not_found` 不再被写成“原论文没有报告”；
+- SI 未上传时只描述“当前证据未包含 SI”，不评价原文没有条件数据。
 
-- 每篇论文的主归属能由规范事实解释；
-- Blueprint 标题中的对象、体系和方法与 Matrix 一致；
-- Topic 的辅助维度可以在小节或比较表中追踪，不需要全部成为一级章节；
-- 不再因多个分类轴交叉产生大量重复、单论文章节；
-- 系统不得在正文中解释并保留已经确定错误的章节标题。
+### 8.2 结构与写作
 
-### 9.4 写作
+- 一级章节使用同一分类轴；
+- 多论文主体章节的比较覆盖率不再为 0；
+- 同一论文不会在多个章节被重复完整介绍；
+- 正文不出现 supplied evidence、available excerpt、Matrix 等内部语言；
+- 关键机制、条件和定量结论可以回溯到可定位原文。
 
-- 章节整体能呈现趋势、差异、例外、边界和意义，而不是逐篇摘要；
-- 比较结论能回溯到至少两项口径可比的研究证据；
-- 正文和图注不出现 Matrix、indexed evidence、available excerpt 等内部术语；
-- 摘要能够概括对象、范围、组织方式、主要内容和综述增量。
+### 8.3 References 与图片
 
-### 9.5 图像与终稿
+- References 不再从 OCR 污染串直接生成；
+- DOI、期刊、作者、年份、卷页按字段展示核验状态；
+- Stage 5 选图只形成论文级已批准资产池；
+- Final 只插入有明确论证作用、正文调用和来源身份的图片；
+- 图片不会漂移到 References，图注不再使用候选文件名或损坏 OCR；
+- 总览图没有空模块、模板占位和正文未支持的类别。
 
-- 每张图片有明确论证作用、来源论文和正文调用；
-- 装置照片、表格截图和损坏图注不会被默认选入综述正文；
-- 总览图不包含未经证据支持的体系、性能标签或 Topic 原始提示词；
-- 正文引用、图注来源和规范参考文献使用同一个 `paper_id`；
-- `valid`、书目完整和可正式发布是不同状态，不再混为一个结果。
+### 8.4 自动闭环与兼容性
 
-## 10. 明确不做的内容
+- 诊断能定位到具体目标并调用原阶段的局部修复；
+- 不新增用户必须经过的确认阶段；
+- 单项失败不会清空已有产物或强制全流程重跑；
+- SVG/Ketcher 编辑、人工图像审核、段落候选接受和 Word/PDF 下载继续可用；
+- 旧项目在未迁移新字段时使用兼容默认值，不误读为空结果。
 
-- 不新增工作流阶段；
-- 不新建第二套向量数据库或知识图谱；
-- 不建立独立于现有阶段的质量中心；
-- 不为某个主题硬编码金属、底物、产物或章节名称；
-- 不要求用户逐篇、逐段重复确认；
-- 不让 Skill 决定 DOI、年份、引用编号或论文身份；
-- 不用更多免责声明替代科学比较；
-- 本轮不处理任务重试、服务超时、断点恢复和运行故障降级。
+## 9. 文档逻辑与代码冗余自审
 
-## 11. 预期效果与边界
+### 9.1 已修正的逻辑矛盾
 
-按照本方案实施，可以泛化改善审稿意见中的以下大部分问题：
+1. **“允许下载”与“保证科学正确”并不冲突**：继续允许生成工作文件，但不得把未验证内容描述成已验证事实；自动可修复问题应先修复，剩余问题明确显示。
+2. **图片是论文级代表图，但插入是稿件级编辑行为**：选择时只绑定论文，终稿时再决定是否插入以及放在哪里，避免强制段落绑定和强制全插入两个极端。
+3. **外部检索失败不应阻断全部流程**：降级为限定本地语料并如实表述，同时保留定向补检能力。
+4. **人工接受不能改变科学事实状态**：人工可以接受写作候选或版式结果，但不能把未核验书目、缺失证据自动变成 verified。
+5. **结构 `valid=true` 不等于学术内容正确**：保留内部字段，但界面必须展示其具体含义，不增加新的投稿模式。
+6. **缺少比较不需要新 Skill**：现有 Skill 已覆盖写法，真正需要的是强制执行和局部补写。
 
-- 分类错位和重复；
-- 催化剂、促进剂和研究对象的事实错误；
-- 章节缺少横向比较；
-- 参考文献字段污染和来源错配；
-- 图像与正文不一致；
-- 总览图出现无证据内容；
-- 内部工作语言和过度防御性表述；
-- 标题、摘要、正文和结论的范围不一致。
+### 9.2 已删除的冗余设计
 
-自动系统不能证明某个主题的全球文献已经绝对完整，也不能自动取得原论文图片的版权许可。系统应准确诊断这两类边界并提供可执行操作，但不能伪造“完整覆盖”或“已获许可”。
+- 删除新建 `review_scope.json`、`taxonomy_contract.json`、`section_synthesis_report.json`、`figure_relevance_report.json` 和 `manuscript_readiness_report.json` 的提议；
+- 删除新增五个 domain service 的提议；
+- 删除新增跨研究综合 Skill 的提议；
+- 删除通用 `/quality/issues/{id}/repair` 巨型动作接口；
+- 删除三种质量模式和用户可见 `draft_ready/publication_ready` 双状态方案；
+- 不重复建设向量数据库、知识图谱、证据中心或书目真相文件。
 
-本方案的核心不是增加更多技术，而是让现有事实、分类、证据、写作、图像和参考文献使用同一套规范身份和内容契约，并只在确实需要语义判断的位置使用 Agent。
+### 9.3 仍需注意的实现风险
+
+- 外部书目服务可能失败，因此核验必须支持缓存、多来源和非破坏性降级；
+- SI 并非每篇论文都有，不能把缺少 SI 设为统一阻断；
+- 比较覆盖率不能只按关键词统计，需要结合 Blueprint 的比较任务和论文数量；
+- 自动调整 Outline 时必须保护用户人工编辑；
+- 自动图文调用不能虚构图中不存在的内容；
+- PDF 自动排版修复必须回归测试 Word、SVG、Ketcher 和不同图片尺寸。
+
+## 10. 已确认的产品决策
+
+### 10.1 图片默认策略
+
+Stage 5 的“已选择/已审核”只表示图片进入论文级图片池。系统在 Final 根据正文论证自动选取必要子集；未插入图片继续保留在项目中，不丢失人工选择、AI 重绘或 SVG/Ketcher 编辑结果。
+
+### 10.2 终稿生成与待处理问题
+
+- 按钮继续使用“生成最终稿”；
+- Word/PDF 文件继续正常生成和下载，不因普通待处理问题阻断；
+- 没有问题时显示“终稿已生成”；
+- 仍有问题时显示“终稿已生成 · 还有 N 项待处理”；
+- 点击数量可查看具体段落、图片、书目或导出问题；
+- 下载文件名保持现有 Final Draft 命名，不新增“工作稿/投稿稿”等流程状态。
+
+这只是完善结果说明，不改变第六阶段初稿、第七阶段终稿或现有导出接口。
+
+### 10.3 联网补检默认关闭
+
+创建项目和普通本地检索时不自动调用 Crossref、OpenAlex、Semantic Scholar 等外部来源。联网补检仅在用户主动点击相应操作时执行。
+
+未执行联网补检时：
+
+- 系统继续使用当前本地语料；
+- 不阻断 Matrix、Blueprint、章节和终稿生成；
+- 公开范围说明必须标记为基于当前纳入语料；
+- 不得声称已完成系统性外部检索，也不得把工作流运行日期写成检索截止日期。
+
+用户主动补检后，只有实际成功执行的来源和结果才能进入覆盖记录及公开方法说明。外部请求失败时保留原有本地候选和后续产物，不清空、不自动过期。
+
+以上决策不增加新的常规人工审核步骤。

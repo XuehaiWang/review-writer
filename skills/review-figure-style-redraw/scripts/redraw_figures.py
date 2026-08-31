@@ -52,6 +52,7 @@ from review_writer_core.figure_redraw_routing import (  # noqa: E402
     FIGURE_TYPE_MULTIPANEL,
     FIGURE_TYPE_PLOT,
     FIGURE_TYPE_SCOPE,
+    FIGURE_TYPE_SIMPLE,
     FIGURE_TYPE_TABLE,
     classify_chemical_figure,
     normalize_figure_type,
@@ -95,6 +96,19 @@ MECHANISM_MAX_EDIT_ATTEMPTS = 2
 COLORED_CLEANUP_MAX_EDIT_ATTEMPTS = 2
 COLORED_MAX_REMAINING_CHROMATIC_RATIO = 0.012
 COLORED_MAX_SOURCE_CHROMATIC_RETENTION = 0.45
+AI_CHEMISTRY_BACKGROUND_CLEANUP_TYPES = {
+    FIGURE_TYPE_MECHANISM,
+    FIGURE_TYPE_SIMPLE,
+    FIGURE_TYPE_SCOPE,
+    FIGURE_TYPE_LOW_RESOLUTION,
+    FIGURE_TYPE_COLORED,
+}
+# Keep this floor above CONTENT_INK_THRESHOLD so deterministic cleanup never
+# erases a pixel that the chemistry-integrity geometry gate considers ink.
+AI_BACKGROUND_HALO_LUMINANCE_FLOOR = 195
+AI_BACKGROUND_CANVAS_LUMINANCE_FLOOR = 235
+AI_BACKGROUND_HALO_MAX_CHANNEL_SPREAD = 20
+AI_BACKGROUND_HALO_MAX_IMAGE_RATIO = 0.12
 CHAT_COMPLETION_NO_IMAGE_ATTEMPTS = 3
 AI_EDIT_MAX_INPUT_SIDE = 2048
 ASPECT_PADDING_GUARD_RATIO = 0.004
@@ -805,6 +819,152 @@ def colored_fill_cleanup_check(source_path: Path, output_path: Path) -> dict[str
     }
 
 
+def clean_ai_chemistry_background(
+    image_path: Path,
+    figure_type: str,
+) -> dict[str, Any]:
+    """Remove light neutral pixel halos without touching scientific ink.
+
+    Image relays sometimes return a clean-looking chemistry drawing with pale
+    neutral JPEG/antialiasing ghosts around glyphs and bonds. Those pixels are
+    visually dirty but are not chemical content. We whiten only low-chroma
+    pixels brighter than the geometry gate's ink threshold. Plot/table/general
+    images are excluded because a true gray series or cell fill may be data.
+    An unusually large candidate area is also left unchanged rather than risk
+    deleting a semantic shaded region.
+    """
+
+    if figure_type not in AI_CHEMISTRY_BACKGROUND_CLEANUP_TYPES:
+        return {
+            "status": "skipped",
+            "reason": "figure_type_may_contain_semantic_gray",
+            "figure_type": figure_type,
+        }
+
+    with Image.open(image_path) as opened:
+        rgba = ImageOps.exif_transpose(opened).convert("RGBA")
+        flattened = Image.new("RGBA", rgba.size, "white")
+        flattened.alpha_composite(rgba)
+        rgb = flattened.convert("RGB")
+
+    pixels = rgb.load()
+    pixel_count = rgb.width * rgb.height
+    near_white_mask = bytearray(pixel_count)
+    halo_candidates: list[tuple[int, int]] = []
+    for y in range(rgb.height):
+        for x in range(rgb.width):
+            red, green, blue = pixels[x, y]
+            spread = max(red, green, blue) - min(red, green, blue)
+            luminance = (red + green + blue) / 3
+            if spread > AI_BACKGROUND_HALO_MAX_CHANNEL_SPREAD:
+                continue
+            if luminance >= AI_BACKGROUND_CANVAS_LUMINANCE_FLOOR:
+                near_white_mask[y * rgb.width + x] = 1
+            elif luminance >= AI_BACKGROUND_HALO_LUMINANCE_FLOOR:
+                halo_candidates.append((x, y))
+
+    # A provider can return the whole canvas as RGB 245-254 instead of pure
+    # white.  That must not trip the local-halo safety ratio.  Flood from the
+    # border so only the actual canvas background is normalized; a light gray
+    # region enclosed by scientific ink remains untouched.
+    queue: deque[int] = deque()
+    visited = bytearray(pixel_count)
+    border_indices = [
+        *range(rgb.width),
+        *range((rgb.height - 1) * rgb.width, rgb.height * rgb.width),
+        *(y * rgb.width for y in range(rgb.height)),
+        *(y * rgb.width + rgb.width - 1 for y in range(rgb.height)),
+    ]
+    for index in border_indices:
+        if near_white_mask[index] and not visited[index]:
+            visited[index] = 1
+            queue.append(index)
+    background_candidates: list[tuple[int, int]] = []
+    while queue:
+        index = queue.popleft()
+        x, y = index % rgb.width, index // rgb.width
+        if pixels[x, y] != (255, 255, 255):
+            background_candidates.append((x, y))
+        if x > 0:
+            neighbour = index - 1
+            if near_white_mask[neighbour] and not visited[neighbour]:
+                visited[neighbour] = 1
+                queue.append(neighbour)
+        if x + 1 < rgb.width:
+            neighbour = index + 1
+            if near_white_mask[neighbour] and not visited[neighbour]:
+                visited[neighbour] = 1
+                queue.append(neighbour)
+        if y > 0:
+            neighbour = index - rgb.width
+            if near_white_mask[neighbour] and not visited[neighbour]:
+                visited[neighbour] = 1
+                queue.append(neighbour)
+        if y + 1 < rgb.height:
+            neighbour = index + rgb.width
+            if near_white_mask[neighbour] and not visited[neighbour]:
+                visited[neighbour] = 1
+                queue.append(neighbour)
+
+    total_pixels = max(1, rgb.width * rgb.height)
+    halo_ratio = len(halo_candidates) / total_pixels
+    halo_cleanup_allowed = halo_ratio <= AI_BACKGROUND_HALO_MAX_IMAGE_RATIO
+    if not halo_cleanup_allowed and not background_candidates:
+        return {
+            "status": "skipped",
+            "reason": "local_halo_region_too_large",
+            "figure_type": figure_type,
+            "halo_candidate_pixels": len(halo_candidates),
+            "halo_candidate_ratio": round(halo_ratio, 6),
+            "maximum_ratio": AI_BACKGROUND_HALO_MAX_IMAGE_RATIO,
+        }
+    candidates = [
+        *background_candidates,
+        *(halo_candidates if halo_cleanup_allowed else []),
+    ]
+    if not candidates:
+        return {
+            "status": "not_needed",
+            "figure_type": figure_type,
+            "removed_pixels": 0,
+            "removed_ratio": 0.0,
+        }
+
+    for x, y in candidates:
+        pixels[x, y] = (255, 255, 255)
+
+    suffix = image_path.suffix.lower()
+    image_format = {".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP"}.get(
+        suffix, "PNG"
+    )
+    temporary = image_path.with_name(
+        f"{image_path.stem}.background-cleaned{image_path.suffix}"
+    )
+    save_options: dict[str, Any] = {"optimize": True}
+    if image_format == "JPEG":
+        save_options = {"quality": 100, "subsampling": 0, "optimize": True}
+    elif image_format == "WEBP":
+        save_options = {"quality": 100, "method": 6}
+    rgb.save(temporary, format=image_format, **save_options)
+    temporary.replace(image_path)
+    return {
+        "status": "cleaned",
+        "figure_type": figure_type,
+        "image_size": [rgb.width, rgb.height],
+        "removed_pixels": len(candidates),
+        "removed_ratio": round(len(candidates) / total_pixels, 6),
+        "background_pixels_normalized": len(background_candidates),
+        "local_halo_pixels_removed": len(halo_candidates)
+        if halo_cleanup_allowed
+        else 0,
+        "local_halo_candidate_ratio": round(halo_ratio, 6),
+        "local_halo_cleanup_skipped": not halo_cleanup_allowed,
+        "neutral_channel_spread_max": AI_BACKGROUND_HALO_MAX_CHANNEL_SPREAD,
+        "luminance_floor": AI_BACKGROUND_HALO_LUMINANCE_FLOOR,
+        "canvas_luminance_floor": AI_BACKGROUND_CANVAS_LUMINANCE_FLOOR,
+    }
+
+
 def edit_profile_for_figure_type(figure_type: str, render_mode: str) -> str:
     """Derive the edit profile from the final classification, ignoring stale caller flags."""
     if figure_type == FIGURE_TYPE_MECHANISM and render_mode == "ai-edit":
@@ -1327,6 +1487,8 @@ def build_prompt(
         "Apply one consistent publication style to the supplied figure: crisp medium-weight black line art, "
         "pure white background, even contrast, clean antialiasing, consistent line caps and arrowheads, and no "
         "decorative gradients, shadows, textures, or grayscale fills. "
+        "Leave no pale gray pixel halos, ghost outlines, compression speckles, or dirty off-white residue around "
+        "letters, numbers, chemical bonds, rings, charges, arrows, or colored scientific labels. "
         "Do not introduce cyan, teal, green, orange, or any other filled colour regions: molecule-ring interiors "
         "and non-semantic substituent-marker circles must remain white and hollow, with only their source outlines "
         "and symbols retained. "
@@ -2757,6 +2919,11 @@ def run(args: argparse.Namespace) -> int:
                         "source_size": list(aspect_framing.get("source_size") or []),
                         "reason": "Standard ai-edit outputs retain the complete provider canvas without cropping or stretching.",
                     }
+                if effective_render_mode not in SOURCE_FAITHFUL_RENDER_MODES:
+                    redraw_row["background_cleanup"] = clean_ai_chemistry_background(
+                        out_path,
+                        figure_type,
+                    )
                 if effective_edit_profile == MECHANISM_ARROW_STRAIGHTEN_PROFILE:
                     source_fidelity = mechanism_source_fidelity_check(copied_source, out_path)
                     attempt_failures = list(source_fidelity["failures"])

@@ -63,11 +63,22 @@ class BibliographySourceSelectionTests(unittest.TestCase):
                 }
             )
         )
+        self.assertTrue(
+            _bibliography_needs_bounded_agent(
+                {
+                    "status": "not_found",
+                    "manual_review_status": "resolved",
+                    "resolved_by": "automatic",
+                    "automatic_resolution_missing_fields": ["authors"],
+                }
+            )
+        )
         self.assertFalse(
             _bibliography_needs_bounded_agent(
                 {
                     "status": "not_found",
                     "manual_review_status": "resolved",
+                    "resolved_by": "human",
                     "automatic_resolution_missing_fields": ["authors"],
                 }
             )
@@ -302,7 +313,16 @@ class _WorkflowRunner:
                 json.dumps(
                     {
                         "template": {"name": "Mechanism overview"},
-                        "features": {"metal_categories": ["Cu", "Fe"]},
+                        "features": {
+                            "metal_categories": ["Cu", "Fe"],
+                            "overview_content_contract": {
+                                "primary_axis": "substrate",
+                                "modules": ["Alcohol substrates", "Terminal alkynes"],
+                                "evidence_bindings": {
+                                    "Alcohol substrates": {"section_id": "S02"}
+                                },
+                            },
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -984,7 +1004,11 @@ class NativeWorkflowHandlerTests(unittest.TestCase):
             self.assertNotIn(
                 "Mechanism overview", overview["editable_text"]["subtitle"]
             )
-            self.assertEqual([], overview["editable_text"]["labels"])
+            self.assertEqual(
+                ["Alcohol substrates", "Terminal alkynes"],
+                overview["editable_text"]["labels"],
+            )
+            self.assertEqual("substrate", overview["editable_text"]["primary_axis"])
             self.assertTrue(Path(exported["output_path"]).is_file())
             expected = {
                 "draft.evaluate",

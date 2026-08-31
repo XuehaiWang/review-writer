@@ -848,7 +848,7 @@ class DiscoveryV1Tests(unittest.TestCase):
             reloaded["results"][1]["local_results"][1]["role"],
         )
 
-    def test_confirmed_project_tags_are_project_scoped_and_enter_matrix(self) -> None:
+    def test_legacy_discovery_tags_are_stripped_before_matrix(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client)
             current = client.get(
@@ -864,11 +864,9 @@ class DiscoveryV1Tests(unittest.TestCase):
                         "reaction_type": ["project-specific allenation"],
                     }
                     row["tag_review_status"] = "confirmed"
-                    # These fields are immutable evidence and must not be
-                    # replaceable through the review endpoint.
                     row["base_tags"] = {"reaction_type": "tampered"}
-                    row["project_tag_assessment"]["suggested_tags"] = {
-                        "reaction_type": ["tampered suggestion"]
+                    row["project_tag_assessment"] = {
+                        "suggested_tags": {"reaction_type": ["tampered suggestion"]}
                     }
             saved_response = client.put(
                 f"/api/v1/projects/{self.project_id}/discovery",
@@ -894,27 +892,26 @@ class DiscoveryV1Tests(unittest.TestCase):
             for row in group["local_results"]
             if row["paper_id"] == "P001"
         ]
-        self.assertEqual(1, saved["statistics"]["tag_reviewed_candidate_count"])
-        self.assertTrue(all(row["tag_review_status"] == "confirmed" for row in p001_hits))
-        self.assertTrue(
-            all(row["base_tags"]["reaction_type"] == "allenation" for row in p001_hits)
-        )
-        self.assertTrue(
-            all(
-                row["project_tag_assessment"]["suggested_tags"]["reaction_type"]
-                == ["allenation"]
-                for row in p001_hits
-            )
-        )
+        legacy_fields = {
+            "base_tags",
+            "base_tags_verified",
+            "project_tag_assessment",
+            "confirmed_project_tags",
+            "tag_review_status",
+        }
+        self.assertTrue(all(legacy_fields.isdisjoint(row) for row in p001_hits))
         matrix_row = confirmed["matrix"]["rows"][0]
-        self.assertEqual("confirmed", matrix_row["project_tag_review_status"])
-        self.assertEqual(
-            ["project-specific allenation"],
-            matrix_row["project_tags"]["reaction_type"],
+        self.assertTrue(
+            {
+                "base_tags",
+                "base_tags_verified",
+                "project_tags",
+                "project_tag_review_status",
+                "human_confirmed_tags",
+            }.isdisjoint(matrix_row)
         )
-        self.assertEqual("allenation", matrix_row["base_tags"]["reaction_type"])
 
-    def test_legacy_project_tag_suggestions_remain_provisional_in_matrix(self) -> None:
+    def test_discovery_confirmation_does_not_create_project_tags(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client)
             selected = client.put(
@@ -928,10 +925,10 @@ class DiscoveryV1Tests(unittest.TestCase):
                 headers=self.headers(),
             ).json()
         matrix_row = confirmed["matrix"]["rows"][0]
-        self.assertEqual("retrieval_hint_only", matrix_row["project_tag_review_status"])
-        self.assertEqual({}, matrix_row["project_tags"])
+        self.assertNotIn("project_tag_review_status", matrix_row)
+        self.assertNotIn("project_tags", matrix_row)
 
-    def test_stage_two_screening_tags_cannot_organize_matrix(self) -> None:
+    def test_stage_two_defers_formal_classification_to_matrix(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client, topic="Screened tags")
             selected = client.put(
@@ -945,10 +942,10 @@ class DiscoveryV1Tests(unittest.TestCase):
                 headers=self.headers(),
             ).json()
         matrix_row = confirmed["matrix"]["rows"][0]
-        self.assertEqual("retrieval_hint_only", matrix_row["project_tag_review_status"])
-        self.assertEqual([], matrix_row["provisional_screening_tags"])
-        self.assertEqual({}, matrix_row["project_tags"])
-        self.assertEqual("deferred_to_matrix", matrix_row["screening_classification_status"])
+        self.assertNotIn("project_tag_review_status", matrix_row)
+        self.assertNotIn("provisional_screening_tags", matrix_row)
+        self.assertNotIn("project_tags", matrix_row)
+        self.assertNotIn("screening_classification_status", matrix_row)
         self.assertEqual("matrix_after_selection", matrix_row["classification_stage"])
 
     def test_unverified_library_tags_do_not_enter_matrix(self) -> None:
@@ -976,9 +973,9 @@ class DiscoveryV1Tests(unittest.TestCase):
             ).json()
 
         matrix_row = confirmed["matrix"]["rows"][0]
-        self.assertFalse(matrix_row["base_tags_verified"])
-        self.assertEqual({}, matrix_row["base_tags"])
-        self.assertEqual("retrieval_hint_only", matrix_row["project_tag_review_status"])
+        self.assertNotIn("base_tags_verified", matrix_row)
+        self.assertNotIn("base_tags", matrix_row)
+        self.assertNotIn("project_tag_review_status", matrix_row)
 
     def test_failed_atomic_save_keeps_previous_discovery_pointer_and_revision(self) -> None:
         repository = self.app.state.workflow_repository

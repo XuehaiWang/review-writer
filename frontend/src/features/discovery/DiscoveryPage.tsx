@@ -14,36 +14,6 @@ import { buildPaperDisplayLabels } from "../../utils/paperLabels";
 import { DiscoveryJobProgress } from "./DiscoveryJobProgress";
 import { buildMatrixRecommendation } from "./matrixRecommendation";
 
-type ProjectTagMap = Record<string, string[]>;
-
-type ProjectTagEvidence = {
-  keyword?: string;
-  query_category?: string;
-  matched_fields?: string[];
-  score?: number;
-  reason?: string;
-};
-
-type ProjectTagAssessment = {
-  suggested_tags?: ProjectTagMap;
-  unclassified_terms?: string[];
-  relevance_score?: number;
-  generated_by?: string;
-  topic_fingerprint?: string;
-  evidence?: ProjectTagEvidence[];
-  provisional_screening_tags?: Array<{
-    axis_id?: string;
-    axis_label?: string;
-    partition_id?: string;
-    partition_label?: string;
-    relation_to_paper?: string;
-    confidence?: number;
-    support_excerpt?: string;
-    evidence_key?: string;
-  }>;
-  classification_status?: "evidence_backed_screening" | "screening_evidence_supported" | "pending_evidence" | "deferred_to_matrix" | "out_of_scope";
-};
-
 type DiscoveryRow = Record<string, unknown> & {
   paper_id?: string;
   candidate_id?: string;
@@ -67,11 +37,6 @@ type DiscoveryRow = Record<string, unknown> & {
   classification_status?: "evidence_backed_screening" | "screening_evidence_supported" | "pending_evidence" | "deferred_to_matrix" | "out_of_scope";
   semantic_index_status?: string;
   screening_chunks?: Array<{ chunk_id?: string; page_start?: number; section_path?: string[]; excerpt?: string; channel?: string }>;
-  base_tags?: Record<string, string>;
-  base_tags_verified?: boolean;
-  project_tag_assessment?: ProjectTagAssessment;
-  confirmed_project_tags?: ProjectTagMap;
-  tag_review_status?: "pending" | "confirmed";
 };
 
 type DiscoveryGroup = {
@@ -115,8 +80,6 @@ type DiscoveryPayload = {
     external_candidate_count?: number;
     category_count?: number;
     unclassified_keyword_group_count?: number;
-    tag_reviewed_candidate_count?: number;
-    tag_reviewed_selected_count?: number;
   };
   coverage_mode?: "local_bounded" | "multi_source";
   coverage_decision?: "keep_local";
@@ -165,19 +128,6 @@ type DiscoveryJobState = {
 
 type CandidateFilter = "all" | "recommended" | "review" | "selected" | "metadata_rules" | "fulltext_lexical" | "semantic" | "online";
 
-const CATEGORY_ORDER = [
-  "product",
-  "substrate",
-  "catalyst_or_method",
-  "organometallic_partner",
-  "ligand_or_chiral_source",
-  "leaving_group",
-  "reaction_type",
-  "document_scope",
-  "evidence_pending",
-  "unclassified",
-];
-
 function publicPlannerNotice(
   plan: DiscoveryPayload["query_plan"],
   text: (zh: string, en: string) => string,
@@ -197,25 +147,7 @@ function publicPlannerNotice(
   );
 }
 
-const CATEGORY_LABELS: Record<string, [string, string]> = {
-  product: ["产物", "Product"],
-  substrate: ["底物", "Substrate"],
-  catalyst_or_method: ["催化剂与方法", "Catalyst / method"],
-  organometallic_partner: ["有机金属试剂", "Organometallic partner"],
-  ligand_or_chiral_source: ["配体与手性来源", "Ligand / chiral source"],
-  leaving_group: ["离去基团", "Leaving group"],
-  reaction_type: ["反应类型", "Reaction type"],
-  document_scope: ["文献范围", "Document scope"],
-  evidence_pending: ["混合召回候选", "Hybrid-retrieved candidates"],
-  unclassified: ["待分类主题", "Unclassified theme"],
-};
-
 type TextSelector = (zh: string, en: string) => string;
-
-function categoryLabel(category: string, text: TextSelector): string {
-  const labels = CATEGORY_LABELS[category] || [category, category];
-  return text(labels[0], labels[1]);
-}
 
 function groupLabel(group: DiscoveryGroup | undefined, text: TextSelector): string {
   if (group?.system_group === "__topic_candidates_pending_evidence__") {
@@ -237,14 +169,6 @@ function queryGroupSourceLabel(group: DiscoveryGroup, text: TextSelector): strin
   if (channels.has("semantic")) labels.push(text("语义", "Semantic"));
   if ((group.web_results || []).length) labels.push(text("联网", "Online"));
   return labels.join(" · ") || text("查询规划组", "Planned query group");
-}
-
-function normalizedTagMap(value: ProjectTagMap | undefined): ProjectTagMap {
-  return Object.fromEntries(
-    Object.entries(value || {})
-      .filter(([category, tags]) => CATEGORY_ORDER.includes(category) && category !== "unclassified" && Array.isArray(tags))
-      .map(([category, tags]) => [category, tags.map((tag) => String(tag).trim()).filter(Boolean)]),
-  );
 }
 
 function selectedForMatrix(row: DiscoveryRow): boolean {
@@ -309,8 +233,6 @@ function PaperDetail({ row, kind, displayLabel }: { row: DiscoveryRow | null; ki
       </div>
     );
   }
-  const assessment = row.project_tag_assessment || {};
-  const suggestedTags = normalizedTagMap(assessment.suggested_tags);
   return (
     <div className="discovery-detail">
       <div className="detail-summary"><span className="step-label" title={paperId}>{displayLabel || paperId}</span><h2>{row.title}</h2><p>{row.authors?.join(", ")}</p></div>
@@ -318,23 +240,6 @@ function PaperDetail({ row, kind, displayLabel }: { row: DiscoveryRow | null; ki
         <div className="screening-summary"><span>{text("推荐状态", "Recommendation")}：{row.recommendation_status || "review"}</span><span>{text("召回通道", "Retrieval channels")}：{row.retrieval_channels?.join(" · ") || text("题录与规则", "Metadata and rules")}</span><span>{text("正式分类", "Formal classification")}：{text("进入 Matrix 后生成", "Generated after Matrix entry")}</span></div>
         {row.screening_chunks?.length ? <details><summary>{text(`查看 ${row.screening_chunks.length} 条筛选片段`, `View ${row.screening_chunks.length} screening excerpts`)}</summary>{row.screening_chunks.map((chunk) => <article key={String(chunk.chunk_id)}><strong>{[chunk.channel, chunk.page_start ? `p.${chunk.page_start}` : "", ...(chunk.section_path || [])].filter(Boolean).join(" · ")}</strong><p>{chunk.excerpt}</p></article>)}</details> : null}
         <p className="message message-info">{text("第二阶段只负责召回、排序和选择。命中片段与分区查询只作为检索线索；论文确认进入 Matrix 后，系统才会依据可定位的科学事实完成正式分类。", "Stage 02 only retrieves, ranks, and selects papers. Hit excerpts and partition queries remain retrieval hints; formal classification is produced from source-addressable scientific facts after Matrix entry.")}</p>
-      </section>
-      <section className="project-tag-review">
-        <div className="project-tag-review-head">
-          <div><span className="step-label">{text("检索命中说明", "Retrieval match details")}</span><h3>{text("已验证基础 Tag 与本次召回线索", "Verified base Tags and current retrieval hints")}</h3></div>
-        </div>
-        <p className="muted">{row.base_tags_verified
-          ? text("系统仅复用经过人工确认的 Library 基础 Tag；当前项目建议只是检索命中线索，不参与正式分区。", "Only human-verified Library base Tags are reused. Current project suggestions are retrieval hints and do not assign formal partitions.")
-          : text("这篇论文的历史 Library Tag 未经人工确认，已从正式分类中忽略；Matrix 会依据本次提取的科学事实重新判断。", "Unverified historical Library Tags are ignored for formal classification. The Matrix re-evaluates the paper from newly extracted scientific facts.")}</p>
-        <div className="project-tag-grid">
-          {CATEGORY_ORDER.filter((category) => category !== "unclassified").map((category) => {
-            const baseValue = String(row.base_tags?.[category] || "").trim();
-            const suggestions = suggestedTags[category] || [];
-            return <div className="project-tag-row" key={category}><div className="project-tag-label"><strong>{categoryLabel(category, text)}</strong><small>{category}</small></div><div className="base-tag-value"><span>{text("基础", "Base")}</span><p>{baseValue && baseValue !== "not specified" ? baseValue : text("未指定", "Not specified")}</p></div><div className="suggested-tag-value"><span>{text("检索命中线索", "Retrieval hint")}</span><p>{suggestions.length ? suggestions.join(" · ") : "—"}</p></div></div>;
-          })}
-        </div>
-        {assessment.unclassified_terms?.length ? <div className="unclassified-tag-note"><strong>{text("未归类检索词：", "Unclassified query terms:")}</strong> {assessment.unclassified_terms.join(" · ")}</div> : null}
-        {assessment.evidence?.length ? <details className="tag-evidence"><summary>{text(`查看 ${assessment.evidence.length} 条匹配证据`, `View ${assessment.evidence.length} matching signals`)}</summary><div>{assessment.evidence.map((item, index) => <article key={`${item.keyword || "evidence"}-${index}`}><strong>{item.keyword || text("未命名关键词", "Unnamed keyword")}</strong><span>{[item.query_category, ...(item.matched_fields || [])].filter(Boolean).join(" → ")}</span><small>{typeof item.score === "number" ? `${Math.round(item.score * 100)}% · ` : ""}{item.reason}</small></article>)}</div></details> : null}
       </section>
       <details open><summary>{text("元数据", "Metadata")}</summary><pre>{metadata.isPending ? text("正在加载…", "Loading…") : JSON.stringify(metadata.data, null, 2)}</pre></details>
       <details><summary>Markdown</summary><pre className="markdown-preview compact-preview">{markdown.isPending ? text("正在加载…", "Loading…") : markdown.data}</pre></details>

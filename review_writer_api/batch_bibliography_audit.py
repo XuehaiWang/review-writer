@@ -101,7 +101,7 @@ def main() -> int:
                         "markdown_relative_path": record.markdown_relative_path,
                         "previous_audit": record.bibliography_audit,
                         "network_mode": (
-                            "force" if arguments.force_network else "fallback"
+                            "force" if arguments.force_network else "disabled"
                         ),
                         "task_kind": "bibliography_verification",
                         "adds_candidate_papers": False,

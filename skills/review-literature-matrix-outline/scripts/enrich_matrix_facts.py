@@ -31,6 +31,17 @@ from review_writer_core.classification_axes import (  # noqa: E402
     axis_requires_formal_route,
     normalize_classification_axes_semantics,
 )
+from review_writer_core.evidence_integrity import (  # noqa: E402
+    normalized_source_excerpt_text,
+    source_contains_excerpt,
+    normalized_scalar_value,
+    source_span_view,
+    unsupported_realization_anchors,
+)
+from review_writer_core.evidence_queries import COMPARISON_FIELD_IDS  # noqa: E402
+from review_writer_core.review_fact_readiness import (  # noqa: E402
+    DEFAULT_REVIEW_FACT_ROLES,
+)
 
 
 EPISTEMIC_STATUSES = {
@@ -52,6 +63,22 @@ CLASSIFICATION_RELATIONS = {
     "comparison_context",
     "background_mention",
     "uncertain",
+}
+FACT_SCHEMA_VERSION = "scientific-fact/2"
+FACT_PROMPT_VERSION = "fact-extraction/3"
+FACT_TYPES_BY_FIELD = {
+    "object_input": "reported_object_or_input",
+    "method_conditions": "condition",
+    "quantitative_results": "reported_result",
+    "scope": "scope",
+    "mechanism": "mechanism_evidence",
+    "limitations": "limitation",
+    "validation_evidence": "validation_evidence",
+    "scale_reproducibility": "scale_or_reproducibility",
+    "intervention_role": "component_role",
+    "safety_cost_sustainability": "safety_cost_or_sustainability",
+    "specialized_metrics": "reported_result",
+    "topic_partition": "classification",
 }
 
 
@@ -79,10 +106,61 @@ def compact(value: Any, limit: int) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
 
 
+_CHEMICAL_LOCANT_NAME = re.compile(
+    r"\b(?:[A-Za-z][A-Za-z0-9]*|\d+(?:,\d+)+)"
+    r"(?:-(?:\d+(?:,\d+)*|[A-Za-z][A-Za-z0-9]*))+\b"
+)
+
+
+def normalized_evidence_text(value: Any, limit: int) -> str:
+    """Compatibility wrapper around the shared publication validator."""
+
+    return normalized_source_excerpt_text(value)[:limit]
+
+
 def normalized_contains(content: str, excerpt: str) -> bool:
-    source = compact(content, 100_000).casefold()
-    target = compact(excerpt, 2_000).casefold()
-    return bool(target and target in source)
+    return source_contains_excerpt(content, excerpt)
+
+
+def all_fact_candidates(paper: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return every source candidate that the extraction prompt exposes."""
+
+    candidates: dict[str, dict[str, Any]] = {}
+    # Put partition candidates first so a duplicate primary fact candidate can
+    # replace it with its more specific question_ids below.
+    for item in [
+        *(paper.get("partition_evidence_candidates") or []),
+        *(paper.get("evidence_candidates") or []),
+    ]:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("evidence_key") or "")
+        if key:
+            candidates[key] = item
+    return candidates
+
+
+def normalize_failed_fields(
+    values: Any,
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Accept provider string/object variants while keeping stable field IDs."""
+
+    fields: list[str] = []
+    details: list[dict[str, str]] = []
+    for item in values or []:
+        if isinstance(item, dict):
+            field_id = compact(item.get("field_id"), 80).casefold()
+            reason = compact(item.get("reason"), 600)
+        else:
+            field_id = compact(item, 80).casefold()
+            reason = ""
+        if not field_id or not re.fullmatch(r"[a-z0-9_:-]+", field_id):
+            continue
+        if field_id not in fields:
+            fields.append(field_id)
+        if reason and not any(row.get("field_id") == field_id for row in details):
+            details.append({"field_id": field_id, "reason": reason})
+    return fields, details
 
 
 def prompt_for_paper(
@@ -91,10 +169,20 @@ def prompt_for_paper(
     topic_partitions: list[str] | None = None,
     classification_axes: list[dict[str, Any]] | None = None,
 ) -> str:
+    required_roles = list(
+        dict.fromkeys(
+            compact(value, 80).casefold()
+            for value in (
+                paper.get("required_fact_roles") or DEFAULT_REVIEW_FACT_ROLES
+            )
+            if compact(value, 80).casefold() in COMPARISON_FIELD_IDS
+        )
+    )
     candidates = [
         {
             "evidence_key": item.get("evidence_key"),
             "question_ids": item.get("question_ids"),
+            "allowed_fact_roles": required_roles,
             "content_type": item.get("content_type"),
             "page_start": item.get("page_start"),
             "page_end": item.get("page_end"),
@@ -107,6 +195,7 @@ def prompt_for_paper(
     partition_candidates = [
         {
             "evidence_key": item.get("evidence_key"),
+            "allowed_fact_roles": required_roles,
             "content_type": item.get("content_type"),
             "page_start": item.get("page_start"),
             "page_end": item.get("page_end"),
@@ -208,25 +297,53 @@ For every axis with no supported assignment, add one item to `classification_out
         if axes
         else "\nReturn empty `topic_classification_assignments` and `classification_outcomes` lists.\n"
     )
+    reused_facts = [
+        {
+            "fact_id": fact.get("fact_id"),
+            "field_id": fact.get("field_id"),
+            "value": compact(fact.get("value"), 800),
+            "evidence_refs": fact.get("evidence_refs") or [],
+        }
+        for fact in (paper.get("reused_fact_cache") or {}).get("facts") or []
+        if isinstance(fact, dict)
+    ]
     return f"""Extract reusable scientific fact cards for one paper in a narrative review.
 
 Review topic: {topic}
 Paper ID: {paper.get('paper_id')}
 Paper title: {paper.get('title')}
+Required fact roles for this review: {json.dumps(required_roles, ensure_ascii=False)}
 
 Return one JSON object with keys `facts` and `failed_fields`. Each fact must have:
-- field_id: exactly one question_id offered by its selected evidence;
+- field_id: exactly one question_id offered by its selected evidence, or one
+  allowed_fact_role when a partition evidence candidate is used;
 - value: a concise factual normalization, not a vague paper summary;
 - support_excerpt: an exact contiguous quotation copied from the selected content;
 - evidence_key: exactly one supplied evidence_key;
 - epistemic_status: direct_source_report, source_author_interpretation, or abstract_level_report;
 - confidence: number from 0 to 1;
 - evidence_ceiling: a short statement of what must not be inferred.
+- fact_type: a concise discipline-neutral type such as reported_result, condition,
+  scope, limitation, mechanism_evidence, validation_evidence, component_role, or
+  author_interpretation;
+- subject and predicate: concise parts of the reported proposition. Do not add a
+  subject, role, or causal predicate that is absent from the quotation;
+- qualifiers: a JSON object containing only explicit scope or condition qualifiers
+  copied or conservatively normalized from the same quotation.
 
 Use only supplied evidence. Do not combine separate passages into one fact. Do not infer a
 mechanism from outcomes, convert absence into a limitation, or turn an abstract into detailed
 conditions or numerical claims. If a field is unsupported, list it in failed_fields and omit the
 fact. Prefer at most one strong fact per field and at most nine facts total.
+Extract the required fact roles first, before optional roles. A partition evidence candidate may
+also support a required fact role when its quoted content directly states that fact. Return
+failed_fields either as field-id strings or as objects with `field_id` and `reason`; never serialize
+an object into a string.
+The following facts were already hard-validated for the same user's identical source
+lineage and schema. Do not re-extract these field/value pairs unless a supplied current
+candidate provides a stronger, directly conflicting value. They are computation cache,
+not project truth, and will be revalidated by the host before Matrix publication:
+{json.dumps(reused_facts, ensure_ascii=False)}
 {profile_guidance}
 {partition_guidance}
 {axis_guidance}
@@ -573,11 +690,74 @@ def program_assertion_ceiling(source: dict[str, Any], epistemic_status: str) -> 
 def numerical_tokens_supported(value: str, excerpt: str) -> bool:
     """Prevent normalized facts from introducing numbers absent from their quote."""
 
-    numbers = re.findall(r"(?<![A-Za-z])[-+]?\d+(?:\.\d+)?(?:\s*%)?", value)
+    # Chemical nomenclature locants (buta-2,3-dien-1-ol and
+    # 1,3-disubstituted) are identifiers rather than quantitative claims. They
+    # must not make a supported yield/temperature fact fail merely because the
+    # excerpt says "the product". Compound labels are intentionally not
+    # stripped because strings such as 25C may be real reported conditions.
+    numeric_text = _CHEMICAL_LOCANT_NAME.sub(" ", str(value or ""))
+    numbers = re.findall(
+        r"(?<![A-Za-z])[-+]?\d+(?:\.\d+)?(?:\s*%)?", numeric_text
+    )
     if not numbers:
         return True
-    normalized_excerpt = re.sub(r"\s+", "", excerpt).casefold()
-    return all(re.sub(r"\s+", "", number).casefold() in normalized_excerpt for number in numbers)
+    normalized_excerpt = re.sub(
+        r"\s+", "", normalized_evidence_text(excerpt, 100_000)
+    )
+    return all(
+        re.sub(r"\s+", "", number).casefold() in normalized_excerpt
+        for number in numbers
+    )
+
+
+def validated_fact_semantics(
+    raw: dict[str, Any],
+    *,
+    field_id: str,
+    excerpt: str,
+    value: str,
+) -> dict[str, Any]:
+    """Keep only schema-v2 extensions that do not add unsupported anchors."""
+
+    fact_type = compact(raw.get("fact_type"), 80).casefold()
+    if not fact_type:
+        fact_type = FACT_TYPES_BY_FIELD.get(field_id, "reported_fact")
+    subject = compact(raw.get("subject"), 400)
+    predicate = compact(raw.get("predicate"), 300)
+    for name, candidate in (("subject", subject), ("predicate", predicate)):
+        unsupported = unsupported_realization_anchors(candidate, [excerpt])
+        if unsupported["quantitative"] or unsupported["technical_entities"]:
+            if name == "subject":
+                subject = ""
+            else:
+                predicate = ""
+    qualifiers: dict[str, Any] = {}
+    raw_qualifiers = raw.get("qualifiers")
+    if not isinstance(raw_qualifiers, dict):
+        raw_qualifiers = {}
+    for key, raw_value in raw_qualifiers.items():
+        normalized_key = compact(key, 80)
+        values = raw_value if isinstance(raw_value, list) else [raw_value]
+        accepted = [
+            compact(item, 300)
+            for item in values
+            if compact(item, 300)
+            and normalized_contains(excerpt, compact(item, 300))
+        ]
+        if normalized_key and accepted:
+            qualifiers[normalized_key] = (
+                accepted if isinstance(raw_value, list) else accepted[0]
+            )
+    normalized_value, unit = normalized_scalar_value(value)
+    return {
+        "fact_schema_version": FACT_SCHEMA_VERSION,
+        "fact_type": fact_type,
+        "subject": subject,
+        "predicate": predicate,
+        "normalized_value": normalized_value,
+        "unit": unit,
+        "qualifiers": qualifiers,
+    }
 
 
 def normalize_axis_classification(
@@ -651,8 +831,16 @@ def normalize_axis_classification(
         assertion_ceiling = program_assertion_ceiling(source, "direct_source_report")
         classification_fact = {
             "fact_id": fact_id,
+            "paper_id": str(paper.get("paper_id") or ""),
+            "fact_schema_version": FACT_SCHEMA_VERSION,
             "field_id": "topic_partition",
+            "fact_type": "classification",
+            "subject": compact(paper.get("title"), 400),
+            "predicate": "is classified within the supported review axis as",
             "value": f"{compact(axis.get('label'), 120)}: {compact(partition.get('label'), 120)}",
+            "normalized_value": f"{axis_id}:{partition_id}",
+            "unit": "",
+            "qualifiers": {},
             "support_excerpt": excerpt,
             "epistemic_status": "direct_source_report",
             "confidence": round(confidence, 4),
@@ -675,9 +863,26 @@ def normalize_axis_classification(
                 600,
             ),
             "evidence_refs": [evidence_ref],
+            "source_span": source_span_view(
+                evidence_ref,
+                source=source,
+                paper_id=paper.get("paper_id"),
+                mineru_artifact_id=(paper.get("index_summary") or {}).get(
+                    "mineru_artifact_id"
+                ),
+                source_content_sha256=(paper.get("index_summary") or {}).get(
+                    "content_sha256"
+                ),
+            ),
             "classification_axis_id": axis_id,
             "classification_partition_id": partition_id,
             "extraction_method": "model_classified_from_bounded_source",
+            "extraction": {
+                "mode": "agent_verified",
+                "schema_version": FACT_SCHEMA_VERSION,
+                "prompt_version": FACT_PROMPT_VERSION,
+                "model": compact(paper.get("actual_model_id"), 120),
+            },
         }
         classification_facts.append(classification_fact)
         tags.setdefault(axis_id, []).append(
@@ -761,10 +966,11 @@ def normalize_result(
     topic_partitions: list[str] | None = None,
     classification_axes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    candidates = {
-        str(item.get("evidence_key") or ""): item
-        for item in paper.get("evidence_candidates") or []
-        if isinstance(item, dict) and item.get("evidence_key")
+    candidates = all_fact_candidates(paper)
+    required_roles = {
+        compact(value, 80).casefold()
+        for value in (paper.get("required_fact_roles") or DEFAULT_REVIEW_FACT_ROLES)
+        if compact(value, 80).casefold() in COMPARISON_FIELD_IDS
     }
     facts: list[dict[str, Any]] = []
     used_fields: set[str] = set()
@@ -777,6 +983,11 @@ def normalize_result(
             continue
         field_id = compact(raw.get("field_id"), 80).casefold()
         allowed_fields = {str(item) for item in source.get("question_ids") or []}
+        # Retrieval question_ids explain why a passage was found; they are not
+        # a scientific truth boundary.  If the same bounded quotation directly
+        # supports another required role, accept it after the exact excerpt and
+        # numerical guards below.
+        allowed_fields.update(required_roles)
         if field_id not in allowed_fields or field_id in used_fields:
             continue
         excerpt = compact(raw.get("support_excerpt"), 1600)
@@ -822,6 +1033,13 @@ def normalize_result(
         facts.append(
             {
                 "fact_id": fact_id,
+                "paper_id": str(paper.get("paper_id") or ""),
+                **validated_fact_semantics(
+                    raw,
+                    field_id=field_id,
+                    excerpt=excerpt,
+                    value=value,
+                ),
                 "field_id": field_id,
                 "value": value,
                 "support_excerpt": excerpt,
@@ -851,7 +1069,31 @@ def normalize_result(
                         "source_lineage_hash": source.get("source_lineage_hash"),
                     }
                 ],
+                "source_span": source_span_view(
+                    {
+                        "evidence_key": key,
+                        "chunk_id": source.get("chunk_id"),
+                        "page_start": source.get("page_start"),
+                        "page_end": source.get("page_end"),
+                        "section_path": source.get("section_path") or [],
+                        "source_lineage_hash": source.get("source_lineage_hash"),
+                    },
+                    source=source,
+                    paper_id=paper.get("paper_id"),
+                    mineru_artifact_id=(paper.get("index_summary") or {}).get(
+                        "mineru_artifact_id"
+                    ),
+                    source_content_sha256=(paper.get("index_summary") or {}).get(
+                        "content_sha256"
+                    ),
+                ),
                 "extraction_method": "model_normalized_from_bounded_source",
+                "extraction": {
+                    "mode": "agent_verified",
+                    "schema_version": FACT_SCHEMA_VERSION,
+                    "prompt_version": FACT_PROMPT_VERSION,
+                    "model": compact(paper.get("actual_model_id"), 120),
+                },
             }
         )
         used_fields.add(field_id)
@@ -863,12 +1105,8 @@ def normalize_result(
         )
     )
     facts.extend(classification_facts)
-    failed_fields = list(
-        dict.fromkeys(
-            compact(item, 80).casefold()
-            for item in generated.get("failed_fields") or []
-            if compact(item, 80)
-        )
+    failed_fields, failed_field_details = normalize_failed_fields(
+        generated.get("failed_fields")
     )
     abstract_only = bool(facts) and all(
         fact["epistemic_status"] == "abstract_level_report" for fact in facts
@@ -915,6 +1153,7 @@ def normalize_result(
         "status": status,
         "facts": facts,
         "failed_fields": failed_fields,
+        "failed_field_details": failed_field_details,
         "review_status": review_status,
         "topic_partition_classification": normalize_partition_classification(
             paper,
@@ -929,6 +1168,14 @@ def normalize_result(
             "unresolved_required_axes": unresolved_required_axes,
             "safe_route_policy": "positive_evidence_only_with_automatic_boundary_routing",
             "user_action_required": status == "failed",
+        },
+        "fact_extraction_profile": {
+            "schema_version": FACT_SCHEMA_VERSION,
+            "prompt_version": FACT_PROMPT_VERSION,
+            "mode": "baseline_plus_targeted_recheck",
+            "baseline_roles": sorted(used_fields),
+            "targeted_recheck_attempted": False,
+            "partial_success": bool(facts) and bool(failed_fields),
         },
         "error": "" if facts else "No source-validated fact survived normalization.",
     }
@@ -1014,6 +1261,15 @@ def merge_targeted_recheck(
         "safe_route_policy": "positive_evidence_only_with_automatic_boundary_routing",
         "user_action_required": merged.get("status") == "failed",
     }
+    merged["fact_extraction_profile"] = {
+        **dict(base.get("fact_extraction_profile") or {}),
+        "schema_version": FACT_SCHEMA_VERSION,
+        "prompt_version": FACT_PROMPT_VERSION,
+        "mode": "baseline_plus_targeted_recheck",
+        "targeted_recheck_attempted": True,
+        "targeted_axes": sorted(axis_ids),
+        "resolved_targeted_axes": sorted(resolved_axis_ids),
+    }
     if merged.get("status") != "failed":
         merged["review_status"] = "auto_resolved" if unresolved_after else "not_required"
     return merged
@@ -1072,6 +1328,88 @@ def derive_topic_partition_from_formal_tags(
     return updated
 
 
+def merge_reused_fact_cache(
+    result: dict[str, Any],
+    paper: dict[str, Any],
+    *,
+    provider_failed: bool = False,
+) -> dict[str, Any]:
+    """Revalidate and merge user-isolated cached facts without changing truth pointers."""
+
+    valid_keys = {
+        str(item.get("evidence_key") or "")
+        for item in [
+            *(paper.get("evidence_candidates") or []),
+            *(paper.get("partition_evidence_candidates") or []),
+        ]
+        if isinstance(item, dict) and str(item.get("evidence_key") or "")
+    }
+    reused: list[dict[str, Any]] = []
+    for fact in (paper.get("reused_fact_cache") or {}).get("facts") or []:
+        if not isinstance(fact, dict) or not str(fact.get("fact_id") or ""):
+            continue
+        refs = [ref for ref in fact.get("evidence_refs") or [] if isinstance(ref, dict)]
+        if not refs or any(
+            str(ref.get("evidence_key") or "") not in valid_keys for ref in refs
+        ):
+            continue
+        reused.append(dict(fact))
+    if not reused:
+        return result
+    merged = dict(result)
+    facts_by_id = {
+        str(fact.get("fact_id") or ""): dict(fact)
+        for fact in reused
+        if str(fact.get("fact_id") or "")
+    }
+    for fact in result.get("facts") or []:
+        if isinstance(fact, dict) and str(fact.get("fact_id") or ""):
+            facts_by_id[str(fact["fact_id"])] = dict(fact)
+    merged["facts"] = list(facts_by_id.values())
+    if str(merged.get("status") or "") == "failed":
+        merged["status"] = "partial"
+        merged["review_status"] = "auto_resolved"
+    profile = dict(merged.get("fact_extraction_profile") or {})
+    profile.update(
+        {
+            "schema_version": FACT_SCHEMA_VERSION,
+            "prompt_version": FACT_PROMPT_VERSION,
+            "mode": "baseline_plus_targeted_recheck",
+            "cache_reused": True,
+            "cache_reused_fact_count": len(reused),
+            "cache_source_project_id": str(
+                (paper.get("reused_fact_cache") or {}).get("source_project_id")
+                or ""
+            ),
+            "provider_supplement_failed": bool(provider_failed),
+        }
+    )
+    merged["fact_extraction_profile"] = profile
+    if provider_failed:
+        merged["error"] = compact(
+            "The provider supplement failed; validated same-user cached facts were retained. "
+            + str(merged.get("error") or ""),
+            1000,
+        )
+    return merged
+
+
+def cache_covers_current_fields(paper: dict[str, Any]) -> bool:
+    offered = {
+        str(field_id)
+        for item in paper.get("evidence_candidates") or []
+        if isinstance(item, dict)
+        for field_id in item.get("question_ids") or []
+        if str(field_id) and str(field_id) != "abstract_summary"
+    }
+    cached = {
+        str(fact.get("field_id") or "")
+        for fact in (paper.get("reused_fact_cache") or {}).get("facts") or []
+        if isinstance(fact, dict) and str(fact.get("field_id") or "")
+    }
+    return bool(offered) and offered.issubset(cached)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
@@ -1086,6 +1424,8 @@ def main() -> int:
     checkpoint = read_json(checkpoint_path) if checkpoint_path.exists() else {}
     entries = dict(checkpoint.get("entries") or {}) if isinstance(checkpoint, dict) else {}
     papers = [item for item in source.get("papers") or [] if isinstance(item, dict)]
+    for paper in papers:
+        paper.setdefault("actual_model_id", source.get("actual_model_id"))
     topic_partitions = [
         compact(item, 100)
         for item in source.get("topic_partitions") or []
@@ -1143,6 +1483,43 @@ def main() -> int:
             previous_is_current
         ):
             result = dict(previous["result"])
+        elif (
+            cache_covers_current_fields(paper)
+            and not topic_partitions
+            and not classification_axes
+            and not routing_axis_id
+        ):
+            result = merge_reused_fact_cache(
+                {
+                    "paper_id": paper_id,
+                    "status": "complete",
+                    "facts": [],
+                    "failed_fields": [],
+                    "review_status": "not_required",
+                    "topic_partition_classification": {
+                        "schema_version": 1,
+                        "status": "not_requested",
+                        "partition": "",
+                        "confidence": 0.0,
+                        "evidence_refs": [],
+                    },
+                    "evidence_backed_tags": {},
+                    "classification_outcomes": [],
+                    "automatic_resolution": {
+                        "status": "not_needed",
+                        "targeted_recheck_attempted": False,
+                        "unresolved_required_axes": [],
+                        "user_action_required": False,
+                    },
+                    "fact_extraction_profile": {
+                        "schema_version": FACT_SCHEMA_VERSION,
+                        "prompt_version": FACT_PROMPT_VERSION,
+                        "mode": "baseline_plus_targeted_recheck",
+                    },
+                    "error": "",
+                },
+                paper,
+            )
         elif not paper.get("evidence_candidates") and not paper.get(
             "partition_evidence_candidates"
         ):
@@ -1192,6 +1569,7 @@ def main() -> int:
                     topic_partitions,
                     classification_axes,
                 )
+                result = merge_reused_fact_cache(result, paper)
                 unresolved_axes = unresolved_axes_for_targeted_recheck(
                     result, classification_axes
                 )
@@ -1379,6 +1757,9 @@ def main() -> int:
                     ],
                     "error": compact(exc, 1000),
                 }
+                result = merge_reused_fact_cache(
+                    result, paper, provider_failed=True
+                )
         if routing_axis_id and "routing_recommendation" not in result:
             result["routing_recommendation"] = {
                 "schema_version": 1,

@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from review_writer_api.domain_services.drafts import (
     DRAFT_DOCUMENT,
     DRAFT_QUALITY,
+    SECTION_EVIDENCE,
     DraftsService,
 )
 from review_writer_api.errors import WorkflowConflict
@@ -22,6 +23,10 @@ class DraftsV1Tests(NativeFigureApiTestCase):
         self.noop_rewrite = False
         self.hard_gate_failures: list[str] = []
         self.accept_rewrite_model_calls = 0
+        self.rewrite_source_evidence_refs: list[str] = []
+        self.rewrite_source_check_entry: dict = {}
+        self.rewrite_unsupported_claims_before: list[str] = []
+        self.rewrite_unsupported_claims_after: list[str] = []
         super().setUp()
 
     def extra_native_workflow_overrides(self) -> dict:
@@ -75,6 +80,10 @@ class DraftsV1Tests(NativeFigureApiTestCase):
                         "score": 60.0,
                         "severity": "major",
                         "route": "section_rewrite",
+                        "source_check_status": "partially_supported",
+                        "unsupported_claims": list(
+                            self.rewrite_unsupported_claims_before
+                        ),
                     },
                 },
                 "candidate_evaluation": {
@@ -89,8 +98,12 @@ class DraftsV1Tests(NativeFigureApiTestCase):
                         "failed_dimensions": [],
                         "diagnosis": "",
                         "source_check_status": "verified",
-                        "source_evidence_refs": [],
-                        "unsupported_claims": [],
+                        "source_evidence_refs": list(
+                            self.rewrite_source_evidence_refs
+                        ),
+                        "unsupported_claims": list(
+                            self.rewrite_unsupported_claims_after
+                        ),
                     },
                     "local_dimension_scores": [],
                     "local_hard_gate_failures": [],
@@ -98,10 +111,14 @@ class DraftsV1Tests(NativeFigureApiTestCase):
                         "paragraph_checks": [],
                         "paragraph_findings": [],
                     },
-                    "source_check_entry": {
-                        "paragraph_id": payload["paragraph_id"],
-                        "source_check_status": "verified",
-                    },
+                    "source_check_entry": (
+                        dict(self.rewrite_source_check_entry)
+                        if self.rewrite_source_check_entry
+                        else {
+                            "paragraph_id": payload["paragraph_id"],
+                            "source_check_status": "verified",
+                        }
+                    ),
                     "evaluated_at": "2026-08-16T00:00:00+00:00",
                 },
             }
@@ -191,6 +208,60 @@ class DraftsV1Tests(NativeFigureApiTestCase):
         self.assertEqual(200, assembled.status_code, assembled.text)
         return assembled.json()
 
+    def seed_section_evidence_package(self) -> str:
+        repository = self.app.state.workflow_repository
+        state = repository.get_stage_state(
+            self.first.user_id, self.project_id, "sections"
+        )
+        run = repository.create_stage_run(
+            self.first.user_id, self.project_id, "sections", status="succeeded"
+        )
+        package = {
+            "schema_version": 2,
+            "project_id": self.project_id,
+            "evidence_registry": [],
+            "sections": [
+                {
+                    "section_id": "S1",
+                    "status": "insufficient_evidence",
+                    "hits": [],
+                    "primary_paper_states": [
+                        {
+                            "paper_id": "P001",
+                            "status": "unresolved",
+                            "diagnostic": "missing_direct_evidence",
+                        }
+                    ],
+                    "query_plans": [
+                        {
+                            "question_id": "section_focus",
+                            "status": "insufficient",
+                            "required_for_section": True,
+                            "coverage_policy": "all_primary",
+                        }
+                    ],
+                }
+            ],
+        }
+        artifact = self._publish(
+            run.id,
+            SECTION_EVIDENCE,
+            "evidence-package.json",
+            (json.dumps(package, ensure_ascii=False, indent=2) + "\n").encode(),
+            "json",
+        )
+        repository.promote_stage_artifacts_atomically(
+            self.first.user_id,
+            self.project_id,
+            "sections",
+            artifact_ids={SECTION_EVIDENCE: artifact.id},
+            run_id=run.id,
+            expected_revision=state.revision,
+            status="approved",
+            invalidate_stages=("figure-review", "figures", "draft", "final"),
+        )
+        return artifact.id
+
     def test_claim_centered_paragraph_keeps_all_source_callouts(self) -> None:
         markdown = self.app.state.drafts_service._assemble_markdown(
             "Review",
@@ -274,6 +345,48 @@ class DraftsV1Tests(NativeFigureApiTestCase):
         self.assertIn("[1] Study two", markdown)
         self.assertIn("[2] Study one", markdown)
 
+    def test_current_insertion_plan_skips_unplaced_pool_assets(self) -> None:
+        markdown = self.app.state.drafts_service._assemble_markdown(
+            "Review",
+            {
+                "sections": [
+                    {
+                        "section_id": "S01",
+                        "heading": "Methods",
+                        "paragraphs": [
+                            {
+                                "paragraph_id": "S01-p1",
+                                "paper_id": "P001",
+                                "cited_paper_ids": ["P001"],
+                                "text": "The study reports a transformation.",
+                            }
+                        ],
+                    }
+                ]
+            },
+            {
+                "insertion_plan": [
+                    {
+                        "figure_id": "P001-F01",
+                        "include": False,
+                        "skip_reason": "no_supported_paragraph",
+                    }
+                ],
+                "figures": [
+                    {
+                        "figure_id": "P001-F01",
+                        "paper_id": "P001",
+                        "target_paragraph_id": "S01-p1",
+                        "output_artifact_id": "artifact-1",
+                        "status": "redrawn",
+                    }
+                ],
+            },
+            {"rows": [{"paper_id": "P001", "title": "Study one"}]},
+        )
+        self.assertNotIn("artifact-1", markdown)
+        self.assertNotIn("Figure 1", markdown)
+
     def test_figure_caption_is_normalized_without_leaking_conditions_into_prose(self) -> None:
         source_caption = (
             r"Scheme 1. $Pd_{2}(dba)_{3}\cdot CHCl_{3}$ , "
@@ -356,6 +469,37 @@ class DraftsV1Tests(NativeFigureApiTestCase):
 
         self.assertEqual(complete_draft, payload["draft_text"])
         self.assertIn(payload["paragraph_text"], payload["draft_text"])
+
+    def test_legacy_quality_issue_gets_consistent_response_only_repair_route(self) -> None:
+        legacy = {
+            "issue_id": "legacy-1",
+            "paragraph_id": "S01-p2",
+            "source_check_status": "needs_human_review",
+            "route": "local_source_recheck",
+            "recommended_return_stage": "planning",
+            "recommended_action": "Correct Matrix before continuing.",
+            "message": "A required claim is not supported by the local source.",
+        }
+
+        public = DraftsService._public_issue_repair_metadata(legacy)
+
+        self.assertNotIn("repair_stage", legacy)
+        self.assertEqual("evidence_package", public["repair_stage"])
+        self.assertEqual("draft", public["recommended_return_stage"])
+        self.assertFalse(public["rewrite_eligible"])
+        self.assertNotEqual(legacy["recommended_action"], public["recommended_action"])
+
+    def test_current_quality_issue_keeps_persisted_repair_route(self) -> None:
+        current = {
+            "issue_id": "current-1",
+            "repair_stage": "figures",
+            "repair_action": "custom_current_action",
+            "recommended_return_stage": "draft",
+        }
+
+        public = DraftsService._public_issue_repair_metadata(current)
+
+        self.assertEqual(current, public)
 
     def publish_changed_sections(self, *, change_rendered_text: bool = True) -> str:
         repository = self.app.state.workflow_repository
@@ -811,6 +955,91 @@ class DraftsV1Tests(NativeFigureApiTestCase):
             after_reassemble["paragraphs"][0]["paragraph_id"],
             after_reassemble["overlay_replay"]["applied"],
         )
+
+    def test_accepting_single_rewrite_atomically_publishes_matching_evidence(self) -> None:
+        source_evidence_id = self.seed_section_evidence_package()
+        source_ref = "P001:block:17"
+        self.rewrite_source_evidence_refs = [source_ref]
+        self.rewrite_source_check_entry = {
+            "paragraph_id": "S1-p1",
+            "source_check_status": "verified",
+            "source_evidence_refs": [source_ref],
+            "papers": [
+                {
+                    "paper_id": "P001",
+                    "passages": [
+                        {
+                            "ref": source_ref,
+                            "page": 3,
+                            "text": "Copper promoted the reported transformation under the tested conditions.",
+                        }
+                    ],
+                }
+            ],
+        }
+        self.rewrite_unsupported_claims_before = [
+            "The catalyst is universally optimal."
+        ]
+
+        with TestClient(self.app) as client:
+            self.prepare_draft(client)
+            evaluation = client.post(
+                f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
+                json={},
+                headers=self.headers("evidence-rewrite-evaluate"),
+            )
+            self.assertEqual(
+                "succeeded", self.wait_job(client, evaluation.json()["id"])["status"]
+            )
+            current = client.get(
+                f"/api/v1/projects/{self.project_id}/draft"
+            ).json()
+            paragraph_id = current["paragraphs"][0]["paragraph_id"]
+            rewrite = client.post(
+                f"/api/v1/projects/{self.project_id}/draft/paragraphs/{paragraph_id}/rewrite-jobs",
+                json={},
+                headers=self.headers("evidence-rewrite-candidate"),
+            )
+            rewrite_job = self.wait_job(client, rewrite.json()["id"])
+            candidate_id = rewrite_job["result"]["candidate_id"]
+            before_accept = self.app.state.workflow_repository.get_current_artifact(
+                self.first.user_id, self.project_id, SECTION_EVIDENCE
+            )
+            pending = client.get(
+                f"/api/v1/projects/{self.project_id}/draft"
+            ).json()
+            accepted = client.post(
+                f"/api/v1/projects/{self.project_id}/draft/rewrite-candidates/{candidate_id}/accept-jobs",
+                json={"revision": pending["revision"]},
+                headers=self.headers("evidence-rewrite-accept"),
+            )
+            accepted_job = self.wait_job(client, accepted.json()["id"])
+            after = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
+
+        self.assertEqual("succeeded", rewrite_job["status"])
+        self.assertEqual(1, rewrite_job["result"]["evidence_repair_preview"]["added_evidence_count"])
+        self.assertEqual(source_evidence_id, before_accept.id)
+        self.assertEqual("succeeded", accepted_job["status"])
+        result = accepted_job["result"]
+        self.assertEqual(1, result["evidence_repair"]["added_evidence_count"])
+        self.assertNotEqual(source_evidence_id, result["section_evidence_artifact_id"])
+        current_evidence = self.app.state.workflow_repository.get_current_artifact(
+            self.first.user_id, self.project_id, SECTION_EVIDENCE
+        )
+        resolved = self.app.state.artifact_service.resolve_owned_artifact(
+            self.first.user_id, current_evidence.id
+        )
+        package = json.loads(resolved.path.read_text(encoding="utf-8"))
+        repaired = next(
+            row
+            for row in package["evidence_registry"]
+            if row.get("source_ref") == source_ref
+        )
+        self.assertEqual("P001", repaired["paper_id"])
+        self.assertEqual("draft_targeted_source_recheck", repaired["source_channel"])
+        self.assertEqual(1, after["quality"]["evidence_repair"]["added_evidence_count"])
+        self.assertTrue(after["quality"]["claim_dispositions"])
+        self.assertFalse(after["freshness"]["upstream_stale"])
 
     def test_accepting_rewrite_supersedes_other_candidates_from_old_draft(self) -> None:
         with TestClient(self.app) as client:

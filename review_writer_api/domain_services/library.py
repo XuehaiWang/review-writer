@@ -1493,7 +1493,10 @@ class LibraryService:
                 current_audit.get("manual_review_status") or "not_reviewed"
             )
             merged_audit = dict(audit)
-            if current_manual_status in {"resolved", "supporting_only", "rejected"}:
+            if (
+                str(current_audit.get("resolved_by") or "") == "human"
+                and current_manual_status in {"resolved", "supporting_only", "rejected"}
+            ):
                 # A provider job may have started before a user decision. Preserve
                 # that newer decision instead of letting the stale job clear it.
                 for key in (

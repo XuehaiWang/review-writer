@@ -328,6 +328,9 @@ def canonical_classification_contract(
         "source": _compact(source) or "canonical_axis_contract",
         "primary_axis_id": primary_axis_id,
         "required_route_axis_ids": required_route_axis_ids,
+        "section_partition_policy": "single_primary_axis",
+        "minimum_body_papers": 2,
+        "single_paper_section_policy": "merge_unless_scientifically_justified",
         "axes": normalized,
         "fingerprint": fingerprint,
     }

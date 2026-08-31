@@ -292,6 +292,25 @@ class FinalV1Tests(NativeFigureApiTestCase):
         self.assertLess(assembled.index(marker), assembled.index("## 1. Introduction"))
         self.assertGreater(assembled.index(marker), assembled.index("Abstract text."))
 
+    def test_public_scope_note_is_reader_facing_and_inserted_in_introduction(self) -> None:
+        note = FinalService._public_scope_selection_paragraph(
+            {
+                "search_record": {
+                    "retrieved_at": "2026-08-28T10:00:00Z",
+                    "successful_sources": ["crossref", "openalex"],
+                    "selected_matrix_candidate_count": 16,
+                }
+            },
+            {"scope_contract": {"time_span": {"from": 2015, "to": 2026}}},
+        )
+        assembled = FinalService._insert_after_introduction_heading(
+            "# Review\n\n## Introduction\n\nOpening argument.", note
+        )
+        self.assertIn("Crossref, OpenAlex", note)
+        self.assertIn("16 sources", note)
+        self.assertNotIn("Matrix", note)
+        self.assertLess(assembled.index(note), assembled.index("Opening argument."))
+
     def test_reference_affiliation_residue_is_removed_without_losing_science(self) -> None:
         markdown = (
             "# Review\n\nA result <sup>2</sup> was reported.\n\n"

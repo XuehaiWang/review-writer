@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import unittest
+import json
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
+from review_writer_api import scientific_tasks
 from review_writer_core.publication_metadata import (
     extract_front_matter_doi,
     extract_publication_evidence,
@@ -114,6 +120,39 @@ class PublicationMetadataTests(unittest.TestCase):
 
         self.assertEqual("conflict", resolved["status"])
         self.assertTrue(resolved["network_required"])
+
+    def test_reliable_local_evidence_skips_metadata_model_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            markdown = root / "paper.md"
+            pdf = root / "paper.pdf"
+            output = root / "result.json"
+            markdown.write_text(
+                "Published online 18 June 2024\n\n# Introduction",
+                encoding="utf-8",
+            )
+            pdf.write_bytes(b"%PDF-test")
+            args = SimpleNamespace(
+                markdown=markdown,
+                pdf=pdf,
+                filename="paper.pdf",
+                output=output,
+            )
+            with (
+                patch.object(scientific_tasks, "gateway_configured", return_value=True),
+                patch.object(
+                    scientific_tasks,
+                    "read_pdf_first_page_text",
+                    return_value="Published online 18 June 2024",
+                ),
+                patch.object(scientific_tasks, "call_json_model") as model_call,
+            ):
+                scientific_tasks.publication_date_extract(args)
+
+            result = json.loads(output.read_text(encoding="utf-8"))
+            model_call.assert_not_called()
+            self.assertFalse(result["model_attempted"])
+            self.assertFalse(result["model_needed"])
 
 
 if __name__ == "__main__":

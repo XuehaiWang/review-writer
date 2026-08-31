@@ -10,13 +10,14 @@ from sqlalchemy.pool import StaticPool
 
 from review_writer_api.billing import BillingService, CreditConflict, InsufficientCredit
 from review_writer_api.database import (
+    AIModelRequest,
     Base,
     CreditReservation,
     CreditTransaction,
     User,
     database_session,
 )
-import review_writer_api.workflow_models  # noqa: F401 - registers FK targets
+from review_writer_api.workflow_models import WorkflowJob
 
 
 class BillingServiceTests(unittest.TestCase):
@@ -123,6 +124,79 @@ class BillingServiceTests(unittest.TestCase):
             )
         self.assertEqual("0.00000000", captured.exception.details["available_usd"])
         self.assertEqual([], self.billing.transactions(self.user_id))
+
+    def test_new_reservation_releases_orphaned_hold_from_terminal_job(self) -> None:
+        self.billing.adjust(
+            actor_user_id=self.admin_id,
+            target_user_id=self.user_id,
+            amount_usd="1",
+            reason="Recovery test credit",
+            idempotency_key="adjust-recovery",
+        )
+        job_id = uuid.uuid4()
+        request_id = uuid.uuid4()
+        with database_session(self.sessions) as database:
+            database.add(
+                WorkflowJob(
+                    id=job_id,
+                    user_id=self.user_id,
+                    scope="project",
+                    job_type="sections.generate",
+                    status="running",
+                    idempotency_scope_key="project-1",
+                    idempotency_key="job-recovery",
+                )
+            )
+            database.add(
+                AIModelRequest(
+                    id=request_id,
+                    user_id=self.user_id,
+                    job_id=job_id,
+                    request_key="section-S05",
+                    stage="section-academic-planning",
+                    model_tier="scientific",
+                    model_name="test-model",
+                    request_sha256="a" * 64,
+                    status="running",
+                    input_price_usd_per_million=0,
+                    cached_input_price_usd_per_million=0,
+                    output_price_usd_per_million=0,
+                )
+            )
+        stale = self.billing.reserve(
+            user_id=self.user_id,
+            amount_usd="0.75",
+            reference_type="text_model",
+            reference_id=request_id,
+            attempt_number=1,
+            job_id=job_id,
+        )
+        with database_session(self.sessions) as database:
+            job = database.get(WorkflowJob, job_id)
+            job.status = "failed"
+
+        recovered_summary = self.billing.account_summary(self.user_id)
+        self.assertEqual("0.00000000", recovered_summary["reserved_usd"])
+        self.assertEqual("1.00000000", recovered_summary["available_usd"])
+
+        current = self.billing.reserve(
+            user_id=self.user_id,
+            amount_usd="0.5",
+            reference_type="text_model",
+            reference_id="new-request",
+            attempt_number=1,
+        )
+
+        with database_session(self.sessions) as database:
+            recovered = database.get(CreditReservation, stale.id)
+            linked_request = database.get(AIModelRequest, request_id)
+            active = database.get(CreditReservation, current.id)
+            self.assertEqual("released", recovered.status)
+            self.assertEqual("failed", linked_request.status)
+            self.assertEqual("active", active.status)
+        summary = self.billing.account_summary(self.user_id)
+        self.assertEqual("0.50000000", summary["reserved_usd"])
+        self.assertEqual("0.50000000", summary["available_usd"])
 
     def test_provider_overrun_is_recorded_and_blocks_future_spend(self) -> None:
         self.billing.adjust(

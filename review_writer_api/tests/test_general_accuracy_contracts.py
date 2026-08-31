@@ -194,6 +194,34 @@ Body two.
         self.assertEqual("invalid", report["status"])
         self.assertIn("overview_unsupported_labels", report["issues"])
 
+    def test_overview_requires_labels_when_an_image_exists(self) -> None:
+        report = FinalService._overview_semantic_report(
+            {"title": "Catalytic allene synthesis", "labels": []},
+            {"topic": "Catalytic allene synthesis"},
+            {"sections": []},
+            overview_present=True,
+        )
+        self.assertIn("overview_labels_missing", report["issues"])
+
+    def test_overview_labels_trace_to_current_body_axis(self) -> None:
+        report = FinalService._overview_semantic_report(
+            {
+                "title": "Catalytic allene synthesis",
+                "labels": ["Propargylic alcohol substrates"],
+            },
+            {"topic": "Catalytic syntheses of allenes by substrate"},
+            {
+                "classification_basis": {"primary_axis": "substrate"},
+                "sections": [
+                    {
+                        "section_role": "body",
+                        "title": "Propargylic alcohol substrates",
+                    }
+                ],
+            },
+        )
+        self.assertEqual("aligned", report["status"])
+
     def test_comparison_schema_includes_role_and_safety_without_guessing(self) -> None:
         self.assertIn("intervention_role", COMPARISON_FIELD_IDS)
         self.assertIn("safety_cost_sustainability", COMPARISON_FIELD_IDS)
@@ -304,6 +332,43 @@ Body two.
             {item["rule_id"] for item in report["issues"]},
         )
 
+    def test_taxonomy_contract_uses_declared_partition_aliases(self) -> None:
+        report = taxonomy_diagnostics(
+            [
+                {
+                    "section_id": "S02",
+                    "title": "Controlled comparisons",
+                    "section_role": "body",
+                    "primary_papers": ["P001"],
+                    "secondary_axis_routes": {
+                        "randomized trials": ["P001"],
+                    },
+                }
+            ],
+            ["P001"],
+            classification_contract={
+                "required_outline_partitions": ["randomized evidence"],
+                "classification_axes": [
+                    {
+                        "axis_id": "study_design",
+                        "axis_role": "required_independent_discussion",
+                        "partitions": [
+                            {
+                                "label": "randomized evidence",
+                                "aliases": ["randomized trials"],
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual("aligned", report["classification_contract_status"])
+        self.assertEqual([], report["missing_topic_partitions"])
+        self.assertEqual(
+            ["S02"], report["topic_partition_trace"]["randomized evidence"]
+        )
+
     def test_boundary_section_with_explicit_rationale_is_not_contract_drift(self) -> None:
         report = taxonomy_diagnostics(
             [
@@ -333,6 +398,61 @@ Body two.
         self.assertEqual([], report["unresolved_boundary_section_ids"])
         self.assertNotIn(
             "taxonomy.boundary_section_outside_contract",
+            {item["rule_id"] for item in report["issues"]},
+        )
+
+    def test_taxonomy_contract_accepts_explicit_paper_exclusion_reason(self) -> None:
+        report = taxonomy_diagnostics(
+            [
+                {
+                    "section_id": "S01",
+                    "title": "Introduction",
+                    "section_role": "introduction",
+                    "excluded_papers": [
+                        {
+                            "paper_id": "P002",
+                            "reason": "The source-confirmed transformation is outside the declared review scope.",
+                        }
+                    ],
+                },
+                {
+                    "section_id": "S02",
+                    "title": "Defined primary category",
+                    "section_role": "body",
+                    "primary_papers": ["P001"],
+                },
+                {
+                    "section_id": "S03",
+                    "title": "Conclusion",
+                    "section_role": "conclusion",
+                },
+            ],
+            ["P001", "P002"],
+        )
+
+        self.assertTrue(report["can_confirm"])
+        self.assertEqual([], report["orphan_paper_ids"])
+        self.assertEqual(["P002"], report["excluded_paper_ids"])
+        self.assertEqual(1, report["excluded_paper_count"])
+
+    def test_taxonomy_contract_rejects_paper_exclusion_without_reason(self) -> None:
+        report = taxonomy_diagnostics(
+            [
+                {
+                    "section_id": "S01",
+                    "title": "Defined primary category",
+                    "section_role": "body",
+                    "primary_papers": ["P001"],
+                    "excluded_papers": [{"paper_id": "P002", "reason": ""}],
+                }
+            ],
+            ["P001", "P002"],
+        )
+
+        self.assertFalse(report["can_confirm"])
+        self.assertIn("P002", report["orphan_paper_ids"])
+        self.assertIn(
+            "taxonomy.paper_exclusion_reason_missing",
             {item["rule_id"] for item in report["issues"]},
         )
 

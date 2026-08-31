@@ -15,6 +15,8 @@ from PIL import Image
 
 MAX_EDITOR_BYTES = 25 * 1024 * 1024
 MAX_VECTOR_DIMENSION = 1600
+VECTOR_NEUTRAL_HALO_LUMINANCE_FLOOR = 195
+VECTOR_NEUTRAL_HALO_MAX_CHANNEL_SPREAD = 20
 _SVG_OPENING = re.compile(r"\s*<svg\b([^>]*)>", re.IGNORECASE | re.DOTALL)
 
 
@@ -191,6 +193,37 @@ def _color(value: tuple[int, int, int]) -> str:
     return f"#{value[0]:02x}{value[1]:02x}{value[2]:02x}"
 
 
+def _vector_trace_color(
+    value: tuple[int, int, int],
+) -> tuple[int, int, int] | None:
+    """Return an SVG trace colour while suppressing neutral raster halos.
+
+    AI/raster antialiasing commonly leaves RGB 195-247 neutral pixels around
+    otherwise crisp labels and bonds.  The former floor quantizer converted a
+    barely visible RGB 247 pixel into RGB 224, making the residue conspicuous
+    in the SVG editor.  Ignore only bright low-chroma pixels; saturated
+    scientific colours and darker semantic gray content remain traceable.
+    """
+
+    red, green, blue = value
+    spread = max(value) - min(value)
+    luminance = (red + green + blue) / 3
+    if min(value) >= 248:
+        return None
+    if (
+        spread <= VECTOR_NEUTRAL_HALO_MAX_CHANNEL_SPREAD
+        and luminance >= VECTOR_NEUTRAL_HALO_LUMINANCE_FLOOR
+    ):
+        return None
+
+    def nearest_level(channel: int) -> int:
+        # Round rather than floor so light antialiasing is not darkened by as
+        # much as a complete 32-value colour bucket.
+        return min(255, ((channel + 16) // 32) * 32)
+
+    return tuple(nearest_level(channel) for channel in value)
+
+
 def build_full_vector_svg(source_path: Path) -> str:
     """Trace visible raster runs into editable SVG paths without chemical OCR."""
 
@@ -235,19 +268,17 @@ def build_full_vector_svg(source_path: Path) -> str:
             x = 0
             current_row: list[int] = []
             while x < width:
-                red, green, blue = pixels[x, y]
-                if min(red, green, blue) >= 248:
+                quantized = _vector_trace_color(pixels[x, y])
+                if quantized is None:
                     x += 1
                     continue
                 # Eight levels per channel preserve chemistry colors while keeping
                 # the browser DOM small enough for interactive hit testing.
-                quantized = (red // 32 * 32, green // 32 * 32, blue // 32 * 32)
                 start = x
                 x += 1
                 while x < width:
-                    next_pixel = pixels[x, y]
-                    next_quantized = tuple(channel // 32 * 32 for channel in next_pixel)
-                    if min(next_pixel) >= 248 or next_quantized != quantized:
+                    next_quantized = _vector_trace_color(pixels[x, y])
+                    if next_quantized is None or next_quantized != quantized:
                         break
                     x += 1
                 index = len(runs)
@@ -294,6 +325,13 @@ def build_full_vector_svg(source_path: Path) -> str:
             trace_objects.append(
                 f'<g data-trace-object-id="trace-{object_index}" '
                 f'data-vector-kind="base-trace-object">{paths}</g>'
+            )
+        if not trace_objects:
+            # Keep the editor's full-trace contract for a genuinely blank
+            # raster without reintroducing a visible gray placeholder.
+            trace_objects.append(
+                '<g data-trace-object-id="trace-empty" '
+                'data-vector-kind="base-trace-object"></g>'
             )
         title = html.escape("Full-image chemistry figure vector trace", quote=False)
         svg = (

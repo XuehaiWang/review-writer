@@ -22,6 +22,8 @@ from .database import (
     utc_now,
 )
 from .errors import WorkflowError, WorkflowNotFound, WorkflowValidationError
+from .workflow_contracts import TERMINAL_JOB_STATUSES
+from .workflow_models import WorkflowJob
 
 
 MONEY_QUANTUM = Decimal("0.00000001")
@@ -82,6 +84,82 @@ class BillingService:
         return money(account.balance_usd) - money(account.reserved_usd)
 
     @staticmethod
+    def _linked_request(
+        database, reservation: CreditReservation
+    ) -> AIModelRequest | AIImageRequest | None:
+        """Return the metered request protected by one credit reservation."""
+
+        try:
+            reference_id = uuid.UUID(str(reservation.reference_id))
+        except (ValueError, TypeError, AttributeError):
+            return None
+        if reservation.reference_type == "text_model":
+            return database.get(AIModelRequest, reference_id)
+        if reservation.reference_type == "image_model":
+            return database.get(AIImageRequest, reference_id)
+        return None
+
+    def _release_terminal_job_holds(
+        self,
+        database,
+        *,
+        account: UserCreditAccount,
+    ) -> int:
+        """Release orphaned holds left behind after a job has already ended.
+
+        The gateway normally releases a hold in its request-level ``except``
+        block.  A process or connection can still disappear between reserving
+        credit and entering that cleanup path.  Such a hold must not reduce a
+        user's available balance forever.  A successfully metered request is
+        deliberately left untouched so it can still be reconciled at cost.
+        """
+
+        reservations = database.scalars(
+            select(CreditReservation)
+            .join(WorkflowJob, WorkflowJob.id == CreditReservation.job_id)
+            .where(
+                CreditReservation.user_id == account.user_id,
+                CreditReservation.status == "active",
+                WorkflowJob.status.in_(TERMINAL_JOB_STATUSES),
+            )
+            .order_by(CreditReservation.created_at, CreditReservation.id)
+            .with_for_update()
+        ).all()
+        released = 0
+        now = utc_now()
+        for reservation in reservations:
+            linked_request = self._linked_request(database, reservation)
+            if linked_request is not None and linked_request.status == "succeeded":
+                continue
+            held = money(reservation.amount_usd)
+            account.reserved_usd = max(ZERO, money(account.reserved_usd) - held)
+            account.updated_at = now
+            reservation.status = "released"
+            reservation.released_at = now
+            reservation.updated_at = now
+            if linked_request is not None and linked_request.status == "running":
+                linked_request.status = "failed"
+                linked_request.error_message = (
+                    "The parent workflow job ended before the provider request completed."
+                )
+                linked_request.finished_at = now
+                linked_request.updated_at = now
+            if held > ZERO:
+                self._append(
+                    database,
+                    account=account,
+                    transaction_type="release",
+                    idempotency_key=f"ledger:release:{reservation.id}",
+                    reserved_delta=-held,
+                    reservation=reservation,
+                    job_id=reservation.job_id,
+                    reason="任务已结束，自动释放未完成外部调用的冻结额度",
+                    details={"reconciled_terminal_job": True},
+                )
+            released += 1
+        return released
+
+    @staticmethod
     def _append(
         database,
         *,
@@ -125,7 +203,8 @@ class BillingService:
     def account_summary(self, user_id: str | uuid.UUID) -> dict[str, Any]:
         target = _uuid(user_id, label="用户 ID")
         with database_session(self.session_factory) as database:
-            account = self._account(database, target)
+            account = self._account(database, target, lock=True)
+            self._release_terminal_job_holds(database, account=account)
             return self._account_dict(account)
 
     def reserve(
@@ -160,6 +239,7 @@ class BillingService:
             if existing is not None:
                 return existing
             account = self._account(database, target, lock=True)
+            self._release_terminal_job_holds(database, account=account)
             available = self._available(account)
             if available < hold:
                 raise InsufficientCredit(

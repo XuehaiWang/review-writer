@@ -203,6 +203,63 @@ class SectionAcademicPipelineTests(unittest.TestCase):
         self.assertEqual([], table["missing_cells"])
         self.assertEqual(2, len(table["cells"]))
 
+    def test_deterministic_comparison_fallback_uses_registered_evidence(self) -> None:
+        table = PIPELINE.build_matrix_comparison_table(
+            "S02",
+            ["P001", "P002"],
+            {
+                "P001": {
+                    "scientific_facts": [
+                        {
+                            "fact_id": "F-A",
+                            "field_id": "yield",
+                            "value": "81%",
+                            "evidence_refs": [{"evidence_key": "sha256:a"}],
+                        }
+                    ]
+                },
+                "P002": {
+                    "scientific_facts": [
+                        {
+                            "fact_id": "F-B",
+                            "field_id": "yield",
+                            "value": "76%",
+                            "evidence_refs": [{"evidence_key": "sha256:b"}],
+                        }
+                    ]
+                },
+            },
+        )
+        writing = {"section_id": "S02", "paragraphs": [], "claims": []}
+        synthesis = {"section_id": "S02", "components": []}
+        added = PIPELINE.ensure_evidence_bound_comparison_plan(
+            writing,
+            synthesis,
+            table,
+            [
+                {
+                    "evidence_id": "EV-A",
+                    "evidence_key": "sha256:a",
+                    "paper_id": "P001",
+                    "claim_eligible": True,
+                    "assertion_ceiling": "direct_source_report",
+                },
+                {
+                    "evidence_id": "EV-B",
+                    "evidence_key": "sha256:b",
+                    "paper_id": "P002",
+                    "claim_eligible": True,
+                    "assertion_ceiling": "direct_source_report",
+                },
+            ],
+        )
+        self.assertTrue(added)
+        self.assertEqual(
+            "cross_study_comparison", writing["claims"][0]["claim_kind"]
+        )
+        self.assertEqual(["P001", "P002"], writing["claims"][0]["citation_group"])
+        self.assertEqual("supported", synthesis["components"][0]["status"])
+
     def test_unknown_evidence_cannot_form_an_indexed_claim(self) -> None:
         proposed = dict(self.proposed)
         proposed["paragraphs"] = [dict(self.proposed["paragraphs"][0])]
@@ -350,6 +407,74 @@ class SectionAcademicPipelineTests(unittest.TestCase):
         )
         self.assertTrue(overview)
         self.assertIn("[1]", paragraphs[0]["text"])
+
+    def test_safe_evidence_fallback_rechecks_a_repaired_claim_instead_of_reusing_plan_failure(self) -> None:
+        evidence = [
+            {
+                "evidence_id": "EV-A",
+                "evidence_key": "sha256:a",
+                "paper_id": "P001",
+                "chunk_id": "C001",
+                "content": "The cited study reports the transformation under the investigated conditions.",
+            }
+        ]
+        writing = {
+            "overview_intent": "Summarize the cited study.",
+            "paragraphs": [
+                {
+                    "paragraph_id": "S02-p1",
+                    "claim_ids": ["S02-p1-C01"],
+                    "positive_synthesis": "The transformation was reported.",
+                }
+            ],
+            "claims": [
+                {
+                    "claim_id": "S02-p1-C01",
+                    "paragraph_id": "S02-p1",
+                    "claim": "The product was obtained in 97% yield.",
+                    "allowed_assertion": "The transformation was reported under the investigated conditions.",
+                    "claim_kind": "reported_finding",
+                    "citation_group": ["P001"],
+                    "evidence_refs": [
+                        {
+                            "evidence_id": "EV-A",
+                            "evidence_key": "sha256:a",
+                            "relationship": "supports",
+                        }
+                    ],
+                    "support_status": "partially_supported",
+                    "coverage": {
+                        "subject": True,
+                        "predicate": True,
+                        "value": False,
+                        "qualifiers": False,
+                        "paper_identity": True,
+                    },
+                    "failed_coverage_fields": ["value", "qualifiers"],
+                }
+            ],
+        }
+
+        fallback = PIPELINE.build_safe_evidence_fallback(
+            writing_section=writing,
+            evidence=evidence,
+        )
+        overview, paragraphs, _validations, reviews = PIPELINE.validate_and_realize_section(
+            section_id="S02",
+            generated=fallback,
+            writing_section=writing,
+            evidence=evidence,
+            citation_map={"P001": 1},
+        )
+
+        self.assertTrue(overview)
+        self.assertEqual([], paragraphs[0]["claim_realizations"][0]["failed_coverage_fields"])
+        self.assertEqual(
+            ["value", "qualifiers"],
+            paragraphs[0]["claim_realizations"][0]["planned_failed_coverage_fields"],
+        )
+        self.assertEqual("PASS_WITH_WARNINGS", reviews[0]["decision"])
+        self.assertEqual("planned_claim_scope_narrowed", reviews[0]["issues"][0]["type"])
 
     def test_legacy_prefix_fallback_requires_explicit_authorization(self) -> None:
         self.assertEqual(

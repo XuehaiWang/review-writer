@@ -5,7 +5,8 @@ description: Draft each review section from section_blueprint.json, literature m
 
 # Review Section Drafting Figure Picking
 
-Goal: write each section as a separate file, with figures tied to paragraphs.
+Goal: write each section as a separate file and build a reviewed paper-level
+figure asset pool with evidence-supported placement suggestions.
 
 ## Inputs
 
@@ -134,7 +135,13 @@ section_drafting_report.md
 
 `section_drafts.json` must contain, for every section, a `paragraphs` list. Each paragraph item carries `paragraph_id`, `paper_id`, `cited_paper_ids`, and (when applicable) `figure_candidate_id`. The aggregated `draft_md` is still kept for preview.
 
-`figure_candidates.json` items must carry `target_paragraph_id` (the paragraph_id this figure should attach to). Free-text `fits_paragraph_or_claim` stays optional and human-readable.
+`figure_candidates.json` items should carry `target_paragraph_id` when the
+current section draft contains a defensible placement. A reviewed figure may
+remain in the paper-level asset pool with an empty target when no safe anchor
+exists; this is not a reason to discard the asset or block the next stage.
+Final manuscript assembly selects a conservative subset and inserts only rows
+with an approved insertion decision. Free-text `fits_paragraph_or_claim` stays
+optional and human-readable.
 
 `section_tasks.json` must be a list. Each item must contain:
 

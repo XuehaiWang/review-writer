@@ -62,9 +62,9 @@ describe("SectionJobProgress", () => {
         section_progress: {
           phase: "generating",
           completed_sections: [
-            { section_id: "S01", heading: "Introduction", generation_mode: "standard" },
-            { section_id: "S02", heading: "Methods", generation_mode: "evidence_repaired" },
-            { section_id: "S03", heading: "Outlook", generation_mode: "safe_evidence_fallback" },
+            { section_id: "S01", heading: "Introduction", generation_mode: "standard", section_readiness: { status: "scientific_complete" } },
+            { section_id: "S02", heading: "Methods", generation_mode: "evidence_repaired", section_readiness: { status: "needs_evidence_repair" } },
+            { section_id: "S03", heading: "Outlook", generation_mode: "safe_evidence_fallback", section_readiness: { status: "provider_fallback" } },
           ],
         },
       },
@@ -72,6 +72,8 @@ describe("SectionJobProgress", () => {
     })} />);
 
     expect(screen.getByText("标准生成 1 · 自动修复 1 · 安全保底 1")).toBeInTheDocument();
-    expect(screen.getByText("安全保底")).toBeInTheDocument();
+    expect(screen.getByText("标准生成 · 科学就绪")).toBeInTheDocument();
+    expect(screen.getByText("自动修复 · 需补证据")).toBeInTheDocument();
+    expect(screen.getByText("安全保底 · 服务降级保底")).toBeInTheDocument();
   });
 });

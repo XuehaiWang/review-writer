@@ -434,6 +434,9 @@ def figure_rights_fields(source: dict[str, Any] | None) -> dict[str, Any]:
         row.get("original_synthesis")
     ):
         return {
+            "source_identity_status": "not_required",
+            "source_paper_id": None,
+            "source_label": None,
             "rights_status": "original_synthesis",
             "source_relationship": "original_synthesis",
             "permission_status": "not_required_for_source_reuse",
@@ -446,8 +449,26 @@ def figure_rights_fields(source: dict[str, Any] | None) -> dict[str, Any]:
         or row.get("license_record")
         or ""
     ).strip()
+    source_paper_id = str(
+        row.get("paper_id") or row.get("source_paper_id") or ""
+    ).strip()
+    source_label = str(
+        row.get("source_label")
+        or row.get("source_figure_label")
+        or row.get("original_label")
+        or ""
+    ).strip()
+    source_artifact = str(
+        row.get("source_artifact_id")
+        or row.get("source_image_artifact_id")
+        or ""
+    ).strip()
+    identity_verified = bool(source_paper_id and (source_label or source_artifact))
     if row.get("license_verified") is True and permission_record:
         return {
+            "source_identity_status": "verified" if identity_verified else "unresolved",
+            "source_paper_id": source_paper_id or None,
+            "source_label": source_label or None,
             "rights_status": "license_verified",
             "source_relationship": "source_attributed",
             "permission_status": "verified",
@@ -461,6 +482,9 @@ def figure_rights_fields(source: dict[str, Any] | None) -> dict[str, Any]:
         or row.get("source_image_artifact_id")
     )
     return {
+        "source_identity_status": "verified" if identity_verified else "unresolved",
+        "source_paper_id": source_paper_id or None,
+        "source_label": source_label or None,
         "rights_status": "source_attributed" if attributed else "permission_unknown",
         "source_relationship": "source_attributed" if attributed else "unknown",
         "permission_status": "unknown",

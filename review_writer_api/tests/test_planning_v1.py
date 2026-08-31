@@ -18,11 +18,15 @@ from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User
 from review_writer_api.domain_services.planning import (
     MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION,
+    MATRIX_FACT_PROMPT_VERSION,
     TOPIC_PARTITION_BOUNDARY_LABEL,
     _matrix_classification_axes,
+    _required_topic_partitions_from_outline,
     _topic_outline_intent,
     _topic_partition_for_text,
     _topic_partition_for_row,
+    _topic_partition_routes,
+    _usable_fact_candidate,
 )
 from review_writer_api.domain_services.library_index import EvidenceHit
 from review_writer_api.security import Principal, Role
@@ -342,6 +346,69 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertGreater(
             paper["retrieval_summary"]["relaxed_question_hit_count"], 0
         )
+        self.assertEqual(payload["required_fact_roles"], paper["required_fact_roles"])
+        self.assertIn("object_input", paper["required_fact_roles"])
+        self.assertEqual("fact-extraction/3", MATRIX_FACT_PROMPT_VERSION)
+
+    def test_path_only_mineru_image_is_not_a_fact_candidate(self) -> None:
+        self.assertFalse(
+            _usable_fact_candidate("image", "images/8a42f1ac87f2.png")
+        )
+        self.assertFalse(
+            _usable_fact_candidate("text", r"figures\scheme-1.jpeg")
+        )
+        self.assertTrue(
+            _usable_fact_candidate(
+                "image",
+                "Scheme 1 shows the reported catalytic conversion.",
+            )
+        )
+
+    def test_prior_matrix_facts_remain_available_as_provider_failure_fallback(self) -> None:
+        service = self.app.state.planning_service
+        artifact, _run = self.app.state.discovery_service._write_json_artifact(
+            self.first,
+            self.project_id,
+            stage_id="matrix",
+            logical_name="matrix/fallback-test.json",
+            payload={
+                "rows": [
+                    {
+                        "paper_id": "P001",
+                        "scientific_facts": [
+                            {
+                                "fact_id": "MF-PREVIOUS",
+                                "field_id": "object_input",
+                                "value": "Terminal alkynes and aldehydes.",
+                                "evidence_refs": [
+                                    {"evidence_key": "sha256:previous"}
+                                ],
+                            },
+                            {
+                                "fact_id": "MF-CLASSIFICATION",
+                                "field_id": "topic_partition",
+                                "value": "A runtime classification.",
+                                "evidence_refs": [
+                                    {"evidence_key": "sha256:previous"}
+                                ],
+                            },
+                        ],
+                    }
+                ]
+            },
+            make_current=False,
+        )
+
+        fallback = service._prior_matrix_facts(
+            self.first,
+            {
+                "fact_enrichment_summary": {
+                    "source_matrix_artifact_id": artifact.id
+                }
+            },
+        )
+
+        self.assertEqual(["MF-PREVIOUS"], [row["fact_id"] for row in fallback["P001"]])
 
     def test_current_fact_refresh_is_an_idempotent_success_not_an_error(self) -> None:
         service = self.app.state.planning_service
@@ -467,6 +534,91 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertEqual(35, reloaded["matrix_enrichment"]["counts"]["failed"])
         self.assertEqual(0, reloaded["matrix_enrichment"]["counts"]["pending"])
         self.assertTrue(reloaded["outline_current"])
+
+    def test_fact_publish_uses_shared_excerpt_rules_and_required_roles(self) -> None:
+        service = self.app.state.planning_service
+        current = service.get(self.first, self.project_id)
+        rows = current["literature_matrix"]["rows"]
+        evidence_key = "sha256:shared-validator"
+        source_payload = {
+            "source_matrix_artifact_id": current["matrix_artifact_id"],
+            "expected_matrix_revision": current["matrix_revision"],
+            "classification_axes": [],
+            "papers": [
+                {
+                    "paper_id": row["paper_id"],
+                    "source_fingerprint": f"shared-{row['paper_id']}",
+                    "index_summary": {},
+                    "evidence_candidates": (
+                        [
+                            {
+                                "evidence_key": evidence_key,
+                                "content": (
+                                    r"Terminal alkynes—including 1a–1c—and aldehydes "
+                                    r"were combined at $25\,\mathrm { C }$."
+                                ),
+                                "content_type": "text",
+                                "question_ids": ["method_conditions"],
+                            }
+                        ]
+                        if row["paper_id"] == "P001"
+                        else []
+                    ),
+                }
+                for row in rows
+            ],
+        }
+        built = {
+            "papers": [
+                (
+                    {
+                        "paper_id": row["paper_id"],
+                        "status": "partial",
+                        "facts": [
+                            {
+                                "fact_id": "MF-SHARED",
+                                "fact_schema_version": "scientific-fact/2",
+                                "field_id": "object_input",
+                                "value": "The reported inputs were terminal alkynes and aldehydes.",
+                                "support_excerpt": (
+                                    r"Terminal alkynes-including 1a-1c-and aldehydes "
+                                    r"were combined at $25\,\mathrm { C}$."
+                                ),
+                                "epistemic_status": "direct_source_report",
+                                "confidence": 0.95,
+                                "support_level": "direct",
+                                "evidence_ceiling": "Only the stated inputs are supported.",
+                                "evidence_refs": [{"evidence_key": evidence_key}],
+                            }
+                        ],
+                        "failed_fields": [],
+                    }
+                    if row["paper_id"] == "P001"
+                    else {
+                        "paper_id": row["paper_id"],
+                        "status": "failed",
+                        "facts": [],
+                        "failed_fields": ["all"],
+                    }
+                )
+                for row in rows
+            ]
+        }
+
+        service.publish_matrix_enrichment(
+            self.first,
+            self.project_id,
+            source_payload,
+            built,
+        )
+        published = service.get(self.first, self.project_id)["literature_matrix"]
+        paper = next(row for row in published["rows"] if row["paper_id"] == "P001")
+
+        self.assertEqual("object_input", paper["scientific_facts"][0]["field_id"])
+        self.assertEqual(
+            ["object_input"],
+            paper["fact_enrichment"]["supported_fact_roles"],
+        )
 
     @staticmethod
     def isolated_reference_analysis(
@@ -780,7 +932,7 @@ class PlanningV1Tests(unittest.TestCase):
             ),
         )
 
-    def test_topic_guided_outline_combines_partitions_and_matrix_axis(self) -> None:
+    def test_topic_guided_outline_keeps_partitions_inside_primary_axis(self) -> None:
         service = self.app.state.planning_service
         rows = [{"paper_id": f"P{index:03d}"} for index in range(1, 5)]
         tags_by_paper = {
@@ -816,16 +968,14 @@ class PlanningV1Tests(unittest.TestCase):
             intent=intent,
         )
 
+        self.assertIn("## 1. Three-component coupling", outline)
+        self.assertIn("## 2. Homologation", outline)
+        self.assertNotIn("Racemic ATA — Three-component coupling", outline)
+        self.assertIn("Assigned papers: P001, P002.", outline)
         self.assertIn(
-            "Racemic ATA — Three-component coupling",
+            "Topic-requested independent discussion represented by assigned evidence: racemic ATA, enantioselective ATA (EATA).",
             outline,
         )
-        self.assertIn(
-            "Enantioselective ATA (EATA) — Three-component coupling",
-            outline,
-        )
-        self.assertIn("Assigned papers: P001.", outline)
-        self.assertIn("Assigned papers: P002.", outline)
         self.assertIn("catalytic or promoting system", outline)
         self.assertIn(
             "Focus dimensions: monosubstituted allenes, "
@@ -864,11 +1014,12 @@ class PlanningV1Tests(unittest.TestCase):
             },
         )
 
+        self.assertIn("## 1. Controlled comparison", outline)
+        self.assertNotIn("Randomized evidence — Controlled comparison", outline)
         self.assertIn(
-            "Randomized evidence — Controlled comparison",
+            "Topic-requested independent discussion represented by assigned evidence: randomized evidence.",
             outline,
         )
-        self.assertIn("Topic partition: randomized evidence.", outline)
 
     def test_completed_model_boundary_is_not_overruled_by_keyword_match(self) -> None:
         routed = _topic_partition_for_row(
@@ -885,6 +1036,84 @@ class PlanningV1Tests(unittest.TestCase):
         )
 
         self.assertEqual("", routed)
+
+    def test_blueprint_partition_routes_follow_source_bound_matrix_classification(self) -> None:
+        sections = [
+            {
+                "section_id": "S02",
+                "title": "Controlled comparisons",
+                "section_role": "body",
+                "primary_papers": ["P001", "P002"],
+            }
+        ]
+        rows = {
+            "P001": {
+                "paper_id": "P001",
+                "topic_partition_classification": {
+                    "status": "classified",
+                    "partition": "randomized evidence",
+                    "confidence": 0.91,
+                    "evidence_refs": [{"evidence_key": "sha256:randomized"}],
+                },
+            },
+            "P002": {
+                "paper_id": "P002",
+                "topic_partition_classification": {
+                    "status": "boundary",
+                    "partition": "",
+                    "confidence": 0.45,
+                    "evidence_refs": [],
+                },
+            },
+        }
+
+        routes, support = _topic_partition_routes(
+            sections,
+            rows,
+            ["randomized evidence", "observational evidence"],
+            {
+                "P001": "The literal label is intentionally absent.",
+                "P002": "Observational evidence appears only in related work.",
+            },
+        )
+
+        self.assertEqual(
+            {"randomized evidence": ["P001"]}, routes["S02"]
+        )
+        self.assertEqual(["P001"], support["randomized evidence"])
+        self.assertEqual([], support["observational evidence"])
+
+    def test_required_partitions_upgrade_legacy_outline_fields(self) -> None:
+        partitions = _required_topic_partitions_from_outline(
+            {
+                "classification_basis": {
+                    "required_outline_partitions": [
+                        "randomized evidence",
+                        "observational evidence",
+                    ]
+                },
+                "classification_contract": {
+                    "axes": [
+                        {
+                            "axis_role": "required_independent_discussion",
+                            "partitions": [
+                                {"label": "randomized evidence"},
+                                {"label": "qualitative evidence"},
+                            ],
+                        }
+                    ]
+                },
+            }
+        )
+
+        self.assertEqual(
+            [
+                "randomized evidence",
+                "observational evidence",
+                "qualitative evidence",
+            ],
+            partitions,
+        )
 
     def test_formal_matrix_tag_routes_before_legacy_topic_text_match(self) -> None:
         routed = _topic_partition_for_row(
@@ -935,6 +1164,27 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertIn("transition-metal catalysis", outline)
         self.assertIn("photochemical methods", outline)
         self.assertIn("electrochemical methods", outline)
+
+    def test_topic_guided_outline_retains_unresolved_primary_study_as_boundary(self) -> None:
+        service = self.app.state.planning_service
+        outline = service._topic_outline_document(
+            [{"paper_id": "P001"}],
+            tags_by_paper={"P001": {}},
+            text_by_paper={
+                "P001": "A selected primary experiment whose current evidence has no declared route."
+            },
+            taxonomy_profile="general_academic",
+            intent={
+                "available": True,
+                "primary_axis": "reaction_type",
+                "secondary_axes": [],
+                "required_partitions": [],
+            },
+        )
+
+        self.assertIn("## 1. Cross-category comparison", outline)
+        self.assertIn("Assigned papers: P001.", outline)
+        self.assertIn("Boundary rationale:", outline)
 
     def test_reselecting_current_outline_is_idempotent(self) -> None:
         with TestClient(self.app) as client:
@@ -1140,9 +1390,64 @@ class PlanningV1Tests(unittest.TestCase):
             for section in repaired
             if section["section_role"] == "introduction"
         )
+        boundary = next(
+            section
+            for section in repaired
+            if section.get("title") == "Cross-category comparison"
+        )
         self.assertEqual([], introduction["context_paper_ids"])
+        self.assertEqual(["P001"], boundary["paper_ids"])
+        self.assertTrue(boundary["boundary_rationale"])
         self.assertEqual("unresolved_classification_retained", adjustments[0]["method"])
         self.assertEqual(["P001"], adjustments[0]["paper_ids"])
+
+    def test_generated_coverage_reconciliation_uses_bounded_fact_excerpt(self) -> None:
+        service = self.app.state.planning_service
+        sections = [
+            {
+                "title": "Introduction",
+                "section_role": "introduction",
+                "paper_ids": [],
+                "context_paper_ids": [],
+            },
+            {
+                "title": "Formaldehyde-based terminal-alkyne homologation",
+                "section_role": "body",
+                "paper_ids": ["P001"],
+            },
+            {
+                "title": "Conclusion",
+                "section_role": "conclusion",
+                "paper_ids": [],
+            },
+        ]
+        repaired, adjustments = service._reconcile_generated_outline_coverage(
+            sections,
+            [{"paper_id": "P001"}, {"paper_id": "P002"}],
+            {"P001": {}, "P002": {}},
+            {
+                "P001": "terminal alkyne homologation",
+                "P002": (
+                    "CuI and paraformaldehyde were combined with a terminal alkyne "
+                    "to synthesize a terminal allene."
+                ),
+            },
+            outline_style="topic-guided",
+            taxonomy_profile="allene",
+            tag_key_override="reaction_type",
+            axis_label_override="reaction type",
+        )
+
+        target = next(
+            section
+            for section in repaired
+            if section["title"] == "Formaldehyde-based terminal-alkyne homologation"
+        )
+        self.assertEqual(["P001", "P002"], target["paper_ids"])
+        self.assertEqual(
+            "coverage_reconciliation_evidence_route",
+            adjustments[0]["method"],
+        )
 
     def test_topic_guided_repair_preserves_non_default_primary_axis(self) -> None:
         service = self.app.state.planning_service
@@ -1216,6 +1521,37 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertEqual(["P001"], by_title["enynes"]["paper_ids"])
         self.assertEqual("scientific_object_reassignment", adjustments[0]["method"])
 
+    def test_equivalent_generated_body_sections_merge_without_cross_category_guessing(self) -> None:
+        repaired, adjustments = (
+            self.app.state.planning_service._merge_equivalent_generated_body_sections(
+                [
+                    {
+                        "title": "Method Family A",
+                        "section_role": "body",
+                        "paper_ids": ["P001"],
+                    },
+                    {
+                        "title": "method-family A",
+                        "section_role": "body",
+                        "paper_ids": ["P002"],
+                    },
+                    {
+                        "title": "Method Family B",
+                        "section_role": "body",
+                        "paper_ids": ["P003"],
+                    },
+                ]
+            )
+        )
+
+        self.assertEqual(2, len(repaired))
+        self.assertEqual(["P001", "P002"], repaired[0]["paper_ids"])
+        self.assertEqual(["P003"], repaired[1]["paper_ids"])
+        self.assertEqual(
+            "equivalent_primary_axis_category_merge",
+            adjustments[0]["method"],
+        )
+
     def test_topic_partition_survives_scientific_object_realignment(self) -> None:
         repaired, _adjustments = (
             self.app.state.planning_service._realign_generated_body_sections(
@@ -1252,10 +1588,7 @@ class PlanningV1Tests(unittest.TestCase):
 
         self.assertEqual(1, len(repaired))
         self.assertEqual("randomized evidence", repaired[0]["topic_partition"])
-        self.assertEqual(
-            "Randomized evidence — Enynes",
-            repaired[0]["title"],
-        )
+        self.assertEqual("enynes", repaired[0]["title"])
 
     def test_topic_boundary_rationale_survives_primary_axis_realignment(self) -> None:
         rationale = (
@@ -1367,6 +1700,33 @@ class PlanningV1Tests(unittest.TestCase):
             ["aldehyde-based three-component ATA"],
             tags["P001"]["reaction_type"],
         )
+
+    def test_outline_sources_include_bounded_fact_excerpt_for_routing(self) -> None:
+        with patch(
+            "review_writer_api.domain_services.planning.verified_structured_tags",
+            return_value={},
+        ):
+            _tags, text_by_paper = self.app.state.planning_service._outline_sources(
+                self.first,
+                [
+                    {
+                        "paper_id": "P001",
+                        "scientific_facts": [
+                            {
+                                "field_id": "catalyst_or_method",
+                                "value": "Copper-based system",
+                                "support_excerpt": (
+                                    "CuI and paraformaldehyde were added to the terminal "
+                                    "alkyne substrate."
+                                ),
+                            }
+                        ],
+                    }
+                ],
+            )
+
+        self.assertIn("paraformaldehyde", text_by_paper["P001"])
+        self.assertIn("terminal alkyne substrate", text_by_paper["P001"])
 
     def test_outline_sources_ignore_unverified_library_tags(self) -> None:
         with self.sessions.begin() as session:
@@ -1540,6 +1900,19 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertEqual([], conclusion["major_papers"])
         self.assertTrue(introduction["supporting_papers"])
         self.assertTrue(conclusion["supporting_papers"])
+        self.assertTrue(
+            all(section["writing_requirements"] for section in blueprint["sections"])
+        )
+        self.assertTrue(
+            all(section["scientific_claims"] == [] for section in blueprint["sections"])
+        )
+        self.assertTrue(
+            all(
+                section["review_claims"][0]["legacy_role"]
+                == "writing_requirement"
+                for section in blueprint["sections"]
+            )
+        )
         self.assertTrue(
             blueprint["paper_assignment_policy"][
                 "introduction_and_conclusion_are_synthesis_only"

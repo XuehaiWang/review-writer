@@ -1171,7 +1171,9 @@ def render_smiles_ball_and_stick(smiles: str, output_path: Path,
     def depth01(z: float) -> float:
         return (z - zmin) / max(zmax - zmin, 1e-6)
 
-    img = Image.new("RGB", img_size, (255, 255, 255))
+    # Preserve transparency so compositing never introduces a white rectangle
+    # around the molecule.
+    img = Image.new("RGBA", img_size, (255, 255, 255, 0))
     draw = ImageDraw.Draw(img)
     items = []
     for i, j, order in bonds:
@@ -1233,22 +1235,33 @@ def render_smiles_ball_and_stick(smiles: str, output_path: Path,
 # visually).  The previous module-cards / why-strategy-what regions were
 # calibrated against a mismatched artwork and pasted the molecule over
 # category cards, so they were removed.
-# The model is not fully deterministic: it alternates between a wide horizontal
-# structure panel at the top-left and a tall vertical panel on the left.  Each
-# layout therefore retains known regions as safe fallbacks after live panel
-# detection has failed.
-# Automatic blank-panel detection is always attempted first because the image
-# provider can move or resize a panel while keeping the same named layout.
-# These calibrated regions are deliberately only fallbacks for outputs whose
-# borders/backgrounds prevent automatic detection.
+# The model is not fully deterministic: it alternates between a compact
+# top-left panel, a wide horizontal panel, and a tall vertical panel.  A known
+# layout uses these guarded regions first because a maximal-white-rectangle
+# search can merge page whitespace above a panel with its blank interior and
+# return a visually shifted box. Unknown or drifted layouts still use live
+# detection after every calibrated candidate fails the blankness guard.
 _COMPOSITE_REGIONS: dict[str, list[tuple[float, float, float, float]]] = {
     "module-cards-crosscut-sidebar": [
+        # Variant D: compact upper-left reaction/product panel.  Its heading is
+        # outside the border and its caption sits immediately below it, so the
+        # taller Variant C box would include both pieces of text and fail the
+        # blankness guard.
+        (0.03, 0.14, 0.38, 0.385),
+        # Variant C: compact square-canvas structure panel at the top-left.
+        # This is the outer provider panel, not the smaller page-whitespace
+        # rectangle that the automatic detector can find above/inside it.
+        (0.02, 0.115, 0.39, 0.465),
         # Variant A: wide horizontal structure panel at the top-left
         # (caption excluded), calibrated against _composite_test.png.
         (0.02, 0.13, 0.78, 0.365),
         # Variant B: tall vertical structure panel on the left
         # (caption excluded), calibrated against the 2026-08-06 run.
         (0.016, 0.16, 0.198, 0.795),
+        # Variant E: portrait upper-left product panel.  Keep this after the
+        # established variants because its footprint is contained in some
+        # wider blank panels and would otherwise steal their calibration.
+        (0.027, 0.092, 0.34, 0.438),
     ],
 }
 
@@ -1261,6 +1274,80 @@ def _panel_whiteness(fig: Any, box: tuple[int, int, int, int]) -> float:
     white = sum(1 for i in range(0, len(raw), 3)
                 if raw[i] > 225 and raw[i + 1] > 225 and raw[i + 2] > 225)
     return white / max(1, len(raw) // 3)
+
+
+def _panel_neutrality(fig: Any, box: tuple[int, int, int, int]) -> float:
+    """Fraction of light pixels without a meaningful colour cast.
+
+    Pastel strategy cards often satisfy the legacy near-white threshold.  A
+    reserved structure panel is neutral white/grey, while those cards retain a
+    visible channel spread.  Keeping this as a separate guard prevents a known
+    coordinate from erasing real generated content after layout drift.
+    """
+
+    x0, y0, x1, y1 = box
+    raw = fig.crop((x0, y0, x1, y1)).convert("RGB").resize((120, 48)).tobytes()
+    neutral = sum(
+        1
+        for i in range(0, len(raw), 3)
+        if min(raw[i], raw[i + 1], raw[i + 2]) > 215
+        and max(raw[i], raw[i + 1], raw[i + 2])
+        - min(raw[i], raw[i + 1], raw[i + 2])
+        <= 14
+    )
+    return neutral / max(1, len(raw) // 3)
+
+
+def calibrated_structure_panel(
+    fig: Any,
+    layout: str,
+    *,
+    whiteness_threshold: float = 0.965,
+    neutrality_threshold: float = 0.93,
+) -> tuple[int, int, int, int] | None:
+    """Return the first verified panel for a known provider layout."""
+
+    width, height = fig.size
+    for box in _COMPOSITE_REGIONS.get(layout, []):
+        candidate = (
+            int(width * box[0]),
+            int(height * box[1]),
+            int(width * box[2]),
+            int(height * box[3]),
+        )
+        if (
+            _looks_like_structure_panel(candidate, width, height)
+            and _panel_whiteness(fig, candidate) >= whiteness_threshold
+            and _panel_neutrality(fig, candidate) >= neutrality_threshold
+        ):
+            return candidate
+    return None
+
+
+def _panel_matches_layout_zone(
+    layout: str,
+    box: tuple[int, int, int, int],
+    width: int,
+    height: int,
+) -> bool:
+    """Prevent a generic blank rectangle from winning in the wrong column.
+
+    The module-cards template reserves its representative-structure panel on
+    the upper-left.  Its right-hand evidence table can contain an even larger
+    white rectangle, so blankness alone is not sufficient to identify the
+    paste target.  Other layouts remain unrestricted until they have an
+    explicit placement contract.
+    """
+
+    if layout != "module-cards-crosscut-sidebar":
+        return True
+    x0, y0, x1, _y1 = box
+    center_x = (x0 + x1) / 2
+    return (
+        x0 <= 0.14 * width
+        and center_x <= 0.44 * width
+        and y0 <= 0.28 * height
+    )
 
 
 _DETECT_GRID_COLS = 24
@@ -1513,18 +1600,67 @@ def detect_blank_panel(fig: Any, min_area_fraction: float = 0.03,
     return None
 
 
+def _skeleton_rgba(image: Any) -> Any:
+    """Return a molecule layer with a transparent background.
+
+    Programmatic skeletons already carry alpha. Provider-redrawn and legacy
+    assets may still be RGB-on-white; for those, opacity is derived from colour
+    distance to white so anti-aliased molecular edges remain smooth.
+    """
+
+    from PIL import Image, ImageChops
+
+    rgba = image.convert("RGBA")
+    alpha = rgba.getchannel("A")
+    if alpha.getextrema() == (255, 255):
+        rgb = rgba.convert("RGB")
+        white = Image.new("RGB", rgb.size, "white")
+        red, green, blue = ImageChops.difference(rgb, white).split()
+        difference = ImageChops.lighter(ImageChops.lighter(red, green), blue)
+        alpha = difference.point(
+            lambda value: 0 if value <= 5 else min(255, (value - 5) * 4)
+        )
+        rgba.putalpha(alpha)
+    return rgba
+
+
+def _crop_skeleton_layer(image: Any) -> Any:
+    """Crop transparent/white margins while retaining meaningful fragments."""
+
+    rgba = _skeleton_rgba(image)
+    mask = rgba.getchannel("A").point(lambda value: 255 if value > 8 else 0)
+    bbox = _skeleton_content_bbox(mask)
+    return rgba.crop(bbox) if bbox else rgba
+
+
+def _fit_skeleton_layer(layer: Any, available_w: int, available_h: int) -> tuple[Any, bool]:
+    """Fit the molecule, rotating 90 degrees when a portrait panel benefits."""
+
+    from PIL import Image
+
+    available_w = max(1, int(available_w))
+    available_h = max(1, int(available_h))
+    width, height = max(1, layer.width), max(1, layer.height)
+    normal_scale = min(available_w / width, available_h / height)
+    rotated_scale = min(available_w / height, available_h / width)
+    rotated = normal_scale < 1.0 and rotated_scale >= normal_scale * 1.05
+    if rotated:
+        layer = layer.transpose(Image.Transpose.ROTATE_90)
+    layer.thumbnail((available_w, available_h), Image.Resampling.LANCZOS)
+    return layer, rotated
+
+
 def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layout: str,
                                    ) -> tuple[bool, str, str]:
     """Paste the exact ball-and-stick model into the layout's structure panel.
 
     Guarantees pixel-exact molecular geometry: the panel is cleared to white
-    and the programmatically rendered model is centered into it.  The actual
-    blank panel is detected from every generated image first so layout drift
-    cannot reuse stale hand-measured coordinates.  Calibrated regions are only
-    fallbacks when automatic detection cannot identify a safe target.
+    and the programmatically rendered model is centered into it. Known layouts
+    use strict blank-and-neutral calibrated panels first; automatic detection
+    handles layouts for which every calibration fails.
 
     Returns ``(ok, reason, panel_source)`` where ``panel_source`` is
-    ``"calibrated-fallback"``, ``"auto-detected"``, ``"appended-dock"``,
+    ``"calibrated"``, ``"auto-detected"``, ``"appended-dock"``,
     or ``""``.
     If the image model ignored the reserved-blank-panel instruction, the
     generated overview is preserved pixel-for-pixel and a white structure
@@ -1540,26 +1676,15 @@ def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layou
     with Image.open(figure_path) as fig:
         fig = fig.convert("RGB")
         W, H = fig.size
-        target = detect_blank_panel(fig)
-        panel_source = "auto-detected" if target is not None else ""
+        target = calibrated_structure_panel(fig, layout)
+        panel_source = "calibrated" if target is not None else ""
         if target is None:
-            for box in _COMPOSITE_REGIONS.get(layout, []):
-                x0, y0, x1, y1 = (
-                    int(W * box[0]),
-                    int(H * box[1]),
-                    int(W * box[2]),
-                    int(H * box[3]),
-                )
-                # Guard: only paste into a mostly-blank panel.  If the layout
-                # drifted and the region contains cards/text/colors, preserve it.
-                candidate = (x0, y0, x1, y1)
-                if (
-                    _looks_like_structure_panel(candidate, W, H)
-                    and _panel_whiteness(fig, candidate) >= 0.965
-                ):
-                    target = (x0, y0, x1, y1)
-                    panel_source = "calibrated-fallback"
-                    break
+            detected = detect_blank_panel(fig)
+            if detected is not None and _panel_matches_layout_zone(
+                layout, detected, W, H
+            ):
+                target = detected
+                panel_source = "auto-detected"
         if target is None:
             # The provider occasionally fills the explicitly reserved panel
             # with its own approximate molecule.  Never overwrite a populated
@@ -1568,11 +1693,7 @@ def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layou
             # remains unscaled and uncropped, so no generated content is lost.
             try:
                 with Image.open(skeleton_path) as sk:
-                    sk = sk.convert("RGB")
-                    mask = sk.convert("L").point(lambda p: 255 if p < 245 else 0)
-                    bbox = _skeleton_content_bbox(mask)
-                    if bbox:
-                        sk = sk.crop(bbox)
+                    sk = _crop_skeleton_layer(sk)
 
                     dock_width = max(320, min(480, int(round(W * 0.38))))
                     padding = max(22, int(round(dock_width * 0.08)))
@@ -1617,10 +1738,10 @@ def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layou
 
                     available_w = max(1, inset[2] - inset[0] - 2 * padding)
                     available_h = max(1, inset[3] - inset[1] - 2 * padding)
-                    sk.thumbnail((available_w, available_h))
+                    sk, _rotated = _fit_skeleton_layer(sk, available_w, available_h)
                     sx = inset[0] + (inset[2] - inset[0] - sk.width) // 2
                     sy = inset[1] + (inset[3] - inset[1] - sk.height) // 2
-                    canvas.paste(sk, (sx, sy))
+                    canvas.paste(sk, (sx, sy), sk.getchannel("A"))
                     canvas.save(figure_path, format="PNG")
                 return True, "", "appended-dock"
             except Exception as exc:
@@ -1628,58 +1749,27 @@ def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layou
         x0, y0, x1, y1 = target
         _clear_panel_specks(fig, (x0, y0, x1, y1))
         with Image.open(skeleton_path) as sk:
-            sk = sk.convert("RGB")
-            # Trim the skeleton's white margins so the molecule uses the panel space.
-            mask = sk.convert("L").point(lambda p: 255 if p < 245 else 0)
-            bbox = _skeleton_content_bbox(mask)
-            if bbox:
-                sk = sk.crop(bbox)
+            sk = _crop_skeleton_layer(sk)
 
-            # Draw a deterministic inset frame instead of relying on the
-            # image provider to preserve a visible panel border.  The header
-            # and padding make the molecule read as a deliberate scientific
-            # element, never as a loose overlay.
-            from PIL import ImageDraw
-            draw = ImageDraw.Draw(fig)
+            # Use the template's own blank panel directly.  Adding a second
+            # rounded rectangle and a synthetic heading made the structure
+            # look like a floating card and could obscure the surrounding
+            # layout.  Only the molecular content is composited here.
             panel_w = x1 - x0
             panel_h = y1 - y0
-            border_width = max(2, min(W, H) // 420)
-            radius = max(10, min(panel_w, panel_h) // 14)
-            inset = max(border_width + 2, min(panel_w, panel_h) // 35)
-            framed_box = (x0 + inset, y0 + inset, x1 - inset, y1 - inset)
-            draw.rounded_rectangle(
-                framed_box,
-                radius=radius,
-                fill="white",
-                outline=(182, 199, 219),
-                width=border_width,
-            )
-            title = "Representative structure"
-            title_font = _label_font(max(14, min(24, panel_w // 28)))
-            title_box = draw.textbbox((0, 0), title, font=title_font)
-            title_width = title_box[2] - title_box[0]
-            title_height = title_box[3] - title_box[1]
-            title_x = x0 + (panel_w - title_width) // 2
-            title_y = y0 + inset + max(8, panel_h // 40)
-            draw.text(
-                (title_x, title_y),
-                title,
-                fill=(24, 56, 102),
-                font=title_font,
-            )
-            inner_padding = max(14, min(panel_w, panel_h) // 16)
+            inner_padding = max(16, min(panel_w, panel_h) // 12)
             content_box = (
-                framed_box[0] + inner_padding,
-                title_y + title_height + inner_padding,
-                framed_box[2] - inner_padding,
-                framed_box[3] - inner_padding,
+                x0 + inner_padding,
+                y0 + inner_padding,
+                x1 - inner_padding,
+                y1 - inner_padding,
             )
             available_w = max(1, content_box[2] - content_box[0])
             available_h = max(1, content_box[3] - content_box[1])
-            sk.thumbnail((available_w, available_h))
+            sk, _rotated = _fit_skeleton_layer(sk, available_w, available_h)
             sx = content_box[0] + (available_w - sk.width) // 2
             sy = content_box[1] + (available_h - sk.height) // 2
-            fig.paste(sk, (sx, sy))
+            fig.paste(sk, (sx, sy), sk.getchannel("A"))
         fig.save(figure_path, format="PNG")
     return True, "", panel_source
 
@@ -1945,7 +2035,7 @@ _GATE_R_TOLERANCE = 1                # allowed |detected - expected| R labels
 _AI_SKELETON_REDRAW_PROMPT = (
     "STYLE-TRANSFER TASK. The attached reference is an exact ball-and-stick diagram of ONE "
     "molecule. Re-render this EXACT molecule as a glossy photorealistic 3D ball-and-stick "
-    "model on a pure white background: shaded spheres with specular highlights, cylindrical "
+    "model on a transparent background: shaded spheres with specular highlights, cylindrical "
     "lit bonds, soft studio lighting, mild perspective.\n"
     "PRESERVE EXACTLY (chemistry must not change):\n"
     "- every atom: same count, same topology, same colors (black carbon, red oxygen, blue "
@@ -1955,7 +2045,7 @@ _AI_SKELETON_REDRAW_PROMPT = (
     "cumulated C=C=C core;\n"
     "- all label texts verbatim (R1, R2, ...).\n"
     "Do not add, remove, merge or relabel atoms. No caption, no border, no extra text; "
-    "output only the molecule centered on white."
+    "output only the molecule, centered, with no background."
 )
 
 # The redraw is non-deterministic and the gate probabilistic, so a single
@@ -2163,7 +2253,12 @@ def attempt_ai_skeleton_redraw(features: dict[str, Any], reference_png: Path,
         try:
             import io
             from PIL import Image
-            img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            source_img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+            # The integrity gate is calibrated for a white background. Flatten
+            # only its inspection copy; preserve the provider alpha (when
+            # present) for the saved compositing asset.
+            img = Image.new("RGB", source_img.size, "white")
+            img.paste(source_img, (0, 0), source_img.getchannel("A"))
         except Exception as exc:
             attempt_notes.append(f"attempt_{attempt}:undecodable_image:{exc}"[:300])
             continue
@@ -2186,7 +2281,7 @@ def attempt_ai_skeleton_redraw(features: dict[str, Any], reference_png: Path,
             continue
         attempt_notes.append(f"attempt_{attempt}:gate_passed")
         output_png.parent.mkdir(parents=True, exist_ok=True)
-        output_png.write_bytes(image_bytes)
+        _skeleton_rgba(source_img).save(output_png, format="PNG")
         return output_png, "gate_passed", attempt_notes
     return None, attempt_notes[-1] if attempt_notes else "no_attempts", attempt_notes
 
@@ -2233,6 +2328,8 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
         "catalyst_keywords": [],
         "skeleton_smiles": "",
         "overview_axis_contract": {},
+        "overview_modules": [],
+        "overview_evidence_bindings": {},
     }
 
     # Read query plan for group_by, filters, keywords, and topic
@@ -2293,6 +2390,23 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
                 features["classification_rule"] = str(
                     basis.get("description") or f"By {axis.replace('_', ' ')}"
                 )
+        if isinstance(blueprint, dict):
+            for section in blueprint.get("sections") or []:
+                if not isinstance(section, dict):
+                    continue
+                role = str(section.get("section_role") or "body").casefold()
+                if role != "body":
+                    continue
+                section_id = str(section.get("section_id") or "").strip()
+                title = str(section.get("title") or section.get("heading") or "").strip()
+                label = _heading_to_category(title)
+                if not label or label in features["overview_modules"]:
+                    continue
+                features["overview_modules"].append(label)
+                features["overview_evidence_bindings"][label] = {
+                    "section_id": section_id,
+                    "source": "current_blueprint_body_section",
+                }
 
     # Fallback: recover the review topic from PostgreSQL artifacts that the
     # native final-overview compatibility workspace actually materializes,
@@ -2328,12 +2442,19 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
         features["group_by"] = ["catalyst_or_method"]
         features["classification_rule"] = "By catalyst center metal"
 
+    # The confirmed Blueprint owns the top-level overview modules.  The
+    # legacy ``metal_categories`` field remains the renderer input name, but
+    # its values are no longer allowed to retheme a substrate/reaction-axis
+    # review as a metal taxonomy.
+    if features.get("overview_modules"):
+        features["metal_categories"] = list(features["overview_modules"])
+
     # Backfill categories from first_draft.md section headings when the
     # outline is too sparse to fill the figure (avoids empty panels)
     real_cats = [c for c in features["metal_categories"] if c != "Organocatalysis"]
     if len(real_cats) < 3:
         draft_cats = _categories_from_draft(project_dir)
-        if len(draft_cats) > len(real_cats):
+        if not features.get("overview_modules") and len(draft_cats) > len(real_cats):
             features["metal_categories"] = draft_cats
 
     # Read discovery results for group stats
@@ -2346,6 +2467,47 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
     # Without this, non-chemistry reviews inherit allene-centric prompts.
     _resolve_taxonomy_profile(project_dir, features)
     features["display_title"] = build_overview_display_title(features)
+    overview_modules = list(
+        dict.fromkeys(
+            str(value or "").strip()
+            for value in (
+                features.get("overview_modules")
+                or features.get("metal_categories")
+                or [features.get("classification_rule")]
+            )
+            if str(value or "").strip()
+        )
+    )
+    if not overview_modules:
+        raise ValueError(
+            "The current Blueprint and draft contain no evidence-bound overview modules."
+        )
+    features["metal_categories"] = overview_modules
+    approved_labels = list(
+        dict.fromkeys(
+            value
+            for value in [
+                str(features.get("display_title") or "").strip(),
+                str(features.get("classification_rule") or "").strip(),
+                *(
+                    str(item or "").strip()
+                    for item in overview_modules
+                ),
+            ]
+            if value
+        )
+    )
+    features["overview_content_contract"] = {
+        "schema_version": 1,
+        "title": features["display_title"],
+        "primary_axis": (
+            (features.get("group_by") or [""])[0]
+        ),
+        "modules": overview_modules,
+        "approved_labels": approved_labels,
+        "evidence_bindings": dict(features.get("overview_evidence_bindings") or {}),
+        "performance_label_policy": "omit_without_structured_evidence_binding",
+    }
 
     # Store project dir for multi-pass extraction in _build_metal_rows_text
     features["_project_dir"] = project_dir
@@ -2706,7 +2868,7 @@ def _build_approved_terminology(features: dict[str, Any]) -> str:
         "catalytic strategy", "key feature", "key advantage", "main limitation",
         "key challenge", "selectivity", "enantioselectivity", "regioselectivity",
         "diastereoselectivity", "chemoselectivity", "stereoselectivity",
-        "mild conditions", "broad scope", "representative transformation",
+        "reported conditions", "reported scope", "representative transformation",
         "representative reaction", "classification rule", "opportunities and challenges",
     ]
     for g_term in generic:
@@ -3078,9 +3240,9 @@ def _build_metal_rows_text(features: dict[str, Any]) -> str:
 
     lines.append("")
     lines.append("For each row, fill 3 cells. Use EXACTLY the text below (do NOT invent):")
-    lines.append("  Cell 1 = strategy (the catalytic approach, max 3 words)")
-    lines.append("  Cell 2 = selectivity (ee level or selectivity type, max 2 words)")
-    lines.append("  Cell 3 = highlight (one distinguishing feature, max 2 words)")
+    lines.append("  Cell 1 = system or method role (neutral wording, max 3 words)")
+    lines.append("  Cell 2 = reported selectivity type, when explicit (max 2 words)")
+    lines.append("  Cell 3 = evidence-bound feature; otherwise leave blank (max 2 words)")
     lines.append("")
 
     used: dict[str, set[str]] = {"strategy": set(), "selectivity": set(), "highlight": set()}
@@ -3115,7 +3277,7 @@ def _build_metal_rows_text(features: dict[str, Any]) -> str:
         lines.append(f"  [{m}] cell1=\"{row['strategy']}\"  cell2=\"{row['selectivity']}\"  cell3=\"{row['highlight']}\"")
 
     lines.append("")
-    lines.append("Column headers above row 1: \"Strategy\"  \"Selectivity\"  \"Highlight\"")
+    lines.append("Column headers above row 1: \"System / role\"  \"Selectivity\"  \"Supported feature\"")
     lines.append("")
     lines.append("RULES:")
     lines.append("- Render each cell EXACTLY as given. Do not modify, add, or remove text.")
@@ -3239,23 +3401,10 @@ def _get_extraction_patterns() -> tuple[list, list, list]:
         (r"stereoselective|stereospecific|enantiospecific", "stereoselective"),
         (r"enantioconvergent|enantiodivergent", "enantioselective"),
     ]
-    highlight_pats = [
-        (r"mild|room temp|ambient", "mild conditions"),
-        (r"green|sustainable|earth[- ]?abundant", "sustainable"),
-        (r"broad|diverse|wide scope", "broad scope"),
-        (r"direct|atom[- ]?econom|no pre[- ]?activ", "atom-economical"),
-        (r"remote|long[- ]?range", "remote control"),
-        (r"divergent|switchable|tunable", "divergent"),
-        (r"modular|versatile|flexible", "modular"),
-        (r"scalable|gram[- ]?scale|flow", "scalable"),
-        (r"metal[- ]?free|organocatal", "metal-free"),
-        (r"emerging|new|novel|unprecedented", "emerging"),
-        (r"cooperative|synergistic|dual", "cooperative"),
-        (r"cost[- ]?effective|cheap|inexpensive", "cost-effective"),
-        (r"ligand[- ]?free", "ligand-free"),
-        (r"electrochem", "electrochemical"),
-        (r"photo|visible light", "photoredox"),
-    ]
+    # Performance, scope, cost, and sustainability adjectives require a
+    # structured evidence binding.  Plain prose matching cannot establish
+    # that contract, so the generic generator leaves this cell empty.
+    highlight_pats: list[tuple[str, str]] = []
     return strategy_pats, selectivity_pats, highlight_pats
 
 
@@ -3291,10 +3440,11 @@ def _derive_strategy(cat: str) -> str:
     # Catch-all categories
     if cat_lower in ("other", "others", "miscellaneous"):
         return "diverse methods"
-    # Metal symbols → "X catalysis"
-    metal_symbols = {"pd", "cu", "ni", "co", "au", "rh", "ir", "fe", "ru", "zn", "cr"}
+    # A category name alone does not establish whether a component is a
+    # catalyst, promoter, co-catalyst, or stoichiometric reagent.
+    metal_symbols = {"pd", "cu", "ni", "co", "au", "rh", "ir", "fe", "ru", "zn", "cr", "cd", "ti"}
     if cat_lower in metal_symbols:
-        return f"{cat} catalysis"
+        return f"{cat} system"
     # Organocatalysis
     if "organicat" in cat_lower or "metal-free" in cat_lower:
         return "organocatalysis"
@@ -3306,40 +3456,12 @@ def _derive_strategy(cat: str) -> str:
 
 
 def _derive_selectivity(cat: str) -> str:
-    """Final fallback: derive a selectivity label."""
-    cat_lower = cat.lower()
-    if cat_lower in ("other", "others", "miscellaneous"):
-        return "mixed"
-    if "organicat" in cat_lower or "metal-free" in cat_lower:
-        return "enantioselective"
-    if cat_lower in ("pd", "au", "rh"):
-        return "high ee"
-    if cat_lower in ("cu", "ni", "co"):
-        return "moderate"
+    """Never derive a performance claim from a category label."""
     return "—"
 
 
 def _derive_highlight(cat: str) -> str:
-    """Final fallback: derive a highlight label."""
-    cat_lower = cat.lower()
-    if cat_lower in ("other", "others", "miscellaneous"):
-        return "emerging"
-    if "organicat" in cat_lower or "metal-free" in cat_lower:
-        return "metal-free"
-    if cat_lower in ("ni", "co", "fe"):
-        return "earth-abundant"
-    if cat_lower == "cu":
-        return "cost-effective"
-    if cat_lower == "pd":
-        return "broad scope"
-    if cat_lower == "au":
-        return "mild conditions"
-    if any(w in cat_lower for w in ("acetate", "carbonate")):
-        return "versatile"
-    if "halide" in cat_lower:
-        return "flow-compatible"
-    if "free" in cat_lower or "propargyl" in cat_lower:
-        return "atom-economical"
+    """Never derive an advantage or sustainability claim from a category."""
     return "—"
 
 
@@ -3419,11 +3541,11 @@ def _build_take_home_text(features: dict[str, Any]) -> str:
         f"2. {class_short}-centered",
     ]
     if has_chirality:
-        messages.append("3. High enantioselectivity")
+        messages.append("3. Selectivity evidence")
     else:
-        messages.append("3. Distinct category features")
-    messages.append("4. Diverse substrate scope" if has_reaction_focus else "4. Diverse categories")
-    messages.append("5. Emerging sustainable methods" if has_reaction_focus else "5. Emerging approaches")
+        messages.append("3. Comparative evidence")
+    messages.append("4. Applicability boundaries" if has_reaction_focus else "4. Category boundaries")
+    messages.append("5. Mechanistic evidence" if has_reaction_focus else "5. Evidence limitations")
     messages.append("6. Future directions")
     return "Take-home messages (bottom band, 6 items):\n" + "\n".join(messages)
 

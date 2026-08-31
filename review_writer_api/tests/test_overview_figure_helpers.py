@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -25,6 +27,45 @@ SPEC.loader.exec_module(overview)
 
 
 class OverviewFigureHelperTests(unittest.TestCase):
+    def test_blueprint_body_sections_override_legacy_metal_categories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            blueprint_dir = project / "01_matrix_outline"
+            blueprint_dir.mkdir(parents=True)
+            (blueprint_dir / "section_blueprint.json").write_text(
+                json.dumps(
+                    {
+                        "review_topic": "Allene synthesis by substrate class",
+                        "classification_basis": {
+                            "primary_axis": "substrate",
+                            "overview_axis": "substrate",
+                        },
+                        "sections": [
+                            {
+                                "section_id": "S02",
+                                "section_role": "body",
+                                "title": "Propargylic alcohol substrates",
+                            },
+                            {
+                                "section_id": "S03",
+                                "section_role": "body",
+                                "title": "Terminal alkyne substrates",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            features = overview.extract_review_features(project)
+
+        contract = features["overview_content_contract"]
+        self.assertEqual("substrate", contract["primary_axis"])
+        self.assertEqual(
+            ["Propargylic alcohol", "Terminal alkyne"], contract["modules"]
+        )
+        self.assertNotIn("Fe", contract["approved_labels"])
+
     def test_overview_title_rewrites_instruction_topic_as_academic_title(self) -> None:
         topic = (
             'Please write a review on the topic “allenation-of-terminal-alkynes (ATA)”, '
@@ -166,6 +207,20 @@ class OverviewFigureHelperTests(unittest.TestCase):
         self.assertEqual(["Cu", "Fe", "ee", "R1", "R2", "R3", "R4"], symbols)
         self.assertNotIn("Pd", symbols)
         self.assertNotIn("Ni", symbols)
+
+    def test_category_name_does_not_create_performance_claims(self) -> None:
+        self.assertEqual("Au system", overview._derive_strategy("Au"))
+        self.assertEqual("—", overview._derive_selectivity("Au"))
+        self.assertEqual("—", overview._derive_highlight("Cu"))
+        take_home = overview._build_take_home_text(
+            {
+                "has_chirality": True,
+                "has_reaction_focus": True,
+                "classification_rule": "By reaction type",
+            }
+        )
+        self.assertNotIn("High enantioselectivity", take_home)
+        self.assertNotIn("sustainable", take_home.casefold())
 
     def test_existing_integrity_fallbacks_and_blueprint_contract_remain(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")

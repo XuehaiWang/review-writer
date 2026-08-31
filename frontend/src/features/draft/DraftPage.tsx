@@ -19,9 +19,10 @@ import { hardGateDetails, type HardGateFinding } from "./hardGateDetails";
 type Paragraph = { paragraph_id: string; text: string };
 type ParagraphImage = { figure_id: string; artifact_id: string; url: string };
 type QualityStage = "discovery" | "planning" | "sections" | "draft";
+type RepairStage = "discovery" | "library_matrix" | "planning" | "evidence_package" | "writing_plan" | "draft" | "figures" | "bibliography" | "final";
 type QualityRouting = { recommended_return_stage?: QualityStage; recommended_action?: string; counts_by_stage?: Partial<Record<QualityStage, number>> };
 type ManualClaimReview = { warning_required?: boolean; verified_manual_paragraph_ids?: string[]; unverified_manual_paragraph_ids?: string[] };
-type QualityIssue = Record<string, unknown> & { issue_id?: string; severity?: string; paragraph_id?: string; section_id?: string; message?: string; diagnosis?: string; score?: number; route?: string; failed_dimensions?: string[]; source_check_status?: string; recommended_return_stage?: QualityStage; recommended_action?: string; unresolved_primary_papers?: string[]; corpus_gap_questions?: string[]; paragraph?: { paragraph_id: string; text: string; images: ParagraphImage[] } };
+type QualityIssue = Record<string, unknown> & { issue_id?: string; severity?: string; paragraph_id?: string; section_id?: string; message?: string; diagnosis?: string; score?: number; route?: string; failed_dimensions?: string[]; source_check_status?: string; recommended_return_stage?: QualityStage; recommended_action?: string; repair_stage?: RepairStage; repair_action?: string; rewrite_eligible?: boolean; unresolved_primary_papers?: string[]; corpus_gap_questions?: string[]; paragraph?: { paragraph_id: string; text: string; images: ParagraphImage[] } };
 type IncrementalEvaluation = { paragraph_id: string; old_paragraph_score: number; new_paragraph_score: number; previous_overall_score: number; updated_overall_score: number; evaluated_at?: string };
 type RewriteCandidate = {
   candidate_id: string;
@@ -34,6 +35,10 @@ type RewriteCandidate = {
   route?: string;
   rewrite_mode?: string;
   requires_manual_confirmation?: boolean;
+  evidence_repair_preview?: {
+    added_evidence_count?: number;
+    downgraded_claim_count?: number;
+  };
 };
 type OptimizationChange = { paragraph_id: string; original_text: string; candidate_text: string; source_paragraph_score?: number; candidate_paragraph_score?: number; score_delta?: number; overall_score_delta?: number; accuracy_improved?: boolean };
 type OptimizationProposal = { proposal_id: string; source_score: number; candidate_score: number; changes: OptimizationChange[]; status: string; created_at: string; reference_repair?: { changed?: boolean }; evidence_repair?: { added_evidence_count?: number } };
@@ -71,6 +76,8 @@ export function PendingRewrite({ candidate, decide, disabled }: { candidate?: Re
   const sourceScore = Number(candidate.source_paragraph_score);
   const candidateScore = Number(candidate.candidate_paragraph_score);
   const scored = Number.isFinite(sourceScore) && Number.isFinite(candidateScore);
+  const addedEvidence = Number(candidate.evidence_repair_preview?.added_evidence_count || 0);
+  const downgradedClaims = Number(candidate.evidence_repair_preview?.downgraded_claim_count || 0);
   return <section className="rewrite-candidate-react">
     <header className="rewrite-candidate-score">
       <div><span>{text("原段分数", "Original score")}</span><strong>{scored ? sourceScore.toFixed(1) : "—"}</strong></div>
@@ -81,6 +88,7 @@ export function PendingRewrite({ candidate, decide, disabled }: { candidate?: Re
     <div><h4>{text("原文", "Original")}</h4><p>{candidate.original_text}</p></div>
     <div><h4>{text("重写候选", "Rewrite candidate")}</h4><p>{candidate.candidate_text}</p></div>
     <p className="rewrite-candidate-note muted">{text("正文尚未改变。保存时直接采用上方已评分候选，并按分差增量更新全文分数，不再调用模型复评。", "The draft is still unchanged. Saving uses the scored candidate above and updates the overall score by its delta without another model evaluation.")}</p>
+    {addedEvidence > 0 || downgradedClaims > 0 ? <p className="message message-success">{text(`保存后将同步更新章节证据包：新增 ${addedEvidence} 条本地全文证据，记录 ${downgradedClaims} 条证据不足声明的降级处理。`, `Saving also updates the section Evidence Package with ${addedEvidence} local full-text passage(s) and ${downgradedClaims} claim-downgrade record(s).`)}</p> : null}
     {candidate.requires_manual_confirmation ? <p className="message message-warning">{text("此候选只改善表达，没有解决原评估中的来源或图文身份冲突。保存后该问题仍需人工核对，不能视为已完成来源确认。", "This candidate improves wording only; it does not resolve the source or figure-identity conflict in the evaluation. Manual confirmation is still required after saving.")}</p> : null}
     <footer><button className="button button-primary" type="button" disabled={disabled} onClick={() => decide(candidate.candidate_id, "accept")}>{text("保存此候选", "Save candidate")}</button><button className="button button-secondary" type="button" disabled={disabled} onClick={() => decide(candidate.candidate_id, "reject")}>{text("放弃候选", "Discard candidate")}</button></footer>
   </section>;
@@ -388,6 +396,17 @@ export function DraftPage() {
     sections: text("章节证据与撰写", "section evidence and writing"),
     draft: text("当前初稿", "the current Draft"),
   }[stage || "draft"]);
+  const repairStageLabel = (stage?: RepairStage) => ({
+    discovery: text("论文检索", "Literature retrieval"),
+    library_matrix: text("文献库与 Matrix", "Library and Matrix"),
+    planning: text("Matrix 与大纲", "Matrix and outline"),
+    evidence_package: text("章节证据包", "Section evidence package"),
+    writing_plan: text("章节综合与写作计划", "Section synthesis and writing plan"),
+    draft: text("当前初稿段落", "Current Draft paragraph"),
+    figures: text("图像与插图计划", "Figures and insertion plan"),
+    bibliography: text("规范参考文献", "Canonical bibliography"),
+    final: text("终稿与导出", "Final and export"),
+  }[stage || "draft"]);
   const returnToStage = (stage?: QualityStage, issue?: QualityIssue) => {
     const target = stage || "draft";
     if (target === "draft") {
@@ -398,6 +417,28 @@ export function DraftPage() {
     if (issue?.section_id) params.set("section", issue.section_id);
     if (issue?.paragraph_id) params.set("paragraph", issue.paragraph_id);
     navigate(`/${target}?${params.toString()}`);
+  };
+  const returnToRepairStage = (stage: RepairStage, issue: QualityIssue) => {
+    const route = {
+      discovery: "discovery",
+      library_matrix: "planning",
+      planning: "planning",
+      evidence_package: "sections",
+      writing_plan: "sections",
+      draft: "draft",
+      figures: "images",
+      bibliography: "final",
+      final: "final",
+    }[stage];
+    if (route === "draft") {
+      editIssueParagraph(String(issue.paragraph_id || ""));
+      return;
+    }
+    const params = new URLSearchParams({ project: project!.project_id });
+    if (issue.section_id) params.set("section", issue.section_id);
+    if (issue.paragraph_id) params.set("paragraph", issue.paragraph_id);
+    if (route === "images") params.set("tab", "redraw");
+    navigate(`/${route}?${params.toString()}`);
   };
   const routing = payload?.quality.routing;
   const manualClaimReview = payload?.quality.manual_claim_review;
@@ -429,15 +470,18 @@ export function DraftPage() {
             const rewriteActive = jobIsActive(state?.status);
             const upstreamRepair = issue.recommended_return_stage && issue.recommended_return_stage !== "draft";
             const sectionRepair = issue.recommended_return_stage === "sections" && Boolean(paragraphId);
+            const repairStage = issue.repair_stage || "draft";
+            const rewriteEligible = issue.rewrite_eligible !== false;
+            const routedOutsideDraft = !["draft", "evidence_package"].includes(repairStage);
             return <article id={`quality-issue-${paragraphId}`} tabIndex={-1} className={`quality-issue-react${qualityFocusParagraph === paragraphId ? " quality-focus" : ""}`} key={String(issue.issue_id || index)}>
               <header><strong>{String(issue.severity || "issue")} · {paragraphId}</strong><span>{String(issue.message || issue.diagnosis || "")}</span></header>
-              <dl className="quality-issue-meta"><div><dt>{text("段落分数", "Paragraph score")}</dt><dd>{issue.score === undefined || issue.score === null ? "—" : Number(issue.score).toFixed(1)}</dd></div><div><dt>{text("处理位置", "Handled in")}</dt><dd>{sectionRepair ? text("当前初稿页面", "Current draft page") : stageLabel(issue.recommended_return_stage)}</dd></div><div><dt>{text("来源核验", "Source check")}</dt><dd>{issue.source_check_status || "—"}</dd></div><div><dt>{text("章节", "Section")}</dt><dd>{issue.section_id || "—"}</dd></div></dl>
+              <dl className="quality-issue-meta"><div><dt>{text("段落分数", "Paragraph score")}</dt><dd>{issue.score === undefined || issue.score === null ? "—" : Number(issue.score).toFixed(1)}</dd></div><div><dt>{text("实际修复位置", "Actual repair owner")}</dt><dd>{repairStageLabel(repairStage)}</dd></div><div><dt>{text("来源核验", "Source check")}</dt><dd>{issue.source_check_status || "—"}</dd></div><div><dt>{text("章节", "Section")}</dt><dd>{issue.section_id || "—"}</dd></div></dl>
               {issue.recommended_action ? <p className="quality-recommended-action"><strong>{text("建议：", "Recommended: ")}</strong>{issue.recommended_action}</p> : null}
               {issue.failed_dimensions?.length ? <div className="quality-dimensions"><strong>{text("未通过维度", "Failed dimensions")}</strong>{issue.failed_dimensions.map((dimension) => <span key={dimension}>{dimension}</span>)}</div> : null}
               {issue.corpus_gap_questions?.length ? <p className="message message-warning">{text(`证据问题：${issue.corpus_gap_questions.join("、")}`, `Evidence gaps: ${issue.corpus_gap_questions.join(", ")}`)}</p> : null}
               <p>{issue.paragraph?.text || ""}</p>
               {issue.paragraph?.images?.length ? <div className="issue-images">{issue.paragraph.images.map((image) => <figure key={image.artifact_id}><img src={image.url} alt={image.figure_id} /><figcaption>{image.figure_id}</figcaption></figure>)}</div> : null}
-              <div className="quality-issue-actions"><button className="button button-secondary" type="button" disabled={editingLocked} onClick={() => editIssueParagraph(paragraphId)}>{text("在 Preview 中编辑", "Edit in Preview")}</button>{sectionRepair ? <button className="button button-primary" type="button" disabled={editingLocked || rewrite.isPending || rewriteActive} onClick={() => rewrite.mutate(paragraphId)}>{rewriteActive || (rewrite.isPending && rewrite.variables === paragraphId) ? text("正在自动优化并评分…", "Optimizing and scoring…") : candidate ? text("重新自动优化该段", "Regenerate paragraph repair") : text("自动优化该段", "Optimize this paragraph")}</button> : upstreamRepair ? <button className="button button-primary" type="button" disabled={editingLocked} onClick={() => returnToStage(issue.recommended_return_stage, issue)}>{text(`返回${stageLabel(issue.recommended_return_stage)}`, `Return to ${stageLabel(issue.recommended_return_stage)}`)}</button> : <button className="button button-secondary" type="button" disabled={editingLocked || rewrite.isPending || rewriteActive} onClick={() => rewrite.mutate(paragraphId)}>{rewriteButtonText(paragraphId, Boolean(candidate), rewriteActive, true)}</button>}</div>
+              <div className="quality-issue-actions"><button className="button button-secondary" type="button" disabled={editingLocked || !paragraphId} onClick={() => editIssueParagraph(paragraphId)}>{text("在 Preview 中编辑", "Edit in Preview")}</button>{routedOutsideDraft ? <button className="button button-primary" type="button" disabled={editingLocked} onClick={() => returnToRepairStage(repairStage, issue)}>{text(`前往${repairStageLabel(repairStage)}`, `Go to ${repairStageLabel(repairStage)}`)}</button> : !issue.repair_stage && upstreamRepair ? <button className="button button-primary" type="button" disabled={editingLocked} onClick={() => returnToStage(issue.recommended_return_stage, issue)}>{text(`返回${stageLabel(issue.recommended_return_stage)}`, `Return to ${stageLabel(issue.recommended_return_stage)}`)}</button> : rewriteEligible ? <button className={sectionRepair || repairStage === "evidence_package" ? "button button-primary" : "button button-secondary"} type="button" disabled={editingLocked || rewrite.isPending || rewriteActive || !paragraphId} onClick={() => rewrite.mutate(paragraphId)}>{rewriteButtonText(paragraphId, Boolean(candidate), rewriteActive, true)}</button> : null}</div>
               <PendingRewrite candidate={candidate} decide={decideCandidate} disabled={decide.isPending || acceptRewriteActive} />
             </article>;
           })}

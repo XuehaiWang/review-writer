@@ -12,6 +12,7 @@ import { useUiText } from "../../i18n/useUiText";
 import { buildPaperDisplayLabels, replacePaperIdsForDisplay } from "../../utils/paperLabels";
 import { SectionJobProgress } from "./SectionJobProgress";
 import { findSectionJobForDisplay, replaceSectionJobSnapshot } from "./sectionJobResume";
+import { sectionReadinessLabel } from "./sectionStatusLabels";
 
 type SectionTask = Record<string, unknown> & {
   section_id?: string;
@@ -23,6 +24,16 @@ type SectionTask = Record<string, unknown> & {
   context_papers?: string[];
   allowed_papers?: string[];
   must_cover_points?: string[];
+  scientific_claims?: Array<{
+    claim_id?: string;
+    proposition?: string;
+    required_for_section?: boolean;
+  }>;
+  writing_requirements?: Array<{
+    requirement_id?: string;
+    type?: string;
+    instruction?: string;
+  }>;
   avoid_points?: string[];
   figure_need?: unknown;
 };
@@ -127,10 +138,40 @@ type WritingClaim = {
   evidence_ceiling?: string;
 };
 
+type NarrativeDiagnostics = {
+  status?: "complete" | "shallow" | string;
+  paragraph_count?: number;
+  target_paragraph_count?: number;
+  comparison_paragraph_count?: number;
+  minimum_comparison_paragraphs?: number;
+  missing_requirements?: string[];
+};
+
 type DraftReview = {
   decision?: string;
   issues?: Array<{ type?: string; severity?: string; reason?: string }>;
   repair_objective?: string;
+};
+
+type SectionReadiness = {
+  status?: string;
+  missing_required_claim_ids?: string[];
+  structure_gaps?: string[];
+  depth_sufficient?: boolean;
+};
+
+type SectionDraftState = {
+  section_id?: string;
+  generation_mode?: string;
+  section_readiness?: SectionReadiness;
+  depth_diagnostics?: {
+    actual_word_count?: number;
+    minimum_word_count?: number;
+    sufficient?: boolean;
+  };
+  paragraphs?: DraftParagraph[];
+  validations?: Array<{ rule_id?: string; status?: string; target_id?: string }>;
+  reviews?: DraftReview[];
 };
 
 type SectionsPayload = {
@@ -153,10 +194,10 @@ type SectionsPayload = {
   } | null;
   writing_plan?: {
     planning_mode?: string;
-    sections?: Array<{ section_id?: string; route?: string; overview_intent?: string; paragraphs?: WritingParagraph[]; claims?: WritingClaim[] }>;
+    sections?: Array<{ section_id?: string; route?: string; overview_intent?: string; paragraphs?: WritingParagraph[]; claims?: WritingClaim[]; narrative_diagnostics?: NarrativeDiagnostics }>;
   } | null;
   section_drafts?: {
-    sections?: Array<{ section_id?: string; paragraphs?: DraftParagraph[]; validations?: Array<{ rule_id?: string; status?: string; target_id?: string }>; reviews?: DraftReview[] }>;
+    sections?: SectionDraftState[];
   } | null;
 };
 
@@ -192,13 +233,20 @@ function TaskRequirements({ task, paperLabels }: { task?: SectionTask; paperLabe
   const { text } = useUiText();
   if (!task) return <div className="empty-state">{text("当前Blueprint没有可用的章节写作任务。", "The current blueprint has no section-writing tasks.")}</div>;
   const figures = Array.isArray(task.figure_need) ? task.figure_need : task.figure_need ? [task.figure_need] : [];
+  const scientificClaims = task.scientific_claims?.length
+    ? task.scientific_claims.map((item) => item.proposition || item.claim_id || "").filter(Boolean)
+    : task.must_cover_points || [];
+  const writingRequirements = (task.writing_requirements || [])
+    .map((item) => item.instruction || item.type || item.requirement_id || "")
+    .filter(Boolean);
   return (
     <article className="task-sheet-react">
       <header><span className="step-label">{task.section_id || text("章节", "Section")}</span><h2>{task.heading || task.section_id}</h2><p>{task.core_argument || text("未指定核心论点。", "No core argument specified.")}</p></header>
       <div className="task-requirement-grid">
         <section><h3>{text("分配论文", "Assigned papers")}</h3><div className="chip-list">{task.allowed_papers?.length ? task.allowed_papers.map((paper) => <span key={paper} title={text(`内部论文 ID：${paper}`, `Internal paper ID: ${paper}`)}>{paperLabels.get(paper) || paper}</span>) : <em>{text("尚未分配", "Not assigned")}</em>}</div></section>
         <section><h3>{text("图像要求", "Figure requirements")}</h3>{figures.length ? figures.map((figure, index) => <pre key={index}>{typeof figure === "string" ? figure : JSON.stringify(figure, null, 2)}</pre>) : <p>{text("未指定图像要求。", "No figure requirements specified.")}</p>}</section>
-        <section className="wide"><h3>{text("必须覆盖", "Must cover")}</h3>{task.must_cover_points?.length ? <ol>{task.must_cover_points.map((item) => <li key={item}>{item}</li>)}</ol> : <p>{text("未指定。", "Not specified.")}</p>}</section>
+        <section className="wide"><h3>{text("科学命题", "Scientific claims")}</h3>{scientificClaims.length ? <ol>{scientificClaims.map((item) => <li key={item}>{item}</li>)}</ol> : <p>{text("当前没有预设的必证命题；系统将从证据中形成受限论点。", "No required proposition is predeclared; bounded claims will be formed from the evidence.")}</p>}</section>
+        <section className="wide"><h3>{text("写作要求", "Writing requirements")}</h3>{writingRequirements.length ? <ol>{writingRequirements.map((item) => <li key={item}>{item}</li>)}</ol> : <p>{text("使用本阶段的通用综合规则。", "Use the stage's general synthesis rules.")}</p>}</section>
         <section className="wide"><h3>{text("写作边界", "Writing boundaries")}</h3>{task.avoid_points?.length ? <ul>{task.avoid_points.map((item) => <li key={item}>{item}</li>)}</ul> : <p>{text("未指定。", "Not specified.")}</p>}</section>
       </div>
     </article>
@@ -244,18 +292,21 @@ function SynthesisView({ section, mode }: { section?: { summary?: string; compon
   return <div className="academic-state-view"><header><span className="step-label">{text("自动综合", "Automatic synthesis")}</span><h2>{text("章节知识综合", "Section knowledge synthesis")}</h2><p>{section.summary || text("综合组件已按当前证据准备。", "Synthesis components were prepared from current evidence.")}</p><small>{mode}</small></header><div className="academic-card-list">{(section.components || []).map((component) => <article key={component.component_id}><div><strong>{component.component_type}</strong><span className={`status-pill ${component.status === "supported" ? "ok" : "warning"}`}>{component.status}</span></div><p>{component.summary || component.purpose}</p><footer><span>{component.necessity}</span><span>{text(`${component.evidence_keys?.length || 0} 个证据键`, `${component.evidence_keys?.length || 0} evidence keys`)}</span></footer></article>)}</div></div>;
 }
 
-function WritingPlanView({ section, paperLabels }: { section?: { route?: string; overview_intent?: string; paragraphs?: WritingParagraph[]; claims?: WritingClaim[] }; paperLabels: Map<string, string> }) {
+function WritingPlanView({ section, paperLabels }: { section?: { route?: string; overview_intent?: string; paragraphs?: WritingParagraph[]; claims?: WritingClaim[]; narrative_diagnostics?: NarrativeDiagnostics }; paperLabels: Map<string, string> }) {
   const { text } = useUiText();
   if (!section) return <div className="empty-state">{text("当前章节尚无写作计划。", "This section has no writing plan yet.")}</div>;
   const claims = new Map((section.claims || []).map((claim) => [claim.claim_id, claim]));
-  return <div className="academic-state-view"><header><span className="step-label">{text(`路线 ${section.route || "—"}`, `Route ${section.route || "—"}`)}</span><h2>{text("段落与 Claim/Citation 计划", "Paragraph and Claim/Citation plan")}</h2><p>{section.overview_intent}</p></header><div className="academic-card-list">{(section.paragraphs || []).map((paragraph) => <article key={paragraph.paragraph_id}><div><strong>{paragraph.paragraph_id} · {paragraph.argument_role}</strong></div><h3>{paragraph.theme}</h3><p>{paragraph.objective}</p><blockquote>{paragraph.reader_takeaway}</blockquote>{(paragraph.claim_ids || []).map((claimId) => { const claim = claims.get(claimId); return <details key={claimId}><summary>{claimId} · {claim?.claim_kind}</summary><p>{claim?.claim}</p><div className="chip-list">{(claim?.citation_group || []).map((paperId) => <span key={paperId}>{paperLabels.get(paperId) || paperId}</span>)}<span>{claim?.epistemic_status}</span><span>{claim?.support_status}</span></div><small>{claim?.evidence_ceiling}</small></details>; })}</article>)}</div></div>;
+  const narrative = section.narrative_diagnostics;
+  return <div className="academic-state-view"><header><span className="step-label">{text(`路线 ${section.route || "—"}`, `Route ${section.route || "—"}`)}</span><h2>{text("段落与 Claim/Citation 计划", "Paragraph and Claim/Citation plan")}</h2><p>{section.overview_intent}</p>{narrative ? <div className="chip-list"><span className={`status-pill ${narrative.status === "complete" ? "ok" : "warning"}`}>{narrative.status === "complete" ? text("叙事结构完整", "Narrative structure complete") : text("叙事结构偏浅", "Narrative structure shallow")}</span><span>{text(`${narrative.paragraph_count || 0}/${narrative.target_paragraph_count || 0} 段`, `${narrative.paragraph_count || 0}/${narrative.target_paragraph_count || 0} paragraphs`)}</span><span>{text(`${narrative.comparison_paragraph_count || 0}/${narrative.minimum_comparison_paragraphs || 0} 个比较段`, `${narrative.comparison_paragraph_count || 0}/${narrative.minimum_comparison_paragraphs || 0} comparison paragraphs`)}</span></div> : null}</header><div className="academic-card-list">{(section.paragraphs || []).map((paragraph) => <article key={paragraph.paragraph_id}><div><strong>{paragraph.paragraph_id} · {paragraph.argument_role}</strong></div><h3>{paragraph.theme}</h3><p>{paragraph.objective}</p><blockquote>{paragraph.reader_takeaway}</blockquote>{(paragraph.claim_ids || []).map((claimId) => { const claim = claims.get(claimId); return <details key={claimId}><summary>{claimId} · {claim?.claim_kind}</summary><p>{claim?.claim}</p><div className="chip-list">{(claim?.citation_group || []).map((paperId) => <span key={paperId}>{paperLabels.get(paperId) || paperId}</span>)}<span>{claim?.epistemic_status}</span><span>{claim?.support_status}</span></div><small>{claim?.evidence_ceiling}</small></details>; })}</article>)}</div></div>;
 }
 
-function ReviewView({ section }: { section?: { validations?: Array<{ rule_id?: string; status?: string; target_id?: string }>; reviews?: DraftReview[] } }) {
+function ReviewView({ section }: { section?: SectionDraftState }) {
   const { text } = useUiText();
   if (!section) return <div className="empty-state">{text("当前章节尚无审校状态。", "This section has no review state yet.")}</div>;
   const reviews = section.reviews || [];
-  return <div className="academic-state-view"><header><span className="step-label">{text("自动审校", "Automatic review")}</span><h2>{reviews[0]?.decision || text("待审校", "Pending")}</h2><p>{reviews[0]?.repair_objective || text("Claim、引用与段落身份校验已完成。", "Claim, citation, and paragraph identity validation is complete.")}</p></header><div className="academic-card-list">{(section.validations || []).map((validation, index) => <article key={`${validation.rule_id}-${index}`}><div><strong>{validation.rule_id}</strong><span className={`status-pill ${validation.status === "pass" ? "ok" : "warning"}`}>{validation.status}</span></div><p>{validation.target_id}</p></article>)}{reviews.flatMap((review) => review.issues || []).map((issue, index) => <article key={`${issue.type}-${index}`}><div><strong>{issue.type}</strong><span className="status-pill warning">{issue.severity}</span></div><p>{issue.reason}</p></article>)}</div></div>;
+  const readiness = String(section.section_readiness?.status || "");
+  const depth = section.depth_diagnostics;
+  return <div className="academic-state-view"><header><span className="step-label">{text("自动审校", "Automatic review")}</span><h2>{reviews[0]?.decision || text("待审校", "Pending")}</h2><div className="chip-list">{readiness ? <span className={`status-pill ${readiness === "scientific_complete" ? "ok" : "warning"}`}>{sectionReadinessLabel(readiness, text)}</span> : null}<span>{section.generation_mode || text("标准生成", "Standard")}</span>{depth ? <span>{text(`${depth.actual_word_count || 0}/${depth.minimum_word_count || 0} 词`, `${depth.actual_word_count || 0}/${depth.minimum_word_count || 0} words`)}</span> : null}</div><p>{reviews[0]?.repair_objective || text("Claim、引用与段落身份校验已完成。", "Claim, citation, and paragraph identity validation is complete.")}</p></header><div className="academic-card-list">{(section.validations || []).map((validation, index) => <article key={`${validation.rule_id}-${index}`}><div><strong>{validation.rule_id}</strong><span className={`status-pill ${validation.status === "pass" ? "ok" : "warning"}`}>{validation.status}</span></div><p>{validation.target_id}</p></article>)}{reviews.flatMap((review) => review.issues || []).map((issue, index) => <article key={`${issue.type}-${index}`}><div><strong>{issue.type}</strong><span className="status-pill warning">{issue.severity}</span></div><p>{issue.reason}</p></article>)}</div></div>;
 }
 
 export function SectionsPage() {

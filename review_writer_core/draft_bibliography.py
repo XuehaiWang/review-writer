@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .author_metadata import clean_author_names
 from .metadata_fields import metadata_value
 
 
@@ -45,15 +46,7 @@ def reference_text(
     """
 
     raw_authors = metadata_value(row, "authors")
-    authors = (
-        ", ".join(
-            cleaned
-            for item in raw_authors
-            if (cleaned := clean_reference_field(item))
-        )
-        if isinstance(raw_authors, list)
-        else clean_reference_field(raw_authors)
-    )
+    authors = ", ".join(clean_author_names(raw_authors))
     journal = clean_reference_field(metadata_value(row, "journal"))
     year = clean_reference_field(
         metadata_value(row, "bibliographic_year")

@@ -49,6 +49,10 @@ from review_writer_core.document_front_matter import (  # noqa: E402
 from review_writer_core.publication_metadata import (  # noqa: E402
     extract_front_matter_doi,
     extract_publication_metadata,
+    read_pdf_first_page_text,
+)
+from review_writer_core.mineru_bibliography import (  # noqa: E402
+    extract_mineru_bibliography,
 )
 from review_writer_core.workspace import discover_review_root  # noqa: E402
 from review_writer_core.providers import (  # noqa: E402
@@ -953,14 +957,30 @@ def build_metadata(
     slug = str(job.get("slug") or slugify(job.get("pdf_name") or paper_id))
     blocks = load_blocks(content_path)
     md = markdown_head(md_path)
-    title = extract_title(blocks, md, slug)
-    authors = extract_authors(blocks, title["value"])
+    mineru_bibliography = extract_mineru_bibliography(
+        blocks,
+        md,
+        filename=str(job.get("pdf_name") or slug),
+        pdf_first_page_text=(
+            read_pdf_first_page_text(pdf_path)
+            if isinstance(pdf_path, Path) and pdf_path.is_file()
+            else ""
+        ),
+    )
+    local_fields = dict(mineru_bibliography.get("fields") or {})
+    title = local_fields.get("title") or extract_title(blocks, md, slug)
+    authors = local_fields.get("authors") or scored(
+        None, "awaiting_bounded_document_resolution", 0.0
+    )
     keywords = extract_keywords(blocks, md)
     abstract = extract_abstract(blocks, md)
     publication = extract_publication_metadata(md, job.get("pdf_name") or slug)
-    year = publication["year"]
+    year = local_fields.get("year") or publication["year"]
     doi_candidate = extract_doi(md)
-    journal = extract_journal(md, job.get("pdf_name") or slug)
+    journal = local_fields.get("journal") or scored(
+        None, "awaiting_bounded_document_resolution", 0.0
+    )
+    local_doi = local_fields.get("doi")
     # Reusable Library metadata must remain project-neutral. Previous versions
     # scanned title/abstract/body text and persisted one rule-selected label per
     # category. Background mentions and references made those labels unstable
@@ -975,10 +995,14 @@ def build_metadata(
         "authors": authors,
         "year": year,
         "first_publication_date": publication["first_publication_date"],
-        "bibliographic_year": publication["bibliographic_year"],
+        "bibliographic_year": local_fields.get("bibliographic_year")
+        or publication["bibliographic_year"],
         "publication_status": publication["publication_status"],
         "journal": journal,
-        "doi": scored(None, "awaiting_bibliography_verification", 0.0),
+        "doi": local_doi
+        if isinstance(local_doi, dict)
+        and float(local_doi.get("confidence") or 0.0) >= 0.88
+        else scored(None, "awaiting_bounded_document_resolution", 0.0),
         "doi_candidate": doi_candidate,
         "abstract": abstract,
         "structured_tags": scored(
@@ -998,7 +1022,7 @@ def build_metadata(
             "sha256": pdf_hash,
         },
         "extraction": {
-            "mode": "bibliographic_rules",
+            "mode": "mineru_local_bibliographic_rules",
             "model": None,
             "created_at": utc_now(),
             "inputs": {
@@ -1006,9 +1030,21 @@ def build_metadata(
                 "content_blocks": len(blocks),
                 "markdown_chars_used": min(len(md), MARKDOWN_FRONT_MATTER_CHARS),
                 "tag_policy": "project_neutral_until_human_verified",
+                "bibliography_policy": "mineru_primary_agent_on_low_confidence",
             },
-            "notes": [],
+            "notes": [
+                "network_bibliography_lookup_not_required_for_ingest",
+                *(
+                    [
+                        "bounded_agent_recommended_for:"
+                        + ",".join(mineru_bibliography.get("needs_agent_fields") or [])
+                    ]
+                    if mineru_bibliography.get("needs_agent_fields")
+                    else []
+                ),
+            ],
         },
+        "local_bibliography_resolution": mineru_bibliography,
         "human_review": existing.get("human_review")
         if existing and isinstance(existing.get("human_review"), dict)
         else {
@@ -1024,6 +1060,10 @@ def build_metadata(
             "needs_human_check": True,
         },
     }
+    for locator_field in ("volume", "issue", "pages", "article_number"):
+        local_value = local_fields.get(locator_field)
+        if isinstance(local_value, dict) and has_value(local_value.get("value")):
+            meta[locator_field] = local_value
     apply_structured_tags_to_compat_fields(meta)
     if existing:
         preserve_human_checked_fields(meta, existing)

@@ -8,6 +8,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from review_writer_core.figure_qualification import (
+    argument_role,
+    candidate_exclusion_reasons,
+    candidate_qualification,
+    figure_score,
+    representative_role,
+)
+
 
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -24,35 +32,6 @@ def norm(text: Any) -> str:
 
 def lower(text: Any) -> str:
     return norm(text).lower()
-
-
-def figure_score(candidate: dict[str, Any], section: dict[str, Any] | None = None) -> int:
-    caption = lower(candidate.get("source_caption_text"))
-    label = lower(candidate.get("source_label"))
-    score = int(candidate.get("inventory_score") or 0)
-    if "scheme" in label or "scheme" in caption:
-        score += 8
-    if "mechanism" in caption or "catalytic cycle" in caption:
-        score += 10
-    if "scope" in caption:
-        score += 4
-    if "optimization" in caption:
-        score -= 5
-    if "gram-scale" in caption or "control experiment" in caption:
-        score -= 2
-    if section:
-        section_text = lower(" ".join([section.get("heading", ""), section.get("core_argument", "")]))
-        if "radical" in section_text and ("radical" in caption or "photoredox" in caption):
-            score += 6
-        if "stereo" in section_text and ("stereo" in caption or "enantio" in caption or "chiral" in caption):
-            score += 5
-        if "carbonates" in section_text and "carbonate" in caption:
-            score += 4
-        if "mechan" in section_text and "mechanism" in caption:
-            score += 4
-    if candidate.get("source_image_path"):
-        score += 4
-    return score
 
 
 def inventory_by_paper(inventory: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -117,11 +96,18 @@ def best_candidate_for_paper(paper: dict[str, Any]) -> dict[str, Any]:
 
 
 def best_redrawable_candidate_index(candidates: list[dict[str, Any]]) -> int | None:
-    """Choose the highest-scoring candidate with a located source image that the redraw stage can use."""
+    """Choose the best candidate that passes the hard minimum qualification."""
     redrawable = [
         candidate
         for candidate in candidates
         if candidate.get("source_image_path")
+        and bool(
+            (
+                candidate.get("candidate_qualification")
+                if isinstance(candidate.get("candidate_qualification"), dict)
+                else candidate_qualification(candidate)
+            ).get("eligible")
+        )
     ]
     if not redrawable:
         return None
@@ -169,9 +155,17 @@ def build_outputs(project: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
             choices = [dict(candidate) for candidate in paper.get("top_candidates", []) if isinstance(candidate, dict)]
             for index, candidate in enumerate(choices):
                 candidate["candidate_index"] = index
-                candidate["score"] = figure_score(candidate)
+                qualification = candidate_qualification(candidate)
+                candidate["score"] = int(qualification.get("score") or 0)
                 candidate["resolution_status"] = "ready" if candidate.get("source_image_path") else "needs_source_resolution"
                 candidate["needs_human_check"] = True
+                candidate["exclusion_reasons"] = candidate_exclusion_reasons(candidate)
+                candidate["argument_role"] = argument_role(candidate)
+                candidate["representative_role"] = representative_role(candidate)
+                candidate["candidate_qualification"] = qualification
+                candidate["automatic_selection_eligible"] = bool(
+                    candidate["candidate_qualification"].get("eligible")
+                )
                 candidate.update(anchors[paper_id])
             selected_index = best_redrawable_candidate_index(choices)
             paper_rows.append({
@@ -179,18 +173,21 @@ def build_outputs(project: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
                 "title": paper.get("title"),
                 "candidates": choices,
                 "selected_candidate_index": selected_index,
-                "status": "auto_selected" if selected_index is not None else ("needs_human_selection" if choices else "no_useful_figure"),
-                "no_useful_figure_reason": "No redrawable image or scheme candidate was found in MinerU content_list." if choices and selected_index is None else ("No image/table candidates were found in MinerU content_list." if not choices else ""),
+                "status": "auto_selected" if selected_index is not None else ("no_qualified_figure" if choices else "no_useful_figure"),
+                "no_useful_figure_reason": "No candidate passed the minimum scientific figure qualification; the paper is allowed to remain without a figure." if choices and selected_index is None else ("No image/table candidates were found in MinerU content_list." if not choices else ""),
             })
 
     manuscript: list[dict[str, Any]] = []
     used_keys: set[tuple[str, str]] = set()
-    for section in tasks if isinstance(tasks, list) else []:
-        if not isinstance(section, dict):
-            continue
-        figure_need = lower(section.get("figure_need"))
-        if figure_need in {"no", "none", "optional"}:
-            continue
+    task_rows = tasks if isinstance(tasks, list) else []
+    eligible_sections = [
+        section
+        for section in task_rows
+        if isinstance(section, dict)
+        and lower(section.get("figure_need")) not in {"no", "none", "optional"}
+    ]
+    global_budget = min(8, max(3, len(eligible_sections)))
+    for section in eligible_sections:
         allowed = [str(pid) for pid in section.get("allowed_papers", [])]
         pool: list[dict[str, Any]] = []
         for paper_id in allowed:
@@ -202,7 +199,12 @@ def build_outputs(project: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
             for candidate in paper.get("top_candidates", []):
                 if isinstance(candidate, dict):
                     row = dict(candidate)
-                    row["_score"] = figure_score(row, section)
+                    qualification = candidate_qualification(row, section=section)
+                    if not qualification.get("eligible"):
+                        continue
+                    row["_score"] = int(qualification.get("score") or 0)
+                    row["candidate_qualification"] = qualification
+                    row["automatic_selection_eligible"] = True
                     pool.append(row)
         pool.sort(key=lambda c: c.get("_score", 0), reverse=True)
         section_selected = 0
@@ -231,12 +233,22 @@ def build_outputs(project: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
                     "manuscript_selected": True,
                     "resolution_status": "ready" if candidate.get("source_image_path") else "needs_source_resolution",
                     "needs_human_check": True,
+                    "argument_role": argument_role(candidate),
+                    "representative_role": representative_role(candidate),
+                    "exclusion_reasons": [],
+                    "candidate_qualification": candidate.get(
+                        "candidate_qualification"
+                    )
+                    or candidate_qualification(candidate, section=section),
+                    "automatic_selection_eligible": True,
                 }
             )
             candidate.update(anchors.get(str(candidate.get("paper_id") or ""), {}))
             manuscript.append(candidate)
-            if section_selected >= 2:
+            if section_selected >= 1 or len(manuscript) >= global_budget:
                 break
+        if len(manuscript) >= global_budget:
+            break
     return {"project_id": project.name, "papers": paper_rows}, manuscript
 
 
@@ -261,7 +273,7 @@ def main() -> int:
     print(f"Wrote {out_dir / 'paper_figure_candidates.json'} ({len(paper_level['papers'])} papers)")
     print(f"Wrote {out_dir / 'figure_candidates.json'} ({len(manuscript)} records)")
     if not manuscript:
-        raise SystemExit("No manuscript figure candidates selected.")
+        print("No argument-relevant manuscript figure candidates were selected; continuing without source figures.")
     return 0
 
 

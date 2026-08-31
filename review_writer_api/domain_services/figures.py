@@ -36,6 +36,12 @@ from review_writer_api.figure_rules import (
 )
 from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
+from review_writer_core.figure_insertion import build_figure_insertion_plan
+from review_writer_core.figure_qualification import (
+    candidate_qualification,
+    figure_output_state,
+    figure_source_kind,
+)
 from review_writer_core.publication_caption import (
     canonical_figure_role,
     figure_rights_fields,
@@ -447,10 +453,20 @@ class FiguresService(OwnedProjectService):
                     else:
                         candidate["source_image_url"] = artifact_url(artifact_id)
                         candidate["source_image_path"] = candidate["source_image_url"]
+                qualification = candidate.get("candidate_qualification")
+                if not isinstance(qualification, dict):
+                    qualification = candidate_qualification(candidate)
+                candidate["candidate_qualification"] = qualification
+                candidate.setdefault(
+                    "automatic_selection_eligible",
+                    bool(qualification.get("eligible")),
+                )
                 candidates.append(candidate)
             paper["candidates"] = candidates
             paper["review_required"] = any(
-                bool(candidate.get("source_image_url")) for candidate in candidates
+                bool(candidate.get("source_image_url"))
+                and candidate.get("automatic_selection_eligible") is not False
+                for candidate in candidates
             )
             paper_id = str(paper.get("paper_id") or "")
             review = (
@@ -465,6 +481,30 @@ class FiguresService(OwnedProjectService):
             visible.append(paper)
         state = self.repository.get_stage_state(
             principal.user_id, project_id, "figure-review"
+        )
+        _current_inputs, current_inputs_artifact = self._read_json(
+            principal, project_id, REVIEW_INPUTS, required=False
+        )
+        current_inputs_metadata = (
+            dict(current_inputs_artifact.metadata or {})
+            if current_inputs_artifact is not None
+            else {}
+        )
+        redraw_inputs_in_sync = bool(
+            selections_artifact is not None
+            and current_inputs_artifact is not None
+            and str(
+                current_inputs_metadata.get(
+                    "source_paper_candidates_artifact_id"
+                )
+                or ""
+            )
+            == paper_artifact.id
+            and str(
+                current_inputs_metadata.get("source_selection_artifact_id")
+                or ""
+            )
+            == selections_artifact.id
         )
         return {
             "project_id": project_id,
@@ -483,6 +523,7 @@ class FiguresService(OwnedProjectService):
             "freshness": {
                 "source_stale": False,
                 "review_stale": stale,
+                "redraw_inputs_in_sync": redraw_inputs_in_sync,
                 "stale": stale,
             },
         }
@@ -564,6 +605,7 @@ class FiguresService(OwnedProjectService):
                 reviewable = any(
                     isinstance(candidate, dict)
                     and bool(candidate.get("source_image_artifact_id"))
+                    and candidate.get("automatic_selection_eligible") is not False
                     for candidate in paper.get("candidates") or []
                 )
                 if reviewable:
@@ -591,6 +633,23 @@ class FiguresService(OwnedProjectService):
             )
             candidate["source_image_artifact_id"] = source_artifact.id
             candidate["source_review_note"] = str(review.get("review_note") or "")
+            candidate["selection_source"] = str(
+                review.get("selection_source") or "automatic_top_score"
+            )
+            qualification_enforced = bool(
+                isinstance(candidate.get("candidate_qualification"), dict)
+                or "automatic_selection_eligible" in candidate
+            )
+            qualification = candidate.get("candidate_qualification")
+            if not isinstance(qualification, dict):
+                qualification = candidate_qualification(candidate)
+            candidate["candidate_qualification"] = qualification
+            candidate["qualification_enforced"] = qualification_enforced
+            if qualification_enforced:
+                candidate.setdefault(
+                    "automatic_selection_eligible",
+                    bool(qualification.get("eligible")),
+                )
             selected.append(candidate)
         return selected, missing
 
@@ -1279,6 +1338,17 @@ class FiguresService(OwnedProjectService):
             row["source_current"] = source_current
             row["output_current"] = output_current
             row["requires_human_approval"] = requires_approval
+            qualification = figure.get("candidate_qualification")
+            if not isinstance(qualification, dict):
+                qualification = candidate_qualification(figure)
+            row["candidate_qualification"] = qualification
+            row["candidate_eligible"] = bool(qualification.get("eligible"))
+            row["qualification_enforced"] = bool(
+                figure.get("qualification_enforced")
+            )
+            row["selection_source"] = str(figure.get("selection_source") or "")
+            row["output_state"] = figure_output_state(row)
+            row["figure_source_kind"] = figure_source_kind(row)
             row["manuscript_selected"] = figure_id not in excluded_ids
             if figure_id in excluded_ids:
                 usable.discard(figure_id)
@@ -2403,18 +2473,6 @@ class FiguresService(OwnedProjectService):
             raise FigureOutputsIncomplete(
                 "Figure generation is still running. Wait or stop it before entering Draft."
             )
-        unplaced = [
-            str(row.get("figure_id") or "")
-            for row in payload.get("figure_candidates") or []
-            if isinstance(row, dict)
-            and row.get("manuscript_selected") is not False
-            and not str(row.get("target_paragraph_id") or "").strip()
-        ]
-        if unplaced:
-            raise FigureOutputsIncomplete(
-                "One or more paper-level figures have no supported paragraph placement in the current section drafts. Exclude them or regenerate the relevant section before entering Draft.",
-                details={"figure_ids": unplaced, "reason": "waiting_for_supported_paragraph"},
-            )
         if selected <= 0 or usable != selected:
             raise FigureOutputsIncomplete(
                 f"Figure redraw is incomplete or out of date ({usable}/{selected} current outputs are usable). Redraw missing figures or approve warning outputs before building the draft.",
@@ -2424,16 +2482,67 @@ class FiguresService(OwnedProjectService):
                     "remaining_count": max(0, selected - usable),
                 },
             )
-        state = self.repository.compare_and_set_stage(
-            principal.user_id,
+        _figures, inputs_artifact = self._selected_inputs(principal, project_id)
+        manifest, manifest_artifact = self._current_manifest(
+            principal, project_id, inputs_artifact.id
+        )
+        public_manifest = dict(payload.get("redrawn_manifest") or {})
+        insertion_plan = build_figure_insertion_plan(
+            public_manifest.get("figures") or []
+        )
+        decisions = {
+            str(row.get("figure_id") or ""): row
+            for row in insertion_plan
+            if str(row.get("figure_id") or "")
+        }
+        for row in manifest.get("figures") or []:
+            if not isinstance(row, dict):
+                continue
+            decision = decisions.get(str(row.get("figure_id") or ""))
+            if decision is None:
+                continue
+            row["insert_in_manuscript"] = bool(decision.get("include"))
+            row["insertion_skip_reason"] = str(decision.get("skip_reason") or "")
+        manifest["insertion_plan"] = insertion_plan
+        manifest["insertion_policy"] = {
+            "selection_scope": "paper_level_asset_pool",
+            "placement_scope": "current_supported_paragraphs",
+            "max_per_section": 2,
+        }
+        manifest["updated_at"] = utc_now().isoformat()
+        published, state = self._publish_files(
+            principal,
             project_id,
-            "figures",
-            int(revision),
+            stage_id="figures",
+            files={
+                FIGURE_MANIFEST: (
+                    (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode(),
+                    "json",
+                )
+            },
+            expected_revision=int(revision),
             status="approved",
+            invalidate_stages=("draft", "final"),
+            metadata={
+                "asset_pool_count": selected,
+                "manuscript_insertion_count": sum(
+                    1 for row in insertion_plan if row.get("include")
+                ),
+            },
+            expected_current_artifacts=(
+                {FIGURE_MANIFEST: manifest_artifact.id}
+                if manifest_artifact is not None
+                else None
+            ),
         )
         return {
             "project_id": project_id,
             "revision": state.revision,
             "status": state.status,
             "next_stage": "draft",
+            "manifest_artifact_id": published[FIGURE_MANIFEST].id,
+            "asset_pool_count": selected,
+            "manuscript_insertion_count": sum(
+                1 for row in insertion_plan if row.get("include")
+            ),
         }

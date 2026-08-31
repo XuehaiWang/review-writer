@@ -576,6 +576,51 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertEqual(["P009"], tasks[0]["context_papers"])
         self.assertEqual(["P001", "P009"], tasks[0]["allowed_papers"])
 
+    def test_blueprint_claim_contract_separates_science_from_authoring(self) -> None:
+        tasks = self.app.state.sections_service.tasks_from_blueprint(
+            {
+                "paper_assignment_policy": {
+                    "mode": "single_primary_section_with_supporting_cross_references"
+                },
+                "sections": [
+                    {
+                        "section_id": "S02",
+                        "title": "Catalyst comparison",
+                        "section_role": "body",
+                        "primary_papers": ["P001"],
+                        "scientific_thesis": {
+                            "text": "Compare catalyst-dependent evidence boundaries."
+                        },
+                        "scientific_claims": [
+                            {
+                                "claim_id": "S02-SC01",
+                                "proposition": "The studies report different selectivity patterns.",
+                                "primary_papers": ["P001"],
+                            }
+                        ],
+                        "writing_requirements": [
+                            {
+                                "instruction": "Synthesize evidence instead of listing papers."
+                            }
+                        ],
+                        "review_claims": [
+                            {"claim": "Legacy authoring instruction that must be ignored."}
+                        ],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(
+            "Compare catalyst-dependent evidence boundaries.",
+            tasks[0]["core_argument"],
+        )
+        self.assertEqual(
+            ["The studies report different selectivity patterns."],
+            tasks[0]["must_cover_points"],
+        )
+        self.assertEqual(1, len(tasks[0]["writing_requirements"]))
+
     def test_publish_rejects_a_changed_outline_dependency(self) -> None:
         service = self.app.state.sections_service
         payload = service.generation_payload(self.first, self.project_id)
@@ -875,8 +920,67 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertEqual(["P001"], scope["matched_primary_papers"])
         self.assertEqual("not_required", scope["diagnostics_by_primary_paper"]["P002"])
         self.assertEqual("not_required", scope["diagnostics_by_primary_paper"]["P003"])
-        self.assertEqual("not_reported", limitations["status"])
+        self.assertEqual("retrieval_not_found", limitations["status"])
         self.assertNotIn("limitations", section["corpus_gap_questions"])
+
+    def test_evidence_package_exposes_claim_support_and_boundary_routes(self) -> None:
+        self._seed_document_indexes()
+        with self.sessions.begin() as session:
+            chunk = session.query(LibraryDocumentChunk).filter_by(
+                paper_id="P001"
+            ).one()
+            chunk.content = (
+                "Catalyst identity changes the reported product selectivity, "
+                "although the substrate scope remains limited."
+            )
+            chunk.normalized_content = chunk.content.casefold()
+
+        service = self.app.state.sections_service
+        catalog = service._catalog(self.first, ["P001"])
+        package = service._evidence_package(
+            self.first,
+            self.project_id,
+            [
+                {
+                    "section_id": "S02",
+                    "heading": "Catalyst selectivity",
+                    "core_argument": "Compare catalyst selectivity.",
+                    "must_cover_points": [],
+                    "scientific_claims": [
+                        {
+                            "claim_id": "S02-SC01",
+                            "proposition": "Catalyst identity changes the reported selectivity.",
+                            "required_for_section": True,
+                        }
+                    ],
+                    "writing_requirements": [
+                        {
+                            "instruction": "Compare the assigned studies without listing them."
+                        }
+                    ],
+                    "primary_papers": ["P001"],
+                    "supporting_papers": [],
+                    "allowed_papers": ["P001"],
+                }
+            ],
+            catalog,
+        )
+
+        section = package["sections"][0]
+        routes = {
+            plan["query_route"] for plan in section["query_plans"]
+        }
+        self.assertIn("support", routes)
+        self.assertIn("boundary", routes)
+        self.assertEqual(
+            "evidence_supported", section["scientific_claim_states"][0]["status"]
+        )
+        self.assertEqual(
+            "S02-SC01", section["scientific_claim_states"][0]["claim_id"]
+        )
+        self.assertEqual(
+            "sufficient", section["scientific_claim_states"][0]["boundary_status"]
+        )
 
     def test_academic_validation_uses_section_scoped_evidence_role(self) -> None:
         evidence_key = "sha256:" + "a" * 64
@@ -1161,7 +1265,16 @@ class SectionsV1Tests(unittest.TestCase):
                 "section_role": "body",
                 "heading": "Propargylic alcohol substrates",
                 "core_argument": "Compare scope and mechanisms.",
-                "must_cover_points": ["Explain catalyst effects on selectivity."],
+                "must_cover_points": [
+                    "Compare the assigned papers and explain their limitations."
+                ],
+                "scientific_claims": [
+                    {
+                        "claim_id": "S02-SC01",
+                        "proposition": "Catalyst identity affects the reported selectivity.",
+                        "required_for_section": True,
+                    }
+                ],
             },
             review_topic='Review of "axial-chiral allene synthesis"',
         )
@@ -1170,10 +1283,35 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertIn("scope", {plan["question_id"] for plan in plans})
         self.assertIn("mechanism", {plan["question_id"] for plan in plans})
         self.assertIn("required_claim_01", {plan["question_id"] for plan in plans})
+        self.assertIn("claim_boundary_01", {plan["question_id"] for plan in plans})
+        claim_plan = next(
+            plan for plan in plans if plan["question_id"] == "required_claim_01"
+        )
+        self.assertEqual("S02-SC01", claim_plan["claim_id"])
+        self.assertEqual("support", claim_plan["query_route"])
         scope = next(plan for plan in plans if plan["question_id"] == "scope")
         self.assertEqual(2, len(scope["term_groups"]))
         self.assertIn(" OR ", scope["websearch_query"])
         self.assertNotIn("Compare scope and mechanisms", scope["websearch_query"])
+
+    def test_plain_authoring_instruction_never_becomes_required_claim_query(self) -> None:
+        service = self.app.state.sections_service
+        plans = service._evidence_queries(
+            {
+                "section_id": "S02",
+                "section_role": "body",
+                "heading": "Methods",
+                "must_cover_points": [
+                    "Develop claim-centered synthesis from the assigned papers."
+                ],
+                "scientific_claims": [],
+            },
+            review_topic="A scientific review",
+        )
+
+        ids = {plan["question_id"] for plan in plans}
+        self.assertFalse(any(value.startswith("required_claim_") for value in ids))
+        self.assertFalse(any(value.startswith("claim_boundary_") for value in ids))
 
     def test_question_query_plan_expands_quoted_compounds_and_focus_terms(self) -> None:
         service = self.app.state.sections_service

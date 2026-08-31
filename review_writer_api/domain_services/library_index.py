@@ -1079,6 +1079,7 @@ class LibraryIndexService:
         *,
         allowed_papers: list[str],
         limit: int,
+        per_paper_limit: int | None = None,
     ) -> list[tuple[uuid.UUID, float]]:
         if (
             not self.vector_enabled
@@ -1121,29 +1122,61 @@ class LibraryIndexService:
             )
         vector_text = json.dumps(query_vector, separators=(",", ":"))
         user_id = uuid.UUID(principal.user_id)
+        paper_limit = max(0, min(int(per_paper_limit or 0), 3))
+        sql = (
+            """
+            WITH ranked AS (
+                SELECT c.id,
+                       1 - (e.embedding <=> CAST(:query_vector AS vector)) AS similarity,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY c.paper_id
+                           ORDER BY e.embedding <=> CAST(:query_vector AS vector), c.ordinal
+                       ) AS paper_rank
+                FROM library_chunk_embeddings e
+                JOIN library_document_chunks c ON c.id = e.chunk_row_id
+                JOIN library_document_indexes i ON i.id = c.index_id
+                WHERE e.user_id = CAST(:user_id AS uuid)
+                  AND e.paper_id = ANY(CAST(:allowed_papers AS varchar[]))
+                  AND e.embedding_model_snapshot = :model
+                  AND e.dimension = :dimension
+                  AND e.status = 'ready'
+                  AND i.status = 'ready'
+                  AND i.is_current = true
+                  AND c.is_reference = false
+                  AND (e.embedding <=> CAST(:query_vector AS vector))
+                      <= :max_distance
+            )
+            SELECT id, similarity
+            FROM ranked
+            WHERE paper_rank <= :per_paper_limit
+            ORDER BY paper_rank, similarity DESC, id
+            LIMIT :limit
+            """
+            if paper_limit
+            else
+            """
+            SELECT c.id,
+                   1 - (e.embedding <=> CAST(:query_vector AS vector)) AS similarity
+            FROM library_chunk_embeddings e
+            JOIN library_document_chunks c ON c.id = e.chunk_row_id
+            JOIN library_document_indexes i ON i.id = c.index_id
+            WHERE e.user_id = CAST(:user_id AS uuid)
+              AND e.paper_id = ANY(CAST(:allowed_papers AS varchar[]))
+              AND e.embedding_model_snapshot = :model
+              AND e.dimension = :dimension
+              AND e.status = 'ready'
+              AND i.status = 'ready'
+              AND i.is_current = true
+              AND c.is_reference = false
+              AND (e.embedding <=> CAST(:query_vector AS vector))
+                  <= :max_distance
+            ORDER BY e.embedding <=> CAST(:query_vector AS vector), c.ordinal
+            LIMIT :limit
+            """
+        )
         with database_session(self.session_factory) as session:
             rows = session.execute(
-                text(
-                    """
-                    SELECT c.id,
-                           1 - (e.embedding <=> CAST(:query_vector AS vector)) AS similarity
-                    FROM library_chunk_embeddings e
-                    JOIN library_document_chunks c ON c.id = e.chunk_row_id
-                    JOIN library_document_indexes i ON i.id = c.index_id
-                    WHERE e.user_id = CAST(:user_id AS uuid)
-                      AND e.paper_id = ANY(CAST(:allowed_papers AS varchar[]))
-                      AND e.embedding_model_snapshot = :model
-                      AND e.dimension = :dimension
-                      AND e.status = 'ready'
-                      AND i.status = 'ready'
-                      AND i.is_current = true
-                      AND c.is_reference = false
-                      AND (e.embedding <=> CAST(:query_vector AS vector))
-                          <= :max_distance
-                    ORDER BY e.embedding <=> CAST(:query_vector AS vector), c.ordinal
-                    LIMIT :limit
-                    """
-                ),
+                text(sql),
                 {
                     "query_vector": vector_text,
                     "user_id": str(user_id),
@@ -1151,7 +1184,8 @@ class LibraryIndexService:
                     "model": model,
                     "dimension": dimension,
                     "max_distance": 1.0 - float(self.tuning.semantic_min_similarity),
-                    "limit": max(1, min(int(limit), 200)),
+                    "per_paper_limit": paper_limit or 1,
+                    "limit": max(1, min(int(limit), 400)),
                 },
             ).all()
         return [(uuid.UUID(str(row_id)), float(similarity or 0)) for row_id, similarity in rows]
@@ -1419,6 +1453,7 @@ class LibraryIndexService:
         allowed_papers: list[str],
         limit: int,
         term_groups: list[list[str]] | None = None,
+        per_paper_limit: int = 1,
     ) -> list[dict[str, Any]]:
         normalized = " ".join(str(query or "").casefold().split())
         if not normalized or not allowed_papers:
@@ -1441,6 +1476,7 @@ class LibraryIndexService:
         groups = [group for group in groups if group]
         if not groups:
             groups = [phrases]
+        paper_limit = max(1, min(int(per_paper_limit), 3))
         with database_session(self.session_factory) as session:
             dialect = session.get_bind().dialect.name
             if dialect == "postgresql":
@@ -1449,11 +1485,15 @@ class LibraryIndexService:
                 tsquery = func.websearch_to_tsquery("simple", web_query)
                 vector = func.to_tsvector("simple", LibraryDocumentChunk.content)
                 rank = func.ts_rank_cd(vector, tsquery)
-                rows = session.execute(
+                paper_rank = func.row_number().over(
+                    partition_by=LibraryDocumentChunk.paper_id,
+                    order_by=(rank.desc(), LibraryDocumentChunk.ordinal),
+                )
+                ranked = (
                     select(
-                        LibraryDocumentChunk,
-                        LibraryDocumentIndex.source_lineage_hash,
+                        LibraryDocumentChunk.id.label("chunk_row_id"),
                         rank.label("lexical_score"),
+                        paper_rank.label("paper_rank"),
                     )
                     .join(
                         LibraryDocumentIndex,
@@ -1467,9 +1507,40 @@ class LibraryIndexService:
                         LibraryDocumentChunk.is_reference.is_(False),
                         postgres_term_group_constraint(vector, groups),
                     )
-                    .order_by(rank.desc(), LibraryDocumentChunk.ordinal)
+                    .subquery()
+                )
+                ranked_rows = session.execute(
+                    select(
+                        ranked.c.chunk_row_id,
+                        ranked.c.lexical_score,
+                        ranked.c.paper_rank,
+                    )
+                    .where(ranked.c.paper_rank <= paper_limit)
+                    .order_by(
+                        ranked.c.paper_rank,
+                        ranked.c.lexical_score.desc(),
+                        ranked.c.chunk_row_id,
+                    )
                     .limit(max(1, min(int(limit), 400)))
                 ).all()
+                if not ranked_rows:
+                    return []
+                ids = tuple(row_id for row_id, _score, _paper_rank in ranked_rows)
+                chunk_rows = session.execute(
+                    select(
+                        LibraryDocumentChunk,
+                        LibraryDocumentIndex.source_lineage_hash,
+                    )
+                    .join(
+                        LibraryDocumentIndex,
+                        LibraryDocumentIndex.id == LibraryDocumentChunk.index_id,
+                    )
+                    .where(LibraryDocumentChunk.id.in_(ids))
+                ).all()
+                chunks_by_id = {
+                    chunk.id: (chunk, lineage_hash)
+                    for chunk, lineage_hash in chunk_rows
+                }
                 return [
                     {
                         "paper_id": chunk.paper_id,
@@ -1483,7 +1554,9 @@ class LibraryIndexService:
                         "index_id": str(chunk.index_id),
                         "source_lineage_hash": str(lineage_hash or ""),
                     }
-                    for chunk, lineage_hash, score in rows
+                    for chunk_row_id, score, _paper_rank in ranked_rows
+                    if chunk_row_id in chunks_by_id
+                    for chunk, lineage_hash in (chunks_by_id[chunk_row_id],)
                 ]
             rows = session.execute(
                 select(
@@ -1542,7 +1615,26 @@ class LibraryIndexService:
                 }
             )
         ranked.sort(key=lambda row: (-float(row["score"]), str(row["chunk_id"])))
-        return ranked[: max(1, min(int(limit), 400))]
+        coverage_rows: list[tuple[int, dict[str, Any]]] = []
+        paper_counts: dict[str, int] = {}
+        for row in ranked:
+            paper_id = str(row["paper_id"])
+            paper_rank = paper_counts.get(paper_id, 0) + 1
+            if paper_rank > paper_limit:
+                continue
+            paper_counts[paper_id] = paper_rank
+            coverage_rows.append((paper_rank, row))
+        coverage_rows.sort(
+            key=lambda item: (
+                item[0],
+                -float(item[1]["score"]),
+                str(item[1]["chunk_id"]),
+            )
+        )
+        return [
+            row
+            for _paper_rank, row in coverage_rows[: max(1, min(int(limit), 400))]
+        ]
 
     def _screening_semantic_chunks(
         self,
@@ -1551,12 +1643,14 @@ class LibraryIndexService:
         *,
         allowed_papers: list[str],
         limit: int,
+        per_paper_limit: int = 1,
     ) -> list[dict[str, Any]]:
         ranked_ids = self._semantic_ranked_ids(
             principal,
             query,
             allowed_papers=allowed_papers,
             limit=limit,
+            per_paper_limit=per_paper_limit,
         )
         if not ranked_ids:
             return []
@@ -1631,19 +1725,11 @@ class LibraryIndexService:
 
         clean_queries = [
             dict(item)
-            for item in queries[:13]
+            for item in queries[:16]
             if isinstance(item, dict)
             and str(item.get("query_id") or "").strip()
             and str(item.get("query") or "").strip()
         ]
-        # Admission queries must run before partition discriminators even when
-        # an older artifact stored them in another order. Partition searches
-        # may annotate only the papers already admitted by a Topic query.
-        clean_queries.sort(
-            key=lambda item: 1
-            if str(item.get("kind") or "") == "topic_partition"
-            else 0
-        )
         # Admission queries must run before partition discriminators even when
         # an older artifact stored them in another order. Partition searches
         # may annotate only the papers already admitted by a Topic query.
@@ -1705,6 +1791,7 @@ class LibraryIndexService:
                         if isinstance(query.get("lexical_term_groups"), list)
                         else None
                     ),
+                    per_paper_limit=max_chunks,
                 ),
                 (0.50, 0.30, 0.20),
             )
@@ -1718,6 +1805,7 @@ class LibraryIndexService:
                             query_text,
                             allowed_papers=allowed,
                             limit=candidate_limit,
+                            per_paper_limit=max_chunks,
                         ),
                         (0.50, 0.30, 0.20),
                     )

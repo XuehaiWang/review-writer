@@ -11,6 +11,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from .author_metadata import author_quality_issues, authors_are_publication_ready
 from .paper_sources.base import PaperSearchRequest, PaperSourceConnector
 from .paper_sources.normalize import normalize_doi, normalize_title
 from .publication_metadata import (
@@ -181,6 +182,95 @@ def _missing_resolution_fields(
         for field in DOCUMENT_REQUIREMENTS.get(document_type, DOCUMENT_REQUIREMENTS["other"])
         if field not in available
     ]
+
+
+_BIBLIOGRAPHY_RESIDUE = re.compile(
+    r"<[^>]+>|\b(?:received|accepted|cite this|read online|"
+    r"article recommendations?|supporting information)\b",
+    re.IGNORECASE,
+)
+
+
+def bibliography_field_readiness(
+    metadata: dict[str, Any], audit: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Return field-level publication readiness for canonical metadata.
+
+    A traceable local PDF or a paper-level audit status is not sufficient.
+    Final release depends on the canonical fields that will actually be
+    rendered in the reference list.
+    """
+
+    audit_row = dict(audit or {})
+    document_type = str(
+        _value(metadata, "document_type")
+        or audit_row.get("document_type")
+        or "journal_article"
+    ).strip()
+    if document_type not in DOCUMENT_REQUIREMENTS:
+        document_type = "journal_article"
+    parent_paper_id = str(
+        _value(metadata, "parent_paper_id")
+        or audit_row.get("parent_paper_id")
+        or ""
+    ).strip()
+    missing = _missing_resolution_fields(
+        metadata,
+        document_type=document_type,
+        parent_paper_id=parent_paper_id,
+    )
+    if document_type == "journal_article":
+        canonical_doi = normalize_doi(_value(metadata, "doi"))
+        online_first = str(
+            _value(metadata, "publication_status") or ""
+        ).casefold() in {"online_first", "early_view", "accepted_manuscript"}
+        has_locator = bool(
+            _value(metadata, "pages")
+            or _value(metadata, "article_number")
+            or _value(metadata, "locator")
+        )
+        if not has_locator and not (canonical_doi and online_first):
+            missing.append("pages_or_article_number")
+        if not canonical_doi and not has_locator:
+            missing.append("doi_or_locator")
+    polluted: list[str] = []
+    raw_authors = _value(metadata, "authors")
+    author_issues = author_quality_issues(raw_authors)
+    if raw_authors not in (None, "", []) and author_issues:
+        polluted.append("authors")
+    for field in (
+        "title",
+        "authors",
+        "journal",
+        "book_title",
+        "publisher",
+        "pages",
+        "article_number",
+    ):
+        value = _value(metadata, field)
+        serialized = " ".join(map(str, value)) if isinstance(value, list) else str(value or "")
+        if serialized and _BIBLIOGRAPHY_RESIDUE.search(serialized):
+            polluted.append(field)
+    year = _value(metadata, "year") or _value(metadata, "publication_year")
+    if year not in (None, "") and not re.fullmatch(r"(?:18|19|20|21)\d{2}", str(year).strip()):
+        polluted.append("year")
+    unresolved_conflicts = [
+        dict(value)
+        for value in audit_row.get("unresolved_conflicts") or []
+        if isinstance(value, dict)
+    ]
+    missing = list(dict.fromkeys(missing))
+    polluted = list(dict.fromkeys(polluted))
+    return {
+        "document_type": document_type,
+        "parent_paper_id": parent_paper_id,
+        "required_fields": list(DOCUMENT_REQUIREMENTS[document_type]),
+        "missing_fields": missing,
+        "polluted_fields": polluted,
+        "author_quality_issues": author_issues,
+        "unresolved_conflicts": unresolved_conflicts,
+        "ready": not missing and not polluted and not unresolved_conflicts,
+    }
 
 
 def _manual_evidence(payload: dict[str, Any]) -> dict[str, str]:
@@ -397,6 +487,49 @@ def _field_human_checked(metadata: dict[str, Any], key: str) -> bool:
     return bool(isinstance(value, dict) and value.get("human_checked"))
 
 
+def _mineru_field_confirmed(metadata: dict[str, Any], key: str) -> bool:
+    """Return whether one canonical field is grounded in literal MinerU evidence."""
+
+    value = metadata.get(key)
+    if not isinstance(value, dict) or value.get("value") in (None, "", []):
+        return False
+    if bool(value.get("human_checked")):
+        return True
+    if key == "authors" and not authors_are_publication_ready(value.get("value")):
+        return False
+    source = str(value.get("source") or "").casefold()
+    status = str(value.get("verification_status") or "").casefold()
+    evidence = value.get("evidence")
+    return bool(
+        source.startswith("mineru_")
+        and status == "confirmed"
+        and isinstance(evidence, dict)
+        and str(evidence.get("source_text") or "").strip()
+        and float(value.get("confidence") or 0.0) >= 0.88
+    )
+
+
+def _mineru_record_is_locally_complete(
+    metadata: dict[str, Any], *, document_type: str
+) -> bool:
+    """Accept a complete, clean article identity without a network round trip."""
+
+    if document_type != "journal_article":
+        return False
+    if not all(
+        _mineru_field_confirmed(metadata, field)
+        for field in DOCUMENT_REQUIREMENTS[document_type]
+    ):
+        return False
+    if not any(
+        _mineru_field_confirmed(metadata, field)
+        for field in ("pages", "article_number", "doi")
+    ):
+        return False
+    readiness = bibliography_field_readiness(metadata, {"unresolved_conflicts": []})
+    return bool(readiness.get("ready"))
+
+
 def _author_keys(authors: Any) -> set[str]:
     values = authors if isinstance(authors, list) else [authors] if authors else []
     keys = set()
@@ -568,7 +701,17 @@ def audit_bibliography(
     )
     identity_metadata = json.loads(json.dumps(metadata, ensure_ascii=False))
     for field, raw in agent_fields.items():
-        if field not in {"doi", "title", "authors", "year", "journal"}:
+        if field not in {
+            "doi",
+            "title",
+            "authors",
+            "year",
+            "journal",
+            "volume",
+            "issue",
+            "pages",
+            "article_number",
+        }:
             continue
         row = dict(raw) if isinstance(raw, dict) else {}
         value = row.get("value")
@@ -729,6 +872,10 @@ def audit_bibliography(
         "first_publication_date",
         "publication_status",
         "journal",
+        "volume",
+        "issue",
+        "pages",
+        "article_number",
     ):
         provenance: list[dict[str, Any]] = []
         canonical = _value(metadata, field)
@@ -861,7 +1008,11 @@ def audit_bibliography(
         candidate_normalized = _normalized_field(field, best.get("value"))
         if best_confidence < 0.94:
             continue
-        if canonical_normalized == candidate_normalized:
+        canonical_is_polluted_author = bool(
+            field == "authors"
+            and not authors_are_publication_ready(_value(metadata, "authors"))
+        )
+        if canonical_normalized == candidate_normalized and not canonical_is_polluted_author:
             continue
         # Human-reviewed fields were excluded above. A literal source-grounded
         # document/provider value must beat an unreviewed parser confidence,
@@ -906,6 +1057,25 @@ def audit_bibliography(
     automatic_missing = _missing_resolution_fields(
         preview_metadata, document_type=document_type
     )
+    preview_readiness = bibliography_field_readiness(
+        preview_metadata,
+        {"unresolved_conflicts": unresolved_conflicts},
+    )
+    for field in preview_readiness.get("polluted_fields") or []:
+        if field in DOCUMENT_REQUIREMENTS[document_type] and field not in automatic_missing:
+            automatic_missing.append(field)
+    automatic_missing = list(dict.fromkeys(automatic_missing))
+    if any(
+        field in DOCUMENT_REQUIREMENTS[document_type]
+        for field in preview_readiness.get("polluted_fields") or []
+    ):
+        overall = "conflict"
+    mineru_locally_complete = _mineru_record_is_locally_complete(
+        preview_metadata,
+        document_type=document_type,
+    )
+    if overall != "conflict" and mineru_locally_complete and not unresolved_conflicts:
+        overall = "verified"
     if (
         overall != "verified"
         and str(agent_extraction.get("status") or "") == "reliable"
@@ -926,12 +1096,17 @@ def audit_bibliography(
     verification_method = (
         "local_document+provider"
         if network_used
+        else "mineru_local_document"
+        if mineru_locally_complete
         else "local_document"
         if local_status == "reliable"
         else "local_document_insufficient"
     )
-    if agent_extraction:
+    extraction_method = str(agent_extraction.get("method") or "")
+    if "bounded_document_agent" in extraction_method:
         verification_method += "+bounded_agent"
+    elif agent_extraction and "mineru" not in verification_method:
+        verification_method += "+mineru_rules"
     audit = {
         "schema_version": 2,
         "status": overall,
@@ -982,6 +1157,7 @@ def audit_bibliography(
         ),
         "document_type": document_type,
         "automatic_resolution_missing_fields": automatic_missing,
+        "field_readiness": preview_readiness,
     }
     audit["candidates"] = bibliography_candidates(audit)
     return audit
@@ -1006,15 +1182,25 @@ def apply_bibliography_updates(
         "first_publication_date",
         "publication_status",
         "journal",
+        "volume",
+        "issue",
+        "pages",
+        "article_number",
     ):
         proposed = updates.get(field)
         if not isinstance(proposed, dict) or proposed.get("value") in (None, "", []):
             continue
         if _field_human_checked(updated, field):
             continue
-        if _normalized_field(field, _value(updated, field)) == _normalized_field(
-            field, proposed.get("value")
-        ):
+        normalized_equal = _normalized_field(
+            field, _value(updated, field)
+        ) == _normalized_field(field, proposed.get("value"))
+        replace_polluted_authors = bool(
+            field == "authors"
+            and not authors_are_publication_ready(_value(updated, "authors"))
+            and authors_are_publication_ready(proposed.get("value"))
+        )
+        if normalized_equal and not replace_polluted_authors:
             continue
         updated[field] = dict(proposed)
         changed.append(field)

@@ -28,6 +28,13 @@ from review_writer_core.review_structure import (  # noqa: E402
     assign_primary_paper_sections,
     infer_section_role,
 )
+from review_writer_core.classification_axes import (  # noqa: E402
+    canonical_classification_contract,
+)
+from review_writer_core.section_narrative_contracts import (  # noqa: E402
+    derive_scientific_thesis,
+    derive_section_depth_contract,
+)
 
 
 STOPWORDS = {
@@ -553,19 +560,77 @@ def build_section(
         claims.append(claim_from_papers(section["section_id"], title, idx, claim_papers, axes, rule_pack))
     dominant_logic = infer_logic(title, rule_pack)
     target_paragraphs, target_words = target_depth(title, len(selected))
+    legacy_thesis = section_thesis(title, evidence_papers, dominant_logic, rule_pack)
+    axis_contract = canonical_classification_contract(
+        [
+            {
+                "axis_id": str(axis),
+                "axis_role": (
+                    "primary_organization" if index == 0 else "comparison_dimension"
+                ),
+            }
+            for index, axis in enumerate(axes)
+            if str(axis or "").strip()
+        ],
+        primary_axis_hint=str(axes[0] if axes else ""),
+        source="legacy_blueprint_script",
+    )
+    thesis_contract = derive_scientific_thesis(
+        {
+            **section,
+            "section_role": role,
+            "purpose": legacy_thesis,
+            "primary_papers": paper_ids,
+            "supporting_papers": supporting_ids,
+            "target_words": target_words,
+        },
+        papers_by_id,
+        axis_contract,
+    )
+    if role == "body" and not (
+        (thesis_contract.get("components") or {}).get("source_backed_paper_ids")
+    ):
+        thesis_contract["text"] = legacy_thesis
+        thesis_contract["status"] = "provisional"
+        thesis_contract["source"] = "legacy_matrix_metadata_pending_fact_retrieval"
+    thesis = str(thesis_contract.get("text") or legacy_thesis)
+    depth_contract = derive_section_depth_contract(
+        {
+            "section_role": role,
+            "primary_papers": paper_ids,
+            "target_words": target_words,
+        }
+    )
     return {
         "section_id": section["section_id"],
         "title": title,
         "section_role": role,
-        "section_thesis": section_thesis(title, evidence_papers, dominant_logic, rule_pack),
+        "section_thesis": thesis,
+        "scientific_thesis": thesis_contract,
+        "thesis_status": str(thesis_contract.get("status") or "provisional"),
         "review_problem": review_problem(title, evidence_papers, dominant_logic, rule_pack),
         "target_paragraphs": target_paragraphs,
         "target_words": target_words,
+        "depth_contract": depth_contract,
         "dominant_logic": dominant_logic,
         "major_papers": paper_ids,
         "primary_papers": paper_ids,
         "supporting_papers": supporting_ids,
         "review_claims": claims,
+        # These legacy claims describe how the author should synthesize the
+        # assigned literature ("establish", "compare", "qualify", etc.).
+        # They must not become required full-text search propositions.
+        "scientific_claims": [],
+        "writing_requirements": [
+            {
+                "requirement_id": f"WR-{section['section_id']}-{index:02d}",
+                "type": "cross_study_synthesis",
+                "instruction": str(claim.get("claim") or ""),
+                "source": "legacy_blueprint_script",
+            }
+            for index, claim in enumerate(claims, start=1)
+            if str(claim.get("claim") or "").strip()
+        ],
         "figure_or_table_needs": [
             {
                 "type": (

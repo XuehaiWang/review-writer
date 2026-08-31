@@ -132,6 +132,37 @@ class BibliographyAgentTests(unittest.TestCase):
         self.assertEqual("Organic Syntheses", updated["journal"]["value"])
         self.assertEqual(2014, updated["year"]["value"])
 
+    def test_validator_accepts_literal_volume_and_page_locator(self) -> None:
+        regions = [
+            {
+                "source_location": "mineru_front_window",
+                "text": "Cite This: J. Org. Chem. 2024, 89, 9001−9010",
+            }
+        ]
+        payload = {
+            "fields": {
+                "volume": {
+                    "value": "89",
+                    "role": "volume",
+                    "source_excerpt": "J. Org. Chem. 2024, 89, 9001−9010",
+                    "source_location": "mineru_front_window",
+                    "confidence": 0.98,
+                },
+                "pages": {
+                    "value": "9001-9010",
+                    "role": "pages",
+                    "source_excerpt": "J. Org. Chem. 2024, 89, 9001−9010",
+                    "source_location": "mineru_front_window",
+                    "confidence": 0.98,
+                },
+            }
+        }
+
+        accepted = validate_bibliography_agent_result(payload, regions)
+
+        self.assertEqual("89", accepted["fields"]["volume"]["value"])
+        self.assertEqual("9001-9010", accepted["fields"]["pages"]["value"])
+
 
 if __name__ == "__main__":
     unittest.main()
