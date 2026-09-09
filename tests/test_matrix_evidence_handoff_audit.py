@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
-import httpx
+import httpx2 as httpx
 
 from review_writer_api.domain_services.sections import SectionsService
 from review_writer_api.domain_services.library_index import EvidenceHit
