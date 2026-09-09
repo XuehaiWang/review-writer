@@ -51,6 +51,151 @@ def batch_result(ids: list[str], d1: float, d2: float) -> dict[str, object]:
 
 
 class FeedbackLoopBatchingTests(unittest.TestCase):
+    def test_changed_paragraph_evaluation_scores_only_the_requested_subset(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "review-projects" / "project-1"
+            first = project / "04_first_draft"
+            first.mkdir(parents=True)
+            (first / "first_draft.md").write_text(
+                "# Review\n\nChanged [1].\n\n<!-- paragraph_id: p1 -->\n\n"
+                "Unchanged [2].\n\n<!-- paragraph_id: p2 -->\n",
+                encoding="utf-8",
+            )
+            preflight = {
+                "hard_regressions": [],
+                "paragraph_checks": [
+                    {"paragraph_id": "p1", "word_range_applicable": False},
+                    {"paragraph_id": "p2", "word_range_applicable": False},
+                ],
+                "paragraph_findings": [],
+            }
+            args = SimpleNamespace(
+                project_id="project-1",
+                goal=90,
+                paragraph_goal=85,
+                min_case_words=1,
+                max_case_words=100,
+            )
+
+            with mock.patch.object(
+                feedback_loop, "deterministic_preflight", return_value=preflight
+            ), mock.patch.object(
+                feedback_loop, "paragraph_metadata", return_value={}
+            ), mock.patch.object(
+                feedback_loop, "matrix_rows", return_value=[]
+            ), mock.patch.object(
+                feedback_loop, "claim_evidence_contract", return_value={}
+            ), mock.patch.object(
+                feedback_loop,
+                "source_evidence",
+                return_value={"paper_ids": [], "evidence": []},
+            ), mock.patch.object(
+                feedback_loop,
+                "call_json_model",
+                return_value=batch_result(["p1"], 3, 4),
+            ) as model_call:
+                _preflight, evaluation, _evidence = (
+                    feedback_loop.evaluate_changed_paragraphs(
+                        root,
+                        project,
+                        args,
+                        rubric(),
+                        {"p1"},
+                        first / "incremental",
+                        global_dimension_scores=[],
+                    )
+                )
+
+        self.assertEqual(
+            ["p1"],
+            [row["paragraph_id"] for row in evaluation["paragraph_scores"]],
+        )
+        self.assertEqual(1, model_call.call_count)
+        self.assertIn("Changed-paragraph", model_call.call_args.kwargs["label"])
+
+    def test_feedback_loop_reuses_an_exact_full_draft_baseline(self) -> None:
+        self._run_baseline_case(mismatch=False)
+
+    def test_expired_baseline_is_evaluated_once_and_continues(self) -> None:
+        self._run_baseline_case(mismatch=True)
+
+    def _run_baseline_case(self, *, mismatch):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = root / "review-projects" / "project-1" / "04_first_draft"
+            first.mkdir(parents=True)
+            source_markdown = (
+                "# Review\n\nStable paragraph [1].\n\n"
+                "<!-- paragraph_id: p1 -->\n"
+            )
+            draft_path = first / "first_draft.md"
+            draft_path.write_text(source_markdown, encoding="utf-8")
+            baseline = {
+                "quality_scope": feedback_loop.FULL_DRAFT_QUALITY_SCOPE,
+                "evaluation_rule_version": feedback_loop.DRAFT_QUALITY_RULE_VERSION,
+                "evaluation_input_sha256": feedback_loop.sha256_file(draft_path),
+                "paragraph_coverage": ["p1"],
+                "total_score": 95,
+                "pass_threshold": 90,
+                "decision": "PASS",
+                "hard_gate_failures": [],
+                "paragraph_scores": [
+                    {
+                        "paragraph_id": "p1",
+                        "score": 95,
+                        "route": "pass",
+                        "severity": "pass",
+                    }
+                ],
+                "paragraph_failures": [],
+                "blocking_paragraph_failures": [],
+                "preflight": {"hard_regressions": [], "paragraph_checks": []},
+                "source_check": {"entries": []},
+            }
+            if mismatch:
+                baseline["evaluation_input_sha256"] = "previous-manuscript"
+            (first / "baseline_quality.json").write_text(
+                json.dumps(baseline), encoding="utf-8"
+            )
+            args = SimpleNamespace(
+                review_root=str(root),
+                project_id="project-1",
+                goal=90.0,
+                paragraph_goal=85.0,
+                max_iterations=1,
+                min_improvement=1.0,
+                min_case_words=1,
+                max_case_words=100,
+                evaluate_only=True,
+                reuse_baseline=True,
+            )
+
+            with mock.patch.object(
+                feedback_loop,
+                "ensure_prose_paragraph_markers",
+                return_value=(
+                    source_markdown,
+                    {"prose_paragraph_count": 1, "changed": False},
+                ),
+            ), mock.patch.object(feedback_loop, "evaluate_current_draft") as evaluate:
+                evaluate.return_value = (baseline["preflight"], baseline,
+                    {"gate_decision": "GATE_RELEASE"}, [paragraph("p1")], {})
+                result = feedback_loop.run_feedback_loop(args)
+
+            status = json.loads(
+                (first / "feedback_loop_status.json").read_text(encoding="utf-8")
+            )
+
+        if mismatch:
+            evaluate.assert_called_once()
+            self.assertEqual(1, status["baseline_full_evaluation_count"])
+            self.assertEqual("baseline_expired", status["run_mode"])
+        else:
+            evaluate.assert_not_called()
+        self.assertEqual("released", result["status"])
+        self.assertEqual(not mismatch, status["quality_reused"])
+
     def test_global_dimensions_are_scored_once_and_local_dimensions_are_batched(self) -> None:
         mixed_rubric = {
             "dimensions": [
@@ -146,6 +291,53 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
         self.assertEqual("evaluation", sent["stage"])
         self.assertTrue(sent["request_key"].startswith("evaluation-"))
 
+    def test_batch_gateway_reuses_original_result_recovery(self):
+        from review_writer_core import model_gateway_client
+        environment = {"REVIEW_WRITER_MODEL_GATEWAY_URL": "http://gateway/model-responses",
+                       "REVIEW_WRITER_TASK_TOKEN": "task-token"}
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = json.dumps({
+            "status": "succeeded", "result": {"output_text": '{"score": 95}'},
+        }).encode()
+        with mock.patch.dict(os.environ, environment), mock.patch.object(
+            model_gateway_client.urllib.request, "urlopen", side_effect=[TimeoutError("timed out"), response],
+        ) as opened:
+            self.assertEqual({"score": 95}, feedback_loop.call_json_model("score this", label="evaluation"))
+        self.assertEqual(["POST", "GET"], [call.args[0].get_method() for call in opened.call_args_list])
+        self.assertTrue(feedback_loop.recoverable_paragraph_provider_failure(
+            model_gateway_client.GatewayRequestError("暂不可用", status_code=503)))
+        self.assertFalse(feedback_loop.recoverable_paragraph_provider_failure(
+            model_gateway_client.GatewayRequestError("授权失效", status_code=401)))
+
+    def test_internal_gateway_recovers_latex_slash_in_model_json(self) -> None:
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def read() -> bytes:
+                output = (
+                    "<think>Internal reasoning with {draft notes}.</think>\n"
+                    r'{"score": 95, "excerpt": "$25^{\\\mathrm{C}}$"}'
+                )
+                return json.dumps({"output_text": output}).encode("utf-8")
+
+        environment = {
+            "REVIEW_WRITER_MODEL_GATEWAY_URL": "http://gateway/model-responses",
+            "REVIEW_WRITER_TASK_TOKEN": "scoped-task-token",
+        }
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            feedback_loop.urllib.request, "urlopen", return_value=Response()
+        ) as urlopen:
+            result = feedback_loop.call_json_model("score this", label="evaluation")
+
+        self.assertEqual(r"$25^{\\mathrm{C}}$", result["excerpt"])
+        self.assertEqual(1, urlopen.call_count)
+
     def test_paragraph_batches_bound_each_provider_request(self) -> None:
         paragraphs = [paragraph(f"p{index}") for index in range(17)]
 
@@ -224,6 +416,10 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
         self.assertNotIn('"paragraph_id": "p2"', prompt)
 
     def test_source_check_prefers_exact_claim_bound_chunk_over_lexical_reretrieval(self) -> None:
+        complete_passage = (
+            "The optimization study examined the reaction conditions. " * 25
+            + "NaI improved the yield; 4ua gave 27% at 25 C and 83% at 60 C."
+        )
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir)
             section_dir = project / "02_section_drafting"
@@ -264,7 +460,7 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
                                 "paper_id": "P001",
                                 "chunk_id": "C0042",
                                 "page_start": 7,
-                                "content": "The exact supporting passage.",
+                                "content": complete_passage,
                                 "claim_eligible": True,
                             }
                         ]
@@ -300,7 +496,73 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
         passage = result["evidence"][0]["original_passages"][0]
         self.assertEqual("C0042", passage["chunk_id"])
         self.assertEqual(7, passage["page"])
-        self.assertEqual("The exact supporting passage.", passage["text"])
+        self.assertEqual(complete_passage, passage["text"])
+        for minimal in (False, True):
+            prompt = feedback_loop.rewrite_prompt(
+                {"paragraph_id": "S02-p1", "text": "4ua gave 27% at 25 C [1]."},
+                {"diagnosis": "Check the temperature comparison."}, result, 1, 280,
+                minimal_evidence=minimal,
+            )
+            self.assertIn("NaI improved the yield; 4ua gave 27% at 25 C and 83% at 60 C.", prompt)
+        evaluation_prompt = feedback_loop.evaluation_prompt(
+            rubric(), [paragraph("S02-p1")], {"S02-p1": result}, {}, 90, 85,
+        )
+        self.assertIn(complete_passage, evaluation_prompt)
+
+    def test_evidence_projection_preserves_late_passages_and_source_identity(self) -> None:
+        passages = [
+            {"ref": f"source-{i}", "page": i, "claim_id": f"claim-{i}",
+             "text": f"Experiment {i}. " * 100 + f"Yield {i + 70}% at the end."}
+            for i in range(5)
+        ]
+        raw = {"evidence": [
+            {"paper_id": "P001", "original_passages": passages},
+            {"paper_id": "P002", "original_passages": [
+                {**passages[4], "ref": "other-source", "claim_id": "other-claim"},
+            ]},
+        ]}
+        for minimal in (False, True):
+            with self.subTest(minimal=minimal):
+                projection = feedback_loop.compact_evidence_for_prompt(raw, minimal=minimal)
+                self.assertEqual(5, len(projection["passage_texts"]))
+                projected = projection["evidence"][0]["original_passages"]
+                self.assertEqual(5, len(projected))
+                for original, item in zip(passages, projected):
+                    self.assertEqual(original["text"], projection["passage_texts"][item["text_ref"]])
+                    self.assertEqual(original["ref"], item["ref"])
+                    self.assertEqual(original["claim_id"], item["claim_id"])
+                other = projection["evidence"][1]["original_passages"][0]
+                self.assertEqual("other-source", other["ref"])
+                self.assertEqual("other-claim", other["claim_id"])
+                self.assertEqual(projected[4]["text_ref"], other["text_ref"])
+
+    def test_request_budget_splits_scoring_without_discarding_evidence(self) -> None:
+        batch = [paragraph("p1"), paragraph("p2")]
+        tail = "Late result: 53% yield and 98% ee."
+        evidence = {p["paragraph_id"]: {"evidence": [{
+            "paper_id": "P001", "original_passages": [
+                {"ref": "source", "text": "Evidence context. " * 100 + tail},
+            ],
+        }]} for p in batch}
+        calls = []
+
+        def model(prompt, **kwargs):
+            calls.append(prompt)
+            if len(calls) == 1:
+                raise feedback_loop.ProviderRequestBodyBudgetExceeded("request too large")
+            ids = [p["paragraph_id"] for p in batch if f'"paragraph_id": "{p["paragraph_id"]}"' in prompt]
+            return batch_result(ids, 4, 4)
+
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(feedback_loop, "update_status"), mock.patch.object(
+            feedback_loop, "call_json_model", side_effect=model,
+        ):
+            result = feedback_loop.request_paragraph_score_batches(
+                Path(raw), rubric=rubric(), paragraphs=batch, evidence=evidence, preflight={},
+                goal=90, paragraph_goal=85, draft_structure=[], prior_quality_context={}, label_prefix="Test",
+            )
+        self.assertEqual([["p1"], ["p2"]], [[p["paragraph_id"] for p in b] for b, _ in result])
+        self.assertEqual(3, len(calls))
+        self.assertTrue(all(tail in prompt for prompt in calls))
 
     def test_http_524_is_returned_to_adaptive_split_without_identical_retries(self) -> None:
         timeout = urllib.error.HTTPError(
@@ -490,8 +752,18 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
                 "decision": "FAIL",
                 "hard_gate_failures": [],
                 "paragraph_scores": [
-                    {"paragraph_id": "p1", "score": 60},
-                    {"paragraph_id": "p2", "score": 60},
+                    {
+                        "paragraph_id": "p1",
+                        "score": 60,
+                        "route": "section_rewrite",
+                        "failed_dimensions": ["scientific_synthesis"],
+                    },
+                    {
+                        "paragraph_id": "p2",
+                        "score": 60,
+                        "route": "section_rewrite",
+                        "failed_dimensions": ["scientific_synthesis"],
+                    },
                 ],
                 "paragraph_failures": [
                     {
@@ -499,12 +771,14 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
                         "score": 60,
                         "route": "section_rewrite",
                         "diagnosis": "Improve p1.",
+                        "failed_dimensions": ["P02"],
                     },
                     {
                         "paragraph_id": "p2",
                         "score": 60,
                         "route": "section_rewrite",
                         "diagnosis": "Improve p2.",
+                        "failed_dimensions": ["P02"],
                     },
                 ],
             }
@@ -512,8 +786,18 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
                 **source_evaluation,
                 "total_score": 80,
                 "paragraph_scores": [
-                    {"paragraph_id": "p1", "score": 60},
-                    {"paragraph_id": "p2", "score": 90},
+                    {
+                        "paragraph_id": "p1",
+                        "score": 60,
+                        "route": "section_rewrite",
+                        "failed_dimensions": ["scientific_synthesis"],
+                    },
+                    {
+                        "paragraph_id": "p2",
+                        "score": 90,
+                        "route": "pass",
+                        "failed_dimensions": [],
+                    },
                 ],
             }
             paragraphs = feedback_loop.parse_marked_paragraphs(source_markdown)
@@ -552,7 +836,11 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
                 feedback_loop,
                 "evaluate_current_draft",
                 side_effect=evaluations,
-            ), mock.patch.object(
+            ) as full_evaluate, mock.patch.object(
+                feedback_loop,
+                "evaluate_changed_paragraphs",
+                return_value=(preflight, final_evaluation, {"p2": {}}),
+            ) as changed_evaluate, mock.patch.object(
                 feedback_loop,
                 "call_json_model",
                 side_effect=rewrite_response,
@@ -571,13 +859,15 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
                 (first / "batch_review_candidates.json").read_text(encoding="utf-8")
             )
 
-        self.assertEqual("needs_human_review", result["status"])
+        self.assertEqual("released", result["status"])
         self.assertEqual(1, checkpoint["rewrite_deferred"])
         self.assertEqual("deferred", checkpoint["items"][0]["status"])
         self.assertEqual("completed", checkpoint["items"][1]["status"])
         self.assertEqual(1, status["rewrite_deferred"])
         self.assertEqual(["p1"], status["deferred_paragraph_ids"])
         self.assertEqual(["p2"], [item["paragraph_id"] for item in review["changes"]])
+        self.assertEqual(2, full_evaluate.call_count)
+        changed_evaluate.assert_called_once()
 
     def test_rewrite_prompt_compacts_many_papers_to_a_bounded_payload(self) -> None:
         evidence = {
@@ -638,15 +928,33 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
         source_evaluation = {
             "total_score": 75,
             "paragraph_scores": [
-                {"paragraph_id": "sec1-p1", "score": 70},
-                {"paragraph_id": "sec1-p2", "score": 80},
+                {
+                    "paragraph_id": "sec1-p1",
+                    "score": 70,
+                    "route": "section_rewrite",
+                    "failed_dimensions": ["scientific_synthesis"],
+                },
+                {
+                    "paragraph_id": "sec1-p2",
+                    "score": 80,
+                    "route": "section_rewrite",
+                },
             ],
         }
         candidate_evaluation = {
             "total_score": 80,
             "paragraph_scores": [
-                {"paragraph_id": "sec1-p1", "score": 90},
-                {"paragraph_id": "sec1-p2", "score": 70},
+                {
+                    "paragraph_id": "sec1-p1",
+                    "score": 90,
+                    "route": "pass",
+                    "failed_dimensions": [],
+                },
+                {
+                    "paragraph_id": "sec1-p2",
+                    "score": 70,
+                    "route": "section_rewrite",
+                },
             ],
         }
         preflight = {
@@ -682,7 +990,7 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
         self.assertEqual(["sec1-p1"], list(best))
         self.assertTrue(
             any(
-                "candidate_score_or_evidence_not_improved" in row.get("reasons", [])
+                "paragraph_score_regression" in row.get("reasons", [])
                 for row in excluded
             )
         )
@@ -727,7 +1035,7 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
             "paragraph_scores": [
                 {
                     "paragraph_id": "sec1-p1",
-                    "score": 87,
+                    "score": 89.5,
                     "source_check_status": "partially_supported",
                     "unsupported_claims": [],
                     "source_evidence_refs": ["P001:p1:b2"],
@@ -766,7 +1074,66 @@ class FeedbackLoopBatchingTests(unittest.TestCase):
 
         self.assertEqual([], excluded)
         self.assertTrue(best["sec1-p1"]["accuracy_improved"])
-        self.assertEqual(-3.0, best["sec1-p1"]["score_delta"])
+        self.assertEqual(-0.5, best["sec1-p1"]["score_delta"])
+
+    def test_batch_review_rejects_accuracy_candidate_outside_score_tolerance(self) -> None:
+        source = (
+            "# Review\n\nUnsupported detail [1].\n\n"
+            "<!-- paragraph_id: sec1-p1 -->\n"
+        )
+        candidate = source.replace(
+            "Unsupported detail [1].",
+            "The source supports a narrower interpretation [1].",
+        )
+        source_evaluation = {
+            "paragraph_scores": [
+                {
+                    "paragraph_id": "sec1-p1",
+                    "score": 90,
+                    "route": "local_source_recheck",
+                    "source_check_status": "unsupported",
+                    "unsupported_claims": ["Unsupported detail"],
+                }
+            ]
+        }
+        candidate_evaluation = {
+            "paragraph_scores": [
+                {
+                    "paragraph_id": "sec1-p1",
+                    "score": 88,
+                    "route": "pass",
+                    "source_check_status": "verified",
+                    "unsupported_claims": [],
+                }
+            ]
+        }
+        preflight = {
+            "paragraph_checks": [
+                {
+                    "paragraph_id": "sec1-p1",
+                    "word_range_applicable": False,
+                    "issues": [],
+                }
+            ]
+        }
+        best: dict[str, dict[str, object]] = {}
+
+        excluded = feedback_loop.update_best_paragraph_candidates(
+            best,
+            source_markdown=source,
+            candidate_markdown=candidate,
+            source_evaluation=source_evaluation,
+            candidate_evaluation=candidate_evaluation,
+            source_preflight=preflight,
+            candidate_preflight=preflight,
+            candidate_evidence={},
+            min_words=1,
+            max_words=200,
+            iteration=1,
+        )
+
+        self.assertFalse(best)
+        self.assertIn("paragraph_score_regression", excluded[0]["reasons"])
 
 
 if __name__ == "__main__":

@@ -1,13 +1,42 @@
 ---
 name: review-final-audit-release
-description: Use when an approved first review draft and validated generated conclusion need integration, final evidence audit, and release preparation.
+description: Support final manuscript assembly, front-matter generation, validation, release, and PDF rendering, with a separate standalone conclusion-integration audit workflow.
 ---
 
 # Review Final Audit Release
 
-This stage integrates the already validated conclusion before scanning or
-editing the final manuscript. It corrects and releases supported content; it
-does not invent new arguments or remap paper identities.
+Correct and release supported manuscript content without inventing arguments
+or remapping paper identities.
+
+## Current Web integration
+
+`review_writer_api.domain_services.final` owns Final assembly, validation,
+release state, and current-artifact checks. It consumes the approved Draft and
+its matching evaluation/approval state. A separately generated conclusion and
+Overview are optional; if present, their companion artifacts must be complete
+and tied to the current Draft. Do not require an absent optional artifact or a
+standalone Mermaid chart merely because the legacy workflow below uses it.
+
+The native Final jobs use this skill's `scripts/generate_front_matter.py` for
+abstract/keywords and `scripts/render_modern_survey_pdf.py` for the locked PDF
+rendering path (or the configured renderer service). Conclusion generation is
+owned by `review-conclusion-generator`, Overview by `review-figure-style-redraw`,
+and Word conversion by `review-export-docx`. Source-passage writing does not
+require new fact-card extraction at this stage. Runtime warnings and blockers
+come from the current Final API, not from an assumed optional optimization score.
+
+Search execution provenance, selected-source counts, and retrieval dates stay
+in the internal methods execution report. Final assembly must not prepend a
+fixed corpus-selection paragraph to a narrative introduction. It preserves the
+approved prose; changing its scientific exposition requires a manuscript edit
+or section regeneration followed by the normal approval workflow.
+
+## Standalone filesystem audit
+
+The inputs, commands, receipt, blocking conditions, and checkpoint below apply
+to the explicit filesystem audit workflow. They do not replace Web publication
+or PostgreSQL-owned approvals. That workflow integrates an already validated
+generated conclusion before scanning the final manuscript.
 
 ## Required Inputs
 
@@ -102,4 +131,4 @@ evidence files, the source first draft, and readiness for export.
 ## Human Check Point
 
 Stop after this stage. The human confirms scientific acceptability, remaining
-risks, figures, and references before summary-chart generation.
+risks, figures, and references before its standalone summary-chart step.

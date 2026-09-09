@@ -27,10 +27,6 @@ def load_module(name: str, path: Path):
 from review_writer_core import taxonomy  # noqa: E402
 
 
-PREPARE = load_module(
-    "taxonomy_profile_prepare",
-    ROOT / "skills" / "review-metadata-prep" / "scripts" / "prepare_metadata.py",
-)
 VALIDATE = load_module(
     "taxonomy_profile_validate",
     ROOT / "skills" / "review-metadata-prep" / "scripts" / "validate_metadata.py",
@@ -56,7 +52,7 @@ class TaxonomyProfileChecks(unittest.TestCase):
         self.assertEqual(identity["profile"], "allene")
         self.assertEqual(len(identity["sha256"]), 64)
 
-    def test_custom_rules_reach_metadata_validation_and_discovery(self) -> None:
+    def test_custom_rules_reach_human_tag_validation_and_discovery(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             custom = root / "custom_taxonomy.py"
@@ -69,12 +65,9 @@ class TaxonomyProfileChecks(unittest.TestCase):
                 {"REVIEW_CLASSIFICATION_RULES": str(custom), "REVIEW_TAXONOMY_PROFILE": "allene"},
                 clear=False,
             ):
-                resolved = taxonomy.resolve_taxonomy_path(root)
-                metadata_labels = PREPARE.load_classification_rules(resolved)
                 validation_labels = VALIDATE.load_allowed_labels(root)
                 discovery_aliases = DISCOVER.load_classification_rules(root)
                 identity = taxonomy.taxonomy_identity(root)
-            self.assertIn("custom product", metadata_labels["product"])
             self.assertIn("custom product", validation_labels["product"])
             self.assertEqual(discovery_aliases["product"]["custom product"], ["custom alias"])
             self.assertEqual(identity["profile"], "custom")

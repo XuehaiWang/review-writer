@@ -15,7 +15,57 @@ export type EraseOperation = OperationBase & {
   type: "erase";
   points: Point[];
   coordinateSpace?: "source";
+  targets?: EraseTarget[];
 };
+
+type EraseTarget = {
+  id: string;
+  dx: number;
+  dy: number;
+  matrix: number[];
+  bounds: CropBox;
+};
+
+// Bind in the rendered SVG so nested transforms, zoom and crop all use the
+// browser's actual coordinate system. A mask is never shared across objects.
+export function bindEraseOperation(state: SvgEditorState, operation: EraseOperation, canvas: Element): EraseOperation {
+  const svg = canvas.querySelector("svg");
+  const trace = svg?.querySelector<SVGGraphicsElement>("#full-image-vector-trace");
+  const sourceMatrix = trace?.getScreenCTM();
+  if (!trace || !sourceMatrix) throw new Error("无法定位擦除对象，请重新打开编辑器。");
+  const edits = new Map(state.traceEdits.map((edit) => [edit.id, edit]));
+  const targets: EraseTarget[] = [];
+  const brush = {
+    left: Math.min(...operation.points.map((p) => p.x)) - operation.width / 2,
+    right: Math.max(...operation.points.map((p) => p.x)) + operation.width / 2,
+    top: Math.min(...operation.points.map((p) => p.y)) - operation.width / 2,
+    bottom: Math.max(...operation.points.map((p) => p.y)) + operation.width / 2,
+  };
+  trace.querySelectorAll<SVGGraphicsElement>("[data-trace-object-id]").forEach((node) => {
+    const id = node.getAttribute("data-trace-object-id") || "";
+    if (edits.get(id)?.hidden) return;
+    const nodeMatrix = node.getScreenCTM();
+    if (!nodeMatrix) throw new Error("无法定位擦除对象，请重新打开编辑器。");
+    const toSource = sourceMatrix.inverse().multiply(nodeMatrix);
+    const box = node.getBBox();
+    const edges = [[box.x, box.y], [box.x + box.width, box.y], [box.x, box.y + box.height], [box.x + box.width, box.y + box.height]]
+      .map(([x, y]) => ({ x: toSource.a * x + toSource.c * y + toSource.e, y: toSource.b * x + toSource.d * y + toSource.f }));
+    if (Math.max(...edges.map((p) => p.x)) < brush.left || Math.min(...edges.map((p) => p.x)) > brush.right
+      || Math.max(...edges.map((p) => p.y)) < brush.top || Math.min(...edges.map((p) => p.y)) > brush.bottom) return;
+    const parent = node.parentElement as unknown as SVGGraphicsElement;
+    const parentMatrix = parent.getScreenCTM();
+    if (!parentMatrix) throw new Error("无法定位擦除对象，请重新打开编辑器。");
+    const matrix = parentMatrix.inverse().multiply(sourceMatrix);
+    const corners = [[0, 0], [state.vectorWidth, 0], [0, state.vectorHeight], [state.vectorWidth, state.vectorHeight]]
+      .map(([x, y]) => ({ x: matrix.a * x + matrix.c * y + matrix.e, y: matrix.b * x + matrix.d * y + matrix.f }));
+    const xs = corners.map((p) => p.x), ys = corners.map((p) => p.y);
+    const width = Math.max(...xs) - Math.min(...xs), height = Math.max(...ys) - Math.min(...ys);
+    targets.push({ id, dx: edits.get(id)?.dx || 0, dy: edits.get(id)?.dy || 0,
+      matrix: [matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f],
+      bounds: { x: Math.min(...xs) - width, y: Math.min(...ys) - height, width: width * 3, height: height * 3 } });
+  });
+  return { ...operation, targets };
+}
 
 export type LineOperation = OperationBase & {
   type: "line";
@@ -147,6 +197,11 @@ function editableTraceMarkup(markup: string): string {
   );
   const container = documentNode.querySelector("#trace-root");
   if (!container || documentNode.querySelector("parsererror")) return markup;
+  // Export wrappers are reconstructed from operation metadata, exactly once.
+  container.querySelectorAll("[data-editor-erase-wrapper]").forEach((wrapper) => {
+    wrapper.replaceWith(...Array.from(wrapper.childNodes));
+  });
+  container.querySelectorAll("[data-editor-erase-defs]").forEach((node) => node.remove());
   const existing = [...container.querySelectorAll<SVGElement>("[data-trace-object-id]")];
   if (!existing.length) {
     const wrapper = documentNode.createElementNS("http://www.w3.org/2000/svg", "g");
@@ -193,7 +248,7 @@ function materializedTraceMarkup(
   const container = documentNode.querySelector("#trace-root");
   if (!container || documentNode.querySelector("parsererror")) return state.traceMarkup;
   const edits = new Map(state.traceEdits.map((item) => [item.id, item]));
-  container.querySelectorAll<SVGElement>("[data-trace-object-id]").forEach((node) => {
+  container.querySelectorAll<SVGElement>("[data-trace-object-id]").forEach((node, index) => {
     const id = node.getAttribute("data-trace-object-id") || "";
     const edit = edits.get(id);
     const selectedNow = selected.has(`trace:${id}`);
@@ -208,6 +263,27 @@ function materializedTraceMarkup(
       node.setAttribute("transform", `translate(${dx} ${dy})${baseTransform ? ` ${baseTransform}` : ""}`);
     }
     if (edit?.hidden) node.setAttribute("display", "none");
+    const strokes = state.operations.flatMap((operation) => {
+      if (operation.type !== "erase") return [];
+      const target = operation.targets?.find((item) => item.id === id);
+      return target ? [{ operation, target, x: dx - target.dx, y: dy - target.dy }] : [];
+    });
+    if (strokes.length) {
+      const maskId = `editor-object-erase-${index}`;
+      const x = Math.min(...strokes.map((s) => s.target.bounds.x + s.x));
+      const y = Math.min(...strokes.map((s) => s.target.bounds.y + s.y));
+      const width = Math.max(...strokes.map((s) => s.target.bounds.x + s.x + s.target.bounds.width)) - x;
+      const height = Math.max(...strokes.map((s) => s.target.bounds.y + s.y + s.target.bounds.height)) - y;
+      const defs = documentNode.createElementNS("http://www.w3.org/2000/svg", "defs");
+      defs.setAttribute("data-editor-erase-defs", "true");
+      defs.innerHTML = `<mask id="${maskId}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="${x}" y="${y}" width="${width}" height="${height}" style="mask-type:luminance"><rect x="${x}" y="${y}" width="${width}" height="${height}" fill="white"/>${strokes.map(({ operation, target, x: tx, y: ty }) => `<polyline transform="translate(${tx} ${ty}) matrix(${target.matrix.join(" ")})" points="${operation.points.map((p) => `${p.x},${p.y}`).join(" ")}" fill="none" stroke="black" stroke-width="${operation.width}" stroke-linecap="round" stroke-linejoin="round"/>`).join("")}</mask>`;
+      const wrapper = documentNode.createElementNS("http://www.w3.org/2000/svg", "g");
+      wrapper.setAttribute("data-editor-erase-wrapper", id);
+      wrapper.setAttribute("mask", `url(#${maskId})`);
+      node.replaceWith(wrapper);
+      wrapper.appendChild(node);
+      container.prepend(defs);
+    }
   });
   return container.innerHTML;
 }
@@ -227,8 +303,16 @@ export function normalizeAuditOperations(value: unknown): EditorOperation[] {
       const points = Array.isArray(candidate.points)
         ? candidate.points.map((item) => point(item, { x: 0, y: 0 }))
         : [];
+      const targets = Array.isArray(candidate.targets) ? candidate.targets.flatMap<EraseTarget>((raw) => {
+        if (!raw || typeof raw !== "object") return [];
+        const t = raw as EraseTarget;
+        if (!t.id || !Array.isArray(t.matrix) || t.matrix.length !== 6 || !t.matrix.every(Number.isFinite)
+          || !t.bounds || ![t.bounds.x, t.bounds.y, t.bounds.width, t.bounds.height, t.dx, t.dy].every(Number.isFinite)
+          || t.bounds.width <= 0 || t.bounds.height <= 0) return [];
+        return [{ id: String(t.id), dx: t.dx, dy: t.dy, matrix: [...t.matrix], bounds: { ...t.bounds } }];
+      }) : undefined;
       return points.length > 1
-        ? [{ id, type: "erase" as const, points, color: "#ffffff", width, coordinateSpace: "source" as const }]
+        ? [{ id, type: "erase" as const, points, color: "#ffffff", width, coordinateSpace: "source" as const, ...(targets ? { targets } : {}) }]
         : [];
     }
     if (type === "line") {
@@ -432,11 +516,16 @@ export function mergeSavedSvg(
       traceEdits = [];
     }
   }
+  let savedOperations = auditOperations;
+  try {
+    const metadata = root.querySelector("#editor-operations")?.textContent;
+    if (metadata) savedOperations = JSON.parse(metadata);
+  } catch { /* Older exports use the separate audit document. */ }
   return {
     ...state,
     crop,
     traceEdits,
-    operations: normalizeAuditOperations(auditOperations),
+    operations: normalizeAuditOperations(savedOperations),
     elements,
   };
 }
@@ -625,12 +714,13 @@ export function outputPixelSize(state: SvgEditorState): { width: number; height:
 
 export function buildSvgDocument(state: SvgEditorState, options: SvgRenderOptions = {}): string {
   const interactive = Boolean(options.interactive);
+  if (!interactive && state.operations.some((op) => op.type === "erase" && !op.targets)) {
+    throw new Error("旧擦除记录尚未转换，请重新打开编辑器后保存。");
+  }
   const selected = new Set(options.selection || []);
   const crop = state.crop;
   const pixelCrop = sourcePixelCrop(state);
   const cropped = crop.x > 0 || crop.y > 0 || crop.width !== state.vectorWidth || crop.height !== state.vectorHeight;
-  const erasers = state.operations.filter((operation): operation is EraseOperation => operation.type === "erase");
-  const mask = erasers.length ? `<mask id="editor-erase-mask" x="0" y="0" width="${state.vectorWidth}" height="${state.vectorHeight}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse"><rect x="0" y="0" width="${state.vectorWidth}" height="${state.vectorHeight}" fill="#fff"/>${erasers.map((operation) => `<polyline points="${operation.points.map((item) => `${item.x},${item.y}`).join(" ")}" fill="none" stroke="#000" stroke-width="${operation.width}" stroke-linecap="round" stroke-linejoin="round"/>`).join("")}</mask>` : "";
   const operations = state.operations.filter((operation) => operation.type !== "erase").map((operation) => (
     operationMarkup(shiftedOperation(operation, selected, options.dragDelta), interactive, selected)
   )).join("");
@@ -651,7 +741,7 @@ export function buildSvgDocument(state: SvgEditorState, options: SvgRenderOption
   const traceMarkup = materializedTraceMarkup(state, selected, options.dragDelta);
   const persistedTraceEdits = state.traceEdits.filter((item) => item.hidden || item.dx || item.dy);
   const traceMetadata = `<metadata id="editor-trace-edits">${xml(JSON.stringify(persistedTraceEdits))}</metadata>`;
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${crop.width}" height="${crop.height}" viewBox="0 0 ${crop.width} ${crop.height}" data-vector-width="${state.vectorWidth}" data-vector-height="${state.vectorHeight}" data-original-width="${pixelCrop.width}" data-original-height="${pixelCrop.height}" data-source-width="${state.sourceWidth}" data-source-height="${state.sourceHeight}" data-content-crop="${cropped ? "true" : "false"}" data-crop-unit="source-px" data-crop-x="${pixelCrop.x}" data-crop-y="${pixelCrop.y}" data-crop-width="${pixelCrop.width}" data-crop-height="${pixelCrop.height}"><title>Full-image chemistry figure vector trace with React SVG edits</title>${traceMetadata}<defs>${selectionDefs}${mask}</defs><g transform="translate(${-crop.x} ${-crop.y})"><rect width="${state.vectorWidth}" height="${state.vectorHeight}" fill="#fff"/><g id="full-image-vector-trace"${erasers.length ? ' mask="url(#editor-erase-mask)"' : ""}>${traceMarkup}</g><g id="editor-inserted-elements">${elements}</g><g id="editable-arrow-overlays" data-base-mode="${state.baseMode}">${operations}</g>${transientErase}${marquee}</g></svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${crop.width}" height="${crop.height}" viewBox="0 0 ${crop.width} ${crop.height}" data-vector-width="${state.vectorWidth}" data-vector-height="${state.vectorHeight}" data-original-width="${pixelCrop.width}" data-original-height="${pixelCrop.height}" data-source-width="${state.sourceWidth}" data-source-height="${state.sourceHeight}" data-content-crop="${cropped ? "true" : "false"}" data-crop-unit="source-px" data-crop-x="${pixelCrop.x}" data-crop-y="${pixelCrop.y}" data-crop-width="${pixelCrop.width}" data-crop-height="${pixelCrop.height}"><title>Full-image chemistry figure vector trace with React SVG edits</title>${traceMetadata}<metadata id="editor-operations">${xml(JSON.stringify(state.operations.map(operationForSave)))}</metadata><defs>${selectionDefs}</defs><g transform="translate(${-crop.x} ${-crop.y})"><rect width="${state.vectorWidth}" height="${state.vectorHeight}" fill="#fff"/><g id="full-image-vector-trace">${traceMarkup}</g><g id="editor-inserted-elements">${elements}</g><g id="editable-arrow-overlays" data-base-mode="${state.baseMode}">${operations}</g>${transientErase}${marquee}</g></svg>`;
 }
 
 export function updateHandle(operation: EditorOperation, kind: string, value: Point): EditorOperation {
@@ -672,7 +762,7 @@ export function updateHandle(operation: EditorOperation, kind: string, value: Po
 
 export function operationForSave(operation: EditorOperation): Record<string, unknown> {
   if (operation.type === "erase") {
-    return { type: "erase", id: operation.id, width: operation.width, points: operation.points, coordinateSpace: "source" };
+    return { type: "erase", id: operation.id, width: operation.width, points: operation.points, coordinateSpace: "source", ...(operation.targets ? { targets: operation.targets } : {}) };
   }
   if (operation.type === "line") {
     return { type: "line", id: operation.id, color: operation.color, width: operation.width, start: operation.start, end: operation.end };

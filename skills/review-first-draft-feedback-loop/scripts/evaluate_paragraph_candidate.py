@@ -71,6 +71,7 @@ def evaluate(args: argparse.Namespace) -> dict:
             candidate_text,
             args.min_case_words if bool(request.get("word_range_applicable", True)) else 1,
             args.max_case_words,
+            source_corrections=request.get('source_corrections'),
             allowed_unsupported_claims=[
                 str(value)
                 for value in request.get("allowed_unsupported_claims") or []
@@ -119,30 +120,27 @@ def evaluate(args: argparse.Namespace) -> dict:
             structured.get(paragraph_id, {}),
             rows,
             {},
+            loop.claim_evidence_contract(project),
         )
     }
-    raw = loop.call_json_model(
-        loop.evaluation_prompt(
-            rubric,
-            [paragraph],
-            evidence,
-            local_preflight,
-            float(args.goal),
-            float(args.paragraph_goal),
-            draft_structure=[
+    batches = loop.request_paragraph_score_batches(
+        project, rubric=rubric, paragraphs=[paragraph], evidence=evidence,
+        preflight=local_preflight, goal=float(args.goal), paragraph_goal=float(args.paragraph_goal),
+        prior_quality_context=loop.read_json(first / 'prior_quality_context.json', {}) or {},
+        draft_structure=[
                 {
                     "paragraph_id": str(item.get("paragraph_id") or ""),
                     "heading": loop.clean_text(item.get("heading")),
                 }
                 for item in paragraphs
             ],
-        ),
-        label=(
+        label_prefix=(
             f"Current paragraph evaluation {paragraph_id}"
             if current_paragraph_mode
             else f"Accepted paragraph evaluation {paragraph_id}"
         ),
     )
+    raw = loop.merge_batched_evaluations(rubric, batches)
     evaluation = loop.normalize_evaluation(
         raw,
         rubric,
@@ -176,8 +174,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--review-root", default=".")
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--paragraph-id", required=True)
-    parser.add_argument("--goal", type=float, default=90.0)
-    parser.add_argument("--paragraph-goal", type=float, default=85.0)
+    parser.add_argument("--goal", type=float, default=loop.DRAFT_PASS_THRESHOLD)
+    parser.add_argument("--paragraph-goal", type=float, default=loop.PARAGRAPH_PASS_THRESHOLD)
     parser.add_argument(
         "--min-case-words", type=int, default=loop.CASE_PARAGRAPH_MIN_WORDS
     )

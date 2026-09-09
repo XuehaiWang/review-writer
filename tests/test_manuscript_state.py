@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from review_writer_core.latex_renderer import TEMPLATE_VERSION, latex_escape, render_tex
+from review_writer_core.latex_renderer import TEMPLATE_VERSION, _table, latex_escape, render_tex
 from review_writer_core.manuscript_state import (
     build_manuscript_state,
     choose_figure_layout,
@@ -280,6 +280,47 @@ The reported systems support a bounded comparison [1, 2].
         self.assertIn(r"\caption{Shared comparison dimensions.}", rendered)
         self.assertNotIn("Scheme 7", rendered)
         self.assertNotIn("Table 4", rendered)
+
+    def test_prose_dense_table_uses_paginated_longtable(self) -> None:
+        explanation = (
+            "This evidence record preserves the reported substrates, conditions, "
+            "outcome, interpretation, and limitations without removing scientific detail. "
+        ) * 3
+        rendered = _table(
+            {
+                "header": [
+                    "System",
+                    "Substrates",
+                    "Conditions",
+                    "Results",
+                    "Evidence",
+                    "Limitations",
+                ],
+                "rows": [
+                    [f"System {index}", "—", explanation, "—", "—", "—"]
+                    for index in range(16)
+                ],
+                "caption": "Table 1. Dense evidence comparison.",
+            }
+        )
+
+        self.assertIn(r"\begin{longtable}", rendered)
+        self.assertNotIn(r"\begin{table*}", rendered)
+        self.assertIn("System 15", rendered)
+
+    def test_oversized_longtable_row_is_split_without_losing_text(self) -> None:
+        tokens = [f"evidence{index:04d}" for index in range(180)]
+        rendered = _table(
+            {
+                "header": ["System", "Evidence", "Boundary"],
+                "rows": [["System A", " ".join(tokens), "Verified source"]] * 21,
+                "caption": "Table 1. Oversized evidence rows.",
+            }
+        )
+
+        self.assertIn(r"\begin{longtable}", rendered)
+        self.assertEqual(21, rendered.count("evidence0000"))
+        self.assertEqual(21, rendered.count("evidence0179"))
 
     def test_figure_layout_uses_geometry_then_semantic_role(self) -> None:
         self.assertEqual(

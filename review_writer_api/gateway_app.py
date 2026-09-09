@@ -23,6 +23,7 @@ from review_writer_api.schemas import (
     ImageGatewayResponse,
     ModelGatewayRequest,
     ModelGatewayResponse,
+    ModelGatewayResultResponse,
 )
 from review_writer_api.server_providers import ServerProviderSettingsService
 from review_writer_api.security import Principal, Role
@@ -157,7 +158,7 @@ def create_gateway_app(settings: ApiSettings | None = None) -> FastAPI:
                 lifetime_seconds=8 * 60 * 60,
             )
         except ModelGatewayError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+            raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "gateway_detail", str(exc))) from exc
         return LeaseTokenResponse(task_token=token)
 
     @app.post("/api/internal/v1/provider-test", include_in_schema=False)
@@ -198,8 +199,20 @@ def create_gateway_app(settings: ApiSettings | None = None) -> FastAPI:
                 response_format=payload.response_format,
             )
         except ModelGatewayError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+            raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "gateway_detail", str(exc))) from exc
         return ModelGatewayResponse.model_validate(result)
+
+    @app.get(
+        "/api/internal/v1/model-responses/{request_key}",
+        response_model=ModelGatewayResultResponse,
+        include_in_schema=False,
+    )
+    def model_result(request_key: str, request: Request) -> ModelGatewayResultResponse:
+        try:
+            result = gateway.request_result(_bearer_token(request), request_key=request_key)
+        except ModelGatewayError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "gateway_detail", str(exc))) from exc
+        return ModelGatewayResultResponse.model_validate(result)
 
     @app.get(
         "/api/internal/v1/embedding-profile",
@@ -230,7 +243,7 @@ def create_gateway_app(settings: ApiSettings | None = None) -> FastAPI:
                 inputs=payload.inputs,
             )
         except ModelGatewayError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+            raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "gateway_detail", str(exc))) from exc
         return EmbeddingGatewayResponse.model_validate(result)
 
     @app.post(
@@ -255,7 +268,7 @@ def create_gateway_app(settings: ApiSettings | None = None) -> FastAPI:
                 size=payload.size,
             )
         except ModelGatewayError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+            raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "gateway_detail", str(exc))) from exc
         return ImageGatewayResponse.model_validate(result)
 
     app.state.model_gateway = gateway

@@ -23,6 +23,7 @@ from review_writer_core.evidence_integrity import (
     technical_entity_anchors,
     unsupported_realization_anchors,
 )
+from review_writer_core.draft_bibliography import CITATION_MAP_RE
 
 
 class GeneralAccuracyContractTests(unittest.TestCase):
@@ -175,8 +176,9 @@ Body two.
 
         self.assertEqual(
             "Later source [1] is discussed before the earlier-numbered source [2].",
-            rendered,
+            CITATION_MAP_RE.sub("", rendered).strip(),
         )
+        self.assertIn('<!-- citation_map: {"1":"P008","2":"P003"} -->', rendered)
         self.assertEqual(
             [(1, "P008"), (2, "P003")],
             [(row["callout"], row["paper_id"]) for row in ledger["entries"]],

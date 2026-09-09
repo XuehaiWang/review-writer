@@ -26,6 +26,13 @@ export type VisualOutlineDraft = {
   sections: OutlineSectionDraft[];
 };
 
+export type OutlinePaperRecommendation = {
+  section_index: number;
+  paper_ids: string[];
+};
+
+const EMPTY_TITLE_SENTINEL = "<!-- outline-untitled -->";
+
 function unique(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
@@ -37,7 +44,8 @@ export function parseOutlineMarkdown(value: string): VisualOutlineDraft {
   for (const rawLine of String(value || "").replace(/\r\n?/g, "\n").split("\n")) {
     const heading = rawLine.trim().match(/^##\s+(?:\d+[.)]\s*)?(.+?)\s*$/);
     if (heading) {
-      current = { title: heading[1].trim(), purpose: "", paperIds: [], contextPaperIds: [], notes: "" };
+      const parsedTitle = heading[1].trim();
+      current = { title: parsedTitle === EMPTY_TITLE_SENTINEL ? "" : parsedTitle, purpose: "", paperIds: [], contextPaperIds: [], notes: "" };
       sections.push(current);
       continue;
     }
@@ -73,7 +81,7 @@ export function parseOutlineMarkdown(value: string): VisualOutlineDraft {
 export function serializeOutlineMarkdown(draft: VisualOutlineDraft): string {
   const preamble = draft.preamble.trim() || "# Selected Outline\n\nPrimary structure: user-edited visual outline.";
   const blocks = draft.sections.map((section, index) => {
-    const title = section.title.trim() || "Untitled section";
+    const title = section.title.trim() || EMPTY_TITLE_SENTINEL;
     const purpose = section.purpose.trim() || "Synthesize and compare the assigned Matrix evidence.";
     const lines = [
       `## ${index + 1}. ${title}`,
@@ -90,28 +98,27 @@ export function serializeOutlineMarkdown(draft: VisualOutlineDraft): string {
 
 export function validateVisualOutline(draft: VisualOutlineDraft) {
   const missingTitles = draft.sections.flatMap((section, index) => section.title.trim() ? [] : [index + 1]);
-  const missingPapers = draft.sections.flatMap((section, index) => section.paperIds.length || ["introduction", "conclusion", "references"].includes(section.sectionRole || "") ? [] : [index + 1]);
   return {
     sectionCount: draft.sections.length,
     missingTitles,
-    missingPapers,
-    ready: draft.sections.length > 0 && !missingTitles.length && !missingPapers.length,
+    ready: draft.sections.length > 0 && !missingTitles.length,
   };
+}
+
+export function applyOutlinePaperRecommendations(value: string, recommendations: OutlinePaperRecommendation[]): string {
+  const draft = parseOutlineMarkdown(value);
+  const papersBySection = new Map(recommendations.map((item) => [item.section_index, unique(item.paper_ids)]));
+  return serializeOutlineMarkdown({
+    ...draft,
+    sections: draft.sections.map((section, index) => papersBySection.has(index)
+      ? { ...section, paperIds: papersBySection.get(index) || [] }
+      : section),
+  });
 }
 
 function paperText(paper: OutlinePaper): string {
   const title = typeof paper.title === "string" ? paper.title : JSON.stringify(paper.title || "");
   return [paper.paper_id, title, ...(paper.keywords || []), paper.abstract || ""].join(" ").toLowerCase();
-}
-
-function recommendPapers(section: OutlineSectionDraft, papers: OutlinePaper[]): string[] {
-  const common = new Set(["the", "and", "for", "with", "from", "review", "section", "introduction", "conclusion", "scope", "comparison"]);
-  const terms = unique(`${section.title} ${section.purpose}`.toLowerCase().match(/[a-z0-9\u3400-\u9fff-]{2,}/g) || []).filter((term) => !common.has(term));
-  const ranked = papers
-    .map((paper, index) => ({ paper, index, score: terms.reduce((score, term) => score + (paperText(paper).includes(term) ? 1 : 0), 0) }))
-    .sort((left, right) => right.score - left.score || left.index - right.index);
-  const matched = ranked.filter((item) => item.score > 0);
-  return (matched.length ? matched : ranked).slice(0, 6).map((item) => item.paper.paper_id);
 }
 
 export function OutlineBuilder({ value, papers, onChange }: { value: string; papers: OutlinePaper[]; onChange: (value: string) => void }) {
@@ -135,9 +142,8 @@ export function OutlineBuilder({ value, papers, onChange }: { value: string; pap
   }
 
   function addStarterSections() {
-    const ids = papers.map((paper) => paper.paper_id);
-    const introduction: OutlineSectionDraft = { title: text("引言与范围", "Introduction and scope"), purpose: text("说明综述范围、术语和组织问题。", "Define the review scope, terminology, and organizing question."), paperIds: ids.slice(0, Math.min(6, ids.length)), contextPaperIds: [], notes: "", sectionRole: "introduction" };
-    const conclusion: OutlineSectionDraft = { title: text("结论与展望", "Conclusion and outlook"), purpose: text("比较主要证据、局限与未来方向。", "Compare the main evidence, limitations, and future directions."), paperIds: ids.slice(Math.max(0, ids.length - 6)), contextPaperIds: [], notes: "", sectionRole: "conclusion" };
+    const introduction: OutlineSectionDraft = { title: text("引言与范围", "Introduction and scope"), purpose: text("说明综述范围、术语和组织问题。", "Define the review scope, terminology, and organizing question."), paperIds: [], contextPaperIds: [], notes: "", sectionRole: "introduction" };
+    const conclusion: OutlineSectionDraft = { title: text("结论与展望", "Conclusion and outlook"), purpose: text("比较主要证据、局限与未来方向。", "Compare the main evidence, limitations, and future directions."), paperIds: [], contextPaperIds: [], notes: "", sectionRole: "conclusion" };
     const hasIntroduction = draft.sections.some((section) => section.sectionRole === "introduction" || /^(?:introduction|引言)/i.test(section.title.trim()));
     const hasConclusion = draft.sections.some((section) => section.sectionRole === "conclusion" || /^(?:conclusion|结论)/i.test(section.title.trim()));
     commit({
@@ -163,7 +169,7 @@ export function OutlineBuilder({ value, papers, onChange }: { value: string; pap
       <div className="beginner-outline-editor">
         <div className="outline-mode-switch"><button type="button" onClick={() => setMode("visual")}>{text("新手填写", "Beginner editor")}</button><button type="button" className="active" onClick={() => setMode("markdown")}>{text("高级 Markdown", "Advanced Markdown")}</button></div>
         <textarea className="outline-editor" value={value} onChange={(event) => onChange(event.target.value)} spellCheck={false} />
-        <p className="muted">{text("高级模式需为每个 ## 章节保留 Assigned papers: 行。", "Advanced mode requires an Assigned papers: line under every ## section.")}</p>
+        <p className="muted">{text("每个 ## 章节需填写标题；暂无合适论文时可省略 Assigned papers: 行。", "Give every ## section a title; omit Assigned papers: when no suitable papers are available.")}</p>
       </div>
     );
   }
@@ -171,12 +177,12 @@ export function OutlineBuilder({ value, papers, onChange }: { value: string; pap
   return (
     <div className="beginner-outline-editor">
       <div className="outline-mode-switch"><button type="button" className="active" onClick={() => setMode("visual")}>{text("新手填写", "Beginner editor")}</button><button type="button" onClick={() => setMode("markdown")}>{text("高级 Markdown", "Advanced Markdown")}</button></div>
-      <div className="outline-builder-toolbar"><div><strong>{text("按章节填写，无需了解 Markdown", "Fill in sections without learning Markdown")}</strong><p>{text("填写章节标题和写作目标，再勾选本节要使用的论文。系统会自动生成后续需要的格式。", "Enter each section title and purpose, then select its papers. The required Markdown is generated automatically.")}</p></div><div><button className="button button-secondary" type="button" onClick={addStarterSections}>{text("加入引言和结论", "Add introduction and conclusion")}</button><button className="button button-primary" type="button" onClick={() => addSection()}>{text("添加章节", "Add section")}</button></div></div>
-      <div className={validation.ready ? "outline-builder-validation ready" : "outline-builder-validation"}>{validation.sectionCount ? text(`${validation.sectionCount} 个章节 · ${validation.missingTitles.length} 个缺少标题 · ${validation.missingPapers.length} 个未选择论文`, `${validation.sectionCount} sections · ${validation.missingTitles.length} missing titles · ${validation.missingPapers.length} missing paper selections`) : text("还没有章节，请添加章节或使用引言/结论模板。", "No sections yet. Add a section or use the introduction/conclusion starter.")}</div>
+      <div className="outline-builder-toolbar"><div><strong>{text("按章节填写，无需了解 Markdown", "Fill in sections without learning Markdown")}</strong><p>{text("填写标题和写作目标后可统一推荐论文；允许暂时不选论文，推荐结果可手动调整。", "Fill in titles and goals, then recommend papers in one pass; paper selections are optional and editable.")}</p></div><div><button className="button button-secondary" type="button" onClick={addStarterSections}>{text("加入引言和结论", "Add introduction and conclusion")}</button><button className="button button-primary" type="button" onClick={() => addSection()}>{text("添加章节", "Add section")}</button></div></div>
+      <div className={validation.ready ? "outline-builder-validation ready" : "outline-builder-validation"}>{validation.sectionCount ? text(`${validation.sectionCount} 个章节 · ${validation.missingTitles.length} 个缺少标题`, `${validation.sectionCount} sections · ${validation.missingTitles.length} missing titles`) : text("还没有章节，请添加章节或使用引言/结论模板。", "No sections yet. Add a section or use the introduction/conclusion starter.")}</div>
       {draft.sections.length ? <div className="outline-builder-list">{draft.sections.map((section, index) => {
         const filter = (paperFilters[index] || "").toLowerCase();
         const visible = papers.filter((paper) => `${paperText(paper)} ${paperLabels.get(paper.paper_id) || ""}`.includes(filter));
-        return <article className="outline-builder-card" key={`${index}-${section.title}`}><div className="outline-builder-card-head"><strong>{text(`第 ${index + 1} 节`, `Section ${index + 1}`)}</strong><div><button type="button" className="button button-quiet" onClick={() => updateSection(index, { paperIds: recommendPapers(section, papers) })}>{text("推荐论文", "Recommend papers")}</button><button type="button" className="button button-quiet" disabled={index === 0} onClick={() => move(index, -1)}>↑</button><button type="button" className="button button-quiet" disabled={index === draft.sections.length - 1} onClick={() => move(index, 1)}>↓</button><button type="button" className="button button-quiet danger" onClick={() => commit({ ...draft, sections: draft.sections.filter((_, sectionIndex) => sectionIndex !== index) })}>{text("删除", "Delete")}</button></div></div>
+        return <article className="outline-builder-card" key={`outline-section-${index}`}><div className="outline-builder-card-head"><strong>{text(`第 ${index + 1} 节`, `Section ${index + 1}`)}</strong><div><button type="button" className="button button-quiet" disabled={index === 0} onClick={() => move(index, -1)}>↑</button><button type="button" className="button button-quiet" disabled={index === draft.sections.length - 1} onClick={() => move(index, 1)}>↓</button><button type="button" className="button button-quiet danger" onClick={() => commit({ ...draft, sections: draft.sections.filter((_, sectionIndex) => sectionIndex !== index) })}>{text("删除", "Delete")}</button></div></div>
           <label className="outline-builder-field"><span>{text("章节标题", "Section title")}</span><input value={section.title} onChange={(event) => updateSection(index, { title: event.target.value })} placeholder={text("例如：芳香族底物的反应范围", "e.g. Scope of aromatic substrates")} /></label>
           <label className="outline-builder-field"><span>{text("本节要回答什么问题", "What should this section answer?")}</span><textarea value={section.purpose} onChange={(event) => updateSection(index, { purpose: event.target.value })} placeholder={text("说明本节比较哪些工作、解决什么问题。", "Describe the papers and question this section should compare.")} /></label>
           {section.contextPaperIds?.length ? <p className="outline-context-note">{text(`系统已将 ${section.contextPaperIds.length} 篇综述或观点文献作为背景证据，不计入正文主分类。`, `${section.contextPaperIds.length} review or perspective paper(s) are retained as contextual evidence rather than primary body evidence.`)}</p> : null}

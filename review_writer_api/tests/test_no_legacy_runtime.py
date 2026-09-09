@@ -76,6 +76,9 @@ class NoLegacyRuntimeTests(unittest.TestCase):
         self.assertIn("postgres:17", workflow)
         self.assertIn("REVIEW_WRITER_RUN_POSTGRES_TESTS: \"1\"", workflow)
         self.assertNotIn("sqlite+pysqlite", workflow)
+        self.assertIn('"pytest>=8,<10"', workflow)
+        self.assertIn("--import-mode=importlib tests review_writer_api/tests", workflow)
+        self.assertIn("tee native-api-tests.log || status=$?", workflow)
 
     def test_react_frontend_is_mounted_without_legacy_static_fallbacks(self) -> None:
         source = (ROOT / "review_writer_api" / "app.py").read_text(encoding="utf-8")

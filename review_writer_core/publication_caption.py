@@ -17,7 +17,7 @@ from typing import Any
 from review_writer_core.text_safety import make_xml_compatible
 
 
-CAPTION_NORMALIZATION_VERSION = "publication-caption/3"
+CAPTION_NORMALIZATION_VERSION = "publication-caption/4"
 
 # These roles describe what a figure contributes to the review.  They are
 # intentionally discipline-neutral; chemistry-specific labels remain accepted
@@ -50,7 +50,7 @@ _ROLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("core_transformation", re.compile(r"\b(reaction|transformation|synthesis|synthetic route|reaction conditions|scheme)\b", re.I)),
 )
 
-_ROLE_FALLBACK_CAPTIONS = {
+_LEGACY_GENERIC_CAPTIONS = {
     "workflow": "Study workflow and major analysis steps reported in the source study.",
     "core_transformation": "Core transformation and representative reaction conditions reported in the source study.",
     "mechanism_model": "Proposed mechanistic pathway, key intermediates, or transition states reported in the source study.",
@@ -334,16 +334,17 @@ def normalize_publication_caption(
     role = infer_figure_role(
         source, source_label, context_title, preferred=representative_role
     )
-    if not source:
-        fallback = _ROLE_FALLBACK_CAPTIONS[role]
+    if (not source or source.rstrip('.').casefold() in
+            {value.rstrip('.').casefold() for value in _LEGACY_GENERIC_CAPTIONS.values()}
+            or re.fullmatch(r"(?:figure|fig\.?|scheme|table)\s*(?:candidate\s*)?\d+[a-z]?[.:]?", source, re.I)):
         return PublicationCaption(
-            "", fallback, fallback, "cleaned", (),
+            source, "", "", "cleaned", (),
             representative_role=role,
             alt_text=_ROLE_ALT_TEXT[role],
-            quality_status="generated_fallback",
+            quality_status="pending",
             quality_warnings=("source_caption_missing",),
-            word_count=len(fallback.split()),
-            sentence_count=1,
+            word_count=0,
+            sentence_count=0,
         )
     try:
         safe, replaced = make_xml_compatible(source)
@@ -361,13 +362,24 @@ def normalize_publication_caption(
             _caption_quality(visible, warnings)
         )
         publication_text = visible
-        # Never cut a scientific caption in the middle of a sentence.  When
-        # the source is abnormally long/noisy, use an explicitly generic,
-        # role-aware publication caption and retain the immutable source text
-        # for evidence inspection.
-        if quality_status == "needs_review":
-            publication_text = _ROLE_FALLBACK_CAPTIONS[role]
-            quality_status = "generated_fallback"
+        # Keep a complete, specific source sentence rather than inventing a
+        # role-based caption. Longer material can be compressed by the selected
+        # figure helper; unresolved captions stay empty and visible in the UI.
+        multi_panel = len(re.findall(r"(?:\([a-fA-F]\)|\b[a-fA-F]\))", visible)) >= 2
+        if multi_panel and len(visible.split()) <= 60 and quality_status != "needs_review":
+            pass
+        elif len(visible.split()) > 35 or sentence_count > 1:
+            first = re.split(r"(?<=[.!?。！？])\s+(?=[A-Z(])", visible, maxsplit=1)[0].rstrip('.')
+            first_quality = _caption_quality(first, warnings)
+            if len(first.split()) <= 45 and first_quality[0] != "needs_review":
+                publication_text = first
+                quality_status, quality_warnings, word_count, sentence_count = first_quality
+            else:
+                publication_text = ""
+                quality_status = "pending"
+        elif quality_status == "needs_review":
+            publication_text = ""
+            quality_status = "pending"
         return PublicationCaption(
             source_text=source,
             publication_text=publication_text,

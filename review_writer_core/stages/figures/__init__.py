@@ -1,0 +1,1 @@
+"""Figure-stage core logic."""

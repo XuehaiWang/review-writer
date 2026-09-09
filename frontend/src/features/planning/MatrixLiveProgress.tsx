@@ -13,6 +13,8 @@ type LivePaper = {
   paper_id: string;
   status: string;
   fact_count: number;
+  pending_fact_count?: number;
+  verified_fact_count?: number;
   classification_count: number;
   automatic_resolution_status: string;
   facts_preview: LiveFact[];
@@ -23,6 +25,7 @@ export type MatrixEnrichmentLive = {
   current: number;
   total: number;
   current_paper_id: string;
+  active_paper_ids: string[];
   target_axis_ids: string[];
   items: LivePaper[];
 };
@@ -58,6 +61,7 @@ export function readMatrixEnrichmentLive(job: Job): MatrixEnrichmentLive | null 
       current: number(direct.current),
       total: number(direct.total),
       current_paper_id: String(direct.current_paper_id || ""),
+      active_paper_ids: strings(direct.active_paper_ids),
       target_axis_ids: strings(direct.target_axis_ids),
       items: items.flatMap((raw) => {
         const item = record(raw);
@@ -67,6 +71,8 @@ export function readMatrixEnrichmentLive(job: Job): MatrixEnrichmentLive | null 
           paper_id: String(item.paper_id),
           status: String(item.status || "complete"),
           fact_count: number(item.fact_count),
+          pending_fact_count: number(item.pending_fact_count),
+          verified_fact_count: number(item.verified_fact_count),
           classification_count: number(item.classification_count),
           automatic_resolution_status: String(item.automatic_resolution_status || ""),
           facts_preview: previews.flatMap((rawFact) => {
@@ -89,7 +95,7 @@ export function readMatrixEnrichmentLive(job: Job): MatrixEnrichmentLive | null 
   if (!progress && !checkpoint) return null;
   const entries = record(checkpoint?.entries) || {};
   const completedIds = strings(progress?.completed_papers);
-  const ids = completedIds.length ? completedIds : Object.keys(entries);
+  const ids = Array.isArray(progress?.completed_papers) ? completedIds : Object.keys(entries);
   const items = ids.flatMap((paperId): LivePaper[] => {
     const entry = record(entries[paperId]);
     const result = record(entry?.result);
@@ -100,6 +106,8 @@ export function readMatrixEnrichmentLive(job: Job): MatrixEnrichmentLive | null 
       paper_id: paperId,
       status: String(result.status || "complete"),
       fact_count: facts.length,
+      pending_fact_count: number(result.pending_fact_count),
+      verified_fact_count: number(result.verified_fact_count),
       classification_count: Object.values(tags).reduce<number>((sum, value) => sum + (Array.isArray(value) ? value.length : 0), 0),
       automatic_resolution_status: String(record(result.automatic_resolution)?.status || ""),
       facts_preview: facts.slice(0, 3).flatMap((rawFact): LiveFact[] => {
@@ -118,6 +126,7 @@ export function readMatrixEnrichmentLive(job: Job): MatrixEnrichmentLive | null 
     current: number(progress?.current ?? job.progress_current),
     total: number(progress?.total ?? job.progress_total),
     current_paper_id: String(progress?.current_paper_id || ""),
+    active_paper_ids: strings(progress?.active_paper_ids),
     target_axis_ids: strings(progress?.target_axis_ids),
     items,
   };
@@ -135,12 +144,20 @@ export function MatrixLiveProgress({ job, papers }: { job: Job; papers: MatrixPa
   const paperLabels = buildPaperDisplayLabels(papers);
   const papersById = new Map(papers.map((paper) => [paper.paper_id, paper]));
   const currentPaper = papersById.get(live?.current_paper_id || "");
+  const activeIds = live?.active_paper_ids || [];
   const total = live?.total || job.progress_total || papers.length;
   const current = live?.current ?? job.progress_current;
   const percent = total ? Math.min(100, Math.round((current / total) * 100)) : 0;
-  const phaseLabel = ({
+  const phaseLabel = activeIds.length > 1
+    ? text(`正在并行提取与核验 ${activeIds.length} 篇论文`, `Extracting and verifying ${activeIds.length} papers in parallel`)
+    : ({
     extracting: text("提取与核对原文事实", "Extracting and checking source facts"),
     targeted_recheck: text("正在自动补证分类边界", "Automatically rechecking classification evidence"),
+    routing_adjudication: text("正在核对论文分类", "Checking paper classification"),
+    verifying: text("正在核验事实与原文的对应关系", "Verifying facts against their sources"),
+    verified: text("事实核验已完成", "Fact verification completed"),
+    retrieving: text("正在查找缺失事实的原文依据", "Retrieving source evidence for fact gaps"),
+    supplementing: text("正在补充缺失事实", "Extracting missing facts"),
     restoring: text("正在恢复已有检查点", "Restoring an existing checkpoint"),
     finalizing: text("正在汇总并写入 Matrix", "Finalizing and publishing to the Matrix"),
   } as Record<string, string>)[live?.phase || "extracting"] || text("正在处理", "Processing");
@@ -151,7 +168,9 @@ export function MatrixLiveProgress({ job, papers }: { job: Job; papers: MatrixPa
       <header>
         <div>
           <strong>{phaseLabel}</strong>
-          <span>{currentPaper
+          <span>{activeIds.length > 1
+            ? activeIds.map((paperId) => paperLabels.get(paperId) || paperId).join(" · ")
+            : currentPaper
             ? `${paperLabels.get(currentPaper.paper_id) || currentPaper.paper_id} · ${titleText(currentPaper.title)}`
             : text("等待 Worker 开始处理第一篇论文", "Waiting for the worker to start the first paper")}</span>
         </div>
@@ -165,9 +184,10 @@ export function MatrixLiveProgress({ job, papers }: { job: Job; papers: MatrixPa
           return <article key={item.paper_id}>
             <div className="matrix-live-result-head">
               <strong>{paperLabels.get(item.paper_id) || item.paper_id}{paper ? ` · ${titleText(paper.title)}` : ""}</strong>
-              <span className={item.status === "failed" ? "failed" : "complete"}>{item.status === "failed" ? text("未提取成功", "Not extracted") : text("已完成", "Completed")}</span>
+              <span className={item.status === "failed" ? "failed" : "complete"}>{item.pending_fact_count ? text("待核验", "Verification pending") : item.status === "failed" ? text("处理失败", "Processing failed") : text("处理完成", "Processing completed")}</span>
             </div>
             <small>{text(`已提取 ${item.fact_count} 条事实 · ${item.classification_count} 个正式分类`, `${item.fact_count} facts · ${item.classification_count} formal classifications`)}</small>
+            {item.pending_fact_count ? <small>{text(`还有 ${item.pending_fact_count} 条事实待核验，继续处理会复用已完成的事实。`, `${item.pending_fact_count} facts await verification; continuing reuses completed work.`)}</small> : null}
             {item.facts_preview.length ? <ul>{item.facts_preview.map((fact, index) => <li key={fact.fact_id || `${item.paper_id}-${index}`}><b>{fact.field_id.replaceAll("_", " ")}</b><span>{fact.value}</span></li>)}</ul> : null}
           </article>;
         })}

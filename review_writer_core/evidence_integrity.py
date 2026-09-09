@@ -5,7 +5,22 @@ from __future__ import annotations
 import re
 import unicodedata
 import hashlib
+import html
 from typing import Any, Iterable
+
+
+def normalize_retrieval_mode(value: Any) -> str:
+    """Read the base contract, including the one persisted legacy repair mode.
+
+    Provenance is not a retrieval mode. Unknown suffixes are deliberately not
+    treated as full-text evidence or as permission for a legacy fallback.
+    """
+    mode = str(value or "insufficient_evidence").strip()
+    if mode == "lexical+draft_targeted_source_recheck":
+        return "lexical"
+    return mode if mode in {
+        "lexical", "abstract_only", "fixed_prefix_fallback", "insufficient_evidence",
+    } else "unsupported_retrieval_mode"
 
 
 QUANTITATIVE_ANCHOR_RE = re.compile(
@@ -36,7 +51,7 @@ FORMULA_ANCHOR_RE = re.compile(
 )
 
 LATEX_TEXT_WRAPPER_RE = re.compile(
-    r"\\(?:mathrm|mathsf|mathbf|text|operatorname|ce)\s*\{([^{}]*)\}"
+    r"\\(?:mathrm|mathsf|mathbf|text|operatorname|ce)\s*\{((?:[^{}]|\{[^{}]*\})*)\}"
 )
 TECHNICAL_ROLE_SUFFIX_RE = re.compile(
     r"-?(?:mediated|cataly[sz]ed|promoted|assisted|enabled|derived|based)$",
@@ -55,6 +70,36 @@ _SOURCE_DASH_TRANSLATION = str.maketrans(
 )
 
 
+def _unwrap_scientific_text(text: str) -> str:
+    for _ in range(6):
+        collapsed = LATEX_TEXT_WRAPPER_RE.sub(r"\1", text)
+        if collapsed == text:
+            break
+        text = collapsed
+    return text
+
+
+def _normalize_math_number_spacing(value: str) -> str:
+    """Join split digits only in a delimited, single scalar with an explicit unit.
+
+    Plain-text tables, lists, ranges and damaged identifiers are not repaired.
+    This is a comparison view; source bytes and lineage remain unchanged.
+    """
+    def math(match):
+        text = match.group(0)
+        unwrapped = _unwrap_scientific_text(text)
+        scalar = re.fullmatch(
+            r"(?P<open>\$\$?|\\\(|\\\[)\s*(?P<number>[+-]?\d(?:[ \t]+\d){1,})(?P<unit>[ \t]*(?:"
+            r"(?:\^\s*\{?\s*\\circ\s*\}?|°|\\degree)\s*[CK]\b|"
+            r"\\?%|K\b|(?:mM|mmol|mol|mg|kg|g|mL|L|nm|cm|h|min|s)\b)\s*[,.;:]?\s*)(?P<close>\$\$?|\\\)|\\\])",
+            unwrapped,
+        )
+        if scalar is None:
+            return text
+        return scalar["open"] + re.sub(r"[ \t]+", "", scalar["number"]) + scalar["unit"] + scalar["close"]
+    return re.sub(r"\$\$?[\s\S]*?\$\$?|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]", math, value)
+
+
 def normalized_source_excerpt_text(value: Any) -> str:
     """Canonicalize presentation-only MinerU/model differences.
 
@@ -63,7 +108,12 @@ def normalized_source_excerpt_text(value: Any) -> str:
     reorder words or remove scientific tokens.
     """
 
-    text = unicodedata.normalize("NFKC", str(value or "")).translate(
+    # Inline presentation tags carry no extra scientific content. Preserve
+    # their text (including subscripts/superscripts); never repair missing
+    # digits, OCR substitutions or table structure by guessing.
+    text = _normalize_math_number_spacing(html.unescape(str(value or "")))
+    text = re.sub(r"</?(?:sup|sub|b|strong|i|em)\b[^>]*>", "", text, flags=re.I)
+    text = unicodedata.normalize("NFKC", text).translate(
         _SOURCE_DASH_TRANSLATION
     )
     text = re.sub(r"\s+", " ", text).strip()
@@ -89,14 +139,12 @@ def _plain_scientific_markup(value: Any) -> str:
     scientific value rather than the extraction markup.
     """
 
-    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = _normalize_math_number_spacing(html.unescape(str(value or "")))
+    text = re.sub(r"</?(?:sup|sub|b|strong|i|em)\b[^>]*>", "", text, flags=re.I)
+    text = unicodedata.normalize("NFKC", text)
     text = text.replace("\\%", "%").replace("\\degree", "°")
     text = re.sub(r"\^\s*\{?\s*\\circ\s*\}?", "°", text)
-    for _ in range(6):
-        collapsed = LATEX_TEXT_WRAPPER_RE.sub(r"\1", text)
-        if collapsed == text:
-            break
-        text = collapsed
+    text = _unwrap_scientific_text(text)
     text = re.sub(r"[_^]\s*\{([^{}]*)\}", r"\1", text)
     text = re.sub(r"[_^]\s*([A-Za-z0-9+\-]+)", r"\1", text)
     text = re.sub(r"\\(?:,|;|!|:|\s)", "", text)

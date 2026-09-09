@@ -3,6 +3,18 @@ import { describe, expect, it } from "vitest";
 import { hardGateDetails } from "./hardGateDetails";
 
 describe("hardGateDetails", () => {
+  it("does not turn advisory findings back into a hard gate through a fallback list", () => {
+    const advisory = { paragraph_id: "S01-p1", rule: "P01", severity: "major", hard_gate: false };
+    const quality = {
+      hard_gate_failures: ["paragraph_readability_or_source_failures"],
+      preflight: { paragraph_findings: [advisory] },
+      paragraph_failures: [{ paragraph_id: "S01-p1", severity: "major" }],
+    };
+    expect(hardGateDetails(quality)[0].findings).toEqual([]);
+    quality.preflight.paragraph_findings.push({ paragraph_id: "S02-p1", rule: "C01", severity: "major", hard_gate: true });
+    expect(hardGateDetails(quality)[0].findings.map((finding) => finding.paragraph_id)).toEqual(["S02-p1"]);
+  });
+
   it("lists the exact blocking preflight paragraphs for the compound paragraph gate", () => {
     expect(hardGateDetails({
       hard_gate_failures: ["paragraph_readability_or_source_failures"],

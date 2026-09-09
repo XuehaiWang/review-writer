@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from pathlib import Path
 from typing import Any
+
+from review_writer_core.figure_caption import recover_caption, caption_fields
 
 
 FIGURE_TYPES = {"image", "chart", "table"}
@@ -142,6 +145,9 @@ def build_inventory(review_root: Path, project_id: str) -> dict[str, Any]:
         source_paths = meta.get("source_paths") or {}
         content_path = resolve_recorded_path(review_root, source_paths.get("content_list"))
         extracted_dir = resolve_recorded_path(review_root, source_paths.get("extracted_dir"))
+        markdown_path = resolve_recorded_path(review_root, source_paths.get("markdown"))
+        markdown = markdown_path.read_text(encoding="utf-8", errors="replace") if markdown_path and markdown_path.is_file() else ""
+        pdf_path = resolve_recorded_path(review_root, source_paths.get("pdf"))
         candidates = []
         if content_path and content_path.is_file():
             blocks = read_json(content_path)
@@ -156,22 +162,28 @@ def build_inventory(review_root: Path, project_id: str) -> dict[str, Any]:
                         else ""
                     )
                     caption = block_caption(block)
+                    missing_caption = "source_caption_missing" in caption_fields({"source_caption_text": caption})["caption_quality"]["warnings"]
+                    recovered = recover_caption(blocks, idx - 1, markdown=markdown, pdf_path=pdf_path) if missing_caption else {}
                     source_type = str(block.get("type") or "")
                     candidates.append(
                         {
                             "paper_id": paper_id,
                             "title": field_value(meta, "title"),
-                            "source_label": infer_source_label(caption, len(candidates) + 1, source_type),
+                            "source_label": infer_source_label(recovered.get("caption_source_text") or caption, len(candidates) + 1, source_type),
                             "source_type": source_type,
                             "source_pdf": source_paths.get("pdf"),
                             "source_content_list": str(content_path),
                             "source_image_path": source_image_path if source_image_path and Path(source_image_path).exists() else "",
                             "source_page_hint": f"page {int(block.get('page_idx', 0)) + 1}" if block.get("page_idx") is not None else "",
                             "source_caption_text": caption,
-                            "inventory_score": candidate_score(caption, source_type),
+                            "source_image_sha256": hashlib.sha256(Path(source_image_path).read_bytes()).hexdigest() if source_image_path and Path(source_image_path).is_file() else "",
+                            **recovered,
+                            "what_it_shows": recovered.get("caption_source_text") or caption,
+                            "inventory_score": candidate_score(recovered.get("caption_source_text") or caption, source_type),
                             "human_reading_hint": "Prefer if this is a reaction scheme, mechanism, catalytic cycle, or scope summary.",
                         }
                     )
+                    candidates[-1].update(caption_fields(candidates[-1]))
         candidates.sort(key=lambda item: item.get("inventory_score", 0), reverse=True)
         papers.append(
             {

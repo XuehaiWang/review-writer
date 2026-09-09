@@ -27,6 +27,9 @@ from review_writer_api.workflow_models import (
 )
 from review_writer_api.domain_services.planning import BLUEPRINT_LOGICAL_NAME
 from review_writer_api.domain_services.sections import _merge_evidence_registry_row
+from review_writer_api.tests.planning_fixtures import seed_verified_matrix, offline_argument_planner
+from review_writer_core.claim_contracts import argument_projection
+from review_writer_core.stages.sections.evidence_resolution import pending_markdown, resolution_record
 
 
 TEST_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("=")
@@ -129,6 +132,7 @@ class SectionsV1Tests(unittest.TestCase):
         self.figure_source_outside_recorded_extraction = False
         self.use_chunk_evidence = False
         self.use_unknown_chunk = False
+        self.evidence_outcome = None
 
         def writer(context, payload):
             self.writer_calls += 1
@@ -144,7 +148,8 @@ class SectionsV1Tests(unittest.TestCase):
             for task in payload["tasks"]:
                 evidence_by_paper = {
                     str(hit.get("paper_id") or ""): hit
-                    for hit in package_sections.get(task["section_id"], {}).get("hits") or []
+                    for hit in sorted(package_sections.get(task["section_id"], {}).get("hits") or [],
+                                      key=lambda item: bool(item.get("claim_eligible")))
                     if isinstance(hit, dict) and not hit.get("is_neighbor")
                 }
                 paragraphs = [
@@ -191,6 +196,111 @@ class SectionsV1Tests(unittest.TestCase):
                 "report_md": f"# Section Drafting Report\n\nGenerated {len(sections)} sections.\n",
                 "attempts": 1,
             }
+            synthesis_sections = []
+            writing_sections = []
+            generated_by_id = {
+                str(section["section_id"]): section for section in sections
+            }
+            for task in payload["tasks"]:
+                section_id = str(task["section_id"])
+                package_section = package_sections.get(section_id, {})
+                available_keys = {
+                    str(hit.get("evidence_key") or "")
+                    for hit in package_section.get("hits") or []
+                    if isinstance(hit, dict) and hit.get("evidence_key")
+                }
+                planned_claims = []
+                claim_ids_by_paragraph: dict[str, list[str]] = {}
+                generated_paragraphs = generated_by_id[section_id]["paragraphs"]
+                default_paragraph_id = str(
+                    generated_paragraphs[0]["paragraph_id"]
+                    if generated_paragraphs
+                    else f"{section_id}-p1"
+                )
+                for claim in task.get("scientific_claims") or []:
+                    if not isinstance(claim, dict) or claim.get("support_status") != "supported":
+                        continue
+                    refs = [
+                        dict(ref)
+                        for ref in claim.get("evidence_refs") or []
+                        if isinstance(ref, dict)
+                        and str(ref.get("evidence_key") or "") in available_keys
+                    ]
+                    if len(refs) != len(claim.get("evidence_refs") or []):
+                        continue
+                    claim_id = str(claim.get("claim_id") or "")
+                    if not claim_id or not refs:
+                        continue
+                    paragraph_id = default_paragraph_id
+                    planned_claims.append(
+                        {
+                            "claim_id": claim_id,
+                            "paragraph_id": paragraph_id,
+                            "claim": str(claim.get("proposition") or ""),
+                            "claim_kind": str(claim.get("claim_type") or "reported_result"),
+                            "support_status": "supported",
+                            "citation_group": list(
+                                dict.fromkeys(
+                                    [
+                                        *(claim.get("primary_papers") or []),
+                                        *(claim.get("comparison_papers") or []),
+                                    ]
+                                )
+                            ),
+                            "evidence_refs": refs,
+                            "fact_ids": list(claim.get("fact_ids") or []),
+                            "fact_binding_status": "explicit_fact_selection",
+                            "assertion_ceiling": claim.get("assertion_ceiling"),
+                            **argument_projection(claim),
+                        }
+                    )
+                    claim_ids_by_paragraph.setdefault(paragraph_id, []).append(claim_id)
+                synthesis_sections.append({"section_id": section_id, "components": []})
+                writing_sections.append(
+                    {
+                        "section_id": section_id,
+                        "section_role": task.get("section_role") or "body",
+                        "paragraphs": [
+                            {
+                                "paragraph_id": str(paragraph["paragraph_id"]),
+                                "claim_ids": claim_ids_by_paragraph.get(
+                                    str(paragraph["paragraph_id"]), []
+                                ),
+                            }
+                            for paragraph in generated_paragraphs
+                        ],
+                        "claims": planned_claims,
+                    }
+                )
+            result["synthesis_state"] = {
+                "schema_version": 2,
+                "planning_mode": "current_contract_fixture",
+                "sections": synthesis_sections,
+            }
+            result["writing_plan"] = {
+                "schema_version": 2,
+                "planning_mode": "current_contract_fixture",
+                "sections": writing_sections,
+            }
+            if self.evidence_outcome:
+                section = result["sections"][0]
+                sid = section["section_id"]
+                pending = self.evidence_outcome not in {"limited_evidence", "limited_coverage"}
+                section["generation_mode"] = "pending_evidence" if pending else "limited_evidence"
+                section["evidence_resolution"] = resolution_record(package_sections[sid], pending=pending, reason="Evidence cannot support full coverage")
+                if pending:
+                    section.update(overview="", paragraphs=[], draft_md=pending_markdown(sid, section["heading"]))
+                    writing_sections[0].update(claims=[], paragraphs=[])
+                    synthesis_sections[0]["components"] = []
+                    if self.evidence_outcome == "forged_pending":
+                        section["draft_md"] += "Invented scientific conclusion."
+                elif self.evidence_outcome == "limited_coverage":
+                    section["paragraphs"] = section["paragraphs"][:1]
+                    section["draft_md"] = f"## {section['heading']}\n\n" + section["paragraphs"][0]["text"]
+                    pid = section["paragraphs"][0]["paragraph_id"]
+                    writing_sections[0]["paragraphs"] = [p for p in writing_sections[0]["paragraphs"] if p["paragraph_id"] == pid]
+                    writing_sections[0]["claims"] = [c for c in writing_sections[0]["claims"] if c["paragraph_id"] == pid]
+                result["section_drafts_md"] = "\n".join(s["draft_md"] for s in result["sections"])
             if self.include_figures:
                 source = self.mineru_source
                 if self.figure_source_outside_recorded_extraction:
@@ -264,7 +374,7 @@ class SectionsV1Tests(unittest.TestCase):
             settings,
             principal_provider=lambda: self.current,
             session_factory_override=self.sessions,
-            native_workflow_overrides={"sections.generate": writer},
+            native_workflow_overrides={"sections.generate": writer, "planning.blueprint": offline_argument_planner},
         )
         self._seed_planning()
 
@@ -370,6 +480,7 @@ class SectionsV1Tests(unittest.TestCase):
                 headers=self.headers(),
             )
             self.assertEqual(200, confirmed.status_code, confirmed.text)
+            seed_verified_matrix(self.app.state.planning_service, self.first, self.project_id)
             planning = client.get(f"/api/v1/projects/{self.project_id}/planning").json()
             outline_md = (
                 "# Selected Outline\n\n"
@@ -400,10 +511,13 @@ class SectionsV1Tests(unittest.TestCase):
                 json={"revision": 0},
                 headers=self.headers(),
             )
-            self.assertEqual(200, blueprint.status_code, blueprint.text)
+            self.assertEqual(202, blueprint.status_code, blueprint.text)
+            job = self.wait_job(client, blueprint.json()["id"])
+            self.assertEqual("succeeded", job["status"], job)
+            candidate = client.get(f"/api/v1/projects/{self.project_id}/planning").json()
             confirmed_blueprint = client.post(
                 f"/api/v1/projects/{self.project_id}/planning/blueprint/confirm",
-                json={"revision": blueprint.json()["blueprint_revision"]},
+                json={"revision": candidate["blueprint_revision"], "artifact_id": candidate["blueprint_artifact_id"]},
                 headers=self.headers(),
             )
             self.assertEqual(200, confirmed_blueprint.status_code, confirmed_blueprint.text)
@@ -440,7 +554,17 @@ class SectionsV1Tests(unittest.TestCase):
             {"P001": "P001", "P002": "P002", "P003": "P003"},
             payload["paper_display_labels"],
         )
-        self.assertEqual(len(payload["section_blueprint"]["sections"]), len(payload["section_tasks"]))
+        self.assertEqual(
+            len(
+                [
+                    section
+                    for section in payload["section_blueprint"]["sections"]
+                    if section.get("section_role") != "body"
+                    or section.get("generation_eligible") is not False
+                ]
+            ),
+            len(payload["section_tasks"]),
+        )
         introduction = next(
             task
             for task in payload["section_tasks"]
@@ -619,7 +743,37 @@ class SectionsV1Tests(unittest.TestCase):
             ["The studies report different selectivity patterns."],
             tasks[0]["must_cover_points"],
         )
-        self.assertEqual(1, len(tasks[0]["writing_requirements"]))
+        self.assertEqual(2, len(tasks[0]["writing_requirements"]))
+        self.assertEqual("single_paper_policy", tasks[0]["writing_requirements"][1]["source"])
+        self.assertIn("field-wide consensus", tasks[0]["writing_requirements"][1]["instruction"])
+
+    def test_legacy_blueprint_fact_gaps_are_not_required_for_source_writing(self) -> None:
+        custom_field = "photocatalyst_excited_state_behavior"
+        tasks = self.app.state.sections_service.tasks_from_blueprint(
+            {
+                "paper_assignment_policy": {
+                    "mode": "single_primary_section_with_supporting_cross_references"
+                },
+                "sections": [
+                    {
+                        "section_id": "S02",
+                        "title": "Evidence gaps",
+                        "section_role": "body",
+                        "primary_papers": ["P001"],
+                        "required_fact_roles": ["mechanism", custom_field],
+                        "targeted_fact_gaps": {
+                            "P001": ["mechanism", custom_field, "not_registered"],
+                            "P999": ["mechanism"],
+                        },
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(
+            {},
+            tasks[0]["targeted_fact_gaps"],
+        )
 
     def test_publish_rejects_a_changed_outline_dependency(self) -> None:
         service = self.app.state.sections_service
@@ -641,7 +795,7 @@ class SectionsV1Tests(unittest.TestCase):
             self.first, self.project_id, BLUEPRINT_LOGICAL_NAME
         )
         changed = deepcopy(blueprint)
-        changed["sections"][0]["major_papers"] = ["P999"]
+        changed["sections"][1]["primary_papers"] = ["P999"]
         published, run = service._publish_files(
             self.first,
             self.project_id,
@@ -680,6 +834,20 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertEqual("succeeded", job["status"])
         self.assertEqual(len(payload["section_tasks"]), job["progress_total"])
         self.assertEqual(job["progress_total"], job["progress_current"])
+
+    def test_abstract_background_gets_stable_identity_without_fulltext_promotion(self) -> None:
+        service = self.app.state.sections_service
+        catalog = service._catalog(self.first, ["P001"])
+        task = {"section_id": "S02", "heading": "Grounded evidence", "core_argument": "Grounded evidence",
+                "must_cover_points": [], "primary_papers": ["P001"], "supporting_papers": [],
+                "allowed_papers": ["P001"]}
+        package = service._evidence_package(self.first, self.project_id, [task], catalog)
+        abstracts = [r for r in package["evidence_registry"] if r.get("chunk_id") == "abstract"]
+        self.assertTrue(abstracts)
+        for row in abstracts:
+            self.assertTrue(row["evidence_key"].startswith("sha256:"))
+            self.assertFalse(row["claim_eligible"])
+            self.assertEqual("abstract_report_only", row["assertion_ceiling"])
 
     def test_generation_publishes_page_addressable_evidence_package(self) -> None:
         self._seed_document_indexes()
@@ -823,6 +991,8 @@ class SectionsV1Tests(unittest.TestCase):
                     "heading": "Selective allene anchor",
                     "core_argument": "Compare the primary evidence.",
                     "must_cover_points": [],
+                    "required_fact_roles": ["mechanism"],
+                    "targeted_fact_gaps": {"P002": ["mechanism"]},
                     "primary_papers": ["P002"],
                     "supporting_papers": [],
                     "allowed_papers": ["P002"],
@@ -854,6 +1024,18 @@ class SectionsV1Tests(unittest.TestCase):
             if item["mode"] == "question_terms_relaxed_recovery"
         )
         self.assertEqual(["P002"], relaxed_attempt["matched_primary_papers"])
+        self.assertEqual({"P002": ["mechanism"]}, section["targeted_fact_gaps"])
+        self.assertEqual(
+            {
+                "field_id": "mechanism",
+                "requested_papers": ["P002"],
+                "matched_papers": ["P002"],
+                "unresolved_papers": [],
+                "status": "resolved",
+                "stop_reason": "matching_evidence_retained",
+            },
+            section["targeted_fact_gap_outcomes"][0],
+        )
 
     def test_optional_question_requires_only_evidence_bearing_primary_papers(self) -> None:
         self._seed_document_indexes()
@@ -973,7 +1155,11 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertIn("support", routes)
         self.assertIn("boundary", routes)
         self.assertEqual(
-            "evidence_supported", section["scientific_claim_states"][0]["status"]
+            "evidence_missing", section["scientific_claim_states"][0]["status"]
+        )
+        self.assertEqual(
+            "registered_claim_fact_bindings",
+            section["scientific_claim_states"][0]["support_basis"],
         )
         self.assertEqual(
             "S02-SC01", section["scientific_claim_states"][0]["claim_id"]
@@ -1364,10 +1550,11 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertIn("Grounded synthesis", payload["section_files"][0]["content"])
         self.assertTrue(job["result"]["synthesis_state_artifact_id"])
         self.assertTrue(job["result"]["writing_plan_artifact_id"])
-        self.assertEqual("legacy_adapter", payload["synthesis_state"]["planning_mode"])
         self.assertEqual(
-            "legacy_derived_after_generation",
-            payload["writing_plan"]["planning_mode"],
+            "current_contract_fixture", payload["synthesis_state"]["planning_mode"]
+        )
+        self.assertEqual(
+            "current_contract_fixture", payload["writing_plan"]["planning_mode"]
         )
         for logical_name in (
             "sections/synthesis_state.json",
@@ -1483,6 +1670,42 @@ class SectionsV1Tests(unittest.TestCase):
         self.figure_source_outside_recorded_extraction = True
         with TestClient(self.app) as client:
             job = self.start(client, "wrong-paper-source")
+        self.assertEqual("failed", job["status"])
+        self.assertEqual("WORKFLOW_VALIDATION_FAILED", job["error_code"])
+
+    def test_pending_evidence_publishes_other_chapters_and_allows_handoff(self) -> None:
+        self.evidence_outcome = "pending_evidence"
+        with TestClient(self.app) as client:
+            job = self.start(client, "pending-evidence")
+            self.assertEqual("succeeded", job["status"], job.get("error_message"))
+            sections = client.get(f"/api/v1/projects/{self.project_id}/sections").json()
+            self.assertTrue(sections["handoff"]["current"])
+            self.assertIn("Evidence pending", sections["section_files"][0]["content"])
+            self.assertTrue(any("Grounded synthesis" in f["content"] for f in sections["section_files"][1:]))
+            response = client.post(f"/api/v1/projects/{self.project_id}/sections/confirm",
+                json={"revision": sections["revision"]}, headers=self.headers())
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertEqual("images", response.json()["next_stage"])
+
+    def test_pending_evidence_cannot_hide_unvalidated_prose(self) -> None:
+        self.evidence_outcome = "forged_pending"
+        with TestClient(self.app) as client:
+            job = self.start(client, "forged-pending")
+        self.assertEqual("failed", job["status"])
+        self.assertIn("Invalid evidence-resolution output", job["error_message"])
+
+    def test_limited_primary_coverage_can_be_published(self) -> None:
+        self.evidence_outcome = "limited_coverage"
+        with TestClient(self.app) as client:
+            job = self.start(client, "limited-coverage")
+        self.assertEqual("succeeded", job["status"], job.get("error_message"))
+
+    def test_limited_evidence_still_rejects_unknown_source_citations(self) -> None:
+        self._seed_document_indexes()
+        self.evidence_outcome = "limited_evidence"
+        self.use_chunk_evidence = self.use_unknown_chunk = True
+        with TestClient(self.app) as client:
+            job = self.start(client, "invalid-limited-evidence")
         self.assertEqual("failed", job["status"])
         self.assertEqual("WORKFLOW_VALIDATION_FAILED", job["error_code"])
 

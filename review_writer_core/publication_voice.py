@@ -10,6 +10,33 @@ REFERENCES_HEADING = re.compile(r"(?im)^#{1,6}\s+references\s*$")
 COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 FENCED_CODE = re.compile(r"```.*?```", re.DOTALL)
 INLINE_CODE = re.compile(r"`[^`\n]+`")
+_PROTECTED = re.compile(r'<!--.*?-->|```.*?```|`[^`\n]+`|"[^"\n]*"|“[^”\n]*”', re.DOTALL)
+_SOURCE_WORDING = re.compile(
+    r"\b(?P<modifier>supplied|provided|retrieved)\s+(?P<noun>passages?|excerpts?)"
+    r"(?=\s+(?:identify|describe|report|indicate|show|state|document|support|suggest|demonstrate)s?\b)", re.I)
+
+
+def normalize_publication_voice(markdown: str) -> str:
+    """Remove source-delivery wording without erasing evidence limitations.
+
+    Only affirmative source-attribution subjects are projected. Statements
+    about missing evidence need semantic repair and remain detectable.
+    """
+    parts = REFERENCES_HEADING.split(str(markdown or ""), maxsplit=1)
+    body = parts[0]
+    def prose(value: str) -> str:
+        return _SOURCE_WORDING.sub(lambda m: (
+            ("Cited" if m.group("modifier")[0].isupper() else "cited")
+            + (" sources" if m.group("noun").lower().endswith("s") else " source")), value)
+    protected = []
+    def stash(match):
+        protected.append(match.group(0))
+        return f"\x00VOICE{len(protected)-1}\x00"
+    body = _PROTECTED.sub(stash, body)
+    body = "\n".join(line if line.lstrip().startswith((">", "#", "![", "|")) else prose(line) for line in body.split("\n"))
+    for index, value in enumerate(protected):
+        body = body.replace(f"\x00VOICE{index}\x00", value)
+    return body + str(markdown or "")[len(parts[0]):]
 LEAK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("evidence_package", re.compile(r"\b(?:supplied|provided) evidence\b", re.I)),
     (

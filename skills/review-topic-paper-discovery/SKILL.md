@@ -15,50 +15,21 @@ selects it in Discovery.
 
 ## Hard Rules
 
-```text
-Use the 8 LLM structured tag categories for metadata retrieval:
-product
-substrate
-catalyst_or_method
-organometallic_partner
-ligand_or_chiral_source
-leaving_group
-reaction_type
-document_scope
-```
+Query keywords may use the shared vocabulary categories: `product`,
+`substrate`, `catalyst_or_method`, `organometallic_partner`,
+`ligand_or_chiral_source`, `leaving_group`, `reaction_type` and
+`document_scope`. Unknown scientific phrases use the neutral `unclassified`
+retrieval route. These are query hints, not preassigned paper Tags.
 
-Discovery query plans may additionally use `unclassified` as a temporary
-routing category when a meaningful topic phrase cannot safely fit one of the
-eight tags. It is never written into paper metadata and never becomes a ninth
-Matrix field. The retriever evaluates it across all eight tags and parsed
-source text. Never force an unknown phrase into `reaction_type`.
+Do not use stored Library Tags for admission or ranking, or require a user
+to confirm project Tags in Discovery. Retrieve from title and source-addressable
+parsed content. Formal, evidence-backed paper classification belongs to Matrix
+after the user selects candidate papers.
 
-Use the shared taxonomy loader as the tag vocabulary and synonym source. The default profile is `<review-root>/review_writer_core/taxonomies/allene.py`; `REVIEW_TAXONOMY_PROFILE` selects a built-in profile and `REVIEW_CLASSIFICATION_RULES` selects a custom rules file. Discovery outputs must record the active taxonomy path and SHA-256 identity. Do not rank local papers by metadata abstract.
-
-Match short taxonomy aliases such as `Cu`, `Pd`, `Au`, and `Ni` only as whole
-tokens, never as substrings inside ordinary words. Canonicalize exact aliases
-to their taxonomy label and de-duplicate them before retrieval. For
-Never use a Library base Tag unless its complete `structured_tags` field has
-`human_checked=true`. Keep older automatic values stored for audit and backward
-compatibility, but exclude them from retrieval scoring and Matrix planning.
-
-Treat Library Metadata Tags and project Tags as separate layers:
-
-```text
-base_tags                    human-verified snapshot from Library metadata
-base_tags_verified           whether the reusable snapshot passed the trust policy
-project_tag_assessment       topic-scoped automatic Tags plus matching evidence
-confirmed_project_tags       legacy human override retained for compatibility
-tag_review_status            legacy pending | confirmed state
-```
-
-Never write project Tags or legacy confirmations back into Library metadata.
-Synchronize the project Tag assessment across duplicate keyword hits for the
-same `paper_id`. When the human selects a paper for Matrix, automatically apply
-`project_tag_assessment.suggested_tags`. If an older project already contains
-`confirmed_project_tags` with `tag_review_status=confirmed`, preserve that
-explicit legacy override instead. Per-paper Tag confirmation is not a workflow
-step.
+Reuse the shared taxonomy loader for vocabulary/aliases and record the effective
+taxonomy and normalization SHA-256 identities. Default to `general_academic`;
+honor the project's selected profile and `REVIEW_CLASSIFICATION_RULES`.
+Match short aliases as whole tokens, not substrings of ordinary words.
 
 External retrieval (both run in parallel when requested):
 
@@ -75,33 +46,36 @@ the joined label for quick reading.
 
 ## Run
 
-Before invoking the script, Codex must resolve the Topic using
-`references/keyword_expansion_prompt.md` and write the query plan to:
+The default dashboard path uses `--auto-query-plan`. It parses explicit
+topic phrases, date bounds and organization requests locally. It does not
+ask a model to generate an outline or paper-classification partitions.
 
-```text
-review-projects/<project-id>/00_discovery/query_plan.draft.json
-```
+Definitions such as "long form (ABBR)" and simple list references such as
+"class, their derivatives" are resolved locally. Only undefined abbreviations
+use the small optional prompt in `references/keyword_expansion_prompt.md`.
+Run literal local retrieval before that request. On timeout or an unusable
+answer, retain the original terms and continue; do not guess expansions.
+Billing/authorization rules for model access remain separate.
 
-For every resolved abbreviation, record an LLM confidence score and reason.
-Put ambiguous concepts in `unresolved_concepts` rather than guessing, then
-review them before discovery. Proceed only if other resolved concepts or
-validated keywords still define a meaningful search; stop and ask for
-clarification when the plan contains unresolved concepts only.
-
-Convert relative-year instructions to inclusive local limits in
-`filters.year_from` and `filters.year_to` using the current calendar year.
-Record organization requests such as "by catalyst type" in `group_by` as
-`["catalyst_or_method"]`, not as generic retrieval keywords.
-
-Invoke the local discovery boundary with the generated plan:
+Automatic plans preserve `group_by` and the original `organization_intent`.
+Formal partitions are deferred to the selected papers' Matrix evidence.
+The hosted application subsequently uses its existing Library index for
+paper-level lexical/vector fusion; the standalone script handles local
+lexical and optional external retrieval.
 
 ```bash
 python skills/review-topic-paper-discovery/scripts/discover.py \
   --review-root <review-root> \
   --topic "<review topic>" \
   --project-id <project-id> \
-  --query-plan review-projects/<project-id>/00_discovery/query_plan.draft.json
+  --auto-query-plan
 ```
+
+The script writes `00_discovery/query_plan.draft.json`. Existing explicitly
+supplied `--query-plan <path>` files remain supported and validated. A cached
+automatic plan is reused only for matching topic, keywords, taxonomy, prompt,
+model, planner schema and calendar year. Failed optional expansions are not
+cached as a permanent success.
 
 Add `--sciatlas-search`, `--web-search`, or both to that command when external
 coverage is requested. For SciAtlas KG, configure the service and append its
@@ -127,10 +101,8 @@ metadata is filtered independently and inclusively by `filters.year_from` and
 `filters.year_to` from `query_plan.draft.json`. The external hint does not
 replace or alter the local query-plan year bounds.
 
-Direct script execution without `--query-plan` retains the deterministic
-fallback for compatibility. The dashboard uses `--auto-query-plan`: it first
-uses the active text-provider settings and falls back to deterministic theme
-splitting when the provider is unavailable. Every `group_by` value must be one
+Direct script execution without either plan flag retains deterministic
+retrieval for compatibility. Every `group_by` value must be one
 of the eight structured tag categories above; keyword categories may also use
 the Discovery-only `unclassified` route.
 
@@ -200,21 +172,16 @@ human_check_state.json
 `selected_discovery_results.json` contains every local paper explicitly kept by
 the human reviewer; there is no fixed paper-count cap. External (SciAtlas/Crossref) papers go into
 `web_papers`; they are a topic-coverage check pool only. They never enter
-the local `paper_id` registry and the matrix stage may cite them only as
-references without assigning a `paper_id`.
+the local `paper_id` registry. A search result alone is not chapter evidence;
+acquire, register, and explicitly select a paper through the normal Library
+workflow before using its source passages in manuscript claims.
 
-Each local result carries verified-only `base_tags`, `base_tags_verified`, and the generated
-`project_tag_assessment`. Legacy `confirmed_project_tags` and
-`tag_review_status` fields may remain in serialized artifacts for backward
-compatibility. The Matrix handoff automatically adds current project
-suggestions. Unverified reusable Tags never enter retrieval or downstream
-outline grouping.
+In the Web workflow, confirming Discovery does not automatically queue
+`matrix.enrich` or require scientific fact cards. Continue to outline selection
+and chapter planning using the selected-paper context.
 
 ## Human Check
 
-Stop after discovery. The human checks `/discovery`, explicitly includes or
-excludes candidate papers, compares base Tags with topic-specific suggestions,
-assigns paper roles when needed, and then confirms the selected set. Project
-Tags are read-only evidence in the UI and are applied automatically. SciAtlas papers are visible
-in the same "external" panel as Crossref papers; deletions take effect for
-both sources.
+Stop after discovery. The human reviews candidate papers, includes or excludes
+them, and confirms which enter Matrix. Topic-related retrieval hints are not
+scientific classifications. Do not silently select all newly retrieved papers.

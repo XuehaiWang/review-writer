@@ -8,11 +8,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from review_writer_core.figure_caption import enrich_selected_captions, identity
+from review_writer_core.model_gateway_client import call_json_model, gateway_configured
+
 from review_writer_core.figure_qualification import (
     argument_role,
     candidate_exclusion_reasons,
     candidate_qualification,
     figure_score,
+    figure_requirement,
     representative_role,
 )
 
@@ -161,7 +165,7 @@ def build_outputs(project: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
                 candidate["needs_human_check"] = True
                 candidate["exclusion_reasons"] = candidate_exclusion_reasons(candidate)
                 candidate["argument_role"] = argument_role(candidate)
-                candidate["representative_role"] = representative_role(candidate)
+                candidate["representative_role"] = candidate.get("representative_role") or representative_role(candidate)
                 candidate["candidate_qualification"] = qualification
                 candidate["automatic_selection_eligible"] = bool(
                     candidate["candidate_qualification"].get("eligible")
@@ -184,7 +188,7 @@ def build_outputs(project: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         section
         for section in task_rows
         if isinstance(section, dict)
-        and lower(section.get("figure_need")) not in {"no", "none", "optional"}
+        and figure_requirement(section.get("figure_need")) == "required"
     ]
     global_budget = min(8, max(3, len(eligible_sections)))
     for section in eligible_sections:
@@ -223,7 +227,7 @@ def build_outputs(project: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
                         "Selected as a section-level scheme/figure because it directly supports the section argument "
                         "and has a resolvable MinerU source image."
                     ),
-                    "what_it_shows": candidate.get("source_caption_text") or candidate.get("source_label"),
+                    "what_it_shows": candidate.get("caption_source_text") or candidate.get("source_caption_text") or "",
                     "fits_paragraph_or_claim": section.get("core_argument"),
                     "recommended_action": (
                         "redraw"
@@ -234,7 +238,7 @@ def build_outputs(project: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
                     "resolution_status": "ready" if candidate.get("source_image_path") else "needs_source_resolution",
                     "needs_human_check": True,
                     "argument_role": argument_role(candidate),
-                    "representative_role": representative_role(candidate),
+                    "representative_role": candidate.get("representative_role") or representative_role(candidate),
                     "exclusion_reasons": [],
                     "candidate_qualification": candidate.get(
                         "candidate_qualification"
@@ -266,6 +270,26 @@ def main() -> int:
         raise SystemExit(f"Project not found: {project}")
     paper_level, manuscript = build_outputs(project)
     out_dir = project / "02_section_drafting"
+    selected = [c for paper in paper_level["papers"] for c in paper.get("candidates", [])
+                if c.get("candidate_index") == paper.get("selected_candidate_index")]
+    selected.extend(manuscript)
+    cache_path = out_dir / "figure_caption_cache.json"
+    try:
+        cache = read_json(cache_path) if cache_path.is_file() else {}
+        if not isinstance(cache, dict):
+            cache = {}
+    except (OSError, ValueError):
+        cache = {}
+    model = (lambda prompt: call_json_model(prompt, label="figure-caption", timeout_seconds=60,
+                                            recover_on_timeout=False)) if gateway_configured() else None
+    enrich_selected_captions(selected, call=model, cache=cache)
+    # Copies of the same selected asset share the source-bound cached result.
+    enriched = {identity(row): row for row in selected if row.get("publication_caption_text")}
+    for row in selected:
+        if identity(row) in enriched:
+            row.update({k: v for k, v in enriched[identity(row)].items()
+                        if k.startswith(("caption_", "publication_caption_"))})
+    write_json(cache_path, cache)
     generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     write_json(out_dir / "paper_figure_candidates.json", paper_level)
     write_json(out_dir / "figure_candidates.json", manuscript)

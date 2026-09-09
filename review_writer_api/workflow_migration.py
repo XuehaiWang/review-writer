@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 
 from review_writer_api.database import Project, User, database_session, utc_now
 from review_writer_api.workflow_models import (

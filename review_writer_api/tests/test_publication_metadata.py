@@ -9,15 +9,82 @@ from unittest.mock import patch
 
 from review_writer_api import scientific_tasks
 from review_writer_core.publication_metadata import (
+    _layout_page_regions,
     extract_front_matter_doi,
     extract_publication_evidence,
     extract_publication_metadata,
+    read_pdf_first_page_text,
     resolve_local_publication_extraction,
     validate_model_publication_extraction,
 )
 
 
 class PublicationMetadataTests(unittest.TestCase):
+    def test_layout_regions_follow_whitespace_even_when_header_exceeds_eighteen_percent(self) -> None:
+        layout = "\n".join(
+            [*[f"Header {index}" for index in range(10)], *([""] * 4)]
+            + [f"Body {index}" for index in range(24)]
+            + ["", "", "", "Footer 1", "Footer 2"]
+        )
+
+        _full, header, body, footer = _layout_page_regions(layout)
+
+        self.assertIn("Header 9", header)
+        self.assertNotIn("Body 0", header)
+        self.assertIn("Body 0", body)
+        self.assertEqual("Footer 1\nFooter 2", footer)
+
+    def test_dense_layout_uses_text_density_window_without_fixed_ratio(self) -> None:
+        layout = "\n".join(f"Line {index}" for index in range(100))
+
+        _full, header, body, footer = _layout_page_regions(layout)
+
+        self.assertEqual(10, len(header.splitlines()))
+        self.assertEqual(80, len(body.splitlines()))
+        self.assertEqual(10, len(footer.splitlines()))
+
+    def test_first_page_text_exposes_coordinate_header_and_footer_regions(self) -> None:
+        from pypdf import PdfWriter
+        from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "coordinate-regions.pdf"
+            writer = PdfWriter()
+            page = writer.add_blank_page(width=612, height=792)
+            font = writer._add_object(
+                DictionaryObject(
+                    {
+                        NameObject("/Type"): NameObject("/Font"),
+                        NameObject("/Subtype"): NameObject("/Type1"),
+                        NameObject("/BaseFont"): NameObject("/Helvetica"),
+                    }
+                )
+            )
+            page[NameObject("/Resources")] = DictionaryObject(
+                {
+                    NameObject("/Font"): DictionaryObject(
+                        {NameObject("/F1"): font}
+                    )
+                }
+            )
+            content = DecodedStreamObject()
+            content.set_data(
+                b"BT /F1 10 Tf 72 760 Td (Journal Header 12 \\(2024\\) 100123) Tj ET\n"
+                b"BT /F1 10 Tf 72 400 Td (Body reference Nature 2020, 1, 1-2) Tj ET\n"
+                b"BT /F1 10 Tf 72 24 Td (Footer Journal 2024, 12, 100-110) Tj ET"
+            )
+            page[NameObject("/Contents")] = writer._add_object(content)
+            with path.open("wb") as output:
+                writer.write(output)
+
+            extracted = read_pdf_first_page_text(path)
+
+        self.assertEqual("coordinate_layout", extracted.extraction_mode)
+        self.assertIn("Journal Header 12 (2024) 100123", extracted.header_text)
+        self.assertIn("Footer Journal 2024, 12, 100-110", extracted.footer_text)
+        self.assertNotIn("Body reference", extracted.header_text)
+        self.assertNotIn("Body reference", extracted.footer_text)
+
     def test_labelled_publication_date_beats_download_and_acceptance_dates(self) -> None:
         fields = extract_publication_metadata(
             """

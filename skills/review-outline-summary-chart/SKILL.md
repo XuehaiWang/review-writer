@@ -5,6 +5,12 @@ description: Use when an approved final review Markdown needs one current full-r
 
 # Review Outline Summary Chart
 
+This is a standalone Mermaid/structure-chart tool and a component of the legacy
+filesystem orchestrator. It is not called by the current Web Final Overview
+action, which uses `review-figure-style-redraw/scripts/generate_overview_figure.py`.
+Do not add this chart as a Web export prerequisite. The orchestrated requirements
+below describe only the standalone filesystem status contract.
+
 Generate the single full-review Mermaid summary only after the
 final-audit checkpoint has approved the final draft.
 

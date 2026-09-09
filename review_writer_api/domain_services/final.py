@@ -5,7 +5,6 @@ from __future__ import annotations
 import html
 import json
 import re
-import shutil
 import threading
 import uuid
 import zipfile
@@ -19,13 +18,8 @@ from sqlalchemy import select
 
 from review_writer_api.artifact_service import ArtifactService
 from review_writer_api.database import User, database_session, utc_now
-from review_writer_api.domain_services.drafts import (
-    DRAFT_APPROVAL,
-    DRAFT_DOCUMENT,
-    DRAFT_QUALITY,
-    DraftsService,
-)
-from review_writer_api.domain_services.discovery import discovery_search_record
+from review_writer_api.domain_services.base import ArtifactBackedService
+from review_writer_api.domain_services.drafts import DraftsService
 from review_writer_api.errors import (
     WorkflowConflict,
     WorkflowNotFound,
@@ -37,11 +31,18 @@ from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
 from review_writer_core.latex_renderer import SUPPORTED_PROFILES, TEMPLATE_VERSION
 from review_writer_core.draft_bibliography import (
+    CALLOUT_RE,
+    CITATION_MAP_RE,
+    citation_map_comment,
     citation_entries_from_draft,
+    format_citation_group,
     expand_callouts,
     ordered_callouts,
     reference_text,
 )
+from review_writer_core.chemical_typography import normalize_chemical_typography
+from review_writer_core.draft_quality import QUALITY_INPUT_ARTIFACTS
+from review_writer_core.stages.discovery.records import discovery_search_record
 from review_writer_core.bibliography_audit import bibliography_field_readiness
 from review_writer_core.final_issue_details import final_issue_details
 from review_writer_core.manuscript_state import build_manuscript_state
@@ -49,11 +50,9 @@ from review_writer_core.markdown_images import (
     malformed_markdown_image_lines,
     parse_markdown_image,
 )
-from review_writer_core.publication_voice import publication_voice_issues
-from review_writer_core.publication_scope import (
-    methods_execution_report,
-    public_scope_statement,
-)
+from review_writer_core.publication_voice import publication_voice_issues, normalize_publication_voice
+from review_writer_core.publication_tables import refresh_generated_comparison_tables
+from review_writer_core.publication_scope import methods_execution_report
 from review_writer_core.review_titles import (
     build_publication_overview_text,
     build_publication_review_title,
@@ -62,31 +61,36 @@ from review_writer_core.review_titles import (
     overview_text_needs_rewrite,
 )
 from review_writer_core.review_structure import sanitize_internal_section_title
+from review_writer_core.workflow.artifacts import (
+    BLUEPRINT as BLUEPRINT_LOGICAL_NAME,
+    DISCOVERY_REVIEW as DISCOVERY_LOGICAL_NAME,
+    DRAFT_APPROVAL,
+    DRAFT_MANUSCRIPT as DRAFT_DOCUMENT,
+    DRAFT_QUALITY_REPORT as DRAFT_QUALITY,
+    FINAL_CONCLUSION,
+    FINAL_CONCLUSION_REPORT,
+    FINAL_DOCX,
+    FINAL_DOCX_QA,
+    FINAL_FRONT_MATTER,
+    FINAL_MANUSCRIPT as FINAL_DRAFT,
+    FINAL_MANUSCRIPT_STATE,
+    FINAL_OVERVIEW_IMAGE,
+    FINAL_OVERVIEW_TEXT,
+    FINAL_PDF,
+    FINAL_PDF_COMPILE_LOG,
+    FINAL_PDF_QA,
+    FINAL_RELEASE,
+    FINAL_RENDER_MANIFEST,
+    FINAL_TEX,
+    FINAL_VALIDATION,
+)
 
 
-FINAL_CONCLUSION = "final/conclusion.md"
-FINAL_CONCLUSION_REPORT = "final/conclusion-report.json"
-FINAL_OVERVIEW_IMAGE = "final/overview.png"
-FINAL_OVERVIEW_TEXT = "final/overview-text.json"
-FINAL_FRONT_MATTER = "final/front-matter.json"
-FINAL_DRAFT = "final/manuscript.md"
-FINAL_VALIDATION = "final/validation.json"
-FINAL_RELEASE = "final/release.json"
-FINAL_DOCX = "final/manuscript.docx"
-FINAL_DOCX_QA = "final/docx-qa.json"
-FINAL_MANUSCRIPT_STATE = "final/manuscript_state.json"
-FINAL_RENDER_MANIFEST = "final/render_manifest.json"
-FINAL_TEX = "final/manuscript.tex"
-FINAL_PDF = "final/manuscript.pdf"
-FINAL_PDF_QA = "final/pdf-qa.json"
-FINAL_PDF_COMPILE_LOG = "final/pdf-compile.log"
-DISCOVERY_LOGICAL_NAME = "discovery/review.json"
-BLUEPRINT_LOGICAL_NAME = "blueprint/section_blueprint.json"
 ARTIFACT_URL = re.compile(r"/api/v1/artifacts/([0-9a-fA-F-]{36})/content")
 REFERENCES_HEADING = re.compile(
     r"(?im)^\s*#{1,6}\s*(?:references|reference list|bibliography|cited literature|参考文献)\s*$"
 )
-CITATION_CALLOUT = re.compile(r"\[([0-9][0-9,;\s-]*)\]")
+CITATION_CALLOUT = CALLOUT_RE
 REFERENCE_ITEM = re.compile(r"(?m)^\s*\[(\d+)\]\s*\.?\s+(.+?)\s*$")
 MARKDOWN_HEADING = re.compile(r"(?m)^\s*(#{1,6})\s+(.+?)\s*$")
 INTRODUCTION_TITLES = ("introduction", "background", "引言", "绪论", "研究背景")
@@ -165,10 +169,29 @@ def _safe_script_text(value: str, *, superscript: bool) -> str:
     return f"{marker}({text})"
 
 
+def _normalize_conclusion_heading(markdown: str) -> str:
+    """Display the former generated heading naturally without rewriting prose."""
+    return re.sub(
+        r"(?m)^(#{1,6})[ \t]+Conclusions?[ \t]*/[ \t]*Challenges[ \t]*/[ \t]*Insights[ \t]*$",
+        r"\1 Conclusions and Outlook", markdown,
+    )
+
+
+def _same_metadata_content(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    """Ignore only the metadata file's own version, not source-file changes."""
+    def content(value):
+        result = json.loads(json.dumps(value))
+        for field in ("_artifact_ids", "_artifact_paths"):
+            if isinstance(result.get(field), dict):
+                result[field].pop("metadata", None)
+        return result
+    return content(before) == content(after)
+
+
 def _normalize_publication_markup(markdown: str) -> str:
     """Convert harmless HTML formatting while preserving workflow comments."""
 
-    source = _clean_reference_affiliation_markup(str(markdown or ""))
+    source = _normalize_conclusion_heading(_clean_reference_affiliation_markup(str(markdown or "")))
     # A replacement character is evidence that an upstream byte could not be
     # decoded.  It has no publishable meaning, so remove it while retaining the
     # surrounding text instead of blocking all exports.
@@ -215,7 +238,7 @@ def _normalize_publication_markup(markdown: str) -> str:
     normalized = re.sub(r"\n{3,}", "\n\n", normalized)
     for index, comment in enumerate(comments):
         normalized = normalized.replace(f"\x00RWCOMMENT{index}\x00", comment)
-    return normalized
+    return normalize_publication_voice(normalize_chemical_typography(normalized))
 
 
 def _figure_argument_findings(markdown: str) -> list[dict[str, Any]]:
@@ -252,9 +275,9 @@ def _figure_argument_findings(markdown: str) -> list[dict[str, Any]]:
             "" if parse_markdown_image(line) is not None else line
             for line in visible_prose.splitlines()
         )
-        visible_prose = re.sub(r"(?m)^\s*\*Figure\s+\d+\..*?\*\s*$", "", visible_prose)
+        visible_prose = re.sub(r"(?m)^\s*\*(?:Figure|Scheme|Table)\s+\d+\..*?\*\s*$", "", visible_prose)
         if published_label and not re.search(
-            rf"\b{escaped_label}\b[^\n]{{0,500}}\b(?:presents?|shows?|summarizes?|illustrates?|compares?|depicts?)\b",
+            rf"\b{escaped_label}\b",
             visible_prose,
             re.IGNORECASE,
         ):
@@ -266,8 +289,12 @@ def _figure_argument_findings(markdown: str) -> list[dict[str, Any]]:
             and not str(metadata.get("source_label") or "").strip()
         ):
             issues.append("source_figure_identity_unresolved")
-        if str(metadata.get("interpretation_basis") or "") != "source_caption":
+        if str(metadata.get("interpretation_basis") or "") not in {
+            "source_caption", "source_caption_summary", "source_figure_context"
+        }:
             issues.append("paper_level_interpretation_missing")
+        if (metadata.get("caption_quality") or {}).get("status") == "pending":
+            issues.append("figure_caption_pending")
         if (
             str(metadata.get("source_relationship") or "") == "source_attributed"
             and str(metadata.get("permission_status") or "") != "verified"
@@ -289,7 +316,7 @@ class FinalNotReady(WorkflowConflict):
     code = "FINAL_NOT_READY"
 
 
-class FinalService:
+class FinalService(ArtifactBackedService):
     def __init__(
         self,
         repository: WorkflowRepository,
@@ -301,14 +328,6 @@ class FinalService:
         self.drafts = drafts
         self._write_lock = threading.RLock()
 
-    def _artifact(self, principal: Principal, project_id: str, logical_name: str):
-        principal.require(Permission.PROJECT_READ)
-        if self.repository.get_owned_project(principal.user_id, project_id) is None:
-            raise WorkflowNotFound("Project not found.")
-        return self.repository.get_current_artifact(
-            principal.user_id, project_id, logical_name
-        )
-
     def _read_text(
         self,
         principal: Principal,
@@ -317,13 +336,9 @@ class FinalService:
         *,
         required: bool = False,
     ) -> tuple[str, ArtifactRecord | None]:
-        artifact = self._artifact(principal, project_id, logical_name)
-        if artifact is None:
-            if required:
-                raise WorkflowNotFound("Current workflow artifact not found.")
-            return "", None
-        resolved = self.artifacts.resolve_owned_artifact(principal.user_id, artifact.id)
-        return resolved.path.read_text(encoding="utf-8"), artifact
+        return super()._read_text(
+            principal, project_id, logical_name, required=required
+        )
 
     def _read_json(
         self,
@@ -331,16 +346,9 @@ class FinalService:
         project_id: str,
         logical_name: str,
     ) -> tuple[dict[str, Any], ArtifactRecord | None]:
-        text, artifact = self._read_text(principal, project_id, logical_name)
-        if artifact is None:
-            return {}, None
-        try:
-            value = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise WorkflowConflict("The current workflow artifact is invalid.") from exc
-        if not isinstance(value, dict):
-            raise WorkflowConflict("The current workflow artifact is invalid.")
-        return value, artifact
+        return super()._read_json(
+            principal, project_id, logical_name, required=False
+        )
 
     def _canonical_reference_section(
         self,
@@ -538,13 +546,10 @@ class FinalService:
                 new = old_to_new.get(old)
                 if new is not None and new not in rendered:
                     rendered.append(new)
-            return (
-                "[" + ", ".join(map(str, rendered)) + "]"
-                if rendered
-                else match.group(0)
-            )
+            return format_citation_group(rendered) or match.group(0)
 
-        updated = CITATION_CALLOUT.sub(replace_group, markdown)
+        updated = CITATION_CALLOUT.sub(replace_group, CITATION_MAP_RE.sub("", markdown)).rstrip()
+        updated += "\n\n" + citation_map_comment(paper_to_number) + "\n"
         rendered_ledger = dict(ledger)
         rendered_ledger.update(
             {
@@ -833,65 +838,6 @@ class FinalService:
         after = body[insertion:].lstrip()
         return "\n\n".join(
             value for value in (before, normalized_block, after) if value
-        )
-
-    @staticmethod
-    def _insert_after_introduction_heading(markdown: str, block: str) -> str:
-        """Insert public scope prose inside Introduction, never as a new stage heading."""
-
-        body = str(markdown or "").rstrip()
-        normalized_block = str(block or "").strip()
-        if not normalized_block:
-            return body
-        for match in MARKDOWN_HEADING.finditer(body):
-            title = re.sub(
-                r"^\s*\d+(?:\.\d+)*[.)]?\s*", "", match.group(2)
-            ).strip().casefold()
-            if any(
-                title == candidate
-                or any(
-                    title.startswith(f"{candidate}{separator}")
-                    for separator in (" ", ":", "：", "与", "和")
-                )
-                for candidate in INTRODUCTION_TITLES
-            ):
-                before = body[: match.end()].rstrip()
-                after = body[match.end() :].lstrip()
-                existing_intro = after[:1800].casefold()
-                if "literature search" in existing_intro and any(
-                    marker in existing_intro
-                    for marker in ("screening", "retrieved", "database", "sources were retained")
-                ):
-                    return body
-                return "\n\n".join(
-                    value for value in (before, normalized_block, after) if value
-                )
-        return body
-
-    @staticmethod
-    def _public_scope_selection_paragraph(
-        discovery: dict[str, Any], blueprint: dict[str, Any]
-    ) -> str:
-        """Render only observed search facts as reader-facing Introduction prose."""
-
-        record = (
-            discovery.get("search_record")
-            if isinstance(discovery.get("search_record"), dict)
-            else discovery_search_record(discovery)
-        )
-        scope = (
-            blueprint.get("scope_contract")
-            if isinstance(blueprint.get("scope_contract"), dict)
-            else {}
-        )
-        return public_scope_statement(
-            search_record=record,
-            coverage_diagnostics=(
-                discovery.get("coverage_diagnostics")
-                if isinstance(discovery.get("coverage_diagnostics"), dict)
-                else {"coverage_mode": discovery.get("coverage_mode")}
-            ),
-            scope_contract=scope,
         )
 
     @staticmethod
@@ -1367,7 +1313,21 @@ class FinalService:
             ),
         }
 
-    def conclusion_payload(self, principal: Principal, project_id: str) -> dict[str, Any]:
+    def validate_task_inputs(self, principal, project_id, payload):
+        self._approved_draft(principal, project_id)
+        expected = self.validate_artifact_inputs(principal, project_id, payload, {
+            **QUALITY_INPUT_ARTIFACTS,
+            "source_draft_artifact_id": DRAFT_DOCUMENT,
+            "source_quality_artifact_id": DRAFT_QUALITY,
+            "source_front_matter_artifact_id": FINAL_FRONT_MATTER,
+            "source_final_artifact_id": FINAL_DRAFT,
+            "source_release_artifact_id": FINAL_RELEASE,
+        })
+        if "expected_revision" in payload and self._revision(principal, project_id) != payload["expected_revision"]:
+            raise WorkflowConflict("Final inputs changed while the task was waiting or running.")
+        return expected
+
+    def _synthesis_payload(self, principal: Principal, project_id: str) -> dict[str, Any]:
         text, draft, _approval = self._approved_draft(principal, project_id)
         synthesis = self.drafts.automatic_synthesis_source(
             principal, project_id, text=text, draft=draft
@@ -1383,6 +1343,9 @@ class FinalService:
             ],
             "expected_revision": self._revision(principal, project_id),
         }
+
+    def conclusion_payload(self, principal: Principal, project_id: str) -> dict[str, Any]:
+        return self._synthesis_payload(principal, project_id)
 
     def build_payload(self, principal: Principal, project_id: str) -> dict[str, Any]:
         text, draft, _approval = self._approved_draft(principal, project_id)
@@ -1599,9 +1562,8 @@ class FinalService:
         job_payload: dict[str, Any],
         built: dict[str, Any],
     ) -> dict[str, Any]:
-        _text, current, _approval = self._approved_draft(principal, project_id)
-        if current.id != job_payload["source_draft_artifact_id"]:
-            raise WorkflowConflict("Draft changed while conclusion was generated.")
+        expected_inputs = self.validate_task_inputs(principal, project_id, job_payload)
+        current = self._artifact(principal, project_id, DRAFT_DOCUMENT)
         markdown = str(built.get("markdown") or "").strip()
         if not markdown:
             raise WorkflowValidationError("Conclusion generation returned no Markdown.")
@@ -1637,7 +1599,7 @@ class FinalService:
                         job_payload.get("excluded_manual_paragraph_ids") or []
                     ),
                 },
-                expected_current_artifacts={DRAFT_DOCUMENT: current.id},
+                expected_current_artifacts=expected_inputs,
             )
         return {
             "conclusion_artifact_id": published[FINAL_CONCLUSION].id,
@@ -1646,21 +1608,7 @@ class FinalService:
         }
 
     def overview_payload(self, principal: Principal, project_id: str) -> dict[str, Any]:
-        text, draft, _approval = self._approved_draft(principal, project_id)
-        synthesis = self.drafts.automatic_synthesis_source(
-            principal, project_id, text=text, draft=draft
-        )
-        return {
-            **self.drafts.compatibility_payload(principal, project_id),
-            "project_id": project_id,
-            "draft_text": synthesis["draft_text"],
-            "source_draft_artifact_id": draft.id,
-            "source_quality_artifact_id": synthesis["source_quality_artifact_id"],
-            "excluded_manual_paragraph_ids": synthesis[
-                "excluded_manual_paragraph_ids"
-            ],
-            "expected_revision": self._revision(principal, project_id),
-        }
+        return self._synthesis_payload(principal, project_id)
 
     def publish_overview(
         self,
@@ -1669,9 +1617,8 @@ class FinalService:
         job_payload: dict[str, Any],
         built: dict[str, Any],
     ) -> dict[str, Any]:
-        _text, current, _approval = self._approved_draft(principal, project_id)
-        if current.id != job_payload["source_draft_artifact_id"]:
-            raise WorkflowConflict("Draft changed while overview was generated.")
+        expected_inputs = self.validate_task_inputs(principal, project_id, job_payload)
+        current = self._artifact(principal, project_id, DRAFT_DOCUMENT)
         raw_output = str(built.get("output_path") or "").strip()
         output = Path(raw_output).resolve() if raw_output else None
         user_root = self.artifacts.workspace_manager.user_root(principal.user_id)
@@ -1719,7 +1666,7 @@ class FinalService:
                         ),
                     },
                 },
-                expected_current_artifacts={DRAFT_DOCUMENT: current.id},
+                expected_current_artifacts=expected_inputs,
             )
         return {
             "overview_artifact_id": published[FINAL_OVERVIEW_IMAGE].id,
@@ -2046,6 +1993,11 @@ class FinalService:
             if isinstance(compatibility.get("section_index"), dict)
             else {}
         )
+        # Re-render generated tables from the same approved source context. Keep
+        # the saved prose, approval, and citation ledger intact.
+        draft_body = refresh_generated_comparison_tables(
+            draft_body, section_index, matrix_rows or [],
+        )
         structured_source_paper_ids = [
             str(paper_id)
             for section in section_index.get("sections") or []
@@ -2103,12 +2055,6 @@ class FinalService:
         # are not publication prose.
         draft_body = self._sanitize_internal_section_headings(draft_body)
         draft_body = self._remove_review_methods(draft_body)
-        scope_selection = self._public_scope_selection_paragraph(
-            discovery, blueprint
-        )
-        draft_body = self._insert_after_introduction_heading(
-            draft_body, scope_selection
-        )
         overview_block = ""
         if overview is not None:
             overview_lines = [
@@ -2224,12 +2170,22 @@ class FinalService:
             )
             else {}
         )
-        changed_after_blueprint = sorted(
+        version_changed = sorted(
             paper_id
             for paper_id, artifact_id in reference_metadata_artifact_ids.items()
             if str(blueprint_metadata_ids.get(paper_id) or "")
             and str(blueprint_metadata_ids.get(paper_id) or "") != str(artifact_id)
         )
+        changed_after_blueprint = []
+        for paper_id in version_changed:
+            try:
+                before = self.artifacts.resolve_owned_artifact(principal.user_id, str(blueprint_metadata_ids[paper_id]))
+                after = self.artifacts.resolve_owned_artifact(principal.user_id, str(reference_metadata_artifact_ids[paper_id]))
+                same = _same_metadata_content(json.loads(before.path.read_text(encoding="utf-8")), json.loads(after.path.read_text(encoding="utf-8")))
+            except (OSError, ValueError, WorkflowNotFound):
+                same = False
+            if not same:
+                changed_after_blueprint.append(paper_id)
         if changed_after_blueprint:
             release_integrity_issues.append(
                 "scope_selection_requires_recheck_after_metadata_change"
@@ -2959,7 +2915,7 @@ class FinalService:
                 **dict(draft_payload.get("draft_approval") or {}),
                 "record": dict(draft_payload.get("draft_approval") or {}),
             },
-            "final_draft_md": final_text,
+            "final_draft_md": _normalize_publication_markup(final_text),
             "final_artifact_id": final_artifact.id if final_artifact else "",
             "final_current": final_current,
             "conclusion_generated_md": conclusion,

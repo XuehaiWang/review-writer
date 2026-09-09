@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,9 +13,18 @@ SPEC = importlib.util.spec_from_file_location("review_metadata_prepare_script", 
 assert SPEC is not None and SPEC.loader is not None
 prepare_metadata = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(prepare_metadata)
+VALIDATE_SCRIPT = (
+    ROOT / "skills" / "review-metadata-prep" / "scripts" / "validate_metadata.py"
+)
+VALIDATE_SPEC = importlib.util.spec_from_file_location(
+    "review_metadata_validate_script", VALIDATE_SCRIPT
+)
+assert VALIDATE_SPEC is not None and VALIDATE_SPEC.loader is not None
+validate_metadata = importlib.util.module_from_spec(VALIDATE_SPEC)
+VALIDATE_SPEC.loader.exec_module(validate_metadata)
 
 
-class MetadataTaxonomyMatchingTests(unittest.TestCase):
+class MetadataPreparationTests(unittest.TestCase):
     def test_h2_article_title_replaces_mineru_p001_slug(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             markdown = Path(temporary) / "p001.md"
@@ -88,29 +98,88 @@ class MetadataTaxonomyMatchingTests(unittest.TestCase):
             )
         )
 
-    def test_short_metal_alias_does_not_match_inside_an_ordinary_word(self) -> None:
-        tags = prepare_metadata.structured_tags_from_classification_rules(
+    def test_llm_payload_does_not_request_or_expose_structured_tags(self) -> None:
+        metadata, _blocks, _markdown, _registry = prepare_metadata.build_metadata(
+            "P001",
+            {"slug": "paper", "pdf_name": "paper.pdf"},
+            None,
+            None,
+            None,
+            None,
             ROOT,
-            "Molecular design and calculations for stereoselective allene synthesis",
-            profile="allene",
+        )
+        payload = prepare_metadata.build_llm_payload(
+            metadata,
+            [],
+            "",
+            "Extract bibliographic metadata only.",
+            "test-model",
         )
 
-        self.assertEqual("not specified", tags["catalyst_or_method"])
-
-    def test_explicit_metal_phrase_uses_the_correct_catalyst_label(self) -> None:
-        gold = prepare_metadata.structured_tags_from_classification_rules(
-            ROOT,
-            "Gold-catalyzed synthesis of axially chiral allenes",
-            profile="allene",
+        schema = payload["text"]["format"]["schema"]
+        self.assertNotIn("structured_tags", schema["required"])
+        self.assertNotIn("structured_tags", schema["properties"])
+        user_content = json.loads(payload["input"][1]["content"])
+        self.assertNotIn(
+            "structured_tags", user_content["rule_extracted_initial_metadata"]
         )
-        nickel = prepare_metadata.structured_tags_from_classification_rules(
+        self.assertNotIn("classification_rules", user_content)
+
+    def test_llm_merge_ignores_unexpected_automatic_structured_tags(self) -> None:
+        metadata, _blocks, _markdown, _registry = prepare_metadata.build_metadata(
+            "P001",
+            {"slug": "paper", "pdf_name": "paper.pdf"},
+            None,
+            None,
+            None,
+            None,
             ROOT,
-            "A Ni-catalyzed stereoselective allenylation method",
-            profile="allene",
+        )
+        automatic_tags = {
+            key: "automatically classified"
+            for key in prepare_metadata.STRUCTURED_TAG_KEYS
+        }
+
+        prepare_metadata.merge_llm(
+            metadata,
+            {
+                "structured_tags": {
+                    "value": automatic_tags,
+                    "source": "llm",
+                    "confidence": 1.0,
+                    "human_checked": False,
+                },
+                "warnings": [],
+            },
         )
 
-        self.assertEqual("gold catalysis", gold["catalyst_or_method"])
-        self.assertEqual("nickel catalysis", nickel["catalyst_or_method"])
+        self.assertEqual(
+            {"not specified"}, set(metadata["structured_tags"]["value"].values())
+        )
+        self.assertEqual(
+            "project_neutral_unverified", metadata["structured_tags"]["source"]
+        )
+
+    def test_validation_rejects_persisted_unverified_tag_values(self) -> None:
+        metadata, _blocks, _markdown, _registry = prepare_metadata.build_metadata(
+            "P001",
+            {"slug": "paper", "pdf_name": "paper.pdf"},
+            None,
+            None,
+            None,
+            None,
+            ROOT,
+        )
+        metadata["structured_tags"]["value"]["product"] = "automatic product"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "P001.metadata.json"
+            prepare_metadata.write_json(path, metadata)
+            report = validate_metadata.validate_one(path, {})
+
+        self.assertIn(
+            "unverified_structured_tag_must_be_neutral_product",
+            report["blocking_issues"],
+        )
 
 
 if __name__ == "__main__":

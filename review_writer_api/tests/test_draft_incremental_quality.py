@@ -9,6 +9,7 @@ from review_writer_api.domain_services.drafts import DraftsService
 class DraftIncrementalQualityTests(unittest.TestCase):
     def test_accept_payload_reuses_candidate_evaluation_created_before_review(self) -> None:
         service = DraftsService(None, None)  # type: ignore[arg-type]
+        service.validate_artifact_inputs = lambda *_args: {}  # Isolate immutable score reuse.
         evaluation = {
             "evaluation_scope": "single_paragraph",
             "evaluation_mode": "accepted_candidate",
@@ -183,8 +184,8 @@ class DraftIncrementalQualityTests(unittest.TestCase):
             "preflight": {
                 "paragraph_checks": [],
                 "paragraph_findings": [
-                    {"paragraph_id": "p1", "severity": "major"},
-                    {"paragraph_id": "p2", "severity": "major"},
+                    {"paragraph_id": "p1", "severity": "major", "rule": "C01"},
+                    {"paragraph_id": "p2", "severity": "major", "rule": "C01"},
                 ],
             },
         }

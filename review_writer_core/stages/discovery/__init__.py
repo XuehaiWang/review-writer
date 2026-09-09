@@ -1,0 +1,1 @@
+"""Discovery-stage core logic."""

@@ -57,6 +57,15 @@ python scripts/apply_feedback_overlays.py --review-root <review-root> --project-
 
 ## Host Integration Rules
 
+- Scientific fact-card extraction and the former automatic fact-repair chain
+  are not prerequisites or automatic substeps of Draft evaluation/optimization.
+  Check current manuscript assertions against original passages. Targeted source
+  retrieval/rechecks remain available; do not equate them with regenerating
+  fact cards or revising the confirmed chapter plan.
+- Reuse a quality baseline only for its matching manuscript and evaluation
+  context. The host handles reversible artifact-URL/local-path projection and
+  stale-baseline recovery; do not disable hash checks or reuse a stale score
+  merely to avoid a failed optimization step.
 - Treat evaluation, rewrite candidates, targeted improvement, and human approval as Stage-8 actions depending only on the current saved draft.
 - Keep Stage 9 read-only with respect to the first draft; it only assembles and audits a human-approved Stage-8 version.
 - Pass provider settings through the host's normal runtime configuration; do not add skill-specific API keys.
@@ -73,8 +82,14 @@ python scripts/apply_feedback_overlays.py --review-root <review-root> --project-
 - For batch optimization, publish only independently improved paragraph candidates to the review interface. Keep them pending across refreshes, support per-paragraph selection, and leave the saved manuscript untouched until the user confirms.
 - Mark incremental quality explicitly and retain the last full evaluation as its baseline; require a full evaluation after arbitrary manual or full-text edits.
 
-## Release and Safety
+## Optimization completion and safety
 
-Release only when the total score reaches the overall goal, every paragraph meets the paragraph goal, and no hard-gate failure remains. The overall goal may be higher than the rubric threshold but never lower than 90. If the model is unavailable, evaluation JSON is malformed, score improvement plateaus, or protected content changes, retain the highest fully evaluated draft when available and return an explicit status for human review.
+The optional optimization loop reports its target as reached only when the
+total score reaches the overall goal, every paragraph meets the paragraph goal,
+and no hard-gate failure remains. This loop status is not an additional mandatory
+publication gate. Use the current host's approval/readiness rules for advancing
+the saved Draft. If the model is unavailable, evaluation JSON is malformed,
+score improvement plateaus, or protected content changes, retain the highest
+fully evaluated draft when available and return an explicit status for review.
 
 Do not silently fabricate evidence, references, chemical details, or scores. Do not broaden a paragraph rewrite into a whole-draft rewrite.

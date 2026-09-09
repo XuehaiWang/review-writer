@@ -1,6 +1,6 @@
 ---
 name: review-metadata-prep
-description: Prepare a MinerU-parsed review-writing paper library for metadata review. Use when Codex needs to extract or validate required paper metadata and eight fixed LLM classification tags from PDF/Markdown/content_list outputs.
+description: Prepare a MinerU-parsed review-writing paper library for metadata review. Use when Codex needs to extract or validate project-neutral bibliographic metadata from PDF/Markdown/content_list outputs.
 ---
 
 # Review Metadata Prep
@@ -50,26 +50,12 @@ Open:
 ## LLM Mode
 
 By default, `prepare_metadata.py` extracts project-neutral bibliographic
-metadata and writes all reusable structured Tags as `not specified`. Domain
-rules are reserved for query expansion and do not classify uploaded papers.
+metadata and writes reusable structured Tags as `not specified`. Domain rules
+are reserved for query expansion and project Matrix work; they do not classify
+uploaded papers or populate Library Metadata Tags.
 
-For useful classification tags, use LLM mode. The LLM extracts required bibliographic fields and exactly eight structured tags:
-
-LLM-produced reusable Tags remain unverified audit suggestions until the
-complete `structured_tags` field is explicitly marked `human_checked=true`.
-
-```text
-product
-substrate
-catalyst_or_method
-organometallic_partner
-ligand_or_chiral_source
-leaving_group
-reaction_type
-document_scope
-```
-
-Each tag value must be selected from the active shared taxonomy profile under the matching category, or `not specified`. The built-in default is `<review-root>/review_writer_core/taxonomies/allene.py`. Select another built-in profile with `REVIEW_TAXONOMY_PROFILE`, or point `REVIEW_CLASSIFICATION_RULES` at an absolute or workspace-relative Python rules file. Metadata must record the active taxonomy path and SHA-256 identity.
+LLM mode may enhance title, authors, year, and abstract extraction. It never
+generates or updates `structured_tags`.
 
 To enable LLM enhancement, set:
 
@@ -92,60 +78,28 @@ python <review-root>/skills/review-metadata-prep/scripts/prepare_metadata.py \
   --reasoning-effort high
 ```
 
-LLM extraction is constrained to the first-page blocks, title/author/abstract candidates, and early Markdown context. Do not send full papers unless explicitly needed.
-
-To refresh only the eight LLM tags on an existing library without rebuilding paper IDs or paths:
-
-```bash
-python <review-root>/skills/review-metadata-prep/scripts/llm_retag_metadata.py \
-  --review-root <review-root> \
-  --model "$REVIEW_METADATA_MODEL" \
-  --base-url "$OPENAI_BASE_URL" \
-  --reasoning-effort high \
-  --api-key "$OPENAI_API_KEY"
-```
-
-For a full-library refresh, prefer the resumable batch runner. It processes three papers per round by default, skips already successful LLM-tagged papers, writes progress after every paper, and retries failures:
-
-```bash
-python <review-root>/skills/review-metadata-prep/scripts/batch_llm_retag_metadata.py \
-  --review-root <review-root> \
-  --batch-size 3 \
-  --max-attempts 5 \
-  --retry-delay 30 \
-  --sleep-seconds 0.5
-```
-
-Use `--force` only when existing successful LLM tags should be overwritten. Use `--retry-forever` only when the API failures are known to be transient.
+LLM extraction is constrained to the first-page blocks,
+title/author/abstract candidates, and early Markdown context. Do not send full
+papers unless explicitly needed.
 
 Useful options:
 
 ```text
---paper-id P001
---limit 5
 --base-url <openai-compatible-base-url>
 --api-key <key>
 --reasoning-effort high
 --sleep-seconds 0.5
 ```
 
-Outputs:
-
-```text
-review-library/metadata/llm_retag_report.json
-review-library/metadata/llm_retag_report.md
-review-library/metadata/llm_retag_batch_report.json
-review-library/metadata/llm_retag_batch_report.md
-```
-
-If old metadata files need the new `structured_tags` field before LLM retagging:
+If old metadata files need the neutral `structured_tags` field for schema
+compatibility:
 
 ```bash
 python <review-root>/skills/review-metadata-prep/scripts/backfill_structured_tags.py \
   --review-root <review-root>
 ```
 
-This only writes `not specified` placeholders for schema compatibility. It does not replace LLM tagging.
+This only writes `not specified` placeholders. It does not classify papers.
 
 ## Outputs
 
@@ -193,18 +147,19 @@ confidence
 human_checked
 ```
 
-Use `human_review` for audit status and notes. Local paper retrieval may use the
-eight values inside `structured_tags` only when the complete field has
-`human_checked=true`; unverified rule or LLM values remain audit data only. Do
-not generate or rely on legacy `keywords`, `llm_tags`, `human_tags`, or category
-compatibility fields.
+Use `human_review` for audit status and notes. `structured_tags` stays neutral
+unless a person explicitly edits and verifies the complete field with
+`human_checked=true`. Do not automatically generate Tags or rely on legacy
+`keywords`, `llm_tags`, `human_tags`, or category compatibility fields.
 
 ## Human Audit Dashboard
 
-The dashboard code lives outside this skill:
+The current Web dashboard and API live outside this skill:
 
 ```text
-<review-root>/view/
+<review-root>/frontend/src/features/library/
+<review-root>/review_writer_api/domain_services/library.py
+<review-root>/review_writer_api/routers/library.py
 ```
 
 The dashboard is a review console. In hosted mode PostgreSQL owns user, project, audit and current-artifact state; immutable JSON metadata remains the scientific interchange artifact.
@@ -234,6 +189,7 @@ missing year
 missing abstract
 missing structured_tags
 missing any of the eight structured tag keys
+unverified structured tags are not neutral
 missing source PDF
 missing Markdown
 missing metadata JSON
@@ -245,7 +201,6 @@ Treat these as review warnings:
 ```text
 missing journal
 missing DOI
-missing structured_tags
 structured tag value is not specified
 low confidence title
 low confidence abstract

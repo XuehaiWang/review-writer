@@ -3,23 +3,25 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from collections.abc import Mapping
 from typing import Any
 import uuid
 
 from fastapi import APIRouter, Depends, Header, status
 
 from review_writer_api.domain_services.planning import PlanningService
+from review_writer_api.job_handlers.stage_execution import queue_fact_revision
+from review_writer_core.stages.planning.matrix import has_fact_sources
 from review_writer_api.errors import WorkflowConflict
 from review_writer_api.job_service import JobService
 from review_writer_api.routers.jobs import _job_response
-from review_writer_api.security import Principal, Role
+from review_writer_api.security import Principal
 from review_writer_api.workflow_schemas import (
     BlueprintRestoreRequest,
     BlueprintGenerateRequest,
     BlueprintConfirmRequest,
     MatrixLimitedModeRequest,
     MatrixRowUpdateRequest,
+    OutlineRecommendationRequest,
     OutlineSaveRequest,
     ReferenceOutlineUploadRequest,
 )
@@ -29,69 +31,10 @@ def build_planning_router(
     principal_dependency: Callable[..., Principal],
     planning_service: PlanningService,
     job_service: JobService,
-    handlers: Mapping[str, Callable] | None = None,
 ) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/projects/{project_id}/planning", tags=["planning"]
     )
-    enrichment_builder = dict(handlers or {}).get("matrix.enrich")
-    if enrichment_builder is not None:
-
-        def matrix_enrichment_handler(context, payload):
-            payload = dict(payload)
-            principal = Principal(context.user_id, frozenset({Role.USER}))
-            if payload.get("prepare_on_start"):
-                expected_artifact_id = str(
-                    payload.get("source_matrix_artifact_id") or ""
-                )
-                payload = planning_service.matrix_enrichment_payload(
-                    principal, str(context.project_id)
-                )
-                if (
-                    expected_artifact_id
-                    and payload.get("source_matrix_artifact_id") != expected_artifact_id
-                ):
-                    raise WorkflowConflict(
-                        "Matrix changed before scientific fact extraction started."
-                    )
-            if context.retry_of_job_id:
-                source_job = context.repository.get_job(
-                    context.user_id, context.retry_of_job_id
-                )
-                source_result = (source_job.result or {}) if source_job is not None else {}
-                checkpoint = source_result.get("matrix_enrichment_checkpoint")
-                if not isinstance(checkpoint, dict):
-                    # The progress callback persists checkpoints before the
-                    # handler publishes its final result.  A publish conflict
-                    # therefore leaves the scientifically useful checkpoint
-                    # under this generic progress key.
-                    checkpoint = source_result.get("section_checkpoint")
-                if isinstance(checkpoint, dict):
-                    payload["resume_checkpoint"] = checkpoint
-            total = int(payload.get("pending_paper_count") or 0)
-            context.report_progress(0, total)
-            if not total:
-                return {
-                    "project_id": str(context.project_id),
-                    "status": "current",
-                    "message": "Matrix scientific facts are already current.",
-                }
-            if not int(payload.get("fulltext_candidate_paper_count") or 0):
-                return {
-                    "project_id": str(context.project_id),
-                    "status": "awaiting_fulltext_index",
-                    "pending_paper_count": total,
-                    "message": "Build full-text indexes before extracting Matrix scientific facts.",
-                }
-            built = enrichment_builder(context, payload)
-            context.checkpoint()
-            result = planning_service.publish_matrix_enrichment(
-                principal, str(context.project_id), payload, built
-            )
-            context.report_progress(total, total)
-            return result
-
-        job_service.register_handler("matrix.enrich", matrix_enrichment_handler)
 
     @router.get("")
     def get_planning(
@@ -107,7 +50,7 @@ def build_planning_router(
         payload: MatrixRowUpdateRequest,
         principal: Principal = Depends(principal_dependency),
     ) -> dict[str, Any]:
-        return planning_service.update_matrix_row(
+        saved = planning_service.update_matrix_row(
             principal,
             project_id,
             paper_id,
@@ -117,6 +60,7 @@ def build_planning_router(
             scientific_facts=payload.scientific_facts,
             mark_complete=payload.mark_complete,
         )
+        return queue_fact_revision(planning_service, job_service, principal, project_id, saved)
 
     @router.post("/matrix/enrichment/jobs", status_code=status.HTTP_202_ACCEPTED)
     def enrich_matrix(
@@ -136,7 +80,7 @@ def build_planning_router(
                 "status": "current",
                 "message": "Matrix scientific facts are already current.",
             }
-        if not int(payload.get("fulltext_candidate_paper_count") or 0):
+        if not has_fact_sources(payload):
             raise WorkflowConflict(
                 "Build full-text indexes before extracting Matrix scientific facts."
             )
@@ -177,6 +121,19 @@ def build_planning_router(
             manual="outline_md" in payload.model_fields_set,
         )
 
+    @router.post("/outline/recommendations")
+    async def recommend_outline_papers(
+        project_id: str,
+        payload: OutlineRecommendationRequest,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        return await planning_service.recommend_outline_papers(
+            principal,
+            project_id,
+            revision=payload.revision,
+            outline_md=payload.outline_md,
+        )
+
     @router.post("/reference-outlines", status_code=status.HTTP_201_CREATED)
     def register_reference_outline(
         project_id: str,
@@ -191,15 +148,36 @@ def build_planning_router(
             content_base64=payload.content_base64,
         )
 
-    @router.post("/blueprint")
-    def generate_blueprint(
-        project_id: str,
-        payload: BlueprintGenerateRequest,
+    @router.post("/blueprint", status_code=status.HTTP_202_ACCEPTED)
+    @router.post("/blueprint/jobs", status_code=status.HTTP_202_ACCEPTED)
+    def plan_blueprint(
+        project_id: str, payload: BlueprintGenerateRequest,
+        idempotency_key: str = Header(default="", alias="Idempotency-Key"),
         principal: Principal = Depends(principal_dependency),
-    ) -> dict[str, Any]:
-        return planning_service.generate_blueprint(
-            principal, project_id, revision=payload.revision
-        )
+    ):
+        """Both public entries submit the same source-grounded argument planning job."""
+        if payload.draft_quality_artifact_id:
+            raise WorkflowConflict("Draft argument repairs now run in Draft optimization. Refresh the page and generate a joint revision there.")
+        prepared = planning_service.blueprint_job_payload(principal, project_id, revision=payload.revision)
+        request_key = idempotency_key.strip() or str(uuid.uuid4())
+        try:
+            job = job_service.submit(
+                principal, scope="project", project_id=project_id, job_type="planning.blueprint",
+                idempotency_key=request_key, operation_key="blueprint-planning", payload=prepared,
+            )
+        except WorkflowConflict as conflict:
+            existing_id = conflict.details.get("existing_job_id")
+            if not existing_id:
+                raise
+            existing = job_service.status(principal, existing_id)
+            # Preparation adds timestamps and checkpoints. For an already scoped
+            # idempotency key, compare the client request, not those derived fields.
+            if (existing.idempotency_key != request_key
+                    or existing.payload.get("blueprint_revision") != payload.revision
+                    or existing.payload.get("draft_repair_input_artifacts") != prepared.get("draft_repair_input_artifacts")):
+                raise
+            job = existing
+        return _job_response(job)
 
     @router.post("/blueprint/confirm")
     def confirm_blueprint(
@@ -208,7 +186,7 @@ def build_planning_router(
         principal: Principal = Depends(principal_dependency),
     ) -> dict[str, Any]:
         return planning_service.confirm_blueprint(
-            principal, project_id, revision=payload.revision
+            principal, project_id, revision=payload.revision, artifact_id=payload.artifact_id
         )
 
     @router.post("/blueprint/restore")

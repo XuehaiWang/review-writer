@@ -8,6 +8,20 @@ description: Use when a merged review draft has been human-approved and needs a 
 Generate a grounded ending that synthesizes the approved review without
 recapping it or introducing unmapped papers.
 
+## Current Web integration
+
+The native `final_conclusion` job calls `scripts/generate_conclusion1.py` with
+`--mode orchestrated` using a temporary snapshot of the approved current Draft.
+Results are published as immutable artifacts tied to that Draft. The Web Final
+builder can also assemble a manuscript without a separately generated
+conclusion; when this action is requested, the generated text and report must
+both be valid and current. A conclusion chapter produced during Sections is a
+different output and does not itself complete this optional Final action.
+
+Do not require scientific fact cards before this action. Existing reading
+notes and Matrix data are supporting context; the approved manuscript and
+its mapped sources remain authoritative.
+
 ## Orchestrated Contract
 
 - Commands use and default to `--mode orchestrated`; this selects only the approved first draft.

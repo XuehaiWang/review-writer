@@ -1,0 +1,1 @@
+"""Planning-stage core logic."""

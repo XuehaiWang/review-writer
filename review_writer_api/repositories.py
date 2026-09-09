@@ -16,8 +16,9 @@ from review_writer_core.taxonomy import DEFAULT_TAXONOMY_PROFILE, validate_taxon
 from review_writer_core.workspace import WorkspaceConfigurationError, WorkspacePaths, validate_project_id
 
 from .database import Project, database_session, utc_now
+from .job_lifecycle import cancel_project_jobs
 from .model_catalog import DEFAULT_MODEL_TIER, resolve_model_tier
-from .workflow_models import WorkflowStageState
+from .workflow_models import WorkflowJob, WorkflowStageState
 
 
 class ProjectOperationError(ValueError):
@@ -491,11 +492,19 @@ class HostedProjectRepository:
 
     def delete_for_user(self, user_id: str, project_id: str) -> bool:
         with database_session(self.session_factory) as session:
-            project = self._owned_project(session, user_id, project_id)
+            project = self._owned_project(session, user_id, project_id, for_update=True)
             if project is None:
                 return False
+            now = utc_now()
             project.status = "deleted"
-            project.deleted_at = utc_now()
+            project.deleted_at = now
+            project.updated_at = now
+            cancel_project_jobs(
+                session,
+                now,
+                WorkflowJob.project_id == project.id,
+                WorkflowJob.user_id == project.user_id,
+            )
             return True
 
     def restore_for_user(self, user_id: str, project_id: str) -> bool:

@@ -49,7 +49,7 @@ class PublicationCaptionTests(unittest.TestCase):
             result.publication_text,
             "Mechanism for the phosphine-catalyzed [3+2] cycloaddition",
         )
-        self.assertEqual(result.version, "publication-caption/3")
+        self.assertEqual(result.version, "publication-caption/4")
 
         capitalized = normalize_publication_caption(
             "Figure 2. Cycloaddi tions enabled by phosphines."
@@ -59,16 +59,15 @@ class PublicationCaptionTests(unittest.TestCase):
             "Cycloadditions enabled by phosphines",
         )
 
-    def test_abnormally_long_source_uses_role_aware_caption_without_truncation(self) -> None:
+    def test_abnormally_long_source_stays_pending_without_generic_caption(self) -> None:
         raw = "Figure 8. Proposed mechanism " + "detailed intermediate description " * 120
 
         result = normalize_publication_caption(raw)
 
         self.assertEqual("mechanism_model", result.representative_role)
-        self.assertEqual("generated_fallback", result.quality_status)
-        self.assertIn("Proposed mechanistic pathway", result.publication_text)
+        self.assertEqual("pending", result.quality_status)
+        self.assertEqual("", result.publication_text)
         self.assertEqual(raw.strip(), result.source_text)
-        self.assertNotIn(result.publication_text, raw)
 
 
 if __name__ == "__main__":

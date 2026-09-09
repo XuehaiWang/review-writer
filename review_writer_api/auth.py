@@ -8,7 +8,6 @@ import hmac
 import secrets
 import threading
 import time
-import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone

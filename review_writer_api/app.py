@@ -78,6 +78,7 @@ from .schemas import (
     ModelCatalogResponse,
     ModelGatewayRequest,
     ModelGatewayResponse,
+    ModelGatewayResultResponse,
     EmbeddingGatewayRequest,
     EmbeddingGatewayResponse,
     ImageGatewayRequest,
@@ -115,6 +116,11 @@ from .routers.drafts import build_drafts_router
 from .routers.final import build_final_router
 from .routers.planning import build_planning_router
 from .routers.sections import build_sections_router
+from .job_handlers.stage_execution import register_planning_handlers, register_sections_handler
+from .job_handlers.discovery_execution import register_discovery_handlers
+from .job_handlers.figures_execution import register_figure_handlers
+from .job_handlers.draft_execution import register_draft_handlers
+from .job_handlers.final_execution import register_final_handlers
 from .routers.figures import build_figures_router
 from .scientific_runner import ScientificRunner
 from .workflow_repository import WorkflowRepository
@@ -321,6 +327,8 @@ def create_app(
             hosted_workspace_manager,
             provider_settings_service,
             model_gateway,
+            planning_service=planning_service,
+            sections_service=sections_service,
         ).mapping()
         if scientific_runner is not None and hosted_workspace_manager is not None
         else {}
@@ -1170,8 +1178,24 @@ def create_app(
                     response_format=payload.response_format,
                 )
             except ModelGatewayError as exc:
-                raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+                raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "gateway_detail", str(exc))) from exc
             return ModelGatewayResponse.model_validate(result)
+
+        @app.get(
+            "/api/internal/v1/model-responses/{request_key}",
+            response_model=ModelGatewayResultResponse,
+            include_in_schema=False,
+        )
+        def internal_model_result(request_key: str, request: Request) -> ModelGatewayResultResponse:
+            if not resolved.embedded_gateway_routes_enabled:
+                raise HTTPException(status_code=404, detail="Not Found")
+            authorization = str(request.headers.get("Authorization") or "")
+            token = authorization[7:].strip() if authorization.casefold().startswith("bearer ") else ""
+            try:
+                result = model_gateway.request_result(token, request_key=request_key)
+            except ModelGatewayError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "gateway_detail", str(exc))) from exc
+            return ModelGatewayResultResponse.model_validate(result)
 
         @app.post(
             "/api/internal/v1/embeddings",
@@ -1198,7 +1222,7 @@ def create_app(
                     inputs=payload.inputs,
                 )
             except ModelGatewayError as exc:
-                raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+                raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "gateway_detail", str(exc))) from exc
             return EmbeddingGatewayResponse.model_validate(result)
 
         @app.post(
@@ -1232,7 +1256,7 @@ def create_app(
                     size=payload.size,
                 )
             except ModelGatewayError as exc:
-                raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+                raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "gateway_detail", str(exc))) from exc
             return ImageGatewayResponse.model_validate(result)
 
         @app.get(
@@ -1386,58 +1410,58 @@ def create_app(
             )
         )
     if discovery_service is not None and job_service is not None:
+        register_discovery_handlers(discovery_service, job_service, native_handlers)
         app.include_router(
             build_discovery_router(
                 current_principal,
                 discovery_service,
                 job_service,
                 planning_service,
-                native_handlers,
             )
         )
     if planning_service is not None and job_service is not None:
+        register_planning_handlers(planning_service, job_service, native_handlers)
         app.include_router(
             build_planning_router(
                 current_principal,
                 planning_service,
                 job_service,
-                native_handlers,
             )
         )
     if sections_service is not None and job_service is not None:
+        register_sections_handler(sections_service, job_service, native_handlers)
         app.include_router(
             build_sections_router(
                 current_principal,
                 sections_service,
                 job_service,
-                native_handlers,
             )
         )
     if figures_service is not None and job_service is not None:
+        register_figure_handlers(figures_service, job_service, native_handlers)
         app.include_router(
             build_figures_router(
                 current_principal,
                 figures_service,
                 job_service,
-                native_handlers,
             )
         )
     if drafts_service is not None and job_service is not None:
+        register_draft_handlers(drafts_service, job_service, native_handlers)
         app.include_router(
             build_drafts_router(
                 current_principal,
                 drafts_service,
                 job_service,
-                native_handlers,
             )
         )
     if final_service is not None and job_service is not None:
+        register_final_handlers(final_service, job_service, native_handlers)
         app.include_router(
             build_final_router(
                 current_principal,
                 final_service,
                 job_service,
-                native_handlers,
             )
         )
     return app

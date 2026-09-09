@@ -17,6 +17,7 @@ from review_writer_core.markdown_images import (
     malformed_markdown_image_lines,
     parse_markdown_image,
 )
+from review_writer_core.publication_tables import split_table_row
 from review_writer_core.publication_caption import (
     infer_figure_role,
     repair_publication_ocr_splits,
@@ -99,12 +100,8 @@ def _semantic_text(block: dict[str, Any]) -> str:
 
 
 def _is_table_separator(line: str) -> bool:
-    cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+    cells = split_table_row(line)
     return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
-
-
-def _table_cells(line: str) -> list[str]:
-    return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
 def _caption_text(line: str) -> str:
@@ -432,11 +429,11 @@ def build_manuscript_state(
                 if TABLE_CAPTION.match(candidate):
                     caption = candidate.strip("*").strip()
                     blocks.pop()
-            header = _table_cells(line)
+            header = split_table_row(line)
             rows: list[list[str]] = []
             index += 2
             while index < len(lines) and "|" in lines[index] and lines[index].strip():
-                rows.append(_table_cells(lines[index]))
+                rows.append(split_table_row(lines[index]))
                 index += 1
             next_index = index
             while next_index < len(lines) and not lines[next_index].strip():

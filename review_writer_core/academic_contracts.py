@@ -666,6 +666,7 @@ def taxonomy_diagnostics(
     matrix_paper_ids: Iterable[Any],
     *,
     classification_contract: dict[str, Any] | None = None,
+    unused_papers: Iterable[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Diagnose routing and classification-contract drift.
 
@@ -712,6 +713,7 @@ def taxonomy_diagnostics(
                 "context_paper_ids": _unique(
                     source.get("context_paper_ids")
                     or source.get("context_papers")
+                    or source.get("supporting_papers")
                     or []
                 ),
                 "excluded_papers": [
@@ -767,11 +769,11 @@ def taxonomy_diagnostics(
         issues.append(
             {
                 "rule_id": "taxonomy.dominant_boundary_section",
-                "severity": "planning_blocker",
+                "severity": "warning",
                 "section_ids": dominant_boundary_ids,
                 "message": (
-                    "A residual boundary section owns too much of the selected corpus. "
-                    "Reroute its papers into evidence-based academic categories before writing."
+                    "A large residual group merits scholarly analysis: establish its shared scientific question "
+                    "and evidence-based rationale, or propose narrower categories. Its size alone does not block writing."
                 ),
             }
         )
@@ -902,6 +904,11 @@ def taxonomy_diagnostics(
         for item in normalized
         for exclusion in item["excluded_papers"]
     ]
+    exclusions.extend(
+        {"paper_id": _text(item.get("paper_id")), "reason": _text(item.get("reason"))}
+        for item in unused_papers or []
+        if isinstance(item, dict) and _text(item.get("paper_id"))
+    )
     excluded = _unique(
         exclusion["paper_id"]
         for exclusion in exclusions
@@ -929,7 +936,7 @@ def taxonomy_diagnostics(
                 "rule_id": "taxonomy.orphan_papers",
                 "severity": "planning_blocker",
                 "paper_ids": orphan_ids,
-                "message": "Every selected paper needs one primary analytical route or an explicit exclusion reason.",
+                "message": "Some selected papers have neither a chapter assignment nor a documented exclusion reason.",
             }
         )
 
@@ -943,7 +950,7 @@ def taxonomy_diagnostics(
                 *(exclusion["paper_id"] for exclusion in item["excluded_papers"]),
             ]
             if paper_id not in matrix_set
-        }
+        } | {item["paper_id"] for item in exclusions if item["paper_id"] not in matrix_set}
     )
     if unknown_ids:
         issues.append(
@@ -1123,6 +1130,15 @@ def taxonomy_diagnostics(
     }
 
 
+def blueprint_taxonomy_diagnostics(blueprint: dict[str, Any], matrix_paper_ids: Iterable[Any]) -> dict[str, Any]:
+    """Use the same chapter roles and explicit exclusions at every Blueprint boundary."""
+    return taxonomy_diagnostics(
+        blueprint.get("sections") or [], matrix_paper_ids,
+        classification_contract=blueprint.get("classification_contract") or blueprint.get("classification_basis") or {},
+        unused_papers=blueprint.get("unused_papers") or [],
+    )
+
+
 def section_academic_contract(section: dict[str, Any]) -> dict[str, Any]:
     role = _text(section.get("section_role")).casefold() or "body"
     title = _text(section.get("title")) or _text(section.get("section_id"))
@@ -1141,6 +1157,9 @@ def section_academic_contract(section: dict[str, Any]) -> dict[str, Any]:
         node_type = "analytical"
         academic_role = "evidence_synthesis"
         expected = "Compare evidence on shared dimensions and explain the resulting pattern and boundary."
+        policy = section.get("single_paper_policy") or {}
+        if policy.get("mode") == "source_bounded_case_analysis":
+            expected = "Explain the primary study's findings, internal comparisons and implications within its demonstrated scope."
     return {
         "node_type": node_type,
         "academic_role": academic_role,

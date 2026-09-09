@@ -7,9 +7,37 @@ description: Read every paper explicitly selected by the human reviewer, build a
 
 Goal: read selected papers and create the literature matrix plus outline options.
 
-Boundary: this skill produces high-level structure (sections, purposes,
-assigned papers, expected figures). It does NOT emit per-paragraph or
-per-claim constraints; that is `review-section-blueprint`'s job.
+Boundary: this skill prepares selected-paper information and high-level
+structure. Blueprint then plans chapter questions and retrieval directions;
+actual scientific claims are generated from original passages during drafting.
+
+## Current Web workflow
+
+Discovery confirmation creates the selected-paper input without starting a
+separate fact-extraction job. When the reviewer generates the chapter plan,
+the same Planning job automatically performs bounded, current-topic fact
+analysis before it plans chapter questions and paper roles. It reuses the
+existing Matrix enrichment contract, cached coverage, and checkpoints.
+The first evidence-bounded extraction also attempts the primary paper route;
+run a separate route recheck only when that response and deterministic/formal
+classification both remain unresolved. Reuse semantic fact verdicts only when
+the fact fingerprint, validation contract, and immutable source spans still
+match. Once baseline evidence is review-ready, retain optional supplement
+requests for later question-scoped repair instead of exhaustively expanding
+every paper before Blueprint exists.
+
+The enriched Matrix is candidate-scoped: generating a plan does not move the
+current Matrix pointer or invalidate downstream work. Confirming the reviewed
+Blueprint atomically promotes its exact Matrix, Outline, and Blueprint input
+chain. A model/provider failure in fact analysis degrades to registered source
+passages and must not block chapter planning. Missing fact cards are never
+negative evidence and do not impose a per-paper quota.
+
+`scripts/enrich_matrix_facts.py` remains available for retry, repair, and
+standalone interchange use; it is no longer the normal user-facing prerequisite.
+The Web/API/PostgreSQL services own Matrix, Outline, and Blueprint state; the
+paths below describe scientific interchange files, not an alternate way to
+advance a Web stage.
 
 ## Inputs
 
@@ -31,7 +59,7 @@ linked PDF when choosing figures or checking chemistry
 
 ## Matrix Rules
 
-For every selected paper, every matrix row must contain all fields:
+The interchange matrix uses these paper fields:
 
 ```text
 paper_id
@@ -46,21 +74,25 @@ most_relevant_figure
 Field requirements:
 
 ```text
-keywords: use the 8 structured tag values from metadata.
+keywords: retain available paper keywords; use project classification separately and do not promote neutral Library Tags into verified classifications.
 abstract: use metadata abstract if reliable; if missing or poor, write "abstract unavailable or unreliable" and continue.
-main_content: around 1000 English words; summarize the paper's actual work, not just the abstract.
-most_relevant_figure: the figure/scheme/table that best reflects the principle or main work of the paper; include source label, caption, page hint, image path if available, and why it is relevant.
+main_content: preserve available reading notes; a lengthy per-paper summary is not required before planning and is not a substitute for original-source support.
+most_relevant_figure: retain a source-linked candidate when available; detailed figure selection can occur after section writing.
 ```
 
-Do not omit any field. Do not exclude a paper only because its abstract is poor.
+Do not fabricate missing field values. Do not exclude a paper only because
+its abstract is poor or fact cards are absent. The current planner can use
+bounded local source excerpts when abstracts are unavailable.
 
 External `web_papers` (SciAtlas/Crossref) from discovery are reference-only:
-they may be cited in the manuscript with a reference list entry, but they do
-not get a `paper_id` and do not become matrix rows.
+they do not get a local `paper_id` or become selected Matrix evidence. A search
+result alone does not authorize a manuscript claim or citation; acquire,
+register, and select the source through the normal workflow before using it
+as chapter evidence.
 
 ## Outline Rules
 
-After the matrix is complete, use:
+For outline organization, use the available selected-paper context:
 
 ```text
 review topic
@@ -69,9 +101,11 @@ review-section-blueprint writing rules / rule pack
 template review organization summary
 ```
 
-Create `2-3` outline options. Each option must include section titles, purpose, assigned papers, and expected figures.
+Offer structures appropriate to the topic rather than requiring a fixed number
+of AI-generated alternatives. Each candidate describes chapter titles and
+purposes, with paper assignments and visual intentions where available.
 
-The outline must imitate the template reviews' organization mode. Choose and name one primary structure:
+Use the chosen organization mode. Possible structures include:
 
 ```text
 problem-progressive
@@ -91,7 +125,7 @@ Write under:
 review-projects/<project_id>/01_matrix_outline/
 ```
 
-Required files:
+Standalone/interchange files may include:
 
 ```text
 paper_reading_notes.json
@@ -117,9 +151,14 @@ and Matrix. Legacy direct-heading-extraction candidates are unsafe and must not
 be offered for selection.
 The dashboard's default editor is a visual section-card builder. Reviewers can
 edit section titles and purposes, assign papers with checkboxes, request a
-metadata-based paper recommendation, and reorder sections without knowing the
-Markdown syntax. Every major section must have a non-empty title and at least
-one assigned paper before the outline can be saved.
+paper recommendation, and reorder sections without knowing the Markdown
+syntax. The editor allows papers to remain unassigned while titles and writing
+goals are prepared; recommendations can then fill assignments for review.
+Use current API validation for save and confirmation readiness. Verified facts
+may make questions, comparisons, and paper roles more specific, but do not
+require a fact-card count or invent an extra per-section paper quota. Blueprint
+defines provisional questions and directions; claim wording is still created
+and checked against original passages during section drafting.
 
 Advanced reviewers may switch to Markdown editing. Keep major sections as
 level-2 headings (`## Section title` or `## 1. Section title`) and use

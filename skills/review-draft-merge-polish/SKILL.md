@@ -7,6 +7,23 @@ description: Merge separately drafted section files into one coherent first revi
 
 Goal: merge section files into one complete review draft.
 
+## Current Web integration
+
+The native Draft service owns assembly, immutable versions, citation mapping,
+and paragraph/figure anchors. Use its API for a Web project rather than changing
+workspace files to advance a stage. The file contracts below support standalone
+tools and interchange snapshots; the legacy orchestrator's filesystem checks
+are not additional Web approval conditions.
+
+New sections use `source_passages/1`: preserve their checked claim-to-source
+bindings without requiring pre-generated scientific fact cards. Retain pending
+or limited-evidence outcomes visibly and do not turn editorial fallback notices
+into scientific assertions. Scientific text edits must use the host's binding
+invalidation and evaluation flow rather than silently retaining stale support.
+Draft evaluation and optional optimization are provided by
+`review-first-draft-feedback-loop`; merging does not automatically run the old
+fact-card extraction/repair chain.
+
 ## Inputs
 
 ```text
@@ -85,6 +102,14 @@ the draft. Never infer placement from paper order. For legacy manifests without
 an insertion plan, use the recorded target conservatively.
 
 ## Figure Numbering and Paragraph References
+
+Native assembly derives short captions through `review_writer_core.figure_caption`
+and keeps provenance separate from publication text. It rejects stale generic
+display captions, appends source credit separately, and adds a natural
+parenthetical figure reference to the relevant paragraph when needed. It does
+not append a generic "provides visual context" sentence or require fixed verbs
+such as "shows". Missing descriptions remain pending in the figure UI; the
+manuscript retains the image number/source credit without fabricated content.
 
 After inserting visual assets, number them from the order in which they occur
 in `first_draft.md`, never from redraw-manifest order, source-paper numbering,

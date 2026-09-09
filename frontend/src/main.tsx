@@ -5,6 +5,7 @@ import { BrowserRouter } from "react-router-dom";
 
 import { App } from "./app/App";
 import "./styles/app.css";
+import "./styles/metadata-editor.css";
 
 const queryClient = new QueryClient({
   defaultOptions: {

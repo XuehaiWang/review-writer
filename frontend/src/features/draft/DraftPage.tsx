@@ -11,10 +11,11 @@ import { ProjectSelector, useSelectedProject } from "../../components/ProjectSel
 import { jobIsActive, useJob } from "../../hooks/useJob";
 import { useUiText } from "../../i18n/useUiText";
 import { DraftJobStatus } from "./DraftJobStatus";
+import { DraftRepairSummary, RepairLabel, RevisionFailures, SavedSourceChecks, type SourceCheck, type RevisionFailure, type Adjustment, type RepairFinding } from "./DraftRepairSummary";
 import { readDraftJobId, writeDraftJobId } from "./draftJobPersistence";
 import { preferredDraftJobId, restorableDraftJobId, serverJobToRemember } from "./draftJobSelection";
 import { draftPublicationIsPending } from "./draftPublicationSync";
-import { hardGateDetails, type HardGateFinding } from "./hardGateDetails";
+import { DraftApprovalPanel } from "./DraftApprovalPanel";
 
 type Paragraph = { paragraph_id: string; text: string };
 type ParagraphImage = { figure_id: string; artifact_id: string; url: string };
@@ -22,7 +23,7 @@ type QualityStage = "discovery" | "planning" | "sections" | "draft";
 type RepairStage = "discovery" | "library_matrix" | "planning" | "evidence_package" | "writing_plan" | "draft" | "figures" | "bibliography" | "final";
 type QualityRouting = { recommended_return_stage?: QualityStage; recommended_action?: string; counts_by_stage?: Partial<Record<QualityStage, number>> };
 type ManualClaimReview = { warning_required?: boolean; verified_manual_paragraph_ids?: string[]; unverified_manual_paragraph_ids?: string[] };
-type QualityIssue = Record<string, unknown> & { issue_id?: string; severity?: string; paragraph_id?: string; section_id?: string; message?: string; diagnosis?: string; score?: number; route?: string; failed_dimensions?: string[]; source_check_status?: string; recommended_return_stage?: QualityStage; recommended_action?: string; repair_stage?: RepairStage; repair_action?: string; rewrite_eligible?: boolean; unresolved_primary_papers?: string[]; corpus_gap_questions?: string[]; paragraph?: { paragraph_id: string; text: string; images: ParagraphImage[] } };
+type QualityIssue = Record<string, unknown> & RepairFinding & { issue_id?: string; severity?: string; paragraph_id?: string; section_id?: string; message?: string; diagnosis?: string; score?: number; route?: string; failed_dimensions?: string[]; source_check_status?: string; recommended_return_stage?: QualityStage; recommended_action?: string; repair_stage?: RepairStage; repair_action?: string; rewrite_eligible?: boolean; blocking?: boolean; auto_repairable?: boolean; unresolved_primary_papers?: string[]; corpus_gap_questions?: string[]; paragraph?: { paragraph_id: string; text: string; images: ParagraphImage[] } };
 type IncrementalEvaluation = { paragraph_id: string; old_paragraph_score: number; new_paragraph_score: number; previous_overall_score: number; updated_overall_score: number; evaluated_at?: string };
 type RewriteCandidate = {
   candidate_id: string;
@@ -40,8 +41,8 @@ type RewriteCandidate = {
     downgraded_claim_count?: number;
   };
 };
-type OptimizationChange = { paragraph_id: string; original_text: string; candidate_text: string; source_paragraph_score?: number; candidate_paragraph_score?: number; score_delta?: number; overall_score_delta?: number; accuracy_improved?: boolean };
-type OptimizationProposal = { proposal_id: string; source_score: number; candidate_score: number; changes: OptimizationChange[]; status: string; created_at: string; reference_repair?: { changed?: boolean }; evidence_repair?: { added_evidence_count?: number } };
+type OptimizationChange = { paragraph_id: string; original_text: string; candidate_text: string; source_paragraph_score?: number; candidate_paragraph_score?: number; score_delta?: number; overall_score_delta?: number; accuracy_improved?: boolean; group_id?: string; argument_revisions?: { claim_id: string; original_proposition: string; proposition: string; reason: string }[] };
+type OptimizationProposal = { proposal_id: string; source_score: number; candidate_score: number; changes: OptimizationChange[]; status: string; created_at: string; reference_repair?: { changed?: boolean }; evidence_repair?: { added_evidence_count?: number }; excluded?: RevisionFailure[] };
 type OptimizationDecisionResult = { proposal_id: string; decision: "accept" | "reject"; selected_paragraph_ids?: string[]; draft_changed?: boolean; score?: number; revision: number };
 type DraftVersion = { artifact_id: string; current: boolean; operation: string; created_at: string };
 type DraftPayload = {
@@ -106,25 +107,35 @@ export function OptimizationProposalReview({ proposal, decide, disabled }: { pro
     || Number(proposal.evidence_repair?.added_evidence_count || 0) > 0,
   );
   const selectedSet = new Set(selected);
+  const sourceScore = Math.max(0, Math.min(100, Number(proposal.source_score || 0)));
   const selectedScore = Math.max(0, Math.min(100,
-    Number(proposal.source_score || 0) + proposal.changes
+    sourceScore + proposal.changes
       .filter((change) => selectedSet.has(change.paragraph_id))
       .reduce((total, change) => total + Number(change.overall_score_delta || 0), 0),
   ));
-  const displayedCandidateScore = proposal.changes.every((change) => Number.isFinite(Number(change.overall_score_delta)))
-    ? selectedScore
-    : selected.length === proposal.changes.length
-      ? Number(proposal.candidate_score || 0)
-      : Number(proposal.source_score || 0);
-  const toggle = (paragraphId: string) => setSelected((current) => current.includes(paragraphId) ? current.filter((value) => value !== paragraphId) : [...current, paragraphId]);
+  const candidateScore = Number(proposal.candidate_score);
+  const allChangesSelected = selected.length === proposal.changes.length;
+  const displayedCandidateScore = allChangesSelected && Number.isFinite(candidateScore)
+    ? Math.max(0, Math.min(100, candidateScore))
+    : proposal.changes.every((change) => Number.isFinite(Number(change.overall_score_delta)))
+      ? selectedScore
+      : sourceScore;
+  const toggle = (paragraphId: string) => setSelected((current) => {
+    const group = proposal.changes.find(change => change.paragraph_id === paragraphId)?.group_id;
+    const ids = proposal.changes.filter(change => group ? change.group_id === group : change.paragraph_id === paragraphId).map(change => change.paragraph_id);
+    return current.includes(paragraphId) ? current.filter(value => !ids.includes(value)) : [...new Set([...current, ...ids])];
+  });
   return <section className="optimization-proposal-review">
-    <header><div><span>{text("待人工审核", "Awaiting human review")}</span><h3>{text("批量安全优化对比", "Batch safe-optimization comparison")}</h3></div><strong>{Number(proposal.source_score || 0).toFixed(1)} → {displayedCandidateScore.toFixed(1)}</strong></header>
+    <header><div><span>{text("待人工审核", "Awaiting human review")}</span><h3>{text("批量安全优化对比", "Batch safe-optimization comparison")}</h3></div><strong>{sourceScore.toFixed(1)} → {displayedCandidateScore.toFixed(1)}</strong></header>
     <p className="muted">{text(`循环保留了 ${proposal.changes.length} 个通过完整性校验、提高评分或提高证据准确性的候选。正文尚未改变，请勾选要保存的段落；未勾选段落会保留原文。`, `The loop retained ${proposal.changes.length} candidates that passed integrity checks and improved either the score or evidence accuracy. The draft is still unchanged; select the paragraphs to save and unchecked paragraphs will keep their originals.`)}</p>
     <div className="optimization-selection-tools"><span>{text(`已选 ${selected.length}/${proposal.changes.length}`, `${selected.length}/${proposal.changes.length} selected`)}</span><button className="button button-quiet" type="button" disabled={disabled || selected.length === proposal.changes.length} onClick={() => setSelected(proposal.changes.map((change) => change.paragraph_id))}>{text("全选", "Select all")}</button><button className="button button-quiet" type="button" disabled={disabled || !selected.length} onClick={() => setSelected([])}>{text("清空选择", "Clear")}</button></div>
     <div className="optimization-change-list">{proposal.changes.map((change) => <article key={change.paragraph_id} className={selectedSet.has(change.paragraph_id) ? "selected" : ""}>
+      {change.group_id ? <p className="muted">{text("关联修订：同组段落一起保存或放弃，避免论点与正文不一致。", "Linked revision: save or discard related paragraphs together to keep arguments and text aligned.")}</p> : null}
+      {change.argument_revisions?.map(revision => <details key={revision.claim_id} className="advanced-panel"><summary>{text("修订依据与论点变化", "Argument revision and rationale")}</summary><p>{text("原论点：", "Original argument: ")}{revision.original_proposition}</p><p>{text("候选论点：", "Proposed argument: ")}{revision.proposition}</p><p>{revision.reason}</p></details>)}
       <div className="optimization-change-heading"><label><input type="checkbox" disabled={disabled} checked={selectedSet.has(change.paragraph_id)} onChange={() => toggle(change.paragraph_id)} /> <strong>{change.paragraph_id}</strong></label><span>{change.accuracy_improved ? text("证据准确性已提高", "Evidence accuracy improved") : Number.isFinite(Number(change.source_paragraph_score)) && Number.isFinite(Number(change.candidate_paragraph_score)) ? `${Number(change.source_paragraph_score).toFixed(1)} → ${Number(change.candidate_paragraph_score).toFixed(1)}` : text("已通过单段复评", "Paragraph re-evaluated")}</span></div>
       <div className="optimization-comparison"><div><strong>{text("当前原文", "Current original")}</strong><p>{change.original_text}</p></div><div><strong>{text("优化候选", "Optimized candidate")}</strong><p>{change.candidate_text}</p></div></div>
     </article>)}</div>
+    <RevisionFailures items={proposal.excluded} />
     <footer><button className="button button-primary" type="button" disabled={disabled || (!selected.length && !hasAutomaticRepair)} onClick={() => decide(proposal.proposal_id, "accept", selected)}>{!proposal.changes.length && hasAutomaticRepair ? text("应用引用与证据修复", "Apply citation and evidence repairs") : selected.length === proposal.changes.length ? text("保存全部优化", "Save all optimizations") : text(`保存选中的 ${selected.length} 段`, `Save ${selected.length} selected`)}</button><button className="button button-secondary" type="button" disabled={disabled} onClick={() => decide(proposal.proposal_id, "reject")}>{text("放弃本批", "Discard batch")}</button></footer>
   </section>;
 }
@@ -288,18 +299,8 @@ export function DraftPage() {
   });
   const approve = useMutation({
     mutationFn: () => {
-      const qualityGoal = Number(payload!.quality.goal || 90);
-      const score = Number(payload!.quality.score || 0);
-      const hardFailures = payload!.quality.hard_gate_failures || [];
-      if (hardFailures.length > 0) throw new Error(text("当前评估存在硬性门禁失败，必须修复并重新评估，不能人工覆盖。", "The current evaluation has hard gate failures. Fix and re-evaluate them; they cannot be overridden."));
-      let overrideLowScore = false;
-      let overrideReason = "";
-      if (score < qualityGoal) {
-        overrideLowScore = window.confirm(text("当前评分低于目标。确认已人工复核，并覆盖低分继续？", "The current score is below target. Confirm manual review and override the low score?"));
-        if (!overrideLowScore) throw new Error(text("已取消人工覆盖。", "Manual override cancelled."));
-        overrideReason = text("人工复核后接受当前版本及其评估提示。", "Current version and evaluation warnings accepted after manual review.");
-      }
-      return apiRequest(`/api/v1/projects/${encodeURIComponent(project!.project_id)}/draft/approve`, { method: "POST", ...jsonBody({ revision: payload!.revision, override_low_score: overrideLowScore, override_reason: overrideReason }) });
+      if (!payload!.quality.current) throw new Error(text("请先评估当前保存版本。", "Evaluate the current saved version first."));
+      return apiRequest(`/api/v1/projects/${encodeURIComponent(project!.project_id)}/draft/approve`, { method: "POST", ...jsonBody({ revision: payload!.revision }) });
     },
     onSuccess: refresh,
   });
@@ -315,7 +316,6 @@ export function DraftPage() {
     setEditingParagraph("");
   }, [editingLocked]);
   const issues = payload?.quality.issues || [];
-  const approvalGateDetails = hardGateDetails(payload?.quality);
   const latestIncremental = payload?.quality.incremental_evaluations?.slice(-1)[0];
   const error = assemble.error || saveFull.error || saveParagraph.error || evaluate.error || optimize.error || rewrite.error || decide.error || decideOptimization.error || restore.error || approve.error || cancel.error || (currentJob?.status === "failed" ? new Error(currentJob.error_message || text("任务失败。", "Task failed.")) : null);
   const tabLabels: Array<[DraftTab, string]> = [["preview", text("段落编辑", "Paragraph editing")], ["edit", text("全文编辑", "Full-text editing")], ["quality", text("评估与重写", "Evaluation and rewriting")], ["approval", text("人工确认", "Human approval")], ["history", text("版本历史", "Version history")]];
@@ -355,28 +355,6 @@ export function DraftPage() {
       window.clearTimeout(clearHighlight);
     };
   }, [tab, qualityFocusParagraph, issues.length]);
-  const gateLabel = (gateId: string) => gateId === "paragraph_readability_or_source_failures"
-    ? text("段落可读性或来源校验未通过", "Paragraph readability or source validation failed")
-    : gateId;
-  const gateDiagnosis = (finding: HardGateFinding) => {
-    const diagnosis = finding.diagnosis || text("请检查该段落。", "Review this paragraph.");
-    const wordRange = /^Paragraph has (\d+) words; configured range is (\d+)-(\d+)\.$/.exec(diagnosis);
-    if (wordRange) {
-      return text(
-        `段落共 ${wordRange[1]} 个英文词，未达到配置范围 ${wordRange[2]}–${wordRange[3]}。`,
-        diagnosis,
-      );
-    }
-    if (diagnosis === "No readable local source is registered for at least one cited paper.") {
-      return text("该段引用的至少一篇论文没有可读取的本地来源，需要核对或重新解析 PDF。", diagnosis);
-    }
-    return diagnosis;
-  };
-  const gateRoute = (route?: string) => ({
-    section_rewrite: text("补写或重写该段", "Expand or rewrite this paragraph"),
-    local_source_recheck: text("核对本地论文来源", "Check the local paper source"),
-    final_polish: text("最终润色", "Final polish"),
-  }[route || ""] || route || text("人工检查", "Manual review"));
   const rewriteButtonText = (paragraphId: string, hasCandidate: boolean, active: boolean, targetedEvaluation = false) => {
     if (active || (rewrite.isPending && rewrite.variables === paragraphId)) {
       return targetedEvaluation
@@ -446,11 +424,11 @@ export function DraftPage() {
 
   return <main className="workspace page-container workspace-page draft-page"><div className="workspace-heading"><div><p className="eyebrow">{text("阶段 6 · 初稿反馈循环", "Stage 6 · Draft feedback loop")}</p><h1>{text("初稿编辑、评估与优化", "Draft editing, evaluation, and optimization")}</h1><p className="muted">{text("评估严格绑定当前保存版本；批量优化会自动保存通过完整性校验且复评提分的段落，存在科学歧义或人工修改时才保留对比候选。", "Evaluation is bound to the current saved version. Batch optimization automatically saves paragraphs that pass integrity checks and improve on re-evaluation; comparisons remain only for scientific ambiguity or user-edited content.")}</p></div><ProjectSelector /></div>
     {draft.isPending ? <div className="empty-state">{text("正在加载初稿…", "Loading draft…")}</div> : null}{draft.error ? <ErrorState error={draft.error} onRetry={() => draft.refetch()} /> : null}
-    {payload ? <><div className="draft-grid-react"><aside className="pane draft-flow-react"><div className="pane-head"><div><span className="step-label">{text("初稿工作流", "Draft workflow")}</span><h2>{project?.slug || project?.project_id}</h2></div></div><div className="draft-flow-list">{mainTabLabels.map(([value, label], index) => <button key={value} type="button" className={tab === value ? "active" : ""} onClick={() => setTab(value)}><strong>{index + 1}. {label}</strong>{value === "approval" ? <small>{payload.draft_approval_current ? text("已确认", "Approved") : text("等待质量门禁", "Waiting for quality gate")}</small> : null}</button>)}<details className="workflow-advanced-nav"><summary>{text("高级编辑与版本", "Advanced editing and versions")}</summary><div>{advancedTabLabels.map(([value, label]) => <button key={value} type="button" className={tab === value ? "active" : ""} onClick={() => setTab(value)}><strong>{label}</strong></button>)}</div></details></div></aside>
+    {payload ? <><div className="draft-grid-react"><aside className="pane draft-flow-react"><div className="pane-head"><div><span className="step-label">{text("初稿工作流", "Draft workflow")}</span><h2>{project?.slug || project?.project_id}</h2></div></div><div className="draft-flow-list">{mainTabLabels.map(([value, label], index) => <button key={value} type="button" className={tab === value ? "active" : ""} onClick={() => setTab(value)}><strong>{index + 1}. {label}</strong>{value === "approval" ? <small>{payload.draft_approval_current ? text("已确认", "Approved") : text("等待人工确认", "Waiting for human approval")}</small> : null}</button>)}<details className="workflow-advanced-nav"><summary>{text("高级编辑与版本", "Advanced editing and versions")}</summary><div>{advancedTabLabels.map(([value, label]) => <button key={value} type="button" className={tab === value ? "active" : ""} onClick={() => setTab(value)}><strong>{label}</strong></button>)}</div></details></div></aside>
       <section className="pane draft-main-react"><div className="pane-head"><div><span className="step-label">{payload.freshness.upstream_stale ? text("已过期", "Out of date") : text("当前", "Current")}</span><h2>{tabLabels.find(([value]) => value === tab)?.[1]}</h2></div></div><div className="draft-main-content">
         {payload.freshness.upstream_stale ? <p className="message message-error">{text("上游内容已变化，请重新生成初稿后再编辑。", "Upstream content changed. Regenerate the draft before editing.")}</p> : null}
         {editingLocked ? <p className="message message-warning" role="status">{text("批量优化正在运行：正文和版本操作已临时锁定，仍可查看正文、问题列表与实时进度。任务完成后会自动恢复编辑。", "Batch optimization is running. Draft and version actions are temporarily locked, while the manuscript, issue list, and live progress remain available. Editing resumes automatically when the job finishes.")}</p> : null}
-        {payload.quality.current && payload.quality.release_integrity_failure ? <p className="message message-error">{text("检测到引用身份或来源完整性问题：正文仍可查看和优化，但修复前终稿不会标记为可正式发布。", "Citation identity or source-integrity failures were detected. The draft remains viewable and optimizable, but Final will not be marked release-ready until repaired.")}</p> : payload.quality.current && payload.quality.repair_required ? <p className="message message-warning">{text(`有 ${payload.quality.repair_required_issue_ids?.length || 0} 个问题可由批量安全优化自动取证并局部重写。`, `${payload.quality.repair_required_issue_ids?.length || 0} issues can be handled by batch safe optimization through evidence repair and local rewriting.`)}</p> : null}
+        {payload.quality.current && payload.quality.release_integrity_failure ? <p className="message message-error">{text("检测到引用身份或来源完整性问题：正文仍可查看和优化，但修复前终稿不会标记为可正式发布。", "Citation identity or source-integrity failures were detected. The draft remains viewable and optimizable, but Final will not be marked release-ready until repaired.")}</p> : payload.quality.current && payload.quality.repair_required ? <p className="message message-warning">{text(`当前有 ${issues.length} 条待处理项。表达建议不阻止进入下一阶段；系统会尝试局部修复，无法自动解决的证据问题会保留原因和操作提示。`, `${issues.length} findings remain. Style suggestions do not block the next stage. Local repairs are attempted; unresolved evidence issues retain their reasons and available actions.`)}</p> : null}
         {error ? <p className="message message-error">{error.message}</p> : null}
         {optimizationNotice ? <p className="message message-success" role="status">{optimizationNotice}</p> : null}
         {tab === "quality" ? <OptimizationProposalReview proposal={pendingOptimization} decide={decideOptimizationProposal} disabled={decideOptimization.isPending || editingLocked} /> : null}
@@ -463,6 +441,7 @@ export function DraftPage() {
           {manualClaimReview?.warning_required ? <p className="message message-warning">{text(`有 ${manualClaimReview.unverified_manual_paragraph_ids?.length || 0} 个人工修改段落尚未通过来源核验。正文仍可人工确认和导出，但这些段落不会进入自动结论、摘要或总览图。`, `${manualClaimReview.unverified_manual_paragraph_ids?.length || 0} manually edited paragraphs are not source-verified. They may still be approved and exported with a warning, but are excluded from automatic conclusions, summaries, and overview figures.`)}</p> : null}
           <div className="quality-score-grid"><article><span>{text("当前分数", "Current score")}</span><strong>{payload.quality.score === undefined ? "—" : Number(payload.quality.score).toFixed(1)}</strong></article><article><span>{text("目标", "Goal")}</span><strong>{payload.quality.goal === undefined ? "—" : Number(payload.quality.goal).toFixed(1)}</strong></article><article><span>{text("问题数", "Issues")}</span><strong>{issues.length}</strong></article></div>
           {latestIncremental ? <section className="message message-success"><strong>{text(`最近保存的单段候选：${latestIncremental.paragraph_id}`, `Latest saved paragraph candidate: ${latestIncremental.paragraph_id}`)}</strong><p>{text(`段落 ${Number(latestIncremental.old_paragraph_score).toFixed(1)} → ${Number(latestIncremental.new_paragraph_score).toFixed(1)}；全文 ${Number(latestIncremental.previous_overall_score).toFixed(1)} → ${Number(latestIncremental.updated_overall_score).toFixed(1)}`, `Paragraph ${Number(latestIncremental.old_paragraph_score).toFixed(1)} → ${Number(latestIncremental.new_paragraph_score).toFixed(1)}; overall ${Number(latestIncremental.previous_overall_score).toFixed(1)} → ${Number(latestIncremental.updated_overall_score).toFixed(1)}`)}</p></section> : null}
+          {payload.quality.current ? <><SavedSourceChecks report={payload.quality.source_check as SourceCheck | undefined} /><DraftRepairSummary issues={issues} adjustments={(payload.quality.planning_adjustments || []) as Adjustment[]} onRevise={() => optimize.mutate()} disabled={editingLocked || evaluate.isPending || optimize.isPending || jobIsActive(currentJob?.status)} /></> : null}
           {issues.map((issue, index) => {
             const paragraphId = String(issue.paragraph_id || "");
             const candidate = pendingCandidate(paragraphId);
@@ -471,11 +450,12 @@ export function DraftPage() {
             const upstreamRepair = issue.recommended_return_stage && issue.recommended_return_stage !== "draft";
             const sectionRepair = issue.recommended_return_stage === "sections" && Boolean(paragraphId);
             const repairStage = issue.repair_stage || "draft";
-            const rewriteEligible = issue.rewrite_eligible !== false;
-            const routedOutsideDraft = !["draft", "evidence_package"].includes(repairStage);
+            const rewriteEligible = issue.interactive_rewrite_eligible === true || issue.rewrite_eligible !== false;
+            const routedOutsideDraft = issue.repair_class !== "planning_adjustment" && !["draft", "evidence_package"].includes(repairStage);
             return <article id={`quality-issue-${paragraphId}`} tabIndex={-1} className={`quality-issue-react${qualityFocusParagraph === paragraphId ? " quality-focus" : ""}`} key={String(issue.issue_id || index)}>
-              <header><strong>{String(issue.severity || "issue")} · {paragraphId}</strong><span>{String(issue.message || issue.diagnosis || "")}</span></header>
+              <header><strong>{String(issue.severity || "issue")} · {paragraphId}</strong><RepairLabel issue={issue} /><span>{String(issue.message || issue.diagnosis || "")}</span></header>
               <dl className="quality-issue-meta"><div><dt>{text("段落分数", "Paragraph score")}</dt><dd>{issue.score === undefined || issue.score === null ? "—" : Number(issue.score).toFixed(1)}</dd></div><div><dt>{text("实际修复位置", "Actual repair owner")}</dt><dd>{repairStageLabel(repairStage)}</dd></div><div><dt>{text("来源核验", "Source check")}</dt><dd>{issue.source_check_status || "—"}</dd></div><div><dt>{text("章节", "Section")}</dt><dd>{issue.section_id || "—"}</dd></div></dl>
+              <p className="quality-recommended-action">{issue.repair_class === "advisory" ? text("可选建议，不进入自动重写队列。", "Optional advice; excluded from automatic rewriting.") : issue.repair_class === "planning_adjustment" ? text("保留正文，请查看上方成组论点调整建议。", "The paragraph is retained; review the grouped argument adjustments above.") : issue.repair_class === "human_confirmation" ? text("存在具体来源冲突，请核实对应原文；其他独立段落仍可优化。", "A source conflict requires checking the original passages; other independent paragraphs can still be optimized.") : text("系统按此问题的处理方式局部修复；无法自动解决时保留原文和具体原因。", "The system follows this finding’s repair route, retaining the original text and reason when no safe repair is available.")}</p>
               {issue.recommended_action ? <p className="quality-recommended-action"><strong>{text("建议：", "Recommended: ")}</strong>{issue.recommended_action}</p> : null}
               {issue.failed_dimensions?.length ? <div className="quality-dimensions"><strong>{text("未通过维度", "Failed dimensions")}</strong>{issue.failed_dimensions.map((dimension) => <span key={dimension}>{dimension}</span>)}</div> : null}
               {issue.corpus_gap_questions?.length ? <p className="message message-warning">{text(`证据问题：${issue.corpus_gap_questions.join("、")}`, `Evidence gaps: ${issue.corpus_gap_questions.join(", ")}`)}</p> : null}
@@ -487,7 +467,7 @@ export function DraftPage() {
           })}
           {!issues.length ? <div className="empty-state">{payload.quality.current ? text("当前评估未发现问题。", "No issues found in the current evaluation.") : text("请评估当前初稿。", "Evaluate the current draft.")}</div> : null}
         </> : null}
-        {tab === "approval" ? <section className={payload.draft_approval_current ? "approval-card good" : "approval-card"}><h2>{payload.draft_approval_current ? text("初稿已人工确认", "Draft manually approved") : text("等待人工确认", "Waiting for human approval")}</h2><p>{payload.quality.current ? text(`当前评估分数：${payload.quality.score ?? "—"}`, `Current evaluation score: ${payload.quality.score ?? "—"}`) : text("请先评估当前保存版本。", "Evaluate the current saved version first.")}</p>{approvalGateDetails.length ? <><p className="message message-error">{text("以下硬性门禁失败不可人工覆盖。请按段落明细修复后重新评估：", "The following hard gates cannot be overridden. Fix the listed paragraphs and re-evaluate:")}</p><div className="hard-gate-detail-list">{approvalGateDetails.map((detail) => <article key={detail.gate_id} className="hard-gate-detail"><header><strong>{gateLabel(detail.gate_id)}</strong>{detail.findings.length ? <span>{text(`涉及 ${detail.findings.length} 个段落`, `${detail.findings.length} paragraphs`)}</span> : null}</header>{detail.findings.length ? <div className="hard-gate-paragraphs">{detail.findings.map((finding, index) => <section key={`${detail.gate_id}-${finding.paragraph_id}-${finding.rule || index}`}><div><strong>{finding.paragraph_id}</strong><span>{[finding.rule, finding.severity].filter(Boolean).join(" · ")}</span></div><p>{gateDiagnosis(finding)}</p><footer><small>{text("建议处理：", "Suggested action: ")}{gateRoute(finding.route)}</small><button className="button button-secondary" type="button" onClick={() => reviewGateParagraph(finding.paragraph_id)}>{text("在评估与重写中处理", "Review in evaluation and rewriting")}</button></footer></section>)}</div> : <p className="muted">{text(`门禁标识：${detail.gate_id}。当前旧报告没有段落明细，请在“评估与重写”查看问题并重新评估。`, `Gate: ${detail.gate_id}. This legacy report has no paragraph details; review Evaluation and rewriting, then re-evaluate.`)}</p>}</article>)}</div></> : null}<button className="button button-primary" type="button" disabled={editingLocked || !payload.quality.current || approve.isPending || payload.draft_approval_current || Boolean(payload.quality.hard_gate_failures?.length)} onClick={() => approve.mutate()}>{payload.draft_approval_current ? text("已确认", "Approved") : text("确认并允许进入终稿", "Approve and allow final stage")}</button>{payload.draft_approval_current ? <button className="button button-secondary" type="button" onClick={() => navigate(`/final?project=${encodeURIComponent(project!.project_id)}`)}>{text("进入终稿", "Enter final stage")}</button> : null}</section> : null}
+        {tab === "approval" ? <DraftApprovalPanel quality={payload.quality} approved={payload.draft_approval_current} busy={editingLocked || approve.isPending || evaluationActive || acceptRewriteActive} onApprove={() => approve.mutate()} onReview={reviewGateParagraph} onNext={() => navigate(`/final?project=${encodeURIComponent(project!.project_id)}`)} /> : null}
         {tab === "history" ? <div className="version-list-react">{payload.versions.map((version) => <article key={version.artifact_id} className={version.current ? "current" : ""}><strong>{version.operation || "saved"}</strong><span>{version.created_at}</span><code>{version.artifact_id}</code>{version.current ? <em>{text("当前版本", "Current version")}</em> : <button className="button button-secondary" type="button" disabled={editingLocked || restore.isPending} onClick={() => { if (window.confirm(text("恢复这个不可变初稿版本？", "Restore this immutable draft version?"))) restore.mutate(version.artifact_id); }}>{text("恢复此版本", "Restore this version")}</button>}</article>)}</div> : null}
       </div></section>
       <aside className="pane draft-control-react"><div className="pane-head"><div><span className="step-label">{text("质量控制", "Quality controls")}</span><h2>{text("质量控制", "Quality controls")}</h2></div></div><div className="gate-body"><details className="advanced-panel feedback-settings-advanced"><summary>{text("评分与优化参数", "Evaluation and optimization parameters")}</summary><div className="advanced-panel-body"><div className="feedback-settings"><label>{text("全文目标分数", "Full-draft target score")}<div className="goal-input"><input type="number" min={90} max={100} step={0.5} value={goal} onChange={(event) => setGoal(Math.min(100, Math.max(90, Number(event.target.value) || 90)))} /><span>/ 100</span></div></label><label>{text("段落目标分数", "Paragraph target score")}<div className="goal-input"><input type="number" min={0} max={100} step={0.5} value={paragraphGoal} onChange={(event) => setParagraphGoal(Math.min(100, Math.max(0, Number(event.target.value) || 85)))} /><span>/ 100</span></div></label><label>{text("最大优化轮次", "Maximum iterations")}<input type="number" min={1} max={10} value={maxIterations} onChange={(event) => setMaxIterations(Math.min(10, Math.max(1, Number(event.target.value) || 2)))} /></label><div className="case-word-range"><label>{text("案例最少词数", "Minimum case words")}<input type="number" min={1} value={minCaseWords} onChange={(event) => setMinCaseWords(Math.max(1, Number(event.target.value) || 140))} /></label><label>{text("案例最多词数", "Maximum case words")}<input type="number" min={minCaseWords} value={maxCaseWords} onChange={(event) => setMaxCaseWords(Math.max(minCaseWords, Number(event.target.value) || 280))} /></label></div></div></div></details><button className="button button-primary" type="button" disabled={!payload.draft_artifact_id || evaluate.isPending || optimize.isPending || jobIsActive(currentJob?.status)} onClick={() => evaluate.mutate()}>{evaluate.isPending ? text("正在启动评估…", "Starting evaluation…") : evaluationActive ? text("正在评估…", "Evaluating…") : text("评估当前初稿", "Evaluate current draft")}</button><button className="button button-secondary" type="button" disabled={!payload.draft_artifact_id || evaluate.isPending || optimize.isPending || jobIsActive(currentJob?.status) || maxCaseWords < minCaseWords} onClick={() => optimize.mutate()}>{optimize.isPending ? text("正在启动优化…", "Starting optimization…") : optimizationActive ? text("正在批量优化…", "Optimizing…") : text("批量安全优化", "Batch safe optimize")}</button><p className="feedback-help">{text("批量优化默认最多执行两轮，并逐段取证、校验和复评。安全且提分的修改自动写入；人工编辑或仍有科学歧义的段落继续显示候选对比。", "Batch optimization runs at most two iterations by default, retrieving evidence, validating, and re-evaluating each paragraph. Safe improvements are saved automatically; user-edited or scientifically ambiguous paragraphs remain as reviewable comparisons.")}</p><button className="button button-quiet danger" type="button" disabled={!jobIsActive(currentJob?.status) || cancel.isPending} onClick={() => cancel.mutate()}>{currentJob?.status === "cancel_requested" || cancel.isPending ? text("正在取消…", "Cancelling…") : text("取消运行任务", "Cancel running task")}</button>{evaluate.isPending ? <DraftJobStatus startingType="draft.evaluate" /> : optimize.isPending ? <DraftJobStatus startingType="draft.optimize" /> : currentJob ? <DraftJobStatus job={currentJob} publicationPending={publicationPending} /> : null}<dl className="draft-summary"><dt>{text("分数", "Score")}</dt><dd>{payload.quality.score ?? "—"}</dd><dt>{text("状态", "Status")}</dt><dd>{payload.freshness.upstream_stale ? text("已过期", "Stale") : text("当前", "Current")}</dd><dt>Revision</dt><dd>{payload.revision}</dd></dl></div></aside></div></> : null}

@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "profile": "chemistry_general",
+  "overview_structure_required": false,
+  "motifs": [
+    {
+      "motif": "biaryl",
+      "label": "biaryl core",
+      "patterns": ["\\bbiaryls?\\b", "\\batropisomers?\\b"],
+      "smiles": "*c1ccccc1-c2ccccc2*",
+      "required_smarts": "c-c"
+    },
+    {
+      "motif": "indole",
+      "label": "indole core",
+      "patterns": ["\\bindoles?\\b"],
+      "smiles": "c1ccc2[nH]ccc2c1",
+      "required_smarts": "c1ccc2[nH]ccc2c1"
+    },
+    {
+      "motif": "cyclopropane",
+      "label": "cyclopropane core",
+      "patterns": ["\\bcyclopropanes?\\b"],
+      "smiles": "*C1(*)CC1",
+      "required_smarts": "C1CC1"
+    },
+    {
+      "motif": "diene",
+      "label": "conjugated diene core",
+      "patterns": ["\\b(?:conjugated\\s+)?dienes?\\b"],
+      "smiles": "*C=CC=C*",
+      "required_smarts": "C=CC=C"
+    },
+    {
+      "motif": "enone",
+      "label": "enone core",
+      "patterns": ["\\benones?\\b"],
+      "smiles": "*C(=O)C=C*",
+      "required_smarts": "C(=O)C=C"
+    },
+    {
+      "motif": "imine",
+      "label": "imine core",
+      "patterns": ["\\bimines?\\b"],
+      "smiles": "*C(*)=N*",
+      "required_smarts": "C=N"
+    },
+    {
+      "motif": "nitrile",
+      "label": "nitrile core",
+      "patterns": ["\\bnitriles?\\b", "\\bcyano\\b"],
+      "smiles": "*C#N",
+      "required_smarts": "C#N"
+    },
+    {
+      "motif": "amide",
+      "label": "amide core",
+      "patterns": ["\\bamides?\\b"],
+      "smiles": "*C(=O)N(*)*",
+      "required_smarts": "C(=O)N"
+    },
+    {
+      "motif": "alkyne",
+      "label": "alkyne core",
+      "patterns": ["\\balkynes?\\b", "\\bacetylenes?\\b"],
+      "smiles": "*C#C*",
+      "required_smarts": "C#C"
+    },
+    {
+      "motif": "alkene",
+      "label": "alkene core",
+      "patterns": ["\\balkenes?\\b", "\\bolefins?\\b"],
+      "smiles": "*C(*)=C(*)*",
+      "required_smarts": "C=C"
+    }
+  ]
+}

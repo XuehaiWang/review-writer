@@ -78,3 +78,8 @@
 /frontend/node_modules/
 /frontend/dist/
 /frontend/*.tsbuildinfo
+
+# Local reports and human-facing documentation are not release inputs.
+# Runtime skill instructions, prompts, and templates remain trackable.
+/docs/
+/skills/README.md

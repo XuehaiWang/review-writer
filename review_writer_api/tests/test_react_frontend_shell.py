@@ -42,7 +42,13 @@ class ReactFrontendShellTests(unittest.TestCase):
         self.assertNotIn(retired_route, source)
         self.assertNotIn('return dashboard_response("/figures")', source)
         editor = (
-            ROOT / "frontend" / "src" / "features" / "images" / "SvgKetcherEditor.tsx"
+            ROOT
+            / "frontend"
+            / "src"
+            / "features"
+            / "images"
+            / "editor"
+            / "SvgKetcherEditor.tsx"
         ).read_text(encoding="utf-8")
         self.assertIn('/assets/ketcher/standalone/index.html', editor)
         self.assertIn('/manual-edit', editor)

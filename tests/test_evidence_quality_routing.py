@@ -65,6 +65,80 @@ class EvidenceQualityRoutingTests(unittest.TestCase):
         self.assertEqual("discovery", routing["recommended_return_stage"])
         self.assertEqual("discovery", issues[0]["recommended_return_stage"])
 
+    def test_quality_issue_collects_claim_and_nested_source_papers(self) -> None:
+        issues, _routing = DraftsService._quality_routing(
+            {
+                "issues": [
+                    {
+                        "issue_id": "I-1",
+                        "paragraph_id": "S02-p1",
+                        "paper_ids": ["P004"],
+                    }
+                ],
+                "paragraph_scores": [
+                    {
+                        "paragraph_id": "S02-p1",
+                        "source_check_status": "unsupported",
+                    }
+                ],
+                "source_check": {
+                    "entries": [
+                        {
+                            "paragraph_id": "S02-p1",
+                            "paper_ids": ["P003"],
+                            "papers": [
+                                {
+                                    "paper_id": "P002",
+                                    "passages": [
+                                        {"evidence_key": "sha256:nested-source"}
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+            {
+                "section_index": {
+                    "sections": [
+                        {
+                            "section_id": "S02",
+                            "paragraphs": [{"paragraph_id": "S02-p1"}],
+                        }
+                    ]
+                },
+                "writing_plan": {
+                    "sections": [
+                        {
+                            "section_id": "S02",
+                            "paragraphs": [
+                                {
+                                    "paragraph_id": "S02-p1",
+                                    "claim_ids": ["S02-SC001"],
+                                }
+                            ],
+                            "claims": [
+                                {
+                                    "claim_id": "S02-SC001",
+                                    "citation_group": ["P001"],
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "section_evidence": {"sections": []},
+            },
+        )
+
+        self.assertEqual(["P004", "P003", "P001", "P002"], issues[0]["paper_ids"])
+        self.assertEqual(["S02-SC001"], issues[0]["claim_ids"])
+        self.assertEqual(
+            ["sha256:nested-source"], issues[0]["source_evidence_refs"]
+        )
+        self.assertEqual(
+            issues[0]["paper_ids"], issues[0]["repair_target"]["paper_ids"]
+        )
+
     def test_manual_claim_requires_exact_source_verification(self) -> None:
         current = SimpleNamespace(
             metadata={"unverified_manual_paragraph_ids": ["S01-p1", "S01-p2"]}

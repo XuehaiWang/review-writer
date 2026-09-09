@@ -147,6 +147,12 @@ class ModelGatewayResponse(BaseModel):
     cached: bool
 
 
+class ModelGatewayResultResponse(BaseModel):
+    error: dict[str, Any] | None = None
+    status: str = Field(pattern="^(running|succeeded|failed)$")
+    result: ModelGatewayResponse | None = None
+
+
 class EmbeddingGatewayRequest(BaseModel):
     request_key: str = Field(min_length=1, max_length=128)
     stage: str = Field(default="", max_length=96)

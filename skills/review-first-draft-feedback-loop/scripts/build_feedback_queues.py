@@ -5,7 +5,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+_BOOTSTRAP_ROOT = next(
+    (parent for parent in Path(__file__).resolve().parents if (parent / "review_writer_core").is_dir()),
+    None,
+)
+if _BOOTSTRAP_ROOT is None:
+    raise RuntimeError("Could not locate the Review Writer workspace")
+if str(_BOOTSTRAP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BOOTSTRAP_ROOT))
+from review_writer_core.writing_contracts import DRAFT_PASS_THRESHOLD, paragraph_finding_is_blocking  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,11 +66,7 @@ def main() -> int:
 
     for item in evaluation.get("paragraph_failures", []):
         route = item.get("route", "section_rewrite")
-        failed_dimensions = set(item.get("failed_dimensions", []))
-        if failed_dimensions == {"G07"} and item.get("severity") not in {
-            "critical",
-            "major_protected_fact",
-        }:
+        if not paragraph_finding_is_blocking(item):
             route = "final_polish"
         append_unique(
             final_polish if route == "final_polish" else rewrite,
@@ -77,9 +84,12 @@ def main() -> int:
     score = float(evaluation.get("total_score", 0))
     hard = sorted(set(evaluation.get("hard_gate_failures", []) + preflight.get("hard_regressions", [])))
     threshold = float(
-        evaluation.get("pass_threshold", evaluation.get("pass_threshold_user", 90))
+        evaluation.get(
+            "pass_threshold",
+            evaluation.get("pass_threshold_user", DRAFT_PASS_THRESHOLD),
+        )
     )
-    released = score >= threshold and not hard and not rewrite
+    released = score >= threshold and not hard and not any(paragraph_finding_is_blocking(item) for item in rewrite)
     decision = "GATE_RELEASE" if released else "GATE_HOLD_REWRITE_REQUIRED"
     status = "RELEASED_FOR_CONCLUSION_AND_SELECTIVE_FINAL_POLISH" if released else "REWRITE_REQUIRED"
 

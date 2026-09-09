@@ -16,6 +16,7 @@ from sqlalchemy.orm import sessionmaker
 from review_writer_api.app import create_app
 from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User
+from review_writer_api.errors import WorkflowConflict
 from review_writer_api.security import Principal, Role
 from review_writer_api.workflow_models import LibraryPaper
 
@@ -277,6 +278,20 @@ class DiscoveryV1Tests(unittest.TestCase):
             job = self.discover(client)
             self.assertEqual("succeeded", job["status"])
         self.assertEqual("general_academic", self.discovery_payloads[-1]["taxonomy_profile"])
+        self.assertEqual(0, self.discovery_payloads[-1]["expected_revision"])
+
+    def test_search_cannot_overwrite_review_edited_after_submission(self) -> None:
+        service = self.app.state.discovery_service
+        with TestClient(self.app) as client:
+            self.assertEqual("succeeded", self.discover(client)["status"])
+            queued = service.search_payload(self.first, self.project_id, {"topic": "Copper"})
+            before = service.get(self.first, self.project_id)
+            edited = service.save(self.first, self.project_id, before["revision"], before["results"])
+            with self.assertRaises(WorkflowConflict):
+                service.replace_from_job(self.first, self.project_id, queued, before)
+            after = service.get(self.first, self.project_id)
+            self.assertEqual(edited["artifact_id"], after["artifact_id"])
+            self.assertEqual(edited["revision"], after["revision"])
 
     def test_refresh_can_recover_current_discovery_job_without_resubmitting(self) -> None:
         repository = self.app.state.workflow_repository
@@ -288,6 +303,7 @@ class DiscoveryV1Tests(unittest.TestCase):
             "refresh-recovery",
             {
                 "topic": "Persisted running topic",
+                "expected_revision": 0,
                 "keywords": "",
                 "web_search": False,
                 "project_id": self.project_id,
@@ -588,7 +604,7 @@ class DiscoveryV1Tests(unittest.TestCase):
             restarted = service.replace_from_job(
                 self.first,
                 self.project_id,
-                {"topic": "Copper allenation"},
+                service.search_payload(self.first, self.project_id, {"topic": "Copper allenation"}),
                 current_payload,
             )
             confirmed = client.post(
@@ -753,7 +769,7 @@ class DiscoveryV1Tests(unittest.TestCase):
             restarted = service.replace_from_job(
                 self.first,
                 self.project_id,
-                {"topic": before["topic"]},
+                service.search_payload(self.first, self.project_id, {"topic": before["topic"]}),
                 current_payload,
             )
             after = client.get(

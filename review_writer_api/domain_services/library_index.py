@@ -1969,6 +1969,39 @@ class LibraryIndexService:
             "papers": output,
         }
 
+    def resolve_source_chunks(self, principal: Principal, paper_id: str, chunk_ids: list[str], *, expected_lineage: str) -> list[dict[str, Any]]:
+        """Resolve exact registered chunks, never substitute a ranked search hit."""
+        principal.require(Permission.PROJECT_READ)
+        if not chunk_ids or not expected_lineage:
+            return []
+        with database_session(self.session_factory) as session:
+            rows = session.execute(select(LibraryDocumentChunk, LibraryDocumentIndex.source_lineage_hash)
+                .join(LibraryDocumentIndex, LibraryDocumentIndex.id == LibraryDocumentChunk.index_id)
+                .join(LibraryPaper, (LibraryPaper.user_id == LibraryDocumentChunk.user_id)
+                      & (LibraryPaper.paper_id == LibraryDocumentChunk.paper_id))
+                .where(LibraryDocumentChunk.user_id == uuid.UUID(principal.user_id),
+                       LibraryDocumentChunk.paper_id == paper_id,
+                       LibraryDocumentChunk.chunk_id.in_(tuple(set(chunk_ids))),
+                       LibraryDocumentIndex.is_current.is_(True), LibraryDocumentIndex.status == "ready",
+                       LibraryDocumentIndex.source_lineage_hash == expected_lineage,
+                       LibraryPaper.status == "active", LibraryPaper.deleted_at.is_(None))).all()
+            resolved = [{"paper_id": paper_id, "chunk_id": chunk.chunk_id, "content": chunk.content,
+                     "content_type": chunk.content_type, "page_start": chunk.page_start, "page_end": chunk.page_end,
+                     "section_path": list(chunk.section_path_json or []), "source_lineage_hash": lineage}
+                    for chunk, lineage in rows]
+        # Alternate PDF text is deliberately not an indexed chunk. Re-open only
+        # the exact registered pages, checking both source lineage and file hash.
+        requested = set(chunk_ids)
+        pages = sorted({int(match.group(1)) for chunk_id in requested
+                        if (match := re.fullmatch(r"pdf-text:[0-9a-f]{64}:p([1-9][0-9]*)", chunk_id))})
+        for offset in range(0, len(pages), 3):
+            for hit in self.recover_pdf_pages(principal, paper_id, pages[offset:offset + 3], expected_lineage=expected_lineage):
+                if hit.chunk_id in requested:
+                    resolved.append({"paper_id": paper_id, "chunk_id": hit.chunk_id, "content": hit.content,
+                        "content_type": hit.content_type, "page_start": hit.page_start, "page_end": hit.page_end,
+                        "section_path": list(hit.section_path), "source_lineage_hash": hit.source_lineage_hash})
+        return resolved
+
     def primary_coverage_hits(
         self,
         principal: Principal,
@@ -2065,6 +2098,46 @@ class LibraryIndexService:
                 )
         return output
 
+    def recover_pdf_pages(self, principal: Principal, paper_id: str, pages: list[int], *, expected_lineage: str) -> list[EvidenceHit]:
+        """Bounded alternate text extraction from the owned, hash-checked PDF.
+
+        This does not OCR, change an index or repair scientific symbols. The
+        resulting text must still pass quotation and scientific relation audits.
+        Page requests come from registered chunks, not arbitrary model paths.
+        """
+        from pypdf import PdfReader
+        from pypdf.errors import PyPdfError
+
+        paper, _artifacts, _lineage, actual_lineage = self._paper_and_lineage(principal, paper_id)
+        if actual_lineage != expected_lineage:
+            raise WorkflowValidationError("Source version changed during PDF text recovery.")
+        path = self._safe_file(self.workspace_manager.user_root(principal.user_id), paper.pdf_relative_path)
+        hits = []
+        with path.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if not paper.content_sha256 or digest != paper.content_sha256:
+                raise WorkflowValidationError("Registered PDF content hash changed during source recovery.")
+            # Read the same opened file that was hashed, not a newly resolved
+            # path which could have been replaced between checking and parsing.
+            stream.seek(0)
+            try:
+                reader = PdfReader(stream, strict=False)
+                for page in sorted({p for p in pages if type(p) is int and p > 0})[:3]:
+                    if page > len(reader.pages):
+                        continue
+                    content = str(reader.pages[page - 1].extract_text() or "").strip()[:18000]
+                    if not content:
+                        continue
+                    hits.append(EvidenceHit(
+                        paper_id=paper_id, chunk_id=f"pdf-text:{digest}:p{page}", content=content,
+                        page_start=page, page_end=page, section_path=("Registered PDF text layer",),
+                        content_type="pdf_text", asset_refs=(), score=0, match_reason="source_text_recovery",
+                        is_neighbor=False, index_id="", source_lineage_hash=actual_lineage,
+                    ))
+            except PyPdfError as exc:
+                raise ValueError("Registered PDF text layer could not be read.") from exc
+        return hits
+
     def retrieve(
         self,
         principal: Principal,
@@ -2076,6 +2149,8 @@ class LibraryIndexService:
         per_paper_limit: int | None = None,
         term_groups: list[list[str]] | None = None,
         exact_phrases: list[str] | None = None,
+        semantic_query: str | None = None,
+        use_semantic: bool = True,
     ) -> list[EvidenceHit]:
         """Return page-addressable lexical evidence within an explicit paper scope.
 
@@ -2228,11 +2303,11 @@ class LibraryIndexService:
             # retrieval is an optional recall layer: any gateway/vector error
             # leaves the lexical result untouched.
             semantic_ranked: list[tuple[uuid.UUID, float]] = []
-            if dialect == "postgresql" and self.vector_enabled:
+            if dialect == "postgresql" and self.vector_enabled and use_semantic:
                 try:
                     semantic_ranked = self._semantic_ranked_ids(
                         principal,
-                        normalized,
+                        semantic_query or normalized,
                         allowed_papers=allowed,
                         limit=max(limit, self.tuning.semantic_top_k),
                     )

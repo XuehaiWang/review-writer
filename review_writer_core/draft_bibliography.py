@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import re
+import json
 from typing import Any
 
 from .author_metadata import clean_author_names
 from .metadata_fields import metadata_value
+from .chemical_typography import normalize_chemical_typography
+from .paragraph_markers import PARAGRAPH_MARKER_RE, parse_marked_paragraphs
 
 
-PARAGRAPH_MARKER = re.compile(
-    r"<!--\s*paragraph_id:\s*([A-Za-z0-9_.:-]+)\s*-->"
-)
+PARAGRAPH_MARKER = PARAGRAPH_MARKER_RE
 CALLOUT_RE = re.compile(r"\[((?:\d+\s*(?:[-–]\s*\d+)?\s*[,;]?\s*)+)\]")
 REFERENCE_HEADING_RE = re.compile(r"(?mi)^##\s+References\s*$")
+CITATION_MAP_RE = re.compile(r"<!--\s*citation_map:\s*(\{[^\n]*\})\s*-->")
 REFERENCE_WEB_RESIDUE = re.compile(
     r"\b(?:Cite\s+This|Read\s+Online|Article\s+Recommendations?|Supporting\s+Information)\b.*$",
     re.I,
@@ -105,6 +107,31 @@ def expand_callouts(value: str) -> list[int]:
     return result
 
 
+def format_citation_group(numbers) -> str:
+    """Use numeric ordering at every rendering boundary, independent of Paper ID order."""
+    values = sorted({int(number) for number in numbers if str(number).isdigit() and int(number) > 0})
+    return "[" + ", ".join(map(str, values)) + "]" if values else ""
+
+
+def citation_map_comment(paper_to_number: dict[str, int]) -> str:
+    mapping = {str(number): paper for paper, number in sorted(paper_to_number.items(), key=lambda pair: pair[1])}
+    return "<!-- citation_map: " + json.dumps(mapping, ensure_ascii=True, separators=(",", ":")) + " -->"
+
+
+def _embedded_citation_map(markdown: str) -> dict[int, str]:
+    match = CITATION_MAP_RE.search(markdown)
+    if not match:
+        return {}
+    try:
+        value = json.loads(match[1])
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {int(number): paper for number, paper in value.items()
+            if str(number).isdigit() and int(number) > 0 and isinstance(paper, str) and paper}
+
+
 def ordered_callouts(markdown: str) -> list[int]:
     result: list[int] = []
     for match in CALLOUT_RE.finditer(str(markdown or "")):
@@ -115,35 +142,7 @@ def ordered_callouts(markdown: str) -> list[int]:
 
 
 def _paragraph_text_by_id(markdown: str) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for marker in PARAGRAPH_MARKER.finditer(str(markdown or "")):
-        prefix = markdown[: marker.start()].rstrip()
-        start = prefix.rfind("\n\n") + 2
-        text = prefix[start:].strip()
-        if text and not text.startswith(("#", "![", "<!--")):
-            result[str(marker.group(1))] = text
-    return result
-
-
-def _paragraph_spans(markdown: str) -> list[dict[str, Any]]:
-    """Return paragraph bodies immediately preceding stable paragraph markers."""
-
-    rows: list[dict[str, Any]] = []
-    for marker in PARAGRAPH_MARKER.finditer(str(markdown or "")):
-        prefix = markdown[: marker.start()].rstrip()
-        start = prefix.rfind("\n\n") + 2
-        text = prefix[start:].strip()
-        if not text or text.startswith(("#", "![", "<!--")):
-            continue
-        rows.append(
-            {
-                "paragraph_id": str(marker.group(1)),
-                "text": text,
-                "start": start,
-                "end": len(prefix),
-            }
-        )
-    return rows
+    return {row["paragraph_id"]: row["text"] for row in parse_marked_paragraphs(markdown)}
 
 
 def _structured_paragraph_identities(
@@ -198,6 +197,7 @@ def _structured_paragraph_identities(
                         "paragraph_id": paragraph_id,
                         "paper_ids": paper_ids,
                         "claim_groups": claim_groups,
+                        "claim_realizations": [dict(item) for item in paragraph.get("claim_realizations") or [] if isinstance(item, dict)],
                     }
                 )
     return rows
@@ -212,83 +212,83 @@ def strip_numeric_callouts(value: str) -> str:
     return text.strip()
 
 
-def _append_paragraph_callout(text: str, callout: str) -> str:
-    """Place the source callout before generated Figure-context sentences."""
-
-    cleaned = strip_numeric_callouts(text)
-    figure_suffix = re.search(r"(?<!^)\s+(?=Figure\s+\d+\b)", cleaned)
-    if figure_suffix:
-        body = cleaned[: figure_suffix.start()].rstrip()
-        suffix = cleaned[figure_suffix.start() :]
-        return f"{body} {callout}{suffix}".strip()
-    return f"{cleaned} {callout}".strip()
+def _claim_citation_spans(text: str, identity: dict[str, Any]) -> list[tuple[int, int, list[str]]]:
+    """Locate unchanged claim realizations without replacing edited prose."""
+    spans = []
+    cursor = 0
+    for claim in identity.get("claim_realizations") or []:
+        value = normalize_chemical_typography(strip_numeric_callouts(str(claim.get("text") or "")))
+        papers = list(dict.fromkeys(str(item) for item in claim.get("citation_group") or [] if item))
+        if not value or not papers:
+            return []
+        pattern = r"\s+".join(re.escape(word) for word in value.split())
+        match = re.search(pattern, text[cursor:])
+        if not match:
+            return []
+        start, end = cursor + match.start(), cursor + match.end()
+        if text[cursor:start].strip():
+            return []
+        spans.append((start, end, papers))
+        cursor = end
+    tail = text[cursor:].strip()
+    # Draft assembly may append figure explanations outside the claim plan.
+    if tail and not re.fullmatch(r"(?:Figure \d+ [^.]+\.\s*)+", tail):
+        return []
+    return spans
 
 
 def _rerender_structured_citations(
     markdown: str,
     paragraph_identities: list[dict[str, Any]],
     matrix_rows: dict[str, dict[str, Any]],
+    known_numbers: dict[int, str],
 ) -> tuple[str, dict[str, Any]]:
-    """Render one canonical citation group per paragraph from stable Paper IDs."""
+    """Preserve claim locations; never replace a paragraph with its old source prose."""
+    identities = {str(row.get("paragraph_id") or ""): row for row in paragraph_identities}
+    replacements = []
+    needs_revalidation = []
+    # Temporary source markers let prose and table citations share first-use numbering.
+    def source_marker(papers):
+        return "\x00CITE:" + json.dumps(list(dict.fromkeys(papers)), separators=(",", ":")) + "\x00"
 
-    identity_by_paragraph = {
-        str(row.get("paragraph_id") or ""): row
-        for row in paragraph_identities
-        if isinstance(row, dict) and str(row.get("paragraph_id") or "")
-    }
-    spans = _paragraph_spans(markdown)
-    paper_order: list[str] = []
-    missing_paragraphs: list[str] = []
-    for paragraph in spans:
-        paragraph_id = str(paragraph["paragraph_id"])
-        identity = identity_by_paragraph.get(paragraph_id)
+    for paragraph in parse_marked_paragraphs(markdown):
+        pid = str(paragraph["paragraph_id"])
+        identity = identities.get(pid)
         if identity is None:
-            if CALLOUT_RE.search(str(paragraph.get("text") or "")):
-                missing_paragraphs.append(paragraph_id)
             continue
-        for paper_id in identity.get("paper_ids") or []:
-            value = str(paper_id or "").strip()
-            if value and value not in paper_order:
-                paper_order.append(value)
+        clean = normalize_chemical_typography(strip_numeric_callouts(paragraph["text"]))
+        spans = _claim_citation_spans(clean, identity)
+        if spans:
+            for _start, end, papers in reversed(spans):
+                clean = clean[:end] + " " + source_marker(papers) + clean[end:]
+            replacements.append((paragraph["start"], paragraph["end"], clean))
+        elif identity.get("claim_realizations"):
+            # Renumber existing local callouts below, preserving manual/rewritten text.
+            needs_revalidation.append(pid)
+
+    body = markdown
+    for start, end, replacement in reversed(replacements):
+        body = body[:start] + replacement + body[end:]
+    unresolved = []
+    def bind_existing(match):
+        numbers = expand_callouts(match[1])
+        if any(number not in known_numbers for number in numbers):
+            unresolved.extend(number for number in numbers if number not in known_numbers)
+            return match[0]
+        return source_marker([known_numbers[number] for number in numbers])
+    body = CALLOUT_RE.sub(bind_existing, body)
+    marker_pattern = re.compile(r"\x00CITE:(.*?)\x00")
+    paper_order = list(dict.fromkeys(paper for match in marker_pattern.finditer(body) for paper in json.loads(match[1])))
     missing_papers = sorted(set(paper_order) - set(matrix_rows))
-    if missing_paragraphs or missing_papers or not paper_order:
-        return markdown, {
-            "status": "not_applied",
-            "missing_paragraph_ids": missing_paragraphs,
-            "missing_paper_ids": missing_papers,
-        }
-
-    paper_to_number = {
-        paper_id: index for index, paper_id in enumerate(paper_order, start=1)
-    }
-    repaired_body = markdown
-    for paragraph in reversed(spans):
-        identity = identity_by_paragraph.get(str(paragraph["paragraph_id"]))
-        if identity is None:
-            continue
-        numbers = list(
-            dict.fromkeys(
-                paper_to_number[str(paper_id)]
-                for paper_id in identity.get("paper_ids") or []
-                if str(paper_id) in paper_to_number
-            )
-        )
-        if not numbers:
-            continue
-        callout = "[" + ", ".join(map(str, numbers)) + "]"
-        replacement = _append_paragraph_callout(str(paragraph["text"]), callout)
-        repaired_body = (
-            repaired_body[: int(paragraph["start"])]
-            + replacement
-            + repaired_body[int(paragraph["end"]) :]
-        )
-    return repaired_body, {
-        "status": "applied",
-        "paper_order": paper_order,
-        "paper_to_number": paper_to_number,
-        "missing_paragraph_ids": [],
-        "missing_paper_ids": [],
-    }
+    if unresolved or missing_papers or not paper_order:
+        return markdown, {"status": "not_applied", "unresolved_callouts": sorted(set(unresolved)),
+                          "missing_paper_ids": missing_papers,
+                          "paragraph_ids_needing_revalidation": needs_revalidation}
+    paper_to_number = {paper: index for index, paper in enumerate(paper_order, 1)}
+    body = marker_pattern.sub(lambda match: format_citation_group(paper_to_number[paper] for paper in json.loads(match[1])), body)
+    return body, {"status": "applied", "paper_order": paper_order, "paper_to_number": paper_to_number,
+                  "paragraph_ids_needing_revalidation": needs_revalidation,
+                  "missing_paper_ids": [], "missing_paragraph_ids": []}
 
 
 def citation_entries_from_draft(
@@ -303,7 +303,8 @@ def citation_entries_from_draft(
     """
 
     paragraph_text = _paragraph_text_by_id(markdown)
-    mapped: dict[int, str] = {}
+    embedded = _embedded_citation_map(markdown)
+    mapped: dict[int, str] = dict(embedded)
     conflicts: list[dict[str, Any]] = []
     for section in section_index.get("sections") or []:
         if not isinstance(section, dict):
@@ -325,13 +326,10 @@ def citation_entries_from_draft(
             )
             if not text or not paper_ids:
                 continue
+            if embedded:
+                continue
             groups = [expand_callouts(match.group(1)) for match in CALLOUT_RE.finditer(text)]
             callouts = list(dict.fromkeys(number for group in groups for number in group))
-            if len(callouts) != len(paper_ids) and groups:
-                # Draft assembly appends the paragraph's structured citation
-                # group at the end.  Prefer that group when earlier prose also
-                # contains a comparison citation.
-                callouts = groups[-1]
             if len(callouts) != len(paper_ids):
                 conflicts.append(
                     {
@@ -382,6 +380,9 @@ def repair_numbered_references(
         and str(item.get("callout") or "").isdigit()
         and str(item.get("paper_id") or "").strip()
     }
+    for conflict in citation_identity.get("conflicts") or []:
+        if conflict.get("reason") == "callout_maps_to_multiple_papers":
+            identity.pop(int(conflict["callout"]), None)
     heading = REFERENCE_HEADING_RE.search(str(markdown or ""))
     body = markdown[: heading.start()].rstrip() if heading else str(markdown or "").rstrip()
     used = ordered_callouts(body)
@@ -400,11 +401,13 @@ def repair_numbered_references(
         for row in citation_identity.get("structured_paragraphs") or []
         if isinstance(row, dict) and str(row.get("paragraph_id") or "")
     ]
+    structured: dict[str, Any] = {}
     if structured_paragraphs:
         structured_body, structured = _rerender_structured_citations(
             body,
             structured_paragraphs,
             matrix_rows,
+            identity,
         )
         if structured.get("status") == "applied":
             paper_order = list(structured.get("paper_order") or [])
@@ -415,11 +418,13 @@ def repair_numbered_references(
                 references.append(
                     f"[{number}] {reference_text(matrix_rows[paper_id], fallback=paper_id)}"
                 )
-            repaired = structured_body.rstrip() + "\n\n" + "\n".join(references) + "\n"
+            structured_body = CITATION_MAP_RE.sub("", structured_body).rstrip()
+            repaired = structured_body + "\n\n" + citation_map_comment(paper_to_new) + "\n\n" + "\n".join(references) + "\n"
             return repaired, {
                 "status": "applied",
                 "changed": repaired != markdown,
-                "mode": "structured_paragraph_identity",
+                "mode": "structured_claim_identity",
+                "paragraph_ids_needing_revalidation": structured.get("paragraph_ids_needing_revalidation", []),
                 "entries": [
                     {"callout": int(paper_to_new[paper_id]), "paper_id": paper_id}
                     for paper_id in paper_order
@@ -445,6 +450,7 @@ def repair_numbered_references(
             "missing_paper_ids": missing_papers,
             "conflicts": list(citation_identity.get("conflicts") or []),
             "entries": list(citation_identity.get("entries") or []),
+            "paragraph_ids_needing_revalidation": structured.get("paragraph_ids_needing_revalidation", []),
         }
 
     paper_order: list[str] = []
@@ -461,16 +467,16 @@ def repair_numbered_references(
             new = old_to_new.get(old)
             if new is not None and new not in values:
                 values.append(new)
-        return "[" + ", ".join(map(str, values)) + "]" if values else match.group(0)
+        return format_citation_group(values) or match.group(0)
 
-    repaired_body = CALLOUT_RE.sub(replace_group, body).rstrip()
+    repaired_body = CALLOUT_RE.sub(replace_group, CITATION_MAP_RE.sub("", body)).rstrip()
     references = ["## References"]
     for paper_id in paper_order:
         number = paper_to_new[paper_id]
         references.append(
             f"[{number}] {reference_text(matrix_rows[paper_id], fallback=paper_id)}"
         )
-    repaired = repaired_body + "\n\n" + "\n".join(references) + "\n"
+    repaired = repaired_body + "\n\n" + citation_map_comment(paper_to_new) + "\n\n" + "\n".join(references) + "\n"
     return repaired, {
         "status": "applied",
         "changed": repaired != markdown,
@@ -482,4 +488,5 @@ def repair_numbered_references(
         "unresolved_callouts": [],
         "missing_paper_ids": [],
         "conflicts": list(citation_identity.get("conflicts") or []),
+        "paragraph_ids_needing_revalidation": structured.get("paragraph_ids_needing_revalidation", []),
     }

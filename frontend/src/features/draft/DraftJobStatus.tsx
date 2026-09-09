@@ -1,5 +1,6 @@
 import type { Job } from "../../api/types";
 import { useUiText } from "../../i18n/useUiText";
+import { RevisionFailures, type RevisionFailure } from "./DraftRepairSummary";
 
 type DraftJobStatusProps = {
   job?: Job;
@@ -18,6 +19,7 @@ export function DraftJobStatus({ job, startingType = "draft.evaluate", publicati
   const acceptingRewrite = jobType === "draft.accept-rewrite";
   const result = (job?.result || {}) as Record<string, unknown>;
   const feedback = (result.feedback_status || {}) as Record<string, unknown>;
+  const evidenceRescueCounts = (feedback.evidence_rescue_status_counts || {}) as Record<string, unknown>;
   const evidenceRepair = (result.evidence_repair || {}) as Record<string, unknown>;
   const referenceRepair = (result.reference_repair || {}) as Record<string, unknown>;
   const repairTasks = Array.isArray(result.repair_tasks)
@@ -37,9 +39,14 @@ export function DraftJobStatus({ job, startingType = "draft.evaluate", publicati
   const draftChanged = typeof result.draft_changed === "boolean" ? result.draft_changed : undefined;
   const proposalCreated = result.proposal_created === true;
   const changeCount = Number(result.change_count || 0);
+  const resolvedIssueCount = Number(result.resolved_issue_count || 0);
+  const unresolvedIssueCount = Number(result.unresolved_issue_count || 0);
+  const qualityReused = result.quality_reused === true || feedback.quality_reused === true;
   const acceptedRewrites = Number(result.rewrite_accepted || feedback.rewrite_accepted || 0);
   const rejectedRewrites = Number(result.rewrite_rejected || feedback.rewrite_rejected || 0);
   const deferredRewrites = Number(result.rewrite_deferred || feedback.rewrite_deferred || 0);
+  const providerDeferredCount = Number(feedback.provider_deferred_count || deferredRewrites);
+  const checkedScopeMissCount = Number(evidenceRescueCounts.not_found_in_checked_scope || 0);
   const deferredParagraphIds = Array.isArray(feedback.deferred_paragraph_ids)
     ? feedback.deferred_paragraph_ids.map(String).filter(Boolean)
     : [];
@@ -48,6 +55,11 @@ export function DraftJobStatus({ job, startingType = "draft.evaluate", publicati
   const repairedEvidenceCount = Number(evidenceRepair.added_evidence_count || 0);
   const downgradedClaimCount = Number(evidenceRepair.downgraded_claim_count || 0);
   const referenceRebuilt = referenceRepair.changed === true;
+  const noProgressParagraphs = Array.isArray(feedback.rewrite_items)
+    ? feedback.rewrite_items.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+      .filter(item => item.reason === "unchanged_input_no_safe_improvement" || item.reason === "candidate_unchanged")
+      .map(item => String(item.paragraph_id || "")).filter(Boolean)
+    : [];
   const active = status === "submitting" || activeStatuses.has(status);
   const total = Math.max(0, Number(job?.progress_total || 0));
   const current = Math.max(0, Math.min(Number(job?.progress_current || 0), total || Number.MAX_SAFE_INTEGER));
@@ -80,10 +92,23 @@ export function DraftJobStatus({ job, startingType = "draft.evaluate", publicati
       detail = text("正在按稳定的 Paper ID 核对引文，并准备重建连续参考文献编号。", "Checking citations against stable Paper IDs and preparing a consecutive reference rebuild.");
     } else if (optimizing && phase === "repairing_evidence") {
       detail = text("正在把逐段原文复核命中的片段写回版本化证据包，并记录证据不足 Claim 的降级轨迹。", "Persisting matched original-source passages into the versioned evidence package and recording downgraded evidence-gap claims.");
+    } else if (optimizing && phase === "baseline_reused") {
+      detail = text("当前完整质量报告与初稿及来源版本一致，已直接复用，正在处理仍未解决的段落。", "The full quality report matches the current draft and source versions, so it was reused while unresolved paragraphs are processed.");
+    } else if (optimizing && phase === "baseline_refreshing") {
+      detail = text("评估基线已过期，正在自动重新评估当前正文，完成后继续优化。", "The baseline has expired. Re-evaluating the current draft automatically before continuing optimization.");
+    } else if (optimizing && phase === "scoring_changed_paragraphs") {
+      detail = text(
+        `只复评本轮发生变化的 ${Number(feedback.changed_paragraph_count || 0)} 个段落；未变化段落沿用完整基线。`,
+        `Re-evaluating only ${Number(feedback.changed_paragraph_count || 0)} changed paragraph(s); unchanged paragraphs keep the full baseline result.`,
+      );
+    } else if (optimizing && phase === "changed_paragraphs_evaluated") {
+      detail = text("变化段落已复评，正在组合通过检查的安全候选。", "Changed paragraphs were re-evaluated and the safe candidates are being assembled.");
     } else if (optimizing && phase === "validating_full_draft") {
       detail = text("正在对组合后的候选全文重新执行一次完整评分与硬性校验。", "Re-evaluating the exact combined candidate as a full manuscript with all hard checks.");
     } else if (optimizing && ["publishing", "validating"].includes(phase)) {
       detail = text("正在执行完整终稿校验，并原子发布正文、证据包、参考文献和质量报告。", "Running final full-draft validation and atomically publishing the manuscript, evidence package, references, and quality report.");
+    } else if (phase === "supplementing_facts") {
+      detail = text("正在按论文和问题补查、核验科学事实；结果先保留在候选中。", "Retrieving and verifying scientific facts by paper and question; results remain in the candidate.");
     } else if ((evaluating || optimizing) && phase === "preflight") {
       detail = text("正在执行确定性预检。", "Running deterministic preflight checks.");
     } else if ((evaluating || optimizing) && phase === "source_checking") {
@@ -125,15 +150,15 @@ export function DraftJobStatus({ job, startingType = "draft.evaluate", publicati
       if (optimizing && proposalCreated) {
         title = text("批量优化候选已生成", "Batch optimization proposal ready");
         detail = text(
-          `已生成 ${changeCount} 个段落的优化对比${deferredRewrites ? `；另有 ${deferredRewrites} 段因服务商暂时不可用而待重试` : ""}，正文尚未改变。请在“评估与重写”中检查后选择“保存全部优化”或“放弃本批”。`,
-          `${changeCount} paragraph comparisons are ready${deferredRewrites ? `; ${deferredRewrites} more were deferred because the provider was temporarily unavailable` : ""}. The saved draft is unchanged. Review them under Evaluation and rewriting, then save or discard the batch.`,
+          `已生成 ${changeCount} 个段落的优化对比${providerDeferredCount ? `；另有 ${providerDeferredCount} 项因服务商暂时不可用而待重试` : ""}${checkedScopeMissCount ? `；${checkedScopeMissCount} 项在项目已有来源中未找到匹配证据` : ""}，正文尚未改变。请在“评估与重写”中检查后选择“保存全部优化”或“放弃本批”。`,
+          `${changeCount} paragraph comparisons are ready${providerDeferredCount ? `; ${providerDeferredCount} item(s) were deferred because the provider was temporarily unavailable` : ""}${checkedScopeMissCount ? `; ${checkedScopeMissCount} item(s) had no matching evidence in registered project sources` : ""}. The saved draft is unchanged. Review them under Evaluation and rewriting, then save or discard the batch.`,
         );
       } else if (optimizing && draftChanged === false) {
         title = text("优化完成，正文未改变", "Optimization complete; draft unchanged");
-        detail = deferredRewrites > 0
+        detail = providerDeferredCount > 0
           ? text(
-            `本次队列已继续处理到末尾，但 ${deferredRewrites} 个段落因服务商暂时不可用而待重试${deferredParagraphIds.length ? `：${deferredParagraphIds.join("、")}` : ""}。其他段落的结果和检查点均已保留。`,
-            `The queue continued to completion, but ${deferredRewrites} paragraph(s) were deferred because the provider was temporarily unavailable${deferredParagraphIds.length ? `: ${deferredParagraphIds.join(", ")}` : ""}. Results and checkpoints for the other paragraphs were preserved.`,
+            `本次队列已继续处理到末尾，但 ${deferredRewrites ? `${deferredRewrites} 个段落` : `${providerDeferredCount} 项`}因服务商暂时不可用而待重试${providerDeferredCount > deferredRewrites ? `；另有 ${providerDeferredCount - deferredRewrites} 项证据核验待重试` : ""}${deferredParagraphIds.length ? `：${deferredParagraphIds.join("、")}` : ""}。其他结果和检查点均已保留。`,
+            `The queue continued to completion, but ${deferredRewrites ? `${deferredRewrites} paragraph(s)` : `${providerDeferredCount} item(s)`} were deferred because the provider was temporarily unavailable${providerDeferredCount > deferredRewrites ? `; ${providerDeferredCount - deferredRewrites} evidence check(s) are also deferred` : ""}${deferredParagraphIds.length ? `: ${deferredParagraphIds.join(", ")}` : ""}. Other results and checkpoints were preserved.`,
           )
           : bestScoreRestored
           ? text(
@@ -151,10 +176,10 @@ export function DraftJobStatus({ job, startingType = "draft.evaluate", publicati
           : optimizing
             ? draftChanged
               ? text(
-                `安全修改已保存：新增 ${repairedEvidenceCount} 条直接证据，记录 ${downgradedClaimCount} 条 Claim 处置${referenceRebuilt ? "，并重建了参考文献编号" : ""}；仅有歧义候选继续留给人工确认。`,
-                `Safe changes were saved with ${repairedEvidenceCount} direct evidence addition(s), ${downgradedClaimCount} Claim disposition(s)${referenceRebuilt ? ", and rebuilt reference numbering" : ""}; only ambiguous candidates remain for manual review.`,
+                `安全修改已保存${resolvedIssueCount ? `，解决 ${resolvedIssueCount} 个问题` : ""}${unresolvedIssueCount ? `；${unresolvedIssueCount} 个问题保留原文和原因` : ""}：新增 ${repairedEvidenceCount} 条直接证据，记录 ${downgradedClaimCount} 条 Claim 处置${checkedScopeMissCount ? `；${checkedScopeMissCount} 项在已有来源中未找到匹配证据` : ""}${providerDeferredCount ? `；${providerDeferredCount} 项等待服务商恢复` : ""}${referenceRebuilt ? "，并重建了参考文献编号" : ""}${qualityReused ? "；本轮复用了完整基线评分" : ""}。`,
+                `Safe changes were saved${resolvedIssueCount ? `, resolving ${resolvedIssueCount} issue(s)` : ""}${unresolvedIssueCount ? `; ${unresolvedIssueCount} issue(s) kept their original text and reason` : ""}: ${repairedEvidenceCount} direct evidence addition(s), ${downgradedClaimCount} Claim disposition(s)${checkedScopeMissCount ? `; ${checkedScopeMissCount} item(s) had no matching evidence in registered sources` : ""}${providerDeferredCount ? `; ${providerDeferredCount} item(s) await provider recovery` : ""}${referenceRebuilt ? ", and rebuilt reference numbering" : ""}${qualityReused ? "; the full baseline evaluation was reused" : ""}.`,
               )
-              : text("优化结果已生成，请检查仍需人工确认的段落对比。", "The optimization result is ready. Review any paragraph comparisons that still require manual confirmation.")
+              : text("优化结果已生成。未修好的问题会保留原因；自动修正未完成不代表需要你判断科学事实。", "Optimization results are ready. Unresolved findings retain their reasons; incomplete automatic repair does not mean you must adjudicate scientific facts.")
             : acceptingRewrite
               ? text("已采用候选生成时的单段分数，并发布增量更新后的全文分数。", "The paragraph score computed with the candidate was reused and the incrementally updated overall score was published.")
               : text("候选分数已经显示。请比较原文、候选及分数，然后选择保存或放弃。", "The candidate score is ready. Compare the original, candidate, and scores, then save or discard it.");
@@ -196,6 +221,11 @@ export function DraftJobStatus({ job, startingType = "draft.evaluate", publicati
         <span style={percentage === undefined ? undefined : { width: `${percentage}%` }} />
       </div>
       <p>{detail}</p>
+      <RevisionFailures items={Array.isArray(feedback.local_revision_excluded) ? feedback.local_revision_excluded as RevisionFailure[] : undefined} />
+      {noProgressParagraphs.length ? <p>{text(
+        `这些段落在相同正文和证据下未得到安全改进，已停止重复请求：${noProgressParagraphs.join("、")}。可补充材料、调整范围，或单独生成候选。`,
+        `Repeated requests stopped because unchanged text and evidence yielded no safe improvement: ${noProgressParagraphs.join(", ")}. Add sources, adjust the scope, or request a paragraph candidate explicitly.`,
+      )}</p> : null}
       {repairTasks.length ? <details className="draft-repair-task-summary"><summary>{text(`修复任务 ${repairTasks.length} · ${repairStatus || "completed"}`, `${repairTasks.length} repair task(s) · ${repairStatus || "completed"}`)}</summary><ul>{repairTasks.map((task, index) => { const target = (task.target || {}) as Record<string, unknown>; const paragraphs = Array.isArray(target.paragraph_ids) ? target.paragraph_ids.map(String).filter(Boolean) : []; const sections = Array.isArray(target.section_ids) ? target.section_ids.map(String).filter(Boolean) : []; return <li key={String(task.task_id || index)}><strong>{String(task.repair_route || "repair")}</strong><span>{[...sections, ...paragraphs].join(" · ") || text("全文", "Full draft")}</span><em>{String(task.status || "queued")}</em></li>; })}</ul></details> : null}
     </section>
   );

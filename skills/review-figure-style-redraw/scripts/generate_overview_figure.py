@@ -21,8 +21,8 @@ The script:
    other layout).
 7. Saves the generated overview figure.
 
-Chemistry reviews (allene taxonomy profile or an explicit ``skeleton_smiles``
-in the query plan) run in strict *chemical* skeleton mode: an exact
+Chemistry reviews whose structure contract requires a molecular skeleton run
+in strict *chemical* skeleton mode: an exact
 programmatic skeleton is mandatory.  The optional ai3d style transfer is
 retried up to three times and falls back to that exact programmatic skeleton
 when its probabilistic style gate rejects every attempt.  ``--require-ai-skeleton``
@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import math
 import os
@@ -70,6 +71,8 @@ from review_writer_core.providers import (  # noqa: E402
 )
 from review_writer_core.model_gateway_client import (  # noqa: E402
     call_image_model as call_gateway_image,
+    call_json_model as call_gateway_json,
+    gateway_configured as _text_gateway_configured,
     image_gateway_configured,
 )
 from review_writer_core.review_titles import (  # noqa: E402
@@ -77,6 +80,14 @@ from review_writer_core.review_titles import (  # noqa: E402
 )
 from review_writer_core.taxonomy import (  # noqa: E402
     suggest_taxonomy_profile as _suggest_taxonomy_profile,
+)
+from review_writer_core.stages.figures.overview_structure import (  # noqa: E402
+    contract_smiles as _contract_smiles,
+    derive_overview_structure_contract as _derive_overview_structure_contract,
+    resolve_contract_chemical_name as _resolve_contract_chemical_name,
+    taxonomy_motif_smiles as _taxonomy_motif_smiles,
+    taxonomy_profile_has_structure_registry as _taxonomy_has_structure_registry,
+    taxonomy_requires_overview_structure as _taxonomy_requires_structure,
 )
 
 
@@ -93,19 +104,28 @@ _ENGLISH_NUM_WORDS = {
     7: "seven", 8: "eight", 9: "nine", 10: "ten",
 }
 
-# Category panel lists baked into the template prompts (allene-field originals)
-_CATEGORY_PANEL_RE = re.compile(
-    r"(?:-\s*|(?:(\d+)\.\s*))?Cu\s*\n(?:-\s*|(?:(\d+)\.\s*))?Pd\s*\n"
-    r"(?:-\s*|(?:(\d+)\.\s*))?Au\s*\n(?:-\s*|(?:(\d+)\.\s*))?Rh/Ir\s*\n"
-    r"(?:-\s*|(?:(\d+)\.\s*))?Other metals",
-    re.IGNORECASE,
-)
-_INLINE_CATEGORIES_RE = re.compile(r"Cu\s*/\s*Pd\s*/\s*Au\s*/\s*Rh/Ir", re.IGNORECASE)
+OVERVIEW_TEMPLATE_CONTRACT_VERSION = 2
 
 _TEXT_INTEGRITY_GUARD = (
-    "TEXT INTEGRITY (strict): render every cell EXACTLY as given; never copy or repeat "
+    "TEXT INTEGRITY: summarize supplied evidence according to the display word budget; never copy or repeat "
     "words between panels; no invented, gibberish, hyphen-split, or placeholder text; "
-    "fill every panel, leave no blank areas unless specified above."
+    "omit optional panels without distinct supported content; use whitespace instead of filler."
+)
+
+OVERVIEW_SUMMARY_GUIDANCE = (
+    "OVERVIEW DISPLAY POLICY (overrides template requests to fill every cell or copy evidence verbatim): "
+    "This is a graphical summary, not a literature evidence table. Each module has one short heading "
+    "(at most 6 words) and ONE concise summary sentence (at most 18 English words). "
+    "Describe the supported scientific approach or distinguishing feature directly. "
+    "Do not narrate individual papers: no 'a study reported', 'the authors', article titles, "
+    "source-study labels, paper IDs, claim IDs, DOIs or reference numbers anywhere on the image. "
+    "Source attribution is retained outside the image. Do not render evidence input as display text. "
+    "Do not create separate Conditions, Result and Units boxes or duplicate numerical ranges. "
+    "Prefer qualitative scope and strategy; omit experimental recipes and study-specific metrics "
+    "unless essential to distinguish the module. Never broaden a study-specific result into a universal claim. "
+    "Use at most 3 take-home items, at most 12 words each, only for distinct cross-module insights. "
+    "Do not repeat module summaries in a sidebar or footer; omit these optional panels if redundant. "
+    "Do not cut sentences mid-word or use ellipses to meet the budget."
 )
 
 
@@ -364,9 +384,9 @@ _ATOM_RADIUS = {
 }
 
 
-# Generic SMILES -> accurate 3D geometry.  Any review topic can supply its
-# core motif as SMILES (query_plan "skeleton_smiles"), otherwise a keyword map
-# picks a built-in SMILES.  Geometry is exact by construction:
+# Generic SMILES -> accurate 3D geometry. Any review topic can supply its core
+# motif as SMILES; legacy motif lookup is provided by taxonomy resources.
+# Geometry is exact by construction:
 # rings = regular polygons, substituents grow with ideal hybridization angles
 # (sp 180 / sp2 120 / sp3 109.5), cumulated double bonds get perpendicular
 # planes (allene chirality).
@@ -383,41 +403,10 @@ _AROMATIC_EL = {"c": "C", "n": "N", "o": "O", "s": "S", "p": "P",
 _TWO_LETTER = ("Cl", "Br", "Si", "Fe", "Cu", "Zn", "Ni", "Co", "Au", "Ag",
                "Pt", "Ir", "Rh", "Ru", "Mn", "Ti", "Al", "Sn", "Se", "Te",
                "Li", "Na", "Mg", "Ca", "Pd")
-# Ordered most-specific first: the first matching key wins, so narrow motif
-# names must precede their generic parents (e.g. "allenoate" before "allene",
-# "suzuki" before "alkene").  Keep every key unambiguous as a plain substring:
-# short words that collide with common English ("heck" vs "checked") are
-# deliberately excluded.
-_LABEL_SMILES = [
-    ("allenoate", "*C(*)=C=C(C(=O)O*)*"),
-    ("biaryl", "*c1ccccc1-c2ccccc2*"),
-    ("atropisomer", "*c1ccccc1-c2ccccc2*"),
-    ("suzuki", "*c1ccccc1-c2ccccc2*"),
-    ("cross-coupling", "*c1ccccc1-c2ccccc2*"),
-    ("negishi", "*c1ccccc1-c2ccccc2*"),
-    ("kumada", "*c1ccccc1-c2ccccc2*"),
-    ("indole", "c1ccc2[nH]ccc2c1"),
-    ("cyclopropane", "*C1(*)CC1"),
-    ("sonogashira", "*C#C*"),
-    ("propargyl", "OCC#C*"),
-    ("diene", "*C=CC=C*"),
-    ("enone", "*C(=O)C=C*"),
-    ("imine", "*C(*)=N*"),
-    ("nitrile", "*C#N"),
-    ("boronic", "*B(O)O"),
-    ("amide", "*C(=O)N(*)*"),
-    ("alkyne", "*C#C*"),
-    ("alkene", "*C(*)=C(*)*"),
-    ("allene", "*C(*)=C=C(*)*"),
-]
+def _smiles_for_label(label: str, *, taxonomy_profile: str = "chemistry_general") -> str | None:
+    """Read legacy motif mappings from taxonomy resources, not renderer code."""
 
-
-def _smiles_for_label(label: str) -> str | None:
-    low = (label or "").lower()
-    for key, smi in _LABEL_SMILES:
-        if key in low:
-            return smi
-    return None
+    return _taxonomy_motif_smiles(label, taxonomy_profile=taxonomy_profile) or None
 
 
 # ---------------------------------------------------------------------------
@@ -434,14 +423,18 @@ def _try_rdkit_parse(smiles: str):
         return None
     mol = Chem.MolFromSmiles(smiles, sanitize=True)
     if mol is None:
-        # Retry without strict sanitization for exotic SMILES
-        mol = Chem.MolFromSmiles(smiles, sanitize=False)
-        if mol is None:
-            return None
+        # A non-sanitized molecule is useful for diagnostics, never for a
+        # published overview.  Do not silently bypass valence/aromaticity
+        # checks merely because a renderer could draw something.
+        return [], []
     atoms: list[dict[str, Any]] = []
     bonds: list[tuple[int, int, float]] = []
     for rd_atom in mol.GetAtoms():
-        el = rd_atom.GetSymbol()
+        # RDKit names dummy atoms "*"; the renderer, the R-label drawing and
+        # skeleton_atom_counts all key off "R" (the built-in parser's symbol
+        # for a wildcard substituent), so normalize it here.
+        symbol = rd_atom.GetSymbol()
+        el = "R" if symbol == "*" else symbol
         aromatic = rd_atom.GetIsAromatic()
         num_hs = rd_atom.GetTotalNumHs()
         atoms.append({"el": el, "aromatic": aromatic, "h": num_hs})
@@ -487,7 +480,10 @@ def _try_rdkit_3d(smiles: str):
         # atom/bond lists from the same mol object so indices align.
         rd_atoms: list[dict[str, Any]] = []
         for rd_atom in mol.GetAtoms():
-            rd_atoms.append({"el": rd_atom.GetSymbol(), "aromatic": False, "h": 0})
+            symbol = rd_atom.GetSymbol()
+            rd_atoms.append(
+                {"el": "R" if symbol == "*" else symbol, "aromatic": False, "h": 0}
+            )
         rd_bonds: list[tuple[int, int, float]] = []
         for rd_bond in mol.GetBonds():
             rd_bonds.append(
@@ -511,12 +507,13 @@ def parse_smiles(smiles: str):
         atoms, bonds = rdkit_result
         if atoms:
             return atoms, bonds
+        raise ValueError("RDKit rejected SMILES during sanitization")
 
     # --- Fallback: built-in lightweight parser ---
     return _parse_smiles_fallback(smiles)
 
 
-def _parse_smiles_fallback(smiles: str):
+def _parse_smiles_fallback(smiles: str, strict: bool = False):
     """Built-in organic-subset SMILES parser (aromatic bond = 1.5)."""
     atoms: list[dict[str, Any]] = []
     bonds: list[tuple[int, int, float]] = []
@@ -528,9 +525,19 @@ def _parse_smiles_fallback(smiles: str):
     while i < n:
         ch = smiles[i]
         if ch == "(":
+            if prev < 0 and strict:
+                raise ValueError("branch has no preceding atom")
             stack.append(prev); i += 1; continue
         if ch == ")":
+            if not stack:
+                if strict:
+                    raise ValueError("unmatched closing branch")
+                i += 1; continue
             prev = stack.pop(); i += 1; continue
+        if ch == ".":
+            if strict:
+                raise ValueError("dot-disconnected motifs must be validated fragment by fragment")
+            prev = -1; pending = 0.0; i += 1; continue
         if ch in "=#-/:\\":
             if ch == ":":
                 pending = 1.5
@@ -556,7 +563,12 @@ def _parse_smiles_fallback(smiles: str):
         aromatic, bracket_h = False, 0
         charge = 0
         if ch == "[":
-            j = smiles.index("]", i) if "]" in smiles[i:] else i + 1
+            if "]" not in smiles[i:]:
+                if strict:
+                    raise ValueError("unclosed bracket atom")
+                j = i + 1
+            else:
+                j = smiles.index("]", i)
             tok = smiles[i + 1:j]
             m = re.match(r"(\d*)([A-Za-z][a-z]?)(@{0,2})", tok)
             raw = m.group(2) if m and m.group(2) else "C"
@@ -582,6 +594,8 @@ def _parse_smiles_fallback(smiles: str):
             el = "R" if ch == "*" else ch
             i += 1
         else:
+            if strict:
+                raise ValueError(f"unsupported SMILES character {ch!r}")
             i += 1
             continue
         atoms.append({"el": el, "aromatic": aromatic, "h": bracket_h, "charge": charge})
@@ -593,6 +607,12 @@ def _parse_smiles_fallback(smiles: str):
             bonds.append((prev, idx, order))
         pending = 0.0
         prev = idx
+    if strict and stack:
+        raise ValueError("unclosed branch")
+    if strict and ring_open:
+        raise ValueError("unclosed ring")
+    if strict and pending:
+        raise ValueError("trailing bond symbol")
     for idx, a in enumerate(atoms):
         if a["el"] in ("R", "H"):
             continue
@@ -1258,6 +1278,10 @@ _COMPOSITE_REGIONS: dict[str, list[tuple[float, float, float, float]]] = {
         # Variant B: tall vertical structure panel on the left
         # (caption excluded), calibrated against the 2026-08-06 run.
         (0.016, 0.16, 0.198, 0.795),
+        # Variant F: narrow product panel below an in-column heading. The old
+        # tall calibration included both the heading and the product caption,
+        # failed its blankness guard, and incorrectly triggered a right dock.
+        (0.018, 0.235, 0.183, 0.715),
         # Variant E: portrait upper-left product panel.  Keep this after the
         # established variants because its footprint is contained in some
         # wider blank panels and would otherwise steal their calibration.
@@ -1341,12 +1365,54 @@ def _panel_matches_layout_zone(
 
     if layout != "module-cards-crosscut-sidebar":
         return True
-    x0, y0, x1, _y1 = box
+    x0, y0, x1, y1 = box
     center_x = (x0 + x1) / 2
-    return (
+    in_upper_left = (
         x0 <= 0.14 * width
         and center_x <= 0.44 * width
         and y0 <= 0.28 * height
+    )
+    if not in_upper_left:
+        return False
+    panel_w = x1 - x0
+    panel_h = y1 - y0
+    if panel_h >= 0.30 * height and panel_w <= 0.30 * width:
+        return x0 <= 0.075 * width
+    return True
+
+
+def _looks_like_layout_structure_panel(
+    layout: str,
+    box: tuple[int, int, int, int],
+    width: int,
+    height: int,
+) -> bool:
+    """Accept provider variants that satisfy a known layout contract.
+
+    The module-cards provider sometimes renders the reserved upper-left
+    molecule panel as a wide, shallow reaction strip.  It is a valid panel,
+    but deliberately remains too shallow for the generic panel detector: a
+    global relaxation would also turn ordinary inter-card whitespace into a
+    paste target.  Keep this exception constrained to the calibrated layout
+    zone and retain the generic guard for every other layout.
+    """
+
+    if _looks_like_structure_panel(box, width, height):
+        return True
+    if layout != "module-cards-crosscut-sidebar":
+        return False
+    x0, y0, x1, y1 = box
+    panel_w = x1 - x0
+    panel_h = y1 - y0
+    return (
+        x0 >= 0.008 * width
+        and x0 <= 0.08 * width
+        and y0 >= 0.08 * height
+        and y0 <= 0.32 * height
+        and x1 <= 0.62 * width
+        and y1 <= 0.48 * height
+        and panel_w >= 0.34 * width
+        and panel_h >= 0.075 * height
     )
 
 
@@ -1500,9 +1566,108 @@ def _looks_like_structure_panel(
     return wide_panel or tall_panel
 
 
+def detect_layout_blank_panel(
+    fig: Any,
+    layout: str,
+    *,
+    white_threshold: int = 248,
+) -> tuple[int, int, int, int] | None:
+    """Detect an enclosed neutral-white panel inside a layout-specific zone.
+
+    Generated templates vary enough that a fixed normalized rectangle can be
+    too narrow or vertically shifted. Pixel-level connected components recover
+    the actual white interior bounded by the provider-drawn panel stroke. Page
+    background components touch the search boundary and are rejected by the
+    existing structure-panel shape guard.
+    """
+
+    if layout != "module-cards-crosscut-sidebar":
+        return None
+    from collections import deque
+
+    image = fig.convert("RGB")
+    width, height = image.size
+    search_x0 = 0
+    search_y0 = max(0, int(round(height * 0.08)))
+    # Known provider variants extend the reserved upper-left reaction strip
+    # slightly beyond the old 42% search boundary.  The layout-zone guard
+    # below still rejects right-column cards, so scan the complete contracted
+    # structure area instead of truncating an otherwise valid panel.
+    search_x1 = min(width, int(round(width * 0.62)))
+    search_y1 = min(height, int(round(height * 0.82)))
+    search_w = max(0, search_x1 - search_x0)
+    search_h = max(0, search_y1 - search_y0)
+    if not search_w or not search_h:
+        return None
+
+    pixels = image.load()
+    white = bytearray(search_w * search_h)
+    for local_y in range(search_h):
+        y = search_y0 + local_y
+        row_offset = local_y * search_w
+        for local_x in range(search_w):
+            red, green, blue = pixels[search_x0 + local_x, y]
+            if (
+                min(red, green, blue) >= white_threshold
+                and max(red, green, blue) - min(red, green, blue) <= 6
+            ):
+                white[row_offset + local_x] = 1
+
+    candidates: list[tuple[int, tuple[int, int, int, int]]] = []
+    minimum_component_area = max(800, int(round(width * height * 0.015)))
+    for start in range(len(white)):
+        if not white[start]:
+            continue
+        white[start] = 0
+        queue = deque([start])
+        start_y, start_x = divmod(start, search_w)
+        min_x = max_x = start_x
+        min_y = max_y = start_y
+        area = 0
+        while queue:
+            index = queue.popleft()
+            local_y, local_x = divmod(index, search_w)
+            area += 1
+            min_x = min(min_x, local_x)
+            max_x = max(max_x, local_x)
+            min_y = min(min_y, local_y)
+            max_y = max(max_y, local_y)
+            if local_x and white[index - 1]:
+                white[index - 1] = 0
+                queue.append(index - 1)
+            if local_x + 1 < search_w and white[index + 1]:
+                white[index + 1] = 0
+                queue.append(index + 1)
+            if local_y and white[index - search_w]:
+                white[index - search_w] = 0
+                queue.append(index - search_w)
+            if local_y + 1 < search_h and white[index + search_w]:
+                white[index + search_w] = 0
+                queue.append(index + search_w)
+        if area < minimum_component_area:
+            continue
+        box = (
+            search_x0 + min_x,
+            search_y0 + min_y,
+            search_x0 + max_x + 1,
+            search_y0 + max_y + 1,
+        )
+        box_area = max(1, (box[2] - box[0]) * (box[3] - box[1]))
+        if area / box_area < 0.72:
+            continue
+        if not _looks_like_layout_structure_panel(layout, box, width, height):
+            continue
+        if not _panel_matches_layout_zone(layout, box, width, height):
+            continue
+        candidates.append((area, box))
+    return max(candidates, default=(0, None), key=lambda item: item[0])[1]
+
+
 def detect_blank_panel(fig: Any, min_area_fraction: float = 0.03,
                        max_area_fraction: float = 0.55,
                        whiteness_threshold: float = 0.85,
+                       prefer_landscape: bool = False,
+                       candidate_filter: Any = None,
                        ) -> tuple[int, int, int, int] | None:
     """Locate the largest mostly-blank panel of a generated overview figure.
 
@@ -1516,6 +1681,10 @@ def detect_blank_panel(fig: Any, min_area_fraction: float = 0.03,
     panel.  Each survivor is re-validated at sampled resolution with the same
     whiteness guard used for calibrated candidates.  Returns the box or None
     when no region qualifies.
+
+    ``prefer_landscape`` picks the first surviving candidate whose width is
+    at least ~1.35x its height (falling back to the largest) so wide reaction
+    schemes are not pasted into a narrow portrait column.
     """
     W, H = fig.size
     small = fig.convert("RGB").resize(
@@ -1557,6 +1726,7 @@ def detect_blank_panel(fig: Any, min_area_fraction: float = 0.03,
     # Largest first so the reserved (biggest) blank panel wins, while smaller
     # candidates remain available when the larger ones are page margins.
     rejected_margins: list[tuple[int, int, int, int]] = []
+    matches: list[tuple[int, int, int, int]] = []
     for area, top, left, bottom, right in sorted(set(candidates), reverse=True):
         fraction = area / (_DETECT_GRID_ROWS * _DETECT_GRID_COLS)
         if fraction < min_area_fraction:
@@ -1596,7 +1766,16 @@ def detect_blank_panel(fig: Any, min_area_fraction: float = 0.03,
             continue
         if _panel_whiteness(fig, box) < whiteness_threshold:
             continue
-        return box
+        if candidate_filter is not None and not candidate_filter(box, W, H):
+            continue
+        matches.append(box)
+    if prefer_landscape:
+        for box in matches:
+            if (box[2] - box[0]) >= 1.35 * (box[3] - box[1]):
+                return box
+        return None
+    if matches:
+        return matches[0]
     return None
 
 
@@ -1628,13 +1807,23 @@ def _crop_skeleton_layer(image: Any) -> Any:
     """Crop transparent/white margins while retaining meaningful fragments."""
 
     rgba = _skeleton_rgba(image)
-    mask = rgba.getchannel("A").point(lambda value: 255 if value > 8 else 0)
+    alpha = rgba.getchannel("A").point(lambda value: 0 if value <= 24 else value)
+    rgba.putalpha(alpha)
+    mask = alpha.point(lambda value: 255 if value > 32 else 0)
     bbox = _skeleton_content_bbox(mask)
     return rgba.crop(bbox) if bbox else rgba
 
 
-def _fit_skeleton_layer(layer: Any, available_w: int, available_h: int) -> tuple[Any, bool]:
-    """Fit the molecule, rotating 90 degrees when a portrait panel benefits."""
+def _fit_skeleton_layer(layer: Any, available_w: int, available_h: int,
+                        allow_rotate: bool = True) -> tuple[Any, bool]:
+    """Scale the molecule to fill the panel, rotating 90 degrees when a portrait panel benefits.
+
+    ``Image.thumbnail`` only shrinks, so a skeleton smaller than the reserved
+    panel kept its native size and appeared lost in the whitespace.  Compute an
+    explicit aspect-preserving scale (up or down) so the model always fills the
+    panel it was given.  Set ``allow_rotate=False`` for reaction schemes, which
+    read left->right and must never be turned sideways.
+    """
 
     from PIL import Image
 
@@ -1643,14 +1832,23 @@ def _fit_skeleton_layer(layer: Any, available_w: int, available_h: int) -> tuple
     width, height = max(1, layer.width), max(1, layer.height)
     normal_scale = min(available_w / width, available_h / height)
     rotated_scale = min(available_w / height, available_h / width)
-    rotated = normal_scale < 1.0 and rotated_scale >= normal_scale * 1.05
+    rotated = allow_rotate and normal_scale < 1.0 and rotated_scale >= normal_scale * 1.05
     if rotated:
         layer = layer.transpose(Image.Transpose.ROTATE_90)
-    layer.thumbnail((available_w, available_h), Image.Resampling.LANCZOS)
+        width, height = height, width
+    scale = min(available_w / width, available_h / height)
+    target_w = max(1, int(round(width * scale)))
+    target_h = max(1, int(round(height * scale)))
+    layer = layer.resize((target_w, target_h), Image.Resampling.LANCZOS)
     return layer, rotated
 
 
 def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layout: str,
+                                   allow_rotate: bool = True,
+                                   scheme_mode: bool = False,
+                                   scheme_title: str = "",
+                                   reaction_slot_ratio: float = 0.24,
+                                   allow_inserted_reaction_slot: bool = False,
                                    ) -> tuple[bool, str, str]:
     """Paste the exact ball-and-stick model into the layout's structure panel.
 
@@ -1660,12 +1858,10 @@ def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layou
     handles layouts for which every calibration fails.
 
     Returns ``(ok, reason, panel_source)`` where ``panel_source`` is
-    ``"calibrated"``, ``"auto-detected"``, ``"appended-dock"``,
-    or ``""``.
-    If the image model ignored the reserved-blank-panel instruction, the
-    generated overview is preserved pixel-for-pixel and a white structure
-    dock is appended to its right.  This is deliberately safer than clearing
-    a non-white region that may contain scientific text or diagram content.
+    ``"layout-detected"``, ``"calibrated"``, ``"auto-detected"``, or ``""``.
+    If the image model ignored the reserved blank-panel instruction,
+    compositing fails closed; the function never publishes a second structure
+    area outside the layout.
     """
     if not skeleton_path.exists():
         return False, "skeleton_missing", ""
@@ -1676,76 +1872,89 @@ def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layou
     with Image.open(figure_path) as fig:
         fig = fig.convert("RGB")
         W, H = fig.size
-        target = calibrated_structure_panel(fig, layout)
-        panel_source = "calibrated" if target is not None else ""
-        if target is None:
-            detected = detect_blank_panel(fig)
-            if detected is not None and _panel_matches_layout_zone(
-                layout, detected, W, H
-            ):
-                target = detected
+        if scheme_mode:
+            # A representative reaction must occupy a deliberate horizontal
+            # slot inside the AI layout.  Appending a second canvas below the
+            # infographic produced the detached, oversized strip seen in early
+            # output.  If the provider did not preserve the requested slot,
+            # reject this attempt so the caller can regenerate instead.
+            target = detect_blank_panel(fig, prefer_landscape=True)
+            if target is None:
+                if not allow_inserted_reaction_slot:
+                    return False, "reaction_slot_unavailable", ""
+                # The retry still did not preserve the declared slot. Create
+                # one *inside the existing canvas*, directly below the title,
+                # and compact the lower AI layout. This is the final automatic
+                # fallback: it keeps the reaction visually integrated instead
+                # of appending a detached white strip below the infographic.
+                from PIL import ImageDraw
+                detected_header_h = detect_title_band_bottom(fig)
+                # Never insert a reaction slot in the upper ninth of an
+                # overview. This conservative floor protects large title text
+                # even when its white glyphs momentarily confuse the dark-bar
+                # detector; a little blank margin is preferable to a torn
+                # scientific title.
+                title_safe_floor = max(46, min(int(H * 0.09), H // 5))
+                header_h = max(detected_header_h or 0, title_safe_floor)
+                # This is a compact emergency slot, not the generous hero
+                # area requested from the AI model. Cap it so a failed image
+                # layout cannot be bisected by a conspicuous white slab.
+                ratio = max(0.12, min(0.16, float(reaction_slot_ratio)))
+                slot_h = max(96, int(H * ratio))
+                slot_h = min(slot_h, max(86, H - header_h - 80))
+                body_h = max(1, H - header_h - slot_h)
+                canvas = Image.new("RGB", (W, H), "white")
+                canvas.paste(fig.crop((0, 0, W, header_h)), (0, 0))
+                body = fig.crop((0, header_h, W, H)).resize(
+                    (W, body_h), Image.Resampling.LANCZOS
+                )
+                canvas.paste(body, (0, header_h + slot_h))
+                inset = max(10, min(18, W // 70))
+                target = (inset, header_h + inset, W - inset, header_h + slot_h - inset)
+                ImageDraw.Draw(canvas).rounded_rectangle(
+                    target, radius=max(10, inset // 2), fill="white",
+                    outline=(182, 199, 219), width=max(2, W // 500),
+                )
+                fig = canvas
+                panel_source = "inserted-reaction-slot"
+            else:
                 panel_source = "auto-detected"
-        if target is None:
-            # The provider occasionally fills the explicitly reserved panel
-            # with its own approximate molecule.  Never overwrite a populated
-            # region: extend the canvas and place the integrity-checked exact
-            # skeleton in a dedicated white dock instead.  The original image
-            # remains unscaled and uncropped, so no generated content is lost.
             try:
                 with Image.open(skeleton_path) as sk:
                     sk = _crop_skeleton_layer(sk)
-
-                    dock_width = max(320, min(480, int(round(W * 0.38))))
-                    padding = max(22, int(round(dock_width * 0.08)))
-                    canvas = Image.new("RGB", (W + dock_width, H), "white")
-                    canvas.paste(fig, (0, 0))
-
-                    # A restrained separator/frame makes the appended area
-                    # read as an intentional scientific inset without adding
-                    # any model-generated labels or changing the source art.
-                    from PIL import ImageDraw
-                    draw = ImageDraw.Draw(canvas)
-                    separator_x = W + max(8, padding // 3)
-                    draw.line(
-                        (separator_x, padding, separator_x, H - padding),
-                        fill=(38, 75, 130),
-                        width=max(2, W // 500),
-                    )
-                    title = "Representative substrate"
-                    title_font = _label_font(max(18, min(28, dock_width // 15)))
-                    title_box = draw.textbbox((0, 0), title, font=title_font)
-                    title_width = title_box[2] - title_box[0]
-                    draw.text(
-                        (W + (dock_width - title_width) // 2, padding),
-                        title,
-                        fill=(24, 56, 102),
-                        font=title_font,
-                    )
-                    title_height = max(44, (title_box[3] - title_box[1]) + padding)
-                    inset = (
-                        W + padding,
-                        padding + title_height,
-                        W + dock_width - padding,
-                        H - padding,
-                    )
-                    draw.rounded_rectangle(
-                        inset,
-                        radius=max(12, padding // 2),
-                        fill="white",
-                        outline=(182, 199, 219),
-                        width=max(2, W // 500),
-                    )
-
-                    available_w = max(1, inset[2] - inset[0] - 2 * padding)
-                    available_h = max(1, inset[3] - inset[1] - 2 * padding)
-                    sk, _rotated = _fit_skeleton_layer(sk, available_w, available_h)
-                    sx = inset[0] + (inset[2] - inset[0] - sk.width) // 2
-                    sy = inset[1] + (inset[3] - inset[1] - sk.height) // 2
-                    canvas.paste(sk, (sx, sy), sk.getchannel("A"))
-                    canvas.save(figure_path, format="PNG")
-                return True, "", "appended-dock"
+                    x0, y0, x1, y1 = target
+                    pad = max(14, min(x1 - x0, y1 - y0) // 16)
+                    avail_w = max(1, x1 - x0 - 2 * pad)
+                    avail_h = max(1, y1 - y0 - 2 * pad)
+                    layer, _rot = _fit_skeleton_layer(sk, avail_w, avail_h,
+                                                       allow_rotate=False)
+                    sx = x0 + (x1 - x0 - layer.width) // 2
+                    sy = y0 + (y1 - y0 - layer.height) // 2
+                    fig.paste(layer, (sx, sy), layer.getchannel("A"))
+                    fig.save(figure_path, format="PNG")
+                return True, "", panel_source
             except Exception as exc:
-                return False, f"append_dock_failed:{type(exc).__name__}", ""
+                return False, f"reaction_slot_failed:{type(exc).__name__}", ""
+        target = detect_layout_blank_panel(fig, layout)
+        panel_source = "layout-detected" if target is not None else ""
+        if target is None:
+            target = calibrated_structure_panel(fig, layout)
+            panel_source = "calibrated" if target is not None else ""
+        if target is None:
+            detected = detect_blank_panel(
+                fig,
+                candidate_filter=lambda box, width, height: _panel_matches_layout_zone(
+                    layout, box, width, height
+                ),
+            )
+            if detected is not None:
+                target = detected
+                panel_source = "auto-detected"
+        if target is None:
+            # Never create a second page-width dock. The prompt reserves a
+            # product/structure panel inside the overview, and publishing a
+            # molecule outside that layout is semantically and visually wrong.
+            return False, "structure_panel_not_detected", ""
         x0, y0, x1, y1 = target
         _clear_panel_specks(fig, (x0, y0, x1, y1))
         with Image.open(skeleton_path) as sk:
@@ -1757,7 +1966,7 @@ def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layou
             # layout.  Only the molecular content is composited here.
             panel_w = x1 - x0
             panel_h = y1 - y0
-            inner_padding = max(16, min(panel_w, panel_h) // 12)
+            inner_padding = max(12, min(panel_w, panel_h) // 18)
             content_box = (
                 x0 + inner_padding,
                 y0 + inner_padding,
@@ -1766,7 +1975,7 @@ def composite_skeleton_into_figure(figure_path: Path, skeleton_path: Path, layou
             )
             available_w = max(1, content_box[2] - content_box[0])
             available_h = max(1, content_box[3] - content_box[1])
-            sk, _rotated = _fit_skeleton_layer(sk, available_w, available_h)
+            sk, _rotated = _fit_skeleton_layer(sk, available_w, available_h, allow_rotate)
             sx = content_box[0] + (available_w - sk.width) // 2
             sy = content_box[1] + (available_h - sk.height) // 2
             fig.paste(sk, (sx, sy), sk.getchannel("A"))
@@ -1837,13 +2046,10 @@ def _validate_smiles_strict(token: str) -> bool:
     Without RDKit, rejects mostly-lowercase letter runs (English words)
     and requires >= 3 atoms from the fallback parser.
     """
-    try:
-        from rdkit import Chem
-        from rdkit import RDLogger
+    if _rdkit_is_available():
+        from rdkit import Chem, RDLogger
         RDLogger.DisableLog("rdApp.*")
         return Chem.MolFromSmiles(token, sanitize=True) is not None
-    except ImportError:
-        pass
     # No RDKit: English words are mostly lowercase; real SMILES carry
     # uppercase atoms, digits, or bracketed groups.
     letters = [c for c in token if c.isalpha()]
@@ -1851,7 +2057,7 @@ def _validate_smiles_strict(token: str) -> bool:
             and not re.search(r"[0-9\[\]*/]", token):
         return False
     try:
-        atoms, _bonds = _parse_smiles_fallback(token)
+        atoms, _bonds = _parse_smiles_fallback(token, strict=True)
         return bool(atoms) and len(atoms) >= 3
     except Exception:
         return False
@@ -1919,40 +2125,55 @@ def resolve_skeleton_smiles(features: dict[str, Any]) -> str:
 
     Resolution priority:
     1. Explicit ``skeleton_smiles`` / ``smiles`` from query_plan (optional override).
-    2. Theme-driven match: review title + product keywords against
-       ``_LABEL_SMILES``.  The review THEME defines the representative core
-       motif for the overview; this is more reliable than scanning the
-       manuscript, which is full of specific example compounds.
-    3. Scored scan of the final manuscript / draft text (theme-unmatched only).
-    4. Outline text scan and broad keyword blob fallback.
+    2. The evidence-aware ``overview_structure_contract`` from Blueprint.
+    3. Product-only keyword match for legacy local projects.
+    4. Scored scan of the final manuscript / outline for non-product-locked
+       legacy projects.
 
     Returns "" when no motif can be determined.
     """
+    if (features.get("_chemistry_decision") or {}).get("mode") == "concept":
+        return ""
+    scheme = features.get("_reaction_scheme") or features.get("_reviewed_product_scheme")
+    if isinstance(scheme, dict) and scheme.get("product_smiles"):
+        return _clean_motif_smiles(scheme["product_smiles"])
+
     # Priority 1: explicit skeleton_smiles (optional override, not required)
     smiles = str(features.get("skeleton_smiles", "") or "").strip()
     if smiles:
-        return smiles
+        return _clean_motif_smiles(smiles)
     smiles = str(features.get("smiles", "") or "").strip()
     if smiles:
-        return smiles
+        return _clean_motif_smiles(smiles)
 
     # Only chemistry-context projects should attempt molecule extraction
     if not is_chemistry_context(features):
         return ""
 
-    # Priority 2: theme-driven motif lookup (title + product keywords).
-    # Example: "axially chiral allenes" -> *C(*)=C=C(*)* regardless of the
-    # specific substrate/product SMILES scattered through the manuscript.
-    products = features.get("product_keywords", [])
-    theme_blob = " ".join(
-        [str(features.get("review_title", "") or "")]
-        + [str(p) for p in products]
-    )
-    smiles = _smiles_for_label(theme_blob) or ""
-    if smiles:
-        return smiles
+    # Priority 2: Blueprint resolves whether the representative molecule is a
+    # target product or the primary subject.  A product-locked contract is
+    # never allowed to fall back to a substrate-shaped topic keyword.
+    structure_contract = features.get("overview_structure_contract")
+    if isinstance(structure_contract, dict):
+        smiles = _contract_smiles(structure_contract)
+        if smiles:
+            return _clean_motif_smiles(smiles)
+        if str(structure_contract.get("role") or "") == "target_product":
+            return ""
 
-    # Priority 3: scan manuscript/draft text (theme did not match a motif)
+    # Priority 3: product-only lookup for legacy projects.  Do not concatenate
+    # the raw Topic here: it commonly contains the starting material before the
+    # target product.
+    products = features.get("product_keywords", [])
+    theme_blob = " ".join(str(p) for p in products)
+    smiles = _smiles_for_label(
+        theme_blob,
+        taxonomy_profile=str(features.get("taxonomy_profile") or "chemistry_general"),
+    ) or ""
+    if smiles:
+        return _clean_motif_smiles(smiles)
+
+    # Priority 4: scan manuscript/draft text (theme did not match a motif)
     project_dir = features.get("_project_dir")
     if project_dir:
         # Try final/first draft (most authoritative, generated before overview)
@@ -1963,22 +2184,25 @@ def resolve_skeleton_smiles(features: dict[str, Any]) -> str:
                     text = draft_path.read_text(encoding="utf-8", errors="ignore")
                     smiles = _extract_smiles_from_text(text)
                     if smiles:
-                        return smiles
+                        return _clean_motif_smiles(smiles)
 
-    # Priority 4: outline text scan and broad keyword blob fallback
+    # Priority 5: outline text scan and broad keyword blob fallback
     outline = str(features.get("_outline_text", "") or "")
     if outline:
         smiles = _extract_smiles_from_text(outline)
         if smiles:
-            return smiles
+            return _clean_motif_smiles(smiles)
         blob_parts = [features.get("review_title", ""), outline[:800]]
         if project_dir:
             draft_path = Path(project_dir) / "04_first_draft" / "first_draft.md"
             if draft_path.exists():
                 blob_parts.append(draft_path.read_text(encoding="utf-8", errors="ignore")[:1200])
-        smiles = _smiles_for_label(" ".join(blob_parts)) or ""
+        smiles = _smiles_for_label(
+            " ".join(blob_parts),
+            taxonomy_profile=str(features.get("taxonomy_profile") or "chemistry_general"),
+        ) or ""
         if smiles:
-            return smiles
+            return _clean_motif_smiles(smiles)
     return ""
 
 
@@ -2327,15 +2551,20 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
         "substrate_keywords": [],
         "catalyst_keywords": [],
         "skeleton_smiles": "",
+        "overview_structure_contract": {},
         "overview_axis_contract": {},
         "overview_modules": [],
         "overview_evidence_bindings": {},
     }
 
+    query_plan: dict[str, Any] = {}
+    blueprint: dict[str, Any] = {}
+
     # Read query plan for group_by, filters, keywords, and topic
     qp_path = project_dir / "00_discovery" / "query_plan.draft.json"
     if qp_path.exists():
         qp = read_json(qp_path)
+        query_plan = qp if isinstance(qp, dict) else {}
         features["group_by"] = qp.get("group_by", [])
         features["review_title"] = qp.get("topic", "")
         filters = qp.get("filters", {})
@@ -2357,7 +2586,7 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
         gb = features["group_by"]
         if gb:
             rule_map = {
-                "catalyst_or_method": "By catalyst center metal",
+                "catalyst_or_method": "By catalyst or method",
                 "substrate": "By substrate class",
                 "reaction_type": "By reaction type",
                 "product": "By product class",
@@ -2391,6 +2620,9 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
                     basis.get("description") or f"By {axis.replace('_', ' ')}"
                 )
         if isinstance(blueprint, dict):
+            stored_structure_contract = blueprint.get("overview_structure_contract")
+            if isinstance(stored_structure_contract, dict):
+                features["overview_structure_contract"] = stored_structure_contract
             for section in blueprint.get("sections") or []:
                 if not isinstance(section, dict):
                     continue
@@ -2440,7 +2672,7 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
     # but the recovered outline/draft clearly organizes by catalyst metals.
     if not features.get("group_by") and features.get("has_metal_classification"):
         features["group_by"] = ["catalyst_or_method"]
-        features["classification_rule"] = "By catalyst center metal"
+        features["classification_rule"] = "By catalyst or method"
 
     # The confirmed Blueprint owns the top-level overview modules.  The
     # legacy ``metal_categories`` field remains the renderer input name, but
@@ -2461,11 +2693,54 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
     sel_path = project_dir / "00_discovery" / "selected_discovery_results.json"
     if sel_path.exists():
         sel = read_json(sel_path)
-        features["group_by"] = sel.get("group_by", features["group_by"])
+        if not features.get("group_by"):
+            features["group_by"] = sel.get("group_by", [])
 
     # Resolve the taxonomy profile for cross-domain prompt adaptation.
-    # Without this, non-chemistry reviews inherit allene-centric prompts.
     _resolve_taxonomy_profile(project_dir, features)
+    matrix_path = project_dir / "01_matrix_outline" / "literature_matrix.json"
+    matrix = read_json(matrix_path) if matrix_path.exists() else {}
+    stored_contract = features.get("overview_structure_contract")
+    if not stored_contract or (
+        isinstance(stored_contract, dict)
+        and stored_contract.get("status") == "unresolved"
+        and not stored_contract.get("candidate_names")
+    ):
+        features["overview_structure_contract"] = _derive_overview_structure_contract(
+            features.get("review_title") or "",
+            query_plan=query_plan,
+            matrix=matrix,
+            sections=(blueprint.get("sections") or []),
+            taxonomy_profile=features.get("taxonomy_profile") or "",
+        )
+    resolution_enabled = os.environ.get(
+        "REVIEW_WRITER_CHEMICAL_NAME_RESOLUTION_ENABLED", "1"
+    ).strip().casefold() not in {"0", "false", "no", "off"}
+    structure_contract = features.get("overview_structure_contract")
+    if (
+        resolution_enabled
+        and isinstance(structure_contract, dict)
+        and structure_contract.get("status") == "unresolved"
+        and structure_contract.get("candidate_names")
+    ):
+        try:
+            timeout_seconds = max(
+                1.0,
+                min(
+                    float(
+                        os.environ.get(
+                            "REVIEW_WRITER_CHEMICAL_NAME_TIMEOUT_SECONDS", "4"
+                        )
+                    ),
+                    8.0,
+                ),
+            )
+        except (TypeError, ValueError):
+            timeout_seconds = 4.0
+        features["overview_structure_contract"] = _resolve_contract_chemical_name(
+            structure_contract,
+            timeout_seconds=timeout_seconds,
+        )
     features["display_title"] = build_overview_display_title(features)
     overview_modules = list(
         dict.fromkeys(
@@ -2508,6 +2783,24 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
         "evidence_bindings": dict(features.get("overview_evidence_bindings") or {}),
         "performance_label_policy": "omit_without_structured_evidence_binding",
     }
+    writing_path = project_dir / "02_section_drafting" / "writing_plan.json"
+    section_index_path = project_dir / "02_section_drafting" / "section_drafts.json"
+    current_draft_path = project_dir / "04_first_draft" / "first_draft.md"
+    if writing_path.is_file() and section_index_path.is_file() and current_draft_path.is_file():
+        from review_writer_core.section_narrative_contracts import build_argument_execution
+        execution = build_argument_execution(
+            blueprint, read_json(writing_path), read_json(section_index_path), matrix,
+            draft_text=current_draft_path.read_text(encoding="utf-8"),
+        )
+        features["argument_execution"] = execution
+        features["overview_content_contract"]["source_claim_bindings"] = [
+            {key: claim.get(key) for key in ("claim_id", "section_id", "claim", "paper_ids", "evidence_refs", "result_context")}
+            for section in execution["sections"] for claim in section["claims"]
+            if claim.get("binding_level") == "source_passage"]
+        features["overview_content_contract"]["argument_input_fingerprint"] = execution["input_fingerprint"]
+        features["overview_content_contract"]["realized_claim_ids"] = [
+            claim["claim_id"] for section in execution["sections"] for claim in section["claims"]
+        ]
 
     # Store project dir for multi-pass extraction in _build_metal_rows_text
     features["_project_dir"] = project_dir
@@ -2531,8 +2824,8 @@ def _heading_to_category(title: str) -> str:
     # Normalize catch-all sections to a single clean label
     if words_low[0] == "other":
         return "Others"
-    # Remove common prefixes like "Allenylation via", "Synthesis from"
-    short = re.sub(r"^(alleny?lation|synthesis|reactions?)\s+(via|from|of|through)\s+", "", title_clean, flags=re.IGNORECASE)
+    # Remove generic organizational prefixes.
+    short = re.sub(r"^(synthesis|reactions?)\s+(via|from|of|through)\s+", "", title_clean, flags=re.IGNORECASE)
     # Remove trailing generic words
     short = re.sub(r"\s+(leaving groups?|and other.*|\(.*\))$", "", short, flags=re.IGNORECASE)
     # If still contains 'via'/'from', take the words after it
@@ -2655,9 +2948,7 @@ def _resolve_taxonomy_profile(project_dir: Path, features: dict[str, Any]) -> No
 
     Resolution order: explicit ``REVIEW_TAXONOMY_PROFILE`` override →
     persisted ``project_config.json`` → topic-signal inference from the
-    review title.  Without this, the generic-project adaptation path in
-    ``build_adapted_prompt`` is dead code and non-chemistry reviews inherit
-    allene-centric template prompts and skeleton geometry.
+    review title. Persisted project choices remain authoritative.
     """
     if features.get("taxonomy_profile"):
         return
@@ -2701,6 +2992,7 @@ def score_template(template: dict[str, Any], features: dict[str, Any]) -> float:
     has_metal = bool(features.get("has_metal_classification"))
     has_chirality = bool(features.get("has_chirality"))
     has_reaction_focus = bool(features.get("has_reaction_focus"))
+    capabilities = template.get("layout_capabilities") or {}
 
     # 1. Classification dimension: match layout semantics to group_by
     if group_by == "catalyst_or_method":
@@ -2733,6 +3025,11 @@ def score_template(template: dict[str, Any], features: dict[str, Any]) -> float:
                 score += 1.5
             else:
                 score -= 1.0
+        min_modules, max_modules = capabilities.get("module_count_range", [1, 99])
+        if int(min_modules) <= num_categories <= int(max_modules):
+            score += 1.0
+        else:
+            score -= 1.5
 
     # 3. Chirality / selectivity emphasis
     selectivity_heavy = ("enantio" in prompt or "chiral" in prompt
@@ -2750,6 +3047,15 @@ def score_template(template: dict[str, Any], features: dict[str, Any]) -> float:
     # is actually about reactions/synthesis
     if "reaction" in prompt and ("scheme" in prompt or "top" in prompt or "center" in prompt):
         score += 1.0 if has_reaction_focus else -1.0
+    chemistry_mode = str((features.get("_chemistry_decision") or {}).get("mode") or "")
+    reaction_slot = str(capabilities.get("reaction_slot") or "none")
+    if chemistry_mode == "reaction":
+        if reaction_slot == "hero-horizontal":
+            score += 3.0
+        elif reaction_slot != "none":
+            score += 1.0
+        else:
+            score -= 3.0
 
     # 5. Section count: dense layouts for many sections, compact ones for few
     if num_sections >= 7:
@@ -2772,17 +3078,34 @@ def score_template(template: dict[str, Any], features: dict[str, Any]) -> float:
     if "cross-cut" in prompt or "shared" in prompt or "sidebar" in layout:
         score += 0.5
 
+    # 7. Chemistry composite placement: layouts with calibrated structure-panel
+    # regions reliably host the pasted molecule; uncalibrated layouts depend on
+    # the model leaving a usable blank panel, which has proven fragile.
+    if is_chemistry_skeleton_project(features) and layout in _COMPOSITE_REGIONS:
+        score += 3.0
+
     return score
 
 
 def select_best_template(templates: list[dict[str, Any]], features: dict[str, Any]) -> dict[str, Any]:
-    """Select the best-matching template based on scoring."""
+    """Rank templates, then let the model select from their declared capabilities."""
     scored = [(score_template(t, features), t) for t in templates]
     scored.sort(key=lambda x: x[0], reverse=True)
-    best_score, best_template = scored[0]
     print(f"  Template scoring results:")
     for s, t in scored[:5]:
         print(f"    [{s:.1f}] id={t['id']} name={t['name']} ({t['layout_type']})")
+    reaction_mode = (features.get("_chemistry_decision") or {}).get("mode") == "reaction"
+    eligible = [
+        pair for pair in scored
+        if not reaction_mode
+        or (pair[1].get("layout_capabilities") or {}).get("reaction_slot", "none") != "none"
+    ]
+    if not eligible:
+        raise ValueError("No template declares a reaction slot")
+    best_template = _ai_select_template(eligible, features) or eligible[0][1]
+    if "_template_selection" not in features:
+        features["_template_selection"] = {"mode": "score_fallback", "reason": "text selector unavailable"}
+    best_score = next(score for score, candidate in scored if candidate is best_template)
     print(f"  Selected: template_{best_template['id']} (score={best_score:.1f})")
     return best_template
 
@@ -2802,20 +3125,10 @@ def _clean_categories(categories: list[str]) -> list[str]:
 
 
 def _retheme_base_prompt(base_prompt: str, features: dict[str, Any]) -> str:
-    """Replace the allene-field content baked into template prompts with the
-    current review's categories, counts, and classification dimension."""
+    """Adjust layout slot counts without injecting subject-matter content."""
     categories = _clean_categories(features.get("metal_categories", []))
-    cats = categories[:5] if categories else ["Category 1", "Category 2",
+    cats = categories if categories else ["Category 1", "Category 2",
                                               "Category 3", "Category 4", "Category 5"]
-
-    def _panel_replacement(match: re.Match) -> str:
-        numbered = any(match.groups())
-        if numbered:
-            return "\n".join(f"{i}. {c}" for i, c in enumerate(cats, 1))
-        return "\n".join(f"- {c}" for c in cats)
-
-    base_prompt = _CATEGORY_PANEL_RE.sub(_panel_replacement, base_prompt)
-    base_prompt = _INLINE_CATEGORIES_RE.sub(" / ".join(cats), base_prompt)
 
     # Adjust slot counts ("five columns/lanes/cards...") to the real count
     n = len(cats)
@@ -2823,33 +3136,18 @@ def _retheme_base_prompt(base_prompt: str, features: dict[str, Any]) -> str:
         word = _ENGLISH_NUM_WORDS.get(n, str(n))
         base_prompt = re.sub(r"\bfive\b", word, base_prompt, flags=re.IGNORECASE)
 
-    # Replace metal-centric wording for non-catalyst classification schemes
-    gb = features.get("group_by", [])
-    if gb and gb[0] != "catalyst_or_method":
-        gb_word = gb[0].replace("_", " ")
-        classification_rule = features.get("classification_rule", f"By {gb_word}")
-        for old, new in [
-            ("catalyst center metal", gb_word),
-            ("catalytically active metal center", f"{gb_word} identity"),
-            ("classification by metal centers", f"classification by {gb_word}"),
-            ("By catalyst center metal", classification_rule),
-            ("metal-catalyzed", f"{gb_word}-based"),
-            ("Metal-centered classification", classification_rule),
-            ("metal-centered", f"{gb_word}-centered"),
-            ("metal families", f"{gb_word} families"),
-            ("metal-family", f"{gb_word}-family"),
-            ("metal nodes", "category nodes"),
-            ("metal strategies", f"{gb_word} strategies"),
-            ("catalyst-family", f"{gb_word}-family"),
-        ]:
-            base_prompt = base_prompt.replace(old, new)
     return base_prompt
 
 
-def _build_approved_terminology(features: dict[str, Any]) -> str:
+def _build_approved_terminology(features: dict[str, Any], row_text: str = "") -> str:
     """Build the approved-terminology list from the review's own keywords
-    plus generic academic phrasing, instead of a fixed allene wordlist."""
+    and confirmed content contract."""
     terms: list[str] = []
+    contract = features.get("overview_content_contract")
+    for value in (contract or {}).get("approved_labels") or []:
+        label = " ".join(str(value).split()).strip().lower()
+        if label and label not in terms:
+            terms.append(label)
     for key in ("product_keywords", "substrate_keywords", "catalyst_keywords"):
         for kw in features.get(key, []):
             kw = kw.strip().lower()
@@ -2862,18 +3160,15 @@ def _build_approved_terminology(features: dict[str, Any]) -> str:
         title_lower = display_title.strip().lower()
         if title_lower and title_lower not in terms:
             terms.append(title_lower)
-    generic = [
-        "recent advances", "key developments", "research trends", "future directions",
-        "substrate scope", "substrate class", "product class", "reaction mode",
-        "catalytic strategy", "key feature", "key advantage", "main limitation",
-        "key challenge", "selectivity", "enantioselectivity", "regioselectivity",
-        "diastereoselectivity", "chemoselectivity", "stereoselectivity",
-        "reported conditions", "reported scope", "representative transformation",
-        "representative reaction", "classification rule", "opportunities and challenges",
-    ]
-    for g_term in generic:
-        if g_term not in terms:
-            terms.append(g_term)
+    for value in re.findall(r'"([^"\n]+)"', row_text):
+        label = " ".join(value.split()).strip().lower()
+        if label and label != "—" and label not in terms:
+            terms.append(label)
+    for key in ("key_findings", "cross_cutting", "take_home"):
+        for item in (features.get("_content_pack") or {}).get(key) or []:
+            phrase = str(item or "").strip().lower()
+            if phrase and phrase not in terms:
+                terms.append(phrase)
     return ", ".join(terms) + "."
 
 
@@ -2882,10 +3177,10 @@ def is_chemistry_skeleton_project(features: dict[str, Any]) -> bool:
 
     Detection strategy (B2: explicit SMILES is the primary signal):
     1. Explicit ``skeleton_smiles`` in the query plan → mandatory skeleton.
-    2. Profile == "allene" (domain-rules taxonomy) → mandatory skeleton.
-    3. Profile starts with "chemistry" but no explicit SMILES → NOT mandatory
-       (generic chemistry reviews may lack a single core molecule; skeleton
-       is rendered only when a SMILES is available).
+    2. A validated Blueprint representative-structure contract → mandatory.
+    3. A taxonomy resource with ``overview_structure_required`` → mandatory.
+    4. Other chemistry profiles without a resolved structure → NOT mandatory;
+       generic reviews may lack a single representative molecule.
 
     Generic academic reviews (profile "general_academic" or unmatched) never
     trigger skeleton mode.
@@ -2893,11 +3188,12 @@ def is_chemistry_skeleton_project(features: dict[str, Any]) -> bool:
     # Primary signal: explicit skeleton SMILES from query plan
     if str(features.get("skeleton_smiles") or "").strip():
         return True
+    if _contract_smiles(features.get("overview_structure_contract")):
+        return True
 
     profile = str(features.get("taxonomy_profile") or "").strip().casefold()
 
-    # Allene profile: domain-rules chemistry with mandatory skeleton
-    if profile == "allene":
+    if _taxonomy_requires_structure(profile):
         return True
 
     return False
@@ -2919,7 +3215,14 @@ def is_chemistry_context(features: dict[str, Any]) -> bool:
     # Explicit non-chemistry profile overrides keyword detection
     if profile == "general_academic":
         return False
-    if profile == "allene":
+    structure_contract = features.get("overview_structure_contract")
+    if (
+        isinstance(structure_contract, dict)
+        and structure_contract.get("status") != "not_applicable"
+        and structure_contract.get("role") in {"target_product", "primary_subject"}
+    ):
+        return True
+    if _taxonomy_has_structure_registry(profile):
         return True
 
     # A broad chemistry-capable profile is a ruleset choice, not proof that
@@ -2937,10 +3240,8 @@ def is_chemistry_context(features: dict[str, Any]) -> bool:
         if str(value).strip()
     ).casefold()
     chemistry_signals = (
-        "allene", "alkene", "alkyne", "biaryl", "atropisomer", "indole",
-        "cyclopropane", "amide", "imine", "nitrile", "boronic", "diene",
-        "enone", "allenoate", "catalyst", "ligand", "substrate", "reaction",
-        "synthesis", "organometallic", "enantioselective", "asymmetric", "chiral",
+        "catalyst", "ligand", "substrate", "reaction", "synthesis",
+        "organometallic", "enantioselective", "asymmetric", "chiral",
         "photochemical", "electrochemical", "polymerization", "functionalization",
     )
     if features.get("has_reaction_focus") or features.get("has_chirality"):
@@ -2953,6 +3254,22 @@ def is_chemistry_context(features: dict[str, Any]) -> bool:
     ):
         return True
     return False
+
+
+def overview_composite_skip_reason(features: dict[str, Any], smiles: str) -> str:
+    """Classify why no skeleton was composited into the overview figure.
+
+    Distinguishes deliberate non-chemistry figures from chemistry reviews
+    that silently lost their molecule panel, so operators can act on the
+    report (e.g. set ``skeleton_smiles`` in the discovery query plan).
+    """
+    if not is_chemistry_context(features):
+        return "non_chemistry"
+    if (features.get("_chemistry_decision") or {}).get("mode") == "concept":
+        return "evidence_concept_fallback"
+    if not str(smiles or "").strip():
+        return "no_motif_resolved"
+    return "skeleton_render_failed"
 
 
 _COMMON_FIGURE_ELEMENT_SYMBOLS = frozenset(
@@ -2988,36 +3305,28 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any],
     is pasted programmatically after generation, so the model must leave that
     panel blank white instead of drawing the molecule itself.
     """
-    # Chemistry projects retheme the template (replace hardcoded categories);
-    # generic academic projects skip retheming since templates may not apply.
     chemistry_project = is_chemistry_context(features)
-    base_prompt = _retheme_base_prompt(template.get("prompt", ""), features) if chemistry_project else ""
+    base_prompt = _retheme_base_prompt(template.get("prompt", ""), features)
 
-    # Build English title: if original is non-English, construct from keywords
     gb = features.get("group_by", [])
     display_title = str(
         features.get("display_title") or build_overview_display_title(features)
     )
-    if re.search(r"[\u4e00-\u9fff]", display_title):
-        products = features.get("product_keywords", [])
-        prod = products[0] if products else "target compounds"
-        time_w = features.get("time_window", "recent years")
-        english_title = f"Recent Advances in {prod.title()} ({time_w})"
-    else:
-        english_title = display_title
+    english_title = display_title
 
     metals = _clean_categories(features.get("metal_categories", []))
     if not metals:
         metals = ["Cat-1", "Cat-2", "Cat-3", "Cat-4", "Cat-5"]
 
-    time_window = features.get("time_window", "recent years")
+    time_window = features.get("time_window") or "omit"
     classification_rule = features.get("classification_rule", "By category")
 
     # Build skeleton, rows, and take-home messages
     skeleton_desc = _build_skeleton_description(features)
     metal_rows_text = _build_metal_rows_text(features)
     take_home_text = _build_take_home_text(features)
-    approved_terms = _build_approved_terminology(features)
+    content_pack_text = _build_content_pack_text(features)
+    approved_terms = _build_approved_terminology(features, metal_rows_text)
     approved_symbols = _approved_figure_symbols(features)
     symbol_clause = (
         " or one of these project-approved symbols: " + ", ".join(approved_symbols)
@@ -3033,10 +3342,14 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any],
             "reference, but discard all source-domain objects and wording. Render only the current project's "
             "title, categories, evidence cells, and take-home messages with crisp vector-like typography."
         )
-    n_words = _ENGLISH_NUM_WORDS.get(len(metals[:5]), str(len(metals[:5])))
-    if len(metals[:5]) != 5:
+    n_words = _ENGLISH_NUM_WORDS.get(len(metals), str(len(metals)))
+    if len(metals) != 5:
         visual_style_desc = re.sub(r"\bFive\b", n_words.capitalize(), visual_style_desc)
         visual_style_desc = re.sub(r"\bfive\b", n_words, visual_style_desc)
+        # Layout descriptions also embed the count as the digit "5"
+        # ("5 tall rounded cards", "5 horizontal lanes"); rewrite it too so
+        # the model does not render five columns for a two-category review.
+        visual_style_desc = re.sub(r"\b5\b", n_words, visual_style_desc)
     if gb and gb[0] != "catalyst_or_method":
         gb_word = gb[0].replace("_", " ")
         gb_display_map = {
@@ -3052,28 +3365,65 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any],
             ("metal hexagons", "category hexagons"),
             ("catalytically active metal center", f"{gb_word} identity"),
             ("classification by metal centers", f"classification by {gb_word}"),
+            ("(metal name)", "(category name)"),
+            ("one per metal family", "one per category"),
+            ("one per metal", "one per category"),
+            ("metal modules", "category modules"),
+            ("metal nodes", "category nodes"),
+            ("metal colors", "category colors"),
         ]
         for old, new in replacements:
             visual_style_desc = visual_style_desc.replace(old, new)
+        # The classification axis is not metal-based: strip any remaining
+        # metal wording so it cannot seed fabricated metal columns.
+        visual_style_desc = re.sub(r"\bMetal\b", gb_word.title(), visual_style_desc)
+        visual_style_desc = re.sub(r"\bmetal\b", gb_word, visual_style_desc)
 
-    if composite_mode and chemistry_project:
+    chemistry_mode = str((features.get("_chemistry_decision") or {}).get("mode") or "")
+    if chemistry_project and chemistry_mode == "concept":
         structure_rule = (
-            "- Leave the large structure/molecule panel COMPLETELY EMPTY (plain white, "
-            "no molecule, no drawing): an exact ball-and-stick model is inserted "
-            "programmatically after generation. Only the short caption below it is drawn."
+            "- Do NOT draw any molecule, reaction arrow, catalyst structure, or chemical formula. "
+            "The automatic evidence check did not support a representative structure; use only "
+            "the supplied review categories, text, and abstract scientific icons."
         )
         blank_rule = (
-            "- Every panel, arc, box, and cell in the layout MUST contain the provided "
-            "text, EXCEPT the structure panel which must stay blank white."
+            "- Every panel, arc, box, and cell in the layout MUST contain the provided text; "
+            "do not reserve a structure panel."
         )
+    elif composite_mode and chemistry_project:
+        if features.get("_skeleton_is_scheme"):
+            structure_rule = (
+                "- Reserve one large, plain-white HORIZONTAL reaction band immediately below "
+                "the title (about 14% of the canvas height). The band must have a thin pale-blue "
+                "border, stay clear of all cards, and span nearly the full content width. A representative reaction "
+                "scheme is inserted programmatically into that band; do NOT draw any molecule, "
+                "reaction scheme, or structure inside it. Fill all other panels with the provided text."
+            )
+            blank_rule = (
+                "- Every panel, arc, box, and cell in the layout MUST contain the provided "
+                "text content, EXCEPT the reserved horizontal reaction band, which must stay blank white."
+            )
+        else:
+            structure_rule = (
+                "- Leave the reserved structure panel COMPLETELY EMPTY (plain white, "
+                "no molecule, no drawing): an exact ball-and-stick model is inserted "
+                "programmatically after generation. Only the short caption below it is drawn.\n"
+                "- Do NOT draw ANY molecule, product structure, reaction scheme, or "
+                "transformation sketch anywhere else in the figure, even where the layout "
+                "mentions a 'generic product' or 'reaction pattern' slot. Render such slots "
+                "as filled text-only boxes or simple abstract icons (flask, chevron) instead."
+            )
+            blank_rule = (
+                "- Every panel, arc, box, and cell in the layout MUST contain the provided "
+                "text, EXCEPT the structure panel which must stay blank white."
+            )
     elif chemistry_project:
         structure_rule = (
             "- The left-page structure area shows ONLY a single representative "
             "skeleton/motif."
         )
         blank_rule = (
-            "- Every panel, arc, box, and cell in the layout MUST contain the provided "
-            "text; absolutely no blank regions."
+            "- Omit redundant optional cells and panels; keep generous whitespace."
         )
     else:
         structure_rule = (
@@ -3081,8 +3431,7 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any],
             "evidence-backed concept map; do not draw a molecule or reaction."
         )
         blank_rule = (
-            "- Every panel, arc, box, and cell in the layout must contain current-project "
-            "content; do not preserve source-template subject matter."
+            "- Use only current-project content; omit redundant optional panels."
         )
     adaptation = f"""
 REFERENCE IMAGE USAGE (read first):
@@ -3105,6 +3454,8 @@ Classification rule: "{classification_rule}"
 
 {metal_rows_text}
 
+{content_pack_text}
+
 {take_home_text}
 
 CRITICAL RULES:
@@ -3114,8 +3465,7 @@ CRITICAL RULES:
 - Do NOT draw a reaction equation (no arrow, no substrate-to-product transformation).
 {structure_rule}
 - Keep all text concise. Category labels stay SHORT (symbols or max 2 words). No long names in hexagons.
-- Right-page cells: max 2-3 words each. Use real metrics from the content above.
-- Generate the figure with ALL text fields FILLED IN. No dotted placeholders.
+- Each module contains one supported summary, at most 18 words. No dotted placeholders.
 {blank_rule}
 - Use the same visual style, layout, color scheme, and icon design as the reference template.
 
@@ -3126,12 +3476,12 @@ FORBIDDEN BEHAVIOR (strictly enforced):
 - Do not hyphenate a word across two lines.
 - Do not replace letters with visually similar characters (e.g. 'l' for '1', 'O' for '0').
 - Do not use placeholder-like pseudo-English or gibberish text.
-- Do not combine two approved phrases into a new unlisted phrase.
+- Paraphrase supplied assertions without changing scientific scope or attribution.
 - Do not repeat or truncate words.
-- Every word in the figure must be a correctly spelled English word from the approved list{symbol_clause}.
+- Scientific labels must use the approved terminology{symbol_clause}; ordinary English grammar may be added.
 - Do not render a metal name, element symbol, or category that is absent from the project categories and row labels above.
 """
-    return base_prompt + adaptation
+    return base_prompt + adaptation + "\n" + OVERVIEW_SUMMARY_GUIDANCE
 
 
 def _build_skeleton_description(features: dict[str, Any]) -> str:
@@ -3178,6 +3528,17 @@ GENERAL RENDERING RULES:
     # leave the reserved structure panel blank white regardless of whether
     # the layout carries calibrated coordinates.
     if features.get("_composite_layout"):
+        layout = str(features.get("_composite_layout"))
+        if features.get("_skeleton_is_scheme"):
+            return "Reserve a plain-white horizontal reaction band below the title. The exact reaction will be inserted programmatically. Fill all other panels with the supplied text; draw no molecules."
+        if layout == "route-map-start-strategy-result":
+            return f"""RESERVED STRUCTURE PANEL (lower-left quadrant, below the lane rows):
+Draw ONE EMPTY white rounded panel with a thin light-gray border — NO molecule, NO atoms, NO bonds inside it.
+Position: below the horizontal lane rows, on the left half of the page, above the bottom band.
+Size: roughly 30% of the page width and 45% of the content height (a large landscape rectangle).
+Keep every arrow, box, icon, and label CLEAR of this panel — nothing may cross or overlap it.
+A chemically accurate ball-and-stick model will be inserted into this panel afterwards.
+Caption below the panel: "{label}"."""
         return f"""LEFT-PAGE STRUCTURE AREA (center of left page):
 Draw an EMPTY white rounded panel here — NO molecule, NO atoms, NO bonds.
 A chemically accurate ball-and-stick model will be inserted into this panel afterwards.
@@ -3216,6 +3577,21 @@ QUALITY CHECK:
 
 def _build_metal_rows_text(features: dict[str, Any]) -> str:
     """Build right-page category rows using fully dynamic multi-pass extraction."""
+    execution = features.get("argument_execution")
+    if isinstance(execution, dict):
+        sections = {row["section_id"]: row for row in execution.get("sections") or []}
+        lines = ["EVIDENCE INPUT FOR SUMMARIZATION ONLY (not text to copy onto the image).",
+                 OVERVIEW_SUMMARY_GUIDANCE]
+        bindings = features.get("overview_evidence_bindings") or {}
+        for label in features.get("overview_modules") or []:
+            section = sections.get(str((bindings.get(label) or {}).get("section_id")), {})
+            claims = section.get("claims") or []
+            lines.append(f"Module: {label}")
+            if not claims:
+                lines.append("Use the category label only; omit unsupported performance/condition cells.")
+            for claim in claims[:2]:
+                lines.append(f"  Supporting assertion: {claim['claim']}")
+        return "\n".join(lines)
     metals = _clean_categories(features.get("metal_categories", []))
     if not metals:
         metals = ["Cat-1", "Cat-2", "Cat-3", "Cat-4", "Cat-5"]
@@ -3281,7 +3657,7 @@ def _build_metal_rows_text(features: dict[str, Any]) -> str:
     lines.append("")
     lines.append("RULES:")
     lines.append("- Render each cell EXACTLY as given. Do not modify, add, or remove text.")
-    lines.append("- If a cell value is \"—\", draw an empty rounded box.")
+    lines.append("- If a cell value is \"—\", draw the rounded box with a single centered dark-gray dash glyph \"—\" inside (never leave the box visually empty).")
     lines.append("- Hexagonal label = ONLY the short category name. No brackets, no extra text.")
     return "\n".join(lines)
 
@@ -3366,7 +3742,7 @@ def _get_extraction_patterns() -> tuple[list, list, list]:
     """Return (strategy, selectivity, highlight) pattern lists."""
     strategy_pats = [
         (r"\bpd\b|palladium|pi[- ]?allyl|π[- ]?allyl", "Pd / pi-allyl"),
-        (r"\bcu\b|copper|sn2'|organocopper", "Cu / SN2'"),
+        (r"\bcu\b|copper|organocopper", "Cu chemistry"),
         (r"\bni\b|nickel|reductive cross", "Ni / reductive"),
         (r"\bco\b|cobalt", "Co catalysis"),
         (r"\bau\b|\bgold\b", "Au catalysis"),
@@ -3378,7 +3754,6 @@ def _get_extraction_patterns() -> tuple[list, list, list]:
         (r"cooperative|dual catal|co[- ]?catal", "cooperative"),
         (r"remote|1,\d+[- ]?addition", "remote control"),
         (r"dehydrative|in situ activ|direct c[- ]?o", "direct activation"),
-        (r"alleneamination", "alleneamination"),
         (r"carboetherification", "carboetherification"),
         (r"three[- ]?component|multicomponent", "multicomponent"),
         (r"ligand[- ]?free", "ligand-free"),
@@ -3524,87 +3899,31 @@ def _parse_outline_sections(outline_text: str, categories: list[str]) -> dict[st
 
 
 def _build_take_home_text(features: dict[str, Any]) -> str:
-    """Build take-home messages dynamically from theme features."""
-    time_window = features.get("time_window", "recent years")
-    classification_rule = features.get("classification_rule", "")
-    has_chirality = bool(features.get("has_chirality"))
-    has_reaction_focus = bool(features.get("has_reaction_focus"))
+    """Build take-home messages: review-grounded when the content pack has them."""
+    pack = features.get("_content_pack")
+    if isinstance(pack, dict):
+        real = [str(t).strip() for t in (pack.get("take_home") or []) if str(t or "").strip()]
+        if real:
+            lines = [f"{i}. {text}" for i, text in enumerate(real[:3], start=1)]
+            return "Optional take-home evidence: summarize in at most 12 words per item; omit duplicates of modules:\n" + "\n".join(lines)
 
-    # Extract short keyword from classification rule
-    class_short = "Classified"
-    if classification_rule:
-        parts = classification_rule.replace("By ", "").split()
-        class_short = parts[0] if parts else "Classified"
-
-    messages = [
-        f"1. Timely overview ({time_window})",
-        f"2. {class_short}-centered",
-    ]
-    if has_chirality:
-        messages.append("3. Selectivity evidence")
-    else:
-        messages.append("3. Comparative evidence")
-    messages.append("4. Applicability boundaries" if has_reaction_focus else "4. Category boundaries")
-    messages.append("5. Mechanistic evidence" if has_reaction_focus else "5. Evidence limitations")
-    messages.append("6. Future directions")
-    return "Take-home messages (bottom band, 6 items):\n" + "\n".join(messages)
+    return "Bottom synthesis band: omit it unless the content contract includes a separately verified cross-module statement."
 
 
 def _get_visual_style_description(template: dict[str, Any]) -> str:
     """Return a visual style description based on the template layout type."""
     layout = template.get("layout_type", "")
     descriptions = {
-        "dual-page-spread": """Layout: Two-page spread (left page + right page) with a unified bottom band.
-Left page: Title 'Concept & classification' at top. Below it, a dark navy rounded banner with the review topic. Below the banner, a SINGLE 3D ball-and-stick molecular model (NO reaction arrow, NO equation — just one 3D molecule model with colored atom spheres and gray bond sticks). One short label below the model. Below that, a 'Classification rule' box with a periodic-table-style icon and the rule text. A summary sentence at the bottom of left page.
-Right page: Title 'Representative metal families' (or category families) at top. Five horizontal rows, each with a colored hexagonal category symbol icon on the left and three info columns (case, selectivity, note) with small icons (clipboard, target, pencil).
-Bottom band: Full-width cream/beige band titled 'Take-home messages' with 6 icon-and-text modules in a row.
-Color scheme: Navy blue headers, white background, colored category hexagons, cream bottom band. Clean sans-serif typography. Rounded corners on all panels. Thin gray borders.
-Icons: Simple line-art style icons (calendar, molecule, target, arrows, lightbulb, chart).""",
-        "top-reaction-5col-table": """Layout: Top reaction scheme strip + 5 vertical columns below + bottom ribbon.
-Top: A reaction scheme showing generic propargylic substrate → allene product with catalyst label.
-Middle: Five equal-width vertical columns, each with a colored header (one per metal family). Each column has 4 sub-blocks: Catalyst/ligand, Representative case, Key selectivity, Synthetic note.
-Bottom: Full-width ribbon with 4 icon modules (scope, mechanism, utility, future).
-Style: Clean white background, colored column headers, thin borders, sans-serif font.""",
-        "center-radial-classification": """Layout: Central panel with 5 radiating branches to outer panels.
-Center: Rounded rectangle with 'APA mini-review' title, time window, and a reaction scheme.
-Branches: 5 colored lines radiating to 5 outer panels (one per metal). Each panel has 3 rows with icons (flask, arrow, star).
-Corners: 4 global theme callouts connected by dashed oval boundary.
-Style: Symmetric radial layout, colored branch lines matching metal colors, white background.""",
-        "route-map-start-strategy-result": """Layout: Horizontal lanes (left-to-right flow) + right outcome panel + bottom band.
-Center: 5 horizontal lanes (one per metal), each with 3 sequential boxes connected by chevrons.
-Right: 'Outcome' panel with product schematic and 3 result boxes.
-Bottom: 'Challenges & outlook' band with 4 modules.
-Style: Left-to-right reading flow, colored lane headers, chevron connectors.""",
-        "metal-x-dimension-matrix": """Layout: Grid matrix with metal columns × dimension rows.
-Columns: 5 metal families as column headers.
-Rows: 4 information dimensions (Catalyst system, Representative chemistry, Selectivity, Utility).
-Bottom: 'Shared conclusions' footer with 4 summary blocks.
-Style: Clean table/grid layout, alternating row shading, colored column headers.""",
-        "module-cards-crosscut-sidebar": """Layout: 5 tall rounded cards in a row + narrow right sidebar.
-Cards: Each card has a colored header (metal name) and 4 mini-sections inside.
-Sidebar: 'Cross-cutting issues' with 4 stacked modules.
-Bottom: Abbreviations line.
-Style: Card-based modular layout, colored headers, rounded corners.""",
-        "tree-metal-classification": """Layout: Tree diagram with central node branching to metal nodes.
-Root: Dark rounded node 'Metal-centered classification'.
-Branches: 5 branches to circular metal nodes, each with 3 leaf boxes below.
-Bottom: Shared 'General lessons' conclusion box.
-Style: Scientific taxonomy tree, colored nodes, hierarchical layout.""",
-        "why-strategy-what": """Layout: 3-section horizontal flow (Why → Strategies → What).
-Section 1: Motivation/importance.
-Section 2: 5 horizontal metal modules with 3 columns each.
-Section 3: Outcomes with product motifs and summary blocks.
-Bottom: Shared summary band.
-Style: Left-to-right narrative flow, bold section arrows.""",
-        "asymmetric-ring-right-sidebar": """Layout: Asymmetric ring/arc segments + right vertical sidebar.
-Ring: 5 arc segments (one per metal) with catalyst icons and info boxes.
-Sidebar: 'Shared insights' with 4 stacked panels.
-Style: Intentionally asymmetric ring, modern infographic feel.""",
-        "mosaic-infographic": """Layout: Mosaic of 5 aligned tiles + 2 support tiles + bottom legend.
-Main: 5 tiles in a grid, each with 4 zones (Catalyst, Chemistry, Selectivity, Highlight).
-Support: 'Key trends' tile (lower left) and 'Outlook' tile (lower right).
-Bottom: Compact legend with abbreviations.
-Style: Mosaic/tile-based, visually distinctive, publication-friendly.""",
+        "dual-page-spread": "Two balanced pages with one left concept area, stacked right-side modules, and an optional shared bottom band.",
+        "top-reaction-5col-table": "One wide top visual strip, equal vertical content columns, and an optional full-width bottom band.",
+        "center-radial-classification": "One central panel with balanced radial branches and generous whitespace around the outer modules.",
+        "route-map-start-strategy-result": "Parallel left-to-right lanes with three sequential slots and an optional bottom band.",
+        "metal-x-dimension-matrix": "A clean comparison grid with module columns, flexible dimension rows, and an optional synthesis footer.",
+        "module-cards-crosscut-sidebar": "A row of tall rounded cards plus one narrow sidebar for contract-provided cross-module content.",
+        "tree-metal-classification": "A scientific classification tree with one central node, flexible branches, and compact leaf boxes.",
+        "why-strategy-what": "A three-section left-to-right narrative with the middle module area visually dominant.",
+        "asymmetric-ring-right-sidebar": "An intentionally asymmetric ring of modules with a tall right sidebar.",
+        "mosaic-infographic": "A publication-style mosaic of main module tiles and no more than two optional support tiles.",
     }
     return descriptions.get(layout, "Clean scientific infographic style with colored sections and icons.")
 
@@ -4150,10 +4469,30 @@ def _build_report(args, template: dict, features: dict, prompt: str,
                          composite: dict[str, Any] | None = None,
                          skeleton: dict[str, Any] | None = None) -> dict:
     """Build a single report dict (replaces 3 duplicate blocks in main)."""
+    template_digest = hashlib.sha256(
+        json.dumps(
+            template, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    )
+    if reference_image.is_file():
+        template_digest.update(reference_image.read_bytes())
+    content_contract = dict(features.get("overview_content_contract") or {})
+    content_contract_sha256 = hashlib.sha256(
+        json.dumps(
+            content_contract,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     report = {
         "project_id": args.project_id,
         "selected_template_id": template["id"],
         "selected_template_name": template["name"],
+        "template_contract_version": OVERVIEW_TEMPLATE_CONTRACT_VERSION,
+        "template_sha256": template_digest.hexdigest(),
+        "overview_content_contract": content_contract,
+        "overview_content_contract_sha256": content_contract_sha256,
         "reference_image": str(reference_image),
         "score": score_template(template, features),
         "features": {k: v for k, v in features.items() if not k.startswith("_")},
@@ -4164,6 +4503,14 @@ def _build_report(args, template: dict, features: dict, prompt: str,
         "image_size_candidates": overview_image_size_candidates(base_url, args.size),
         "status": status,
     }
+    decision = features.get("_chemistry_decision")
+    if isinstance(decision, dict):
+        report["chemistry_generation"] = dict(decision)
+    selection = features.get("_template_selection")
+    if isinstance(selection, dict):
+        report["template_selection"] = dict(selection)
+    if features.get("_content_pack"):
+        report["content_pack"] = features["_content_pack"]
     if request_metadata:
         report["image_request"] = dict(request_metadata)
     if output_path:
@@ -4176,6 +4523,964 @@ def _build_report(args, template: dict, features: dict, prompt: str,
     if skeleton is not None:
         report["skeleton"] = dict(skeleton)
     return report
+
+
+
+_CHEMISTRY_REVIEW_ENV = "REVIEW_OVERVIEW_CHEMISTRY_REVIEW"
+
+
+_REACTION_CONFIDENCE_MIN = 70
+
+
+_SKELETON_CONFIDENCE_MIN = 40
+
+
+_CHEMISTRY_REVIEW_PROMPT = """You are checking a proposed representative reaction for a review overview figure. You must NOT invent chemistry. Decide only whether the supplied evidence supports this exact generic transformation and condition label.
+
+Review title: {title}
+Product keywords: {products}
+Proposed reaction: {substrate} -> {product}
+Proposed reaction name: {reaction_name}
+Proposed conditions: {conditions}
+Evidence excerpt:
+{draft}
+
+Return ONLY JSON: {{\"supported\": true|false, \"confidence\": 0-100, \"reason\": \"short evidence-based reason\"}}.
+Set supported=false if the excerpt does not support the connectivity, target product, or conditions. A generic product-class mention can support a product motif but not a detailed reaction scheme."""
+
+
+_REACTION_SCHEME_ENABLED_ENV = "REVIEW_OVERVIEW_REACTION_SCHEME"
+
+
+_SCHEME_MAX_REACTANTS = 3
+
+
+_CONTENT_PACK_PROMPT = """You are preparing ALL text content for the overview figure of a scientific review. Every label must be grounded in this review's own content — never generic filler like "comprehensive coverage" or "key advances summarized".
+
+Review topic: "{title}"
+Product keywords: {products}
+Substrate keywords: {substrates}
+
+Review draft excerpt (grounding — prefer findings actually stated here):
+{draft}
+
+Task 1 — Representative reaction: pick the single MOST representative transformation of this review and express it as generic core motifs using "*" for variable substituents (R groups): the starting material (substrate), the target product, and a short catalyst/conditions label. Keep only characteristic skeletons — no specific substituents, no full example compounds.
+Selection guidance (only if the draft supports a representative reaction):
+- If the title names a reaction (e.g. "allenation of terminal alkynes"), use THAT reaction.
+- If the title names only a product class (e.g. "synthesis of allenes"), pick the most classic or dominant route to that product covered by the review.
+- If several reaction families are covered, choose one supported by the draft. Return empty chemistry fields if no exact connectivity is supported.
+Reaction SMILES style examples (format anchors only):
+- allenation of terminal alkynes to allenes -> substrate *C#C*, product *C(*)=C=C(*)*, catalyst "CuI, base"
+- Suzuki coupling to biaryls -> substrate *c1ccccc1Br, product *c1ccccc1-c2ccccc2*, catalyst "Pd catalyst, base"
+- hydroboration of alkynes to alkenylboranes -> substrate *C#C*, product *C(*)=C(*)B(O)O, catalyst "HBpin, catalyst"
+Anti-copy rule: those examples only demonstrate the SMILES STYLE and the JSON shape. Never reuse an example's SMILES, catalyst label, or reaction name for a different review. Every field you return must be justified by THIS review's title, keywords, or draft excerpt.
+catalyst_label rule: search the WHOLE excerpt, including its later sections, for whatever conditions the review attaches to the transformation you chose — a catalyst, but equally a chiral ligand, reagent, solvent, temperature or additive — and write them in the review's own wording, at most 5 words. A route whose conditions are a ligand and a solvent rather than a metal catalyst still MUST get a catalyst_label. Leave it empty only if the excerpt states no condition at all for that exact transformation, and never fill it from an example.
+
+Task 2 — Key findings: exactly 4 short findings stated in the review (max 8 words each). Include concrete numbers, conditions, or system names when the excerpt states them (format only, do not copy: "<catalyst>-mediated <transformation>, up to <number>% <metric>").
+
+Task 3 — Cross-cutting themes: exactly 4 recurring concerns of THIS review (max 4 words each), derived from the topic and excerpt — not generic labels.
+
+Task 4 — Take-home messages: exactly 6 one-line conclusions drawn from the review content (max 6 words each). Do not use generic phrases like "timely overview" or "future directions" unless the review states them.
+
+Rules:
+- The product must be the review's target; the substrate is what it is made from.
+- Ground the connectivity: draw only atoms and attachments the review actually states. When it names a product class by its suffix (an -ol, -oate, -amine, -borane and the like) without saying which atom carries that group, keep the motif to the skeleton the review does state and put the class name in product_name instead of guessing an attachment point.
+- Keep each motif SIMPLE: at most 10 heavy atoms (counting "*" wildcards), plain chains with "*" substituents, no dense branching.
+- Every SMILES must be chemically valid: each carbon has at most 4 bonds total (a carbon with a triple bond may carry at most one further single bond; drop extra branches instead).
+- If the transformation needs more than one reactant, list every reactant in substrate_smiles separated by "." (at most 3 molecules); product_smiles must be exactly ONE molecule.
+- Stereochemistry: when the review describes stereoselective or asymmetric synthesis, mark exactly the stereogenic element it describes — "@" or "@@" on a stereocentre, "/" and "\\" on the two bonds fixing a double bond's geometry — so the drawing shows wedge and hash bonds. Omit every stereo descriptor when the review does not discuss stereochemistry, and never mark a centre the review does not state. A cumulated allene axis (C=C=C) cannot carry such a marker; leave it plain.
+- Use plain ASCII everywhere (no subscripts, no unicode).
+- Leave chemistry fields empty for non-chemical reviews or insufficient reaction evidence. Return fewer text items, or empty lists, when the excerpt cannot support the requested count; never invent filler.
+
+Respond with ONLY a JSON object: {{"substrate_smiles": "<SMILES or empty>", "substrate_name": "<short name>", "product_smiles": "<SMILES or empty>", "product_name": "<short name>", "catalyst_label": "<catalyst/conditions or empty>", "reaction_name": "<short reaction name>", "key_findings": ["<finding>", "<finding>", "<finding>", "<finding>"], "cross_cutting": ["<theme>", "<theme>", "<theme>", "<theme>"], "take_home": ["<message>", "<message>", "<message>", "<message>", "<message>", "<message>"]}}"""
+
+
+def reaction_scheme_enabled() -> bool:
+    """Env kill-switch for the reaction-scheme feature (default on)."""
+    value = str(os.environ.get(_REACTION_SCHEME_ENABLED_ENV, "on") or "on")
+    return value.strip().casefold() not in {"off", "false", "0", "no", "disabled"}
+
+
+def _normalize_r_groups(smi: str) -> str:
+    """Rewrite R-group tokens (R, R1, [R], [R2]) as SMILES wildcards (*).
+
+    Models frequently write substituents as ``R``/``R1`` rather than the
+    wildcard ``*`` the parser expects.  The lookarounds avoid touching
+    two-letter elements (Rh, Ru, ...) or letters inside brackets.
+    """
+    s = re.sub(r"\[R\d*\]", "*", smi)
+    s = re.sub(r"R\d*(?![a-z])", "*", s)
+    return s
+
+
+def _rdkit_is_available() -> bool:
+    """Return whether the production chemistry validator is importable."""
+    try:
+        from rdkit import Chem  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _strict_smiles_problem(smiles: str) -> str:
+    """Return an empty string only for a chemically publishable motif.
+
+    RDKit sanitization is authoritative whenever it is installed.  The small
+    local parser remains useful for lightweight unit tests, but is deliberately
+    stricter than the renderer: malformed branches/rings and over-valent atoms
+    must never reach a reaction scheme.
+    """
+    if not smiles or len(smiles) > 60 or any(ch.isspace() for ch in smiles):
+        return "empty, oversized, or contains whitespace"
+    if _rdkit_is_available():
+        from rdkit import Chem
+        if Chem.MolFromSmiles(smiles, sanitize=True) is None:
+            return "RDKit sanitization failed"
+        return ""
+    try:
+        atoms, bonds = _parse_smiles_fallback(smiles, strict=True)
+    except ValueError as exc:
+        return str(exc)
+    if not atoms:
+        return "contains no atoms"
+    for index, atom in enumerate(atoms):
+        element = atom["el"]
+        if element in {"R", "H"}:
+            continue
+        order = sum(value for left, right, value in bonds if index in {left, right})
+        if order > _VALENCE.get(element, 4):
+            return f"{element} has valence {order:g} above its allowed valence"
+    return ""
+
+
+def chemical_identity(smiles: str) -> dict[str, Any]:
+    """Return reproducible chemistry metadata for the overview report.
+
+    This is diagnostic metadata for the automatic pipeline, not a user form.
+    It makes every generated structure auditable and lets downstream code
+    distinguish a changed molecule from a cosmetic overview regeneration.
+    """
+    if not smiles or not _rdkit_is_available():
+        return {}
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import rdMolDescriptors
+        mol = Chem.MolFromSmiles(smiles, sanitize=True)
+        if mol is None:
+            return {}
+        wildcard_count = sum(1 for atom in mol.GetAtoms() if atom.GetAtomicNum() == 0)
+        identity = {
+            "input_smiles": smiles,
+            "canonical_isomeric_smiles": Chem.MolToSmiles(mol, isomericSmiles=True),
+            "formal_charge": Chem.GetFormalCharge(mol),
+            "heavy_atom_count": mol.GetNumHeavyAtoms(),
+            "wildcard_count": wildcard_count,
+        }
+        if wildcard_count:
+            identity["formula"] = "generic motif (R groups omitted)"
+        else:
+            identity["formula"] = rdMolDescriptors.CalcMolFormula(mol)
+            try:
+                inchi_key = Chem.MolToInchiKey(mol)
+                if inchi_key:
+                    identity["inchi_key"] = inchi_key
+            except Exception:
+                # InChI support is optional in some RDKit builds; canonical
+                # SMILES remains a stable identity when it is unavailable.
+                pass
+        return identity
+    except Exception:
+        return {}
+
+
+def _clean_motif_smiles(raw: str) -> str:
+    """Return a usable core-motif SMILES, or \"\" if invalid/oversized."""
+    smiles = str(raw or "").strip()
+    for candidate in (_normalize_r_groups(smiles), smiles):
+        if not _strict_smiles_problem(candidate):
+            return candidate
+    return ""
+
+
+def _clean_reaction_side(raw: Any, max_fragments: int) -> tuple[str, str]:
+    """Validate one side of a reaction SMILES fragment by fragment.
+
+    Returns ``(smiles, problem)``.  Each dot-separated fragment is validated on
+    its own: validating the joined string would accept a reactant pair that the
+    built-in parser silently fuses into one invented molecule when RDKit is
+    absent.  ``max_fragments`` is 1 on the product side, whose SMILES is reused
+    as the single skeleton and cannot be laid out as disconnected fragments.
+    """
+    fragments = [part.strip() for part in str(raw or "").split(".") if part.strip()]
+    if not fragments:
+        return "", "is empty"
+    if len(fragments) > max_fragments:
+        return "", (f"contains {len(fragments)} dot-separated molecules but at most "
+                    f"{max_fragments} is allowed")
+    cleaned: list[str] = []
+    for fragment in fragments:
+        motif = _clean_motif_smiles(fragment)
+        if not motif:
+            return "", (f"component {fragment!r} is chemically invalid (unparseable, "
+                        "over 60 chars, or a carbon with more than 4 bonds)")
+        cleaned.append(motif)
+    return ".".join(cleaned), ""
+
+
+def _scheme_from_data(data: dict[str, Any]) -> tuple[dict[str, str] | None, str]:
+    """Validate a picker response into a scheme dict.
+
+    Returns ``(scheme, problem)``: on failure scheme is None and problem says
+    which SMILES was empty or chemically invalid, so the caller can feed it
+    back into a corrective retry.
+    """
+    substrate, sub_problem = _clean_reaction_side(
+        data.get("substrate_smiles"), _SCHEME_MAX_REACTANTS)
+    if not substrate:
+        return None, f"substrate_smiles {data.get('substrate_smiles')!r} {sub_problem}"
+    product, prod_problem = _clean_reaction_side(data.get("product_smiles"), 1)
+    if not product:
+        return None, (f"product_smiles {data.get('product_smiles')!r} {prod_problem}"
+                      " — the product must be exactly one molecule")
+    scheme = {
+        "substrate_smiles": substrate,
+        "substrate_name": str(data.get("substrate_name", "") or "").strip()[:60],
+        "product_smiles": product,
+        "product_name": str(data.get("product_name", "") or "").strip()[:60],
+        "catalyst_label": str(data.get("catalyst_label", "") or "").strip()[:60],
+        "reaction_name": str(data.get("reaction_name", "") or "").strip()[:80],
+    }
+    return scheme, ""
+
+
+_DRAFT_SECTION_RE = re.compile(r"^##\s+\S.*$", re.MULTILINE)
+
+
+_BIBLIOGRAPHY_HEADING_RE = re.compile(
+    r"^##\s+(?:references|bibliography|works?\s+cited|参考文献|引用文献)\b",
+    re.IGNORECASE,
+)
+
+
+_CONDITION_METRIC_RE = re.compile(
+    r"\d+\s*%|\b\d+\s*(?:°\s*C|degrees|hours?|h|min|equiv|mol|ee)\b",
+    re.IGNORECASE,
+)
+
+
+_CONDITION_WORD_RE = re.compile(
+    r"\b(?:catalys\w*|cataliz\w*|ligand\w*|solvent\w*|reagent\w*|additive\w*"
+    r"|conditions|temperature|screen\w*|yield\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def _section_slice(section_text: str, budget: int) -> str:
+    """Section opening plus its condition-bearing sentences, within ``budget``.
+
+    The opening says what a route is; its catalyst, ligand, solvent and
+    selectivity numbers usually come in later sentences that a plain head slice
+    never reached.  Sentences reporting a measurement are taken first: a long
+    sentence that only mentions a ligand would otherwise spend the budget
+    before the one stating the actual conditions.
+    """
+    flat = " ".join(section_text.split())
+    if len(flat) <= budget:
+        return flat
+    opening = max(120, budget // 3)
+    parts = [flat[:opening]]
+    room = budget - opening
+    sentences = re.split(r"(?<=[.;])\s+", flat[opening:])
+    measured = [s for s in sentences if _CONDITION_METRIC_RE.search(s)]
+    described = [s for s in sentences
+                 if not _CONDITION_METRIC_RE.search(s) and _CONDITION_WORD_RE.search(s)]
+    for sentence in measured + described:
+        if room <= 40:
+            break
+        snippet = sentence[:room]
+        parts.append(snippet)
+        room -= len(snippet) + 1
+    return " ".join(parts)
+
+
+def _draft_excerpt(features: dict[str, Any], limit: int = 5000) -> str:
+    """Build a grounding excerpt that spans the draft instead of only its head.
+
+    The head of a manuscript is nearly always the Introduction: it states the
+    review's scope but rarely the catalyst or selectivity of any single route,
+    so sampling only the head left the content picker with no conditions to put
+    on the reaction arrow.  Keeping the head plus every later section, each
+    sampled as its opening plus its condition-bearing sentences, covers the
+    whole draft inside the same budget.
+    """
+    project_dir = features.get("_project_dir")
+    if not project_dir:
+        return "(no draft available)"
+    text = ""
+    for sub, name in (
+        ("04_first_draft", "first_draft.md"),
+        ("02_section_drafting", "section_drafts.md"),
+    ):
+        path = Path(project_dir) / sub / name
+        try:
+            if path.exists():
+                text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if text.strip():
+            break
+    if not text.strip():
+        return "(empty draft)" if text else "(no draft available)"
+    # Paragraph-id markers spend budget without adding grounding signal.
+    text = re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
+    marks = [match.start() for match in _DRAFT_SECTION_RE.finditer(text)]
+    if len(marks) < 2:
+        return " ".join(text.split())[:limit]
+    section_ends = {
+        start: (marks[i + 1] if i + 1 < len(marks) else len(text))
+        for i, start in enumerate(marks)
+    }
+    body_marks = [start for start in marks[1:]
+                  if not _BIBLIOGRAPHY_HEADING_RE.match(text[start:start + 60])]
+    head = _section_slice(text[: body_marks[0] if body_marks else marks[1]],
+                          max(500, limit // 3))
+    if not body_marks:
+        return head
+    per_section = max(140, (limit - len(head)) // len(body_marks))
+    parts = [head] + [
+        _section_slice(text[start:section_ends[start]], per_section)
+        for start in body_marks
+    ]
+    return "\n[...]\n".join(part for part in parts if part)[:limit]
+
+
+def _text_list_from_data(data: dict[str, Any], key: str,
+                         min_count: int, max_len: int) -> list[str]:
+    """Validate a list-of-short-strings field from the content pack."""
+    raw = data.get(key)
+    if not isinstance(raw, list):
+        return []
+    items: list[str] = []
+    for entry in raw:
+        text = str(entry or "").strip()
+        if text and len(text) <= max_len and text not in items:
+            items.append(text)
+    return items if len(items) >= min_count else []
+
+
+def _llm_content_pack(features: dict[str, Any]) -> dict[str, Any] | None:
+    """Ask the text model for the overview's full text content in one call.
+
+    Returns ``{"reaction": scheme-or-None, "key_findings": [...],
+    "cross_cutting": [...], "take_home": [...]}`` or None on any failure.
+    The reaction SMILES are validated (with one corrective retry); the text
+    lists are validated for count/length.  Text parts survive even when the
+    reaction is invalid, so the figure still gets review-grounded wording
+    while the molecule falls back to the single-skeleton path.  The outcome
+    reason is recorded in ``features["_reaction_picker_note"]``.
+    """
+    def _fail(note: str) -> None:
+        features["_reaction_picker_note"] = note
+
+    try:
+        if features.get("_dry_run") or not _text_gateway_configured():
+            _fail("text gateway not configured")
+            return None
+        title = str(features.get("review_title", "") or "").strip()
+        if not title:
+            _fail("empty review title")
+            return None
+        products = ", ".join(str(p) for p in (features.get("product_keywords") or [])) or "(none)"
+        substrates = ", ".join(str(s) for s in (features.get("substrate_keywords") or [])) or "(none)"
+        draft = _draft_excerpt(features)
+        if draft in {"(no draft available)", "(empty draft)"}:
+            _fail("no manuscript evidence available")
+            return None
+        prompt = _CONTENT_PACK_PROMPT.format(
+            title=title, products=products, substrates=substrates, draft=draft)
+        prompt += "\n" + OVERVIEW_SUMMARY_GUIDANCE
+        prompt += "\nAuthoritative Overview contract (retain its axis and modules):\n" + json.dumps(
+            features.get("overview_content_contract") or {}, ensure_ascii=False
+        )
+        prompt += "\nRepresentative product constraint:\n" + json.dumps(
+            features.get("overview_structure_contract") or {}, ensure_ascii=False
+        )
+        data = call_gateway_json(prompt, label="overview-reaction", timeout_seconds=120)
+    except Exception as exc:
+        _fail(f"gateway call failed: {type(exc).__name__}: {str(exc)[:180]}")
+        return None
+    if not isinstance(data, dict):
+        _fail(f"non-dict model response: {str(data)[:200]}")
+        return None
+    scheme, problem = _scheme_from_data(data)
+    if scheme is None and is_chemistry_context(features) and (
+        data.get("substrate_smiles") or data.get("product_smiles")
+    ):
+        # One corrective retry for the reaction SMILES: tell the model exactly
+        # what was wrong and ask for a simpler, valid pair.
+        retry_prompt = (
+            prompt
+            + "\n\nYour previous response was rejected because: " + problem
+            + "\nReturn a corrected JSON object with the same schema. Simplify both "
+              "motifs: at most 10 heavy atoms each, plain chains with \"*\" "
+              "substituents, and every carbon within valence 4."
+        )
+        try:
+            retry_data = call_gateway_json(retry_prompt, label="overview-reaction-retry",
+                                           timeout_seconds=120)
+            if isinstance(retry_data, dict):
+                retry_scheme, _ = _scheme_from_data(retry_data)
+                if retry_scheme is not None:
+                    scheme = retry_scheme
+                    print(f"  Text model corrected the reaction scheme on retry: "
+                          f"{scheme['substrate_smiles']!r} -> {scheme['product_smiles']!r}")
+        except Exception:
+            pass
+    key_findings = _text_list_from_data(data, "key_findings", min_count=1, max_len=80)
+    cross_cutting = _text_list_from_data(data, "cross_cutting", min_count=1, max_len=48)
+    take_home = _text_list_from_data(data, "take_home", min_count=1, max_len=60)
+    if scheme is None and not (key_findings or cross_cutting or take_home):
+        echoed = {k: str(v)[:70] for k, v in data.items()}
+        _fail(f"invalid content pack: {problem} | model_returned={echoed}")
+        return None
+    if scheme is not None:
+        print(f"  Text model identified reaction scheme: "
+              f"{scheme['substrate_smiles']!r} -> {scheme['product_smiles']!r} "
+              f"(catalyst: {scheme['catalyst_label']!r}, reaction: {scheme['reaction_name']!r})")
+    _fail("ok" if scheme is not None else "text-only pack (reaction invalid)")
+    return {
+        "reaction": scheme,
+        "key_findings": key_findings,
+        "cross_cutting": cross_cutting,
+        "take_home": take_home,
+    }
+
+
+def _automatic_chemistry_decision(
+    features: dict[str, Any], scheme: dict[str, str] | None
+) -> dict[str, Any]:
+    """Choose an automatic chemistry presentation mode without human review.
+
+    The image model never decides whether a detailed reaction is trustworthy.
+    A valid candidate starts as a conservative product-motif candidate; a
+    separate evidence-review call may promote it to a full reaction scheme.
+    If the evidence is too weak, the overview stays AI-generated but uses a
+    chemistry-free conceptual layout instead of fabricating a structure.
+    """
+    decision = {
+        "mode": "concept",
+        "confidence": 0,
+        "reason": "no validated chemistry candidate",
+        "reviewed_by": "rules",
+    }
+    if scheme is None:
+        return decision
+    # Candidate generation must not bypass the existing Blueprint product lock.
+    contract = features.get("overview_structure_contract") or {}
+    if contract.get("status") == "resolved":
+        from rdkit import Chem
+        product = Chem.MolFromSmiles(str(scheme.get("product_smiles") or ""))
+        required = str(contract.get("required_smarts") or "")
+        pattern = Chem.MolFromSmarts(required or _contract_smiles(contract))
+        if product is None or pattern is None or not product.HasSubstructMatch(pattern):
+            decision["reason"] = "candidate product conflicts with Blueprint structure contract"
+            return decision
+    # _scheme_from_data already validates each fragment; keep a small baseline
+    # for a generic product motif, but do not automatically trust conditions.
+    confidence = 45
+    title_blob = " ".join(
+        [str(features.get("review_title") or ""),
+         *[str(x) for x in features.get("product_keywords") or []]]
+    ).casefold()
+    product_name = str(scheme.get("product_name") or "").casefold()
+    if product_name and any(word in title_blob for word in re.findall(r"[a-z]{4,}", product_name)):
+        confidence += 10
+    decision.update({
+        "mode": "skeleton",
+        "confidence": min(confidence, 69),
+        "reason": "RDKit-valid generic product motif; detailed reaction awaits evidence review",
+    })
+    enabled = str(os.environ.get(_CHEMISTRY_REVIEW_ENV, "on") or "on").strip().casefold()
+    if enabled in {"off", "false", "0", "no", "disabled"} or not _text_gateway_configured():
+        decision["reason"] += "; second AI review unavailable"
+        return decision
+    try:
+        review = call_gateway_json(
+            _CHEMISTRY_REVIEW_PROMPT.format(
+                title=str(features.get("review_title") or ""),
+                products=", ".join(str(x) for x in features.get("product_keywords") or []) or "(none)",
+                substrate=scheme.get("substrate_smiles", ""),
+                product=scheme.get("product_smiles", ""),
+                reaction_name=scheme.get("reaction_name", ""),
+                conditions=scheme.get("catalyst_label", "") or "(none)",
+                draft=_draft_excerpt(features, limit=3500),
+            ),
+            label="overview-chemistry-review",
+            timeout_seconds=120,
+        )
+        supported = review.get("supported") is True if isinstance(review, dict) else False
+        model_confidence = int(review.get("confidence", 0)) if isinstance(review, dict) else 0
+        model_confidence = max(0, min(100, model_confidence))
+        reason = str(review.get("reason", "") or "").strip()[:240]
+        decision.update({
+            "confidence": model_confidence,
+            "reason": reason or "second AI evidence review returned no reason",
+            "reviewed_by": "rules+ai",
+        })
+        if supported and model_confidence >= _REACTION_CONFIDENCE_MIN:
+            decision["mode"] = "reaction"
+        elif model_confidence >= _SKELETON_CONFIDENCE_MIN:
+            decision["mode"] = "skeleton"
+        else:
+            decision["mode"] = "concept"
+    except Exception as exc:
+        decision["reason"] += f"; second AI review failed: {type(exc).__name__}"
+    return decision
+
+
+def _render_motif_2d(smiles: str, output_path: Path,
+                     size: tuple[int, int] = (640, 640)) -> Path | None:
+    """Render a molecule as a 2D bond-line (skeletal) structure via RDKit.
+
+    Wildcard atoms are relabeled R1..Rn.  The white canvas is converted to
+    transparency with ``_skeleton_rgba`` so compositing stays seamless.
+    Returns None when RDKit is unavailable or rendering fails, so callers fall
+    back to the ball-and-stick renderer.
+    """
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import rdDepictor
+        from rdkit.Chem.Draw import rdMolDraw2D
+    except ImportError:
+        return None
+    try:
+        import io
+        from PIL import Image
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            mol = Chem.MolFromSmiles(smiles, sanitize=False)
+        if mol is None:
+            return None
+        r_idx = 0
+        for atom in mol.GetAtoms():
+            if atom.GetAtomicNum() == 0:
+                r_idx += 1
+                atom.SetProp("atomLabel", f"R{r_idx}")
+        rdDepictor.Compute2DCoords(mol)
+        w, h = int(size[0]), int(size[1])
+        drawer = rdMolDraw2D.MolDraw2DCairo(w, h)
+        drawer.DrawMolecule(mol)
+        drawer.FinishDrawing()
+        img = Image.open(io.BytesIO(drawer.GetDrawingText())).convert("RGB")
+        img = _skeleton_rgba(img)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(output_path, format="PNG")
+        return output_path
+    except Exception:
+        return None
+
+
+def _render_scheme_molecule(smi: str, out_path: Path,
+                            mol_size: tuple[int, int], style: str) -> Path | None:
+    """Render one scheme molecule, preferring 2D bond-line over ball-and-stick."""
+    path = _render_motif_2d(smi, out_path, mol_size)
+    if path:
+        return path
+    return render_smiles_ball_and_stick(smi, out_path, mol_size, style)
+
+
+def render_reaction_scheme(reaction: dict[str, str], output_path: Path,
+                           img_size: tuple[int, int] = (1500, 600),
+                           style: str = "3d") -> Path | None:
+    """Render substrate(s) -> product (+ catalyst label) as a programmatic scheme.
+
+    Every molecule is drawn as a 2D bond-line structure via RDKit when
+    available (paper-style skeletal formulae), falling back to the 3D
+    ball-and-stick renderer otherwise.  A transformation that needs several
+    reactants arrives as a dot-disconnected SMILES and is split into its
+    fragments here, each rendered on its own and joined with a "+": handing the
+    dot string to a renderer as one molecule would either read as stray
+    structures (RDKit) or invent a bond between the reactants (the built-in
+    parser ignores ".").  Returns None on any failure so the caller falls back
+    to the single-skeleton path.  The scheme reads left->right and must not be
+    rotated downstream.
+    """
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return None
+    sub_frags = [part.strip() for part in
+                 str(reaction.get("substrate_smiles") or "").split(".")]
+    sub_frags = [part for part in sub_frags if part][:_SCHEME_MAX_REACTANTS]
+    prod_smi = str(reaction.get("product_smiles") or "").strip()
+    # The product is reused as the single-skeleton SMILES, where the
+    # ball-and-stick renderer cannot lay out disconnected fragments.
+    if not sub_frags or not prod_smi or "." in prod_smi:
+        return None
+    W, H = int(img_size[0]), int(img_size[1])
+    out_dir = output_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sub_tmps = [out_dir / f"{output_path.stem}.scheme_sub{i}.png"
+                for i in range(len(sub_frags))]
+    prod_tmp = out_dir / (output_path.stem + ".scheme_prod.png")
+    try:
+        sub_layers = []
+        for frag, frag_tmp in zip(sub_frags, sub_tmps):
+            if not _render_scheme_molecule(frag, frag_tmp, (640, 640), style):
+                return None
+            with Image.open(frag_tmp) as im:
+                layer = _crop_skeleton_layer(im)
+            if min(layer.width, layer.height) < 4:
+                return None
+            sub_layers.append(layer)
+        if not _render_scheme_molecule(prod_smi, prod_tmp, (640, 640), style):
+            return None
+        with Image.open(prod_tmp) as im:
+            prod_layer = _crop_skeleton_layer(im)
+        if min(prod_layer.width, prod_layer.height) < 4:
+            return None
+
+        # Normalize every molecule to a comparable height, capping width so a
+        # sprawling R-group cannot eat the arrow's room.
+        target_h = int(H * 0.60)
+        max_w = int(W * 0.32)
+
+        def _fit_mol(layer: Any) -> Any:
+            s = min(target_h / layer.height, max_w / layer.width)
+            return layer.resize(
+                (max(1, int(round(layer.width * s))), max(1, int(round(layer.height * s)))),
+                Image.Resampling.LANCZOS,
+            )
+
+        sub_layers = [_fit_mol(layer) for layer in sub_layers]
+        prod_layer = _fit_mol(prod_layer)
+
+        gap = int(W * 0.02)
+        arrow_len = int(W * 0.15)
+        ink = (25, 25, 25)
+        plus_font = _label_font(max(18, int(H * 0.09)))
+        plus_w = max(12, int(H * 0.05))
+        if len(sub_layers) > 1 and plus_font is not None:
+            probe = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
+            box = probe.textbbox((0, 0), "+", font=plus_font)
+            plus_w = max(plus_w, box[2] - box[0])
+        plus_gap = max(6, int(gap * 0.6))
+
+        def _reactant_width(layers: list[Any]) -> int:
+            width = sum(layer.width for layer in layers)
+            if len(layers) > 1:
+                width += (len(layers) - 1) * (plus_w + 2 * plus_gap)
+            return width
+
+        total = _reactant_width(sub_layers) + prod_layer.width + arrow_len + 4 * gap
+        if total > W:
+            shrink = W / total
+            sub_layers = [
+                layer.resize((max(1, int(layer.width * shrink)),
+                              max(1, int(layer.height * shrink))),
+                             Image.Resampling.LANCZOS)
+                for layer in sub_layers
+            ]
+            prod_layer = prod_layer.resize(
+                (max(1, int(prod_layer.width * shrink)),
+                 max(1, int(prod_layer.height * shrink))),
+                Image.Resampling.LANCZOS)
+            total = _reactant_width(sub_layers) + prod_layer.width + arrow_len + 4 * gap
+
+        cy = int(H * 0.55)
+        x0 = (W - total) // 2
+        canvas = Image.new("RGBA", (W, H), (255, 255, 255, 0))
+        draw = ImageDraw.Draw(canvas)
+        cursor = x0
+        for index, layer in enumerate(sub_layers):
+            canvas.paste(layer, (cursor, cy - layer.height // 2), layer.getchannel("A"))
+            cursor += layer.width
+            if index < len(sub_layers) - 1:
+                draw.text((cursor + plus_gap + plus_w / 2, cy), "+", fill=ink,
+                          font=plus_font, anchor="mm")
+                cursor += plus_w + 2 * plus_gap
+        arrow_x0 = cursor + gap
+        arrow_x1 = arrow_x0 + arrow_len
+        # Paper-style reaction arrow: thin shaft, small sharp head, near-black.
+        head_len = max(12, int(arrow_len * 0.16))
+        head_h = max(7, int(H * 0.024))
+        shaft_w = max(2, H // 150)
+        draw.line([(arrow_x0, cy), (arrow_x1 - head_len, cy)], fill=ink, width=shaft_w)
+        draw.polygon([(arrow_x1, cy), (arrow_x1 - head_len, cy - head_h),
+                      (arrow_x1 - head_len, cy + head_h)], fill=ink)
+        canvas.paste(prod_layer, (arrow_x1 + gap, cy - prod_layer.height // 2),
+                     prod_layer.getchannel("A"))
+
+        # Conditions and reaction names belong strictly to the arrow column.
+        # Letting either label spill across the arrow length makes it collide
+        # with substituent labels on the product (the exact overlap reported
+        # in early allene overviews). Wrap to two short lines instead.
+        def _arrow_label_lines(value: str, max_width: int) -> tuple[list[str], Any]:
+            words = value.split()
+            if not words:
+                return [], None
+            for size in range(max(14, H // 24), 9, -1):
+                font = _label_font(size)
+                if font is None:
+                    continue
+                lines: list[str] = []
+                line = ""
+                for word in words:
+                    candidate = f"{line} {word}".strip()
+                    if line and draw.textbbox((0, 0), candidate, font=font)[2] > max_width:
+                        lines.append(line)
+                        line = word
+                    else:
+                        line = candidate
+                if line:
+                    lines.append(line)
+                if len(lines) <= 2 and all(
+                    draw.textbbox((0, 0), item, font=font)[2] <= max_width
+                    for item in lines
+                ):
+                    return lines, font
+            # A long unbreakable token is less useful than an overlapping
+            # label. Keep the arrow clear and show a compact, truthful prefix.
+            font = _label_font(10)
+            clipped = value[:28].rstrip(" ,;:-") + ("..." if len(value) > 28 else "")
+            return [clipped], font
+
+        arrow_center = (arrow_x0 + arrow_x1) / 2
+        label_width = max(40, arrow_len - max(8, gap // 2))
+        catalyst_lines, catalyst_font = _arrow_label_lines(
+            str(reaction.get("catalyst_label") or "").strip(), label_width
+        )
+        if catalyst_lines and catalyst_font is not None:
+            line_h = max(12, H // 28)
+            start_y = cy - int(H * 0.13) - ((len(catalyst_lines) - 1) * line_h) / 2
+            for index, line in enumerate(catalyst_lines):
+                draw.text((arrow_center, start_y + index * line_h), line,
+                          fill=(25, 25, 25), font=catalyst_font, anchor="mm")
+        rname_lines, rname_font = _arrow_label_lines(
+            str(reaction.get("reaction_name") or "").strip(), label_width
+        )
+        if rname_lines and rname_font is not None:
+            line_h = max(12, H // 30)
+            start_y = cy + int(H * 0.13) - ((len(rname_lines) - 1) * line_h) / 2
+            for index, line in enumerate(rname_lines):
+                draw.text((arrow_center, start_y + index * line_h), line,
+                          fill=(60, 60, 60), font=rname_font, anchor="mm")
+
+        canvas.save(output_path, format="PNG")
+        return output_path
+    except Exception as exc:
+        print(f"  WARNING: reaction scheme render failed: {exc}")
+        return None
+    finally:
+        for tmp in (*sub_tmps, prod_tmp):
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def detect_title_band_bottom(fig: Any) -> int | None:
+    """Find the lower edge of a dense, dark title band near the page top.
+
+    AI overview variants commonly use a navy or dark-colored full-width title
+    bar, but its height varies. The fallback reaction slot must begin *after*
+    that bar, not after a percentage-based crop that can absorb the first row
+    of cards. Only a broad dark band can qualify, so dark text on a white card
+    is not mistaken for a title bar.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    if not isinstance(fig, Image.Image):
+        return None
+    rgb = fig.convert("RGB")
+    W, H = rgb.size
+    if W < 40 or H < 40:
+        return None
+    scan_limit = max(20, min(int(H * 0.22), H // 3))
+    sample_w = min(240, W)
+    sample_h = max(1, int(H * sample_w / W))
+    small = rgb.resize((sample_w, sample_h))
+    scale_y = H / sample_h
+    max_y = min(sample_h, max(1, int(scan_limit / scale_y)))
+    dark_rows: list[bool] = []
+    for y in range(max_y):
+        dark = 0
+        for x in range(sample_w):
+            r, g, b = small.getpixel((x, y))
+            if (r + g + b) / 3 < 145 and max(r, g, b) - min(r, g, b) > 12:
+                dark += 1
+        # Large white title glyphs can temporarily cover much of a dark bar.
+        # A moderate threshold preserves the entire band; unrelated side cards
+        # occupy far less than half of a page-width row.
+        dark_rows.append(dark / sample_w >= 0.45)
+
+    best_start = best_end = -1
+    start = -1
+    gaps = 0
+    for y, is_dark in enumerate(dark_rows):
+        if is_dark:
+            if start < 0:
+                start = y
+            gaps = 0
+        elif start >= 0:
+            gaps += 1
+            if gaps > 2:
+                end = y - gaps
+                if end - start > best_end - best_start:
+                    best_start, best_end = start, end
+                start = -1
+                gaps = 0
+    if start >= 0:
+        end = len(dark_rows) - 1 - gaps
+        if end - start > best_end - best_start:
+            best_start, best_end = start, end
+    if best_start < 0 or best_end - best_start < 5:
+        return None
+    return max(1, min(H - 1, int(round((best_end + 1) * scale_y))))
+
+
+def resolve_reaction_scheme(features: dict[str, Any]) -> dict[str, str] | None:
+    """Resolve the overview's content pack and its reaction scheme.
+
+    Returns the reaction-scheme dict (substrate/product SMILES + catalyst
+    label) or None.  The full content pack (review-grounded key findings,
+    cross-cutting themes, take-home messages) is stored in
+    ``features["_content_pack"]`` whenever available — even when the reaction
+    part is invalid — so the figure's wording stays review-grounded while the
+    molecule falls back to the single-skeleton path.  Falls back to None for
+    non-chemistry reviews, explicit skeleton overrides, a disabled switch, or
+    any picker failure, so this never breaks overview generation.
+    """
+    if not reaction_scheme_enabled():
+        features["_reaction_picker_note"] = "disabled by REVIEW_OVERVIEW_REACTION_SCHEME"
+        return None
+    if not is_chemistry_context(features):
+        features["_reaction_picker_note"] = "not a chemistry context"
+        features["_chemistry_decision"] = {
+            "mode": "concept", "confidence": 100,
+            "reason": "non-chemistry review", "reviewed_by": "rules",
+        }
+        pack = _llm_content_pack(features)
+        if pack:
+            features["_content_pack"] = {
+                key: pack.get(key) or []
+                for key in ("key_findings", "cross_cutting", "take_home")
+            }
+        return None
+    # Respect an explicit deterministic override; don't replace it with a scheme.
+    if str(features.get("skeleton_smiles", "") or "").strip():
+        features["_reaction_picker_note"] = "explicit skeleton_smiles override"
+        return None
+    if str(features.get("smiles", "") or "").strip():
+        features["_reaction_picker_note"] = "explicit smiles override"
+        return None
+    pack = _llm_content_pack(features)
+    if not pack:
+        # Do not turn an unavailable candidate-generation call into an
+        # unreviewed molecule drawn by the image model.  The caller will use
+        # the automatic concept-overview fallback instead.
+        features["_chemistry_decision"] = _automatic_chemistry_decision(features, None)
+        return None
+    if pack.get("key_findings") or pack.get("cross_cutting") or pack.get("take_home"):
+        features["_content_pack"] = {
+            "key_findings": pack.get("key_findings") or [],
+            "cross_cutting": pack.get("cross_cutting") or [],
+            "take_home": pack.get("take_home") or [],
+        }
+    scheme = pack.get("reaction")
+    if scheme:
+        decision = _automatic_chemistry_decision(features, scheme)
+        features["_chemistry_decision"] = decision
+        if decision["mode"] == "reaction":
+            features["_reaction_scheme"] = scheme
+            return scheme
+        if decision["mode"] == "skeleton":
+            # Reuse the validated product, without another model call or a
+            # legacy keyword fallback that could substitute the substrate.
+            features["_reviewed_product_scheme"] = scheme
+        features["_reaction_picker_note"] = (
+            f"{decision['mode']} mode ({decision['confidence']}/100): "
+            f"{decision['reason']}"
+        )
+        return None
+    if "_chemistry_decision" not in features:
+        features["_chemistry_decision"] = _automatic_chemistry_decision(features, None)
+    return None
+
+
+def _ai_select_template(scored: list[tuple[float, dict[str, Any]]], features: dict[str, Any]) -> dict[str, Any] | None:
+    """Let the text model choose among catalog-described layout candidates."""
+    if features.get("_dry_run") or not _text_gateway_configured():
+        return None
+    mode = str((features.get("_chemistry_decision") or {}).get("mode") or "concept")
+    candidates = [
+        {
+            "id": template["id"], "name": template["name"], "score": round(score, 2),
+            "capabilities": template.get("layout_capabilities") or {},
+            "description": template.get("description", ""),
+        }
+        for score, template in scored
+    ]
+    prompt = (
+        "Choose the single best overview layout for this review. You choose autonomously; "
+        "the numeric score is only a hint. Respect declared layout capabilities, especially "
+        "reaction_slot and module_count_range. A reaction mode requires enough horizontal "
+        "space for a readable substrate-to-product scheme. Do not choose a template by name alone.\n\n"
+        f"Review title: {features.get('display_title') or features.get('review_title') or ''}\n"
+        f"Classification modules: {json.dumps(_clean_categories(features.get('metal_categories', [])))}\n"
+        f"Chemistry mode: {mode}\nCandidates: {json.dumps(candidates, ensure_ascii=False)}\n\n"
+        "Return ONLY JSON: {\"template_id\": <integer>, \"reason\": \"short reason\"}."
+    )
+    try:
+        answer = call_gateway_json(prompt, label="overview-template-selection", timeout_seconds=90)
+        requested_id = int(answer.get("template_id"))
+        selected = next((template for _score, template in scored if template["id"] == requested_id), None)
+        selected_slot = str((selected or {}).get("layout_capabilities", {}).get("reaction_slot") or "none")
+        if selected is not None and not (mode == "reaction" and selected_slot == "none"):
+            features["_template_selection"] = {"mode": "ai", "reason": str(answer.get("reason") or "")[:240]}
+            return selected
+        if selected is not None:
+            features["_template_selection"] = {
+                "mode": "score_fallback",
+                "reason": "AI selection lacked a declared reaction slot",
+            }
+    except Exception:
+        pass
+    return None
+
+
+def _build_content_pack_text(features: dict[str, Any]) -> str:
+    """Supply review-grounded panel text from the content pack, if available.
+
+    When the pack resolved, key findings and cross-cutting themes become
+    EXACT text the figure must render, and the model is forbidden from
+    inventing its own generic panels (the "Goals/Highlights" boilerplate
+    failure mode).  Returns "" when no pack is available so the prompt
+    falls back to the deterministic text.
+    """
+    pack = features.get("_content_pack")
+    if not isinstance(pack, dict):
+        return ""
+    findings = [str(t).strip() for t in (pack.get("key_findings") or []) if str(t or "").strip()]
+    cross = [str(t).strip() for t in (pack.get("cross_cutting") or []) if str(t or "").strip()]
+    if not findings and not cross:
+        return ""
+    lines = ["REVIEW-GROUNDED EVIDENCE FOR SHORT PANEL SUMMARIES (do not copy verbatim):", OVERVIEW_SUMMARY_GUIDANCE]
+    if findings:
+        lines.append("Key findings (short labeled items, max 4):")
+        lines.extend(f"  - {text}" for text in findings[:4])
+    if cross:
+        lines.append("Cross-cutting themes (short items, max 4):")
+        lines.extend(f"  - {text}" for text in cross[:4])
+    lines.append(
+        "RULE: render ONLY the panels defined by this layout and the text supplied in this prompt. "
+        "Do NOT invent additional panels (e.g. \"Goals\", \"Highlights\", \"Overview\") or fill any "
+        "panel with generic filler such as \"comprehensive coverage\" or \"key advances summarized\" — "
+        "use the review-grounded text above instead."
+    )
+    return "\n".join(lines)
 
 
 def main():
@@ -4239,11 +5544,23 @@ def main():
     # Extract review features
     print(f"\nAnalyzing review project: {args.project_id}")
     features = extract_review_features(project_dir)
+    features["_dry_run"] = args.dry_run
     print(f"  Sections: {features['num_sections']}")
     print(f"  Metal classification: {features['has_metal_classification']}")
     print(f"  Metal categories: {features['metal_categories']}")
     print(f"  Time window: {features['time_window']}")
     print(f"  Group by: {features['group_by']}")
+    if is_chemistry_context(features) and not _rdkit_is_available():
+        print(
+            "ERROR: RDKit is required for a chemistry overview. Use the project Docker image "
+            "or install the locked chemistry dependency; no best-effort structure fallback is allowed.",
+            file=sys.stderr,
+        )
+        sys.exit(6)
+    # Resolve chemistry before layout selection so the model can weigh the
+    # actual reaction-mode requirement against every template capability.
+    reaction = resolve_reaction_scheme(features)
+    smiles = resolve_skeleton_smiles(features)
 
     # Select best template
     print(f"\nMatching templates...")
@@ -4265,8 +5582,15 @@ def main():
     layout_type = best_template["layout_type"]
     program_style = "3d" if args.skeleton_style == "ai3d" else args.skeleton_style
     ai_style_required = bool(args.require_ai_skeleton)
-    strict_skeleton = ai_style_required or is_chemistry_skeleton_project(features)
-    smiles = resolve_skeleton_smiles(features)
+    # Low-confidence candidates deliberately produce a concept overview.  This
+    # is an automatic safety fallback, not a missing-skeleton error.
+    strict_skeleton = (
+        ai_style_required
+        or (
+            is_chemistry_skeleton_project(features)
+            and str((features.get("_chemistry_decision") or {}).get("mode") or "") != "concept"
+        )
+    )
     skeleton_attempts: list[str] = []
     ai_redraw_note = ""
 
@@ -4296,15 +5620,29 @@ def main():
             "(or include a recognizable motif keyword) so the overview can embed "
             "an exact molecule.",
         )
-    skeleton_rendered = render_skeleton_model(features, skeleton_png,
-                                              style=program_style)
+    skeleton_rendered = None
     skeleton_source = "programmatic"
+    if reaction is not None:
+        skeleton_rendered = render_reaction_scheme(reaction, skeleton_png,
+                                                   style=program_style)
+        if skeleton_rendered:
+            skeleton_source = "reaction_scheme"
+            features["_skeleton_is_scheme"] = True
+    if not skeleton_rendered:
+        # No usable reaction scheme: render the single product skeleton.  If a
+        # scheme was resolved, its product SMILES is still reused via the
+        # priority-0 short-circuit inside resolve_skeleton_smiles.
+        skeleton_rendered = render_skeleton_model(features, skeleton_png,
+                                                  style=program_style)
     if strict_skeleton and not skeleton_rendered:
         _fail_skeleton(
             "skeleton_render_failed",
             f"Strict skeleton mode: the ball-and-stick renderer rejected SMILES {smiles!r}.",
         )
-    if skeleton_rendered and args.skeleton_style == "ai3d" and not args.dry_run:
+    if skeleton_source == "reaction_scheme":
+        ai_redraw_note = "skipped_reaction_scheme"
+        print("  Reaction scheme kept programmatic (AI restyle gate is single-molecule only).")
+    elif skeleton_rendered and args.skeleton_style == "ai3d" and not args.dry_run:
         ai_png, ai_redraw_note, skeleton_attempts = attempt_ai_skeleton_redraw(
             features, skeleton_png, out_dir / "skeleton_model_ai3d.png",
             api_key, base_url, args.model, wire_api)
@@ -4423,10 +5761,57 @@ def main():
         "panel_source": "",
     }
     if not will_composite:
-        composite_report["reason"] = "skeleton_render_failed"
+        skip_reason = overview_composite_skip_reason(features, smiles)
+        composite_report["reason"] = skip_reason
+        if skip_reason == "no_motif_resolved":
+            print(
+                "  WARNING: chemistry review but no core-motif SMILES could be "
+                "resolved; the overview is generated WITHOUT a molecule. Set "
+                "'skeleton_smiles' in the discovery query plan to embed one.",
+                file=sys.stderr,
+            )
+        elif skip_reason == "skeleton_render_failed":
+            print(
+                f"  WARNING: the ball-and-stick renderer rejected SMILES {smiles!r}; "
+                "the overview is generated WITHOUT a molecule.",
+                file=sys.stderr,
+            )
     else:
+        reaction_slot_ratio = float(
+            (best_template.get("layout_capabilities") or {}).get(
+                "reaction_slot_ratio", 0.24
+            )
+        )
         composited, skip_reason, panel_source = composite_skeleton_into_figure(
-            output_path, skeleton_png, layout_type)
+            output_path, skeleton_png, layout_type,
+            allow_rotate=(skeleton_source != "reaction_scheme"),
+            scheme_mode=(skeleton_source == "reaction_scheme"),
+            scheme_title=(reaction.get("reaction_name", "")
+                          if isinstance(reaction, dict) else ""),
+            reaction_slot_ratio=reaction_slot_ratio,
+        )
+        if not composited and skip_reason == "reaction_slot_unavailable":
+            # The selected template declares a reaction slot, so retry the
+            # same AI layout request once rather than detaching the scheme at
+            # the bottom of an otherwise balanced overview.
+            try:
+                print("  Reaction slot was not preserved; regenerating the selected layout once.")
+                retry_bytes = call_image_edit_api(
+                    api_key, base_url, upload_image, adapted_prompt, args.model,
+                    preferred_size=args.size, wire_api=wire_api,
+                    request_metadata=request_metadata, extra_images=extra_images,
+                )
+                output_path.write_bytes(retry_bytes)
+                composited, skip_reason, panel_source = composite_skeleton_into_figure(
+                    output_path, skeleton_png, layout_type,
+                    allow_rotate=False, scheme_mode=True,
+                    scheme_title=(reaction.get("reaction_name", "")
+                                  if isinstance(reaction, dict) else ""),
+                    reaction_slot_ratio=reaction_slot_ratio,
+                    allow_inserted_reaction_slot=True,
+                )
+            except Exception as exc:
+                skip_reason = f"reaction_slot_retry_failed:{type(exc).__name__}"
         if composited:
             composite_report["status"] = "success"
             composite_report["panel_source"] = panel_source
@@ -4453,7 +5838,27 @@ def main():
         "source": skeleton_source,
         "smiles": smiles,
         "attempts": skeleton_attempts,
+        "reaction_scheme_note": str(features.get("_reaction_picker_note", "") or ""),
     }
+    if smiles:
+        skeleton_report["chemical_identity"] = chemical_identity(smiles)
+    if skeleton_source == "reaction_scheme" and isinstance(reaction, dict):
+        skeleton_report["reaction"] = {
+            "reaction_name": reaction.get("reaction_name", ""),
+            "substrate_smiles": reaction.get("substrate_smiles", ""),
+            "substrate_name": reaction.get("substrate_name", ""),
+            "product_smiles": reaction.get("product_smiles", ""),
+            "product_name": reaction.get("product_name", ""),
+            "catalyst_label": reaction.get("catalyst_label", ""),
+        }
+        skeleton_report["reaction"]["substrate_identities"] = [
+            chemical_identity(fragment)
+            for fragment in str(reaction.get("substrate_smiles") or "").split(".")
+            if fragment
+        ]
+        skeleton_report["reaction"]["product_identity"] = chemical_identity(
+            str(reaction.get("product_smiles") or "")
+        )
     if composite_report["status"] == "skipped" and strict_skeleton:
         # In composite mode the model was told to leave the panel blank, so a
         # skipped compositing pass can leave the overview without ANY molecule.

@@ -83,11 +83,23 @@ export function MarkdownView({ content, empty }: { content?: string | null; empt
   const emptyMessage = empty || text("暂无内容。", "No content yet.");
   const source = String(content || "").replace(/<!--[\s\S]*?-->/g, "").trim();
   if (!source) return <div className="empty-state">{emptyMessage}</div>;
-  const blocks = source.split(/\n{2,}/);
+  const blocks = source.split(/\n\s*\n/);
   return (
     <article className="markdown-view">
       {blocks.map((block, index) => {
         const value = block.trim();
+        const tableRows = value.split("\n").map((line) => line.trim().replace(/^\||\|$/g, "").split(/(?<!\\)\|/).map((cell) => cell.trim().replace(/\\\|/g, "|")));
+        if (tableRows.length >= 2 && tableRows[0].length > 1
+          && tableRows[1].length === tableRows[0].length
+          && tableRows[1].every((cell) => /^:?-{3,}:?$/.test(cell))
+          && tableRows.slice(2).every((row) => row.length === tableRows[0].length)) {
+          return <div className="markdown-table-scroll" key={index} tabIndex={0}>
+            <table>
+              <thead><tr>{tableRows[0].map((cell, column) => <th scope="col" key={column}>{inlineContent(cell)}</th>)}</tr></thead>
+              <tbody>{tableRows.slice(2).map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, column) => <td key={column}>{inlineContent(cell)}</td>)}</tr>)}</tbody>
+            </table>
+          </div>;
+        }
         const heading = /^(#{1,3})\s+(.+)$/.exec(value);
         if (heading) {
           const children = inlineContent(heading[2]);

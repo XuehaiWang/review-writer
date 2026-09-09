@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import os
 import re
 from functools import lru_cache
@@ -64,17 +65,79 @@ TAXONOMY_PROFILES: tuple[TaxonomyProfileDefinition, ...] = (
 TAXONOMY_PROFILE_BY_ID = {item.id: item for item in TAXONOMY_PROFILES}
 PUBLIC_TAXONOMY_PROFILE_IDS = frozenset({"general_academic", "chemistry_general"})
 
+# Order matters: suggest_taxonomy_profile returns the first profile whose
+# signals match, so the most specific profile (allene) must precede the
+# broad chemistry_general bucket.
 PROFILE_TOPIC_SIGNALS: dict[str, tuple[str, ...]] = {
     "allene": (
         "allene",
         "allenation",
-        "propargylic",
-        "propargyl",
-        "allenylidene",
-        "axial chirality",
-        "sn2'",
+        "联烯",
+    ),
+    "chemistry_general": (
+        "enantioselective",
+        "diastereoselective",
+        "stereoselective",
+        "asymmetric catalysis",
+        "asymmetric synthesis",
+        "asymmetric induction",
+        "cross-coupling",
+        "cross coupling",
+        "catalyzed",
+        "catalysed",
+        "catalytic",
+        "catalysis",
+        "organocatalytic",
+        "organocatalysis",
+        "organometallic",
+        "photocatalytic",
+        "photocatalysis",
+        "photoredox",
+        "electrocatalytic",
+        "hydrogenation",
+        "hydroboration",
+        "hydrosilylation",
+        "hydroamination",
+        "cycloaddition",
+        "metathesis",
+        "olefination",
+        "annulation",
+        "borylation",
+        "arylation",
+        "silylation",
+        "carbonylation",
+        "c-h activation",
+        "c–h activation",
+        "total synthesis",
+        "suzuki",
+        "sonogashira",
+        "negishi",
+        "heterocycl",
+        "atropisomer",
+        "organic chemistry",
+        "medicinal chemistry",
+        "synthetic chemistry",
+        "synthetic methodology",
     ),
 }
+
+
+def _active_taxonomy_profiles(profile: str, topic_text: str = "") -> list[str]:
+    selected = str(profile or DEFAULT_TAXONOMY_PROFILE).strip().lower()
+    # A specialist profile is an overlay on the general chemistry vocabulary,
+    # not an independent replacement taxonomy.
+    active = ["chemistry_general", selected] if selected == "allene" else [selected]
+    if selected == "chemistry_general" and str(topic_text or "").strip():
+        specialized = suggest_taxonomy_profile(topic_text)
+        if specialized not in {DEFAULT_TAXONOMY_PROFILE, selected}:
+            active.append(specialized)
+    return active
+
+
+def effective_taxonomy_profile(profile: str, topic_text: str = "") -> str:
+    """Return the final profile selected by the confirmed Topic."""
+
+    return _active_taxonomy_profiles(profile, topic_text)[-1]
 
 
 class TaxonomyConfigurationError(ValueError):
@@ -164,6 +227,89 @@ def load_rules_from_path(path: Path) -> list[tuple[str, str, list[str]]]:
     return [(label, category, list(aliases)) for label, category, aliases in rules]
 
 
+@lru_cache(maxsize=32)
+def _load_literal_cached(path_text: str, modified_ns: int, name: str) -> Any:
+    del modified_ns
+    path = Path(path_text)
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    value_node = next(
+        (
+            node.value
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
+        ),
+        None,
+    )
+    if value_node is None:
+        raise TaxonomyConfigurationError(f"Taxonomy file does not define {name}: {path}")
+    try:
+        return ast.literal_eval(value_node)
+    except (SyntaxError, ValueError) as exc:
+        raise TaxonomyConfigurationError(f"Taxonomy extension {name} is not literal data: {path}") from exc
+
+
+def load_discovery_normalization(
+    review_root: Path,
+    *,
+    profile: str,
+    topic_text: str,
+) -> dict[str, Any]:
+    """Load optional topic-specific Discovery normalization with a safe fallback."""
+
+    selected = str(profile or DEFAULT_TAXONOMY_PROFILE).strip().lower()
+    active = _active_taxonomy_profiles(selected, topic_text)
+    specialized = next(
+        (item for item in active if item not in {DEFAULT_TAXONOMY_PROFILE, "chemistry_general"}),
+        "",
+    )
+    if not specialized:
+        return {
+            "status": "not_applicable",
+            "profile": "",
+            "config": {},
+            "sha256": hashlib.sha256(b"").hexdigest(),
+            "warnings": [],
+            "coverage_confirmation_required": False,
+        }
+    try:
+        path = resolve_taxonomy_path(review_root, profile=specialized)
+        payload = _load_literal_cached(
+            str(path.resolve()), path.stat().st_mtime_ns, "discovery_normalization"
+        )
+        if not isinstance(payload, dict):
+            raise TaxonomyConfigurationError(
+                f"Taxonomy discovery_normalization must be an object: {path}"
+            )
+        raw = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    except (OSError, TypeError, TaxonomyConfigurationError) as exc:
+        return {
+            "status": "degraded",
+            "profile": specialized,
+            "config": {},
+            "sha256": hashlib.sha256(b"").hexdigest(),
+            "warnings": [
+                f"Specialized Discovery normalization is unavailable ({exc}); general matching remains active."
+            ],
+            "coverage_confirmation_required": True,
+        }
+    try:
+        relative_path = str(path.relative_to(Path(review_root).resolve()))
+    except ValueError:
+        relative_path = str(path)
+    return {
+        "status": "enabled",
+        "profile": specialized,
+        "rules_path": relative_path,
+        "config": payload,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "warnings": [],
+        "coverage_confirmation_required": False,
+    }
+
+
 def load_taxonomy_rules(
     review_root: Path,
     *,
@@ -187,11 +333,7 @@ def load_taxonomy_rules(
         profile
         or os.environ.get("REVIEW_TAXONOMY_PROFILE", DEFAULT_TAXONOMY_PROFILE)
     ).strip().lower()
-    active_profiles = [selected_profile]
-    if selected_profile == "chemistry_general" and str(topic_text or "").strip():
-        specialized = suggest_taxonomy_profile(topic_text)
-        if specialized not in {DEFAULT_TAXONOMY_PROFILE, selected_profile}:
-            active_profiles.append(specialized)
+    active_profiles = _active_taxonomy_profiles(selected_profile, topic_text)
 
     combined: list[tuple[str, str, list[str]]] = []
     indexes: dict[tuple[str, str], int] = {}
@@ -317,14 +459,12 @@ def taxonomy_identity(
     *,
     profile: str = "",
     rules_path: str | Path = "",
+    topic_text: str = "",
 ) -> dict[str, Any]:
-    path = resolve_taxonomy_path(review_root, profile=profile, rules_path=rules_path)
-    raw = path.read_bytes()
-    configured_path = os.environ.get("REVIEW_CLASSIFICATION_RULES", "").strip()
-    try:
-        relative_path = str(path.relative_to(Path(review_root).resolve()))
-    except ValueError:
-        relative_path = str(path)
+    root = Path(review_root).resolve()
+    configured_path = str(
+        rules_path or os.environ.get("REVIEW_CLASSIFICATION_RULES", "")
+    ).strip()
     identity_profile = (
         "custom"
         if configured_path
@@ -334,17 +474,51 @@ def taxonomy_identity(
                 or os.environ.get(
                     "REVIEW_TAXONOMY_PROFILE", DEFAULT_TAXONOMY_PROFILE
                 )
-            ).strip()
+            ).strip().lower()
             or DEFAULT_TAXONOMY_PROFILE
         )
     )
+    active_profiles = (
+        ["custom"]
+        if configured_path
+        else _active_taxonomy_profiles(identity_profile, topic_text)
+    )
+    rules: list[dict[str, str]] = []
+    digest = hashlib.sha256()
+    for active_profile in active_profiles:
+        path = resolve_taxonomy_path(
+            root,
+            profile="" if active_profile == "custom" else active_profile,
+            rules_path=configured_path if active_profile == "custom" else "",
+        )
+        raw = path.read_bytes()
+        try:
+            relative_path = str(path.relative_to(root))
+        except ValueError:
+            relative_path = str(path)
+        sha256 = hashlib.sha256(raw).hexdigest()
+        rules.append(
+            {"profile": active_profile, "rules_path": relative_path, "sha256": sha256}
+        )
+        digest.update(active_profile.encode("utf-8"))
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(raw)
+
     return {
         "profile": identity_profile,
-        "rules_path": relative_path,
-        "sha256": hashlib.sha256(raw).hexdigest(),
+        "effective_profiles": active_profiles,
+        "rules_path": rules[0]["rules_path"],
+        "rules": rules,
+        "sha256": digest.hexdigest(),
         "domain_rules_enabled": (
-            bool(load_rules_from_path(path))
+            bool(
+                load_taxonomy_rules(
+                    root,
+                    profile=identity_profile,
+                    rules_path=configured_path,
+                )
+            )
             if identity_profile == "custom"
-            else taxonomy_profile_uses_domain_rules(identity_profile)
+            else any(taxonomy_profile_uses_domain_rules(item) for item in active_profiles)
         ),
     }

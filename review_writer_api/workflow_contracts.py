@@ -16,6 +16,23 @@ INTERNAL_STAGES = (
     "final",
 )
 
+# Modern artifact paths identify the workflow stage that owns their current
+# pointer.  Some later stages may publish an improved copy of an upstream
+# artifact (for example, Draft fact repair can publish a new Matrix).  Pointer
+# invalidation must follow this logical ownership rather than the stage that
+# happened to write the immutable version.
+ARTIFACT_OWNER_STAGE_BY_PREFIX = {
+    "discovery": "discovery",
+    "matrix": "matrix",
+    "planning": "matrix",
+    "blueprint": "blueprint",
+    "sections": "sections",
+    "figure-review": "figure-review",
+    "figures": "figures",
+    "draft": "draft",
+    "final": "final",
+}
+
 USER_STAGES = (
     "library",
     "discovery",

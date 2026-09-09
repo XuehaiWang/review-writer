@@ -356,8 +356,10 @@ def append_operation_overlays(
         if not isinstance(operation, dict):
             continue
         kind = str(operation.get("type") or "")
+        if kind == "erase":
+            raise ValueError("Eraser edits require the editable SVG with object-bound masks. Reopen the editor and save again.")
         points = operation.get("points") or []
-        if kind not in {"erase", "arrow", "line"} or not isinstance(points, list):
+        if kind not in {"arrow", "line"} or not isinstance(points, list):
             continue
         parsed: list[tuple[float, float]] = []
         for point in points:
@@ -372,10 +374,9 @@ def append_operation_overlays(
         color = str(operation.get("color") or "#111111")
         if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
             color = "#111111"
-        stroke = "#ffffff" if kind == "erase" else color
         marker = ' marker-end="url(#manualArrowHead)"' if kind == "arrow" else ""
         overlays.append(
-            f'<polyline points="{coordinates}" fill="none" stroke="{stroke}" '
+            f'<polyline points="{coordinates}" fill="none" stroke="{color}" '
             f'stroke-width="{width:g}" stroke-linecap="round" stroke-linejoin="round"{marker}/>'
         )
     if not overlays:

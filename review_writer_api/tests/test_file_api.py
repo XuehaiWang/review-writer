@@ -16,6 +16,7 @@ from review_writer_api.app import create_app
 from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User
 from review_writer_api.security import Principal, Role
+from review_writer_api.workflow_models import WorkflowJob
 
 
 TEST_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("=")
@@ -176,6 +177,14 @@ class ArtifactFileApiTests(unittest.TestCase):
         self.assertTrue(project_path.is_dir())
 
         with TestClient(self.app) as client:
+            repository = self.app.state.workflow_repository
+            running = repository.create_or_get_job(
+                self.first.user_id, self.project_id, "project", "matrix.enrich", "running", {}
+            )
+            repository.claim_job(running.id)
+            queued = repository.create_or_get_job(
+                self.first.user_id, self.project_id, "project", "figures.redraw", "queued", {}
+            )
             deleted = client.delete(
                 f"/api/v1/projects/{self.project_id}",
                 headers={"Origin": "http://testserver"},
@@ -185,6 +194,11 @@ class ArtifactFileApiTests(unittest.TestCase):
         with self.sessions() as session:
             project = session.get(Project, uuid.UUID(self.project_id))
             self.assertIsNotNone(project.deleted_at)
+            for job_id in (running.id, queued.id):
+                job = session.get(WorkflowJob, uuid.UUID(job_id))
+                self.assertEqual("cancelled", job.status)
+                self.assertTrue(job.cancellation_requested)
+                self.assertIsNone(job.lease_token)
         self.assertFalse(project_path.exists())
         trash_root = (
             self.app.state.hosted_workspace_manager.user_root(self.first.user_id) / ".trash"

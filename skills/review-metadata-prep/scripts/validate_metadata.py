@@ -25,21 +25,14 @@ from review_writer_core.taxonomy import (  # noqa: E402
     labels_by_category,
     load_validation_taxonomy_rules,
 )
-from review_writer_core.metadata_tags import structured_tags_are_verified  # noqa: E402
+from review_writer_core.metadata_tags import (  # noqa: E402
+    STRUCTURED_TAG_KEYS,
+    structured_tags_are_verified,
+)
 
 
 BLOCKING_FIELDS = ["paper_id", "slug", "title", "authors", "year", "abstract", "source_paths", "structured_tags"]
 WARNING_FIELDS = ["journal", "doi"]
-STRUCTURED_TAG_KEYS = [
-    "product",
-    "substrate",
-    "catalyst_or_method",
-    "organometallic_partner",
-    "ligand_or_chiral_source",
-    "leaving_group",
-    "reaction_type",
-    "document_scope",
-]
 
 
 def load_allowed_labels(review_root: Path) -> dict[str, set[str]]:
@@ -105,12 +98,13 @@ def validate_one(path: Path, allowed_labels: dict[str, set[str]]) -> dict[str, A
         for key in STRUCTURED_TAG_KEYS:
             if not has_value(structured_value.get(key)):
                 issues.append(f"missing_structured_tag_{key}")
-            elif (
-                tags_verified
-                and str(structured_value.get(key)).strip().lower() == "not specified"
-            ):
+                continue
+            value = str(structured_value.get(key)).strip()
+            if not tags_verified and value.casefold() != "not specified":
+                issues.append(f"unverified_structured_tag_must_be_neutral_{key}")
+            elif tags_verified and value.casefold() == "not specified":
                 warnings.append(f"structured_tag_not_specified_{key}")
-            elif str(structured_value.get(key)).strip() not in allowed_labels.get(key, set()):
+            elif tags_verified and value not in allowed_labels.get(key, set()):
                 issues.append(f"invalid_structured_tag_{key}")
     source_paths = meta.get("source_paths") or {}
     if not isinstance(source_paths, dict):

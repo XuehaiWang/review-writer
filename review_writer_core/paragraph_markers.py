@@ -33,6 +33,34 @@ def split_body_and_references(markdown: str) -> tuple[str, str]:
     return markdown[: match.start()], markdown[match.start() :]
 
 
+def parse_marked_paragraphs(markdown: str) -> list[dict[str, Any]]:
+    """Read the final prose block immediately before each paragraph marker."""
+
+    body, _references = split_body_and_references(markdown or "")
+    headings = list(HEADING_RE.finditer(body))
+    paragraphs: list[dict[str, Any]] = []
+    for marker in PARAGRAPH_MARKER_RE.finditer(body):
+        prefix = body[: marker.start()].rstrip()
+        end = len(prefix)
+        separator = prefix.rfind("\n\n")
+        start = separator + 2 if separator >= 0 else 0
+        text = body[start:end].strip()
+        preceding = [heading for heading in headings if heading.end() <= start]
+        heading = preceding[-1].group(2).strip() if preceding else ""
+        if text and not text.lstrip().startswith(("#", "!", "|", "<!--")):
+            paragraphs.append(
+                {
+                    "paragraph_id": marker.group(1),
+                    "heading": heading,
+                    "text": text,
+                    "start": start,
+                    "end": end,
+                    "marker_end": marker.end(),
+                }
+            )
+    return paragraphs
+
+
 def _markdown_blocks(text: str) -> list[dict[str, Any]]:
     """Return blank-line-delimited blocks with source offsets."""
 

@@ -6,6 +6,7 @@ from pathlib import Path
 from review_writer_core.taxonomy import (
     DEFAULT_TAXONOMY_PROFILE,
     TaxonomyConfigurationError,
+    effective_taxonomy_profile,
     load_taxonomy_rules,
     suggest_taxonomy_profile,
     taxonomy_identity,
@@ -43,6 +44,15 @@ class TaxonomyProfileTests(unittest.TestCase):
             "allene", suggest_taxonomy_profile("Axially chiral allene synthesis")
         )
 
+    def test_broad_related_terms_do_not_activate_allene_profile(self) -> None:
+        for topic in (
+            "Propargylic substitution methods",
+            "Axial chirality in biaryls",
+            "SN2' reactions in organic synthesis",
+        ):
+            with self.subTest(topic=topic):
+                self.assertNotEqual("allene", suggest_taxonomy_profile(topic))
+
     def test_general_chemistry_activates_internal_topic_rules(self) -> None:
         general = load_taxonomy_rules(ROOT, profile="chemistry_general")
         specialized = load_taxonomy_rules(
@@ -52,6 +62,28 @@ class TaxonomyProfileTests(unittest.TestCase):
         )
         self.assertNotIn("alkynoates", {label for label, _, _ in general})
         self.assertIn("alkynoates", {label for label, _, _ in specialized})
+        identity = taxonomy_identity(
+            ROOT,
+            profile="chemistry_general",
+            topic_text="联烯合成方法",
+        )
+        self.assertEqual(
+            ["chemistry_general", "allene"], identity["effective_profiles"]
+        )
+        self.assertEqual(2, len(identity["rules"]))
+        self.assertEqual(
+            "allene",
+            effective_taxonomy_profile(
+                "chemistry_general", "Axially chiral allene synthesis"
+            ),
+        )
+
+    def test_internal_specialist_profile_keeps_general_chemistry_base(self) -> None:
+        labels = {
+            label for label, _category, _aliases in load_taxonomy_rules(ROOT, profile="allene")
+        }
+        self.assertIn("heterocycles", labels)
+        self.assertIn("alkynoates", labels)
 
 
 if __name__ == "__main__":

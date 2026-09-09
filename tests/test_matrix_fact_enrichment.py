@@ -19,6 +19,315 @@ SPEC.loader.exec_module(PIPELINE)
 
 
 class MatrixFactEnrichmentTests(unittest.TestCase):
+    def test_correction_retires_damaged_fact_only_after_same_experiment_verification(self):
+        for correction_supported in (True, False):
+            with self.subTest(correction_supported=correction_supported):
+                self.setUp()
+                result, state = self._agent_result(), {"max_supplement_rounds": 1}
+                original_id = result["facts"][0]["fact_id"]
+                source = {"evidence_key": "restored", "chunk_id": "pdf-text:current:p4", "question_ids": ["quantitative_results"],
+                          "content": "The optimized protocol gave 91% yield and 96% ee.", "source_lineage_hash": "lineage"}
+                def model(prompt, **kwargs):
+                    if kwargs["required_list"] == "facts":
+                        return {"facts": [{"field_id": "quantitative_results", "value": "91% yield and 96% ee",
+                            "support_excerpt": source["content"], "evidence_key": "restored", "confidence": 0.99,
+                            "correction_of_fact_id": original_id}]}
+                    return {"verdicts": [{"fact_id": f["fact_id"], "status": "supported", "reason": "Same experiment verified against restored text.",
+                        "source_damage": f["fact_id"] == original_id, "correction_supported": correction_supported}
+                        for f in result["facts"]]}
+                PIPELINE.run_fact_agent(self.paper, result, model_call=model, retrieve=lambda _: [source], state=state, report=lambda _: None)
+                self.assertEqual(2, len(result["facts"]))
+                old, new = result["facts"]
+                self.assertFalse(PIPELINE.fact_is_usable(old))
+                self.assertTrue(PIPELINE.fact_is_usable(new))
+                if correction_supported:
+                    self.assertEqual(new["fact_id"], old["superseded_by_fact_id"])
+                    self.assertFalse(state.get("unresolved_requests"))
+                    self.paper["required_fact_roles"] = ["quantitative_results"]
+                    self.assertEqual("complete", PIPELINE.refresh_fact_status(self.paper, result, state)["status"])
+                    self.assertEqual(1, result["fact_coverage"]["fact_count"])
+                    self.assertEqual(1, result["fact_coverage"]["superseded_fact_count"])
+                else:
+                    self.assertNotIn("superseded_by_fact_id", old)
+
+    def test_resume_keeps_unresolved_questions_alongside_pending_questions(self):
+        result = self._agent_result()
+        result["facts"][0]["verification"] = {"contract": PIPELINE.FACT_VALIDATION_VERSION, "status": "supported"}
+        state = {"pending_requests": [{"field_id": "scope", "query": "external cohort"}],
+                 "unresolved_requests": [{"field_id": "method_conditions", "query": "annealing temperature"}]}
+        seen = []
+        PIPELINE.run_fact_agent(self.paper, result, model_call=lambda *a, **k: self.fail("No extraction needed"),
+            retrieve=lambda request: seen.append(request["questions"][0]["field_id"]) or [], state=state, report=lambda _: None)
+        self.assertEqual(["scope", "method_conditions"], seen)
+
+    def test_failed_lookup_does_not_stop_other_problem_or_poison_no_progress_cache(self):
+        result, state = self._agent_result(), {"max_supplement_rounds": 1}
+        failed = {"field_id": "scope", "query": "external validation", "experiment_id": "cohort-A"}
+        good = {"field_id": "quantitative_results", "query": "control yield", "experiment_id": "control-B"}
+        result["evidence_requests"] = [failed, good]
+        source = {"evidence_key": "new", "chunk_id": "control", "question_ids": ["quantitative_results"],
+                  "content": "The control gave 42% yield.", "source_lineage_hash": "lineage"}
+        called = []
+        def retrieve(request):
+            question = request["questions"][0]
+            called.append(question["experiment_id"])
+            if question["experiment_id"] == "cohort-A":
+                raise RuntimeError("index temporarily unavailable")
+            # This is how an in-process trusted retriever updates the registry.
+            self.paper["evidence_candidates"].append(source)
+            return [source]
+        def model(prompt, **kwargs):
+            if kwargs["required_list"] == "facts":
+                return {"facts": [{"field_id": "quantitative_results", "value": "42% yield",
+                    "support_excerpt": source["content"], "evidence_key": "new", "confidence": 0.99}]}
+            return {"verdicts": [{"fact_id": f["fact_id"], "status": "supported", "reason": "Exact experiment matched."}
+                                 for f in result["facts"]]}
+        PIPELINE.run_fact_agent(self.paper, result, model_call=model, retrieve=retrieve, state=state, report=lambda _: None)
+        self.assertEqual(["cohort-A", "control-B"], called)
+        self.assertEqual(2, len(result["facts"]))
+        self.assertTrue(all(PIPELINE.fact_is_usable(f) for f in result["facts"]))
+        self.assertTrue(state["pending_requests"])
+        self.assertFalse(state.get("no_progress_requests"))
+
+    def test_source_damage_cannot_be_overridden_by_supported_model_verdict(self):
+        result, state = self._agent_result(), {}
+        def model(*a, **k):
+            return {"verdicts": [{"fact_id": result["facts"][0]["fact_id"], "status": "supported",
+                                  "source_damage": True, "reason": "Identifier is truncated in parsed text."}]}
+        PIPELINE.run_fact_agent(self.paper, result, model_call=model, retrieve=lambda _: [], state=state, report=lambda _: None)
+        self.assertFalse(PIPELINE.fact_is_usable(result["facts"][0]))
+        self.assertTrue(state["unresolved_requests"])
+
+    def test_known_source_can_be_reread_once_for_an_unextracted_experiment(self):
+        result, state = self._agent_result(), {}
+        source = {"evidence_key": "known", "chunk_id": "control", "question_ids": ["quantitative_results"],
+                  "content": "The control gave 42% yield.", "source_lineage_hash": "lineage"}
+        self.paper["evidence_candidates"].append(source)
+        request = {"field_id": "quantitative_results", "query": "control yield", "target_terms": ["control"], "experiment_id": "control"}
+        result["evidence_requests"] = [request]
+        extractions = []
+        def model(prompt, **kwargs):
+            if kwargs["required_list"] == "facts":
+                extractions.append(prompt)
+                return {"facts": [{"field_id": "quantitative_results", "value": "42% yield",
+                    "support_excerpt": source["content"], "evidence_key": "known", "confidence": 0.99}],
+                    "evidence_requests": [{**request, "query": "Please examine the control result"}]}
+            return {"verdicts": [{"fact_id": f["fact_id"], "status": "supported", "reason": "Exact experiment matched."}
+                                 for f in result["facts"]]}
+        PIPELINE.run_fact_agent(self.paper, result, model_call=model, retrieve=lambda _: [source], state=state, report=lambda _: None)
+        self.assertEqual(1, len(extractions))
+        self.assertEqual(2, len(result["facts"]))
+        self.assertEqual("supplement_budget_reached", state["stop_reason"])
+
+        # A new attempt with the same source cannot restart a completed lookup.
+        PIPELINE.run_fact_agent(self.paper, result,
+            model_call=lambda *a, **k: self.fail("Completed supplement must be reused"),
+            retrieve=lambda _: self.fail("Only one supplement round is allowed"), state=state, report=lambda _: None)
+
+    def test_empty_supplement_does_not_clear_a_question_when_other_roles_are_complete(self):
+        result, state = self._agent_result(), {"max_supplement_rounds": 1}
+        self.paper["required_fact_roles"] = ["quantitative_results"]
+        result["facts"][0]["verification"] = {"contract": PIPELINE.FACT_VALIDATION_VERSION, "status": "supported"}
+        result["evidence_requests"] = [{"field_id": "quantitative_results", "query": "control result", "experiment_id": "control"}]
+        source = {"evidence_key": "unanswered", "content": "The control experiment is discussed elsewhere.",
+                  "question_ids": ["quantitative_results"]}
+        PIPELINE.run_fact_agent(self.paper, result, model_call=lambda *a, **k: {"facts": [], "evidence_requests": []},
+            retrieve=lambda _: [source], state=state, report=lambda _: None)
+        self.assertTrue(state["pending_requests"])
+        self.assertEqual("partial", result["status"])
+
+    def test_failed_role_and_classification_cannot_make_extraction_complete(self):
+        paper = {**self.paper, "required_fact_roles": ["quantitative_results"]}
+        result = self._agent_result()
+        result["facts"][0]["verification"] = {"contract": PIPELINE.FACT_VALIDATION_VERSION, "status": "supported"}
+        result["facts"].append({"field_id": "topic_partition", "value": "category", "evidence_refs": [{"evidence_key": "k"}]})
+        result["failed_fields"] = ["scope"]
+        self.assertEqual("partial", PIPELINE.refresh_fact_status(paper, result)["status"])
+        self.assertEqual(1, result["fact_coverage"]["scientific_fact_count"])
+        result["failed_fields"] = []
+        self.assertEqual("complete", PIPELINE.refresh_fact_status(paper, result)["status"])
+        result["facts"] = result["facts"][1:]
+        self.assertNotEqual("complete", PIPELINE.refresh_fact_status(paper, result)["status"])
+
+    def test_rejected_fact_has_a_reason_and_bounded_retrieval_request(self):
+        result = PIPELINE.normalize_result(self.paper, {"facts": [{
+            "field_id": "quantitative_results", "value": "99% yield", "support_excerpt": "91% yield and 96% ee",
+            "evidence_key": "sha256:abc", "confidence": 0.95}]})
+        self.assertEqual("numeric_token_mismatch", result["normalization_rejections"][0]["reasons"][0])
+        requests, state = [], {}
+        for _ in range(2):
+            PIPELINE.run_fact_agent(self.paper, result, model_call=lambda *a, **k: self.fail("No fact survived for audit"),
+                                    retrieve=lambda request: requests.append(request) or [], state=state, report=lambda _: None)
+        self.assertEqual(1, len(requests))
+        self.assertEqual("quantitative_results", requests[0]["questions"][0]["field_id"])
+
+    def test_unsuccessful_local_supplement_is_not_reported_as_complete_or_repeated(self):
+        result, state = self._agent_result(), {}
+        result["evidence_requests"] = [{"field_id": "quantitative_results", "query": "control yield"}]
+        attempts = []
+        def retrieve(request):
+            attempts.append(request)
+            return []
+        def model(*args, **kwargs):
+            return {"verdicts": [{"fact_id": result["facts"][0]["fact_id"], "status": "supported", "reason": "Exact reported metric."}]}
+        for _ in range(2):
+            PIPELINE.run_fact_agent(self.paper, result, model_call=model, retrieve=retrieve, state=state, report=lambda _: None)
+        self.assertEqual(1, len(attempts))
+        self.assertEqual("partial", result["status"])
+        self.assertTrue(state["unresolved_requests"])
+
+    def _agent_result(self):
+        return PIPELINE.normalize_result(self.paper, {"facts": [{
+            "field_id": "quantitative_results", "value": "91% yield and 96% ee",
+            "support_excerpt": "91% yield and 96% ee", "evidence_key": "sha256:abc",
+            "epistemic_status": "direct_source_report", "confidence": 0.95,
+        }]})
+
+    def test_fact_agent_audits_relation_and_reuses_completed_verdict(self):
+        result, state, phases = self._agent_result(), {}, []
+        calls = []
+        def model(prompt, **kwargs):
+            calls.append(prompt)
+            return {"verdicts": [{"fact_id": result["facts"][0]["fact_id"], "status": "supported",
+                                  "reason": "Same optimized protocol: yield 91%, ee 96%."}]}
+        for _ in range(2):
+            PIPELINE.run_fact_agent(self.paper, result, model_call=model, retrieve=lambda _: [],
+                                    state=state, report=phases.append)
+        self.assertEqual(1, len(calls))
+        self.assertEqual("supported", result["facts"][0]["verification"]["status"])
+        self.assertIn("verified", phases)
+
+    def test_registered_custom_field_enters_the_same_semantic_audit(self):
+        field = "photocatalyst_excited_state_behavior"
+        excerpt = "Photocatalyst PC-A was reported as a strong excited-state oxidant."
+        self.paper["required_fact_roles"] = [field]
+        self.paper["evidence_candidates"][0].update(
+            content=excerpt,
+            question_ids=[field],
+        )
+        result = PIPELINE.normalize_result(
+            self.paper,
+            {
+                "facts": [
+                    {
+                        "field_id": field,
+                        "value": excerpt,
+                        "support_excerpt": excerpt,
+                        "evidence_key": "sha256:abc",
+                        "confidence": 0.95,
+                    }
+                ]
+            },
+        )
+        calls = []
+
+        def model(prompt, **_kwargs):
+            calls.append(prompt)
+            return {
+                "verdicts": [
+                    {
+                        "fact_id": result["facts"][0]["fact_id"],
+                        "status": "supported",
+                        "reason": "The subject and reported relation match the quotation.",
+                    }
+                ]
+            }
+
+        PIPELINE.run_fact_agent(
+            self.paper,
+            result,
+            model_call=model,
+            retrieve=lambda _request: [],
+            state={},
+            report=lambda _phase: None,
+        )
+        self.assertEqual(1, len(calls))
+        self.assertEqual("supported", result["facts"][0]["verification"]["status"])
+        self.assertTrue(PIPELINE.fact_is_usable(result["facts"][0], purpose="detail"))
+
+    def test_non_fact_question_field_gets_an_explicit_audit_rejection(self):
+        excerpt = "The study compares the reported catalyst systems."
+        self.paper["evidence_candidates"][0].update(
+            content=excerpt,
+            question_ids=["section_focus"],
+        )
+        result = PIPELINE.normalize_result(
+            self.paper,
+            {
+                "facts": [
+                    {
+                        "field_id": "section_focus",
+                        "value": excerpt,
+                        "support_excerpt": excerpt,
+                        "evidence_key": "sha256:abc",
+                        "confidence": 0.95,
+                    }
+                ]
+            },
+        )
+
+        PIPELINE.run_fact_agent(
+            self.paper,
+            result,
+            model_call=lambda *_args, **_kwargs: self.fail(
+                "A non-fact query field must not enter semantic fact verification."
+            ),
+            retrieve=lambda _request: [],
+            state={},
+            report=lambda _phase: None,
+        )
+        verification = result["facts"][0]["verification"]
+        self.assertEqual("rejected", verification["status"])
+        self.assertIn("not registered", verification["reason"])
+        self.assertFalse(PIPELINE.fact_is_usable(result["facts"][0]))
+
+    def test_fact_agent_does_not_use_omitted_or_rejected_verdicts(self):
+        result = self._agent_result()
+        PIPELINE.run_fact_agent(self.paper, result, model_call=lambda *a, **k: {"verdicts": []},
+                                retrieve=lambda _: [], state={}, report=lambda _: None)
+        self.assertFalse(PIPELINE.fact_is_usable(result["facts"][0]))
+        self.assertEqual("context_only", result["facts"][0]["support_level"])
+
+    def test_fact_agent_failure_resumes_without_keeping_stale_error(self):
+        result, state = self._agent_result(), {}
+        def unavailable(*a, **k):
+            raise RuntimeError("temporary outage")
+        PIPELINE.run_fact_agent(self.paper, result, model_call=unavailable, retrieve=lambda _: [],
+                                state=state, report=lambda _: None)
+        self.assertFalse(PIPELINE.fact_is_usable(result["facts"][0]))
+        self.assertIn("error", state)
+        PIPELINE.run_fact_agent(self.paper, result, model_call=lambda *a, **k: {"verdicts": [
+            {"fact_id": result["facts"][0]["fact_id"], "status": "supported", "reason": "Matched both reported metrics."}
+        ]}, retrieve=lambda _: [], state=state, report=lambda _: None)
+        self.assertNotIn("error", state)
+        self.assertEqual("complete", result["status"])
+        self.assertIn("object_input", result["fact_coverage"]["missing_fact_roles"])
+
+    def test_fact_agent_supplement_is_bounded_and_keeps_previous_verification(self):
+        result, state = self._agent_result(), {"max_supplement_rounds": 1}
+        initial_id = result["facts"][0]["fact_id"]
+        result["evidence_requests"] = [{"field_id": "quantitative_results", "query": "control experiment yield"}]
+        supplement = {"evidence_key": "sha256:control", "content": "The control gave 42% yield.",
+                      "source_lineage_hash": "lineage", "chunk_id": "control", "question_ids": ["quantitative_results"]}
+        def model(prompt, **kwargs):
+            if kwargs["required_list"] == "facts":
+                return {"facts": [{"field_id": "quantitative_results", "value": "42% yield",
+                    "support_excerpt": supplement["content"], "evidence_key": supplement["evidence_key"],
+                    "confidence": 0.95, "epistemic_status": "direct_source_report"}],
+                    "evidence_requests": [{"field_id": "quantitative_results", "query": "more controls"}]}
+            return {"verdicts": [{"fact_id": f["fact_id"], "status": "supported", "reason": "Matched the specified experiment."}
+                                 for f in result["facts"]]}
+        retrieved = []
+        def retrieve(request):
+            retrieved.append(request)
+            return [supplement]
+        PIPELINE.run_fact_agent(self.paper, result, model_call=model, retrieve=retrieve, state=state, report=lambda _: None)
+        self.assertEqual(1, len(retrieved))
+        self.assertEqual(2, len(result["facts"]))
+        self.assertEqual(initial_id, result["facts"][0]["fact_id"])
+        self.assertTrue(all(PIPELINE.fact_is_usable(f) for f in result["facts"]))
+        self.assertEqual("supplement_budget_reached", state["stop_reason"])
+
     def setUp(self) -> None:
         self.paper = {
             "paper_id": "P001",
@@ -369,6 +678,7 @@ class MatrixFactEnrichmentTests(unittest.TestCase):
             "field_id": "quantitative_results",
             "fact_type": "reported_result",
             "value": "The reported result was 91% yield and 96% ee.",
+            "support_excerpt": "the product in 91% yield and 96% ee",
             "evidence_refs": [{"evidence_key": "sha256:abc"}],
         }
         paper = {
@@ -397,6 +707,26 @@ class MatrixFactEnrichmentTests(unittest.TestCase):
         self.assertTrue(
             merged["fact_extraction_profile"]["provider_supplement_failed"]
         )
+
+    def test_multiple_results_are_retained_but_metric_swaps_are_rejected(self) -> None:
+        quote = self.paper["evidence_candidates"][0]["content"]
+        base = {
+            "field_id": "quantitative_results", "evidence_key": "sha256:abc",
+            "support_excerpt": quote, "confidence": 0.95,
+        }
+        result = PIPELINE.normalize_result(self.paper, {"facts": [
+            {**base, "value": "91% yield"}, {**base, "value": "96% ee"},
+            {**base, "value": "96% yield and 91% ee"}, {**base, "value": "91% yield"},
+        ]})
+        self.assertEqual(["91% yield", "96% ee"], [fact["value"] for fact in result["facts"]])
+
+    def test_cache_cannot_reuse_an_unverifiable_or_changed_quote(self) -> None:
+        paper = {**self.paper, "reused_fact_cache": {"facts": [{
+            "fact_id": "old", "field_id": "quantitative_results", "value": "99% ee",
+            "support_excerpt": "99% ee", "evidence_refs": [{"evidence_key": "sha256:abc"}],
+        }]}}
+        result = PIPELINE.merge_reused_fact_cache({"facts": []}, paper)
+        self.assertEqual([], result["facts"])
 
     def test_formal_axis_tag_can_supply_duplicate_topic_partition_route(self) -> None:
         axes = [

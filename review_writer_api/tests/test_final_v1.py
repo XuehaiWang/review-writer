@@ -38,7 +38,14 @@ class FinalV1Tests(NativeFigureApiTestCase):
                 "goal": 90,
                 "decision": "PASS",
                 "dimension_scores": [],
-                "paragraph_scores": [],
+                # This fixture models a successful full evaluation, including
+                # source confirmation after manual edits. An overall score
+                # alone must not authorize unverified edited prose.
+                "paragraph_scores": [{"paragraph_id": row["paragraph_id"],
+                    "score": self.evaluation_score, "route": "pass", "severity": "none",
+                    "source_check_status": "verified",
+                    "source_evidence_refs": ["fixture-source:" + row["paragraph_id"]]}
+                    for row in payload.get("paragraphs") or []],
                 "issues": [],
                 "hard_gate_failures": list(self.evaluation_hard_failures),
             }
@@ -292,24 +299,19 @@ class FinalV1Tests(NativeFigureApiTestCase):
         self.assertLess(assembled.index(marker), assembled.index("## 1. Introduction"))
         self.assertGreater(assembled.index(marker), assembled.index("Abstract text."))
 
-    def test_public_scope_note_is_reader_facing_and_inserted_in_introduction(self) -> None:
-        note = FinalService._public_scope_selection_paragraph(
-            {
-                "search_record": {
-                    "retrieved_at": "2026-08-28T10:00:00Z",
-                    "successful_sources": ["crossref", "openalex"],
-                    "selected_matrix_candidate_count": 16,
-                }
-            },
-            {"scope_contract": {"time_span": {"from": 2015, "to": 2026}}},
-        )
-        assembled = FinalService._insert_after_introduction_heading(
-            "# Review\n\n## Introduction\n\nOpening argument.", note
-        )
-        self.assertIn("Crossref, OpenAlex", note)
-        self.assertIn("16 sources", note)
-        self.assertNotIn("Matrix", note)
-        self.assertLess(assembled.index(note), assembled.index("Opening argument."))
+    def test_final_build_keeps_search_provenance_out_of_manuscript(self) -> None:
+        with TestClient(self.app) as client:
+            self.prepare_approved_draft(client)
+            response = client.post(
+                f"/api/v1/projects/{self.project_id}/final/build",
+                headers=self.headers("final-no-workflow-prose"),
+            )
+            self.assertEqual(200, response.status_code, response.text)
+            payload = client.get(f"/api/v1/projects/{self.project_id}/final").json()
+            for phrase in ("assembled local source corpus", "sources were retained",
+                           "earlier retained sources", "recorded searches were run"):
+                self.assertNotIn(phrase, payload["final_draft_md"])
+            self.assertEqual("internal_only", payload["validation"]["methods_execution"]["publication_scope_note"])
 
     def test_reference_affiliation_residue_is_removed_without_losing_science(self) -> None:
         markdown = (

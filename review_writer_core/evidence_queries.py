@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import re
+import hashlib
+import json
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 
@@ -36,6 +39,75 @@ QUESTION_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 COMPARISON_FIELD_IDS = tuple(question_id for question_id, _terms in QUESTION_TERMS)
+FACT_FIELD_ID = re.compile(r"^[a-z0-9][a-z0-9_:-]{0,79}$")
+NON_FACT_QUESTION_IDS = frozenset({"abstract_summary", "coverage", "section_focus"})
+
+
+def normalize_fact_field_id(value: Any) -> str:
+    """Return one bounded field identity suitable for trusted task registries."""
+
+    field_id = str(value or "").strip().casefold()
+    if field_id in NON_FACT_QUESTION_IDS or not FACT_FIELD_ID.fullmatch(field_id):
+        return ""
+    return field_id
+
+
+def registered_fact_field_ids(
+    *,
+    required_roles: Iterable[Any] = (),
+    evidence_candidates: Iterable[Mapping[str, Any]] = (),
+) -> tuple[str, ...]:
+    """Share the exact task-local field registry across extraction and audit."""
+
+    values = [*required_roles]
+    values.extend(
+        field_id
+        for candidate in evidence_candidates
+        if isinstance(candidate, Mapping)
+        for field_id in candidate.get("question_ids") or []
+    )
+    return tuple(
+        dict.fromkeys(
+            field_id
+            for value in values
+            if (field_id := normalize_fact_field_id(value))
+        )
+    )
+
+
+def extraction_fact_field_ids(*, required_roles=(), evidence_candidates=()):
+    """Extraction, verification and publication share available fields, not mandatory quotas."""
+    return registered_fact_field_ids(required_roles=[*COMPARISON_FIELD_IDS, *required_roles],
+                                     evidence_candidates=evidence_candidates)
+
+
+def normalize_targeted_fact_gaps(
+    gaps: Any,
+    *,
+    allowed_paper_ids: Iterable[Any],
+    allowed_field_ids: Iterable[Any],
+) -> dict[str, list[str]]:
+    """Keep one bounded Blueprint gap map inside its section and field scope."""
+
+    if not isinstance(gaps, Mapping):
+        return {}
+    allowed_fields = set(
+        registered_fact_field_ids(required_roles=allowed_field_ids)
+    )
+    normalized: dict[str, list[str]] = {}
+    for raw_paper_id in allowed_paper_ids:
+        paper_id = str(raw_paper_id or "").strip()
+        raw_fields = gaps.get(paper_id)
+        if not paper_id or not isinstance(raw_fields, list):
+            continue
+        fields = [
+            field_id
+            for field_id in registered_fact_field_ids(required_roles=raw_fields)
+            if field_id in allowed_fields
+        ]
+        if fields:
+            normalized[paper_id] = fields
+    return normalized
 
 
 def query_terms(value: Any, *, limit: int = 8) -> list[str]:
@@ -54,6 +126,102 @@ def query_terms(value: Any, *, limit: int = 8) -> list[str]:
 def query_phrase(value: Any) -> str:
     text = " ".join(str(value or "").replace('"', " ").split()).strip()
     return text[:120]
+
+
+def boolean_query(groups: list[list[str]]) -> str:
+    """One portable representation for the structured lexical contract."""
+    return " ".join(
+        "(" + " OR ".join('"' + query_phrase(term) + '"' for term in group if query_phrase(term)) + ")"
+        for group in groups if any(query_phrase(term) for term in group)
+    )
+
+
+def normalize_fact_request(
+    request: Any,
+    *,
+    allowed_field_ids: Iterable[Any] | None = None,
+) -> dict[str, Any] | None:
+    """Keep a question separate from source-stated lookup targets; accept old checkpoints."""
+    if not isinstance(request, dict):
+        return None
+    field_id = normalize_fact_field_id(request.get("field_id"))
+    allowed = set(COMPARISON_FIELD_IDS)
+    if allowed_field_ids is not None:
+        allowed.update(
+            normalized
+            for value in allowed_field_ids
+            if (normalized := normalize_fact_field_id(value))
+        )
+    if not field_id or field_id not in allowed:
+        return None
+    query = " ".join(str(request.get("query") or "").split())[:600]
+    if not query:
+        return None
+    targets = request.get("target_terms") or []
+    keys = request.get("evidence_keys") or []
+    reasons = request.get("reasons") if isinstance(request.get("reasons"), list) else []
+    return {
+        "field_id": field_id, "query": query,
+        "target_terms": list(dict.fromkeys(query_phrase(term).casefold() for term in targets
+            if isinstance(term, str) and query_phrase(term)))[:6] if isinstance(targets, list) else [],
+        "experiment_id": query_phrase(request.get("experiment_id") or ""),
+        "source_recovery": request.get("source_recovery") is True or bool({reason for reason in reasons
+            if isinstance(reason, str)} & {
+            "numeric_token_mismatch", "source_excerpt_mismatch", "source_damage"}),
+        "evidence_keys": sorted(set(str(key) for key in keys if isinstance(key, str) and key))[:8]
+            if isinstance(keys, list) else [],
+    }
+
+
+def fact_request_identity(
+    request: dict[str, Any],
+    *,
+    allowed_field_ids: Iterable[Any] | None = None,
+) -> str:
+    """Deduplicate a problem, not a fact: distinct experiments keep distinct identities."""
+    request = normalize_fact_request(request, allowed_field_ids=allowed_field_ids)
+    if request is None:
+        return ""
+    payload = {key: request[key] for key in ("field_id", "experiment_id", "evidence_keys", "source_recovery")}
+    payload["targets"] = sorted(request["target_terms"])
+    if not payload["targets"] and not payload["experiment_id"] and not payload["evidence_keys"]:
+        payload["targets"] = sorted(set(query_terms(request["query"], limit=40)) - TOPIC_INSTRUCTION_WORDS)
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def build_fact_query_plans(
+    request: dict[str, Any],
+    *,
+    allowed_field_ids: Iterable[Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Bounded exact-to-broad recovery *inside* an already admitted paper/SI.
+
+    Domain vocabulary comes from the request and the existing role definitions,
+    never a paper ID, example result, or a topic-specific synonym catalogue.
+    """
+    request = normalize_fact_request(request, allowed_field_ids=allowed_field_ids)
+    if request is None:
+        return []
+    role_terms = list(dict(QUESTION_TERMS).get(request["field_id"], ()))
+    if not role_terms:
+        role_terms = query_terms(request["field_id"].replace("_", " "), limit=8)
+    targets = request["target_terms"] or [term for term in query_terms(request["query"], limit=24)
+        if term not in TOPIC_INSTRUCTION_WORDS | {"provide", "identify", "identifying", "determine", "whether",
+            "reported", "report", "surrounding", "text", "including", "contains", "all", "only", "actual",
+            "when", "was", "were", "is", "are", "be", "it", "that", "may", "can", "could", "would", "observed"}][:8]
+    identity = [request["experiment_id"].casefold()] if request["experiment_id"] else []
+    variants = [([identity, targets] if identity else [targets, role_terms]),
+                ([identity] if identity else [targets]), [role_terms]]
+    plans, seen = [], set()
+    for groups in variants:
+        groups = [group for group in groups if group]
+        query = boolean_query(groups)
+        if not query or query in seen:
+            continue
+        seen.add(query)
+        plans.append({"websearch_query": query, "term_groups": groups,
+                      "exact_phrases": [term for group in groups for term in group if " " in term]})
+    return plans
 
 
 def _word_form_variants(term: str) -> list[str]:
@@ -150,6 +318,7 @@ def build_question_query_plans(
     review_topic: str,
     heading: str = "",
     core_argument: str = "",
+    research_questions: list[str] | None = None,
     section_role: str = "body",
     must_cover_points: list[Any] | None = None,
     scientific_claims: list[Any] | None = None,
@@ -195,13 +364,9 @@ def build_question_query_plans(
         "introduction": {"object_input", "method_conditions", "limitations"},
         "conclusion": {"quantitative_results", "scope", "limitations"},
     }.get(role, {item[0] for item in QUESTION_TERMS})
-    declared_roles = {
-        str(value or "").strip()
-        for value in required_fact_roles or []
-        if str(value or "").strip()
-    }
+    declared_roles = set(registered_fact_field_ids(required_roles=required_fact_roles or []))
     if declared_roles:
-        applicable &= declared_roles
+        applicable = declared_roles & set(COMPARISON_FIELD_IDS)
     definitions: list[dict[str, Any]] = [
         {
             "question_id": "section_focus",
@@ -222,6 +387,21 @@ def build_question_query_plans(
         for question_id, terms in QUESTION_TERMS
         if question_id in applicable
     )
+    definitions.extend(
+        {
+            "question_id": field_id,
+            "terms": query_terms(field_id.replace("_", " "), limit=8),
+            "coverage_policy": "evidence_bearing",
+            "required_for_section": False,
+            "query_route": "fact_role",
+        }
+        for field_id in sorted(declared_roles - set(COMPARISON_FIELD_IDS))
+    )
+
+    definitions.extend({"question_id": f"writing_question_{index}", "terms": query_terms(question, limit=12),
+                        "coverage_policy": "evidence_bearing", "required_for_section": False, "query_route": "writing_question"}
+                       for index, question in enumerate(dict.fromkeys(research_questions or []), 1)
+                       if str(question).strip())
 
     # Only explicitly structured scientific claims can create required Claim
     # queries.  Legacy prose instructions in ``must_cover_points`` used to be
@@ -292,13 +472,6 @@ def build_question_query_plans(
         groups = [core_group]
         if question_terms:
             groups.append(question_terms)
-        query_parts = []
-        for group in groups:
-            alternatives = [
-                f'"{term}"' if " " in term else term
-                for term in group[:22]
-            ]
-            query_parts.append("(" + " OR ".join(alternatives) + ")")
         exact_phrases = list(
             dict.fromkeys(
                 term
@@ -323,7 +496,7 @@ def build_question_query_plans(
                 "question_term_groups": [question_terms] if question_terms else [],
                 "term_groups": groups,
                 "exact_phrases": exact_phrases,
-                "websearch_query": " ".join(query_parts),
+                "websearch_query": boolean_query([group[:22] for group in groups]),
                 "excluded_terms": [],
                 "expected_content_types": ["text", "merged_text", "markdown", "table"],
             }

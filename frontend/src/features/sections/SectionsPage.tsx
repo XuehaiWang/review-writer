@@ -9,8 +9,10 @@ import { MarkdownView } from "../../components/MarkdownView";
 import { ProjectSelector, useSelectedProject } from "../../components/ProjectSelector";
 import { jobIsActive, useJob } from "../../hooks/useJob";
 import { useUiText } from "../../i18n/useUiText";
+import { SectionContentNotice } from "./SectionContentNotice";
 import { buildPaperDisplayLabels, replacePaperIdsForDisplay } from "../../utils/paperLabels";
 import { SectionJobProgress } from "./SectionJobProgress";
+import { SectionStageActions } from "./SectionStageActions";
 import { findSectionJobForDisplay, replaceSectionJobSnapshot } from "./sectionJobResume";
 import { sectionReadinessLabel } from "./sectionStatusLabels";
 
@@ -28,6 +30,11 @@ type SectionTask = Record<string, unknown> & {
     claim_id?: string;
     proposition?: string;
     required_for_section?: boolean;
+    support_status?: string;
+    primary_papers?: string[];
+    required_fact_roles?: string[];
+    fact_ids?: string[];
+    evidence_refs?: Array<{ evidence_key?: string }>;
   }>;
   writing_requirements?: Array<{
     requirement_id?: string;
@@ -170,7 +177,8 @@ type SectionDraftState = {
     sufficient?: boolean;
   };
   paragraphs?: DraftParagraph[];
-  validations?: Array<{ rule_id?: string; status?: string; target_id?: string }>;
+  validations?: Array<{ rule_id?: string; status?: string; target_id?: string; omitted?: Array<{ reason?: string }> }>;
+  narrative_diagnostics?: { status?: string };
   reviews?: DraftReview[];
 };
 
@@ -233,9 +241,7 @@ function TaskRequirements({ task, paperLabels }: { task?: SectionTask; paperLabe
   const { text } = useUiText();
   if (!task) return <div className="empty-state">{text("当前Blueprint没有可用的章节写作任务。", "The current blueprint has no section-writing tasks.")}</div>;
   const figures = Array.isArray(task.figure_need) ? task.figure_need : task.figure_need ? [task.figure_need] : [];
-  const scientificClaims = task.scientific_claims?.length
-    ? task.scientific_claims.map((item) => item.proposition || item.claim_id || "").filter(Boolean)
-    : task.must_cover_points || [];
+  const scientificClaims = task.scientific_claims || [];
   const writingRequirements = (task.writing_requirements || [])
     .map((item) => item.instruction || item.type || item.requirement_id || "")
     .filter(Boolean);
@@ -245,7 +251,7 @@ function TaskRequirements({ task, paperLabels }: { task?: SectionTask; paperLabe
       <div className="task-requirement-grid">
         <section><h3>{text("分配论文", "Assigned papers")}</h3><div className="chip-list">{task.allowed_papers?.length ? task.allowed_papers.map((paper) => <span key={paper} title={text(`内部论文 ID：${paper}`, `Internal paper ID: ${paper}`)}>{paperLabels.get(paper) || paper}</span>) : <em>{text("尚未分配", "Not assigned")}</em>}</div></section>
         <section><h3>{text("图像要求", "Figure requirements")}</h3>{figures.length ? figures.map((figure, index) => <pre key={index}>{typeof figure === "string" ? figure : JSON.stringify(figure, null, 2)}</pre>) : <p>{text("未指定图像要求。", "No figure requirements specified.")}</p>}</section>
-        <section className="wide"><h3>{text("科学命题", "Scientific claims")}</h3>{scientificClaims.length ? <ol>{scientificClaims.map((item) => <li key={item}>{item}</li>)}</ol> : <p>{text("当前没有预设的必证命题；系统将从证据中形成受限论点。", "No required proposition is predeclared; bounded claims will be formed from the evidence.")}</p>}</section>
+        <section className="wide"><h3>{text("科学命题", "Scientific claims")}</h3>{scientificClaims.length ? <ol>{scientificClaims.map((item) => { const supported = item.support_status === "supported" && Boolean(item.fact_ids?.length) && Boolean(item.evidence_refs?.length); return <li key={item.claim_id || item.proposition}><strong>{supported ? text("证据已绑定", "Evidence bound") : text("补证后才可写", "Writeable after repair")}</strong>{" · "}{supported ? item.proposition : text(`待补充 ${item.required_fact_roles?.join("、") || "相关"} 事实`, `Pending ${item.required_fact_roles?.join(", ") || "relevant"} facts`)}{item.primary_papers?.length ? <small> · {item.primary_papers.map((paper) => paperLabels.get(paper) || paper).join("；")}</small> : null}</li>; })}</ol> : task.must_cover_points?.length ? <ol>{task.must_cover_points.map((item) => <li key={item}>{item}</li>)}</ol> : <p>{text("当前没有可执行科学命题。", "No executable scientific claim is available.")}</p>}</section>
         <section className="wide"><h3>{text("写作要求", "Writing requirements")}</h3>{writingRequirements.length ? <ol>{writingRequirements.map((item) => <li key={item}>{item}</li>)}</ol> : <p>{text("使用本阶段的通用综合规则。", "Use the stage's general synthesis rules.")}</p>}</section>
         <section className="wide"><h3>{text("写作边界", "Writing boundaries")}</h3>{task.avoid_points?.length ? <ul>{task.avoid_points.map((item) => <li key={item}>{item}</li>)}</ul> : <p>{text("未指定。", "Not specified.")}</p>}</section>
       </div>
@@ -334,7 +340,7 @@ export function SectionsPage() {
     Boolean(payload?.handoff.current),
   );
   const polledJob = useJob(jobId || reportJob?.id || "");
-  const currentJob = payload?.handoff.current ? reportJob : polledJob.data || reportJob;
+  const currentJob = polledJob.data || reportJob;
   const currentJobActive = Boolean(currentJob && jobIsActive(currentJob.status));
   const reportJobs = useMemo(
     () => replaceSectionJobSnapshot(payload?.report.jobs || [], currentJob),
@@ -348,6 +354,9 @@ export function SectionsPage() {
     )
     && currentJob.result.section_checkpoint,
   );
+  const retainedSectionCount = Object.keys(
+    (currentJob?.result.section_checkpoint as { entries?: Record<string, unknown> } | undefined)?.entries || {},
+  ).length;
   const liveOutputCount = currentJob && jobIsActive(currentJob.status)
     ? currentJob.progress_current
     : payload?.report.current_output_count || 0;
@@ -356,6 +365,10 @@ export function SectionsPage() {
     const supplied = new Map(Object.entries(payload?.paper_display_labels || {}));
     return supplied.size ? supplied : buildPaperDisplayLabels(payload?.papers || []);
   }, [payload?.paper_display_labels, payload?.papers]);
+
+  useEffect(() => {
+    setJobId("");
+  }, [project?.project_id]);
 
   useEffect(() => {
     if (!payload) return;
@@ -416,6 +429,18 @@ export function SectionsPage() {
       setShowAdvanced(true);
     },
   });
+  const regenerate = useMutation({
+    mutationFn: () => apiRequest<Job>(`/api/v1/projects/${encodeURIComponent(project!.project_id)}/sections/jobs`, {
+      method: "POST",
+      headers: { "Idempotency-Key": newIdempotencyKey() },
+      ...jsonBody({}),
+    }),
+    onSuccess: (job) => {
+      setJobId(job.id);
+      setTab("report");
+      setShowAdvanced(true);
+    },
+  });
   const confirm = useMutation({
     mutationFn: () => apiRequest(`/api/v1/projects/${encodeURIComponent(project!.project_id)}/sections/confirm`, {
       method: "POST",
@@ -430,7 +455,7 @@ export function SectionsPage() {
   const advancedTabs: Array<[WorkspaceTab, string]> = taskOnly
     ? [["report", text("生成报告", "Generation report")]]
     : [["synthesis", text("综合", "Synthesis")], ["writing", text("写作计划", "Writing Plan")], ["evidence", text("证据", "Evidence")], ["review", text("审校", "Review")], ["tasks", text("写作要求", "Writing requirements")], ["report", text("生成报告", "Generation report")]];
-  const error = generate.error || confirm.error || (currentJob?.status === "failed" ? new Error(currentJob.error_message || text("章节生成失败。", "Section generation failed.")) : null);
+  const error = generate.error || regenerate.error || confirm.error || (currentJob?.status === "failed" ? new Error(currentJob.error_message || text("章节生成失败。", "Section generation failed.")) : null);
 
   return (
     <main className="workspace page-container workspace-page sections-page">
@@ -445,11 +470,14 @@ export function SectionsPage() {
             const id = taskOnly ? taskId(item as SectionTask) : (item as SectionFile).name;
             const task = taskOnly ? item as SectionTask : tasks.find((candidate) => taskId(candidate) === (item as SectionFile).section_id);
             const file = taskOnly ? undefined : item as SectionFile;
-            return <button key={id} type="button" className={id === selectedId ? "paper-row active" : "paper-row"} onClick={() => { setSelectedId(id); if (!taskOnly) { setTab("section"); setShowAdvanced(false); } }}><span className="paper-row-main"><strong>{task?.heading || task?.section_id || file?.name}</strong><small>{file ? `${wordCount(file.content)} words` : taskPaperSummary(task, text)}</small></span><span className={file ? "status-dot ok" : "status-dot warning"} /></button>;
+            const state = payload.section_drafts?.sections?.find((section) => section.section_id === (file?.section_id || taskId(task)));
+            const evidenceNotice = state?.generation_mode === "pending_evidence" || state?.generation_mode === "limited_evidence";
+            return <button key={id} type="button" className={id === selectedId ? "paper-row active" : "paper-row"} onClick={() => { setSelectedId(id); if (!taskOnly) { setTab("section"); setShowAdvanced(false); } }}><span className="paper-row-main"><strong>{task?.heading || task?.section_id || file?.name}</strong><small>{evidenceNotice ? state?.generation_mode === "pending_evidence" ? text("待补充 · 可继续", "Evidence pending · Can continue") : text("证据有限 · 可继续", "Limited evidence · Can continue") : file ? `${wordCount(file.content)} words` : taskPaperSummary(task, text)}</small></span><span className={file && !evidenceNotice ? "status-dot ok" : "status-dot warning"} /></button>;
           })}</div></section>
           <section className="pane section-preview-react"><nav className="detail-tabs">{mainTabs.map(([value, label]) => <button key={value} type="button" className={tab === value ? "active" : ""} onClick={() => { setTab(value); setShowAdvanced(false); }}>{label}</button>)}</nav><details className="advanced-panel section-advanced-tabs" open={showAdvanced} onToggle={(event) => setShowAdvanced(event.currentTarget.open)}><summary>{text("生成依据与检查详情", "Generation inputs and checks")}</summary><div className="advanced-panel-body advanced-tab-list">{advancedTabs.map(([value, label]) => <button key={value} type="button" className={tab === value ? "active" : ""} onClick={() => { setTab(value); setShowAdvanced(true); }}>{label}</button>)}</div></details><div className="section-preview-content">
             {tab === "synthesis" ? <SynthesisView section={activeSynthesis} mode={payload.synthesis_state?.planning_mode} /> : null}
             {tab === "writing" ? <WritingPlanView section={activeWritingPlan} paperLabels={paperLabels} /> : null}
+            {tab === "section" ? <SectionContentNotice section={activeDraftState} /> : null}
             {tab === "section" ? <MarkdownView content={displayedActiveContent} empty={text("当前章节尚未生成。", "This section has not been generated.")} /> : null}
             {tab === "merged" ? <MarkdownView content={displayedMergedContent} empty={text("当前没有合并预览。", "No merged preview is available.")} /> : null}
             {tab === "evidence" ? <EvidenceView section={activeEvidence} paragraphs={activeDraftParagraphs} paperLabels={paperLabels} /> : null}
@@ -457,9 +485,9 @@ export function SectionsPage() {
             {tab === "tasks" ? <TaskRequirements task={activeTask} paperLabels={paperLabels} /> : null}
             {tab === "report" ? <div className="job-report"><h2>{text("章节生成报告", "Section generation report")}</h2><p>{liveOutputCount}/{liveTaskCount} {currentJobActive ? text("章已实时完成", "sections completed live") : text("个当前章节产物", "current section artifacts")}</p>{currentJob ? <SectionJobProgress job={currentJob} /> : <div className="empty-state">{text("尚未启动章节生成。", "Section generation has not started.")}</div>}{reportJobs.map((job) => <details key={job.id}><summary>{job.status} · {job.id}</summary><p>{job.progress_current}/{job.progress_total} · {job.error_message || text("无错误", "No errors")}</p></details>)}</div> : null}
           </div></section>
-          <aside className="pane section-gate-react"><div className="pane-head"><div><span className="step-label">{text("审核门", "Review gate")}</span><h2>{text("人工审核", "Human review")}</h2></div></div><div className="gate-body"><p>{payload.handoff.current ? text("当前草稿已生成，可审核后进入图像阶段。", "Current drafts are ready for review before the figure stage.") : currentJob && jobIsActive(currentJob.status) ? text("章节正在生成中。", "Sections are being generated.") : text("请从当前写作要求生成章节草稿。", "Generate section drafts from the current writing requirements.")}</p><ul><li>{text("每节是完整综述段落，不是提纲。", "Each section contains complete review prose, not outline fragments.")}</li><li>{text("引用来自该节允许论文。", "Citations come from papers allowed for that section.")}</li><li>{text("保留证据边界与不确定性。", "Evidence boundaries and uncertainty are preserved.")}</li><li>{text("图像需求与段落论证一致。", "Figure needs align with paragraph arguments.")}</li></ul></div></aside>
+          <aside className="pane section-gate-react"><div className="pane-head"><div><span className="step-label">{text("审核门", "Review gate")}</span><h2>{text("人工审核", "Human review")}</h2></div></div><div className="gate-body"><p>{payload.handoff.current ? text("当前草稿已生成，可审核后进入图像阶段。", "Current drafts are ready for review before the figure stage.") : currentJob && jobIsActive(currentJob.status) ? text("章节正在生成中。", "Sections are being generated.") : text("请从当前写作要求生成章节草稿。", "Generate section drafts from the current writing requirements.")}</p><ul><li>{text("证据有限或待补充的章节会明确标记，可继续后续编辑。", "Sections with limited or pending evidence are marked and allow continued editing.")}</li><li>{text("引用来自该节允许论文。", "Citations come from papers allowed for that section.")}</li><li>{text("保留证据边界与不确定性。", "Evidence boundaries and uncertainty are preserved.")}</li><li>{text("图像需求与段落论证一致。", "Figure needs align with paragraph arguments.")}</li></ul></div></aside>
         </div>
-        <div className="stage-action-bar"><div><strong>{payload.handoff.current ? text("确认章节", "Confirm sections") : canResumeCurrentJob ? text("继续未完成章节", "Resume unfinished sections") : text("生成所有章节", "Generate all sections")}</strong><p>{payload.handoff.current ? text("确认当前版本后进入图像处理。", "Confirm the current version to enter figure processing.") : currentJobActive ? text(`生成中 ${currentJob!.progress_current}/${currentJob!.progress_total}`, `Generating ${currentJob!.progress_current}/${currentJob!.progress_total}`) : canResumeCurrentJob ? text(`已保留 ${currentJob!.progress_current}/${currentJob!.progress_total} 个章节，重试时仅继续未完成章节。`, `${currentJob!.progress_current}/${currentJob!.progress_total} sections are checkpointed; retry resumes only unfinished sections.`) : text("根据当前Blueprint写作要求生成全部章节。", "Generate every section from the current blueprint requirements.")}</p></div>{payload.handoff.current ? <button className="button button-primary" type="button" disabled={confirm.isPending} onClick={() => confirm.mutate()}>{confirm.isPending ? text("确认中…", "Confirming…") : text("确认并进入图像处理", "Confirm and enter figure processing")}</button> : <button className="button button-primary" type="button" disabled={generate.isPending || currentJobActive} onClick={() => generate.mutate()}>{currentJobActive ? text("正在生成…", "Generating…") : generate.isPending ? text("正在提交…", "Submitting…") : canResumeCurrentJob ? text("继续生成", "Resume generation") : text("生成所有章节草稿", "Generate all section drafts")}</button>}{error ? <span className="message message-error">{error.message}</span> : null}</div>
+        <SectionStageActions current={payload.handoff.current} active={currentJobActive} resumable={canResumeCurrentJob} progress={canResumeCurrentJob ? retainedSectionCount : currentJob?.progress_current || 0} total={currentJob?.progress_total || 0} generating={generate.isPending} regenerating={regenerate.isPending} confirming={confirm.isPending} onGenerate={() => generate.mutate()} onRegenerate={() => regenerate.mutate()} onConfirm={() => confirm.mutate()} error={error} />
       </> : null}
     </main>
   );

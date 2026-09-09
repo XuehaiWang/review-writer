@@ -258,24 +258,29 @@ class ScientificRunner:
 
             started = time.monotonic()
             timed_out = False
-            while True:
-                if cancellation():
+            try:
+                while True:
+                    if cancellation():
+                        raise ScientificRunCancelled(attempts=attempt) from None
+                    remaining = timeout - (time.monotonic() - started)
+                    if remaining <= 0:
+                        last_stdout, last_stderr = self._terminate(process)
+                        timed_out = True
+                        break
+                    try:
+                        last_stdout, last_stderr = process.communicate(
+                            timeout=min(self.poll_interval, remaining)
+                        )
+                        break
+                    except subprocess.TimeoutExpired:
+                        if progress_callback is not None:
+                            progress_callback()
+                        continue
+            finally:
+                # A callback can observe deletion, cancellation, or a lost lease
+                # before the next poll. Never leave its child running on exit.
+                if process.poll() is None:
                     self._terminate(process)
-                    raise ScientificRunCancelled(attempts=attempt) from None
-                remaining = timeout - (time.monotonic() - started)
-                if remaining <= 0:
-                    last_stdout, last_stderr = self._terminate(process)
-                    timed_out = True
-                    break
-                try:
-                    last_stdout, last_stderr = process.communicate(
-                        timeout=min(self.poll_interval, remaining)
-                    )
-                    break
-                except subprocess.TimeoutExpired:
-                    if progress_callback is not None:
-                        progress_callback()
-                    continue
 
             last_stdout = self._redact(last_stdout, secret_values)
             last_stderr = self._redact(last_stderr, secret_values)

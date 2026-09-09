@@ -109,4 +109,22 @@ describe("DiscoveryJobProgress", () => {
 
     expect(screen.getByText("未启用")).toBeInTheDocument();
   });
+
+  it("describes optional concept resolution after baseline retrieval", () => {
+    render(<DiscoveryJobProgress job={job({ result: { source_progress: { stage: "resolving_concepts" } } })} />);
+    expect(screen.getByText("正在补充歧义缩写")).toBeInTheDocument();
+    expect(screen.getByText(/已执行原词本地召回/)).toBeInTheDocument();
+  });
+
+  it("does not let stale planning progress hide semantic retrieval", () => {
+    render(<DiscoveryJobProgress job={job({ progress_current: 4, result: { source_progress: { stage: "query_planning" } } })} />);
+    expect(screen.getByText("正在执行论文级语义召回")).toBeInTheDocument();
+    expect(screen.queryByText("正在解析检索条件")).not.toBeInTheDocument();
+  });
+
+  it("describes local planning without claiming model classification", () => {
+    usePreferences.getState().setLanguage("en");
+    render(<DiscoveryJobProgress job={job({ result: { source_progress: { stage: "query_planning" } } })} />);
+    expect(screen.getByText("Parsing search criteria")).toBeInTheDocument();
+  });
 });

@@ -57,8 +57,8 @@ Second supported paragraph [8, 10].
 
         self.assertEqual([], identity["unresolved_callouts"])
         self.assertTrue(report["changed"])
-        self.assertIn("First supported paragraph. [1]", repaired)
-        self.assertIn("Second supported paragraph. [2, 3]", repaired)
+        self.assertIn("First supported paragraph [1].", repaired)
+        self.assertIn("Second supported paragraph [2, 3].", repaired)
         self.assertIn("[1] First. 2020", repaired)
         self.assertIn("[2] Second. 2021", repaired)
         self.assertIn("[3] Third. 2022", repaired)
@@ -139,12 +139,12 @@ First claim from one paper [16]. Second claim from the same paper [16]. [7]
         identity = citation_entries_from_draft(markdown, sections)
         repaired, report = repair_numbered_references(markdown, identity, matrix)
 
-        self.assertEqual([16], identity["unresolved_callouts"])
+        self.assertEqual([16, 7], identity["unresolved_callouts"])
         self.assertEqual("applied", report["status"])
-        self.assertEqual("structured_paragraph_identity", report["mode"])
-        self.assertEqual([16], report["resolved_legacy_callouts"])
+        self.assertEqual("structured_claim_identity", report["mode"])
+        self.assertEqual([7, 16], report["resolved_legacy_callouts"])
         self.assertIn(
-            "First claim from one paper. Second claim from the same paper. [1]",
+            "First claim from one paper. [1] Second claim from the same paper. [1]",
             repaired,
         )
         self.assertNotIn("[16]", repaired)

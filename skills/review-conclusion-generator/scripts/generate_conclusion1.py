@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate high-quality Conclusion / Challenges / Insights for a review project.
+Generate Conclusions and Outlook for a review project.
 
 Aggregates information from the full paper draft, literature matrix, section
 blueprint, section drafts, paper reading notes, and audit report to construct
@@ -51,6 +51,7 @@ from review_writer_core.providers import (  # noqa: E402
     resolve_api_key as _shared_resolve_api_key,
 )
 from review_writer_core.text_safety import make_xml_compatible  # noqa: E402
+from review_writer_core.section_narrative_contracts import build_argument_execution  # noqa: E402
 from review_writer_core.model_gateway_client import (  # noqa: E402
     call_model as call_gateway_model,
     gateway_configured,
@@ -215,7 +216,7 @@ def render_conclusion_markdown(
     paper_to_callout: dict[str, str],
 ) -> str:
     """Render manuscript-only conclusion Markdown with numeric callouts."""
-    lines = ["## Conclusion / Challenges / Insights", ""]
+    lines = ["## Conclusions and Outlook", ""]
     paragraphs = result.get("paragraphs") or []
     if isinstance(paragraphs, list):
         for paragraph in paragraphs:
@@ -506,7 +507,7 @@ def build_conclusion_prompt(context: dict[str, Any]) -> str:
 
     # Build claims summary
     claims_text = ""
-    for claim in claims[:15]:
+    for claim in claims:
         claims_text += f"- [{claim['section_title']}] {claim['claim']} (papers: {', '.join(claim.get('paper_ids', []))})\n"
 
     # Build limitations summary
@@ -527,11 +528,23 @@ def build_conclusion_prompt(context: dict[str, Any]) -> str:
     # Build the list of available paper IDs so the LLM cites real papers only.
     paper_ids_hint = ", ".join(available_paper_ids[:60]) if available_paper_ids else "(paper IDs not enumerated)"
 
-    prompt = f"""You are an expert scientific review writer in organic chemistry. Generate a high-quality Conclusion / Challenges / Insights section for a review paper on: {topic}.
+    execution = context.get("argument_execution")
+    execution_block = ""
+    if isinstance(execution, dict):
+        execution_block = (
+            "\n## Current realized argument bindings\n"
+            + json.dumps(execution, ensure_ascii=False)
+            + "\nOnly realized claims in current prose may support new conclusions. A provisional thesis is a question to test, not a finding. "
+            "Missing bindings do not prove the source lacks data. Do not restore removed claims, introduce new numerical rankings, "
+            "or turn a limited descriptive comparison into a universal conclusion. Do not copy audit/status language into the manuscript.\n"
+        )
+    prompt = f"""You are an expert scientific review writer. Generate a Conclusions and Outlook section for a review paper on: {topic}.
+{execution_block}
 
 ## Instructions
 
 Write 2-3 paragraphs covering:
+Use connected prose without separate Conclusions, Challenges or Insights subheadings. These are content goals, not a rigid paragraph-by-paragraph template.
 1. **Overall Conclusions**: Synthesize what the field has collectively achieved across the reviewed papers. Connect dominant approaches to key products. Avoid simple enumeration.
 2. **Current Challenges / Limitations**: Present 2-3 specific, named challenges drawn from the aggregated limitations. Each challenge must be tied to a specific paper or substrate class. Avoid vague "more research is needed" language.
 3. **Future Directions / Methodological Insights**: Offer 1-2 review-level insights that transcend individual papers. Highlight cross-cutting patterns, tensions, or opportunities.
@@ -925,6 +938,28 @@ def run(args: argparse.Namespace) -> int:
     limitations = collect_limitations(matrix, notes)
     trends = identify_trends(matrix)
     claims = collect_section_claims(blueprint)
+    writing_path = project / "02_section_drafting" / "writing_plan.json"
+    section_index_path = project / "02_section_drafting" / "section_drafts.json"
+    execution = None
+    if writing_path.is_file() and section_index_path.is_file():
+        execution = build_argument_execution(
+            blueprint, read_json(writing_path), read_json(section_index_path), matrix,
+            draft_text=draft_text,
+        )
+        # No fallback to provisional Blueprint claims when current bindings
+        # are missing. The current prose remains available for bounded prose
+        # synthesis; edited sentences never inherit old fact verification.
+        body_sections = [s for s in execution["sections"] if s["section_role"] == "body"]
+        claims = [claim for index in range(3) for section in body_sections
+                  for claim in section["claims"][index:index + 1]]
+        limitations = [{"paper_id": ", ".join(claim["paper_ids"]), "limitation": claim["claim"]}
+                       for claim in claims if claim.get("claim_kind") in {"limitation", "scope_limitation", "boundary"}]
+        # Current claims replace old tag-derived trends, not supplement them.
+        trends = {"paper_count": len({pid for claim in claims for pid in claim["paper_ids"]})}
+        execution = {**execution, "sections": [
+            {key: section[key] for key in ("section_id", "title", "scientific_question", "status")}
+            for section in execution["sections"]],
+            "provenance_policy": "Claims listed below are realized, not provisional Blueprint claims."}
 
     # Parse the full review structure so the conclusion is grounded in the
     # actual section hierarchy (not a truncated 8000-char excerpt).
@@ -964,6 +999,7 @@ def run(args: argparse.Namespace) -> int:
         "topic": topic or "this review",
         "section_summaries": section_summaries,
         "available_paper_ids": available_paper_ids,
+        "argument_execution": execution,
     }
 
     base_url = args.base_url or os.environ.get("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)

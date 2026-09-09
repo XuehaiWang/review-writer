@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from review_writer_core.review_titles import (
     build_publication_overview_text,
@@ -27,6 +28,97 @@ SPEC.loader.exec_module(overview)
 
 
 class OverviewFigureHelperTests(unittest.TestCase):
+    def test_template_catalog_contains_layout_only_prompts(self) -> None:
+        templates = json.loads(overview.overview_template_catalog_path().read_text(encoding="utf-8"))
+        prompts = "\n".join(str(item.get("prompt") or "") for item in templates).casefold()
+        for forbidden in (
+            "allene",
+            "propargyl",
+            "palladium",
+            "rhodium",
+            "other metals",
+            "2020–2025",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, prompts)
+
+    def test_overview_report_records_template_and_content_contract_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            reference = Path(tmp) / "layout.png"
+            reference.write_bytes(b"layout-version")
+            features = {
+                "overview_content_contract": {"schema_version": 1, "modules": ["A"]},
+                "group_by": ["method"],
+                "metal_categories": ["A"],
+            }
+            report = overview._build_report(
+                SimpleNamespace(project_id="project", wire_api="", size=""),
+                {
+                    "id": 1,
+                    "name": "layout",
+                    "layout_type": "mosaic-infographic",
+                    "prompt": "layout only",
+                },
+                features,
+                "prompt",
+                reference,
+                "",
+                "model",
+            )
+
+        self.assertEqual(overview.OVERVIEW_TEMPLATE_CONTRACT_VERSION, report["template_contract_version"])
+        self.assertEqual(64, len(report["template_sha256"]))
+        self.assertEqual(64, len(report["overview_content_contract_sha256"]))
+    def test_legacy_ata_blueprint_derives_product_locked_allene_structure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            planning = project / "01_matrix_outline"
+            planning.mkdir(parents=True)
+            topic = (
+                "Review allenation of terminal alkynes with different substrates "
+                "to access mono-, 1,3-di-, and trisubstituted allenes."
+            )
+            (planning / "section_blueprint.json").write_text(
+                json.dumps(
+                    {
+                        "review_topic": topic,
+                        "taxonomy_profile": "allene",
+                        "sections": [
+                            {
+                                "section_id": "S02",
+                                "section_role": "body",
+                                "title": "Aldehyde-based ATA",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (planning / "literature_matrix.json").write_text(
+                json.dumps(
+                    {
+                        "review_topic": topic,
+                        "rows": [
+                            {
+                                "paper_id": "P001",
+                                "structured_tags": {
+                                    "substrate": {"value": "terminal alkyne"},
+                                    "product": {"value": "substituted allene"},
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            features = overview.extract_review_features(project)
+
+        contract = features["overview_structure_contract"]
+        self.assertEqual("target_product", contract["role"])
+        self.assertEqual("allene", contract["motif"])
+        self.assertEqual("*C=C=C*", overview.resolve_skeleton_smiles(features))
+
     def test_blueprint_body_sections_override_legacy_metal_categories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
@@ -173,6 +265,39 @@ class OverviewFigureHelperTests(unittest.TestCase):
             overview._looks_like_structure_panel((28, 120, 790, 370), 1024, 1024)
         )
 
+    def test_known_layout_accepts_wide_shallow_reserved_structure_panel(self) -> None:
+        box = (34, 154, 530, 263)
+
+        self.assertFalse(overview._looks_like_structure_panel(box, 1024, 1024))
+        self.assertTrue(
+            overview._looks_like_layout_structure_panel(
+                "module-cards-crosscut-sidebar", box, 1024, 1024
+            )
+        )
+        self.assertFalse(
+            overview._looks_like_layout_structure_panel(
+                "unrecognized-layout", box, 1024, 1024
+            )
+        )
+
+    def test_layout_detector_finds_wide_shallow_reserved_structure_panel(self) -> None:
+        from PIL import Image, ImageDraw
+
+        image = Image.new("RGB", (1024, 1024), (238, 242, 246))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((34, 154, 530, 263), fill="white", outline=(90, 100, 110), width=2)
+
+        detected = overview.detect_layout_blank_panel(
+            image, "module-cards-crosscut-sidebar"
+        )
+
+        self.assertIsNotNone(detected)
+        x0, y0, x1, y1 = detected
+        self.assertLessEqual(abs(x0 - 36), 2)
+        self.assertLessEqual(abs(y0 - 156), 2)
+        self.assertLessEqual(abs(x1 - 529), 2)
+        self.assertLessEqual(abs(y1 - 262), 2)
+
     def test_panel_refinement_is_bounded_to_requested_error_budget(self) -> None:
         from PIL import Image
 
@@ -225,7 +350,8 @@ class OverviewFigureHelperTests(unittest.TestCase):
     def test_existing_integrity_fallbacks_and_blueprint_contract_remain(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn('skeleton_source = "programmatic_fallback"', source)
-        self.assertIn('return True, "", "appended-dock"', source)
+        self.assertIn('return False, "structure_panel_not_detected", ""', source)
+        self.assertNotIn('return True, "", "appended-dock"', source)
         self.assertIn('"overview_axis_contract": {}', source)
         self.assertIn("visible = len(atoms)", source)
         self.assertIn("output_path.stat().st_size", source)

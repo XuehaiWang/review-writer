@@ -398,7 +398,7 @@ class LibraryV1Tests(unittest.TestCase):
             "bibliography_verification", audit_jobs[0].payload_json["task_kind"]
         )
         self.assertFalse(audit_jobs[0].payload_json["adds_candidate_papers"])
-        self.assertEqual("disabled", audit_jobs[0].payload_json["network_mode"])
+        self.assertEqual("fallback", audit_jobs[0].payload_json["network_mode"])
         self.assertTrue(audit_jobs[0].payload_json["markdown_relative_path"])
         self.assertEqual(uuid.UUID(submitted_job["id"]), usage.job_id)
         staging = (

@@ -5,7 +5,6 @@ from __future__ import annotations
 import threading
 import uuid
 import logging
-from collections.abc import Callable
 from concurrent.futures import Future, wait as wait_for_futures
 from typing import Any, Protocol
 
@@ -22,6 +21,34 @@ from review_writer_api.workflow_repository import JobRecord, WorkflowRepository
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def job_payload(job: JobRecord) -> dict[str, Any]:
+    """Present one owned job consistently across polling and stage endpoints."""
+    actions = []
+    if job.status in {"queued", "running", "cancel_requested"}:
+        actions.append("cancel")
+    if job.status in JobService.RETRYABLE_STATUSES:
+        actions.append("retry")
+    return {
+        "id": job.id,
+        "project_id": job.project_id,
+        "scope": job.scope,
+        "status": job.status,
+        "job_type": job.job_type,
+        "result": job.result,
+        "progress_current": job.progress_current,
+        "progress_total": job.progress_total,
+        "cancellation_requested": job.cancellation_requested,
+        "error_code": job.error_code,
+        "error_message": job.error_message,
+        "retry_of_job_id": job.retry_of_job_id,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "available_actions": actions,
+    }
 
 
 class JobCancellationRequested(Exception):

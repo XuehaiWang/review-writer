@@ -395,10 +395,10 @@ def build_library_router(
                     "pdf_relative_path": record.pdf_relative_path,
                     "markdown_relative_path": record.markdown_relative_path,
                     "previous_audit": record.bibliography_audit,
-                    # Automatic ingest is intentionally MinerU-first. Public
-                    # provider lookup remains available only through the
-                    # explicit bibliography verification action below.
-                    "network_mode": "force" if force_network else "disabled",
+                    # Local evidence remains first. Crossref is consulted only
+                    # when required publication metadata, such as journal, is
+                    # still missing; explicit verification can force a retry.
+                    "network_mode": "force" if force_network else "fallback",
                     "task_kind": "bibliography_verification",
                     "adds_candidate_papers": False,
                 },
@@ -845,9 +845,8 @@ def build_library_router(
         principal: Principal = Depends(principal_dependency),
     ):
         record = library_service.get(principal, paper_id)
-        # Re-running verification stays MinerU-first by default. Network lookup
-        # is an explicit opt-in for the uncommon record that local evidence and
-        # the bounded document agent cannot resolve.
+        # Re-running verification stays local-first. The fallback provider is
+        # used only for unresolved required metadata; use_network forces retry.
         job = enqueue_bibliography_audit(
             principal,
             record,

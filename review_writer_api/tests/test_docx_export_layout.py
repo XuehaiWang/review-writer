@@ -57,6 +57,25 @@ class DocxExportLayoutTests(unittest.TestCase):
             self.assertNotIn("Table of Contents", visible)
             self.assertEqual([], document.tables)
 
+    def test_formula_counts_and_table_cells_have_native_subscripts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            source, output = directory / "review.md", directory / "review.docx"
+            source.write_text(
+                "# Review\n\nZnI2 and C12H22O11; P001 and A12.\n\n"
+                "Table 1. Conditions.\n\n| System | Catalyst |\n| --- | --- |\n| A \\| B | ZnI2 [1] |\n",
+                encoding="utf-8",
+            )
+            self.export.convert(source, output, TEMPLATE)
+            document = self.export.Document(str(output))
+            paragraph = next(p for p in document.paragraphs if "C12" in p.text)
+            subscripts = [r.text for r in paragraph.runs if r.font.subscript]
+            self.assertEqual(["2", "12", "22", "11"], subscripts)
+            self.assertEqual(1, len(document.tables))
+            self.assertEqual("A | B", document.tables[0].cell(1, 0).text)
+            runs = document.tables[0].cell(1, 1).paragraphs[0].runs
+            self.assertTrue(any(r.text == "2" and r.font.subscript for r in runs))
+
 
 if __name__ == "__main__":
     unittest.main()

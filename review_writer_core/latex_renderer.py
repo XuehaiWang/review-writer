@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import re
+from math import ceil
 from pathlib import Path
 from typing import Any
 
+from .chemical_typography import normalize_chemical_typography
 
-TEMPLATE_VERSION = "modern-survey/6"
+
+TEMPLATE_VERSION = "modern-survey/9"
 SUPPORTED_PROFILES = frozenset({"en", "zh-CN"})
 
 
@@ -21,7 +24,7 @@ ALLOWED_MATH_COMMANDS = frozenset(
         "alpha", "beta", "gamma", "delta", "epsilon", "theta", "lambda",
         "mu", "pi", "sigma", "phi", "omega", "Delta", "Gamma", "Sigma",
         "Phi", "Omega", "mathrm", "mathbf", "mathit", "text", "frac",
-        "sqrt", "times", "cdot", "le", "ge", "pm", "rightarrow", "leftrightarrow",
+        "sqrt", "times", "cdot", "le", "ge", "pm", "rightarrow", "leftrightarrow", "equiv",
     }
 )
 SUPERSCRIPT_TEXT = {
@@ -81,7 +84,7 @@ def _safe_math(raw: str) -> str | None:
 
 
 def latex_escape(value: Any) -> str:
-    text = str(value or "")
+    text = normalize_chemical_typography(str(value or ""))
     output: list[str] = []
     cursor = 0
     for match in MATH_SPAN.finditer(text):
@@ -110,6 +113,84 @@ def _heading(level: int, text: str) -> str:
     return rf"\{command}{{{latex_escape(text)}}}"
 
 
+def _display_units(value: Any) -> int:
+    """Approximate the horizontal space used by prose before TeX escaping."""
+
+    text = normalize_chemical_typography(str(value or ""))
+    return sum(2 if ord(character) > 0xFF else 1 for character in text)
+
+
+def _estimated_table_lines(
+    header: list[Any], rows: list[list[Any]], width: int, caption: str
+) -> int:
+    """Estimate table height so prose-heavy tables are allowed to paginate."""
+
+    # At the table font size, roughly 144 Latin characters fit across the
+    # usable text width. Equal-width columns receive their proportional share.
+    characters_per_line = max(12, 144 // max(1, width))
+
+    def estimated_row_lines(values: list[Any]) -> int:
+        padded = [*values, *([""] * (width - len(values)))]
+        return max(
+            1,
+            *(ceil(_display_units(value) / characters_per_line) for value in padded[:width]),
+        )
+
+    caption_lines = ceil(_display_units(caption) / 144) if caption else 0
+    return caption_lines + estimated_row_lines(header) + sum(
+        estimated_row_lines(values) for values in rows
+    )
+
+
+def _split_text_by_display_units(value: Any, limit: int) -> list[str]:
+    """Split very long table cells at word boundaries without dropping text."""
+
+    text = normalize_chemical_typography(str(value or "")).strip()
+    if not text or _display_units(text) <= limit:
+        return [text]
+    tokens = re.findall(r"\$[^$\n]*\$|\\\(.+?\\\)|\S+", text)
+    chunks: list[str] = []
+    current: list[str] = []
+    current_units = 0
+    for token in tokens:
+        token_units = _display_units(token)
+        separator_units = 1 if current else 0
+        if current and current_units + separator_units + token_units > limit:
+            chunks.append(" ".join(current))
+            current = []
+            current_units = 0
+            separator_units = 0
+        current.append(token)
+        current_units += separator_units + token_units
+    if current:
+        chunks.append(" ".join(current))
+    return chunks or [text]
+
+
+def _paginate_table_rows(rows: list[list[Any]], width: int) -> list[list[Any]]:
+    """Bound longtable row height because TeX cannot split inside one row."""
+
+    characters_per_line = max(12, 144 // max(1, width))
+    # Forty-four wrapped lines remain comfortably below one A4 text page after
+    # the repeated header. Ordinary rows are untouched.
+    cell_limit = characters_per_line * 44
+    paginated: list[list[Any]] = []
+    for values in rows:
+        padded = [*values, *([""] * (width - len(values)))]
+        cell_chunks = [
+            _split_text_by_display_units(value, cell_limit)
+            for value in padded[:width]
+        ]
+        for chunk_index in range(max(len(chunks) for chunks in cell_chunks)):
+            paginated.append(
+                [
+                    chunks[chunk_index] if chunk_index < len(chunks) else ""
+                    for chunks in cell_chunks
+                ]
+            )
+    return paginated
+
+
 def _table(block: dict[str, Any]) -> str:
     header = list(block.get("header") or [])
     rows = [list(row) for row in block.get("rows") or []]
@@ -119,7 +200,8 @@ def _table(block: dict[str, Any]) -> str:
         padded = [*values, *([""] * (width - len(values)))]
         return " & ".join(latex_escape(value) for value in padded[:width]) + r" \\"
     caption = TABLE_LABEL.sub("", str(block.get("caption") or "").strip()).strip()
-    if len(rows) <= 20:
+    estimated_lines = _estimated_table_lines(header, rows, width, caption)
+    if len(rows) <= 20 and estimated_lines <= 58:
         lines = [
             r"\begin{table*}[t]",
             r"\centering",
@@ -156,7 +238,7 @@ def _table(block: dict[str, Any]) -> str:
         r"\midrule",
         r"\endhead",
     ]
-    lines.extend(row(values) for values in rows)
+    lines.extend(row(values) for values in _paginate_table_rows(rows, width))
     lines.extend(
         [r"\bottomrule", r"\end{longtable}", r"\endgroup", r"\clearpage\twocolumn"]
     )

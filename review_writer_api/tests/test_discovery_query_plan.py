@@ -20,9 +20,28 @@ SPEC.loader.exec_module(discover)
 
 EMPTY_RULES = {key: {} for key in discover.STRUCTURED_TAG_KEYS}
 ALLENE_RULES = discover.load_classification_rules(ROOT, "allene")
+ALLENE_NORMALIZATION = discover.load_discovery_normalization(
+    ROOT, profile="allene", topic_text="allene synthesis"
+)
 
 
 class DiscoveryQueryPlanTests(unittest.TestCase):
+    def setUp(self) -> None:
+        discover.configure_discovery_normalization(ALLENE_NORMALIZATION)
+
+    def tearDown(self) -> None:
+        discover.configure_discovery_normalization(None)
+
+    def test_specialized_normalization_is_inactive_for_general_topics(self) -> None:
+        discover.configure_discovery_normalization(None)
+        self.assertEqual(
+            0.0,
+            discover.match_score(
+                "propargylic alcohol derivatives",
+                "Carbonylation of enantioenriched propargylic mesylates",
+            ),
+        )
+
     def test_systematic_23_diene_name_matches_allene_family_only(self) -> None:
         self.assertGreater(
             discover.scientific_family_signal(
@@ -640,114 +659,140 @@ class DiscoveryQueryPlanTests(unittest.TestCase):
             by_keyword,
         )
 
-    def test_auto_planner_falls_back_without_failing_discovery(self) -> None:
-        with patch.object(discover, "llm_query_plan", side_effect=TimeoutError("offline")):
+    def test_clear_topic_does_not_call_model(self) -> None:
+        with patch.object(discover, "resolve_query_ambiguities") as resolver:
             plan = discover.build_auto_query_plan(
-                "photoredox catalysis, electrochemical activation",
-                [],
-                EMPTY_RULES,
+                "photoredox catalysis, electrochemical activation", [], EMPTY_RULES,
             )
+        resolver.assert_not_called()
         self.assertEqual("dashboard_deterministic", plan["planner"])
-        self.assertEqual("planner_unavailable", plan["planner_notice_code"])
-        self.assertNotIn("TimeoutError", plan["planner_notice"])
+        self.assertNotIn("planner_notice", plan)
+        self.assertEqual([], plan["classification_axes"])
+        self.assertTrue(all(query["kind"] == "topic_core" for query in plan["semantic_queries"]))
+
+    def test_explicit_acronym_definitions_need_no_provider(self) -> None:
+        topic = ("allenation-of-terminal-alkynes (ATA), enantioselective ATA (EATA). "
+                 "Organize the review by reaction type and catalytic/promoting system.")
+        with patch.object(discover, "resolve_query_ambiguities") as resolver:
+            plan = discover.build_auto_query_plan(topic, [], EMPTY_RULES)
+        resolver.assert_not_called()
+        self.assertEqual({"ATA", "EATA"}, {item["surface"] for item in plan["resolved_concepts"]})
+        self.assertEqual(["reaction_type", "catalyst_or_method"], plan["group_by"])
+        self.assertEqual(["reaction_type", "catalyst_or_method"],
+                         [axis["axis_id"] for axis in plan["classification_axes"]])
+        self.assertTrue(all(not axis["partitions"] for axis in plan["classification_axes"]))
+        self.assertEqual(topic, plan["organization_intent"])
+        self.assertEqual(plan, discover.validate_query_plan(plan, topic))
+
+    def test_optional_expansion_follows_local_retrieval_and_cannot_replace_plan(self) -> None:
+        events = []
+        def resolve(topic, terms):
+            events.append("model")
+            self.assertEqual(["HAT"], terms)
+            return {"resolved_concepts": [
+                {"surface": "HAT", "expanded_name": "hydrogen atom transfer",
+                 "confidence": 0.95, "reason": "Contextual abbreviation."},
+                {"surface": "UNKNOWN", "expanded_name": "unrelated", "confidence": 1},
+            ], "filters": {"year_from": 1900}, "keywords": [], "group_by": ["product"]}
+        topic = "HAT catalysis from 2020 to 2024 organized by catalyst"
+        with patch.object(discover, "resolve_query_ambiguities", side_effect=resolve):
+            plan = discover.build_auto_query_plan(
+                topic, ["radical reactions"], EMPTY_RULES,
+                before_ambiguity=lambda plan: events.append("local"),
+            )
+        self.assertEqual(["local", "model"], events)
+        self.assertEqual({"year_from": 2020, "year_to": 2024}, plan["filters"])
+        self.assertEqual(["catalyst_or_method"], plan["group_by"])
+        keywords = [item["keyword"] for item in plan["keywords"]]
+        self.assertIn("radical reactions", keywords)
+        self.assertIn("hydrogen atom transfer", keywords)
+        self.assertNotIn("unrelated", keywords)
+
+    def test_auto_planner_falls_back_without_failing_discovery(self) -> None:
+        with patch.object(discover, "resolve_query_ambiguities", side_effect=TimeoutError("offline")):
+            plan = discover.build_auto_query_plan("HAT catalysis", [], EMPTY_RULES)
+        self.assertEqual("dashboard_deterministic", plan["planner"])
+        self.assertEqual("concept_expansion_unavailable", plan["planner_notice_code"])
+        self.assertEqual(["HAT"], plan["unexpanded_concepts"])
+        self.assertTrue(any("HAT" in item["keyword"] for item in plan["keywords"]))
         self.assertNotIn("offline", plan["planner_notice"])
 
+    def test_low_confidence_or_malformed_expansion_preserves_original_query(self) -> None:
+        for response in [
+            {"resolved_concepts": [{"surface": "HAT", "expanded_name": "wrong", "confidence": 0.4}]},
+            {"resolved_concepts": None},
+            {"resolved_concepts": [{"surface": "HAT", "expanded_name": "wrong", "confidence": "oops"}]},
+        ]:
+            with self.subTest(response=response), patch.object(discover, "resolve_query_ambiguities", return_value=response):
+                plan = discover.build_auto_query_plan("HAT catalysis", [], EMPTY_RULES)
+            self.assertTrue(any("HAT" in item["keyword"] for item in plan["keywords"]))
+            self.assertFalse(any(item["keyword"] == "wrong" for item in plan["keywords"]))
+
     def test_auto_planner_stops_discovery_when_credit_is_insufficient(self) -> None:
-        failure = discover.GatewayRequestError(
-            "余额不足，无法使用智能服务。",
-            status_code=402,
-            code="INSUFFICIENT_CREDIT",
-            details={"required_usd": "0.00321480", "available_usd": "0"},
-        )
-        with patch.object(discover, "llm_query_plan", side_effect=failure):
-            with self.assertRaises(discover.GatewayRequestError) as raised:
-                discover.build_auto_query_plan(
-                    "photoredox catalysis",
-                    [],
-                    EMPTY_RULES,
-                )
-        self.assertEqual("INSUFFICIENT_CREDIT", raised.exception.code)
-        self.assertNotIn("0.00321480", str(raised.exception))
+        failure = discover.GatewayRequestError("Insufficient credit", status_code=402, code="INSUFFICIENT_CREDIT")
+        with patch.object(discover, "resolve_query_ambiguities", side_effect=failure):
+            with self.assertRaises(discover.GatewayRequestError):
+                discover.build_auto_query_plan("HAT catalysis", [], EMPTY_RULES)
 
-    def test_auto_planner_keeps_model_plan_when_provider_uses_normalized_alias(self) -> None:
-        topic = (
-            'Please write a review on the topic "syntheses of the axial-chiral allenes", '
-            "categorized by the substrates (propargylic alcohols, their derivatives, "
-            "terminal alkynes, conjugated enynes, etc.) of methods."
-        )
-        provider_plan = {
-            "schema_version": 1,
-            "topic": topic,
-            "resolved_concepts": [
-                {
-                    "surface": "axial-chiral allenes",
-                    "normalized": "axially chiral allenes",
-                    "confidence": 0.96,
-                    "reason": "Normalized scientific terminology.",
-                }
-            ],
-            "unresolved_concepts": [],
-            "keywords": [
-                {
-                    "keyword": keyword,
-                    "category": category,
-                    "source": "agent",
-                    "reason": "Provider expansion.",
-                }
-                for keyword, category in [
-                    ("axially chiral allenes", "product"),
-                    ("chiral allenes", "product"),
-                    ("propargylic alcohols", "substrate"),
-                    ("propargylic alcohol derivatives", "substrate"),
-                    ("terminal alkynes", "substrate"),
-                    ("conjugated enynes", "substrate"),
-                    ("review article", "document_scope"),
-                ]
-            ],
-            "filters": {},
-            "group_by": ["substrate"],
-        }
-
-        with patch.object(discover, "llm_query_plan", return_value=provider_plan):
-            plan = discover.build_auto_query_plan(topic, [], EMPTY_RULES)
-
-        self.assertEqual("dashboard_llm", plan["planner"])
-        self.assertNotIn("planner_notice", plan)
-        self.assertEqual(["substrate"], plan["group_by"])
-        self.assertEqual(
-            "axially chiral allenes",
-            plan["resolved_concepts"][0]["expanded_name"],
-        )
-        self.assertNotIn("review article", [item["keyword"] for item in plan["keywords"]])
-
-    def test_llm_query_plan_uses_internal_gateway_without_provider_key(self) -> None:
-        gateway_plan = {
-            "schema_version": 1,
-            "topic": "ignored",
-            "resolved_concepts": [],
-            "unresolved_concepts": [],
-            "keywords": [],
-            "filters": {},
-            "group_by": [],
-        }
+    def test_concept_resolver_uses_bounded_gateway_call(self) -> None:
         with (
-            patch.dict(
-                os.environ,
-                {
-                    "REVIEW_WRITER_MODEL_GATEWAY_URL": "http://127.0.0.1/gateway",
-                    "REVIEW_WRITER_TASK_TOKEN": "task-token",
-                    "REVIEW_WRITING_API_KEY": "",
-                    "OPENAI_API_KEY": "",
-                },
-                clear=False,
-            ),
-            patch.object(discover, "call_gateway_json", return_value=gateway_plan) as gateway,
+            patch.object(discover, "gateway_configured", return_value=True),
+            patch.object(discover, "call_gateway_json", return_value={"resolved_concepts": []}) as gateway,
         ):
-            result = discover.llm_query_plan("electrochemical catalysis", [])
+            discover.resolve_query_ambiguities("HAT catalysis", ["HAT"])
+        self.assertEqual("discovery-query-concepts", gateway.call_args.kwargs["label"])
+        self.assertFalse(gateway.call_args.kwargs["recover_on_timeout"])
+        self.assertEqual(20, gateway.call_args.kwargs["timeout_seconds"])
+        self.assertLess(len(gateway.call_args.args[0]), 1500)
 
-        self.assertEqual(gateway_plan, result)
-        self.assertEqual("discovery-query-plan", gateway.call_args.kwargs["label"])
-        self.assertIn("electrochemical catalysis", gateway.call_args.args[0])
+    def test_fallback_preserves_locants_and_mixed_language_subject(self) -> None:
+        self.assertIn("1,3-disubstituted allenes", discover.topic_phrase_candidates("1,3-disubstituted allenes"))
+        self.assertIn("光催化", discover.topic_keyword_fallback("光催化CO2还原", []))
+
+    def test_script_preserves_baseline_with_optional_expansion_or_timeout(self) -> None:
+        for succeeds in (False, True):
+            events = []
+            def search(*args, **kwargs):
+                events.append("local")
+                rows = [{"paper_id": "P001", "selected_for_matrix": False,
+                         "score": 0.7, "role": "core_candidate", "title": "HAT catalysis",
+                         "reason": "Literal local match."}] if len(events) == 1 else []
+                return [{"keyword": "HAT catalysis", "category": "unclassified",
+                         "keep": True, "local_results": rows}], {"before_filter": 1, "after_filter": 1}
+            def resolve(*args):
+                events.append("model")
+                if succeeds:
+                    return {"resolved_concepts": [{"surface": "HAT", "expanded_name": "hydrogen atom transfer",
+                                                  "confidence": 0.9, "reason": "Topic context."}]}
+                raise TimeoutError("slow provider")
+            with self.subTest(succeeds=succeeds), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                cache = root / "query-cache.json"
+                with (
+                    patch.object(discover.sys, "argv", ["discover.py", "--review-root", str(root),
+                        "--project-id", "sample", "--topic", "HAT catalysis",
+                        "--output-project-dir", str(root / "staging"), "--auto-query-plan",
+                        "--taxonomy-profile", "general_academic", "--query-plan-cache", str(cache)]),
+                    patch.object(discover, "_load_dotenv_if_present"),
+                    patch.object(discover, "load_metadata", return_value={}),
+                    patch.object(discover, "local_search_by_keyword", side_effect=search),
+                    patch.object(discover, "resolve_query_ambiguities", side_effect=resolve),
+                ):
+                    self.assertEqual(0, discover.run(discover.parse_args()))
+                self.assertEqual(["local", "model", "local"] if succeeds else ["local", "model"], events)
+                self.assertEqual(succeeds, cache.exists())
+                result = discover.read_json(root / "staging/00_discovery/combined_results_by_keyword.json")
+                self.assertEqual("P001", result["results"][0]["local_results"][0]["paper_id"])
+                self.assertEqual({}, result["groups"])
+
+    def test_deferred_axes_preserve_explicit_discussion_in_matrix(self) -> None:
+        from review_writer_core.stages.planning.topic import _matrix_classification_axes, _topic_partitions
+        topic = "Organize the review by catalyst; separately discuss homogeneous and heterogeneous catalysis."
+        plan = discover.build_auto_query_plan(topic, ["catalysis"], EMPTY_RULES)
+        axes = _matrix_classification_axes({"classification_contract": plan["classification_contract"]}, _topic_partitions(topic))
+        self.assertEqual("catalyst_or_method", axes[0]["axis_id"])
+        self.assertEqual("required_independent_discussion", axes[1]["axis_role"])
+        self.assertEqual(2, len(axes[1]["partitions"]))
 
     def test_verified_library_tags_do_not_affect_discovery_scoring(self) -> None:
         rules = {

@@ -5,6 +5,7 @@ import unittest
 from review_writer_core.academic_contracts import taxonomy_diagnostics
 from review_writer_core.classification_axes import canonical_classification_contract
 from review_writer_core.section_narrative_contracts import (
+    apply_single_paper_policy,
     canonical_argument_role,
     derive_narrative_diagnostics,
     derive_scientific_thesis,
@@ -13,6 +14,61 @@ from review_writer_core.section_narrative_contracts import (
 
 
 class SectionNarrativeContractTests(unittest.TestCase):
+    def test_single_paper_policy_limits_writing_without_inventing_evidence_or_merging(self) -> None:
+        section = {
+            "section_id": "S02", "title": "Independent category", "section_role": "body",
+            "primary_papers": ["P001"], "scientific_thesis": {"text": "Provisional question", "status": "provisional"},
+            "evidence_readiness": {"status": "insufficient"}, "targeted_fact_gaps": {"P001": ["scope"]},
+            "writing_requirements": [{"type": "cross_study_synthesis", "source": "native_blueprint", "instruction": "Compare studies"}],
+        }
+        bounded = apply_single_paper_policy(section)
+        self.assertEqual(section["primary_papers"], bounded["primary_papers"])
+        self.assertEqual(section["scientific_thesis"], bounded["scientific_thesis"])
+        self.assertEqual(section["evidence_readiness"], bounded["evidence_readiness"])
+        self.assertEqual(section["targeted_fact_gaps"], bounded["targeted_fact_gaps"])
+        self.assertEqual(1, len(bounded["writing_requirements"]))
+        self.assertEqual("evidence_boundary", bounded["writing_requirements"][0]["type"])
+        self.assertIn("field-wide consensus", bounded["writing_requirements"][0]["instruction"])
+        self.assertEqual(bounded["writing_requirements"][0]["requirement_id"], bounded["single_paper_policy"]["requirement_id"])
+        self.assertNotIn("single_paper_policy", section)
+        self.assertEqual(bounded, apply_single_paper_policy(bounded))
+        report = taxonomy_diagnostics([bounded], ["P001"], classification_contract={"minimum_body_papers": 2})
+        self.assertEqual([], report["unjustified_single_paper_section_ids"])
+        self.assertEqual([], report["single_paper_merge_suggestions"])
+        invalid = {**bounded, "title": "Other or unspecified"}
+        self.assertFalse(taxonomy_diagnostics([invalid], ["P001"])["can_confirm"])
+        for role, papers in [("body", ["P001", "P002"]), ("introduction", ["P001"]), ("conclusion", ["P001"])]:
+            other = {**section, "section_role": role, "primary_papers": papers}
+            self.assertEqual(other, apply_single_paper_policy(other))
+
+    def test_single_paper_policy_cleans_legacy_copies_and_preserves_custom_objectives(self) -> None:
+        from review_writer_core.academic_contracts import section_academic_contract
+
+        section = {"section_id": "S02", "primary_papers": ["P001"]}
+        canonical = apply_single_paper_policy(section)
+        instruction = canonical["writing_requirements"][0]["instruction"]
+        for objective in [instruction, "Explain the observed selectivity pattern."]:
+            legacy = {
+                **section,
+                "single_paper_policy": {"instruction": instruction},
+                "avoid_patterns": ["Do not mix distinct substrate classes.", instruction],
+                "academic_contract": {"expected_synthesis": objective, "semantic_scope": "Selected scope"},
+                "writing_requirements": [
+                    {"type": "source_bounded_case_analysis", "source": "native_blueprint", "instruction": instruction},
+                    {"source": "single_paper_policy", "instruction": instruction},
+                    {"source": "user", "instruction": "Discuss the reported mechanism."},
+                ],
+            }
+            result = apply_single_paper_policy(legacy)
+            self.assertEqual(2, len(result["writing_requirements"]))
+            self.assertEqual("user", result["writing_requirements"][0]["source"])
+            self.assertNotIn("instruction", result["single_paper_policy"])
+            self.assertEqual(["Do not mix distinct substrate classes."], result["avoid_patterns"])
+            self.assertEqual("Selected scope", result["academic_contract"]["semantic_scope"])
+            expected = section_academic_contract(result)["expected_synthesis"] if objective == instruction else objective
+            self.assertEqual(expected, result["academic_contract"]["expected_synthesis"])
+            self.assertEqual(result, apply_single_paper_policy(result))
+
     def test_scientific_thesis_is_derived_from_source_backed_matrix_facts(self) -> None:
         section = {
             "section_id": "S02",

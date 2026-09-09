@@ -17,6 +17,8 @@ from pydantic import (
 from review_writer_core.writing_contracts import (
     CASE_PARAGRAPH_MAX_WORDS,
     CASE_PARAGRAPH_MIN_WORDS,
+    DRAFT_PASS_THRESHOLD,
+    PARAGRAPH_PASS_THRESHOLD,
 )
 
 
@@ -119,6 +121,11 @@ class OutlineSaveRequest(BaseModel):
     scope_contract: dict[str, Any] | None = None
 
 
+class OutlineRecommendationRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+    outline_md: StrictStr = Field(min_length=1, max_length=250_000)
+
+
 class ReferenceOutlineUploadRequest(BaseModel):
     revision: StrictInt = Field(ge=0)
     filename: StrictStr = Field(min_length=1, max_length=255)
@@ -127,10 +134,14 @@ class ReferenceOutlineUploadRequest(BaseModel):
 
 class BlueprintGenerateRequest(BaseModel):
     revision: StrictInt = Field(ge=0)
+    # Retain for an explicit migration error; silently ignoring an old client's
+    # repair request would launch an unintended upstream regeneration.
+    draft_quality_artifact_id: StrictStr | None = Field(default=None, min_length=36, max_length=36)
 
 
 class BlueprintConfirmRequest(BaseModel):
     revision: StrictInt = Field(ge=0)
+    artifact_id: StrictStr | None = Field(default=None, min_length=36, max_length=36)
 
 
 class BlueprintRestoreRequest(BaseModel):
@@ -210,8 +221,8 @@ class DraftRestoreRequest(BaseModel):
 
 
 class DraftEvaluationRequest(BaseModel):
-    goal: float = Field(default=90.0, ge=90, le=100)
-    paragraph_goal: float = Field(default=85.0, ge=0, le=100)
+    goal: float = Field(default=DRAFT_PASS_THRESHOLD, ge=90, le=100)
+    paragraph_goal: float = Field(default=PARAGRAPH_PASS_THRESHOLD, ge=0, le=100)
     max_iterations: StrictInt = Field(default=2, ge=1, le=10)
     min_case_words: StrictInt = Field(
         default=CASE_PARAGRAPH_MIN_WORDS, ge=1, le=10_000

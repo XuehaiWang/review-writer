@@ -20,4 +20,25 @@ describe("MarkdownView chemistry notation", () => {
   it("keeps unsupported commands visible instead of throwing", () => {
     expect(readableInlineMath(String.raw`\unknown{CH}_{3}`)).toBe("unknownCH₃");
   });
+
+  it("renders comparison tables with formulas, citations, and escaped cell pipes", () => {
+    render(<MarkdownView content={String.raw`Table 1. Systems.
+
+| System | Conditions | Source |
+| --- | --- | --- |
+| A \| B | ZnI₂, **25 °C** | [1, 2] |
+
+<!-- comparison_table: private evidence metadata -->`} />);
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getAllByRole("columnheader")).toHaveLength(3);
+    expect(screen.getByRole("cell", { name: "A | B" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "ZnI₂, 25 °C" })).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("private evidence");
+  });
+
+  it("keeps unsafe links inert inside table cells", () => {
+    render(<MarkdownView content={"| System | Link |\n| --- | --- |\n| A | [click](javascript:alert) |"} />);
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  });
 });

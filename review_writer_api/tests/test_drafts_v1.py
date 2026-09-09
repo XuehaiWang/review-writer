@@ -33,7 +33,7 @@ class DraftsV1Tests(NativeFigureApiTestCase):
         def evaluate(_context, payload):
             paragraph_id = payload["paragraphs"][0]["paragraph_id"]
             return {
-                "score": 72.5,
+                "score": getattr(self, "evaluation_score", 72.5),
                 "goal": float(payload.get("goal") or 90),
                 "decision": "REVISE",
                 "dimension_scores": [{"id": "evidence", "score": 72.5}],
@@ -43,6 +43,7 @@ class DraftsV1Tests(NativeFigureApiTestCase):
                         "score": 60,
                         "severity": "major",
                         "route": "section_rewrite",
+                        "failed_dimensions": ["P01"] if getattr(self, "evaluation_style_only", False) else [],
                     }
                 ],
                 "issues": [
@@ -50,7 +51,8 @@ class DraftsV1Tests(NativeFigureApiTestCase):
                         "issue_id": "issue-1",
                         "paragraph_id": paragraph_id,
                         "severity": "major",
-                        "message": "Strengthen the evidence comparison.",
+                        "message": "Improve sentence rhythm." if getattr(self, "evaluation_style_only", False) else "Strengthen the evidence comparison.",
+                        "rule": "P01" if getattr(self, "evaluation_style_only", False) else "C01" if getattr(self, "evaluation_substantive", False) else "",
                     }
                 ],
                 "hard_gate_failures": list(self.hard_gate_failures),
@@ -207,6 +209,50 @@ class DraftsV1Tests(NativeFigureApiTestCase):
         )
         self.assertEqual(200, assembled.status_code, assembled.text)
         return assembled.json()
+
+    def test_evaluation_snapshot_tracks_blueprint_and_figures_and_rejects_stale_sections(self):
+        from review_writer_core.workflow.artifacts import BLUEPRINT, FIGURE_MANIFEST
+
+        service = self.app.state.drafts_service
+        repository = self.app.state.workflow_repository
+        with TestClient(self.app) as client:
+            self.prepare_draft(client)
+            queued = service.evaluation_payload(self.first, self.project_id, goal=90)
+            for field, logical_name in (
+                ("source_blueprint_artifact_id", BLUEPRINT),
+                ("source_figure_manifest_artifact_id", FIGURE_MANIFEST),
+            ):
+                current = repository.get_current_artifact(self.first.user_id, self.project_id, logical_name)
+                self.assertEqual(current.id if current else "", queued[field])
+            self.publish_changed_sections()
+            with self.assertRaises(WorkflowConflict):
+                service.validate_task_inputs(self.first, self.project_id, queued)
+            with self.assertRaises(WorkflowConflict):
+                service.publish_evaluation(self.first, self.project_id, queued, {"score": 100})
+
+    def test_stale_upstream_state_cannot_be_reapproved_using_old_quality(self):
+        service = self.app.state.drafts_service
+        repository = self.app.state.workflow_repository
+        with TestClient(self.app) as client:
+            self.prepare_draft(client)
+            queued = service.evaluation_payload(self.first, self.project_id, goal=90)
+            service.publish_evaluation(self.first, self.project_id, queued, {"score": 95, "issues": []})
+            before = service.get(self.first, self.project_id)
+            self.assertTrue(before["quality"]["current"])
+            state = repository.compare_and_set_stage(
+                self.first.user_id, self.project_id, "draft", before["revision"], status="stale",
+            )
+            after = service.get(self.first, self.project_id)
+            self.assertFalse(after["quality"]["current"])
+            self.assertTrue(after["freshness"]["upstream_stale"])
+            with self.assertRaises(WorkflowConflict):
+                service.validate_task_inputs(self.first, self.project_id, {
+                    "source_draft_artifact_id": after["draft_artifact_id"],
+                    "expected_revision": state.revision,
+                })
+            with self.assertRaises(WorkflowConflict):
+                service.approve(self.first, self.project_id, revision=state.revision,
+                                override_low_score=False, override_reason="")
 
     def seed_section_evidence_package(self) -> str:
         repository = self.app.state.workflow_repository
@@ -427,9 +473,8 @@ class DraftsV1Tests(NativeFigureApiTestCase):
 
         prose, figure_block = markdown.split("<!-- paragraph_id: S01-p1 -->", 1)
         self.assertNotIn("Pd_{2}", prose)
-        self.assertIn(
-            "Figure 1 provides source-linked visual context for this discussion", prose
-        )
+        self.assertIn("(Figure 1)", prose)
+        self.assertNotIn("visual context", prose)
         self.assertIn(
             "Figure 1. Pd₂(dba)₃·CHCl₃, (S)-(−)-MeO-MOP, CHCl₃; −78 °C",
             figure_block,
@@ -1154,6 +1199,7 @@ class DraftsV1Tests(NativeFigureApiTestCase):
         self.assertEqual(409, response.status_code, response.text)
 
     def test_approval_is_bound_to_evaluated_current_draft(self) -> None:
+        self.evaluation_style_only = True
         with TestClient(self.app) as client:
             self.prepare_draft(client)
             before = client.post(
@@ -1173,17 +1219,31 @@ class DraftsV1Tests(NativeFigureApiTestCase):
                 json={"revision": current["revision"]},
                 headers=self.headers("approval-low-score"),
             )
-            approved = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/approve",
-                json={"revision": current["revision"], "override_low_score": True, "override_reason": "Human review"},
-                headers=self.headers("approval-override"),
-            )
         self.assertEqual(409, before.status_code, before.text)
-        self.assertEqual(409, low.status_code, low.text)
-        self.assertEqual(200, approved.status_code, approved.text)
-        self.assertEqual("final", approved.json()["next_stage"])
+        self.assertEqual(200, low.status_code, low.text)
+        self.assertEqual("final", low.json()["next_stage"])
 
-    def test_hard_quality_findings_cannot_be_human_overridden(self) -> None:
+    def test_manual_approval_acknowledges_but_does_not_clear_substantive_findings(self):
+        self.evaluation_score = 96
+        self.evaluation_substantive = True
+        with TestClient(self.app) as client:
+            self.prepare_draft(client)
+            started = client.post(f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs", json={}, headers=self.headers("high-score-evaluate"))
+            self.assertEqual("succeeded", self.wait_job(client, started.json()["id"])["status"])
+            current = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
+            response = client.post(f"/api/v1/projects/{self.project_id}/draft/approve",
+                json={"revision": current["revision"], "override_low_score": True}, headers=self.headers("high-score-approve"))
+            self.assertEqual(200, response.status_code, response.text)
+            after = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
+            self.assertTrue(after["draft_approval_current"])
+            self.assertEqual(current["quality"], after["quality"])
+            self.assertEqual("acknowledged_findings", after["draft_approval"]["approval_mode"])
+            self.assertTrue(after["draft_approval"]["acknowledged_findings"])
+            self.assertTrue(after["quality"]["approval_findings"])
+            # Final consumes this exact approval, without repeating Quality gates.
+            self.app.state.final_service._approved_draft(self.first, self.project_id)
+
+    def test_hard_quality_findings_can_be_acknowledged_but_stale_revision_cannot(self) -> None:
         self.hard_gate_failures = ["citation_integrity_failed"]
         with TestClient(self.app) as client:
             self.prepare_draft(client)
@@ -1212,7 +1272,7 @@ class DraftsV1Tests(NativeFigureApiTestCase):
                 },
                 headers=self.headers("hard-gate-override"),
             )
-        self.assertEqual(409, blocked.status_code, blocked.text)
+        self.assertEqual(200, blocked.status_code, blocked.text)
         self.assertEqual(409, approved.status_code, approved.text)
 
     def test_approval_cannot_mix_an_old_pass_score_with_a_new_quality_artifact(self) -> None:

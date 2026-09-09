@@ -1,5 +1,27 @@
 """Default allene-review taxonomy profile shared by metadata and retrieval."""
 
+discovery_normalization = {
+    "phrase_rewrites": [
+        [
+            r"(?<![A-Za-z0-9])(?:[A-Za-z]+-)?\d+-en-\d+-ynes?(?![A-Za-z0-9])",
+            " conjugated enyne ",
+        ],
+        [r"\benynes\b", "enyne"],
+        [
+            r"\bpropargylic\s+(?:mesylates?|tosylates?|carbonates?|acetates?|esters?|halides?|bromides?|chlorides?|phosphates?|sulfides?)\b",
+            r"\g<0> propargylic alcohol derivative",
+        ],
+    ],
+    "family_prefix_aliases": [
+        ["allenoat", "allene"],
+        ["allenol", "allene"],
+        ["allenyl", "allene"],
+    ],
+    "systematic_family_patterns": [
+        ["allene", r"(?<!\d)2\s*,\s*3\s*[-‐‑‒–—]?\s*[A-Za-z0-9()\-]{0,40}dien"],
+    ],
+}
+
 rules = [
         # 1. Products
         ('allenes', 'product', ['allene', 'allenes', '1,2-diene', 'cumulated diene']),
@@ -30,6 +52,7 @@ rules = [
 
         # 2. Substrates
         ('propargylic alcohols', 'substrate', ['propargylic alcohol', 'propargyl alcohol', 'ethynyl tertiary alcohol', 'ethynyl tertiary alcohols', 'alkynyl tertiary alcohol', 'alkynyl tertiary alcohols', 'azaarylethynyl tertiary alcohol', 'azaarylethynyl tertiary alcohols']),
+        ('activated propargylic derivatives', 'substrate', ['propargylic alcohol derivative', 'propargylic alcohol derivatives', 'propargylic carbonate', 'propargylic carbonates', 'propargylic mesylate', 'propargylic mesylates', 'propargylic phosphate', 'propargylic phosphates', 'propargylic acetate', 'propargylic acetates', 'propargylic benzoate', 'propargylic benzoates', 'propargylic carbamate', 'propargylic carbamates', 'propargylic ester', 'propargylic esters', 'propargylic halide', 'propargylic halides', 'propargylic substrate', 'propargylic substrates']),
         ('propargylic acetates', 'substrate', ['propargylic acetate', 'propargyl acetate', 'propargylic benzoate', 'propargylic benzoates', 'ethynylcarbinol acetate']),
         ('propargylic mesylates', 'substrate', ['propargylic mesylate', 'propargyl mesylate', 'propynyl methanesulfonate']),
         ('propargylic sulfinates and sulfonates', 'substrate', ['propargylic sulfinate', 'propargylic sulfonate', 'propargylic tosylate']),
@@ -54,7 +77,7 @@ rules = [
         ('enol triflates', 'substrate', ['enol triflate', 'enol triflates', 'vinyl triflate', 'vinyl triflates']),
         ('rearrangement precursors', 'substrate', ['propargyl claisen rearrangement', 'propargylic claisen rearrangement', 'myers allene synthesis', 'propargylic rearrangement precursor']),
         ('ketenes', 'substrate', ['ketene', 'substituted ketene']),
-        ('terminal alkynes', 'substrate', ['terminal alkyne', '1-alkyne', 'acetylene substrate']),
+        ('terminal alkynes', 'substrate', ['terminal alkyne', '1-alkyne', '1-alkynes', 'acetylene substrate']),
         ('aldehydes', 'substrate', ['aliphatic aldehyde', 'aromatic aldehyde', 'benzaldehyde']),
         ('ketones', 'substrate', ['ketone', 'dialkyl ketone', 'aryl alkyl ketone']),
 

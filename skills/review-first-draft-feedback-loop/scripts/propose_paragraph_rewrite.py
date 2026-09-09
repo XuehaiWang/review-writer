@@ -95,7 +95,7 @@ def propose(args: argparse.Namespace) -> dict:
     rewrite_mode = loop.interactive_rewrite_mode(
         finding,
         evidence,
-        paragraph_goal=float(status.get("paragraph_goal") or 85),
+        paragraph_goal=float(status.get("paragraph_goal") or loop.PARAGRAPH_PASS_THRESHOLD),
     )
     if not rewrite_mode:
         raise RuntimeError(
@@ -149,7 +149,7 @@ def propose(args: argparse.Namespace) -> dict:
                 repair_attempt=attempt,
             )
         )
-        response = loop.call_json_model(
+        response = {'text': loop.corrected_baseline(paragraph['text'], finding['source_corrections'])} if rewrite_mode == 'source_correction' else loop.call_json_model(
             prompt,
             label=f"Paragraph rewrite candidate {args.paragraph_id}",
         )
@@ -162,6 +162,7 @@ def propose(args: argparse.Namespace) -> dict:
             minimum,
             args.max_case_words,
             allowed_unsupported_claims=allowed_unsupported_claims,
+            source_corrections=finding.get('source_corrections'),
         )
         attempts.append(
             {
@@ -197,6 +198,7 @@ def propose(args: argparse.Namespace) -> dict:
         entries = {}
     original = str(paragraph["text"])
     entry = {
+        'source_corrections': finding.get('source_corrections') or [],
         "paragraph_id": args.paragraph_id,
         "status": "pending_human_review",
         "source_text_sha256": hashlib.sha256(original.encode("utf-8")).hexdigest(),

@@ -1,6 +1,7 @@
 from review_writer_core.figure_qualification import (
     candidate_qualification,
     figure_output_state,
+    figure_requirement,
 )
 
 
@@ -35,6 +36,37 @@ def test_resolved_scientific_scheme_passes_minimum_candidate_gate() -> None:
     assert result["score"] >= result["minimum_score"]
 
 
+def test_figure_needs_handle_empty_optional_and_structured_requests():
+    for value in (None, "", [], {}, "none", "no"):
+        assert figure_requirement(value) == "none"
+    assert figure_requirement("None unless an overview clarifies the scope.") == "optional"
+    assert figure_requirement([{"requirement": "optional", "purpose": "An overview"}]) == "optional"
+    assert figure_requirement([{"requirement": "none", "purpose": "Legacy required text"}]) == "none"
+    assert figure_requirement([{"requirement": "optional"}, {"requirement": "required"}]) == "required"
+    assert figure_requirement([{"purpose": "Show representative source schemes"}]) == "required"
+
+
+def test_empty_needs_do_not_remove_the_paper_candidate_pool(monkeypatch, tmp_path):
+    import importlib.util
+    from pathlib import Path
+    script = Path(__file__).resolve().parents[1] / "skills/review-section-drafting-figure-picking/scripts/select_initial_figure_candidates.py"
+    spec = importlib.util.spec_from_file_location("test_candidate_selection", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    data = {
+        "paper_figure_inventory.json": {"papers": [{"paper_id": "P001", "title": "Study",
+                                                   "top_candidates": [_candidate()]}]},
+        "section_tasks.json": [{"section_id": "S01", "allowed_papers": ["P001"], "figure_need": []}],
+        "section_drafts.json": {"sections": [{"section_id": "S01", "paragraphs": [
+            {"paragraph_id": "S01-p1", "paper_id": "P001", "text": "Study overview."}]}]},
+    }
+    monkeypatch.setattr(module, "read_json", lambda path: data[path.name])
+    pool, manuscript = module.build_outputs(tmp_path)
+    assert manuscript == []
+    assert len(pool["papers"]) == 1
+    assert len(pool["papers"][0]["candidates"]) == 1
+
+
 def test_output_state_distinguishes_source_ai_and_manual_results() -> None:
     assert (
         figure_output_state(
@@ -62,4 +94,3 @@ def test_output_state_distinguishes_source_ai_and_manual_results() -> None:
         )
         == "approved_manually_edited"
     )
-

@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 _BOOTSTRAP_ROOT = next(
     (parent for parent in Path(__file__).resolve().parents if (parent / "review_writer_core").is_dir()),
     None,
@@ -25,6 +24,7 @@ if _BOOTSTRAP_ROOT is None:
 if str(_BOOTSTRAP_ROOT) not in sys.path:
     sys.path.insert(0, str(_BOOTSTRAP_ROOT))
 
+from review_writer_core.metadata_tags import STRUCTURED_TAG_KEYS  # noqa: E402
 from review_writer_core.sciatlas_client import (  # noqa: E402
     SciAtlasClient,
     load_config as load_sciatlas_config,
@@ -112,17 +112,6 @@ def load_metadata(review_root: Path) -> dict[str, dict[str, Any]]:
 
 # Kept only for the stub-metadata schema this skill's registration path writes.
 # Parsed MinerU metadata preparation later fills these same taxonomy fields.
-STRUCTURED_TAG_KEYS = [
-    "product",
-    "substrate",
-    "catalyst_or_method",
-    "organometallic_partner",
-    "ligand_or_chiral_source",
-    "leaving_group",
-    "reaction_type",
-    "document_scope",
-]
-
 
 def tokenize(text: str) -> list[str]:
     return dedupe([w.lower() for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9'′\\-]*", text or "") if len(w) >= 3])

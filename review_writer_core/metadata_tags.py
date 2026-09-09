@@ -17,6 +17,18 @@ STRUCTURED_TAG_KEYS: tuple[str, ...] = (
     "document_scope",
 )
 
+DISCOVERY_CATEGORY_WEIGHTS_VERSION = 1
+DISCOVERY_CATEGORY_WEIGHTS: dict[str, float] = {
+    "product": 5.0,
+    "substrate": 5.0,
+    "catalyst_or_method": 4.4,
+    "organometallic_partner": 4.0,
+    "ligand_or_chiral_source": 3.8,
+    "leaving_group": 3.8,
+    "reaction_type": 4.8,
+    "document_scope": 1.5,
+}
+
 
 def structured_tags_are_verified(metadata: Mapping[str, Any] | None) -> bool:
     """Return whether the complete reusable Tag field was human-verified."""

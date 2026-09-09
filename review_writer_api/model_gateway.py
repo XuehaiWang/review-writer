@@ -34,8 +34,12 @@ from .database import (
     utc_now,
 )
 from .model_catalog import DEFAULT_MODEL_TIER, ModelTier, resolve_model_tier
+from .job_lifecycle import active_job_project
 from .server_providers import ServerProviderRuntime, ServerProviderSettingsService
 from .workflow_models import WorkflowJob
+
+
+from review_writer_core.provider_errors import normalize_provider_error
 
 
 class ModelGatewayError(RuntimeError):
@@ -54,8 +58,22 @@ class GatewayRequestConflict(ModelGatewayError):
     status_code = 409
 
 
+class GatewayRequestNotFound(ModelGatewayError):
+    status_code = 404
+
+
 class GatewayProviderError(ModelGatewayError):
     status_code = 502
+
+    def __init__(self, message: str, *, provider_error: dict | None = None):
+        super().__init__(message)
+        normalized = provider_error or normalize_provider_error(self.status_code, message)
+        self.gateway_detail = {"code": normalized["code"], "message": message, "details": normalized}
+
+
+class GatewayBudgetExceeded(ModelGatewayError):
+    # Not a transient provider failure: task retries must not reset this budget.
+    status_code = 422
 
 
 class GatewaySafetyBlocked(ModelGatewayError):
@@ -84,6 +102,7 @@ TEXT_GATEWAY_JOB_TYPES = frozenset(
         "matrix.enrich",
         "sections.generate",
         "planning.reference-analyze",
+        "planning.blueprint",
         "draft.evaluate",
         "draft.optimize",
         "draft.rewrite",
@@ -365,7 +384,11 @@ class ModelGatewayService:
 
     def _validate_live_job(self, claims: TaskClaims) -> None:
         with database_session(self.session_factory) as session:
-            job = session.get(WorkflowJob, uuid.UUID(claims.job_id))
+            job = session.scalar(
+                select(WorkflowJob).where(
+                    WorkflowJob.id == uuid.UUID(claims.job_id), active_job_project()
+                )
+            )
             database_now = (
                 session.scalar(select(func.now()))
                 if session.get_bind().dialect.name == "postgresql"
@@ -388,6 +411,8 @@ class ModelGatewayService:
                 )
             ):
                 raise InvalidTaskToken("The task token is not bound to a running job.")
+            if job.cancellation_requested:
+                raise GatewayRequestConflict("The job has been cancelled.")
 
     def issue_leased_task_token(
         self,
@@ -410,7 +435,11 @@ class ModelGatewayService:
                 if session.get_bind().dialect.name == "postgresql"
                 else utc_now().replace(tzinfo=None)
             )
-            job = session.get(WorkflowJob, job_uuid)
+            job = session.scalar(
+                select(WorkflowJob).where(
+                    WorkflowJob.id == job_uuid, active_job_project()
+                )
+            )
             if (
                 job is None
                 or job.status != "running"
@@ -534,6 +563,27 @@ class ModelGatewayService:
                 str(row.error_message or ""),
             )
 
+    def request_result(self, token: str, *, request_key: str) -> dict[str, Any]:
+        """Read a task's original request without reserving or retrying a call."""
+        claims = self.verify_task_token(token)
+        self._require_capability(claims, "text")
+        self._validate_live_job(claims)
+        with database_session(self.session_factory) as session:
+            row = session.scalar(select(AIModelRequest).where(
+                AIModelRequest.job_id == uuid.UUID(claims.job_id),
+                AIModelRequest.user_id == uuid.UUID(claims.user_id),
+                AIModelRequest.request_key == request_key,
+            ))
+            if row is None:
+                raise GatewayRequestNotFound("The original model request was not found.")
+            return {
+                "status": row.status,
+                **({"error": {key: value for key, value in normalize_provider_error(502, row.error_message).items()
+                              if key != "message"}} if row.status == "failed" else {}),
+                "result": {**(row.response_json or {}), "cached": True}
+                if row.status == "succeeded" else None,
+            }
+
     async def _join_running_request(
         self,
         request_id: str,
@@ -596,6 +646,48 @@ class ModelGatewayService:
             if isinstance(content, dict)
         )
 
+    def _reserve_text_attempt(self, request_id: str, input_chars: int) -> dict[str, int]:
+        """Count actual provider attempts across all phases and Job retries.
+
+        The Job row is the existing serialization lock; counters stay in the
+        existing request records. No new queue, ledger table or client retry.
+        """
+        with database_session(self.session_factory) as session:
+            request = session.get(AIModelRequest, uuid.UUID(request_id))
+            if request is None:
+                raise GatewayRequestConflict("The model request no longer exists.")
+            job = session.get(WorkflowJob, request.job_id)
+            if job is None or job.status != "running" or job.cancellation_requested:
+                raise GatewayRequestConflict("The task is no longer active; no further model calls were made.")
+            root, seen = job, {job.id}
+            while root.retry_of_job_id is not None:
+                parent = session.get(WorkflowJob, root.retry_of_job_id)
+                if (parent is None or parent.id in seen or parent.user_id != job.user_id
+                        or parent.project_id != job.project_id or parent.job_type != job.job_type):
+                    raise GatewayRequestConflict("The task retry lineage is invalid.")
+                seen.add(parent.id)
+                root = parent
+            # All retries share the original Job's lock and budget, including
+            # concurrent siblings. No new task identity can reset spent work.
+            session.scalar(select(WorkflowJob).where(WorkflowJob.id == root.id).with_for_update())
+            retry_jobs = select(WorkflowJob.id).where(WorkflowJob.id == root.id).cte(recursive=True)
+            retry_jobs = retry_jobs.union_all(select(WorkflowJob.id).join(
+                retry_jobs, WorkflowJob.retry_of_job_id == retry_jobs.c.id
+            ).where(WorkflowJob.user_id == job.user_id, WorkflowJob.job_type == job.job_type))
+            records = session.scalars(select(AIModelRequest).where(
+                AIModelRequest.job_id.in_(select(retry_jobs.c.id))
+            )).all()
+            total_attempts = sum(int((row.response_json or {}).get("provider_attempts") or 0) for row in records)
+            total_chars = sum(int((row.response_json or {}).get("provider_input_chars") or 0) for row in records)
+            if (total_attempts >= self.settings.text_job_max_provider_attempts
+                    or total_chars + input_chars > self.settings.text_job_max_input_chars):
+                raise GatewayBudgetExceeded("The shared task model budget is exhausted; completed results remain available.")
+            counters = dict(request.response_json or {})
+            counters["provider_attempts"] = int(counters.get("provider_attempts") or 0) + 1
+            counters["provider_input_chars"] = int(counters.get("provider_input_chars") or 0) + input_chars
+            request.response_json = counters
+            return {key: counters[key] for key in ("provider_attempts", "provider_input_chars")}
+
     async def _provider_call(
         self,
         *,
@@ -603,6 +695,8 @@ class ModelGatewayService:
         prompt: str,
         idempotency_key: str,
         response_format: str = "json",
+        request_id: str = "",
+        claims: TaskClaims | None = None,
     ) -> dict[str, Any]:
         runtime = self._text_runtime()
         if not runtime.enabled:
@@ -633,6 +727,9 @@ class ModelGatewayService:
             "Idempotency-Key": idempotency_key,
         }
         for attempt in range(1, 4):
+            if claims is not None:
+                self._validate_live_job(claims)
+            counters = self._reserve_text_attempt(request_id, len(prompt)) if request_id else {}
             try:
                 response = await self._provider_client.post(
                     endpoint, json=payload, headers=headers
@@ -650,11 +747,15 @@ class ModelGatewayService:
                         raise GatewayProviderError("Model provider returned invalid JSON.") from exc
                     if not isinstance(result, dict):
                         raise GatewayProviderError("Model provider returned an invalid payload.")
+                    result["_gateway_metering"] = counters
                     return result
-                if response.status_code not in self.TRANSIENT_STATUSES or attempt >= 3:
+                failure = normalize_provider_error(response.status_code, response.text)
+                if (failure["category"] in {"quota_exhausted", "context_limit", "authentication"}
+                        or response.status_code not in self.TRANSIENT_STATUSES or attempt >= 3):
                     detail = response.text[:500].replace("\n", " ")
                     raise GatewayProviderError(
-                        f"Model provider returned HTTP {response.status_code}: {detail}"
+                        f"Model provider returned HTTP {response.status_code}: {detail}",
+                        provider_error=failure,
                     )
             await asyncio.sleep(min(8.0, (2 ** (attempt - 1)) + random.random()))
         raise GatewayProviderError("Model provider request failed.")
@@ -864,6 +965,8 @@ class ModelGatewayService:
                     prompt=prompt,
                     idempotency_key=f"{claims.job_id}:{key}",
                     response_format=normalized_format,
+                    request_id=request_id,
+                    claims=claims,
                 )
             usage = self._usage(provider_data)
             cost = calculate_provider_cost(tier, **{
@@ -882,6 +985,7 @@ class ModelGatewayService:
                 "usage": usage,
                 "cost_usd": format(cost, "f"),
                 "cached": False,
+                **dict(provider_data.get("_gateway_metering") or {}),
             }
             if not response["output_text"]:
                 raise GatewayProviderError("Model provider returned an empty response.")
@@ -908,7 +1012,7 @@ class ModelGatewayService:
                         reason="文本模型调用失败，释放冻结额度",
                         details={"error": str(exc)[:500]},
                     )
-                self._finish_request(request_id, error_message=str(exc))
+                self._finish_request(request_id, error_message=json.dumps(exc.gateway_detail, ensure_ascii=False) if isinstance(exc, GatewayProviderError) else str(exc))
             raise
 
     async def complete_json(
@@ -1090,7 +1194,7 @@ class ModelGatewayService:
                         reason="语义检索向量调用失败，释放冻结额度",
                         details={"error": str(exc)[:500]},
                     )
-                self._finish_request(request_id, error_message=str(exc))
+                self._finish_request(request_id, error_message=json.dumps(exc.gateway_detail, ensure_ascii=False) if isinstance(exc, GatewayProviderError) else str(exc))
             raise
 
     @staticmethod

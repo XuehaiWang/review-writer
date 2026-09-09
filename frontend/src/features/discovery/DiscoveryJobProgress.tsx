@@ -58,7 +58,7 @@ export function DiscoveryJobProgress({ job, submitting = false }: DiscoveryJobPr
   const { text } = useUiText();
   const status = job?.status || (submitting ? "submitting" : "queued");
   const screening = screeningState(job?.result);
-  const useScreeningProgress = status === "running" && Boolean(screening);
+  const useScreeningProgress = status === "running" && Boolean(screening) && Number(job?.progress_current || 0) <= 2;
   const total = useScreeningProgress
     ? screening!.total
     : Math.max(0, Number(job?.progress_total || 0));
@@ -80,20 +80,23 @@ export function DiscoveryJobProgress({ job, submitting = false }: DiscoveryJobPr
     const persistedStage = job?.result?.source_progress && typeof job.result.source_progress === "object"
       ? String((job.result.source_progress as Record<string, unknown>).stage || "")
       : "";
-    if (screening) {
+    if (useScreeningProgress && screening) {
       title = text("正在进行论文初步证据分类", "Screening candidate-paper evidence");
       detail = text(
         `已完成 ${screening.current}/${screening.total} 篇，复用缓存 ${screening.cached} 篇；最多 ${screening.concurrency} 篇并行。`,
         `Completed ${screening.current}/${screening.total}; reused ${screening.cached} cached classifications with up to ${screening.concurrency} concurrent papers.`,
       );
-    } else if (persistedStage === "query_planning") {
-      title = text("正在生成查询计划", "Building the query plan");
-      detail = text("正在将综述主题压缩为检索词、筛选条件和分类维度。", "Converting the review topic into search terms, filters, and classification axes.");
-    } else if (persistedStage === "local_search") {
+    } else if (persistedStage === "query_planning" && current <= 2) {
+      title = text("正在解析检索条件", "Parsing search criteria");
+      detail = text("正在本地提取主题词和年份范围，正式分类在分析阶段确定。", "Extracting topic terms and year bounds locally; formal classification follows in Analysis.");
+    } else if (persistedStage === "resolving_concepts" && current <= 2) {
+      title = text("正在补充歧义缩写", "Resolving ambiguous abbreviations");
+      detail = text("已执行原词本地召回；正在尝试补充缩写全称，不成功也会保留原词继续检索。", "Original-term local retrieval has run. Optional abbreviation expansion will not discard the baseline search if unavailable.");
+    } else if (persistedStage === "local_search" && current <= 2) {
       title = text("正在检索本地文献库", "Searching the local Library");
       detail = text("正在执行题录、分类规则和全文词法召回。", "Running metadata, taxonomy, and full-text lexical retrieval.");
     } else if (current <= 1) {
-      title = text("正在生成查询计划", "Building the query plan");
+      title = text("正在解析检索条件", "Parsing search criteria");
       detail = text("正在读取项目主题、基础 Metadata 和分类规则。", "Reading the project topic, base Metadata, and taxonomy rules.");
     } else if (current === 2) {
       title = text("正在检索本地与联网来源", "Searching local and online sources");
@@ -113,7 +116,7 @@ export function DiscoveryJobProgress({ job, submitting = false }: DiscoveryJobPr
     detail = text("已收到停止请求，正在等待安全检查点。", "The stop request is waiting for a safe checkpoint.");
   } else if (status === "succeeded") {
     title = text("检索完成", "Search complete");
-    detail = text("最新候选论文和分类分组已经载入下方审核区。", "The latest candidates and taxonomy groups are loaded below.");
+    detail = text("最新候选论文已载入下方审核区，正式分类将在分析阶段完成。", "The latest candidates are loaded below; formal classification follows in Analysis.");
   } else if (status === "failed") {
     if (job?.error_code === "INSUFFICIENT_CREDIT") {
       title = text("检索未执行", "Search not run");

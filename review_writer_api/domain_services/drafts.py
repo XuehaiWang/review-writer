@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import re
 import threading
 import uuid
@@ -11,15 +11,29 @@ from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
-
-from sqlalchemy import select
+from review_writer_core.scientific_facts import (
+    attach_repair_fact_context, evidence_repair_has_changes,
+    fact_support_spans, fact_identity, merge_facts, fact_is_usable,
+)
 
 from review_writer_api.artifact_service import ArtifactService
-from review_writer_api.database import database_session, utc_now
-from review_writer_api.domain_services.base import OwnedProjectService
-from review_writer_api.domain_services.planning import (
-    BLUEPRINT_LOGICAL_NAME,
-    MATRIX_LOGICAL_NAME,
+from review_writer_api.database import utc_now
+from review_writer_api.domain_services.base import ArtifactBackedService
+from review_writer_api.domain_services.actions.draft.errors import (
+    DraftApprovalBlocked,
+    DraftNotReady,
+)
+from review_writer_api.domain_services.actions.draft.decisions import (
+    DraftDecisionActionsMixin,
+)
+from review_writer_api.domain_services.actions.draft.optimization import (
+    DraftOptimizationActionsMixin,
+)
+from review_writer_api.domain_services.actions.draft.quality import (
+    DraftQualityActionsMixin,
+)
+from review_writer_api.domain_services.actions.draft.rewrite import (
+    DraftRewriteActionsMixin,
 )
 from review_writer_api.errors import (
     WorkflowConflict,
@@ -27,98 +41,91 @@ from review_writer_api.errors import (
     WorkflowValidationError,
 )
 from review_writer_api.security import Permission, Principal
-from review_writer_api.workflow_models import LibraryPaper
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
 from review_writer_core.draft_bibliography import (
-    citation_entries_from_draft,
+    citation_map_comment,
+    format_citation_group,
     reference_text,
     strip_numeric_callouts,
 )
-from review_writer_core.draft_issue_routing import route_draft_issue
+from review_writer_core.chemical_typography import normalize_chemical_typography
+from review_writer_core.publication_tables import render_section_comparison
+from review_writer_core.draft_issue_routing import (
+    quality_issue_paper_ids,
+    quality_issue_source_evidence_refs,
+    route_draft_issue,
+    REPAIR_ROUTING_VERSION,
+    planning_adjustments,
+    requires_user_decision,
+)
+from review_writer_core.draft_quality import quality_score
+from review_writer_core.stages.draft.text import (
+    apply_rewrite_overlays,
+    normalize_draft_text,
+    optimization_candidate,
+    paragraph_spans,
+    text_sha256,
+)
 from review_writer_core.paragraph_markers import ensure_prose_paragraph_markers
+from review_writer_core.figure_caption import caption_fields
 from review_writer_core.publication_caption import (
     figure_rights_fields,
-    normalize_publication_caption,
 )
 from review_writer_core.publication_voice import publication_voice_issues
 from review_writer_core.writing_contracts import (
-    CASE_PARAGRAPH_MAX_WORDS,
-    CASE_PARAGRAPH_MIN_WORDS,
+    DRAFT_PASS_THRESHOLD,
+    substantive_quality_findings,
+    PARAGRAPH_PASS_THRESHOLD,
+    paragraph_finding_is_blocking,
+)
+from review_writer_core.workflow.artifacts import (
+    DRAFT_APPROVAL,
+    DRAFT_MANUSCRIPT as DRAFT_DOCUMENT,
+    DRAFT_OPTIMIZATION_PROPOSALS as DRAFT_OPTIMIZATIONS,
+    DRAFT_QUALITY_REPORT as DRAFT_QUALITY,
+    DRAFT_REWRITE_CANDIDATES as DRAFT_REWRITES,
+    DRAFT_REWRITE_OVERLAYS as DRAFT_OVERLAYS,
+    FIGURE_MANIFEST,
+    MATRIX as MATRIX_LOGICAL_NAME,
+    SECTION_DRAFTS as SECTION_INDEX,
+    SECTION_EVIDENCE_PACKAGE as SECTION_EVIDENCE,
 )
 
 
-DRAFT_DOCUMENT = "draft/manuscript.md"
-DRAFT_QUALITY = "draft/quality.json"
-DRAFT_REWRITES = "draft/rewrite-candidates.json"
-DRAFT_OPTIMIZATIONS = "draft/optimization-proposals.json"
-DRAFT_OVERLAYS = "draft/rewrite-overlays.json"
-DRAFT_APPROVAL = "draft/approval.json"
-SECTION_INDEX = "sections/section_drafts.json"
-SECTION_EVIDENCE = "sections/evidence_package.json"
-SECTION_WRITING_PLAN = "sections/writing_plan.json"
-FIGURE_MANIFEST = "figures/manifest.json"
-PARAGRAPH_MARKER = re.compile(
-    r"<!--\s*paragraph_id:\s*([A-Za-z0-9_.:-]+)\s*-->"
-)
-class DraftNotReady(WorkflowConflict):
-    code = "DRAFT_NOT_READY"
+class DraftsService(
+    DraftDecisionActionsMixin,
+    DraftOptimizationActionsMixin,
+    DraftQualityActionsMixin,
+    DraftRewriteActionsMixin,
+    ArtifactBackedService,
+):
+    _paragraph_spans = staticmethod(paragraph_spans)
+    _normalized = staticmethod(normalize_draft_text)
+    _text_sha256 = staticmethod(text_sha256)
+    _apply_rewrite_overlays = staticmethod(apply_rewrite_overlays)
+    _optimization_candidate = staticmethod(optimization_candidate)
 
-
-class DraftApprovalBlocked(WorkflowConflict):
-    code = "DRAFT_APPROVAL_BLOCKED"
-
-
-class DraftsService(OwnedProjectService):
     def __init__(self, repository: WorkflowRepository, artifacts: ArtifactService):
         self.repository = repository
         self.artifacts = artifacts
         self._write_lock = threading.RLock()
 
-    def _artifact(self, principal: Principal, project_id: str, logical_name: str):
-        self._owned_project(principal, project_id)
-        return self.repository.get_current_artifact(
-            principal.user_id, project_id, logical_name
-        )
-
-    def _read_text(
-        self,
-        principal: Principal,
-        project_id: str,
-        logical_name: str,
-        *,
-        required: bool = True,
-    ) -> tuple[str, ArtifactRecord | None]:
-        artifact = self._artifact(principal, project_id, logical_name)
-        if artifact is None:
-            if required:
-                raise WorkflowNotFound("Current workflow artifact not found.")
-            return "", None
-        resolved = self.artifacts.resolve_owned_artifact(principal.user_id, artifact.id)
-        try:
-            return resolved.path.read_text(encoding="utf-8"), artifact
-        except OSError as exc:
-            raise WorkflowConflict("The current workflow artifact is unreadable.") from exc
-
-    def _read_json(
-        self,
-        principal: Principal,
-        project_id: str,
-        logical_name: str,
-        *,
-        required: bool = True,
-    ) -> tuple[dict[str, Any], ArtifactRecord | None]:
-        text, artifact = self._read_text(
-            principal, project_id, logical_name, required=required
-        )
-        if artifact is None:
-            return {}, None
-        try:
-            value = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise WorkflowConflict("The current workflow artifact is invalid.") from exc
-        if not isinstance(value, dict):
-            raise WorkflowConflict("The current workflow artifact is invalid.")
-        return value, artifact
+    def _validate_repair_lineages(self, principal, evidence_repair):
+        expected = evidence_repair.get("fact_agent_source_lineages") or {}
+        if not expected:
+            return
+        from review_writer_api.domain_services.library_index import LibraryIndexService
+        index = LibraryIndexService(self.repository.session_factory, self.artifacts.workspace_manager)
+        expected_parents = evidence_repair.get("fact_agent_source_parents") or {}
+        if expected_parents:
+            parents = sorted(set(expected_parents.values()))
+            actual_parents = self._supporting_source_parents(self._catalog(principal, parents), parents)
+            if actual_parents != expected_parents:
+                raise WorkflowConflict("The linked supporting-information scope changed while the repair was pending.")
+        for paper_id, lineage in expected.items():
+            _paper, _artifacts, _lineage, current = index._paper_and_lineage(principal, paper_id)
+            if not lineage or current != lineage:
+                raise WorkflowConflict("The article or linked SI changed while the fact repair candidate was pending.")
 
     def _publish_files(
         self,
@@ -151,6 +158,18 @@ class DraftsService(OwnedProjectService):
         staging = self.artifacts.stage_run_directory(
             principal.user_id, project_id, run.id
         )
+        if DRAFT_DOCUMENT in files and DRAFT_OVERLAYS in files:
+            # A historical Draft must point to its matching accepted revision
+            # bundle, not the overlay from before acceptance. Publish the
+            # overlay before the Draft; Quality can then depend on both.
+            ordered = {}
+            for name, value in files.items():
+                if name == DRAFT_OVERLAYS:
+                    continue
+                if name == DRAFT_DOCUMENT:
+                    ordered[DRAFT_OVERLAYS] = files[DRAFT_OVERLAYS]
+                ordered[name] = value
+            files = ordered
         published: dict[str, ArtifactRecord] = {}
         for index, (logical_name, (content_or_builder, artifact_type)) in enumerate(files.items()):
             content = (
@@ -161,6 +180,10 @@ class DraftsService(OwnedProjectService):
             suffix = Path(logical_name).suffix or ".bin"
             filename = f"{index:03d}-{uuid.uuid4().hex}{suffix}"
             (staging / filename).write_bytes(content)
+            artifact_metadata = (metadata_builder(logical_name, published)
+                                 if metadata_builder is not None else dict(metadata or {}))
+            if logical_name in {DRAFT_DOCUMENT, DRAFT_QUALITY} and DRAFT_OVERLAYS in published:
+                artifact_metadata["source_rewrite_overlay_artifact_id"] = published[DRAFT_OVERLAYS].id
             published[logical_name] = self.artifacts.publish(
                 principal.user_id,
                 project_id,
@@ -170,11 +193,7 @@ class DraftsService(OwnedProjectService):
                 artifact_type=artifact_type,
                 producer_stage="draft",
                 make_current=False,
-                metadata=(
-                    metadata_builder(logical_name, published)
-                    if metadata_builder is not None
-                    else dict(metadata or {})
-                ),
+                metadata=artifact_metadata,
             )
         state = self.repository.promote_stage_artifacts_atomically(
             principal.user_id,
@@ -190,109 +209,6 @@ class DraftsService(OwnedProjectService):
             expected_stage_states=expected_stage_states,
         )
         return published, state
-
-    @staticmethod
-    def _paragraph_spans(markdown: str) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        for marker in PARAGRAPH_MARKER.finditer(markdown or ""):
-            prefix = markdown[: marker.start()].rstrip()
-            start = prefix.rfind("\n\n") + 2
-            text = prefix[start:].strip()
-            if not text or text.startswith(("#", "![", "<!--")):
-                continue
-            rows.append(
-                {
-                    "paragraph_id": marker.group(1),
-                    "text": text,
-                    "start": start,
-                    "end": len(prefix),
-                    "marker_end": marker.end(),
-                }
-            )
-        return rows
-
-    @staticmethod
-    def _normalized(text: str) -> str:
-        return re.sub(r"\s+", " ", str(text or "")).strip()
-
-    @classmethod
-    def _text_sha256(cls, text: str) -> str:
-        return hashlib.sha256(cls._normalized(text).encode("utf-8")).hexdigest()
-
-    @classmethod
-    def _apply_rewrite_overlays(
-        cls, markdown: str, overlays: dict[str, Any]
-    ) -> tuple[str, dict[str, list[str]]]:
-        entries = overlays.get("entries") if isinstance(overlays, dict) else {}
-        if not isinstance(entries, dict) or not entries:
-            return markdown, {"applied": [], "conflicts": []}
-        updated = markdown
-        applied: list[str] = []
-        conflicts: list[str] = []
-        for raw_id, raw_entry in entries.items():
-            paragraph_id = str(raw_id)
-            entry = raw_entry if isinstance(raw_entry, dict) else {}
-            paragraph = next(
-                (
-                    row
-                    for row in cls._paragraph_spans(updated)
-                    if row["paragraph_id"] == paragraph_id
-                ),
-                None,
-            )
-            rewritten = str(entry.get("rewritten_text") or "").strip()
-            if (
-                paragraph is None
-                or not rewritten
-                or cls._text_sha256(str(paragraph["text"]))
-                != str(entry.get("source_text_sha256") or "")
-            ):
-                conflicts.append(paragraph_id)
-                continue
-            updated = (
-                updated[: paragraph["start"]]
-                + rewritten
-                + updated[paragraph["end"] :]
-            )
-            applied.append(paragraph_id)
-        return updated, {"applied": applied, "conflicts": conflicts}
-
-    @classmethod
-    def _optimization_candidate(
-        cls, current_text: str, model_text: str
-    ) -> tuple[str, list[dict[str, str]]]:
-        """Build a reviewable candidate from paragraph bodies only."""
-        source_paragraphs = cls._paragraph_spans(current_text)
-        model_paragraphs = {
-            str(row["paragraph_id"]): row for row in cls._paragraph_spans(model_text)
-        }
-        changes: list[dict[str, str]] = []
-        replacements: list[tuple[int, int, str]] = []
-        for source in source_paragraphs:
-            paragraph_id = str(source["paragraph_id"])
-            candidate = model_paragraphs.get(paragraph_id)
-            if candidate is None:
-                continue
-            original_text = str(source["text"])
-            candidate_text = str(candidate["text"]).strip()
-            if cls._normalized(candidate_text) == cls._normalized(original_text):
-                continue
-            changes.append(
-                {
-                    "paragraph_id": paragraph_id,
-                    "original_text": original_text,
-                    "candidate_text": candidate_text,
-                }
-            )
-            replacements.append(
-                (int(source["start"]), int(source["end"]), candidate_text)
-            )
-        candidate_draft = current_text
-        for start, end, replacement in reversed(replacements):
-            candidate_draft = (
-                candidate_draft[:start] + replacement + candidate_draft[end:]
-            )
-        return candidate_draft.rstrip() + "\n", changes
 
     @classmethod
     def _optimization_candidate_from_changes(
@@ -386,6 +302,7 @@ class DraftsService(OwnedProjectService):
         # publication numbering without creating gaps.
         citation_numbers: dict[str, int] = {}
         cited_paper_ids: set[str] = set()
+        table_number = 0
         for section in section_index.get("sections") or []:
             if not isinstance(section, dict):
                 continue
@@ -431,7 +348,7 @@ class DraftsService(OwnedProjectService):
                             cited_papers.append(paper_id)
                     if callouts:
                         claim_bound_parts.append(
-                            f"{sentence} [{', '.join(str(value) for value in callouts)}]"
+                            f"{sentence} {format_citation_group(callouts)}"
                         )
                     else:
                         claim_bound_parts.append(sentence)
@@ -465,7 +382,7 @@ class DraftsService(OwnedProjectService):
                         cited_paper_ids.add(paper_id)
                     text = strip_numeric_callouts(text)
                     if callouts:
-                        text = f"{text} [{', '.join(str(value) for value in callouts)}]"
+                        text = f"{text} {format_citation_group(callouts)}"
                 paragraph_evidence_rows: list[dict[str, Any]] = []
                 claim_ids: list[str] = []
                 for realization in paragraph.get("claim_realizations") or []:
@@ -521,24 +438,10 @@ class DraftsService(OwnedProjectService):
                     figure_number += 1
                     output_id = str(figure["output_artifact_id"])
                     paper_id = str(figure.get("paper_id") or "").strip()
-                    caption_text = str(figure.get("source_caption_text") or "").strip()
                     role = str(figure.get("representative_role") or "unknown")
-                    normalized_caption = normalize_publication_caption(
-                        caption_text,
-                        representative_role=role,
-                        source_label=figure.get("source_label"),
-                        context_title=figure.get("section_heading"),
-                    )
-                    caption_body = str(
-                        figure.get("publication_caption_text")
-                        or normalized_caption.publication_text
-                        or ""
-                    ).strip()
-                    caption_plain = str(
-                        figure.get("alt_text")
-                        or normalized_caption.alt_text
-                        or f"Figure {figure_number}"
-                    ).strip()
+                    display_caption = caption_fields(figure)
+                    caption_body = str(display_caption.get("publication_caption_text") or "").strip()
+                    caption_plain = caption_body or f"Figure {figure_number}"
                     rights = figure_rights_fields(figure)
                     source_reference_number = citation_numbers.get(paper_id)
                     render_mode = str(
@@ -566,16 +469,7 @@ class DraftsService(OwnedProjectService):
                             )
                             if value
                         )
-                    interpretation_basis = (
-                        "source_caption"
-                        if caption_text
-                        and not re.fullmatch(
-                            r"(?:figure|scheme|table)\s*\d+[a-z]?[.:]?",
-                            caption_text,
-                            re.IGNORECASE,
-                        )
-                        else "identity_only"
-                    )
+                    interpretation_basis = display_caption["caption_provenance"]["method"]
                     figure_evidence_ids = list(
                         dict.fromkeys(
                             str(row.get("evidence_id") or "")
@@ -587,21 +481,8 @@ class DraftsService(OwnedProjectService):
                             )
                         )
                     )
-                    role_text = {
-                        "workflow": "shows the study workflow discussed here",
-                        "core_transformation": "summarizes the core transformation discussed here",
-                        "mechanism": "depicts the proposed mechanistic framework discussed here",
-                        "mechanism_model": "depicts the proposed mechanistic framework discussed here",
-                        "scope": "summarizes the reported scope or result pattern discussed here",
-                        "scope_samples": "summarizes the reported scope or sample pattern discussed here",
-                        "quantitative_results": "summarizes the quantitative result discussed here",
-                        "comparison_ablation": "supports the comparison discussed here",
-                        "paper_overview": "summarizes the study's overall research strategy",
-                        "conceptual_overview": "provides a conceptual overview for this discussion",
-                        "structure_image": "shows the representative structure or image discussed here",
-                        "unknown": "provides source-linked visual context for this discussion",
-                    }.get(role, "provides source-linked visual context for this discussion")
-                    figure_callouts.append(f"Figure {figure_number} {role_text}.")
+                    if not re.search(rf"\bFigure\s+{figure_number}\b", text, re.I):
+                        figure_callouts.append(f"Figure {figure_number}")
                     metadata = json.dumps(
                         {
                             "figure_id": figure.get("figure_id"),
@@ -614,10 +495,11 @@ class DraftsService(OwnedProjectService):
                             "claim_ids": list(dict.fromkeys(claim_ids)),
                             "evidence_ids": paragraph_evidence_ids,
                             "figure_evidence_ids": figure_evidence_ids,
-                            "caption_normalization_status": normalized_caption.status,
-                            "caption_normalization_version": normalized_caption.version,
-                            "caption_quality": figure.get("caption_quality")
-                            or normalized_caption.manifest_fields().get("caption_quality"),
+                            "caption_normalization_status": display_caption["caption_normalization_status"],
+                            "caption_normalization_version": display_caption["caption_normalization_version"],
+                            "caption_quality": display_caption["caption_quality"],
+                            "caption_provenance": {key: value for key, value in display_caption["caption_provenance"].items()
+                                                   if key != "source_text"},
                             "source_reference_number": source_reference_number,
                             "source_identity_status": rights.get(
                                 "source_identity_status"
@@ -646,10 +528,21 @@ class DraftsService(OwnedProjectService):
                         )
                     )
                 if figure_callouts:
-                    text = f"{text} {' '.join(figure_callouts)}"
+                    # Place the reference before final punctuation/citation;
+                    # do not manufacture a second scientific sentence.
+                    suffix = re.search(r"([.!?]?\s*(?:\[[\d,;\s–-]+\]\s*)*)$", text)
+                    position = suffix.start() if suffix else len(text)
+                    text = f"{text[:position].rstrip()} ({'; '.join(figure_callouts)}){text[position:]}"
                 parts.append(f"{text}\n\n<!-- paragraph_id: {paragraph_id} -->")
                 parts.extend(figure_blocks)
+            comparison = render_section_comparison(
+                section, matrix_by_id, citation_numbers, table_number=table_number + 1,
+            )
+            if comparison:
+                table_number += 1
+                parts.append(comparison)
         if cited_paper_ids:
+            parts.append(citation_map_comment(citation_numbers))
             references = ["## References"]
             for paper_id in sorted(cited_paper_ids, key=citation_numbers.__getitem__):
                 number = citation_numbers[paper_id]
@@ -657,7 +550,7 @@ class DraftsService(OwnedProjectService):
                 reference = reference_text(row, fallback=f"Paper P{number:03d}")
                 references.append(f"[{number}] {reference}")
             parts.append("\n".join(references))
-        return "\n\n".join(part.strip() for part in parts if part.strip()) + "\n"
+        return normalize_chemical_typography("\n\n".join(part.strip() for part in parts if part.strip()) + "\n")
 
     def assemble(self, principal: Principal, project_id: str) -> dict[str, Any]:
         principal.require(Permission.PROJECT_WRITE)
@@ -742,6 +635,7 @@ class DraftsService(OwnedProjectService):
         figures = self._artifact(principal, project_id, FIGURE_MANIFEST)
         matrix = self._artifact(principal, project_id, MATRIX_LOGICAL_NAME)
         evidence = self._artifact(principal, project_id, SECTION_EVIDENCE)
+        state = self.repository.get_stage_state(principal.user_id, project_id, "draft")
         metadata = dict(draft.metadata if draft else {})
         source_evidence_id = str(
             metadata.get("source_section_evidence_artifact_id") or ""
@@ -749,12 +643,13 @@ class DraftsService(OwnedProjectService):
         upstream_stale = bool(
             draft
             and (
-                not sections
+                (state is not None and state.status == "stale")
+                or not sections
                 or not figures
                 or not matrix
                 or metadata.get("source_sections_artifact_id") != sections.id
                 or metadata.get("source_figure_manifest_artifact_id") != figures.id
-                or metadata.get("source_matrix_artifact_id") != matrix.id
+                or not self._matrix_dependency_matches(principal, project_id, metadata.get("source_matrix_artifact_id"), matrix)
                 or (
                     source_evidence_id
                     and (
@@ -798,15 +693,10 @@ class DraftsService(OwnedProjectService):
         remain immutable, so the API decorates only the response returned to the UI.
         """
 
-        if int(issue.get("repair_routing_version") or 0) >= 2:
+        if int(issue.get("repair_routing_version") or 0) >= REPAIR_ROUTING_VERSION:
             return dict(issue)
-        legacy_route = str(issue.get("repair_route") or "")
-        if str(issue.get("repair_stage") or "").strip() and legacy_route not in {
-            "manual_online_retrieval_decision",
-            "targeted_evidence_then_paragraph_rewrite",
-            "claim_downgrade_then_paragraph_rewrite",
-            "synthesis_plan_repair",
-        }:
+        # Explicit custom actions are not a legacy output of this router.
+        if not issue.get("repair_routing_version") and issue.get("repair_action") and not issue.get("repair_route"):
             return dict(issue)
         source_status = str(issue.get("source_check_status") or "not_assessed")
         evaluator_route = str(issue.get("route") or "")
@@ -828,7 +718,6 @@ class DraftsService(OwnedProjectService):
                 "citation-map mismatch",
                 "citation map mismatch",
                 "unlisted bibliography",
-                "callout",
             )
         )
         repair = route_draft_issue(
@@ -909,10 +798,12 @@ class DraftsService(OwnedProjectService):
                         "url": f"/api/v1/artifacts/{output_id}/content",
                     }
                 )
+        freshness = self._freshness(principal, project_id, draft_artifact)
         quality_current = bool(
             draft_artifact
             and quality_artifact
             and quality.get("source_draft_artifact_id") == draft_artifact.id
+            and not freshness["upstream_stale"]
         )
         public_quality = dict(quality) if quality else {}
         issues = []
@@ -920,6 +811,7 @@ class DraftsService(OwnedProjectService):
             if not isinstance(issue, dict):
                 continue
             issue = self._public_issue_repair_metadata(issue)
+            issue["blocking"] = paragraph_finding_is_blocking(issue)
             paragraph_id = str(issue.get("paragraph_id") or "")
             paragraph = paragraph_by_id.get(paragraph_id) or {
                 "paragraph_id": paragraph_id,
@@ -936,7 +828,10 @@ class DraftsService(OwnedProjectService):
                 }
             )
         if public_quality:
+            public_quality["approval_findings"] = substantive_quality_findings(quality)
+            public_quality["blocking_issue_count"] = len(public_quality["approval_findings"])
             public_quality["issues"] = issues
+            public_quality["planning_adjustments"] = planning_adjustments(issues)
             public_quality["current"] = quality_current
             if not quality_current:
                 public_quality["status"] = "stale"
@@ -975,6 +870,11 @@ class DraftsService(OwnedProjectService):
             if not isinstance(value, dict):
                 continue
             proposal = dict(value)
+            source_quality = proposal.get("source_quality")
+            if isinstance(source_quality, dict) and source_quality:
+                # Repair legacy pending proposals created from rubric payloads,
+                # which use ``total_score`` instead of the API ``score`` key.
+                proposal["source_score"] = quality_score(source_quality)
             if (
                 proposal.get("status") == "pending"
                 and (
@@ -1050,7 +950,7 @@ class DraftsService(OwnedProjectService):
                 )
                 if str(value).strip()
             ),
-            "first_draft_md": text,
+            "first_draft_md": normalize_chemical_typography(text),
             "publication_voice": {
                 "status": "warning" if voice_issues else "pass",
                 "issues": voice_issues,
@@ -1099,7 +999,7 @@ class DraftsService(OwnedProjectService):
                 }
                 for version in versions
             ],
-            "freshness": self._freshness(principal, project_id, draft_artifact),
+            "freshness": freshness,
         }
 
     def save_text(
@@ -1384,204 +1284,8 @@ class DraftsService(OwnedProjectService):
             )
         return {"draft_artifact_id": artifact.id, "revision": state.revision}
 
-    def evaluation_payload(
-        self,
-        principal: Principal,
-        project_id: str,
-        *,
-        goal: float,
-        paragraph_goal: float = 85.0,
-        max_iterations: int = 2,
-        min_case_words: int = CASE_PARAGRAPH_MIN_WORDS,
-        max_case_words: int = CASE_PARAGRAPH_MAX_WORDS,
-    ) -> dict[str, Any]:
-        payload = self.get(principal, project_id)
-        if not payload["draft_artifact_id"]:
-            raise DraftNotReady("Assemble and save Draft before evaluation.")
-        if payload["freshness"]["upstream_stale"]:
-            raise DraftNotReady("Draft inputs changed. Reassemble Draft before evaluation.")
-        marked_text, marker_report = ensure_prose_paragraph_markers(
-            payload["first_draft_md"]
-        )
-        if int(marker_report.get("prose_paragraph_count") or 0) < 1:
-            raise DraftNotReady("The current Draft contains no prose paragraphs to evaluate.")
-        if marker_report.get("changed"):
-            self.save_text(
-                principal,
-                project_id,
-                text=marked_text,
-                revision=int(payload["revision"]),
-                operation="evaluation-marker-normalization",
-            )
-            payload = self.get(principal, project_id)
-        safe_min_words = max(1, int(min_case_words))
-        safe_max_words = max(1, int(max_case_words))
-        if safe_max_words < safe_min_words:
-            raise WorkflowValidationError(
-                "The maximum case word count must not be lower than the minimum."
-            )
-        compatibility = self.compatibility_payload(principal, project_id)
-        current_quality = (
-            dict(payload.get("quality") or {})
-            if bool((payload.get("quality") or {}).get("current"))
-            else {}
-        )
-        return {
-            **compatibility,
-            "project_id": project_id,
-            "source_draft_artifact_id": payload["draft_artifact_id"],
-            "source_quality_artifact_id": payload["quality_artifact_id"],
-            "expected_revision": payload["revision"],
-            "draft_text": payload["first_draft_md"],
-            "paragraphs": payload["paragraphs"],
-            "goal": max(0.0, min(float(goal), 100.0)),
-            "paragraph_goal": max(0.0, min(float(paragraph_goal), 100.0)),
-            "max_iterations": max(1, min(int(max_iterations), 10)),
-            "min_case_words": safe_min_words,
-            "max_case_words": safe_max_words,
-            "citation_identity": citation_entries_from_draft(
-                payload["first_draft_md"],
-                dict(compatibility.get("section_index") or {}),
-            ),
-            "prior_quality_context": {
-                "source_quality_artifact_id": payload["quality_artifact_id"],
-                "claim_dispositions": dict(
-                    current_quality.get("claim_dispositions") or {}
-                ),
-                "manual_issue_fingerprints": [
-                    str(issue.get("issue_fingerprint") or "")
-                    for issue in current_quality.get("issues") or []
-                    if isinstance(issue, dict)
-                    and not bool(issue.get("auto_repairable", True))
-                    and str(issue.get("issue_fingerprint") or "")
-                ],
-            },
-        }
 
-    def compatibility_payload(
-        self, principal: Principal, project_id: str
-    ) -> dict[str, Any]:
-        project = self.repository.get_owned_project(principal.user_id, project_id)
-        matrix, matrix_artifact = self._read_json(
-            principal, project_id, MATRIX_LOGICAL_NAME, required=False
-        )
-        sections, sections_artifact = self._read_json(
-            principal, project_id, SECTION_INDEX, required=False
-        )
-        section_evidence, section_evidence_artifact = self._read_json(
-            principal, project_id, SECTION_EVIDENCE, required=False
-        )
-        figures, _figures_artifact = self._read_json(
-            principal, project_id, FIGURE_MANIFEST, required=False
-        )
-        blueprint, _blueprint_artifact = self._read_json(
-            principal, project_id, BLUEPRINT_LOGICAL_NAME, required=False
-        )
-        writing_plan, writing_plan_artifact = self._read_json(
-            principal, project_id, SECTION_WRITING_PLAN, required=False
-        )
-        overlays, overlay_artifact = self._read_json(
-            principal, project_id, DRAFT_OVERLAYS, required=False
-        )
-        artifact_paths: dict[str, str] = {}
-        for row in figures.get("figures") or []:
-            if not isinstance(row, dict):
-                continue
-            artifact_id = str(row.get("output_artifact_id") or "")
-            if artifact_id:
-                artifact_paths[artifact_id] = str(
-                    self.artifacts.resolve_owned_artifact(
-                        principal.user_id, artifact_id
-                    ).path
-                )
-        paper_ids = {
-            str(row.get("paper_id") or "")
-            for row in matrix.get("rows") or []
-            if isinstance(row, dict) and row.get("paper_id")
-        }
-        library_metadata: dict[str, dict[str, Any]] = {}
-        if paper_ids:
-            with database_session(self.repository.session_factory) as session:
-                rows = session.scalars(
-                    select(LibraryPaper).where(
-                        LibraryPaper.user_id == uuid.UUID(principal.user_id),
-                        LibraryPaper.paper_id.in_(tuple(paper_ids)),
-                        LibraryPaper.deleted_at.is_(None),
-                    )
-                ).all()
-                library_metadata = {
-                    row.paper_id: dict(row.metadata_json or {}) for row in rows
-                }
-        return {
-            "matrix": matrix,
-            "blueprint": blueprint,
-            "section_index": sections,
-            "section_evidence": section_evidence,
-            "writing_plan": writing_plan,
-            "figure_manifest": figures,
-            "figure_artifact_paths": artifact_paths,
-            "library_metadata": library_metadata,
-            "rewrite_overlays": overlays,
-            "taxonomy_profile": str(
-                project.taxonomy_profile if project is not None else "general_academic"
-            ),
-            "source_matrix_artifact_id": matrix_artifact.id if matrix_artifact else "",
-            "source_sections_artifact_id": sections_artifact.id if sections_artifact else "",
-            "source_section_evidence_artifact_id": (
-                section_evidence_artifact.id if section_evidence_artifact else ""
-            ),
-            "source_writing_plan_artifact_id": (
-                writing_plan_artifact.id if writing_plan_artifact else ""
-            ),
-            "source_rewrite_overlay_artifact_id": (
-                overlay_artifact.id if overlay_artifact else ""
-            ),
-        }
 
-    def automatic_synthesis_source(
-        self,
-        principal: Principal,
-        project_id: str,
-        *,
-        text: str | None = None,
-        draft: ArtifactRecord | None = None,
-    ) -> dict[str, Any]:
-        """Return only source-verified Draft prose for automatic downstream synthesis."""
-
-        if text is None or draft is None:
-            text, draft = self._read_text(principal, project_id, DRAFT_DOCUMENT)
-        quality, quality_artifact = self._read_json(
-            principal, project_id, DRAFT_QUALITY, required=False
-        )
-        excluded = {
-            str(value)
-            for value in quality.get("unverified_manual_paragraph_ids") or []
-            if str(value).strip()
-        }
-        if (
-            quality_artifact is None
-            or quality.get("source_draft_artifact_id") != draft.id
-        ):
-            excluded = set()
-        filtered = str(text)
-        removed: list[str] = []
-        for paragraph in reversed(self._paragraph_spans(filtered)):
-            paragraph_id = str(paragraph["paragraph_id"])
-            if paragraph_id not in excluded:
-                continue
-            filtered = (
-                filtered[: int(paragraph["start"])]
-                + "\n"
-                + filtered[int(paragraph["marker_end"]) :]
-            )
-            removed.append(paragraph_id)
-        return {
-            "draft_text": filtered.rstrip() + "\n",
-            "source_draft_artifact_id": draft.id,
-            "source_quality_artifact_id": quality_artifact.id if quality_artifact else "",
-            "excluded_manual_paragraph_ids": sorted(removed),
-            "warning_required": bool(removed),
-        }
 
     @staticmethod
     def _paragraph_contracts(job_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1850,13 +1554,16 @@ class DraftsService(OwnedProjectService):
                         ).strip()
                         if not fact_value or not support_excerpt:
                             continue
-                        fact_digest = hashlib.sha256(
-                            (
-                                f"{paper_id}\0claim_targeted\0{evidence_key}\0"
-                                f"{fact_value}"
-                            ).encode("utf-8")
-                        ).hexdigest()
-                        fact_id = f"MF-{fact_digest[:16].upper()}"
+                        spans = fact_support_spans(
+                            {"value": fact_value, "evidence_key": evidence_key, "support_excerpt": support_excerpt},
+                            {evidence_key: {**row, "source_lineage_hash": digest}},
+                        )
+                        if not spans:
+                            continue
+                        fact_id = fact_identity({"paper_id": paper_id, "field_id": "claim_targeted_fact",
+                            "value": fact_value, "subject": binding.get("subject"), "predicate": binding.get("predicate"),
+                            "qualifiers": binding.get("qualifiers") or {}, "epistemic_status": "direct_source_report",
+                            "evidence_refs": spans})
                         if fact_id in promoted_fact_ids:
                             continue
                         promoted_fact_ids.add(fact_id)
@@ -1882,6 +1589,7 @@ class DraftsService(OwnedProjectService):
                                         binding.get("qualifiers") or {}
                                     ),
                                     "support_excerpt": support_excerpt,
+                                    "support_spans": spans,
                                     "epistemic_status": "direct_source_report",
                                     "confidence": round(
                                         float(binding.get("confidence") or 0.0), 4
@@ -1973,6 +1681,20 @@ class DraftsService(OwnedProjectService):
                 affected_paragraphs.add(paragraph_id)
                 if section_id:
                     affected_sections.add(section_id)
+
+        agent_repair = built.get("fact_agent_repair") or {}
+        selected = {
+            pid: (scores.get(pid, {}).get("source_evidence_refs")
+                  or source_entries.get(pid, {}).get("source_evidence_refs") or [])
+            for pid in source_entries.keys() | scores.keys()
+        }
+        package, agent_summary = attach_repair_fact_context(
+            package, agent_repair, selected_by_paragraph=selected,
+        )
+        promoted_facts.extend(agent_summary["promoted_facts"])
+        affected_paragraphs.update(agent_summary["affected_paragraph_ids"])
+        affected_sections.update(agent_summary["affected_section_ids"])
+        sections = package.get("sections") or []
 
         # Recompute section summaries from the repaired direct hits so the UI
         # does not keep reporting a gap that this optimization already fixed.
@@ -2127,10 +1849,14 @@ class DraftsService(OwnedProjectService):
                     ),
                     "paper_count": len(direct_papers),
                     "retrieval_mode": (
-                        "lexical+draft_targeted_source_recheck"
+                        "lexical"
                         if direct_papers
                         else str(section.get("retrieval_mode") or "")
                     ),
+                    **({"retrieval_provenance": list(dict.fromkeys([
+                        *(section.get("retrieval_provenance") or []),
+                        "draft_targeted_source_recheck",
+                    ]))} if str(section.get("section_id") or "") in affected_sections else {}),
                     "status": section_status,
                     "primary_paper_states": primary_states,
                     "covered_primary_paper_count": len(writeable),
@@ -2146,6 +1872,9 @@ class DraftsService(OwnedProjectService):
                 }
             )
 
+        promoted_papers = {row["paper_id"] for row in agent_summary["promoted_facts"]}
+        promoted_sources = [paper for paper in agent_repair.get("fact_repair_sources") or []
+                            if str(paper.get("paper_id")) in promoted_papers]
         repaired_at = utc_now().isoformat()
         summary = {
             "status": "completed",
@@ -2157,6 +1886,13 @@ class DraftsService(OwnedProjectService):
             "added_evidence": added,
             "promoted_fact_count": len(promoted_facts),
             "promoted_facts": promoted_facts,
+            "pending_fact_corrections": agent_summary["pending_corrections"],
+            "fact_agent_source_lineages": {source: lineage
+                for paper in promoted_sources
+                for source, lineage in (paper.get("source_lineages") or {}).items()},
+            "fact_agent_source_parents": {source: str(paper.get("paper_id"))
+                for paper in promoted_sources
+                for source in paper.get("source_lineages") or {} if source != str(paper.get("paper_id"))},
         }
         history = list(package.get("draft_repair_history") or [])
         history.append(summary)
@@ -2200,6 +1936,7 @@ class DraftsService(OwnedProjectService):
             row = by_paper.get(paper_id)
             if (
                 row is None
+                or not fact_is_usable(fact)
                 or not fact_id
                 or str(fact.get("field_id") or "") == "topic_partition"
                 or not str(fact.get("support_excerpt") or "").strip()
@@ -2219,9 +1956,10 @@ class DraftsService(OwnedProjectService):
                 if str(existing.get("value") or "") != str(fact.get("value") or ""):
                     continue
             else:
-                facts.append(fact)
-                row["scientific_facts"] = facts
-                applied.append({"paper_id": paper_id, "fact_id": fact_id})
+                merged = merge_facts(facts, [fact])
+                if len(merged) != len(facts):
+                    row["scientific_facts"] = merged
+                    applied.append({"paper_id": paper_id, "fact_id": fact_id})
         candidate["rows"] = rows
         if applied:
             history = [
@@ -2266,6 +2004,7 @@ class DraftsService(OwnedProjectService):
             or ""
         )
         repair_input: dict[str, Any] = {
+            "fact_agent_repair": candidate_evaluation.get("fact_agent_repair") or {},
             "paragraph_scores": [paragraph_score] if paragraph_score else [],
             "source_check": {
                 "entries": [source_entry] if source_entry else [],
@@ -2314,6 +2053,24 @@ class DraftsService(OwnedProjectService):
             for paragraph in section.get("paragraphs") or []
             if isinstance(paragraph, dict) and paragraph.get("paragraph_id")
         }
+        paragraph_claim_ids = {
+            str(paragraph.get("paragraph_id") or ""): [
+                str(value)
+                for value in paragraph.get("claim_ids") or []
+                if str(value)
+            ]
+            for section in (job_payload.get("writing_plan") or {}).get("sections") or []
+            if isinstance(section, dict)
+            for paragraph in section.get("paragraphs") or []
+            if isinstance(paragraph, dict) and paragraph.get("paragraph_id")
+        }
+        claims_by_id = {
+            str(claim.get("claim_id") or ""): claim
+            for section in (job_payload.get("writing_plan") or {}).get("sections") or []
+            if isinstance(section, dict)
+            for claim in section.get("claims") or []
+            if isinstance(claim, dict) and claim.get("claim_id")
+        }
         evidence_sections = {
             str(section.get("section_id") or ""): section
             for section in (job_payload.get("section_evidence") or {}).get("sections") or []
@@ -2329,21 +2086,17 @@ class DraftsService(OwnedProjectService):
             for row in built.get("paragraph_scores") or []
             if isinstance(row, dict)
         }
-        stage_priority = {"discovery": 0, "planning": 1, "sections": 2, "draft": 3}
-        labels = {
-            "discovery": "Return to literature retrieval",
-            "planning": "Return to Matrix and outline",
-            "sections": "Repair affected section evidence inside Draft optimization",
-            "draft": "Revise wording in the current Draft",
-        }
         routed_issues: list[dict[str, Any]] = []
-        by_stage: dict[str, list[str]] = {stage: [] for stage in stage_priority}
         for index, raw_issue in enumerate(built.get("issues") or [], 1):
             if not isinstance(raw_issue, dict):
                 continue
             issue = dict(raw_issue)
             paragraph_id = str(issue.get("paragraph_id") or "")
             score = paragraph_scores.get(paragraph_id, {})
+            issue["finding_category"] = score.get("finding_category") or issue.get("finding_category") or "unknown"
+            if not issue.get("rule") and not issue.get("failed_dimensions"):
+                issue["failed_dimensions"] = list(score.get("failed_dimensions") or [])
+            issue["missing_core_claim_ids"] = list(score.get("missing_core_claim_ids") or issue.get("missing_core_claim_ids") or [])
             section_id = paragraph_sections.get(paragraph_id, "")
             section_evidence = evidence_sections.get(section_id, {})
             source_status = str(
@@ -2353,6 +2106,32 @@ class DraftsService(OwnedProjectService):
             ).casefold()
             route = str(score.get("route") or issue.get("route") or "").casefold()
             source_entry = source_checks.get(paragraph_id, {})
+            issue_claim_ids = [
+                str(value)
+                for value in (
+                    issue.get("claim_ids")
+                    or ([issue.get("claim_id")] if issue.get("claim_id") else [])
+                    or paragraph_claim_ids.get(paragraph_id, [])
+                )
+                if str(value)
+            ]
+            issue["claim_ids"] = list(dict.fromkeys(issue_claim_ids))
+            issue["core_claim_ids"] = [cid for cid in issue_claim_ids
+                                       if claims_by_id.get(cid, {}).get("required_for_section")]
+            for key in ("unsupported_claims", "evidence_rescue_status", "observed_problem"):
+                if key in score:
+                    issue[key] = score[key]
+            issue["paper_ids"] = quality_issue_paper_ids(
+                issue,
+                source_entry=source_entry,
+                claims_by_id=claims_by_id,
+                paragraph_claim_ids=paragraph_claim_ids.get(paragraph_id, []),
+            )
+            issue["source_evidence_refs"] = quality_issue_source_evidence_refs(
+                issue,
+                score=score,
+                source_entry=source_entry,
+            )
             has_original_passages = any(
                 paper.get("passages")
                 for paper in source_entry.get("papers") or []
@@ -2391,17 +2170,16 @@ class DraftsService(OwnedProjectService):
                         or issue.get("failed_dimensions")
                         or []
                     ),
+                    "paper_ids": list(issue.get("paper_ids") or []),
                 },
                 source_status=source_status,
                 evaluator_route=route,
                 has_original_passages=has_original_passages,
                 reference_map_problem=reference_map_problem,
                 source_evidence_refs=list(
-                    score.get("source_evidence_refs")
-                    or issue.get("source_evidence_refs")
-                    or []
+                    issue.get("source_evidence_refs") or []
                 ),
-                source_ready=bool(source_entry),
+                source_ready=has_original_passages,
                 evidence_texts=[
                     str(passage.get("text") or "")
                     for paper in source_entry.get("papers") or []
@@ -2411,10 +2189,14 @@ class DraftsService(OwnedProjectService):
                 ],
             )
             actual_stage = str(repair.get("repair_stage") or "draft")
+            if repair.get("repair_class") == "planning_adjustment":
+                issue["planning_claims"] = [{"claim_id": cid,
+                    "original_text": str(claims_by_id.get(cid, {}).get("proposition") or claims_by_id.get(cid, {}).get("claim") or "")}
+                    for cid in issue_claim_ids]
             # The existing Draft page can execute local Evidence and
             # bibliography repairs itself.  Keep navigation compatibility
             # while exposing the precise workflow owner in ``repair_stage``.
-            stage = DraftsService._navigation_stage_for_repair(actual_stage)
+            stage = DraftsService._navigation_stage_for_repair(str(repair.get("execution_stage") or actual_stage))
             action = str(repair.get("recommended_action") or "")
             question_diagnostics = [
                 {
@@ -2436,7 +2218,9 @@ class DraftsService(OwnedProjectService):
                     "section_id": section_id,
                     "paragraph_role": paragraph_roles.get(paragraph_id, ""),
                     "source_check_status": source_status,
-                    "source_evidence_refs": list(score.get("source_evidence_refs") or []),
+                    "source_evidence_refs": list(
+                        issue.get("source_evidence_refs") or []
+                    ),
                     "recommended_return_stage": stage,
                     "recommended_action": action,
                     **repair,
@@ -2451,16 +2235,7 @@ class DraftsService(OwnedProjectService):
                 }
             )
             routed_issues.append(issue)
-            by_stage[stage].append(issue_id)
-
-        active_stages = [stage for stage, issue_ids in by_stage.items() if issue_ids]
-        recommended = min(active_stages, key=stage_priority.get) if active_stages else "draft"
-        return routed_issues, {
-            "recommended_return_stage": recommended,
-            "recommended_action": labels[recommended],
-            "issues_by_stage": by_stage,
-            "counts_by_stage": {stage: len(issue_ids) for stage, issue_ids in by_stage.items()},
-        }
+        return routed_issues, DraftsService._routing_summary_from_issues(routed_issues)
 
     @staticmethod
     def _quality_root_causes(
@@ -2482,7 +2257,20 @@ class DraftsService(OwnedProjectService):
                 scope = section_id or "unassigned-section"
             else:
                 scope = str(issue.get("paragraph_id") or issue_id or "unknown")
-            key = f"{route}:{scope}"
+            # Route is an action, not the identity of a scientific defect.
+            family = "paragraph_issue" if route in {
+                "paragraph_rewrite", "targeted_evidence_then_paragraph_rewrite",
+                "claim_downgrade_then_paragraph_rewrite",
+            } else route
+            key = f"{family}:{scope}"
+            if scope != "global" and route != "planning_revision":
+                # Distinct missing claims/sources in one paragraph must not
+                # disappear behind a single generic rewrite root.
+                targets = {"claims": sorted(set(str(value) for value in issue.get("claim_ids") or [])),
+                           "papers": sorted(set(str(value) for value in [
+                               *(issue.get("paper_ids") or []), *(issue.get("unresolved_primary_papers") or [])]))}
+                if any(targets.values()):
+                    key += ":" + json.dumps(targets, sort_keys=True)
             root = grouped.setdefault(
                 key,
                 {
@@ -2492,9 +2280,9 @@ class DraftsService(OwnedProjectService):
                     "scope": scope,
                     "issue_type": str(issue.get("issue_type") or "draft_wording"),
                     "auto_repairable": bool(issue.get("auto_repairable", True)),
-                    "requires_user_decision": not bool(
-                        issue.get("auto_repairable", True)
-                    ),
+                    "repair_class": issue.get("repair_class"),
+                    "resolution_state": issue.get("resolution_state", "open"),
+                    "requires_user_decision": requires_user_decision(issue),
                     "issue_ids": [],
                     "paragraph_ids": [],
                     "section_ids": [],
@@ -2506,7 +2294,9 @@ class DraftsService(OwnedProjectService):
             root["auto_repairable"] = bool(root["auto_repairable"]) and bool(
                 issue.get("auto_repairable", True)
             )
-            root["requires_user_decision"] = not root["auto_repairable"]
+            root["requires_user_decision"] = bool(
+                root["requires_user_decision"]
+            ) or requires_user_decision(issue)
             for target, values in (
                 ("issue_ids", [issue_id]),
                 ("paragraph_ids", [str(issue.get("paragraph_id") or "")]),
@@ -2535,12 +2325,15 @@ class DraftsService(OwnedProjectService):
                 "task_id": f"TASK-{root['root_cause_id'][5:]}",
                 "root_cause_id": root["root_cause_id"],
                 "repair_route": root["repair_route"],
+                "repair_class": root.get("repair_class"),
+                "resolution_state": root.get("resolution_state", "open"),
                 "target": {
                     "paragraph_ids": root["paragraph_ids"],
                     "section_ids": root["section_ids"],
                     "paper_ids": root["paper_ids"],
                 },
                 "status": (
+                    root["resolution_state"] if root.get("resolution_state", "open") != "open" else
                     "requires_user_input"
                     if root["requires_user_decision"]
                     else "queued"
@@ -2603,7 +2396,23 @@ class DraftsService(OwnedProjectService):
             for row in current_roots
             if str(row.get("root_cause_id") or "")
         }
-        resolved_ids = sorted(source_ids - remaining_ids)
+        def same_legacy_target(old, current):
+            # Old immutable reports hashed the action route into the root ID.
+            # A routing upgrade alone must not count as a scientific repair.
+            prose_routes = {"paragraph_rewrite", "targeted_evidence_then_paragraph_rewrite",
+                            "claim_downgrade_then_paragraph_rewrite"}
+            return bool(old.get("repair_route") in prose_routes
+                        and current.get("repair_route") in prose_routes
+                        and old.get("paragraph_ids")
+                        and set(old.get("paragraph_ids") or []) == set(current.get("paragraph_ids") or [])
+                        and set(old.get("paper_ids") or []) == set(current.get("paper_ids") or []))
+
+        retained_legacy_ids = {
+            str(old.get("root_cause_id") or "")
+            for old in source_quality.get("root_causes") or []
+            if isinstance(old, dict) and any(same_legacy_target(old, row) for row in current_roots)
+        }
+        resolved_ids = sorted(source_ids - remaining_ids - retained_legacy_ids)
         remaining_user = [
             str(row.get("root_cause_id") or "")
             for row in current_roots
@@ -2616,7 +2425,7 @@ class DraftsService(OwnedProjectService):
         ]
         changed = bool(
             resolved_ids
-            or (evidence_repair or {}).get("added_evidence_count")
+            or evidence_repair_has_changes(evidence_repair)
             or (reference_repair or {}).get("changed")
         )
         if not source_ids and current_roots:
@@ -2628,7 +2437,7 @@ class DraftsService(OwnedProjectService):
         elif changed:
             repair_status = "partial_success"
         else:
-            repair_status = "requires_user_input" if remaining_user else "partial_success"
+            repair_status = "requires_user_input" if remaining_user else "unchanged"
         return {
             "repair_status": repair_status,
             "source_root_cause_ids": sorted(source_ids),
@@ -2720,938 +2529,9 @@ class DraftsService(OwnedProjectService):
             "release_integrity_failures": integrity,
         }
 
-    def publish_evaluation(
-        self,
-        principal: Principal,
-        project_id: str,
-        job_payload: dict[str, Any],
-        built: dict[str, Any],
-    ) -> dict[str, Any]:
-        current = self._artifact(principal, project_id, DRAFT_DOCUMENT)
-        if current is None or current.id != job_payload["source_draft_artifact_id"]:
-            raise WorkflowConflict("Draft changed while evaluation was running.")
-        prior_quality, prior_quality_artifact = self._read_json(
-            principal, project_id, DRAFT_QUALITY, required=False
-        )
-        expected_quality_id = str(job_payload.get("source_quality_artifact_id") or "")
-        if expected_quality_id and (
-            prior_quality_artifact is None
-            or prior_quality_artifact.id != expected_quality_id
-        ):
-            raise WorkflowConflict("Draft evaluation changed while evaluation was running.")
-        score = max(0.0, min(float(built.get("score") or 0), 100.0))
-        routed_issues, routing = self._quality_routing(built, job_payload)
-        root_causes, repair_tasks = self._quality_root_causes(routed_issues)
-        manual_review = self._manual_claim_review(current, built)
-        claim_dispositions = dict(prior_quality.get("claim_dispositions") or {})
-        quality = {
-            **{key: value for key, value in built.items() if key != "source_draft_artifact_id"},
-            "issues": routed_issues,
-            "routing": routing,
-            "root_causes": root_causes,
-            "repair_tasks": repair_tasks,
-            "repair_summary": self._repair_summary(prior_quality, root_causes),
-            "claim_dispositions": claim_dispositions,
-            "manual_claim_review": manual_review,
-            "verified_manual_paragraph_ids": manual_review[
-                "verified_manual_paragraph_ids"
-            ],
-            "unverified_manual_paragraph_ids": manual_review[
-                "unverified_manual_paragraph_ids"
-            ],
-            "source_draft_artifact_id": current.id,
-            "score": score,
-            "goal": float(built.get("goal") or job_payload.get("goal") or 90),
-            "status": "completed",
-            "evaluated_at": utc_now().isoformat(),
-        }
-        quality.update(self._quality_status_partition(quality))
-        with self._write_lock:
-            published, state = self._publish_files(
-                principal,
-                project_id,
-                {
-                    DRAFT_QUALITY: (
-                        (json.dumps(quality, ensure_ascii=False, indent=2) + "\n").encode(),
-                        "json",
-                    )
-                },
-                expected_revision=int(job_payload["expected_revision"]),
-                metadata={"source_draft_artifact_id": current.id, "operation": "evaluate"},
-                expected_current_artifacts={DRAFT_DOCUMENT: current.id},
-                invalidate_final=False,
-            )
-        return {
-            "quality_artifact_id": published[DRAFT_QUALITY].id,
-            "score": score,
-            "feedback_status": (
-                dict(built.get("feedback_status"))
-                if isinstance(built.get("feedback_status"), dict)
-                else {}
-            ),
-            "repair_tasks": repair_tasks,
-            "repair_status": str(
-                (quality.get("repair_summary") or {}).get("repair_status")
-                or "not_started"
-            ),
-            "revision": state.revision,
-        }
 
-    def publish_optimization(
-        self,
-        principal: Principal,
-        project_id: str,
-        job_payload: dict[str, Any],
-        built: dict[str, Any],
-    ) -> dict[str, Any]:
-        current_text, current = self._read_text(principal, project_id, DRAFT_DOCUMENT)
-        if current.id != job_payload["source_draft_artifact_id"]:
-            raise WorkflowConflict("Draft changed while batch optimization was running.")
-        current_quality, current_quality_artifact = self._read_json(
-            principal, project_id, DRAFT_QUALITY, required=False
-        )
-        source_quality_id = str(job_payload.get("source_quality_artifact_id") or "")
-        if source_quality_id and (
-            current_quality_artifact is None
-            or current_quality_artifact.id != source_quality_id
-        ):
-            raise WorkflowConflict(
-                "Draft evaluation changed while batch optimization was running."
-            )
-        repaired_evidence, evidence_repair, claim_dispositions = (
-            self._repair_evidence_package(job_payload, built)
-        )
-        candidate_matrix, matrix_fact_promotions = self._matrix_with_promoted_facts(
-            dict(job_payload.get("matrix") or {}), evidence_repair
-        )
-        evidence_repair["matrix_fact_promotions"] = matrix_fact_promotions
-        evidence_repair["matrix_fact_promotion_count"] = len(matrix_fact_promotions)
-        merged_claim_dispositions = dict(
-            current_quality.get("claim_dispositions") or {}
-        )
-        merged_claim_dispositions.update(claim_dispositions)
-        claim_dispositions = merged_claim_dispositions
-        deterministic_base_text = str(
-            built.get("deterministic_base_draft_text") or current_text
-        ).rstrip() + "\n"
-        reference_repair = (
-            dict(built.get("reference_repair") or {})
-            if isinstance(built.get("reference_repair"), dict)
-            else {"status": "not_requested", "changed": False}
-        )
-        review_changes = [
-            dict(item)
-            for item in built.get("review_changes") or []
-            if isinstance(item, dict)
-        ]
-        review_candidate_text = str(
-            built.get("review_candidate_draft_text") or ""
-        )
-        if review_changes and not bool(
-            built.get("review_candidate_full_draft_evaluated")
-        ):
-            raise WorkflowConflict(
-                "The combined optimization candidate was not evaluated as a full draft."
-            )
-        model_text = str(
-            review_candidate_text
-            if review_changes and review_candidate_text.strip()
-            else built.get("draft_text")
-            or ""
-        ).rstrip() + "\n"
-        if not model_text.strip():
-            raise WorkflowValidationError("Batch optimization returned no Draft content.")
-        score = max(
-            0.0,
-            min(
-                float(
-                    (
-                        built.get("review_candidate_score")
-                        if review_changes
-                        else built.get("score")
-                    )
-                    or 0
-                ),
-                100.0,
-            ),
-        )
-        quality_base = {
-            key: value
-            for key, value in built.items()
-            if key
-            not in {
-                "draft_text",
-                "rewrite_overlays",
-                "source_draft_artifact_id",
-                "review_candidate_draft_text",
-                "review_candidate_score",
-                "review_changes",
-                "review_excluded",
-                "deterministic_base_draft_text",
-                "reference_repair",
-            }
-        }
-        routing_payload = {**job_payload, "section_evidence": repaired_evidence}
-        routed_issues, routing = self._quality_routing(built, routing_payload)
-        root_causes, repair_tasks = self._quality_root_causes(routed_issues)
-        summary_source_quality = dict(current_quality or {})
-        if not summary_source_quality.get("root_causes"):
-            legacy_issues = [
-                dict(row)
-                for row in summary_source_quality.get("issues") or []
-                if isinstance(row, dict)
-            ]
-            legacy_roots, _legacy_tasks = self._quality_root_causes(legacy_issues)
-            summary_source_quality["root_causes"] = legacy_roots
-        repair_summary = self._repair_summary(
-            summary_source_quality,
-            root_causes,
-            evidence_repair=evidence_repair,
-            reference_repair=reference_repair,
-        )
-        quality_base.update(
-            {
-                "issues": routed_issues,
-                "routing": routing,
-                "root_causes": root_causes,
-                "repair_tasks": repair_tasks,
-                "repair_summary": repair_summary,
-                "score": score,
-                "total_score": score,
-                "goal": float(built.get("goal") or job_payload.get("goal") or 90),
-                "status": "completed",
-                "quality_scope": "full_draft",
-                "reference_repair": reference_repair,
-                "evidence_repair": evidence_repair,
-                "claim_dispositions": claim_dispositions,
-                "evaluated_at": utc_now().isoformat(),
-            }
-        )
-        feedback_status = (
-            dict(built.get("feedback_status"))
-            if isinstance(built.get("feedback_status"), dict)
-            else {}
-        )
-        final_feedback_status = {
-            **feedback_status,
-            "phase": "completed",
-            "full_draft_evaluated": bool(
-                built.get("review_candidate_full_draft_evaluated")
-                or not review_changes
-            ),
-        }
-        quality_base["feedback_status"] = final_feedback_status
-        quality_base.update(self._quality_status_partition(quality_base))
 
-        # Only paragraph bodies may enter a batch proposal.  Rebuilding from
-        # the current manuscript prevents a model from silently changing
-        # headings, figure markers, references, or document structure outside
-        # the reviewable paragraph comparisons.
-        candidate_text, changes = self._optimization_candidate(
-            deterministic_base_text, model_text
-        )
-        review_change_by_id = {
-            str(item.get("paragraph_id") or ""): item
-            for item in review_changes
-            if str(item.get("paragraph_id") or "")
-        }
-        changes = [
-            {
-                **change,
-                **{
-                    key: value
-                    for key, value in review_change_by_id.get(
-                        str(change.get("paragraph_id") or ""), {}
-                    ).items()
-                    if key
-                    not in {"paragraph_id", "original_text", "candidate_text"}
-                },
-            }
-            for change in changes
-        ]
-        draft_changed = candidate_text != current_text
-        evidence_changed = bool(
-            evidence_repair.get("added_evidence_count")
-        )
-        deterministic_repair_changed = bool(reference_repair.get("changed"))
 
-        if not draft_changed and not evidence_changed and not deterministic_repair_changed:
-            # There is no text or evidence mutation to approve, but the exact
-            # current manuscript was still fully evaluated.  Publish that
-            # fresh, specifically routed Quality report instead of leaving an
-            # older generic issue queue visible.
-            quality = {
-                **quality_base,
-                "source_draft_artifact_id": current.id,
-            }
-            manual_review = self._manual_claim_review(current, quality)
-            quality.update(
-                {
-                    "manual_claim_review": manual_review,
-                    "verified_manual_paragraph_ids": manual_review[
-                        "verified_manual_paragraph_ids"
-                    ],
-                    "unverified_manual_paragraph_ids": manual_review[
-                        "unverified_manual_paragraph_ids"
-                    ],
-                }
-            )
-            quality.update(self._quality_status_partition(quality))
-            expected_currents = {DRAFT_DOCUMENT: current.id}
-            if current_quality_artifact is not None:
-                expected_currents[DRAFT_QUALITY] = current_quality_artifact.id
-            for logical_name, source_key in (
-                (SECTION_EVIDENCE, "source_section_evidence_artifact_id"),
-                (SECTION_WRITING_PLAN, "source_writing_plan_artifact_id"),
-                (DRAFT_OVERLAYS, "source_rewrite_overlay_artifact_id"),
-            ):
-                source_id = str(job_payload.get(source_key) or "")
-                if source_id:
-                    expected_currents[logical_name] = source_id
-            with self._write_lock:
-                published, state = self._publish_files(
-                    principal,
-                    project_id,
-                    {
-                        DRAFT_QUALITY: (
-                            (
-                                json.dumps(quality, ensure_ascii=False, indent=2)
-                                + "\n"
-                            ).encode(),
-                            "json",
-                        )
-                    },
-                    expected_revision=int(job_payload["expected_revision"]),
-                    metadata={
-                        "operation": "batch-optimization-full-evaluation",
-                        "source_draft_artifact_id": current.id,
-                    },
-                    expected_current_artifacts=expected_currents,
-                    invalidate_final=False,
-                )
-            return {
-                "draft_artifact_id": current.id,
-                "quality_artifact_id": published[DRAFT_QUALITY].id,
-                "score": score,
-                "draft_changed": False,
-                "proposal_created": False,
-                "rewrite_accepted": int(feedback_status.get("rewrite_accepted") or 0),
-                "rewrite_rejected": int(feedback_status.get("rewrite_rejected") or 0),
-                "rewrite_deferred": int(feedback_status.get("rewrite_deferred") or 0),
-                "feedback_status": final_feedback_status,
-                "repair_tasks": repair_tasks,
-                "repair_status": str(repair_summary.get("repair_status") or "partial_success"),
-                "revision": state.revision,
-            }
-        source_quality = dict(current_quality or {})
-        if not source_quality:
-            source_quality = {
-                **quality_base,
-                "source_draft_artifact_id": current.id,
-            }
-        store, store_artifact = self._read_json(
-            principal, project_id, DRAFT_OPTIMIZATIONS, required=False
-        )
-        entries = dict(store.get("entries") or {})
-        proposal_id = str(uuid.uuid4())
-        created_at = utc_now().isoformat()
-        entries[proposal_id] = {
-            "proposal_id": proposal_id,
-            "source_draft_artifact_id": current.id,
-            "source_quality_artifact_id": (
-                current_quality_artifact.id if current_quality_artifact else ""
-            ),
-            "source_section_evidence_artifact_id": str(
-                job_payload.get("source_section_evidence_artifact_id") or ""
-            ),
-            "source_matrix_artifact_id": str(
-                job_payload.get("source_matrix_artifact_id") or ""
-            ),
-            "source_writing_plan_artifact_id": str(
-                job_payload.get("source_writing_plan_artifact_id") or ""
-            ),
-            "source_rewrite_overlay_artifact_id": str(
-                job_payload.get("source_rewrite_overlay_artifact_id") or ""
-            ),
-            "candidate_draft_text": candidate_text,
-            "deterministic_base_draft_text": deterministic_base_text,
-            "reference_repair": reference_repair,
-            "candidate_evidence_package": repaired_evidence,
-            "candidate_matrix": candidate_matrix if matrix_fact_promotions else {},
-            "evidence_repair": evidence_repair,
-            "claim_dispositions": claim_dispositions,
-            "candidate_quality": quality_base,
-            "source_quality": source_quality,
-            "rewrite_overlays": (
-                built.get("rewrite_overlays")
-                if isinstance(built.get("rewrite_overlays"), dict)
-                else (
-                    job_payload.get("rewrite_overlays")
-                    if isinstance(job_payload.get("rewrite_overlays"), dict)
-                    else {}
-                )
-            ),
-            "source_overlays": (
-                dict(job_payload.get("rewrite_overlays") or {})
-                if isinstance(job_payload.get("rewrite_overlays"), dict)
-                else {}
-            ),
-            "changes": changes,
-            "source_score": float(source_quality.get("score") or 0),
-            "candidate_score": score,
-            "feedback_status": final_feedback_status,
-            "status": "pending",
-            "created_at": created_at,
-        }
-        proposal_payload = {"project_id": project_id, "entries": entries}
-        expected_currents = {DRAFT_DOCUMENT: current.id}
-        for logical_name, payload_key in (
-            (DRAFT_QUALITY, "source_quality_artifact_id"),
-            (SECTION_EVIDENCE, "source_section_evidence_artifact_id"),
-            (MATRIX_LOGICAL_NAME, "source_matrix_artifact_id"),
-            (SECTION_WRITING_PLAN, "source_writing_plan_artifact_id"),
-            (DRAFT_OVERLAYS, "source_rewrite_overlay_artifact_id"),
-        ):
-            artifact_id = str(entries[proposal_id].get(payload_key) or "")
-            if artifact_id:
-                expected_currents[logical_name] = artifact_id
-        if store_artifact is not None:
-            expected_currents[DRAFT_OPTIMIZATIONS] = store_artifact.id
-        with self._write_lock:
-            published, state = self._publish_files(
-                principal,
-                project_id,
-                {
-                    DRAFT_OPTIMIZATIONS: (
-                        (
-                            json.dumps(
-                                proposal_payload, ensure_ascii=False, indent=2
-                            )
-                            + "\n"
-                        ).encode(),
-                        "json",
-                    )
-                },
-                expected_revision=int(job_payload["expected_revision"]),
-                metadata={
-                    "operation": "batch-optimization-proposal",
-                    "proposal_id": proposal_id,
-                    "source_draft_artifact_id": current.id,
-                    "feedback_status": final_feedback_status,
-                    "evidence_repair": evidence_repair,
-                    "reference_repair": reference_repair,
-                },
-                expected_current_artifacts=expected_currents,
-                invalidate_final=False,
-            )
-        return {
-            "draft_artifact_id": current.id,
-            "quality_artifact_id": "",
-            "score": score,
-            "draft_changed": False,
-            "proposal_created": True,
-            "proposal_id": proposal_id,
-            "proposal_artifact_id": published[DRAFT_OPTIMIZATIONS].id,
-            "change_count": len(changes),
-            "evidence_repair": evidence_repair,
-            "reference_repair": reference_repair,
-            "claim_dispositions": claim_dispositions,
-            "rewrite_accepted": int(feedback_status.get("rewrite_accepted") or 0),
-            "rewrite_rejected": int(feedback_status.get("rewrite_rejected") or 0),
-            "rewrite_deferred": int(feedback_status.get("rewrite_deferred") or 0),
-            "feedback_status": final_feedback_status,
-            "repair_tasks": repair_tasks,
-            "repair_status": str(repair_summary.get("repair_status") or "partial_success"),
-            "revision": state.revision,
-        }
-
-    def auto_apply_optimization_proposal(
-        self,
-        principal: Principal,
-        project_id: str,
-        proposal_id: str,
-        *,
-        revision: int,
-    ) -> dict[str, Any]:
-        """Apply a whole batch only when every paragraph is demonstrably safe.
-
-        Mixed batches remain pending in the existing comparison UI.  This
-        avoids silently dropping an ambiguous paragraph while still making
-        the normal, integrity-checked improvement path automatic.
-        """
-
-        store, _store_artifact = self._read_json(
-            principal, project_id, DRAFT_OPTIMIZATIONS
-        )
-        proposal = dict((store.get("entries") or {}).get(proposal_id) or {})
-        if not proposal or proposal.get("status") != "pending":
-            return {
-                "auto_applied": False,
-                "auto_apply_status": "proposal_not_pending",
-            }
-        _current_text, current = self._read_text(
-            principal, project_id, DRAFT_DOCUMENT
-        )
-        manual_ids = {
-            str(item)
-            for item in current.metadata.get("unverified_manual_paragraph_ids") or []
-            if str(item).strip()
-        }
-        changes = [
-            dict(item)
-            for item in proposal.get("changes") or []
-            if isinstance(item, dict) and item.get("paragraph_id")
-        ]
-        downgrade_paragraph_ids = {
-            str(item.get("paragraph_id") or "")
-            for item in (proposal.get("claim_dispositions") or {}).values()
-            if isinstance(item, dict) and str(item.get("paragraph_id") or "")
-        }
-        unsafe: list[dict[str, Any]] = []
-        candidate_quality = dict(proposal.get("candidate_quality") or {})
-        if candidate_quality.get("hard_gate_failures"):
-            unsafe.append(
-                {
-                    "paragraph_id": "",
-                    "reasons": ["full_draft_integrity_failure"],
-                }
-            )
-        for change in changes:
-            paragraph_id = str(change.get("paragraph_id") or "")
-            evaluation = dict(change.get("candidate_evaluation") or {})
-            paragraph_score = dict(evaluation.get("paragraph_score") or {})
-            preflight = dict(evaluation.get("local_preflight") or {})
-            reasons: list[str] = []
-            if paragraph_id in manual_ids:
-                reasons.append("user_modified_paragraph")
-            if bool(change.get("requires_manual_confirmation")) or bool(
-                evaluation.get("requires_manual_confirmation")
-            ):
-                reasons.append("scientific_ambiguity_requires_confirmation")
-            if evaluation.get("evaluation_scope") != "single_paragraph":
-                reasons.append("paragraph_re_evaluation_missing")
-            if evaluation.get("local_hard_gate_failures"):
-                reasons.append("local_integrity_failure")
-            if preflight.get("hard_regressions"):
-                reasons.append("local_preflight_regression")
-            if str(paragraph_score.get("route") or "") == "human_confirmation":
-                reasons.append("human_confirmation_route")
-            if paragraph_id in downgrade_paragraph_ids and not bool(
-                change.get("accuracy_improved")
-            ):
-                reasons.append("claim_downgrade_did_not_improve_evidence_accuracy")
-            try:
-                source_score = float(change.get("source_paragraph_score"))
-                candidate_score = float(change.get("candidate_paragraph_score"))
-            except (TypeError, ValueError):
-                if not bool(change.get("accuracy_improved")):
-                    reasons.append("score_delta_unavailable")
-            else:
-                if (
-                    candidate_score <= source_score
-                    and not bool(change.get("accuracy_improved"))
-                ):
-                    reasons.append("paragraph_score_not_improved")
-            if reasons:
-                unsafe.append({"paragraph_id": paragraph_id, "reasons": reasons})
-
-        reference_repair = dict(proposal.get("reference_repair") or {})
-        evidence_repair = dict(proposal.get("evidence_repair") or {})
-        has_deterministic_repairs = bool(
-            reference_repair.get("changed")
-            or evidence_repair.get("added_evidence_count")
-        )
-        changed_paragraph_ids = {
-            str(change.get("paragraph_id") or "") for change in changes
-        }
-        missing_downgrade_rewrites = sorted(
-            downgrade_paragraph_ids - changed_paragraph_ids
-        )
-        if missing_downgrade_rewrites:
-            unsafe.extend(
-                {
-                    "paragraph_id": paragraph_id,
-                    "reasons": ["unsupported_claim_was_not_downgraded_in_text"],
-                }
-                for paragraph_id in missing_downgrade_rewrites
-            )
-        if (not changes and not has_deterministic_repairs) or unsafe:
-            return {
-                "auto_applied": False,
-                "auto_apply_status": "manual_review_required",
-                "manual_review_reasons": unsafe,
-            }
-        accepted = self.decide_optimization_proposal(
-            principal,
-            project_id,
-            proposal_id,
-            decision="accept",
-            revision=revision,
-            selected_paragraph_ids=[
-                str(change.get("paragraph_id") or "") for change in changes
-            ],
-        )
-        return {
-            **accepted,
-            "auto_applied": True,
-            "auto_apply_status": "all_safe_paragraphs_applied",
-            "proposal_created": False,
-            "draft_changed": bool(accepted.get("draft_changed", True)),
-        }
-
-    def decide_optimization_proposal(
-        self,
-        principal: Principal,
-        project_id: str,
-        proposal_id: str,
-        *,
-        decision: str,
-        revision: int,
-        selected_paragraph_ids: list[str] | None = None,
-    ) -> dict[str, Any]:
-        if decision not in {"accept", "reject"}:
-            raise WorkflowValidationError("Unknown optimization proposal decision.")
-        store, store_artifact = self._read_json(
-            principal, project_id, DRAFT_OPTIMIZATIONS
-        )
-        entries = dict(store.get("entries") or {})
-        proposal = dict(entries.get(proposal_id) or {})
-        if not proposal:
-            raise WorkflowNotFound("Optimization proposal not found.")
-        if proposal.get("status") != "pending":
-            raise WorkflowConflict("Optimization proposal was already decided.")
-        current_text, current = self._read_text(
-            principal, project_id, DRAFT_DOCUMENT
-        )
-        if proposal.get("source_draft_artifact_id") != current.id:
-            raise WorkflowConflict("Optimization proposal is stale for the current Draft.")
-
-        proposal_changes = [
-            dict(item)
-            for item in proposal.get("changes") or []
-            if isinstance(item, dict)
-            and str(item.get("paragraph_id") or "").strip()
-        ]
-        available_ids = {
-            str(item.get("paragraph_id") or "") for item in proposal_changes
-        }
-        requested_ids = [
-            str(value).strip()
-            for value in selected_paragraph_ids or []
-            if str(value).strip()
-        ]
-        reference_repair = dict(proposal.get("reference_repair") or {})
-        evidence_repair = dict(proposal.get("evidence_repair") or {})
-        has_automatic_repairs = bool(
-            reference_repair.get("changed")
-            or evidence_repair.get("added_evidence_count")
-            or evidence_repair.get("matrix_fact_promotion_count")
-        )
-        if decision == "accept":
-            selected_ids = set(requested_ids or sorted(available_ids))
-            unknown = sorted(selected_ids - available_ids)
-            if unknown:
-                raise WorkflowValidationError(
-                    "Unknown optimization paragraph selection: "
-                    + ", ".join(unknown)
-                )
-            if not selected_ids and not has_automatic_repairs:
-                raise WorkflowValidationError(
-                    "Select at least one optimized paragraph to save."
-                )
-        else:
-            selected_ids = set()
-        selected_changes = [
-            item
-            for item in proposal_changes
-            if str(item.get("paragraph_id") or "") in selected_ids
-        ]
-
-        decided_at = utc_now().isoformat()
-        proposal["status"] = "accepted" if decision == "accept" else "rejected"
-        proposal["decided_at"] = decided_at
-        proposal["selected_paragraph_ids"] = sorted(selected_ids)
-        proposal["discarded_paragraph_ids"] = sorted(available_ids - selected_ids)
-        entries[proposal_id] = proposal
-        if decision == "accept":
-            for other_id, other_value in list(entries.items()):
-                if other_id == proposal_id or not isinstance(other_value, dict):
-                    continue
-                other = dict(other_value)
-                if (
-                    other.get("status") == "pending"
-                    and other.get("source_draft_artifact_id") == current.id
-                ):
-                    other["status"] = "superseded"
-                    other["superseded_by_proposal_id"] = proposal_id
-                    other["decided_at"] = decided_at
-                    entries[other_id] = other
-
-        files: dict[
-            str,
-            tuple[bytes | Callable[[dict[str, ArtifactRecord]], bytes], str],
-        ] = {
-            DRAFT_OPTIMIZATIONS: (
-                (
-                    json.dumps(
-                        {"project_id": project_id, "entries": entries},
-                        ensure_ascii=False,
-                        indent=2,
-                    )
-                    + "\n"
-                ).encode(),
-                "json",
-            )
-        }
-        if decision == "accept":
-            candidate_matrix = dict(proposal.get("candidate_matrix") or {})
-            if (
-                evidence_repair.get("matrix_fact_promotion_count")
-                and candidate_matrix
-            ):
-                files[MATRIX_LOGICAL_NAME] = (
-                    (
-                        json.dumps(candidate_matrix, ensure_ascii=False, indent=2)
-                        + "\n"
-                    ).encode(),
-                    "json",
-                )
-            candidate_evidence = dict(
-                proposal.get("candidate_evidence_package") or {}
-            )
-            if evidence_repair.get("added_evidence_count") and candidate_evidence:
-                def evidence_content(
-                    published: dict[str, ArtifactRecord],
-                    source: dict[str, Any] = candidate_evidence,
-                ) -> bytes:
-                    value = deepcopy(source)
-                    if MATRIX_LOGICAL_NAME in published:
-                        value["source_matrix_artifact_id"] = published[
-                            MATRIX_LOGICAL_NAME
-                        ].id
-                    return (
-                        json.dumps(value, ensure_ascii=False, indent=2) + "\n"
-                    ).encode()
-
-                files[SECTION_EVIDENCE] = (evidence_content, "json")
-            deterministic_base = str(
-                proposal.get("deterministic_base_draft_text") or current_text
-            )
-            candidate_text = self._optimization_candidate_from_changes(
-                deterministic_base, selected_changes
-            )
-            if not candidate_text.strip() or (
-                candidate_text == current_text and not has_automatic_repairs
-            ):
-                raise WorkflowConflict("Optimization proposal contains no applicable change.")
-            files[DRAFT_DOCUMENT] = (
-                (candidate_text.rstrip() + "\n").encode("utf-8"),
-                "markdown",
-            )
-
-            # Every reviewable optimization change is evaluated at paragraph
-            # scope before it is shown to the user.  Apply those exact scores
-            # whether the user accepts some or all changes.  Previously the
-            # all-selected path replaced them with the loop's full-draft
-            # snapshot; that snapshot can describe an earlier/best iteration
-            # and made the saved score disagree with the comparison UI.
-            candidate_quality, scored_changes = (
-                self._optimization_quality_from_scored_changes(
-                    proposal, selected_changes
-                )
-            )
-            if scored_changes == len(selected_changes) and selected_changes:
-                quality_scope = "batch_selected_paragraphs"
-            elif selected_ids != available_ids:
-                raise WorkflowConflict(
-                    "This legacy batch proposal cannot publish a partial selection "
-                    "because it has no paragraph-level candidate scores."
-                )
-            else:
-                # Compatibility for old proposals and deterministic-only
-                # citation/evidence repairs that predate paragraph scoring.
-                candidate_quality = dict(
-                    proposal.get("candidate_quality")
-                    or proposal.get("source_quality")
-                    or {}
-                )
-                quality_scope = "full_draft"
-            candidate_quality.update(
-                {
-                    "quality_scope": quality_scope,
-                    "selected_paragraph_ids": sorted(selected_ids),
-                    "reference_repair": reference_repair,
-                    "evidence_repair": evidence_repair,
-                    "claim_dispositions": dict(
-                        proposal.get("claim_dispositions") or {}
-                    ),
-                    "status": "completed",
-                    "evaluated_at": decided_at,
-                }
-            )
-            manual_review = self._manual_claim_review(current, candidate_quality)
-            candidate_quality.update(
-                {
-                    "manual_claim_review": manual_review,
-                    "verified_manual_paragraph_ids": manual_review[
-                        "verified_manual_paragraph_ids"
-                    ],
-                    "unverified_manual_paragraph_ids": manual_review[
-                        "unverified_manual_paragraph_ids"
-                    ],
-                }
-            )
-            candidate_quality.update(
-                self._quality_status_partition(candidate_quality)
-            )
-
-            def quality_content(published: dict[str, ArtifactRecord]) -> bytes:
-                quality = {
-                    **candidate_quality,
-                    "source_draft_artifact_id": published[DRAFT_DOCUMENT].id,
-                    "status": "completed",
-                    "evaluated_at": decided_at,
-                }
-                return (
-                    json.dumps(quality, ensure_ascii=False, indent=2) + "\n"
-                ).encode()
-
-            files[DRAFT_QUALITY] = (quality_content, "json")
-            rewrite_overlays = dict(proposal.get("source_overlays") or {})
-            overlay_entries = dict(rewrite_overlays.get("entries") or {})
-            for change in selected_changes:
-                paragraph_id = str(change.get("paragraph_id") or "")
-                overlay_entries[paragraph_id] = {
-                    "paragraph_id": paragraph_id,
-                    "source_text_sha256": self._text_sha256(
-                        str(change.get("original_text") or "")
-                    ),
-                    "rewritten_text": str(change.get("candidate_text") or ""),
-                    "updated_at": decided_at,
-                }
-            rewrite_overlays.update(
-                {
-                    "schema_version": 1,
-                    "project_id": project_id,
-                    "entries": overlay_entries,
-                }
-            )
-            files[DRAFT_OVERLAYS] = (
-                (
-                    json.dumps(
-                        rewrite_overlays, ensure_ascii=False, indent=2
-                    )
-                    + "\n"
-                ).encode(),
-                "json",
-            )
-
-        event = {
-            "id": str(uuid.uuid4()),
-            "stage_id": "draft",
-            "subject_type": "batch-optimization-proposal",
-            "subject_id": proposal_id,
-            "decision": decision,
-            "details": {
-                "change_count": len(selected_changes),
-                "selected_paragraph_ids": sorted(selected_ids),
-                "source_draft_artifact_id": current.id,
-                "candidate_score": proposal.get("candidate_score"),
-            },
-            "created_at": utc_now(),
-        }
-        common_metadata = {
-            **dict(current.metadata),
-            "operation": f"batch-optimization-{decision}",
-            "proposal_id": proposal_id,
-            "previous_draft_artifact_id": current.id,
-            "reference_repair": reference_repair,
-            "evidence_repair": evidence_repair,
-        }
-
-        def artifact_metadata(
-            logical_name: str, published_so_far: dict[str, ArtifactRecord]
-        ) -> dict[str, Any]:
-            value = dict(common_metadata)
-            if SECTION_EVIDENCE in published_so_far:
-                value["source_section_evidence_artifact_id"] = (
-                    published_so_far[SECTION_EVIDENCE].id
-                )
-            if MATRIX_LOGICAL_NAME in published_so_far:
-                value["source_matrix_artifact_id"] = published_so_far[
-                    MATRIX_LOGICAL_NAME
-                ].id
-            if DRAFT_DOCUMENT in published_so_far and logical_name in {
-                DRAFT_QUALITY,
-                DRAFT_OVERLAYS,
-            }:
-                value["source_draft_artifact_id"] = (
-                    published_so_far[DRAFT_DOCUMENT].id
-                )
-            return value
-
-        expected_currents = {
-            DRAFT_DOCUMENT: current.id,
-            DRAFT_OPTIMIZATIONS: store_artifact.id,
-        }
-        for logical_name, source_key in (
-            (DRAFT_QUALITY, "source_quality_artifact_id"),
-            (SECTION_EVIDENCE, "source_section_evidence_artifact_id"),
-            (MATRIX_LOGICAL_NAME, "source_matrix_artifact_id"),
-            (SECTION_WRITING_PLAN, "source_writing_plan_artifact_id"),
-            (DRAFT_OVERLAYS, "source_rewrite_overlay_artifact_id"),
-        ):
-            source_id = str(proposal.get(source_key) or "")
-            if source_id:
-                expected_currents[logical_name] = source_id
-        with self._write_lock:
-            published, state = self._publish_files(
-                principal,
-                project_id,
-                files,
-                expected_revision=revision,
-                metadata=common_metadata,
-                metadata_builder=artifact_metadata,
-                approval_events=[event],
-                expected_current_artifacts=expected_currents,
-                invalidate_final=decision == "accept",
-            )
-        return {
-            "proposal_id": proposal_id,
-            "decision": decision,
-            "selected_paragraph_ids": sorted(selected_ids),
-            "draft_artifact_id": (
-                published[DRAFT_DOCUMENT].id
-                if DRAFT_DOCUMENT in published
-                else current.id
-            ),
-            "quality_artifact_id": (
-                published[DRAFT_QUALITY].id
-                if DRAFT_QUALITY in published
-                else ""
-            ),
-            "section_evidence_artifact_id": (
-                published[SECTION_EVIDENCE].id
-                if SECTION_EVIDENCE in published
-                else str(proposal.get("source_section_evidence_artifact_id") or "")
-            ),
-            "matrix_artifact_id": (
-                published[MATRIX_LOGICAL_NAME].id
-                if MATRIX_LOGICAL_NAME in published
-                else str(proposal.get("source_matrix_artifact_id") or "")
-            ),
-            "evidence_repair": evidence_repair,
-            "reference_repair": reference_repair,
-            "draft_changed": bool(
-                decision == "accept" and DRAFT_DOCUMENT in published
-            ),
-            "score": (
-                candidate_quality.get("score")
-                if decision == "accept"
-                else None
-            ),
-            "revision": state.revision,
-        }
 
     def _optimization_quality_from_scored_changes(
         self,
@@ -3663,8 +2543,12 @@ class DraftsService(OwnedProjectService):
             or proposal.get("candidate_quality")
             or {}
         )
-        scored_changes = 0
+        scoring = {str(change.get("paragraph_id") or ""): change for change in selected_changes}
         for change in selected_changes:
+            for pid, evaluation in (change.get("dependent_evaluations") or {}).items():
+                scoring.setdefault(pid, {"paragraph_id": pid, "candidate_evaluation": evaluation})
+        scored_ids = set()
+        for change in scoring.values():
             paragraph_id = str(change.get("paragraph_id") or "")
             candidate_evaluation = dict(change.get("candidate_evaluation") or {})
             if (
@@ -3681,7 +2565,8 @@ class DraftsService(OwnedProjectService):
                         proposal.get("source_quality_artifact_id") or ""
                     ),
                 )
-                scored_changes += 1
+                scored_ids.add(paragraph_id)
+        scored_changes = sum(str(change.get("paragraph_id") or "") in scored_ids for change in selected_changes)
         if scored_changes == len(selected_changes) and selected_changes:
             # Avoid accumulating one rounding operation per paragraph.  The
             # comparison UI sums unrounded overall deltas once, so publish the
@@ -3691,9 +2576,9 @@ class DraftsService(OwnedProjectService):
                 or proposal.get("candidate_quality")
                 or {}
             )
-            source_score = float(source_quality.get("score") or 0)
+            source_score = quality_score(source_quality)
             explicit_deltas: list[float] = []
-            for change in selected_changes:
+            for change in scoring.values():
                 try:
                     explicit_deltas.append(float(change["overall_score_delta"]))
                 except (KeyError, TypeError, ValueError):
@@ -3712,7 +2597,7 @@ class DraftsService(OwnedProjectService):
                 }
                 paragraph_count = max(1, len(source_scores))
                 exact_score = source_score
-                for change in selected_changes:
+                for change in scoring.values():
                     paragraph_id = str(change.get("paragraph_id") or "")
                     evaluation = dict(change.get("candidate_evaluation") or {})
                     paragraph_score = dict(evaluation.get("paragraph_score") or {})
@@ -3725,530 +2610,9 @@ class DraftsService(OwnedProjectService):
             candidate_quality["total_score"] = exact_score
         return candidate_quality, scored_changes
 
-    def repair_accepted_optimization_quality(
-        self,
-        principal: Principal,
-        project_id: str,
-        proposal_id: str,
-        *,
-        revision: int,
-    ) -> dict[str, Any]:
-        """Republish a score that was saved from the old all-selected path.
 
-        This is intentionally a service-level maintenance operation, not a
-        public route.  It lets deployments repair an already accepted proposal
-        without another paid model evaluation or any manuscript rewrite.
-        """
 
-        store, store_artifact = self._read_json(
-            principal, project_id, DRAFT_OPTIMIZATIONS
-        )
-        proposal = dict((store.get("entries") or {}).get(proposal_id) or {})
-        if not proposal or proposal.get("status") != "accepted":
-            raise WorkflowConflict("Accepted optimization proposal not found.")
-        _current_text, current = self._read_text(
-            principal, project_id, DRAFT_DOCUMENT
-        )
-        if str(current.metadata.get("proposal_id") or "") != proposal_id:
-            raise WorkflowConflict(
-                "The accepted proposal is not attached to the current Draft."
-            )
-        _quality, quality_artifact = self._read_json(
-            principal, project_id, DRAFT_QUALITY
-        )
-        selected_ids = {
-            str(value)
-            for value in proposal.get("selected_paragraph_ids") or []
-            if str(value).strip()
-        }
-        selected_changes = [
-            dict(item)
-            for item in proposal.get("changes") or []
-            if isinstance(item, dict)
-            and str(item.get("paragraph_id") or "") in selected_ids
-        ]
-        candidate_quality, scored_changes = (
-            self._optimization_quality_from_scored_changes(
-                proposal, selected_changes
-            )
-        )
-        if not selected_changes or scored_changes != len(selected_changes):
-            raise WorkflowConflict(
-                "The accepted proposal has no complete paragraph-level scores."
-            )
-        repaired_at = utc_now().isoformat()
-        candidate_quality.update(
-            {
-                "quality_scope": "batch_selected_paragraphs",
-                "selected_paragraph_ids": sorted(selected_ids),
-                "reference_repair": dict(proposal.get("reference_repair") or {}),
-                "evidence_repair": dict(proposal.get("evidence_repair") or {}),
-                "claim_dispositions": dict(
-                    proposal.get("claim_dispositions") or {}
-                ),
-                "status": "completed",
-                "evaluated_at": repaired_at,
-            }
-        )
-        manual_review = self._manual_claim_review(current, candidate_quality)
-        candidate_quality.update(
-            {
-                "manual_claim_review": manual_review,
-                "verified_manual_paragraph_ids": manual_review[
-                    "verified_manual_paragraph_ids"
-                ],
-                "unverified_manual_paragraph_ids": manual_review[
-                    "unverified_manual_paragraph_ids"
-                ],
-            }
-        )
-        candidate_quality.update(self._quality_status_partition(candidate_quality))
-        candidate_quality["source_draft_artifact_id"] = current.id
-        metadata = {
-            **dict(current.metadata),
-            "operation": "repair-batch-optimization-quality",
-            "proposal_id": proposal_id,
-            "source_draft_artifact_id": current.id,
-        }
-        with self._write_lock:
-            published, state = self._publish_files(
-                principal,
-                project_id,
-                {
-                    DRAFT_QUALITY: (
-                        (
-                            json.dumps(
-                                candidate_quality, ensure_ascii=False, indent=2
-                            )
-                            + "\n"
-                        ).encode(),
-                        "json",
-                    )
-                },
-                expected_revision=revision,
-                metadata=metadata,
-                expected_current_artifacts={
-                    DRAFT_DOCUMENT: current.id,
-                    DRAFT_QUALITY: quality_artifact.id,
-                    DRAFT_OPTIMIZATIONS: store_artifact.id,
-                },
-                invalidate_final=True,
-            )
-        return {
-            "proposal_id": proposal_id,
-            "draft_artifact_id": current.id,
-            "quality_artifact_id": published[DRAFT_QUALITY].id,
-            "score": candidate_quality.get("score"),
-            "revision": state.revision,
-        }
 
-    def rewrite_payload(
-        self, principal: Principal, project_id: str, paragraph_id: str
-    ) -> dict[str, Any]:
-        payload = self.get(principal, project_id)
-        quality = payload.get("quality") or {}
-        if not payload.get("quality_artifact_id") or not quality:
-            raise DraftNotReady(
-                "Evaluate the Draft once before requesting a paragraph rewrite."
-            )
-        paragraph = next(
-            (row for row in payload["paragraphs"] if row["paragraph_id"] == paragraph_id),
-            None,
-        )
-        if paragraph is None:
-            raise WorkflowNotFound("Draft paragraph not found.")
-        matching_issues = [
-            issue
-            for issue in quality.get("issues") or []
-            if issue.get("paragraph_id") == paragraph_id
-        ]
-        if not matching_issues:
-            raise DraftNotReady("This paragraph is not in the current issue queue.")
-        if not any(issue.get("rewrite_eligible", True) for issue in matching_issues):
-            repair_stages = sorted(
-                {
-                    str(issue.get("repair_stage") or "upstream")
-                    for issue in matching_issues
-                }
-            )
-            raise DraftNotReady(
-                "This issue cannot be fixed safely by rewriting prose. "
-                "Use the routed repair stage instead: " + ", ".join(repair_stages)
-            )
-        preflight = quality.get("preflight")
-        preflight = preflight if isinstance(preflight, dict) else {}
-        paragraph_check = next(
-            (
-                item
-                for item in preflight.get("paragraph_checks") or []
-                if isinstance(item, dict)
-                and str(item.get("paragraph_id") or "") == paragraph_id
-            ),
-            {},
-        )
-        case_range = preflight.get("case_word_range")
-        if isinstance(case_range, (list, tuple)) and len(case_range) >= 2:
-            min_case_words = int(case_range[0] or CASE_PARAGRAPH_MIN_WORDS)
-            max_case_words = int(case_range[1] or CASE_PARAGRAPH_MAX_WORDS)
-        elif isinstance(case_range, dict):
-            min_case_words = int(
-                case_range.get("min_words") or CASE_PARAGRAPH_MIN_WORDS
-            )
-            max_case_words = int(
-                case_range.get("max_words") or CASE_PARAGRAPH_MAX_WORDS
-            )
-        else:
-            min_case_words, max_case_words = (
-                CASE_PARAGRAPH_MIN_WORDS,
-                CASE_PARAGRAPH_MAX_WORDS,
-            )
-        compatibility = self.compatibility_payload(principal, project_id)
-        return {
-            **compatibility,
-            "project_id": project_id,
-            # The native rewrite handler materializes ``first_draft.md`` from
-            # this field before invoking the feedback-loop CLI.  Keeping only
-            # ``paragraph_text`` is insufficient because the CLI validates the
-            # selected paragraph against the complete, evaluated draft.
-            "draft_text": payload["first_draft_md"],
-            "paragraph_id": paragraph_id,
-            "paragraph_text": paragraph["text"],
-            "source_draft_artifact_id": payload["draft_artifact_id"],
-            "source_quality_artifact_id": payload["quality_artifact_id"],
-            "expected_revision": payload["revision"],
-            "quality": quality,
-            "issues": matching_issues,
-            "goal": float(quality.get("goal") or quality.get("pass_threshold") or 90),
-            "paragraph_goal": float(
-                quality.get("paragraph_pass_threshold")
-                or quality.get("paragraph_goal")
-                or 85
-            ),
-            "min_case_words": min_case_words,
-            "max_case_words": max_case_words,
-            "word_range_applicable": bool(
-                paragraph_check.get("word_range_applicable", True)
-            ),
-        }
-
-    def publish_rewrite_candidate(
-        self,
-        principal: Principal,
-        project_id: str,
-        job_payload: dict[str, Any],
-        built: dict[str, Any],
-    ) -> dict[str, Any]:
-        current = self._artifact(principal, project_id, DRAFT_DOCUMENT)
-        current_quality = self._artifact(principal, project_id, DRAFT_QUALITY)
-        if current is None or current.id != job_payload["source_draft_artifact_id"]:
-            raise WorkflowConflict("Draft changed while rewrite was running.")
-        if (
-            current_quality is None
-            or current_quality.id != job_payload["source_quality_artifact_id"]
-        ):
-            raise WorkflowConflict("Draft evaluation changed while rewrite was running.")
-        original = str(job_payload["paragraph_text"])
-        paragraph_id = str(job_payload["paragraph_id"])
-        source_paragraph_evaluation = dict(
-            built.get("source_paragraph_evaluation") or {}
-        )
-        candidate_evaluation = dict(built.get("candidate_evaluation") or {})
-        candidate_score_entry = dict(candidate_evaluation.get("paragraph_score") or {})
-        if (
-            candidate_evaluation.get("evaluation_scope") != "single_paragraph"
-            or str(candidate_evaluation.get("paragraph_id") or "") != paragraph_id
-            or str(candidate_score_entry.get("paragraph_id") or "") != paragraph_id
-        ):
-            raise WorkflowValidationError(
-                "The generated candidate did not receive a valid paragraph-only score."
-            )
-        source_score_entry = dict(
-            source_paragraph_evaluation.get("paragraph_score") or {}
-        )
-        if str(source_score_entry.get("paragraph_id") or "") != paragraph_id:
-            raise WorkflowValidationError(
-                "The candidate comparison is missing the source paragraph score."
-            )
-        try:
-            source_paragraph_score = float(source_score_entry["score"])
-            candidate_paragraph_score = float(candidate_score_entry["score"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise WorkflowValidationError(
-                "The candidate comparison contains an invalid paragraph score."
-            ) from exc
-        candidate_text = str(built.get("candidate_text") or "").strip()
-        if not candidate_text:
-            raise WorkflowValidationError("AI rewrite returned no candidate text.")
-        if self._normalized(candidate_text) == self._normalized(original):
-            raise WorkflowValidationError(
-                "AI rewrite made no normalized content change; it was not accepted as a candidate."
-            )
-        _candidate_evidence, evidence_repair_preview, claim_dispositions_preview = (
-            self._single_paragraph_evidence_repair(
-                job_payload,
-                candidate_evaluation,
-                source_paragraph_evaluation,
-            )
-        )
-        store, _artifact = self._read_json(
-            principal, project_id, DRAFT_REWRITES, required=False
-        )
-        entries = dict(store.get("entries") or {})
-        candidate_id = str(uuid.uuid4())
-        entries[candidate_id] = {
-            "candidate_id": candidate_id,
-            "paragraph_id": job_payload["paragraph_id"],
-            "source_draft_artifact_id": current.id,
-            "source_quality_artifact_id": current_quality.id,
-            "original_text": original,
-            "candidate_text": candidate_text,
-            "candidate_text_sha256": self._text_sha256(candidate_text),
-            "resolved_issue_ids": list(built.get("resolved_issue_ids") or []),
-            "generation_report": dict(built.get("report") or {}),
-            "route": str(dict(built.get("report") or {}).get("route") or ""),
-            "rewrite_mode": str(
-                dict(built.get("report") or {}).get("rewrite_mode") or ""
-            ),
-            "requires_manual_confirmation": bool(
-                dict(built.get("report") or {}).get(
-                    "requires_manual_confirmation", False
-                )
-            ),
-            "source_paragraph_evaluation": source_paragraph_evaluation,
-            "candidate_evaluation": candidate_evaluation,
-            "source_section_evidence_artifact_id": str(
-                job_payload.get("source_section_evidence_artifact_id") or ""
-            ),
-            "source_matrix_artifact_id": str(
-                job_payload.get("source_matrix_artifact_id") or ""
-            ),
-            "evidence_repair_preview": evidence_repair_preview,
-            "claim_dispositions_preview": claim_dispositions_preview,
-            "source_paragraph_score": round(source_paragraph_score, 2),
-            "candidate_paragraph_score": round(candidate_paragraph_score, 2),
-            "status": "pending",
-            "created_at": utc_now().isoformat(),
-        }
-        payload = {"project_id": project_id, "entries": entries}
-        with self._write_lock:
-            published, state = self._publish_files(
-                principal,
-                project_id,
-                {
-                    DRAFT_REWRITES: (
-                        (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode(),
-                        "json",
-                    )
-                },
-                expected_revision=int(job_payload["expected_revision"]),
-                metadata={"operation": "rewrite-candidate", "paragraph_id": job_payload["paragraph_id"]},
-                expected_current_artifacts={
-                    DRAFT_DOCUMENT: current.id,
-                    DRAFT_QUALITY: current_quality.id,
-                    **(
-                        {
-                            MATRIX_LOGICAL_NAME: str(
-                                job_payload.get("source_matrix_artifact_id") or ""
-                            )
-                        }
-                        if str(job_payload.get("source_matrix_artifact_id") or "")
-                        else {}
-                    ),
-                    **(
-                        {
-                            SECTION_EVIDENCE: str(
-                                job_payload.get(
-                                    "source_section_evidence_artifact_id"
-                                )
-                                or ""
-                            )
-                        }
-                        if str(
-                            job_payload.get("source_section_evidence_artifact_id")
-                            or ""
-                        )
-                        else {}
-                    ),
-                },
-                invalidate_final=False,
-            )
-        return {
-            "candidate_id": candidate_id,
-            "candidate_artifact_id": published[DRAFT_REWRITES].id,
-            "paragraph_id": paragraph_id,
-            "source_paragraph_score": round(source_paragraph_score, 2),
-            "candidate_paragraph_score": round(candidate_paragraph_score, 2),
-            "evidence_repair_preview": evidence_repair_preview,
-            "revision": state.revision,
-        }
-
-    def accept_rewrite_payload(
-        self,
-        principal: Principal,
-        project_id: str,
-        candidate_id: str,
-        *,
-        revision: int,
-    ) -> dict[str, Any]:
-        """Build an immutable payload for publishing one scored candidate."""
-
-        payload = self.get(principal, project_id)
-        quality = dict(payload.get("quality") or {})
-        if not payload.get("quality_artifact_id") or not quality:
-            raise DraftNotReady("The rewrite candidate has no evaluation context.")
-        if int(payload.get("revision") or 0) != int(revision):
-            raise WorkflowConflict("Draft revision changed. Refresh and try again.")
-        store, store_artifact = self._read_json(
-            principal, project_id, DRAFT_REWRITES
-        )
-        candidate = dict((store.get("entries") or {}).get(candidate_id) or {})
-        if not candidate:
-            raise WorkflowNotFound("Rewrite candidate not found.")
-        if candidate.get("status") != "pending":
-            raise WorkflowConflict("Rewrite candidate was already decided.")
-        if candidate.get("source_draft_artifact_id") != payload["draft_artifact_id"]:
-            raise WorkflowConflict("Rewrite candidate is stale for the current Draft.")
-        if candidate.get("source_quality_artifact_id") != payload["quality_artifact_id"]:
-            raise WorkflowConflict("Rewrite candidate is stale for the current evaluation.")
-        paragraph_id = str(candidate.get("paragraph_id") or "")
-        paragraph = next(
-            (
-                row
-                for row in self._paragraph_spans(payload["first_draft_md"])
-                if row["paragraph_id"] == paragraph_id
-            ),
-            None,
-        )
-        if paragraph is None or self._normalized(paragraph["text"]) != self._normalized(
-            candidate.get("original_text")
-        ):
-            raise WorkflowConflict("Rewrite paragraph changed after candidate generation.")
-        candidate_text = str(candidate.get("candidate_text") or "").strip()
-        if not candidate_text:
-            raise WorkflowConflict("Rewrite candidate contains no text.")
-        candidate_text_sha256 = str(candidate.get("candidate_text_sha256") or "")
-        if candidate_text_sha256 and candidate_text_sha256 != self._text_sha256(
-            candidate_text
-        ):
-            raise WorkflowConflict("Rewrite candidate integrity check failed.")
-        candidate_evaluation = dict(candidate.get("candidate_evaluation") or {})
-        if candidate_evaluation and (
-            candidate_evaluation.get("evaluation_scope") != "single_paragraph"
-            or str(candidate_evaluation.get("paragraph_id") or "") != paragraph_id
-            or str(
-                dict(candidate_evaluation.get("paragraph_score") or {}).get(
-                    "paragraph_id"
-                )
-                or ""
-            )
-            != paragraph_id
-        ):
-            raise WorkflowConflict("Stored candidate score is invalid.")
-        candidate_draft = (
-            payload["first_draft_md"][: paragraph["start"]]
-            + candidate_text
-            + payload["first_draft_md"][paragraph["end"] :]
-        ).rstrip() + "\n"
-        matching_issues = [
-            issue
-            for issue in quality.get("issues") or []
-            if isinstance(issue, dict) and issue.get("paragraph_id") == paragraph_id
-        ]
-        allowed_unsupported_claims = sorted(
-            {
-                str(value)
-                for issue in matching_issues
-                for value in issue.get("unsupported_claims") or []
-                if str(value).strip()
-            }
-        )
-        preflight = quality.get("preflight")
-        preflight = preflight if isinstance(preflight, dict) else {}
-        paragraph_check = next(
-            (
-                item
-                for item in preflight.get("paragraph_checks") or []
-                if isinstance(item, dict)
-                and str(item.get("paragraph_id") or "") == paragraph_id
-            ),
-            {},
-        )
-        case_range = preflight.get("case_word_range")
-        if isinstance(case_range, (list, tuple)) and len(case_range) >= 2:
-            min_case_words = int(case_range[0] or CASE_PARAGRAPH_MIN_WORDS)
-            max_case_words = int(case_range[1] or CASE_PARAGRAPH_MAX_WORDS)
-        elif isinstance(case_range, dict):
-            min_case_words = int(
-                case_range.get("min_words") or CASE_PARAGRAPH_MIN_WORDS
-            )
-            max_case_words = int(
-                case_range.get("max_words") or CASE_PARAGRAPH_MAX_WORDS
-            )
-        else:
-            min_case_words, max_case_words = (
-                CASE_PARAGRAPH_MIN_WORDS,
-                CASE_PARAGRAPH_MAX_WORDS,
-            )
-        compatibility = self.compatibility_payload(principal, project_id)
-        source_evidence_id = str(
-            candidate.get("source_section_evidence_artifact_id") or ""
-        )
-        current_evidence_id = str(
-            compatibility.get("source_section_evidence_artifact_id") or ""
-        )
-        if source_evidence_id and current_evidence_id != source_evidence_id:
-            raise WorkflowConflict(
-                "The section Evidence Package changed after candidate generation. "
-                "Generate the paragraph candidate again against the current evidence."
-            )
-        source_matrix_id = str(candidate.get("source_matrix_artifact_id") or "")
-        current_matrix_id = str(compatibility.get("source_matrix_artifact_id") or "")
-        if source_matrix_id and current_matrix_id != source_matrix_id:
-            raise WorkflowConflict(
-                "The Matrix changed after candidate generation. Generate the "
-                "paragraph candidate again against the current facts."
-            )
-        return {
-            **compatibility,
-            "project_id": project_id,
-            "candidate_id": candidate_id,
-            "paragraph_id": paragraph_id,
-            "paragraph_text": str(paragraph["text"]),
-            "candidate_text": candidate_text,
-            # New candidates are scored before human review.  The router uses
-            # this immutable evaluation directly; the legacy evaluator is only
-            # a compatibility fallback for candidates created by older builds.
-            "candidate_evaluation": candidate_evaluation,
-            "source_paragraph_evaluation": dict(
-                candidate.get("source_paragraph_evaluation") or {}
-            ),
-            "source_section_evidence_artifact_id": source_evidence_id,
-            "source_matrix_artifact_id": source_matrix_id or current_matrix_id,
-            "evidence_repair_preview": dict(
-                candidate.get("evidence_repair_preview") or {}
-            ),
-            "claim_dispositions_preview": dict(
-                candidate.get("claim_dispositions_preview") or {}
-            ),
-            "candidate_draft_text": candidate_draft,
-            "source_draft_artifact_id": payload["draft_artifact_id"],
-            "source_quality_artifact_id": payload["quality_artifact_id"],
-            "source_rewrites_artifact_id": store_artifact.id,
-            "expected_revision": int(revision),
-            "quality": quality,
-            "goal": float(quality.get("goal") or quality.get("pass_threshold") or 90),
-            "paragraph_goal": float(
-                quality.get("paragraph_pass_threshold")
-                or quality.get("paragraph_goal")
-                or 85
-            ),
-            "min_case_words": min_case_words,
-            "max_case_words": max_case_words,
-            "word_range_applicable": bool(
-                paragraph_check.get("word_range_applicable", True)
-            ),
-            "allowed_unsupported_claims": allowed_unsupported_claims,
-        }
 
     @staticmethod
     def _replace_scoped_rows(
@@ -4307,7 +2671,7 @@ class DraftsService(OwnedProjectService):
         paragraph_goal = float(
             current_quality.get("paragraph_pass_threshold")
             or current_quality.get("paragraph_goal")
-            or 85
+            or PARAGRAPH_PASS_THRESHOLD
         )
         paragraph_failures = [
             item
@@ -4373,7 +2737,7 @@ class DraftsService(OwnedProjectService):
                         or issue.get("source_evidence_refs")
                         or []
                     ),
-                    source_ready=bool(source_entry),
+                    source_ready=has_original_passages,
                     evidence_texts=[
                         str(passage.get("text") or "")
                         for paper in source_entry.get("papers") or []
@@ -4385,12 +2749,7 @@ class DraftsService(OwnedProjectService):
                 )
             )
             repair_stage = str(issue.get("repair_stage") or "draft")
-            issue["recommended_return_stage"] = {
-                "discovery": "discovery",
-                "planning": "planning",
-                "library_matrix": "planning",
-                "writing_plan": "sections",
-            }.get(repair_stage, "draft")
+            issue["recommended_return_stage"] = self._navigation_stage_for_repair(str(issue.get("execution_stage") or repair_stage))
             issues.append(issue)
         source_check = dict(current_quality.get("source_check") or {})
         source_entry = built.get("source_check_entry")
@@ -4430,14 +2789,17 @@ class DraftsService(OwnedProjectService):
             if str(value).strip()
             and str(value) != "paragraph_readability_or_source_failures"
         )
+        for finding in preflight.get("paragraph_findings") or []:
+            if isinstance(finding, dict):
+                finding["hard_gate"] = paragraph_finding_is_blocking(finding)
         if any(
-            str(item.get("severity") or "") in {"critical", "major"}
+            paragraph_finding_is_blocking(item)
             for item in preflight.get("paragraph_findings") or []
             if isinstance(item, dict)
         ):
             hard_gate_failures.add("paragraph_readability_or_source_failures")
         hard_gate_failures = sorted(hard_gate_failures)
-        goal = float(current_quality.get("goal") or current_quality.get("pass_threshold") or 90)
+        goal = float(current_quality.get("goal") or current_quality.get("pass_threshold") or DRAFT_PASS_THRESHOLD)
         decision = (
             "PASS"
             if updated_score >= goal and not hard_gate_failures and not blocking
@@ -4489,589 +2851,4 @@ class DraftsService(OwnedProjectService):
             ),
             "incremental_evaluations": history,
             "evaluated_at": str(built.get("evaluated_at") or utc_now().isoformat()),
-        }
-
-    def publish_accepted_rewrite(
-        self,
-        principal: Principal,
-        project_id: str,
-        job_payload: dict[str, Any],
-        built: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Publish one accepted paragraph using its precomputed candidate score."""
-
-        current_text, current = self._read_text(principal, project_id, DRAFT_DOCUMENT)
-        current_quality, quality_artifact = self._read_json(
-            principal, project_id, DRAFT_QUALITY
-        )
-        store, store_artifact = self._read_json(
-            principal, project_id, DRAFT_REWRITES
-        )
-        if current.id != job_payload["source_draft_artifact_id"]:
-            raise WorkflowConflict("Draft changed while paragraph evaluation was running.")
-        if quality_artifact.id != job_payload["source_quality_artifact_id"]:
-            raise WorkflowConflict(
-                "Draft evaluation changed while paragraph evaluation was running."
-            )
-        if store_artifact.id != job_payload["source_rewrites_artifact_id"]:
-            raise WorkflowConflict(
-                "Rewrite candidates changed while paragraph evaluation was running."
-            )
-        candidate_id = str(job_payload["candidate_id"])
-        entries = dict(store.get("entries") or {})
-        candidate = dict(entries.get(candidate_id) or {})
-        if not candidate or candidate.get("status") != "pending":
-            raise WorkflowConflict("Rewrite candidate was already decided.")
-        if str(candidate.get("candidate_text") or "").strip() != str(
-            job_payload.get("candidate_text") or ""
-        ).strip():
-            raise WorkflowConflict("Rewrite candidate changed during evaluation.")
-        stored_evaluation = dict(candidate.get("candidate_evaluation") or {})
-        if stored_evaluation:
-            stored_score = dict(stored_evaluation.get("paragraph_score") or {})
-            built_score = dict(built.get("paragraph_score") or {})
-            if (
-                str(stored_evaluation.get("paragraph_id") or "")
-                != str(job_payload["paragraph_id"])
-                or stored_score.get("score") != built_score.get("score")
-            ):
-                raise WorkflowConflict(
-                    "The precomputed candidate score changed before saving."
-                )
-        paragraph_id = str(job_payload["paragraph_id"])
-        candidate_draft = str(job_payload.get("candidate_draft_text") or "")
-        if not candidate_draft.strip() or candidate_draft == current_text:
-            raise WorkflowConflict("Rewrite candidate contains no applicable change.")
-
-        source_evidence_id = str(
-            job_payload.get("source_section_evidence_artifact_id") or ""
-        )
-        source_matrix_id = str(job_payload.get("source_matrix_artifact_id") or "")
-        if source_matrix_id:
-            current_matrix = self._artifact(
-                principal, project_id, MATRIX_LOGICAL_NAME
-            )
-            if current_matrix is None or current_matrix.id != source_matrix_id:
-                raise WorkflowConflict(
-                    "The Matrix changed while the paragraph candidate was awaiting "
-                    "acceptance. Generate the candidate again."
-                )
-        if source_evidence_id:
-            current_evidence = self._artifact(
-                principal, project_id, SECTION_EVIDENCE
-            )
-            if current_evidence is None or current_evidence.id != source_evidence_id:
-                raise WorkflowConflict(
-                    "The section Evidence Package changed while the paragraph "
-                    "candidate was awaiting acceptance."
-                )
-            repaired_evidence, evidence_repair, claim_dispositions = (
-                self._single_paragraph_evidence_repair(
-                    job_payload,
-                    built,
-                    dict(job_payload.get("source_paragraph_evaluation") or {}),
-                )
-            )
-        else:
-            repaired_evidence = {}
-            evidence_repair = {
-                "status": "not_applicable",
-                "added_evidence_count": 0,
-                "downgraded_claim_count": 0,
-                "affected_section_ids": [],
-                "affected_paragraph_ids": [],
-                "added_evidence": [],
-            }
-            claim_dispositions = {}
-
-        candidate_matrix, matrix_fact_promotions = self._matrix_with_promoted_facts(
-            dict(job_payload.get("matrix") or {}), evidence_repair
-        )
-        evidence_repair["matrix_fact_promotions"] = matrix_fact_promotions
-        evidence_repair["matrix_fact_promotion_count"] = len(matrix_fact_promotions)
-
-        updated_quality = self._incremental_quality(
-            current_quality,
-            built,
-            paragraph_id=paragraph_id,
-            source_quality_artifact_id=quality_artifact.id,
-        )
-        merged_dispositions = dict(
-            current_quality.get("claim_dispositions") or {}
-        )
-        merged_dispositions.update(claim_dispositions)
-        updated_quality.update(
-            {
-                "evidence_repair": evidence_repair,
-                "claim_dispositions": merged_dispositions,
-                "repair_summary": self._repair_summary(
-                    current_quality,
-                    list(updated_quality.get("root_causes") or []),
-                    evidence_repair=evidence_repair,
-                ),
-            }
-        )
-        manual_review = self._manual_claim_review(current, updated_quality)
-        updated_quality.update(
-            {
-                "manual_claim_review": manual_review,
-                "verified_manual_paragraph_ids": manual_review[
-                    "verified_manual_paragraph_ids"
-                ],
-                "unverified_manual_paragraph_ids": manual_review[
-                    "unverified_manual_paragraph_ids"
-                ],
-            }
-        )
-        updated_quality.update(self._quality_status_partition(updated_quality))
-        decided_at = utc_now().isoformat()
-        candidate.update(
-            {
-                "status": "accepted",
-                "decided_at": decided_at,
-                "paragraph_score_before": next(
-                    (
-                        item.get("score")
-                        for item in current_quality.get("paragraph_scores") or []
-                        if isinstance(item, dict)
-                        and str(item.get("paragraph_id") or "") == paragraph_id
-                    ),
-                    None,
-                ),
-                "paragraph_score_after": dict(built.get("paragraph_score") or {}).get(
-                    "score"
-                ),
-                "overall_score_after": updated_quality["score"],
-                "evidence_repair": evidence_repair,
-                "claim_dispositions": claim_dispositions,
-            }
-        )
-        entries[candidate_id] = candidate
-        for other_id, other_value in list(entries.items()):
-            if other_id == candidate_id or not isinstance(other_value, dict):
-                continue
-            other = dict(other_value)
-            if (
-                other.get("status") == "pending"
-                and other.get("source_draft_artifact_id") == current.id
-            ):
-                other["status"] = "superseded"
-                other["superseded_by_candidate_id"] = candidate_id
-                other["decided_at"] = decided_at
-                entries[other_id] = other
-
-        overlays, overlay_artifact = self._read_json(
-            principal, project_id, DRAFT_OVERLAYS, required=False
-        )
-        overlay_entries = dict(overlays.get("entries") or {})
-        previous_overlay = overlay_entries.get(paragraph_id)
-        previous_overlay = previous_overlay if isinstance(previous_overlay, dict) else {}
-        overlay_entries[paragraph_id] = {
-            "paragraph_id": paragraph_id,
-            "source_text_sha256": str(
-                previous_overlay.get("source_text_sha256")
-                or self._text_sha256(str(job_payload["paragraph_text"]))
-            ),
-            "rewritten_text": str(job_payload["candidate_text"]).strip(),
-            "updated_at": decided_at,
-        }
-
-        files: dict[
-            str,
-            tuple[bytes | Callable[[dict[str, ArtifactRecord]], bytes], str],
-        ] = {}
-        if matrix_fact_promotions:
-            files[MATRIX_LOGICAL_NAME] = (
-                (
-                    json.dumps(candidate_matrix, ensure_ascii=False, indent=2)
-                    + "\n"
-                ).encode(),
-                "json",
-            )
-        if evidence_repair.get("added_evidence_count") and repaired_evidence:
-            def evidence_content(
-                published: dict[str, ArtifactRecord],
-                source: dict[str, Any] = repaired_evidence,
-            ) -> bytes:
-                value = deepcopy(source)
-                if MATRIX_LOGICAL_NAME in published:
-                    value["source_matrix_artifact_id"] = published[
-                        MATRIX_LOGICAL_NAME
-                    ].id
-                return (
-                    json.dumps(value, ensure_ascii=False, indent=2) + "\n"
-                ).encode()
-
-            files[SECTION_EVIDENCE] = (evidence_content, "json")
-        files[DRAFT_DOCUMENT] = (
-            (candidate_draft.rstrip() + "\n").encode(),
-            "markdown",
-        )
-
-        def quality_content(published: dict[str, ArtifactRecord]) -> bytes:
-            quality_was_current = (
-                current_quality.get("source_draft_artifact_id") == current.id
-            )
-            quality = {
-                **updated_quality,
-                # A targeted paragraph evaluation cannot make an already stale
-                # full-draft evaluation current.  Preserve staleness unless the
-                # source quality snapshot covered the complete current draft.
-                "source_draft_artifact_id": (
-                    published[DRAFT_DOCUMENT].id
-                    if quality_was_current
-                    else current_quality.get("source_draft_artifact_id")
-                ),
-            }
-            return (json.dumps(quality, ensure_ascii=False, indent=2) + "\n").encode()
-
-        files[DRAFT_QUALITY] = (quality_content, "json")
-        files[DRAFT_OVERLAYS] = (
-            (
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "project_id": project_id,
-                        "policy": "Apply only when paragraph_id and source_text_sha256 still match.",
-                        "entries": overlay_entries,
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                + "\n"
-            ).encode(),
-            "json",
-        )
-        files[DRAFT_REWRITES] = (
-            (
-                json.dumps(
-                    {"project_id": project_id, "entries": entries},
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                + "\n"
-            ).encode(),
-            "json",
-        )
-        expected_currents = {
-            DRAFT_DOCUMENT: current.id,
-            DRAFT_QUALITY: quality_artifact.id,
-            DRAFT_REWRITES: store_artifact.id,
-        }
-        if source_evidence_id:
-            expected_currents[SECTION_EVIDENCE] = source_evidence_id
-        if source_matrix_id:
-            expected_currents[MATRIX_LOGICAL_NAME] = source_matrix_id
-        if overlay_artifact is not None:
-            expected_currents[DRAFT_OVERLAYS] = overlay_artifact.id
-        event = {
-            "id": str(uuid.uuid4()),
-            "stage_id": "draft",
-            "subject_type": "rewrite-candidate",
-            "subject_id": candidate_id,
-            "decision": "accept",
-            "details": {
-                "paragraph_id": paragraph_id,
-                "source_draft_artifact_id": current.id,
-                "evaluation_scope": "single_paragraph",
-                "paragraph_score_after": candidate.get("paragraph_score_after"),
-                "overall_score_after": updated_quality["score"],
-                "added_evidence_count": int(
-                    evidence_repair.get("added_evidence_count") or 0
-                ),
-            },
-            "created_at": utc_now(),
-        }
-        common_metadata = {
-            **dict(current.metadata),
-            "operation": "rewrite-accept-pre-evaluated-candidate",
-            "candidate_id": candidate_id,
-            "paragraph_id": paragraph_id,
-            "previous_draft_artifact_id": current.id,
-            "evidence_repair": evidence_repair,
-        }
-
-        def artifact_metadata(
-            logical_name: str, published_so_far: dict[str, ArtifactRecord]
-        ) -> dict[str, Any]:
-            value = dict(common_metadata)
-            if SECTION_EVIDENCE in published_so_far:
-                value["source_section_evidence_artifact_id"] = (
-                    published_so_far[SECTION_EVIDENCE].id
-                )
-            if MATRIX_LOGICAL_NAME in published_so_far:
-                value["source_matrix_artifact_id"] = published_so_far[
-                    MATRIX_LOGICAL_NAME
-                ].id
-            if DRAFT_DOCUMENT in published_so_far and logical_name in {
-                DRAFT_QUALITY,
-                DRAFT_OVERLAYS,
-            }:
-                value["source_draft_artifact_id"] = (
-                    published_so_far[DRAFT_DOCUMENT].id
-                )
-            return value
-
-        with self._write_lock:
-            published, state = self._publish_files(
-                principal,
-                project_id,
-                files,
-                expected_revision=int(job_payload["expected_revision"]),
-                metadata=common_metadata,
-                metadata_builder=artifact_metadata,
-                approval_events=[event],
-                expected_current_artifacts=expected_currents,
-                invalidate_final=True,
-            )
-        return {
-            "candidate_id": candidate_id,
-            "decision": "accept",
-            "draft_artifact_id": published[DRAFT_DOCUMENT].id,
-            "quality_artifact_id": published[DRAFT_QUALITY].id,
-            "paragraph_id": paragraph_id,
-            "paragraph_score": dict(built.get("paragraph_score") or {}).get("score"),
-            "score": updated_quality["score"],
-            "evaluation_scope": "single_paragraph",
-            "section_evidence_artifact_id": (
-                published[SECTION_EVIDENCE].id
-                if SECTION_EVIDENCE in published
-                else source_evidence_id
-            ),
-            "matrix_artifact_id": (
-                published[MATRIX_LOGICAL_NAME].id
-                if MATRIX_LOGICAL_NAME in published
-                else source_matrix_id
-            ),
-            "evidence_repair": evidence_repair,
-            "revision": state.revision,
-        }
-
-    def decide_rewrite(
-        self,
-        principal: Principal,
-        project_id: str,
-        candidate_id: str,
-        *,
-        decision: str,
-        revision: int,
-    ) -> dict[str, Any]:
-        if decision not in {"accept", "reject"}:
-            raise WorkflowValidationError("Unknown rewrite decision.")
-        store, store_artifact = self._read_json(principal, project_id, DRAFT_REWRITES)
-        entries = dict(store.get("entries") or {})
-        candidate = dict(entries.get(candidate_id) or {})
-        if not candidate:
-            raise WorkflowNotFound("Rewrite candidate not found.")
-        if candidate.get("status") != "pending":
-            raise WorkflowConflict("Rewrite candidate was already decided.")
-        current_text, current = self._read_text(principal, project_id, DRAFT_DOCUMENT)
-        current_quality = self._artifact(principal, project_id, DRAFT_QUALITY)
-        overlays, overlay_artifact = self._read_json(
-            principal, project_id, DRAFT_OVERLAYS, required=False
-        )
-        if candidate.get("source_draft_artifact_id") != current.id:
-            raise WorkflowConflict("Rewrite candidate is stale for the current Draft.")
-        if (
-            current_quality is None
-            or candidate.get("source_quality_artifact_id") != current_quality.id
-        ):
-            raise WorkflowConflict("Rewrite candidate is stale for the current evaluation.")
-        files: dict[str, tuple[bytes, str]] = {}
-        expected_currents = {
-            DRAFT_DOCUMENT: current.id,
-            DRAFT_QUALITY: current_quality.id,
-            DRAFT_REWRITES: store_artifact.id,
-        }
-        if decision == "accept":
-            paragraph = next(
-                (
-                    row
-                    for row in self._paragraph_spans(current_text)
-                    if row["paragraph_id"] == candidate.get("paragraph_id")
-                ),
-                None,
-            )
-            if paragraph is None or self._normalized(paragraph["text"]) != self._normalized(
-                candidate.get("original_text")
-            ):
-                raise WorkflowConflict("Rewrite paragraph changed after candidate generation.")
-            updated = (
-                current_text[: paragraph["start"]]
-                + str(candidate["candidate_text"]).strip()
-                + current_text[paragraph["end"] :]
-            )
-            files[DRAFT_DOCUMENT] = ((updated.rstrip() + "\n").encode(), "markdown")
-            overlay_entries = dict(overlays.get("entries") or {})
-            previous_overlay = overlay_entries.get(candidate.get("paragraph_id"))
-            previous_overlay = (
-                previous_overlay if isinstance(previous_overlay, dict) else {}
-            )
-            paragraph_id = str(candidate.get("paragraph_id") or "")
-            overlay_entries[paragraph_id] = {
-                "paragraph_id": paragraph_id,
-                "source_text_sha256": str(
-                    previous_overlay.get("source_text_sha256")
-                    or self._text_sha256(str(candidate.get("original_text") or ""))
-                ),
-                "rewritten_text": str(candidate["candidate_text"]).strip(),
-                "updated_at": utc_now().isoformat(),
-            }
-            files[DRAFT_OVERLAYS] = (
-                (
-                    json.dumps(
-                        {
-                            "schema_version": 1,
-                            "project_id": project_id,
-                            "policy": "Apply only when paragraph_id and source_text_sha256 still match.",
-                            "entries": overlay_entries,
-                        },
-                        ensure_ascii=False,
-                        indent=2,
-                    )
-                    + "\n"
-                ).encode(),
-                "json",
-            )
-            if overlay_artifact is not None:
-                expected_currents[DRAFT_OVERLAYS] = overlay_artifact.id
-            for other_id, other_value in list(entries.items()):
-                if other_id == candidate_id or not isinstance(other_value, dict):
-                    continue
-                other = dict(other_value)
-                if (
-                    other.get("status") == "pending"
-                    and other.get("source_draft_artifact_id") == current.id
-                ):
-                    other["status"] = "superseded"
-                    other["superseded_by_candidate_id"] = candidate_id
-                    other["decided_at"] = utc_now().isoformat()
-                    entries[other_id] = other
-        candidate["status"] = "accepted" if decision == "accept" else "rejected"
-        candidate["decided_at"] = utc_now().isoformat()
-        entries[candidate_id] = candidate
-        files[DRAFT_REWRITES] = (
-            (
-                json.dumps(
-                    {"project_id": project_id, "entries": entries},
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                + "\n"
-            ).encode(),
-            "json",
-        )
-        event = {
-            "id": str(uuid.uuid4()),
-            "stage_id": "draft",
-            "subject_type": "rewrite-candidate",
-            "subject_id": candidate_id,
-            "decision": decision,
-            "details": {
-                "paragraph_id": candidate.get("paragraph_id"),
-                "source_draft_artifact_id": current.id,
-            },
-            "created_at": utc_now(),
-        }
-        with self._write_lock:
-            published, state = self._publish_files(
-                principal,
-                project_id,
-                files,
-                expected_revision=revision,
-                metadata={
-                    **dict(current.metadata),
-                    "operation": f"rewrite-{decision}",
-                    "candidate_id": candidate_id,
-                    "previous_draft_artifact_id": current.id,
-                },
-                approval_events=[event],
-                expected_current_artifacts=expected_currents,
-                invalidate_final=decision == "accept",
-            )
-        return {
-            "candidate_id": candidate_id,
-            "decision": decision,
-            "draft_artifact_id": (
-                published[DRAFT_DOCUMENT].id if DRAFT_DOCUMENT in published else current.id
-            ),
-            "revision": state.revision,
-        }
-
-    def approve(
-        self,
-        principal: Principal,
-        project_id: str,
-        *,
-        revision: int,
-        override_low_score: bool,
-        override_reason: str,
-    ) -> dict[str, Any]:
-        payload = self.get(principal, project_id)
-        quality = payload.get("quality") or {}
-        if not quality.get("current"):
-            raise DraftApprovalBlocked("Evaluate the exact current Draft before approval.")
-        hard = [str(value) for value in quality.get("hard_gate_failures") or [] if str(value)]
-        score = float(quality.get("score") or 0)
-        goal = float(quality.get("goal") or 90)
-        if hard:
-            raise DraftApprovalBlocked(
-                "The current evaluation has hard gate failures that cannot be overridden."
-            )
-        needs_human_override = score < goal
-        if needs_human_override and not override_low_score:
-            raise DraftApprovalBlocked(
-                "The current evaluation has unresolved findings; human override is required."
-            )
-        if needs_human_override and not str(override_reason or "").strip():
-            raise WorkflowValidationError("A reason is required for human override.")
-        draft_id = str(payload["draft_artifact_id"])
-        quality_artifact_id = str(payload.get("quality_artifact_id") or "")
-        if not quality_artifact_id:
-            raise DraftApprovalBlocked("The current evaluation artifact is unavailable.")
-        approval = {
-            "status": "approved",
-            "draft_artifact_id": draft_id,
-            "quality_artifact_id": quality_artifact_id,
-            "score": score,
-            "goal": goal,
-            "below_goal_override": score < goal,
-            "overridden_hard_gate_failures": [],
-            "override_reason": str(override_reason or "").strip(),
-            "approved_at": utc_now().isoformat(),
-        }
-        event = {
-            "id": str(uuid.uuid4()),
-            "stage_id": "draft",
-            "subject_type": "draft-version",
-            "subject_id": draft_id,
-            "decision": "approved",
-            "details": approval,
-            "created_at": utc_now(),
-        }
-        with self._write_lock:
-            published, state = self._publish_files(
-                principal,
-                project_id,
-                {
-                    DRAFT_APPROVAL: (
-                        (json.dumps(approval, ensure_ascii=False, indent=2) + "\n").encode(),
-                        "json",
-                    )
-                },
-                expected_revision=revision,
-                status="approved",
-                metadata={"operation": "draft-approval", "draft_artifact_id": draft_id},
-                approval_events=[event],
-                expected_current_artifacts={
-                    DRAFT_DOCUMENT: draft_id,
-                    DRAFT_QUALITY: quality_artifact_id,
-                },
-                invalidate_final=False,
-            )
-        return {
-            "approved": True,
-            "approval_artifact_id": published[DRAFT_APPROVAL].id,
-            "revision": state.revision,
-            "next_stage": "final",
         }

@@ -9,8 +9,123 @@ comparison coverage are all derived from current inputs.
 from __future__ import annotations
 
 import re
+import hashlib
+import json
 from collections import defaultdict
+from copy import deepcopy
 from typing import Any, Iterable, Mapping
+from review_writer_core.scientific_facts import fact_is_usable
+from review_writer_core.paragraph_markers import parse_marked_paragraphs
+
+
+def build_argument_execution(blueprint, writing_plan, section_index, matrix, *, draft_text=None):
+    """Derive downstream inputs from realized prose, never provisional theses.
+
+    This is an observable binding check, not a semantic quality score. A manual
+    edit invalidates old sentence bindings without changing the author's text.
+    The result belongs inside existing synthesis/quality artifacts.
+    """
+    from review_writer_core.claim_contracts import argument_projection, claim_is_executable
+    from review_writer_core.stages.sections.source_writing import CONTRACT as SOURCE_CONTRACT, support_fingerprint
+
+    def rows(value, key):
+        return [row for row in (value or {}).get(key) or [] if isinstance(row, dict)]
+
+    def normalized(value):
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    facts = {(str(row.get("paper_id")), str(fact.get("fact_id"))): fact
+             for row in rows(matrix, "rows") or rows(matrix, "papers")
+             for fact in row.get("scientific_facts") or [] if isinstance(fact, dict)}
+    plans = {str(row.get("section_id")): row for row in rows(writing_plan, "sections")}
+    bodies = {str(row.get("section_id")): row for row in rows(section_index, "sections")}
+    current = {row["paragraph_id"]: row["text"] for row in parse_marked_paragraphs(draft_text or "")}
+    findings, output, seen = [], [], {}
+    for section in rows(blueprint, "sections"):
+        sid = str(section.get("section_id") or "")
+        plan, body = plans.get(sid, {}), bodies.get(sid, {})
+        claims = {str(row.get("claim_id")): row for row in rows(plan, "claims")}
+        declared = {str(row.get("claim_id")): row for row in rows(section, "scientific_claims")}
+        realized = []
+        for paragraph in rows(body, "paragraphs"):
+            pid = str(paragraph.get("paragraph_id") or "")
+            prose = normalized(current.get(pid, "") if draft_text is not None else paragraph.get("text"))
+            for item in rows(paragraph, "claim_realizations"):
+                cid, sentence = str(item.get("claim_id") or ""), normalized(item.get("text"))
+                if not sentence or sentence not in prose:
+                    findings.append({"code": "claim_binding_not_current", "section_id": sid,
+                                     "paragraph_id": pid, "claim_id": cid})
+                    continue
+                claim = claims.get(cid, {})
+                source_argument = declared.get(cid, {})
+                if plan.get("evidence_mode") != SOURCE_CONTRACT and source_argument.get("argument_basis") and (not claim_is_executable(source_argument)
+                        or argument_projection(claim) != argument_projection(source_argument)):
+                    findings.append({"code": "argument_version_not_current", "section_id": sid,
+                                     "paragraph_id": pid, "claim_id": cid})
+                    continue
+                papers = list(dict.fromkeys(str(v) for v in item.get("citation_group") or claim.get("citation_group") or []))
+                ids = list(dict.fromkeys(str(v) for v in item.get("fact_ids") or claim.get("fact_ids") or []))
+                invalid = [fid for fid in ids if not any(fact_is_usable(facts.get((paper, fid), {})) for paper in papers)]
+                if invalid:
+                    findings.append({"code": "claim_fact_not_current", "section_id": sid,
+                                     "paragraph_id": pid, "claim_id": cid, "fact_ids": invalid})
+                    continue
+                refs = item.get("evidence_refs") or claim.get("evidence_refs") or []
+                if not papers or not refs:
+                    continue
+                source_bound = plan.get("evidence_mode") == SOURCE_CONTRACT
+                if source_bound:
+                    verdict = claim.get("source_verification") or {}
+                    if (verdict.get("status") != "supported" or verdict.get("contract") != SOURCE_CONTRACT
+                            or verdict.get("input_fingerprint") != support_fingerprint(sentence, refs,
+                                claim.get("claim_kind"), claim.get("result_context") or [])):
+                        findings.append({"code": "source_claim_check_not_current", "section_id": sid,
+                                         "paragraph_id": pid, "claim_id": cid})
+                        continue
+                record = {"section_id": sid, "section_title": str(section.get("title") or sid),
+                          "paragraph_id": pid, "claim_id": cid, "claim": sentence,
+                          "paper_ids": papers, "fact_ids": ids, "evidence_refs": refs,
+                          "binding_level": "source_passage" if source_bound else "fact" if ids else "legacy_source",
+                          "source_verification": claim.get("source_verification"),
+                          "result_context": claim.get("result_context") or [],
+                          "claim_kind": str(claim.get("claim_kind") or ""),
+                          "claim_revision": claim.get("claim_revision", 1),
+                          "argument_basis": claim.get("argument_basis"),
+                          "assertion_ceiling": str(claim.get("assertion_ceiling") or "")}
+                realized.append(record)
+                # A repeated paper or even a repeated fact is legitimate when
+                # its analytical contribution differs. Only identical source
+                # sets AND identical claims produce this conservative finding.
+                identity = (tuple(sorted(papers)), tuple(sorted(ids)), sentence.casefold())
+                previous = seen.get(identity)
+                if previous and previous["section_id"] != sid:
+                    findings.append({"code": "repeated_claim_across_sections", "section_id": sid,
+                                     "paragraph_id": pid, "other_paragraph_id": previous["paragraph_id"],
+                                     "claim_id": cid})
+                seen[identity] = record
+        realized_ids = {item["claim_id"] for item in realized}
+        for claim in declared.values():
+            if plan.get("evidence_mode") != SOURCE_CONTRACT and claim.get("argument_basis") and claim.get("required_for_section") and claim["claim_id"] not in realized_ids:
+                findings.append({"code": "core_argument_not_realized", "section_id": sid, "claim_id": claim["claim_id"],
+                    "paragraph_id": next((p.get("paragraph_id", "") for p in rows(plan, "paragraphs")
+                                          if claim["claim_id"] in (p.get("claim_ids") or [])), "")})
+        output.append({"section_id": sid, "title": str(section.get("title") or sid),
+                       "section_role": str(section.get("section_role") or "body"),
+                       "scientific_question": section.get("review_problem") or section.get("scientific_question") or "",
+                       "provisional_thesis": section.get("scientific_thesis") or section.get("section_thesis") or "",
+                       "claims": realized,
+                       "status": "realized_bindings" if realized else "no_current_claim_bindings"})
+    value = {"contract": "argument-execution/1", "sections": output, "findings": findings,
+             "semantic_quality_verified": False}
+    used = {(paper, fid) for section in output for claim in section["claims"]
+            for paper in claim["paper_ids"] for fid in claim["fact_ids"] if (paper, fid) in facts}
+    fact_inputs = [{key: facts[identity].get(key) for key in (
+        "fact_id", "value", "subject", "experiment_id", "qualifiers", "evidence_refs", "support_level", "assertion_ceiling")}
+        for identity in sorted(used)]
+    value["input_fingerprint"] = hashlib.sha256(json.dumps(
+        [value, fact_inputs],
+        sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    return value
 
 
 CANONICAL_PARAGRAPH_ROLES: tuple[str, ...] = (
@@ -99,6 +214,60 @@ def _paper_ids(section: Mapping[str, Any]) -> list[str]:
     )
 
 
+def apply_single_paper_policy(section: Mapping[str, Any]) -> dict[str, Any]:
+    """Turn a sparse body category into a bounded case analysis without rerouting evidence."""
+    result = deepcopy(dict(section))
+    papers = _paper_ids(section)
+    if str(section.get("section_role") or "body").casefold() != "body" or len(papers) != 1:
+        return result
+    instruction = (
+        f"Analyze the source-verified question, method, findings and limitations of {papers[0]} "
+        "as a bounded research case. Compare experiments within the study only where evidence permits; "
+        "cross-study comparisons require separately cited supporting evidence. Do not describe this "
+        "single primary study as independent replication, field-wide consensus or general applicability. "
+        "Missing facts remain evidence gaps, not evidence that the source reported no result. "
+        "These source limits take precedence over generic synthesis or comparison requests."
+    )
+    justification = str(section.get("single_paper_justification") or "").strip() or (
+        f"The selected category {section.get('title') or section.get('section_id') or ''} has one "
+        f"primary study ({papers[0]}). Retain its selected scientific scope as a bounded case "
+        "analysis instead of inferring equivalence to an adjacent category from paper count."
+    )
+    result["single_paper_justification"] = justification
+    previous_instruction = (section.get("single_paper_policy") or {}).get("instruction")
+    policy_instructions = {instruction, previous_instruction} - {None, ""}
+    requirement_id = f"WR-{section.get('section_id') or 'section'}-single-source"
+    result["single_paper_policy"] = {
+        "mode": "source_bounded_case_analysis", "primary_paper_id": papers[0],
+        "requires_user_action": False, "requirement_id": requirement_id,
+    }
+    requirements = []
+    for item in result.get("writing_requirements") or []:
+        if isinstance(item, dict):
+            if item.get("source") == "single_paper_policy":
+                continue
+            if item.get("source") in {"native_blueprint", "legacy_blueprint_script"}:
+                if item.get("type") == "cross_study_synthesis" and not section.get("supporting_papers"):
+                    continue
+                if item.get("type") == "source_bounded_case_analysis" and item.get("instruction") in policy_instructions:
+                    continue
+        requirements.append(item)
+    requirements.append({
+        "requirement_id": requirement_id,
+        "type": "evidence_boundary", "instruction": instruction, "source": "single_paper_policy",
+    })
+    result["writing_requirements"] = requirements
+    # Clean copies written by the old policy without replacing the chapter's synthesis objective.
+    if "avoid_patterns" in result:
+        result["avoid_patterns"] = [item for item in result["avoid_patterns"] or [] if item not in policy_instructions]
+    contract = result.get("academic_contract")
+    if isinstance(contract, dict) and contract.get("expected_synthesis") in policy_instructions:
+        from review_writer_core.academic_contracts import section_academic_contract
+
+        contract["expected_synthesis"] = section_academic_contract(result)["expected_synthesis"]
+    return result
+
+
 def _source_backed_facts(
     paper_ids: Iterable[str], rows_by_id: Mapping[str, Mapping[str, Any]]
 ) -> tuple[dict[str, list[str]], set[str]]:
@@ -107,7 +276,7 @@ def _source_backed_facts(
     for paper_id in paper_ids:
         row = rows_by_id.get(str(paper_id)) or {}
         for fact in row.get("scientific_facts") or []:
-            if not isinstance(fact, dict):
+            if not isinstance(fact, dict) or not fact_is_usable(fact, purpose="detail"):
                 continue
             field_id = _compact(fact.get("field_id"), limit=80).casefold()
             value = _compact(fact.get("value"))
@@ -218,7 +387,19 @@ def derive_scientific_thesis(
         if limit_values
         else "conditions, objects, or outcomes not represented by source-backed facts"
     )
-    if outcomes:
+    if len(papers) == 1:
+        text = (
+            f"For {subject}, analyze the reported methods ({method}) and findings of {papers[0]} as a bounded "
+            f"research case. Verified findings include {outcomes}. "
+            if outcomes else
+            f"Examine what the source evidence from {papers[0]} establishes about {subject}; "
+            "conclusions remain provisional until the missing outcome evidence is retrieved. "
+        ) + (
+            "Compare reported experiments only where evidence permits, and limit conclusions to verified source contexts. "
+            f"Evidence boundaries to check: {boundary}. "
+            "A single primary study does not establish independent replication or field-wide consensus."
+        )
+    elif outcomes:
         text = (
             f"For {subject}, the selected evidence links {method} with reported findings "
             f"including {outcomes}. Comparison across {axes} can establish shared patterns "
@@ -292,6 +473,10 @@ def derive_section_depth_contract(section: Mapping[str, Any]) -> dict[str, Any]:
         default_min = min(1800, 1100 + (paper_count - 4) * 100)
         default_max = min(2600, default_min + 650)
         minimum_comparisons = 2
+    # Current argument plans require realization of their core claims. Paper counts
+    # alone do not establish a scientific need for comparison paragraphs.
+    if "argument_order" in section:
+        minimum_comparisons = 0
     return {
         "target_paragraph_count": paragraph_count,
         "target_word_min": current_min or default_min,

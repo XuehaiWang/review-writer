@@ -46,50 +46,6 @@ def split_body_and_references(markdown: str) -> tuple[str, str]:
     return markdown[: match.start()], markdown[match.start() :]
 
 
-def _section_id(heading: str) -> str:
-    match = re.match(r"\s*(\d+)", heading)
-    return f"sec{match.group(1)}" if match else "sec0"
-
-
-def _numbered_sections(body: str) -> list[tuple[int, int, str, str]]:
-    headings = list(HEADING_RE.finditer(body))
-    sections: list[tuple[int, int, str, str]] = []
-    for index, heading in enumerate(headings):
-        section_id = _section_id(heading.group(2))
-        if section_id == "sec0":
-            continue
-        next_start = headings[index + 1].start() if index + 1 < len(headings) else len(body)
-        sections.append((heading.end(), next_start, section_id, heading.group(2)))
-    return sections
-
-
-def _inject_section_markers(text: str, section_id: str) -> tuple[str, list[str], bool]:
-    existing_ids = PARAGRAPH_ID_RE.findall(text)
-    if existing_ids:
-        return text, existing_ids, False
-    pieces = re.split(r"(\n\s*\n)", text)
-    result: list[str] = []
-    paragraph_ids: list[str] = []
-    counter = 0
-    changed = False
-    for piece in pieces:
-        stripped = piece.strip()
-        result.append(piece)
-        if not stripped or piece.lstrip().startswith("<!--"):
-            continue
-        if PARAGRAPH_ID_RE.search(piece):
-            paragraph_ids.extend(PARAGRAPH_ID_RE.findall(piece))
-            continue
-        if stripped.startswith("#") or stripped.startswith("!") or stripped.startswith("|"):
-            continue
-        counter += 1
-        paragraph_id = f"{section_id}-p{counter}"
-        paragraph_ids.append(paragraph_id)
-        result.append(f"\n\n<!-- paragraph_id: {paragraph_id} -->")
-        changed = True
-    return "".join(result), paragraph_ids, changed
-
-
 def build_manifest(review_root: Path, project_id: str) -> tuple[dict[str, Any], bool]:
     stage_dir = Path(review_root) / "review-projects" / project_id / "04_first_draft"
     draft_path = stage_dir / "first_draft.md"

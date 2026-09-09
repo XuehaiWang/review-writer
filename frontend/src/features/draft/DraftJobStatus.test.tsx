@@ -29,6 +29,39 @@ function job(overrides: Partial<Job> = {}): Job {
 }
 
 describe("DraftJobStatus", () => {
+  it("shows shared fact-agent work during a rewrite", () => {
+    usePreferences.getState().setLanguage("zh-CN");
+    render(<DraftJobStatus job={job({job_type: "draft.optimize", result: {
+      feedback_status: {phase: "supplementing_facts", target_paragraph_ids: ["S02-p3"]},
+    }})} />);
+    expect(screen.getByText(/正在按论文和问题补查、核验科学事实/)).toBeInTheDocument();
+  });
+  it("explains that only changed paragraphs are rescored", () => {
+    usePreferences.getState().setLanguage("zh-CN");
+    render(<DraftJobStatus job={job({job_type: "draft.optimize", result: {
+      feedback_status: {phase: "scoring_changed_paragraphs", changed_paragraph_count: 3},
+    }})} />);
+    expect(screen.getByText(/只复评本轮发生变化的 3 个段落/)).toBeInTheDocument();
+  });
+  it("reports bounded source misses in a completed safe subset", () => {
+    usePreferences.getState().setLanguage("zh-CN");
+    render(<DraftJobStatus job={job({job_type: "draft.optimize", status: "succeeded", result: {
+      draft_changed: true,
+      resolved_issue_count: 2,
+      unresolved_issue_count: 1,
+      feedback_status: {
+        evidence_rescue_status_counts: {not_found_in_checked_scope: 1},
+      },
+    }})} />);
+    expect(screen.getByText(/1 项在已有来源中未找到匹配证据/)).toBeInTheDocument();
+  });
+  it("names unchanged paragraphs whose repeated repair was skipped", () => {
+    usePreferences.getState().setLanguage("zh-CN");
+    render(<DraftJobStatus job={job({job_type: "draft.optimize", status: "succeeded", result: {
+      feedback_status: {rewrite_items: [{paragraph_id: "S02-p3", reason: "unchanged_input_no_safe_improvement"}]},
+    }})} />);
+    expect(screen.getByText(/已停止重复请求：S02-p3/)).toBeInTheDocument();
+  });
   afterEach(() => {
     cleanup();
     usePreferences.getState().setLanguage("zh-CN");
@@ -166,5 +199,10 @@ describe("DraftJobStatus", () => {
     expect(screen.getByText("正在生成并评分候选")).toBeInTheDocument();
     expect(screen.getByText(/随后只评分该候选段落/)).toBeInTheDocument();
     expect(screen.getByRole("progressbar", { name: "候选生成与评分进度" })).toHaveAttribute("aria-valuenow", "50");
+  });
+
+  it("does not turn unfinished automatic optimization into a scientific decision", () => {
+    render(<DraftJobStatus job={job({job_type: "draft.optimize", status: "succeeded"})} />);
+    expect(screen.getByText(/自动修正未完成不代表需要你判断科学事实/)).toBeInTheDocument();
   });
 });

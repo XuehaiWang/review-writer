@@ -27,6 +27,24 @@ function job(result: Record<string, unknown>): Job {
 }
 
 describe("readMatrixEnrichmentLive", () => {
+  it("shows parallel papers while keeping unfinished checkpoints out of completed results", () => {
+    const running = job({
+      matrix_enrichment_progress: {
+        phase: "verifying", current: 0, total: 2, current_paper_id: "P001",
+        active_paper_ids: ["P001", "P002"], completed_papers: [],
+      },
+      matrix_enrichment_checkpoint: {
+        entries: { P001: { result: { status: "partial", facts: [] } } },
+      },
+    });
+    const live = readMatrixEnrichmentLive(running);
+    expect(live?.active_paper_ids).toEqual(["P001", "P002"]);
+    expect(live?.items).toEqual([]);
+    render(<MatrixLiveProgress job={running} papers={[{ paper_id: "P001" }, { paper_id: "P002" }]} />);
+    expect(screen.getByText(/正在并行提取与核验 2 篇论文|Extracting and verifying 2 papers in parallel/)).toBeInTheDocument();
+    expect(screen.getByText("0/2")).toBeInTheDocument();
+  });
+
   it("reads the compact live Matrix payload", () => {
     const live = readMatrixEnrichmentLive(job({
       matrix_enrichment_live: {
@@ -34,6 +52,7 @@ describe("readMatrixEnrichmentLive", () => {
         current: 1,
         total: 2,
         current_paper_id: "P002",
+        active_paper_ids: ["P002"],
         target_axis_ids: ["stereochemical_regime"],
         items: [{
           paper_id: "P001",
@@ -47,6 +66,7 @@ describe("readMatrixEnrichmentLive", () => {
 
     expect(live?.phase).toBe("targeted_recheck");
     expect(live?.current_paper_id).toBe("P002");
+    expect(live?.active_paper_ids).toEqual(["P002"]);
     expect(live?.items[0].facts_preview[0].value).toBe("Cycloaddition");
   });
 

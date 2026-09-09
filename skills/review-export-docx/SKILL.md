@@ -112,6 +112,11 @@ Relative image paths in the Markdown are resolved against the Markdown file's di
 
 ## Summary-chart bridge
 
+This bridge is optional for direct conversion and the native Web export. When
+no `review_summary_chart.json` exists, export proceeds with the supplied
+manuscript. The legacy filesystem orchestrator separately requires a chart;
+that status policy is not a new requirement for the Web export job.
+
 When `review_summary_chart.json` exists beside the selected Markdown, validate
 that it was generated from the current draft with `generation_scope: full` or
 the legacy-compatible `both`. Validate every PNG path and SHA-256 in

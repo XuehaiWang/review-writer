@@ -9,6 +9,7 @@ when this module reports insufficient or conflicting local evidence.
 from __future__ import annotations
 
 import html
+import math
 import re
 from datetime import datetime
 from pathlib import Path
@@ -61,6 +62,36 @@ PUBLICATION_DATE_TYPES = frozenset(
 )
 
 
+class PdfFirstPageText(str):
+    """First-page text plus coordinate-derived header/footer regions.
+
+    This remains a ``str`` so existing publication-date and model-validation
+    callers keep working.  Bibliography extraction can additionally consume
+    the region attributes without changing every ingestion boundary.
+    """
+
+    header_text: str
+    body_text: str
+    footer_text: str
+    extraction_mode: str
+
+    def __new__(
+        cls,
+        value: str,
+        *,
+        header_text: str = "",
+        body_text: str = "",
+        footer_text: str = "",
+        extraction_mode: str = "plain",
+    ) -> "PdfFirstPageText":
+        instance = super().__new__(cls, value)
+        instance.header_text = header_text
+        instance.body_text = body_text
+        instance.footer_text = footer_text
+        instance.extraction_mode = extraction_mode
+        return instance
+
+
 def _field(value: Any, source: str, confidence: float) -> dict[str, Any]:
     return {
         "value": value,
@@ -78,18 +109,115 @@ def front_matter_text(text: str, *, limit: int = 30_000) -> str:
     return candidate[: match.start()] if match else candidate
 
 
+def _layout_page_regions(
+    layout_text: str,
+) -> tuple[str, str, str, str]:
+    """Derive page-edge regions from coordinate whitespace and text density."""
+
+    raw_lines = str(layout_text or "").splitlines()
+    if not raw_lines:
+        return "", "", "", ""
+    normalized_lines = [" ".join(raw.split()) for raw in raw_lines]
+    occupied = [index for index, line in enumerate(normalized_lines) if line]
+    if not occupied:
+        return "", "", "", ""
+
+    gaps = [
+        {
+            "size": right - left - 1,
+            "right": right,
+            "before": position + 1,
+            "after": len(occupied) - position - 1,
+        }
+        for position, (left, right) in enumerate(zip(occupied, occupied[1:]))
+        if right - left > 1
+    ]
+    edge_window = max(1, math.ceil(math.sqrt(len(occupied))))
+    edge_search = edge_window * 2
+    edge_signal = re.compile(
+        r"\b(?:doi|cite\s+this|journal\s+homepage|issn)\b|©|copyright|"
+        r"(?:18|19|20|21)\d{2}\s*,\s*\d{1,5}\s*,|"
+        r"\d{1,5}\s*\(\s*(?:18|19|20|21)\d{2}\s*\)",
+        re.I,
+    )
+    header_gaps = [item for item in gaps if int(item["before"]) <= edge_search]
+    footer_gaps = [item for item in gaps if int(item["after"]) <= edge_search]
+    if header_gaps:
+        # A publisher banner is normally separated from article content by a
+        # conspicuous vertical gap.  Weight gaps by their distance from the
+        # nearest page edge instead of assuming a universal page percentage.
+        header_gap = max(
+            header_gaps,
+            key=lambda item: float(item["size"]) / math.sqrt(float(item["before"])),
+        )
+        header_end = int(header_gap["right"])
+    else:
+        header_end = occupied[min(edge_window, len(occupied)) - 1] + 1
+    if footer_gaps:
+        footer_gap = max(
+            footer_gaps,
+            key=lambda item: float(item["size"]) / math.sqrt(float(item["after"])),
+        )
+        footer_start = int(footer_gap["right"])
+        footer_has_signal = any(
+            edge_signal.search(normalized_lines[index])
+            for index in occupied
+            if index >= footer_start
+        )
+        if not footer_has_signal:
+            preceding = [index for index in occupied if index < footer_start][-edge_window:]
+            signalled = [
+                index for index in preceding if edge_signal.search(normalized_lines[index])
+            ]
+            if signalled:
+                footer_start = min(footer_start, signalled[-1])
+    else:
+        # Dense layouts may contain no blank coordinate rows.  In that case the
+        # edge window grows with document density rather than page percentage.
+        footer_start = occupied[max(0, len(occupied) - edge_window)]
+
+    def normalized(start: int, end: int) -> str:
+        return "\n".join(
+            line for line in normalized_lines[start:end] if line
+        )
+
+    header = normalized(0, header_end)
+    body = normalized(header_end, footer_start) if header_end <= footer_start else ""
+    footer = normalized(footer_start, len(raw_lines))
+    full = normalized(0, len(raw_lines))
+    return full, header, body, footer
+
+
 def read_pdf_first_page_text(path: Path, *, limit: int = 12_000) -> str:
-    """Read one PDF page for local evidence without consulting PDF date metadata."""
+    """Read page one in visual-coordinate order without using PDF date metadata."""
 
     if not path.is_file():
         return ""
     try:
         from pypdf import PdfReader
 
-        text = PdfReader(str(path), strict=False).pages[0].extract_text() or ""
+        page = PdfReader(str(path), strict=False).pages[0]
+        layout_text = page.extract_text(extraction_mode="layout") or ""
+        text, header, body, footer = _layout_page_regions(layout_text)
+        if text:
+            bounded = max(1, int(limit))
+            return PdfFirstPageText(
+                text[:bounded],
+                header_text=header[:bounded],
+                body_text=body[:bounded],
+                footer_text=footer[:bounded],
+                extraction_mode="coordinate_layout",
+            )
+        text = page.extract_text() or ""
     except Exception:
-        return ""
-    return text[: max(1, int(limit))]
+        try:
+            text = PdfReader(str(path), strict=False).pages[0].extract_text() or ""
+        except Exception:
+            return ""
+    return PdfFirstPageText(
+        text[: max(1, int(limit))],
+        extraction_mode="plain_fallback",
+    )
 
 
 def _normalized_date(raw: str) -> str:

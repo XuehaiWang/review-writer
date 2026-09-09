@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from review_writer_api.errors import LiteratureSearchFailed, WorkflowValidationError
@@ -17,6 +18,8 @@ from review_writer_api.native_handlers import (
 )
 from review_writer_api.scientific_runner import ScientificRunFailed
 from review_writer_api.workspaces import HostedWorkspaceManager
+from review_writer_core.draft_quality import full_draft_quality_provenance
+from review_writer_core.paragraph_markers import parse_marked_paragraphs
 
 
 class _Context:
@@ -362,6 +365,31 @@ class _FigureRedrawRunner:
 
 
 class NativeWorkflowHandlerTests(unittest.TestCase):
+    def test_workspace_projects_only_a_verified_baseline_for_image_paths(self):
+        import hashlib
+        from copy import deepcopy
+        for changed in (False, True):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
+                handlers = NativeWorkflowHandlers(None, HostedWorkspaceManager(Path(temporary) / "users"), None)
+                aid = str(uuid.uuid4())
+                original = f"# Review\n\nEvidence paragraph.\n\n<!-- paragraph_id: p1 -->\n\n![Figure](/api/v1/artifacts/{aid}/content)\n"
+                quality = full_draft_quality_provenance(original, parse_marked_paragraphs(original))
+                payload = {"project_id": "project-1", "draft_text": original,
+                           "baseline_quality": quality, "figure_artifact_paths": {aid: "/app/figures/source.png"}}
+                if changed:
+                    payload["draft_text"] = original.replace("Evidence paragraph.", "A changed scientific result.")
+                before = deepcopy(payload)
+                _, _, project = handlers._compatibility_workspace(_Context(str(uuid.uuid4())), payload, name="draft-workspace")
+                first = project / "04_first_draft"
+                baseline = json.loads((first / "baseline_quality.json").read_text())
+                digest = hashlib.sha256((first / "first_draft.md").read_bytes()).hexdigest()
+                self.assertEqual(before, payload)
+                if changed:
+                    self.assertNotEqual(digest, baseline["evaluation_input_sha256"])
+                else:
+                    self.assertEqual(digest, baseline["evaluation_input_sha256"])
+                    self.assertEqual(quality["evaluation_input_sha256"], baseline["source_evaluation_input_sha256"])
+
     def test_paper_source_environment_is_forwarded_without_exposing_keys(self) -> None:
         with patch.dict(
             "os.environ",
@@ -812,6 +840,13 @@ class NativeWorkflowHandlerTests(unittest.TestCase):
             self.assertEqual(70, evaluated["issues"][0]["score"])
             self.assertIn("Batch optimized evidence", optimized["draft_text"])
             self.assertEqual(1, optimized["feedback_status"]["rewrite_accepted"])
+            handlers.draft_optimize(context, {**common, "issues": [{
+                "paragraph_id": "p1", "repair_class": "planning_adjustment", "claim_ids": ["C1"]}]})
+            joint_command = next(command for command in runner.commands if "--local-revision" in command)
+            self.assertEqual("feedback_loop.py", Path(joint_command[1]).name)
+            joint_workspace = Path(joint_command[joint_command.index("--review-root") + 1])
+            requests = json.loads((joint_workspace / "review-projects/project-1/04_first_draft/local_revision_issues.json").read_text(encoding="utf-8"))
+            self.assertEqual(["C1"], requests[0]["claim_ids"])
             optimize_command = next(
                 command
                 for command in runner.commands
@@ -949,6 +984,57 @@ class NativeWorkflowHandlerTests(unittest.TestCase):
             self.assertIn(
                 "matrix_enrichment_checkpoint", context.partial_results[0]
             )
+
+    def test_matrix_resume_replays_independent_questions_after_transient_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            handler = NativeWorkflowHandlers.__new__(NativeWorkflowHandlers)
+            handler.root = root
+            handler._staging = lambda *_: root
+            handler._text_gateway_environment = lambda _: ({}, {})
+            calls = []
+            questions = [{"field_id": "scope", "query": "cohort"}, {"field_id": "method_conditions", "query": "annealing"}]
+            def retrieve(principal, project, payload, request):
+                question = request["questions"][0]
+                calls.append(question)
+                if question == questions[0]:
+                    raise TimeoutError("temporary index outage")
+                return []
+            handler.planning_service = SimpleNamespace(retrieve_matrix_fact_evidence=retrieve)
+            handler.runner = SimpleNamespace(run=lambda *a, **k: (root / "matrix-enrichment-output.json").write_text('{"papers": []}', encoding="utf-8"))
+            context = SimpleNamespace(user_id=str(uuid.uuid4()), project_id="project", job_id=str(uuid.uuid4()),
+                checkpoint=lambda: None, cancellation_requested=lambda: False)
+            checkpoint = {"entries": {"paper": {"source_fingerprint": "current", "agent_state": {
+                "retrieval_requests": [{"paper_id": "paper", "questions": questions}]}}}}
+            payload = {"papers": [{"paper_id": "paper", "source_fingerprint": "current"}], "resume_checkpoint": checkpoint}
+            result = handler.matrix_enrich(context, payload)
+            self.assertEqual(questions, calls)
+            self.assertEqual([questions[0]], result["matrix_enrichment_checkpoint"]["entries"]["paper"]["agent_state"]["pending_requests"])
+            handler.planning_service.retrieve_matrix_fact_evidence = lambda *a: (_ for _ in ()).throw(WorkflowValidationError("Source changed"))
+            with self.assertRaises(WorkflowValidationError):
+                handler.matrix_enrich(context, payload)
+
+    def test_matrix_concurrency_respects_gateway_slots_and_existing_agent_limits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            handler = NativeWorkflowHandlers.__new__(NativeWorkflowHandlers)
+            handler.root = root
+            handler._staging = lambda *_: root
+            handler._text_gateway_environment = lambda _: ({}, {})
+            handler.runner = SimpleNamespace(run=lambda *a, **k: (root / "matrix-enrichment-output.json").write_text(
+                '{"papers": []}', encoding="utf-8"))
+            context = SimpleNamespace(user_id=str(uuid.uuid4()), project_id="project", job_id=str(uuid.uuid4()),
+                                      checkpoint=lambda: None, cancellation_requested=lambda: False)
+            for global_slots, user_slots, requested, expected in [(4, 3, 8, 3), (4, 1, 3, 1), (2, 3, 3, 2), (4, 3, 1, 1)]:
+                with self.subTest(global_slots=global_slots, user_slots=user_slots, requested=requested):
+                    # Split workers obtain these two settings through Compose.
+                    with patch.dict("os.environ", {"REVIEW_WRITER_MODEL_GATEWAY_CONCURRENCY": str(global_slots),
+                                                   "REVIEW_WRITER_MODEL_GATEWAY_USER_CONCURRENCY": str(user_slots)}):
+                        handler.matrix_enrich(context, {"papers": [], "fact_agent_limits": {
+                            "paper_concurrency": requested, "max_model_calls": 5, "max_supplement_rounds": 1}})
+                    saved = json.loads((root / "matrix-enrichment-input.json").read_text(encoding="utf-8"))
+                    self.assertEqual({"paper_concurrency": expected, "max_model_calls": 5, "max_supplement_rounds": 1},
+                                     saved["fact_agent_limits"])
 
     def test_matrix_live_payload_bounds_long_fact_preview(self) -> None:
         live = _matrix_live_payload(

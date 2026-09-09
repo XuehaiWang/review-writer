@@ -29,7 +29,6 @@ import hashlib
 import json
 import re
 import sys
-from copy import deepcopy  # noqa: F401
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -37,7 +36,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image as PILImage
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml import OxmlElement, parse_xml  # noqa: F401
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt
 
@@ -55,6 +54,8 @@ if str(_BOOTSTRAP_ROOT) not in sys.path:
     sys.path.insert(0, str(_BOOTSTRAP_ROOT))
 
 from review_writer_core.markdown_images import parse_markdown_image  # noqa: E402
+from review_writer_core.chemical_typography import normalize_chemical_typography  # noqa: E402
+from review_writer_core.publication_tables import split_table_row  # noqa: E402
 from review_writer_core.publication_caption import (  # noqa: E402
     repair_publication_ocr_splits,
 )
@@ -585,24 +586,10 @@ def _apply_math(para, latex: str) -> None:
 
 
 def _split_script_segments(text: str) -> List[Tuple[str, str]]:
+    text = normalize_chemical_typography(text)
     segments: List[Tuple[str, str]] = []
     mode = "normal"
     current = ""
-
-    def looks_like_ascii_subscript(index: int) -> bool:
-        if index < 0 or index >= len(text):
-            return False
-        char = text[index]
-        if not char.isdigit() or index == 0:
-            return False
-        prev = text[index - 1]
-        if prev in "-–—/[ ":
-            return False
-        if prev.isalpha():
-            return True
-        if prev in ")]}" and index >= 2 and text[index - 2].isalpha():
-            return True
-        return False
 
     def flush() -> None:
         nonlocal current
@@ -610,16 +597,13 @@ def _split_script_segments(text: str) -> List[Tuple[str, str]]:
             segments.append((mode, current))
             current = ""
 
-    for idx, char in enumerate(text):
+    for char in text:
         if char in _UNICODE_SUPERSCRIPT_MAP:
             char_mode = "superscript"
             rendered = _UNICODE_SUPERSCRIPT_MAP[char]
         elif char in _UNICODE_SUBSCRIPT_MAP:
             char_mode = "subscript"
             rendered = _UNICODE_SUBSCRIPT_MAP[char]
-        elif looks_like_ascii_subscript(idx):
-            char_mode = "subscript"
-            rendered = char
         else:
             char_mode = "normal"
             rendered = char
@@ -887,7 +871,7 @@ def tokenize(md_text: str) -> List[Block]:
         if _TABLE_ROW_RE.match(line):
             raw_rows: List[List[str]] = []
             while i < n and _TABLE_ROW_RE.match(lines[i]):
-                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                cells = split_table_row(lines[i])
                 raw_rows.append(cells)
                 i += 1
             data = [r for r in raw_rows
@@ -998,28 +982,6 @@ def _normalize_chart_heading(text: str) -> str:
     value = re.sub(r"^\s*\d+(?:\.\d+)*[.)]?\s*", "", text)
     value = re.sub(r"[^\w]+", " ", value.casefold(), flags=re.UNICODE)
     return re.sub(r"\s+", " ", value).strip()
-
-
-_EXCLUDED_CHART_HEADING_KEYS = {
-    "abstract", "keywords", "key words", "references", "reference list",
-    "bibliography", "cited literature", "supporting information",
-    "supplementary information", "table of contents",
-}
-
-
-def _expected_chart_headings(blocks: List[Block]) -> Dict[str, str]:
-    expected: Dict[str, str] = {}
-    for block_index, block in enumerate(blocks):
-        if block.kind != "heading":
-            continue
-        numbered_h1 = block.level == 1 and _NUMBERED_SECTION_HEADING_RE.match(block.text.strip())
-        effective_level = 2 if numbered_h1 else block.level
-        if effective_level != 2:
-            continue
-        key = _normalize_chart_heading(block.text)
-        if key and key not in _EXCLUDED_CHART_HEADING_KEYS:
-            expected[key] = block.text.strip()
-    return expected
 
 
 def _manifest_image(base_dir: Path, entry: Any, label: str) -> Path:

@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 
 from fastapi import APIRouter, Depends, Header, Response, status
 
 from review_writer_api.domain_services.drafts import DraftsService
 from review_writer_api.job_service import JobService
 from review_writer_api.routers.jobs import _job_response
-from review_writer_api.security import Principal, Role
+from review_writer_api.security import Principal
 from review_writer_api.workflow_schemas import (
     DraftApprovalRequest,
     DraftEvaluationRequest,
@@ -27,109 +27,8 @@ def build_drafts_router(
     principal_dependency: Callable[..., Principal],
     drafts_service: DraftsService,
     job_service: JobService,
-    handlers: Mapping[str, Callable] | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/projects/{project_id}/draft", tags=["draft"])
-    available = dict(handlers or {})
-
-    evaluate_builder = available.get("draft.evaluate")
-    if evaluate_builder is not None:
-        def evaluate_handler(context, payload):
-            principal = Principal(context.user_id, frozenset({Role.USER}))
-            context.report_progress(1, 3)
-            built = evaluate_builder(context, payload)
-            context.checkpoint()
-            context.report_progress(2, 3)
-            result = drafts_service.publish_evaluation(
-                principal, str(context.project_id), payload, built
-            )
-            context.report_progress(3, 3)
-            return result
-
-        job_service.register_handler("draft.evaluate", evaluate_handler)
-
-    rewrite_builder = available.get("draft.rewrite")
-    if rewrite_builder is not None:
-        def rewrite_handler(context, payload):
-            principal = Principal(context.user_id, frozenset({Role.USER}))
-            context.report_progress(1, 4)
-            built = rewrite_builder(context, payload)
-            context.checkpoint()
-            result = drafts_service.publish_rewrite_candidate(
-                principal, str(context.project_id), payload, built
-            )
-            context.report_progress(4, 4)
-            return result
-
-        job_service.register_handler("draft.rewrite", rewrite_handler)
-
-    accept_rewrite_builder = available.get("draft.accept-rewrite")
-    if accept_rewrite_builder is not None:
-        def accept_rewrite_handler(context, payload):
-            principal = Principal(context.user_id, frozenset({Role.USER}))
-            context.report_progress(1, 2)
-            stored_evaluation = payload.get("candidate_evaluation")
-            built = (
-                dict(stored_evaluation)
-                if isinstance(stored_evaluation, dict)
-                and stored_evaluation.get("evaluation_scope") == "single_paragraph"
-                else accept_rewrite_builder(context, payload)
-            )
-            context.checkpoint()
-            result = drafts_service.publish_accepted_rewrite(
-                principal, str(context.project_id), payload, built
-            )
-            context.report_progress(2, 2)
-            return result
-
-        job_service.register_handler("draft.accept-rewrite", accept_rewrite_handler)
-
-    optimize_builder = available.get("draft.optimize")
-    if optimize_builder is not None:
-        def optimize_handler(context, payload):
-            principal = Principal(context.user_id, frozenset({Role.USER}))
-            context.report_partial_result(
-                {"feedback_status": {"phase": "diagnosing"}}
-            )
-            context.report_progress(1, 5)
-            built = optimize_builder(context, payload)
-            context.checkpoint()
-            context.report_partial_result(
-                {"feedback_status": {"phase": "repairing_deterministic"}}
-            )
-            context.report_progress(3, 5)
-            context.report_partial_result(
-                {"feedback_status": {"phase": "repairing_evidence"}}
-            )
-            context.report_progress(4, 5)
-            result = drafts_service.publish_optimization(
-                principal, str(context.project_id), payload, built
-            )
-            context.report_partial_result(
-                {"feedback_status": {"phase": "validating"}}
-            )
-            if (
-                bool(payload.get("auto_apply_safe", True))
-                and result.get("proposal_created")
-                and result.get("proposal_id")
-            ):
-                automatic = drafts_service.auto_apply_optimization_proposal(
-                    principal,
-                    str(context.project_id),
-                    str(result["proposal_id"]),
-                    revision=int(result["revision"]),
-                )
-                result = {**result, **automatic}
-                if (
-                    automatic.get("auto_applied") is False
-                    and automatic.get("auto_apply_status") == "manual_review_required"
-                ):
-                    result["repair_status"] = "requires_user_input"
-            context.report_progress(5, 5)
-            return result
-
-        job_service.register_handler("draft.optimize", optimize_handler)
-
     @router.get("")
     def get_draft(
         project_id: str,

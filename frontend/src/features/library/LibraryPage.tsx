@@ -2,13 +2,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
-import { ACTIVE_JOB_POLL_INTERVAL_MS } from "../../api/polling";
+import { ACTIVE_JOB_POLL_INTERVAL_MS, TRANSIENT_RESULT_VISIBLE_MS } from "../../api/polling";
 import { libraryQuery, queryKeys } from "../../api/queries";
 import type { Job, LibraryPaper, UploadBatchSummary, UploadJob, UploadJobList } from "../../api/types";
 import { ErrorState } from "../../components/ErrorState";
 import { ProjectSelector, useSelectedProject } from "../../components/ProjectSelector";
 import { useUiText } from "../../i18n/useUiText";
 import { buildPaperDisplayLabels } from "../../utils/paperLabels";
+import {
+  cloneMetadata,
+  markMetadataReviewed,
+  metadataForSave,
+  type MetadataRecord,
+} from "./metadata/metadataEditorModel";
+import { MetadataVisualEditor } from "./metadata/MetadataVisualEditor";
 import { buildUploadBatchCounts } from "./uploadBatchProgress";
 import { uploadJobsNeedingLibraryRefresh } from "./uploadRefresh";
 
@@ -30,11 +37,9 @@ type DownloadResult = {
   results?: Array<{ status?: string; error?: string }>;
 };
 
-const UPLOAD_RESULT_VISIBLE_MS = 12_000;
-
 function uploadResultIsVisible(updatedAt: string | undefined, now: number): boolean {
   const timestamp = Date.parse(updatedAt || "");
-  return Number.isFinite(timestamp) && timestamp + UPLOAD_RESULT_VISIBLE_MS > now;
+  return Number.isFinite(timestamp) && timestamp + TRANSIENT_RESULT_VISIBLE_MS > now;
 }
 
 function UploadBatchProgress({
@@ -270,7 +275,7 @@ function AcquisitionPanel({ projectId, onLibraryChanged }: { projectId: string; 
     mutationFn: () => apiRequest<Job>(acquisitionEndpoint("/api/v1/library/search-jobs", projectId), {
       method: "POST",
       headers: { "Idempotency-Key": newIdempotencyKey() },
-      ...jsonBody({ topic: topic.trim(), limit: 30, email: email.trim() }),
+      ...jsonBody({ topic: topic.trim(), email: email.trim() }),
     }),
     onSuccess: async () => {
       setSelected(new Set());
@@ -299,7 +304,7 @@ function AcquisitionPanel({ projectId, onLibraryChanged }: { projectId: string; 
         <div><h2>{text("联网检索开放获取文献", "Find open-access literature online")}</h2><p>{text("搜索候选后选择论文下载；下载成功后自动进入当前用户文献库。", "Search for candidates, select papers to download, and add successful downloads to your library.")}</p></div>
       </div>
       <div className="acquisition-form">
-        <label>{text("英文主题", "Topic in English")}<input value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="axially chiral allene catalysis" /></label>
+        <label>{text("英文主题", "Topic in English")}<input value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="graph neural networks for drug discovery" /></label>
         <label>{text("Unpaywall邮箱（可选）", "Unpaywall email (optional)")}<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
         <button className="button button-secondary" type="button" disabled={!projectId || topic.trim().length < 3 || search.isPending || active} onClick={() => search.mutate()}>
           {search.isPending ? text("提交中…", "Submitting…") : text("检索期刊文章", "Search journal articles")}
@@ -362,7 +367,7 @@ export function LibraryPage() {
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState("");
   const [tab, setTab] = useState<DetailTab>("metadata");
-  const [metadataDraft, setMetadataDraft] = useState("");
+  const [metadataDraft, setMetadataDraft] = useState<MetadataRecord | null>(null);
   const [localUploads, setLocalUploads] = useState<UploadStatus[]>([]);
   const [uploadBatchExpectation, setUploadBatchExpectation] = useState<{ batchId: string; total: number } | null>(null);
   const [uploadSubmitting, setUploadSubmitting] = useState(false);
@@ -411,10 +416,10 @@ export function LibraryPage() {
     const expirations = [
       ...localUploads
         .filter((row) => row.status === "done" || row.status === "failed")
-        .map((row) => Date.parse(row.updatedAt || "") + UPLOAD_RESULT_VISIBLE_MS),
+        .map((row) => Date.parse(row.updatedAt || "") + TRANSIENT_RESULT_VISIBLE_MS),
       ...(uploadJobs.data?.items || [])
         .filter((job) => !["queued", "running", "cancel_requested"].includes(job.status))
-        .map((job) => Date.parse(job.updated_at) + UPLOAD_RESULT_VISIBLE_MS),
+        .map((job) => Date.parse(job.updated_at) + TRANSIENT_RESULT_VISIBLE_MS),
     ].filter((value) => Number.isFinite(value) && value > uploadStatusNow);
     if (!expirations.length) return;
     const delay = Math.max(100, Math.min(...expirations) - Date.now() + 25);
@@ -476,15 +481,19 @@ export function LibraryPage() {
     enabled: Boolean(selectedPaper) && tab === "markdown",
   });
   useEffect(() => {
-    if (metadata.data) setMetadataDraft(JSON.stringify(metadata.data, null, 2));
+    setMetadataDraft(null);
+  }, [selectedPaper?.paper_id]);
+  useEffect(() => {
+    if (metadata.data) setMetadataDraft(cloneMetadata(metadata.data));
   }, [metadata.data]);
   const saveMetadata = useMutation({
-    mutationFn: () => apiRequest<Record<string, unknown>>(`/api/v1/library/papers/${encodeURIComponent(selectedPaper!.paper_id)}/metadata`, {
+    mutationFn: ({ paperId, value }: { paperId: string; value: MetadataRecord }) => apiRequest<MetadataRecord>(`/api/v1/library/papers/${encodeURIComponent(paperId)}/metadata`, {
       method: "PUT",
-      ...jsonBody(JSON.parse(metadataDraft) as Record<string, unknown>),
+      ...jsonBody(value),
     }),
-    onSuccess: async (saved) => {
-      setMetadataDraft(JSON.stringify(saved, null, 2));
+    onSuccess: async (saved, { paperId }) => {
+      queryClient.setQueryData(queryKeys.libraryMetadata(paperId), saved);
+      if (selectedPaper?.paper_id === paperId) setMetadataDraft(cloneMetadata(saved));
       await queryClient.invalidateQueries({ queryKey: queryKeys.library(query) });
     },
   });
@@ -514,25 +523,20 @@ export function LibraryPage() {
     },
   });
   const markReviewed = useMutation({
-    mutationFn: async () => {
-      const parsed = JSON.parse(metadataDraft) as Record<string, unknown>;
-      const humanReview = typeof parsed.human_review === "object" && parsed.human_review !== null
-        ? { ...(parsed.human_review as Record<string, unknown>) }
-        : {};
-      humanReview.status = "reviewed";
-      humanReview.reviewed_at = new Date().toISOString();
-      humanReview.reviewer = humanReview.reviewer || "human";
-      parsed.human_review = humanReview;
-      return apiRequest<Record<string, unknown>>(`/api/v1/library/papers/${encodeURIComponent(selectedPaper!.paper_id)}/metadata`, {
+    mutationFn: async ({ paperId, value }: { paperId: string; value: MetadataRecord }) => {
+      const reviewed = markMetadataReviewed(value, new Date().toISOString());
+      return apiRequest<MetadataRecord>(`/api/v1/library/papers/${encodeURIComponent(paperId)}/metadata`, {
         method: "PUT",
-        ...jsonBody(parsed),
+        ...jsonBody(reviewed),
       });
     },
-    onSuccess: async (saved) => {
-      setMetadataDraft(JSON.stringify(saved, null, 2));
+    onSuccess: async (saved, { paperId }) => {
+      queryClient.setQueryData(queryKeys.libraryMetadata(paperId), saved);
+      if (selectedPaper?.paper_id === paperId) setMetadataDraft(cloneMetadata(saved));
       await queryClient.invalidateQueries({ queryKey: ["library"] });
     },
   });
+  const metadataDirty = Boolean(metadataDraft && metadata.data && JSON.stringify(metadataDraft) !== JSON.stringify(metadata.data));
 
   async function uploadFiles(files: FileList | null) {
     if (!files?.length) return;
@@ -630,7 +634,20 @@ export function LibraryPage() {
               {selectedPaper.search_match ? <button type="button" className="library-search-match" onClick={() => setTab("markdown")}><span>{text(`正文命中 · 第 ${selectedPaper.search_match.page_start || "?"} 页`, `Full-text match · Page ${selectedPaper.search_match.page_start || "?"}`)}</span><p>{selectedPaper.search_match.content}</p><code>{selectedPaper.search_match.chunk_id}</code></button> : null}
               {reindexPaper.error ? <p className="message message-error index-error">{reindexPaper.error.message}</p> : null}
               <nav className="detail-tabs">{(["metadata", "markdown", "pdf"] as const).map((value) => <button key={value} className={tab === value ? "active" : ""} type="button" onClick={() => setTab(value)}>{value === "metadata" ? "Metadata" : value === "markdown" ? "Markdown" : "PDF"}</button>)}</nav>
-              {tab === "metadata" ? <div className="editor-panel metadata-review-panel"><div className="metadata-review-primary"><div><strong>{text("系统已完成 Metadata 解析", "Metadata was parsed automatically")}</strong><p>{text("通常只需核对上方标题、作者和书目信息；确认无误后标记为已审核。", "Usually you only need to check the title, authors, and bibliography above, then mark it reviewed.")}</p></div><button className="button button-primary" type="button" disabled={saveMetadata.isPending || markReviewed.isPending} onClick={() => { try { JSON.parse(metadataDraft); markReviewed.mutate(); } catch { window.alert(text("Metadata不是有效JSON。", "Metadata is not valid JSON.")); } }}>{markReviewed.isPending ? text("标记中…", "Marking…") : text("标记为已审核", "Mark as reviewed")}</button></div><details className="advanced-panel metadata-json-advanced"><summary>{text("高级 Metadata JSON 编辑", "Advanced Metadata JSON editing")}</summary><div className="advanced-panel-body"><textarea className="code-editor" value={metadataDraft} onChange={(event) => setMetadataDraft(event.target.value)} spellCheck={false} /><div className="editor-actions"><button className="button button-secondary" type="button" disabled={saveMetadata.isPending || markReviewed.isPending} onClick={() => { try { JSON.parse(metadataDraft); saveMetadata.mutate(); } catch { window.alert(text("Metadata不是有效JSON。", "Metadata is not valid JSON.")); } }}>{saveMetadata.isPending ? text("保存中…", "Saving…") : text("保存Metadata", "Save metadata")}</button></div></div></details>{saveMetadata.error || markReviewed.error ? <span className="message message-error">{(saveMetadata.error || markReviewed.error)?.message}</span> : null}</div> : null}
+              {tab === "metadata" ? metadata.isPending || !metadataDraft ? (
+                <div className="editor-panel metadata-loading">{metadata.error ? <ErrorState error={metadata.error} onRetry={() => metadata.refetch()} /> : text("正在加载书目信息…", "Loading bibliographic information…")}</div>
+              ) : (
+                <MetadataVisualEditor
+                  draft={metadataDraft}
+                  dirty={metadataDirty}
+                  saving={saveMetadata.isPending}
+                  reviewing={markReviewed.isPending}
+                  error={saveMetadata.error || markReviewed.error}
+                  onChange={setMetadataDraft}
+                  onSave={() => saveMetadata.mutate({ paperId: selectedPaper.paper_id, value: metadataForSave(metadataDraft) })}
+                  onReview={() => markReviewed.mutate({ paperId: selectedPaper.paper_id, value: metadataForSave(metadataDraft) })}
+                />
+              ) : null}
               {tab === "markdown" ? <pre className="markdown-preview">{markdown.isPending ? text("正在加载…", "Loading…") : markdown.data}</pre> : null}
               {tab === "pdf" ? <iframe className="pdf-frame" title={`${selectedPaper.paper_id} PDF`} src={`/api/v1/library/papers/${encodeURIComponent(selectedPaper.paper_id)}/pdf`} /> : null}
             </>

@@ -60,6 +60,61 @@ _JOURNAL_HEADER = re.compile(
     r"(?:vol(?:ume)?\.?\s*)?(?P<volume>\d{1,5})\s*,\s*"
     r"(?:no\.?|issue)\s*(?P<issue>[A-Za-z0-9\-]+)\b"
 )
+_PDF_JOURNAL_VOLUME_YEAR = re.compile(
+    r"(?P<journal>[A-Z][A-Za-z0-9&.'’:/()\- ]{2,120}?)\s+"
+    r"(?P<volume>\d{1,5})\s*\(\s*(?P<year>(?:18|19|20|21)\d{2})\s*\)\s*"
+    r"(?P<locator>[A-Za-z]?\d[A-Za-z0-9.\-−–]{1,40})",
+)
+_PDF_CITE_THIS_HEADER = re.compile(
+    r"^cite\s+this\s*:\s*"
+    r"(?P<journal>[A-Z][A-Za-z0-9&.'’:/()\- ]{2,100}?)\s*,\s*"
+    r"(?P<year>(?:18|19|20|21)\d{2})\s*,\s*"
+    r"(?P<volume>\d{1,5})\s*,?",
+    re.I,
+)
+_PDF_JOURNAL_YEAR_VOLUME = re.compile(
+    r"(?P<journal>[A-Z][A-Za-z0-9&.'’:/()\- ]{2,120}?)\s*,?\s*"
+    r"(?P<year>(?:18|19|20|21)\d{2})\s*,\s*"
+    r"(?:vol(?:ume)?\.?\s*)?(?P<volume>\d{1,5})"
+    r"(?:\s*\(\s*(?P<issue>[A-Za-z0-9\-]+)\s*\))?\s*,\s*"
+    r"(?P<locator>[A-Za-z]?\d[A-Za-z0-9.\-−–]{1,40})",
+    re.I,
+)
+_PDF_JOURNAL_YEAR_LOCATOR = re.compile(
+    r"(?P<journal>[A-Z][A-Za-z0-9&.'’:/()\- ]{2,120}?)\s*,\s*"
+    r"(?P<year>(?:18|19|20|21)\d{2})\s*,\s*"
+    r"(?P<locator>(?:[A-Za-z]?\d{5,}|\d{1,6}\s*[\-−–]\s*\d{1,6}))",
+    re.I,
+)
+_PDF_JOURNAL_ISSUE_PAGES_YEAR = re.compile(
+    r"(?P<journal>[A-Z][A-Za-z0-9&.'’:/()\- ]{2,100}?)\s+"
+    r"No\.?\s*(?P<issue>[A-Za-z0-9\-]+)\s*,\s*"
+    r"p{1,2}\.?\s*,?\s*(?P<locator>\d{1,6}\s*[\-−–]\s*\d{1,6})\s*,\s*"
+    r"(?P<year>(?:18|19|20|21)\d{2})",
+    re.I,
+)
+_PDF_JOURNAL_VOLUME_ISSUE_YEAR = re.compile(
+    r"(?P<journal>[A-Z][A-Za-z0-9&.'’:/()\- ]{2,100}?)\s+"
+    r"Vol\.?\s*(?P<volume>\d{1,5})\s*,?\s*"
+    r"(?:No\.?\s*(?P<issue>[A-Za-z0-9\-]+)\s*,?\s*)?"
+    r"(?:[A-Za-z]+\s+)?(?P<year>(?:18|19|20|21)\d{2})",
+    re.I,
+)
+_PDF_VOLUME_ISSUE_YEAR_JOURNAL = re.compile(
+    r"Vol\.?\s*(?P<volume>\d{1,5})\s*,?\s*"
+    r"(?:No\.?\s*(?P<issue>[A-Za-z0-9\-]+)\s*,?\s*)?"
+    r"(?:[A-Za-z]+\s+)?(?P<year>(?:18|19|20|21)\d{2})\s+"
+    r"(?P<locator>\d{1,6}\s*[\-−–]\s*\d{1,6})\s+"
+    r"(?P<journal>[A-Z][A-Za-z0-9&.'’:/()\- ]{2,100}?)(?=\s+\d|$)",
+    re.I,
+)
+_PDF_PIPE_VOLUME_ARTICLE = re.compile(
+    r"^(?P<journal>[A-Z][A-Za-z0-9&.'’:/()\- ]{2,120}?)\s*\|\s*"
+    r"(?P<volume>\d{1,5})\s*:\s*(?P<locator>[A-Za-z]?\d{3,})\s*\|\s*"
+    r"(?:doi\s*:?\s*|https?://(?:dx\.)?doi\.org/)"
+    r"(?P<doi>10\.\d{4,9}/[-._;()/:A-Z0-9]+)",
+    re.I,
+)
 _ARTICLE_NUMBER = re.compile(r"^(?:e\d{4,}|\d{5,}|[A-Za-z]\d{5,})$", re.I)
 
 
@@ -380,6 +435,379 @@ def _citation_fields(markdown: str) -> dict[str, dict[str, Any]]:
     return fields
 
 
+def _journal_candidate(value: str) -> str:
+    """Clean a journal name captured from a PDF header or footer line."""
+
+    candidate = _clean(value)
+    candidate = re.sub(r"^cite\s+this\s*:\s*", "", candidate, flags=re.I)
+    candidate = re.sub(r"^.*?\bdoi\s*:\s*\S+\s+", "", candidate, flags=re.I)
+    if "|" in candidate:
+        candidate = candidate.rsplit("|", 1)[-1].strip()
+    # ACS footers can prepend copyright/accounting text and page counters before
+    # the actual abbreviated journal name (for example ``7212 9 J. AM...``).
+    candidate = re.sub(r"^.*?\d{3,6}\s+\d{1,3}\s+(?=[A-Z])", "", candidate)
+    candidate = re.sub(
+        r"^.*?(?:American Chemical Society|The Royal Society of Chemistry|"
+        r"Wiley-VCH(?: Verlag)? GmbH(?:\s*&\s*Co\.\s*KGaA)?(?:,\s*Weinheim)?|"
+        r"Thieme\.\s*All rights reserved\.|Pergamon)\s*(?:\d{4}\s+)?",
+        "",
+        candidate,
+        flags=re.I,
+    )
+    candidate = re.sub(r"^Weinheim\s*", "", candidate, flags=re.I)
+    candidate = re.sub(r"^DOI\s*:\s*\S+\s+", "", candidate, flags=re.I)
+    candidate = re.sub(r"^[^A-Za-z]+", "", candidate).strip(" ,;|.-")
+    candidate = re.sub(r"^atrahedron\b", "Tetrahedron", candidate, flags=re.I)
+    candidate = re.sub(r"\s+([.,])", r"\1", candidate)
+    if not 2 < len(candidate) <= 120:
+        return ""
+    if len(candidate.split()) > 14:
+        return ""
+    if _BOILERPLATE.search(candidate) or _AFFILIATION.search(candidate):
+        return ""
+    if re.search(r"\b(?:https?|www|doi|email|issn|contents?\s+lists?)\b", candidate, re.I):
+        return ""
+    if re.search(r"\bet\s+al\.?\b", candidate, re.I) or ";" in candidate:
+        return ""
+    if _SECTION_LABEL.fullmatch(candidate) or not re.search(r"[A-Za-z]{2}", candidate):
+        return ""
+    return candidate
+
+
+def _pdf_match_fields(
+    match: re.Match[str],
+    evidence: str,
+    *,
+    source_location: str = "pdf_page_1",
+) -> dict[str, dict[str, Any]]:
+    journal = _journal_candidate(match.group("journal"))
+    if not journal:
+        return {}
+    groups = match.groupdict()
+    source = "pdf_first_page_citation_header"
+    common = {
+        "source": source,
+        "source_text": evidence,
+        "source_location": source_location,
+        "page_idx": 0,
+    }
+    fields: dict[str, dict[str, Any]] = {
+        "journal": _field(journal, confidence=0.96, **common),
+    }
+    year = groups.get("year")
+    if year:
+        fields["year"] = _field(int(year), confidence=0.96, **common)
+        fields["bibliographic_year"] = _field(int(year), confidence=0.96, **common)
+    volume = groups.get("volume")
+    if volume:
+        fields["volume"] = _field(volume, confidence=0.96, **common)
+    issue = groups.get("issue")
+    if issue:
+        fields["issue"] = _field(issue, confidence=0.94, **common)
+    locator = groups.get("locator")
+    if locator:
+        normalized = re.sub(r"\s*[−–]\s*", "-", locator)
+        key = "article_number" if _ARTICLE_NUMBER.fullmatch(normalized) else "pages"
+        fields[key] = _field(normalized, confidence=0.96, **common)
+    return fields
+
+
+def _pdf_homepage_journal(
+    lines: list[str],
+    *,
+    source_location: str = "pdf_page_1",
+) -> dict[str, dict[str, Any]]:
+    for index, line in enumerate(lines[:40]):
+        if not (
+            re.search(r"journal\s+homepage\s*:", line, re.I)
+            or (
+                re.search(r"journal\s+homepage", line, re.I)
+                and re.search(r"https?://|www\.", line, re.I)
+            )
+        ):
+            continue
+        for candidate_line in reversed(lines[max(0, index - 4) : index]):
+            if re.search(r"contents?\s+lists?|available\s+at|sciencedirect", candidate_line, re.I):
+                continue
+            journal = _journal_candidate(candidate_line)
+            if journal:
+                return {
+                    "journal": _field(
+                        journal,
+                        source="pdf_first_page_journal_homepage",
+                        confidence=0.97,
+                        source_text=f"{candidate_line} | {line}",
+                        source_location=source_location,
+                        page_idx=0,
+                    )
+                }
+    return {}
+
+
+def _pdf_pipe_footer_fields(
+    lines: list[str],
+    *,
+    source_location: str = "pdf_page_1",
+) -> dict[str, dict[str, Any]]:
+    """Recover pipe-delimited publisher footers and an adjacent copyright year."""
+
+    for index, line in enumerate(lines):
+        match = _PDF_PIPE_VOLUME_ARTICLE.search(line)
+        if not match:
+            continue
+        journal = _journal_candidate(match.group("journal"))
+        doi = normalize_doi(match.group("doi"))
+        if not journal or not doi:
+            continue
+
+        nearby_lines = lines[max(0, index - 2) : index + 3]
+        year_match: re.Match[str] | None = None
+        year_evidence = ""
+        for nearby in nearby_lines:
+            if not re.search(
+                r"(?:©|&\s*(?:18|19|20|21)\d{2}|copyright|all rights reserved|"
+                r"published|publishers?\b)",
+                nearby,
+                re.I,
+            ):
+                continue
+            year_match = re.search(r"(?<!\d)(?:18|19|20|21)\d{2}(?!\d)", nearby)
+            if year_match:
+                year_evidence = nearby
+                break
+
+        evidence = " | ".join(
+            dict.fromkeys([line, year_evidence] if year_evidence else [line])
+        )
+        common = {
+            "source": "pdf_first_page_pipe_footer",
+            "source_text": evidence,
+            "source_location": source_location,
+            "page_idx": 0,
+        }
+        fields: dict[str, dict[str, Any]] = {
+            "journal": _field(journal, confidence=0.98, **common),
+            "volume": _field(match.group("volume"), confidence=0.98, **common),
+            "article_number": _field(
+                match.group("locator"), confidence=0.98, **common
+            ),
+            "doi": _field(doi, confidence=0.99, **common),
+        }
+        if year_match:
+            year = int(year_match.group(0))
+            fields["year"] = _field(year, confidence=0.96, **common)
+            fields["bibliographic_year"] = _field(year, confidence=0.96, **common)
+        return fields
+    return {}
+
+
+def _pdf_coordinate_split_header(
+    lines: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Recover a citation whose columns were merged into separate top lines."""
+
+    journal_lines: list[str] = []
+    for line in lines[:4]:
+        if re.fullmatch(
+            r"(?:RESEARCH\s+)?(?:ARTICLE|COMMUNICATIONS?|REVIEW)",
+            line,
+            re.I,
+        ):
+            break
+        if not re.fullmatch(r"[A-Z][A-Z&.'’: \-]{2,80}", line):
+            break
+        journal_lines.append(line)
+    journal = _journal_candidate(" ".join(journal_lines))
+    if not journal:
+        return {}
+
+    window_lines = lines[:10]
+    window = " | ".join(window_lines)
+    year = re.search(r"(?:18|19|20|21)\d{2}", window)
+    volume = re.search(
+        r"\bVol\.?\s*(\d{1,5})(?:\s*,?\s*No\.?\s*([A-Za-z0-9\-]+))?",
+        window,
+        re.I,
+    )
+    locator = re.search(r"\b\d{1,6}\s*[\-−–]\s*\d{1,6}\b", window)
+    if not year or not volume or not locator:
+        return {}
+    common = {
+        "source": "pdf_first_page_split_citation_header",
+        "source_text": window,
+        "source_location": "pdf_page_1_header",
+        "page_idx": 0,
+    }
+    pages = re.sub(r"\s*[−–]\s*", "-", locator.group(0))
+    return {
+        "journal": _field(journal, confidence=0.95, **common),
+        "year": _field(int(year.group(0)), confidence=0.95, **common),
+        "bibliographic_year": _field(int(year.group(0)), confidence=0.95, **common),
+        "volume": _field(volume.group(1), confidence=0.95, **common),
+        **(
+            {"issue": _field(volume.group(2), confidence=0.93, **common)}
+            if volume.group(2)
+            else {}
+        ),
+        "pages": _field(pages, confidence=0.95, **common),
+    }
+
+
+def _pdf_citation_fields(pdf_first_page_text: str) -> dict[str, dict[str, Any]]:
+    """Recover journal metadata from local PDF page-one headers and footers.
+
+    MinerU intentionally focuses on article content and often drops publisher
+    furniture.  PDF text is therefore used only in bounded, citation-shaped
+    locations: the first 28 lines, the last 14 lines, and an explicit journal
+    homepage marker.  This avoids treating bibliography entries as the paper's
+    own publication metadata.
+    """
+
+    full_lines = [_clean(value) for value in str(pdf_first_page_text or "").splitlines()]
+    full_lines = [value for value in full_lines if value]
+    coordinate_regions = (
+        ("pdf_page_1_header", str(getattr(pdf_first_page_text, "header_text", "") or "")),
+        ("pdf_page_1_footer", str(getattr(pdf_first_page_text, "footer_text", "") or "")),
+    )
+    header_regional_lines = [
+        line
+        for raw in coordinate_regions[0][1].splitlines()
+        if (line := _clean(raw))
+    ]
+    footer_regional_lines = [
+        line
+        for raw in coordinate_regions[1][1].splitlines()
+        if (line := _clean(raw))
+    ]
+    regional_lines = [
+        *(("pdf_page_1_header", line) for line in header_regional_lines),
+        *(("pdf_page_1_footer", line) for line in reversed(footer_regional_lines)),
+    ]
+    if regional_lines:
+        candidate_lines = list(dict.fromkeys(regional_lines))
+    else:
+        indexes = list(range(min(12, len(full_lines))))
+        indexes.extend(range(max(0, len(full_lines) - 8), len(full_lines)))
+        candidate_lines = [
+            ("pdf_page_1", full_lines[index])
+            for index in dict.fromkeys(indexes)
+        ]
+    lines = [line for _, line in candidate_lines]
+    if not lines:
+        return {}
+
+    patterns = (
+        _PDF_CITE_THIS_HEADER,
+        _PDF_JOURNAL_VOLUME_YEAR,
+        _PDF_JOURNAL_YEAR_VOLUME,
+        _PDF_JOURNAL_YEAR_LOCATOR,
+        _PDF_JOURNAL_ISSUE_PAGES_YEAR,
+        _PDF_JOURNAL_VOLUME_ISSUE_YEAR,
+        _PDF_VOLUME_ISSUE_YEAR_JOURNAL,
+    )
+    if header_regional_lines:
+        split_header = _pdf_coordinate_split_header(header_regional_lines)
+        if split_header:
+            return split_header
+    pipe_footer = _pdf_pipe_footer_fields(
+        footer_regional_lines if regional_lines else full_lines[-8:],
+        source_location=("pdf_page_1_footer" if regional_lines else "pdf_page_1"),
+    )
+    if pipe_footer:
+        return pipe_footer
+    for source_location, line in candidate_lines:
+        if ";" in line and not re.search(r"cite\s+this", line, re.I):
+            continue
+        for pattern in patterns:
+            match = pattern.search(line)
+            if match:
+                fields = _pdf_match_fields(
+                    match,
+                    line,
+                    source_location=source_location,
+                )
+                if fields:
+                    return fields
+
+    header_lines = [
+        line
+        for source_location, line in candidate_lines
+        if source_location != "pdf_page_1_footer"
+    ]
+    homepage = _pdf_homepage_journal(
+        header_lines,
+        source_location=(
+            "pdf_page_1_header"
+            if regional_lines
+            else "pdf_page_1"
+        ),
+    )
+    if homepage:
+        return homepage
+
+    # Some ACS PDFs split a footer into a two-line all-caps journal title,
+    # followed by a year, volume/issue and page range on separate lines.
+    for index, line in enumerate(lines):
+        if not re.fullmatch(r"(?:18|19|20|21)\d{2}", line):
+            continue
+        following = lines[index + 1 : index + 4]
+        volume_match = next(
+            (
+                match
+                for item in following
+                if (
+                    match := re.search(
+                        r"\bVol\.?\s*(\d{1,5})(?:\s*,?\s*No\.?\s*([A-Za-z0-9\-]+))?",
+                        item,
+                        re.I,
+                    )
+                )
+            ),
+            None,
+        )
+        locator_match = next(
+            (
+                match
+                for item in following
+                if (match := re.fullmatch(r"\d{1,6}\s*[\-−–]\s*\d{1,6}", item))
+            ),
+            None,
+        )
+        if not volume_match or not locator_match:
+            continue
+        title_lines: list[str] = []
+        for candidate_line in reversed(lines[max(0, index - 3) : index]):
+            if not re.fullmatch(r"[A-Z][A-Z&.'’\- ]{2,60}", candidate_line):
+                break
+            title_lines.insert(0, candidate_line)
+        journal = _journal_candidate(" ".join(title_lines))
+        if not journal:
+            continue
+        evidence = " | ".join(title_lines + [line, *following])
+        common = {
+            "source": "pdf_first_page_split_citation_header",
+            "source_text": evidence,
+            "source_location": (
+                "pdf_page_1_footer" if regional_lines else "pdf_page_1"
+            ),
+            "page_idx": 0,
+        }
+        normalized_locator = re.sub(r"\s*[−–]\s*", "-", locator_match.group(0))
+        return {
+            "journal": _field(journal, confidence=0.94, **common),
+            "year": _field(int(line), confidence=0.94, **common),
+            "bibliographic_year": _field(int(line), confidence=0.94, **common),
+            "volume": _field(volume_match.group(1), confidence=0.94, **common),
+            **(
+                {"issue": _field(volume_match.group(2), confidence=0.92, **common)}
+                if volume_match.group(2)
+                else {}
+            ),
+            "pages": _field(normalized_locator, confidence=0.94, **common),
+        }
+    return {}
+
+
 def extract_mineru_bibliography(
     blocks: Iterable[Mapping[str, Any]],
     markdown: str,
@@ -397,9 +825,12 @@ def extract_mineru_bibliography(
             pdf_first_page_text,
             str(title.get("value") or ""),
         )
+    # Markdown evidence remains authoritative when both representations contain
+    # the same field; the local PDF page fills publisher furniture MinerU lost.
     fields: dict[str, dict[str, Any]] = {
         "title": title,
         "authors": authors,
+        **_pdf_citation_fields(pdf_first_page_text),
         **_citation_fields(markdown),
     }
     doi = extract_front_matter_doi(markdown)

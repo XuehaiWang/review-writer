@@ -206,3 +206,11 @@ if __name__ == "__main__":
     import unittest
 
     unittest.main()
+
+
+def test_legacy_eraser_cannot_reintroduce_white_overlay():
+    import pytest
+    from review_writer_api.figure_rules import append_operation_overlays
+    with pytest.raises(ValueError, match="object-bound masks"):
+        append_operation_overlays('<svg><g id="editable-arrow-overlays"></g></svg>',
+                                  [{"type": "erase", "points": [{"x": 1, "y": 1}, {"x": 5, "y": 5}]}])

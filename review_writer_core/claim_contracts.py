@@ -8,10 +8,19 @@ retrieval while preserving genuinely source-testable legacy claims.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from copy import deepcopy
 import re
 from typing import Any, Iterable
 
 from .evidence_integrity import unsupported_realization_anchors
+from .evidence_queries import registered_fact_field_ids
+from .scientific_facts import (
+    claim_assertion_ceiling,
+    fact_is_usable,
+    normalize_assertion_ceiling,
+)
 
 
 SCIENTIFIC_CLAIM_TYPES = {
@@ -25,6 +34,23 @@ SCIENTIFIC_CLAIM_TYPES = {
     "extension",
     "contrast",
     "review_synthesis",
+}
+CURRENT_CLAIM_SUPPORT_STATUSES = {
+    "supported",
+    "partially_supported",
+    "missing",
+}
+FACT_GROUNDED_BLUEPRINT_SCHEMA_VERSION = 2
+ARGUMENT_CONTRACT = "review-argument/1"
+ARGUMENT_FIELDS = ("claim_id", "claim_revision", "proposition", "claim_type", "allowed_assertion",
+                   "fact_ids", "evidence_refs", "assertion_ceiling", "epistemic_status", "argument_basis", "source")
+FACT_ROLE_CLAIM_TYPES = {
+    "method_conditions": "reported_result",
+    "quantitative_results": "reported_result",
+    "object_input": "reported_result",
+    "scope": "scope",
+    "limitations": "limitation",
+    "mechanism": "mechanism",
 }
 WRITING_SIGNAL_RE = re.compile(
     r"\b(?:draft|write|synthesi[sz]e|develop|organize|structure|frame|"
@@ -77,6 +103,282 @@ def _paper_ids(raw: Any, defaults: Iterable[Any] = ()) -> list[str]:
     return _unique([*values, *defaults])
 
 
+def _claim_support_status(value: Any) -> str:
+    normalized = _text(value).casefold()
+    if normalized in CURRENT_CLAIM_SUPPORT_STATUSES:
+        return normalized
+    if normalized == "blocked":
+        return "missing"
+    return "missing"
+
+
+def claim_is_executable(claim: Any) -> bool:
+    """Return whether a current Claim is safe to assign to a writing plan."""
+
+    if not isinstance(claim, dict):
+        return False
+    return bool(
+        _claim_support_status(claim.get("support_status")) == "supported"
+        and _unique(claim.get("fact_ids") or [])
+        and [value for value in claim.get("evidence_refs") or [] if isinstance(value, dict)]
+        and normalize_assertion_ceiling(claim.get("assertion_ceiling"))
+        != "context_only"
+        and _text(claim.get("allowed_assertion") or claim.get("proposition"))
+        and argument_support_status(claim) == "supported"
+    )
+
+
+def argument_fingerprint(claim):
+    basis = claim.get("argument_basis") or {}
+    payload = {key: claim.get(key) for key in ("claim_id", "claim_revision", "proposition", "claim_type",
+        "allowed_assertion", "fact_ids", "evidence_refs", "assertion_ceiling", "epistemic_status")}
+    payload["basis"] = {key: value for key, value in basis.items() if key != "verification"}
+    payload["contract"] = ARGUMENT_CONTRACT
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def argument_projection(claim):
+    """Carry the audited argument unchanged through the writing plan and publication."""
+    return {key: deepcopy(claim[key]) for key in ARGUMENT_FIELDS if key in claim} if claim.get("argument_basis") else {}
+
+
+def argument_support_status(claim):
+    basis = claim.get("argument_basis") or {}
+    if not basis:
+        # Legacy direct reports remain usable; old comparison templates are not an audited synthesis.
+        return "missing" if claim.get("claim_type") in {"cross_study_comparison", "review_synthesis"} else _claim_support_status(claim.get("support_status"))
+    verdict = basis.get("verification") or {}
+    if basis.get("mode") not in {"reported", "author_interpretation", "synthesis"}:
+        return "missing"
+    if verdict.get("status") == "rejected" or not claim.get("fact_ids"):
+        return "missing"
+    if (verdict.get("status") != "supported" or verdict.get("contract_version") != ARGUMENT_CONTRACT
+            or verdict.get("input_fingerprint") != argument_fingerprint(claim)):
+        return "partially_supported"
+    return "supported"
+
+
+def verify_argument(claim, *, supported, reason):
+    """Register a completed source/argument verdict in one shared representation."""
+    basis = claim.setdefault("argument_basis", {"mode": "reported"})
+    basis["verification"] = {"status": "supported" if supported else "rejected", "reason": str(reason),
+        "contract_version": ARGUMENT_CONTRACT, "input_fingerprint": argument_fingerprint(claim)}
+    claim["support_status"] = "supported" if supported else "missing"
+    return claim
+
+
+def section_argument_readiness(section):
+    claims = section.get("scientific_claims") or []
+    core = [claim for claim in claims if claim.get("required_for_section") is True]
+    pending = [claim for claim in core if not claim_is_executable(claim)]
+    framing = section.get("section_role") in {"introduction", "conclusion"}
+    eligible = framing or bool(core) and not pending
+    return {"generation_eligible": eligible,
+        "executable_claim_count": sum(claim_is_executable(c) for c in claims),
+        "pending_claim_count": len(pending), "evidence_readiness": {
+            "status": "synthesis" if framing else "ready" if eligible else "partial",
+            "missing_core_claim_ids": [c["claim_id"] for c in pending],
+            "reason": "" if eligible else "The section's core argument still needs support or revision."}}
+
+
+def scientific_claim_evidence_state(
+    claim: dict[str, Any], evidence: Iterable[dict[str, Any]]
+) -> dict[str, Any]:
+    """Resolve one Claim only from its registered fact and evidence identities."""
+
+    claim_id = _text(claim.get("claim_id"))
+    rows = [dict(row) for row in evidence if isinstance(row, dict)]
+    by_key = {
+        _text(row.get("evidence_key")): row
+        for row in rows
+        if _text(row.get("evidence_key"))
+    }
+    required_keys = {
+        _text(ref.get("evidence_key"))
+        for ref in claim.get("evidence_refs") or []
+        if isinstance(ref, dict) and _text(ref.get("evidence_key"))
+    }
+    required_fact_ids = set(_unique(claim.get("fact_ids") or []))
+    available_fact_ids = {
+        _text(binding.get("fact_id"))
+        for key in required_keys
+        for binding in (by_key.get(key) or {}).get("fact_bindings") or []
+        if isinstance(binding, dict) and _text(binding.get("fact_id"))
+    }
+    claim_papers = set(_paper_ids(claim))
+    evidence_papers = {
+        _text((by_key.get(key) or {}).get("paper_id")) for key in required_keys
+    }
+    missing_keys = sorted(required_keys - set(by_key))
+    missing_fact_ids = sorted(required_fact_ids - available_fact_ids)
+    missing_papers = sorted(claim_papers - evidence_papers)
+    if not claim_is_executable(claim):
+        status = "evidence_missing"
+    elif missing_keys or missing_fact_ids or missing_papers:
+        status = "partially_supported" if required_keys & set(by_key) else "evidence_missing"
+    else:
+        status = "evidence_supported"
+    return {
+        "claim_id": claim_id,
+        "proposition": _text(claim.get("proposition")),
+        "required_for_section": bool(claim.get("required_for_section", True)),
+        "status": status,
+        "matched_papers": sorted(evidence_papers - {""}),
+        "missing_evidence_keys": missing_keys,
+        "missing_fact_ids": missing_fact_ids,
+        "missing_paper_ids": missing_papers,
+        "support_basis": "registered_claim_fact_bindings",
+    }
+
+
+def claim_planning_prompt_block(supported_claims, evidence_states, writing_requirements):
+    """Keep every executable identity; omit only duplicated supported states."""
+    parts = (
+        ("Source-testable scientific claims permitted by current evidence", supported_claims),
+        ("Unresolved scientific claim evidence states (boundaries, not prose obligations)",
+         [state for state in evidence_states if state.get("status") != "evidence_supported"]),
+        ("Writing requirements (authoring operations, never source propositions)", writing_requirements),
+    )
+    return "\n".join(
+        f"{label}: {json.dumps(value, ensure_ascii=False, separators=(',', ':'))}"
+        for label, value in parts
+    )
+
+
+def _fact_evidence_refs(fact: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        dict(value)
+        for value in fact.get("evidence_refs") or fact.get("support_spans") or []
+        if isinstance(value, dict) and _text(value.get("evidence_key"))
+    ]
+
+
+def fact_is_claim_ready(fact: Any) -> bool:
+    """Require the current semantic fact audit before Blueprint use."""
+
+    if not isinstance(fact, dict) or not fact_is_usable(fact, purpose="detail"):
+        return False
+    verification = dict(fact.get("verification") or {})
+    return bool(
+        verification.get("status") == "supported"
+        and verification.get("contract")
+        and _text(fact.get("fact_id"))
+        and _fact_evidence_refs(fact)
+        and normalize_assertion_ceiling(fact.get("assertion_ceiling"))
+        != "context_only"
+    )
+
+
+def _claim_from_fact(
+    *,
+    claim_id: str,
+    paper_id: str,
+    field_id: str,
+    fact: dict[str, Any],
+) -> dict[str, Any]:
+    value = _text(fact.get("value"))
+    evidence_refs = _fact_evidence_refs(fact)
+    subject = _text(fact.get("subject"))
+    predicate = _text(fact.get("predicate"))
+    verification = dict(fact.get("verification") or {})
+    relation_audited = bool(
+        verification.get("status") == "supported"
+        and verification.get("contract")
+    )
+    claim = {
+        "claim_id": claim_id,
+        "claim_revision": 1,
+        "proposition": value,
+        "claim_type": FACT_ROLE_CLAIM_TYPES.get(field_id, "reported_result"),
+        "primary_papers": [paper_id],
+        "comparison_papers": [],
+        "required_fact_roles": [field_id],
+        "required_for_section": True,
+        "source": "blueprint_fact_card",
+        "fact_ids": [_text(fact.get("fact_id"))],
+        "evidence_refs": evidence_refs,
+        "support_status": "supported",
+        "coverage": {
+            "subject": relation_audited and bool(subject or value),
+            "predicate": relation_audited and bool(predicate or value),
+            "value": relation_audited and bool(value),
+            "qualifiers": relation_audited,
+            "paper_identity": True,
+        },
+        "allowed_assertion": value,
+        "assertion_ceiling": normalize_assertion_ceiling(
+            fact.get("assertion_ceiling")
+        ),
+        "evidence_ceiling": _text(fact.get("evidence_ceiling")),
+        "epistemic_status": _text(fact.get("epistemic_status")),
+        "semantic_constraints": [
+            f"paper_id={paper_id}",
+            f"fact_role={field_id}",
+            "Preserve the audited subject, experiment, qualifiers, and source attribution.",
+        ],
+    }
+    claim["argument_basis"] = {"mode": "author_interpretation" if fact.get("epistemic_status") == "source_author_interpretation"
+        else "reported", "comparison_basis": "", "reasoning_summary": "Direct projection of the registered source fact.",
+        "counterevidence_fact_ids": []}
+    return verify_argument(claim, supported=True, reason="Reused the source fact's valid evidence and attribution.")
+
+
+def resolve_claim_with_fact(
+    claim: dict[str, Any], fact: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Resolve one pre-registered gap slot without changing its identity."""
+
+    if not isinstance(claim, dict) or not isinstance(fact, dict):
+        return None
+    papers = _paper_ids(claim)
+    roles = _unique(claim.get("required_fact_roles") or [])
+    paper_id = _text(fact.get("paper_id"))
+    field_id = _text(fact.get("field_id")).casefold()
+    if (
+        len(papers) != 1
+        or paper_id != papers[0]
+        or field_id not in roles
+        or not fact_is_claim_ready(fact)
+        or not _text(fact.get("fact_id"))
+        or not _fact_evidence_refs(fact)
+    ):
+        return None
+    resolved = _claim_from_fact(
+        claim_id=_text(claim.get("claim_id")),
+        paper_id=paper_id,
+        field_id=field_id,
+        fact=fact,
+    )
+    resolved["required_for_section"] = bool(
+        claim.get("required_for_section", True)
+    )
+    resolved["source"] = "targeted_fact_repair"
+    resolved["semantic_constraints"] = _unique(
+        [
+            *(claim.get("semantic_constraints") or []),
+            *(resolved.get("semantic_constraints") or []),
+        ]
+    )
+    return resolved
+
+
+def build_fact_grounded_claims(
+    *, section_id: str, section_title: str, primary_papers: Iterable[Any],
+    required_fact_roles: Iterable[Any], rows_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project all usable facts as optional inputs; the planner chooses the argument."""
+    claims = []
+    for paper_id in _unique(primary_papers):
+        for fact in (rows_by_id.get(paper_id) or {}).get("scientific_facts") or []:
+            if not fact_is_claim_ready(fact) or not fact.get("fact_id") or not _fact_evidence_refs(fact):
+                continue
+            claim = _claim_from_fact(claim_id=section_id + "-SC-" + str(fact["fact_id"]), paper_id=paper_id,
+                                     field_id=str(fact.get("field_id") or ""), fact=fact)
+            claim["required_for_section"] = False
+            claims.append(claim)
+    return claims
+
+
 def _is_structured_scientific_claim(raw: Any) -> bool:
     if not isinstance(raw, dict) or not _claim_text(raw):
         return False
@@ -121,7 +423,13 @@ def _normalize_scientific_claim(
         return None
     source = dict(raw) if isinstance(raw, dict) else {}
     claim_type = _text(source.get("claim_type") or source.get("claim_kind"))
-    primary_papers = _paper_ids(source, default_paper_ids)
+    # A current Claim owns its paper scope.  Section-level papers are only a
+    # compatibility fallback for legacy Claims that carry no paper identity.
+    # Unioning the defaults into an explicit one-paper Claim makes that Claim
+    # appear to require evidence from every primary paper in the section.
+    primary_papers = _paper_ids(source)
+    if not primary_papers:
+        primary_papers = _unique(default_paper_ids)
     comparison_papers = _paper_ids(
         {"comparison_papers": source.get("comparison_papers") or []}
     )
@@ -133,6 +441,8 @@ def _normalize_scientific_claim(
     coverage = dict(source.get("coverage") or {})
     return {
         "claim_id": _text(source.get("claim_id")) or f"{section_id}-SC{index:02d}",
+        "claim_revision": int(source.get("claim_revision") or 1),
+        **({"argument_basis": deepcopy(source["argument_basis"])} if source.get("argument_basis") else {}),
         "proposition": proposition,
         "claim_type": claim_type or "reported_result",
         "primary_papers": primary_papers,
@@ -142,7 +452,7 @@ def _normalize_scientific_claim(
         "source": _text(source.get("source")) or "blueprint",
         "fact_ids": _unique(source.get("fact_ids") or []),
         "evidence_refs": evidence_refs,
-        "support_status": _text(source.get("support_status")) or "not_assessed",
+        "support_status": argument_support_status(source),
         "coverage": {
             key: bool(coverage.get(key, False))
             for key in ("subject", "predicate", "value", "qualifiers", "paper_identity")
@@ -196,7 +506,20 @@ def claim_support_coverage(
     )
     value_supported = not unsupported["quantitative"]
     subject_supported = not unsupported["technical_entities"]
-    existing = dict(claim.get("coverage") or {})
+    # Coverage emitted by a writing model is not a semantic audit.  Only the
+    # Matrix-audited Blueprint claim (or the same slot resolved by the shared
+    # targeted fact repair) may carry subject/predicate/qualifier decisions
+    # into this deterministic check.
+    existing = (
+        dict(claim.get("coverage") or {})
+        if _text(claim.get("source"))
+        in {
+            "blueprint_fact_card",
+            "blueprint_fact_comparison",
+            "targeted_fact_repair",
+        }
+        else {}
+    )
     coverage = {
         "subject": bool(existing.get("subject", subject_supported)) and subject_supported,
         "predicate": bool(existing.get("predicate", bool(proposition))),

@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 import json
+import hashlib
 import threading
 
 from review_writer_api.domain_services.drafts import (
@@ -13,6 +14,7 @@ from review_writer_api.domain_services.drafts import (
     SECTION_EVIDENCE,
     DraftsService,
 )
+from review_writer_core.draft_quality import full_draft_quality_provenance, QUALITY_INPUT_ARTIFACTS
 
 
 class DraftOptimizationProposalTests(unittest.TestCase):
@@ -20,7 +22,65 @@ class DraftOptimizationProposalTests(unittest.TestCase):
     def _drafts_service() -> DraftsService:
         service = object.__new__(DraftsService)
         service._write_lock = threading.RLock()
+        # These tests isolate proposal transformations. Actual database snapshot
+        # checks are covered by test_workflow_input_guards and test_drafts_v1.
+        service.validate_task_inputs = lambda _principal, _project, payload: {
+            logical_name: str(payload[field] or "")
+            for field, logical_name in {
+                **QUALITY_INPUT_ARTIFACTS,
+                "source_draft_artifact_id": DRAFT_DOCUMENT,
+                "source_quality_artifact_id": DRAFT_QUALITY,
+            }.items() if field in payload
+        }
         return service
+
+    def test_evaluation_payload_reuses_only_exact_full_quality(self) -> None:
+        service = self._drafts_service()
+        draft_text = (
+            "# Review\n\nStable paragraph [1].\n\n"
+            "<!-- paragraph_id: S01-p1 -->\n"
+        )
+        paragraphs = [{"paragraph_id": "S01-p1"}]
+        compatibility = {"source_matrix_artifact_id": "matrix-v1"}
+        quality = {
+            "current": True,
+            "source_draft_artifact_id": "draft-v1",
+            "score": 90,
+            **full_draft_quality_provenance(
+                draft_text,
+                paragraphs,
+                input_artifact_ids=compatibility,
+            ),
+        }
+        payload = {
+            "draft_artifact_id": "draft-v1",
+            "quality_artifact_id": "quality-v1",
+            "revision": 4,
+            "first_draft_md": draft_text,
+            "paragraphs": paragraphs,
+            "freshness": {"upstream_stale": False},
+            "quality": quality,
+            "optimization_proposals": [],
+        }
+        service.get = lambda *_args, **_kwargs: payload  # type: ignore[method-assign]
+        service.compatibility_payload = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: compatibility
+        )
+
+        exact = service.evaluation_payload(
+            SimpleNamespace(), "project-1", goal=90
+        )
+        self.assertTrue(exact["quality_reused"])
+        self.assertEqual("steady_state", exact["run_mode"])
+        self.assertEqual(quality, exact["baseline_quality"])
+
+        quality["quality_scope"] = "batch_selected_paragraphs"
+        migration = service.evaluation_payload(
+            SimpleNamespace(), "project-1", goal=90
+        )
+        self.assertFalse(migration["quality_reused"])
+        self.assertEqual("migration", migration["run_mode"])
+        self.assertEqual({}, migration["baseline_quality"])
 
     def test_quality_roots_group_repeated_reference_failures(self) -> None:
         issues = [
@@ -48,6 +108,13 @@ class DraftOptimizationProposalTests(unittest.TestCase):
         self.assertEqual(roots[0]["root_cause_id"], issues[0]["root_cause_id"])
         self.assertEqual(1, len(tasks))
         self.assertEqual("queued", tasks[0]["status"])
+
+    def test_different_missing_claims_are_not_hidden_in_one_root(self):
+        issues = [{"issue_id": f"I{index}", "paragraph_id": "S1-p1", "repair_route": "targeted_evidence_then_paragraph_rewrite",
+                   "claim_ids": [f"claim{index}"], "paper_ids": ["P1"]} for index in range(2)]
+        roots, _tasks = DraftsService._quality_root_causes(issues)
+        self.assertEqual(2, len(roots))
+        self.assertEqual("unchanged", DraftsService._repair_summary({"root_causes": roots}, roots)["repair_status"])
 
     def test_quality_roots_keep_coverage_expansion_as_user_decision(self) -> None:
         issues = [
@@ -215,9 +282,43 @@ class DraftOptimizationProposalTests(unittest.TestCase):
 
         self.assertEqual({DRAFT_QUALITY}, set(captured["files"]))
         self.assertEqual("full_draft", captured["quality"]["quality_scope"])
+        self.assertTrue(captured["quality"]["evaluation_input_sha256"])
         self.assertEqual("completed", captured["quality"]["feedback_status"]["phase"])
         self.assertEqual("quality-v2", result["quality_artifact_id"])
         self.assertFalse(result["proposal_created"])
+
+    def test_pure_support_and_prose_proposal_publish_atomically_on_new_quality(self):
+        service = self._drafts_service()
+        text = '# Review\n\nOriginal paragraph [1].\n\n<!-- paragraph_id: sec1-p1 -->\n'
+        service._read_text = lambda *_a, **_k: (text, SimpleNamespace(id='draft-v1', metadata={}))
+        service._read_json = lambda _u, _p, name, **_k: (
+            ({'score': 70}, SimpleNamespace(id='quality-v1')) if name == DRAFT_QUALITY else ({}, None))
+        captured = {}
+
+        def publish(_u, _p, files, **kwargs):
+            published = {}
+            for name, (content, _suffix) in files.items():
+                captured[name] = json.loads(content(published) if callable(content) else content)
+                published[name] = SimpleNamespace(id=f'new-{name}')
+            captured['guard'] = kwargs
+            return published, SimpleNamespace(revision=8)
+
+        service._publish_files = publish
+        entry = {'paragraph_id': 'sec1-p1', 'source_check_status': 'verified',
+                 'paragraph_text_hash': hashlib.sha256(b'Original paragraph [1].').hexdigest(),
+                 'targeted_source_recheck': {'status': 'supported_without_prose_change'}, 'papers': []}
+        result = service.publish_optimization(SimpleNamespace(), 'project-1',
+            {'source_draft_artifact_id': 'draft-v1', 'source_quality_artifact_id': 'quality-v1', 'expected_revision': 7},
+            {'draft_text': text.replace('Original', 'Improved'), 'score': 88,
+             'review_source_quality': {'total_score': 80, 'paragraph_scores': [], 'source_check': {'entries': [entry]}}})
+        self.assertEqual({DRAFT_QUALITY, DRAFT_OPTIMIZATIONS, 'guard'}, set(captured))
+        proposal = next(iter(captured[DRAFT_OPTIMIZATIONS]['entries'].values()))
+        self.assertEqual(f'new-{DRAFT_QUALITY}', proposal['source_quality_artifact_id'])
+        self.assertEqual('quality-v1', captured['guard']['expected_current_artifacts'][DRAFT_QUALITY])
+        self.assertEqual(7, captured['guard']['expected_revision'])
+        self.assertEqual('verified', captured[DRAFT_QUALITY]['source_check']['entries'][0]['source_check_status'])
+        self.assertFalse(result['draft_changed'])
+        self.assertTrue(result['proposal_created'])
 
     def test_accepting_proposal_publishes_draft_quality_and_overlays_together(self) -> None:
         service = self._drafts_service()
@@ -234,7 +335,9 @@ class DraftOptimizationProposalTests(unittest.TestCase):
                 "Original paragraph [1].", "Improved paragraph [1]."
             ),
             "candidate_quality": {"score": 88.0},
-            "rewrite_overlays": {"entries": {}},
+            "source_overlays": {"entries": {}, "legacy": "keep"},
+            "rewrite_overlays": {"argument_revisions": {"C": {
+                "paragraph_ids": ["sec1-p1"], "group_id": "joint", "proposition": "Bounded conclusion"}}},
             "changes": [
                 {
                     "paragraph_id": "sec1-p1",
@@ -279,9 +382,15 @@ class DraftOptimizationProposalTests(unittest.TestCase):
             set(captured["files"]),
         )
         self.assertEqual("draft-v2", captured["quality"]["source_draft_artifact_id"])
-        self.assertEqual("full_draft", captured["quality"]["quality_scope"])
+        self.assertEqual(
+            "batch_selected_paragraphs", captured["quality"]["quality_scope"]
+        )
+        self.assertTrue(captured["quality"]["requires_full_draft_refresh"])
         self.assertEqual("draft-v2", result["draft_artifact_id"])
         self.assertTrue(captured["kwargs"]["invalidate_final"])
+        saved_overlays = json.loads(captured["files"][DRAFT_OVERLAYS][0])
+        self.assertEqual("Bounded conclusion", saved_overlays["argument_revisions"]["C"]["proposition"])
+        self.assertEqual("keep", saved_overlays["legacy"])
 
     def test_accepting_selected_paragraphs_keeps_unselected_text_and_updates_score(self) -> None:
         service = self._drafts_service()
@@ -328,7 +437,7 @@ class DraftOptimizationProposalTests(unittest.TestCase):
             "proposal_id": "proposal-1",
             "source_draft_artifact_id": "draft-v1",
             "source_quality": {
-                "score": 70.0,
+                # Feedback-loop rubric payloads use total_score without score.
                 "total_score": 70.0,
                 "paragraph_scores": [
                     {"paragraph_id": "sec1-p1", "score": 60},
@@ -516,6 +625,21 @@ class DraftOptimizationProposalTests(unittest.TestCase):
     def test_all_revalidated_improvements_can_apply_automatically(self) -> None:
         service = self._drafts_service()
         current = SimpleNamespace(id="draft-v1", metadata={})
+        current_text = "Original.\n"
+        candidate_text = "Improved.\n"
+        source_quality = {
+            "source_draft_artifact_id": "draft-v1",
+            "score": 70,
+            "paragraph_scores": [{
+                "paragraph_id": "sec1-p2", "source_check_status": "verified",
+                "source_evidence_refs": ["source-2"], "unsupported_claims": [],
+            }],
+            **full_draft_quality_provenance(current_text, []),
+        }
+        candidate_quality = {
+            "score": 91,
+            **full_draft_quality_provenance(candidate_text, []),
+        }
         change = {
             "paragraph_id": "sec1-p1",
             "source_paragraph_score": 70,
@@ -528,10 +652,24 @@ class DraftOptimizationProposalTests(unittest.TestCase):
             },
         }
         service._read_json = lambda *_args, **_kwargs: (  # type: ignore[method-assign]
-            {"entries": {"proposal-1": {"status": "pending", "changes": [change]}}},
+            {
+                "entries": {
+                    "proposal-1": {
+                        "status": "pending",
+                        "changes": [change],
+                        "candidate_draft_text": candidate_text,
+                        "source_quality": source_quality,
+                        "candidate_quality": candidate_quality,
+                        "claim_dispositions": {"historical-claim": {
+                            "paragraph_id": "sec1-p2",
+                            "disposition": "downgraded_due_to_insufficient_evidence",
+                        }},
+                    }
+                }
+            },
             SimpleNamespace(id="proposal-store-v1"),
         )
-        service._read_text = lambda *_args, **_kwargs: ("Original.\n", current)  # type: ignore[method-assign]
+        service._read_text = lambda *_args, **_kwargs: (current_text, current)  # type: ignore[method-assign]
         service.decide_optimization_proposal = lambda *_args, **_kwargs: {  # type: ignore[method-assign]
             "proposal_id": "proposal-1",
             "draft_artifact_id": "draft-v2",
@@ -546,13 +684,52 @@ class DraftOptimizationProposalTests(unittest.TestCase):
         self.assertTrue(result["draft_changed"])
         self.assertFalse(result["proposal_created"])
 
+        for override in [
+            {"source_check_status": "partially_supported"},
+            {"source_evidence_refs": []},
+            {"unsupported_claims": ["Still unsupported"]},
+        ]:
+            with self.subTest(override=override):
+                original = dict(source_quality["paragraph_scores"][0])
+                source_quality["paragraph_scores"][0].update(override)
+                result = service.auto_apply_optimization_proposal(
+                    SimpleNamespace(), "project-1", "proposal-1", revision=8
+                )
+                self.assertFalse(result["auto_applied"])
+                self.assertTrue(any(
+                    "unsupported_claim_was_not_downgraded_in_text" in item["reasons"]
+                    for item in result["manual_review_reasons"]
+                ))
+                source_quality["paragraph_scores"][0] = original
+
+        source_quality["evaluation_input_sha256"] = "stale-baseline"
+        result = service.auto_apply_optimization_proposal(
+            SimpleNamespace(), "project-1", "proposal-1", revision=8
+        )
+        self.assertFalse(result["auto_applied"])
+        self.assertTrue(any(
+            "full_draft_baseline_not_exact" in item["reasons"]
+            for item in result["manual_review_reasons"]
+        ))
+
     def test_accuracy_improvement_can_auto_apply_when_numeric_score_is_lower(self) -> None:
         service = self._drafts_service()
         current = SimpleNamespace(id="draft-v1", metadata={})
+        current_text = "Original.\n"
+        candidate_text = "More accurate.\n"
+        source_quality = {
+            "source_draft_artifact_id": "draft-v1",
+            "score": 91,
+            **full_draft_quality_provenance(current_text, []),
+        }
+        candidate_quality = {
+            "score": 90.5,
+            **full_draft_quality_provenance(candidate_text, []),
+        }
         change = {
             "paragraph_id": "sec1-p1",
             "source_paragraph_score": 91,
-            "candidate_paragraph_score": 89,
+            "candidate_paragraph_score": 90.5,
             "accuracy_improved": True,
             "candidate_evaluation": {
                 "evaluation_scope": "single_paragraph",
@@ -567,13 +744,15 @@ class DraftOptimizationProposalTests(unittest.TestCase):
                     "proposal-1": {
                         "status": "pending",
                         "changes": [change],
-                        "candidate_quality": {"hard_gate_failures": []},
+                        "candidate_draft_text": candidate_text,
+                        "source_quality": source_quality,
+                        "candidate_quality": candidate_quality,
                     }
                 }
             },
             SimpleNamespace(id="proposal-store-v1"),
         )
-        service._read_text = lambda *_args, **_kwargs: ("Original.\n", current)  # type: ignore[method-assign]
+        service._read_text = lambda *_args, **_kwargs: (current_text, current)  # type: ignore[method-assign]
         service.decide_optimization_proposal = lambda *_args, **_kwargs: {  # type: ignore[method-assign]
             "proposal_id": "proposal-1",
             "draft_artifact_id": "draft-v2",
@@ -631,7 +810,10 @@ class DraftOptimizationProposalTests(unittest.TestCase):
         )
 
         self.assertEqual(repaired_text, captured["draft"])
-        self.assertEqual("full_draft", captured["quality"]["quality_scope"])
+        self.assertEqual(
+            "batch_selected_paragraphs", captured["quality"]["quality_scope"]
+        )
+        self.assertTrue(captured["quality"]["requires_full_draft_refresh"])
         self.assertTrue(result["draft_changed"])
 
     def test_accepting_repaired_evidence_publishes_it_before_the_new_draft(self) -> None:

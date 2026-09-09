@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "profile": "allene",
+  "overview_structure_required": true,
+  "motifs": [
+    {
+      "motif": "allenoate",
+      "label": "allenoate core",
+      "patterns": ["\\ballenoates?\\b"],
+      "transformation_patterns": ["\\ballenoate\\s+synthesis\\b"],
+      "smiles": "*C(*)=C=C(C(=O)O*)*",
+      "required_smarts": "C=C=C"
+    },
+    {
+      "motif": "allene",
+      "label": "substituted allene core",
+      "patterns": [
+        "\\ballenes?\\b",
+        "\\baxially\\s+chiral\\s+allenes?\\b",
+        "\\ballenols?\\b"
+      ],
+      "transformation_patterns": [
+        "\\ballenation\\b",
+        "\\ballenylation\\b",
+        "\\bATA\\b",
+        "\\bEATA\\b"
+      ],
+      "smiles": "*C=C=C*",
+      "required_smarts": "C=C=C"
+    }
+  ]
+}

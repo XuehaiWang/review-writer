@@ -8,9 +8,56 @@ import json
 import os
 import re
 import ssl
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
+
+from .provider_errors import normalize_provider_error, provider_error_message
+
+
+# Recovery only reads the original request. Allow the gateway's three provider
+# attempts (up to 300 seconds each) to finish without starting another paid call.
+MODEL_RESULT_RECOVERY_SECONDS = 900
+
+
+def _recover_model_result(url: str, token: str, request_key: str, *, label: str) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url.rstrip("/") + "/" + urllib.parse.quote(request_key, safe=""),
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        method="GET",
+    )
+    deadline = time.monotonic() + MODEL_RESULT_RECOVERY_SECONDS
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            with urllib.request.urlopen(
+                request, context=ssl.create_default_context(), timeout=min(30.0, remaining)
+            ) as response:
+                snapshot = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {408, 429, 500, 502, 503, 504}:
+                raise _gateway_http_error(exc) from exc
+            exc.close()
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            pass
+        else:
+            status = snapshot.get("status") if isinstance(snapshot, dict) else None
+            if status == "succeeded" and isinstance(snapshot.get("result"), dict):
+                return snapshot["result"]
+            if status == "failed":
+                failure = snapshot.get("error") or {}
+                raise GatewayRequestError(
+                    provider_error_message(failure) if failure else "文本模型原请求执行失败，请稍后重试。",
+                    status_code=502, code="MODEL_REQUEST_FAILED", details=failure,
+                )
+            if status != "running":
+                raise RuntimeError(f"{label} gateway returned an invalid recovery status.")
+        time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
+    raise RuntimeError(
+        f"{label} gateway result recovery timed out after {MODEL_RESULT_RECOVERY_SECONDS} seconds; "
+        "the original request was not resubmitted."
+    )
 
 
 class GatewayRequestError(RuntimeError):
@@ -34,6 +81,55 @@ _FENCED_JSON_RE = re.compile(
     r"```(?:json)?\s*(.*?)```",
     flags=re.IGNORECASE | re.DOTALL,
 )
+_LEADING_THINK_BLOCK_RE = re.compile(
+    r"^\s*(?:<think\b[^>]*>.*?</think\s*>\s*)+",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_JSON_SIMPLE_ESCAPES = frozenset('"\\/bfnrt')
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _escape_invalid_json_string_backslashes(text: str) -> str:
+    """Escape model-authored LaTeX slashes that are invalid in JSON strings.
+
+    This is deliberately a narrow fallback. Structural JSON remains untouched;
+    only a backslash inside a quoted string is doubled when it does not begin a
+    valid JSON escape. Odd slash runs such as ``\\\\\\mathrm`` are repaired
+    without changing already-valid pairs.
+    """
+
+    output: list[str] = []
+    in_string = False
+    cursor = 0
+    while cursor < len(text):
+        character = text[cursor]
+        if character == '"':
+            in_string = not in_string
+            output.append(character)
+            cursor += 1
+            continue
+        if character != "\\" or not in_string:
+            output.append(character)
+            cursor += 1
+            continue
+
+        following = text[cursor + 1] if cursor + 1 < len(text) else ""
+        if following in _JSON_SIMPLE_ESCAPES:
+            output.extend((character, following))
+            cursor += 2
+            continue
+        if (
+            following == "u"
+            and cursor + 5 < len(text)
+            and all(value in _HEX_DIGITS for value in text[cursor + 2 : cursor + 6])
+        ):
+            output.append(text[cursor : cursor + 6])
+            cursor += 6
+            continue
+
+        output.append("\\\\")
+        cursor += 1
+    return "".join(output)
 
 
 def _decoded_json_values(text: str) -> list[Any]:
@@ -80,7 +176,9 @@ def parse_json_object_text(
     being mistaken for the requested scientific result.
     """
 
-    cleaned = str(text or "").lstrip("\ufeff").strip()
+    cleaned = _LEADING_THINK_BLOCK_RE.sub(
+        "", str(text or "").lstrip("\ufeff")
+    ).strip()
     if not cleaned:
         raise RuntimeError(f"{context} returned an empty JSON response.")
 
@@ -96,7 +194,13 @@ def parse_json_object_text(
         try:
             decoded = [json.loads(source)]
         except json.JSONDecodeError:
-            decoded = _decoded_json_values(source)
+            repaired = _escape_invalid_json_string_backslashes(source)
+            try:
+                decoded = [json.loads(repaired)]
+            except json.JSONDecodeError:
+                decoded = _decoded_json_values(source)
+                if repaired != source:
+                    decoded.extend(_decoded_json_values(repaired))
         for value in decoded:
             if not isinstance(value, dict):
                 continue
@@ -126,15 +230,18 @@ def _gateway_http_error(exc: urllib.error.HTTPError, *, image: bool = False) -> 
     except json.JSONDecodeError:
         payload = {}
     if isinstance(payload, dict):
-        error = payload.get("error")
+        error = payload.get("error") or payload.get("detail")
         if isinstance(error, dict):
             code = str(error.get("code") or "")
             message = str(error.get("message") or "")
             details = error.get("details") if isinstance(error.get("details"), dict) else {}
-        elif isinstance(payload.get("detail"), str):
-            message = str(payload["detail"])
+        elif isinstance(error, str):
+            message = error
+    failure = normalize_provider_error(exc.code, payload)
     if code == "INSUFFICIENT_CREDIT" or exc.code == 402:
         public = "余额不足，无法使用智能服务。请在“API 设置”中查看余额，或联系管理员添加额度。"
+    elif failure["category"] in {"quota_exhausted", "context_limit", "rate_limited"}:
+        public = provider_error_message(failure)
     elif exc.code in {408, 409, 425, 429, 500, 502, 503, 504}:
         public = "图像服务暂时不可用，请稍后重试。" if image else "文本模型服务暂时不可用，请稍后重试。"
     elif exc.code in {401, 403}:
@@ -144,8 +251,8 @@ def _gateway_http_error(exc: urllib.error.HTTPError, *, image: bool = False) -> 
     return GatewayRequestError(
         public,
         status_code=exc.code,
-        code=code,
-        details={**details, "provider_message": message[:500]},
+        code=code or failure["code"],
+        details={**details, **failure, "provider_message": message[:500]},
     )
 
 
@@ -169,6 +276,7 @@ def call_model(
     label: str,
     response_format: str = "text",
     timeout_seconds: int = 330,
+    recover_on_timeout: bool = True,
 ) -> str:
     url = str(os.environ.get("REVIEW_WRITER_MODEL_GATEWAY_URL") or "").strip()
     token = str(os.environ.get("REVIEW_WRITER_TASK_TOKEN") or "").strip()
@@ -197,9 +305,8 @@ def call_model(
             "Accept": "application/json",
         },
     )
-    # The API model gateway owns provider retries, backoff, request joining and
-    # idempotency. Retrying again in every scientific subprocess multiplies a
-    # single transient failure into as many as nine paid provider calls.
+    # Provider retries belong to the gateway. An uncertain connection failure
+    # only triggers read-only recovery, never another generation POST.
     try:
         with urllib.request.urlopen(
             request,
@@ -208,9 +315,27 @@ def call_model(
         ) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise _gateway_http_error(exc) from exc
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"{label} gateway transport/JSON failure: {exc}") from exc
+        error = _gateway_http_error(exc)
+        if not recover_on_timeout:
+            exc.close()
+            raise error from exc
+        if exc.code not in {408, 500, 502, 503, 504, 524}:
+            raise error from exc
+        # A proxy error does not say whether generation finished. Inspect the
+        # original request once; a terminal failed status stops polling immediately.
+        exc.close()
+        try:
+            payload = _recover_model_result(url, token, request_key, label=label)
+        except GatewayRequestError as recovery_error:
+            if recovery_error.code == "MODEL_REQUEST_FAILED" and recovery_error.details:
+                raise
+            if recovery_error.code == "MODEL_REQUEST_FAILED" or recovery_error.status_code == 404:
+                raise error from exc
+            raise
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        if not recover_on_timeout:
+            raise
+        payload = _recover_model_result(url, token, request_key, label=label)
     text = str(payload.get("output_text") or "")
     if not text:
         raise RuntimeError("The internal model gateway returned an empty response.")
@@ -223,12 +348,14 @@ def call_json_model(
     label: str,
     timeout_seconds: int = 330,
     required_list: str = "",
+    recover_on_timeout: bool = True,
 ) -> dict[str, Any]:
     raw = call_model(
         prompt,
         label=label,
         response_format="json",
         timeout_seconds=timeout_seconds,
+        **({"recover_on_timeout": False} if not recover_on_timeout else {}),
     ).strip()
     return parse_json_object_text(
         raw,

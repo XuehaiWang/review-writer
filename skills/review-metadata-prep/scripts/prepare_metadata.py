@@ -30,15 +30,8 @@ REVIEW_ROOT = _BOOTSTRAP_ROOT
 if str(REVIEW_ROOT) not in sys.path:
     sys.path.insert(0, str(REVIEW_ROOT))
 
-from review_writer_core.taxonomy import (  # noqa: E402
-    labels_by_category,
-    load_rules_from_path,
-    load_taxonomy_rules,
-    load_validation_taxonomy_rules,
-    suggest_taxonomy_profile,
-    taxonomy_identity,
-)
 from review_writer_core.metadata_tags import (  # noqa: E402
+    STRUCTURED_TAG_KEYS,
     neutral_structured_tag_values,
     structured_tags_are_verified,
 )
@@ -63,38 +56,6 @@ from review_writer_core.providers import (  # noqa: E402
 )
 
 
-DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Za-z0-9]+\b")
-YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
-
-JOURNAL_HINTS = [
-    "Angewandte Chemie International Edition",
-    "Angew. Chem. Int. Ed.",
-    "Advanced Synthesis & Catalysis",
-    "Adv. Synth. Catal.",
-    "Tetrahedron Letters",
-    "Tetrahedron",
-    "European Journal of Organic Chemistry",
-    "Eur. J. Org. Chem.",
-    "Organic Letters",
-    "Journal of Organic Chemistry",
-    "Chemical Communications",
-    "Green Chemistry",
-    "Chemical Science",
-]
-
-STRUCTURED_TAG_KEYS = [
-    "product",
-    "substrate",
-    "catalyst_or_method",
-    "organometallic_partner",
-    "ligand_or_chiral_source",
-    "leaving_group",
-    "reaction_type",
-    "document_scope",
-]
-
-DEFAULT_CLASSIFICATION_LABELS = {key: ["not specified"] for key in STRUCTURED_TAG_KEYS}
-
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -118,22 +79,6 @@ def load_dotenv(path: Path) -> None:
         value = value.strip().strip('"').strip("'")
         if key and key not in os.environ:
             os.environ[key] = value
-
-
-def load_classification_rules(path: Path) -> dict[str, list[str]]:
-    return labels_by_category(load_rules_from_path(path), STRUCTURED_TAG_KEYS)
-
-
-def classification_rules_prompt(labels: dict[str, list[str]]) -> str:
-    lines = [
-        "Allowed project taxonomy labels. For each category, output exactly one label from its list.",
-        "Use `not specified` only when no listed label is supported by the supplied paper evidence.",
-    ]
-    for key in STRUCTURED_TAG_KEYS:
-        lines.append(f"\n{key}:")
-        for label in labels.get(key, ["not specified"]):
-            lines.append(f"- {label}")
-    return "\n".join(lines)
 
 
 def slugify(value: str) -> str:
@@ -488,25 +433,6 @@ def extract_doi(md: str) -> dict[str, Any]:
     return extract_front_matter_doi(md)
 
 
-def extract_journal(md: str, pdf_name: str) -> dict[str, Any]:
-    hay = pdf_name + "\n" + md[:8000]
-    for hint in JOURNAL_HINTS:
-        if hint.lower() in hay.lower():
-            return scored(hint, "known_journal_hint", 0.72)
-    cite = re.search(r"Cite this:\s*([^,\n]+)", hay, re.I)
-    if cite:
-        return scored(clean_text(cite.group(1)), "cite_this_line", 0.7)
-    how = re.search(r"How to cite:\s*([^,\n]+)", hay, re.I)
-    if how:
-        return scored(clean_text(how.group(1)), "how_to_cite_line", 0.7)
-    filename = Path(pdf_name).stem
-    if " - " in filename:
-        first = filename.split(" - ")[0].strip()
-        if len(first) > 3:
-            return scored(first, "filename_prefix", 0.55)
-    return scored(None, "rule_not_found", 0.0)
-
-
 def dedupe(items: list[str]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -536,9 +462,7 @@ def build_llm_payload(
     system_prompt: str,
     model: str,
     reasoning_effort: str = "",
-    classification_labels: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
-    classification_labels = classification_labels or DEFAULT_CLASSIFICATION_LABELS
     front_blocks = []
     for i, block in enumerate(blocks[:80]):
         text = clean_text(str(block.get("text") or block.get("content") or ""))
@@ -567,10 +491,8 @@ def build_llm_payload(
                 "journal",
                 "doi",
                 "abstract",
-                "structured_tags",
             ]
         },
-        "classification_rules": classification_rules_prompt(classification_labels),
         "front_blocks": front_blocks,
         "markdown_head": md_head[:9000],
     }
@@ -582,7 +504,6 @@ def build_llm_payload(
             "authors",
             "year",
             "abstract",
-            "structured_tags",
             "warnings",
         ],
         "properties": {
@@ -590,7 +511,6 @@ def build_llm_payload(
             "authors": field_schema("array"),
             "year": field_schema("integer_or_null"),
             "abstract": field_schema("string"),
-            "structured_tags": structured_tags_schema(classification_labels),
             "warnings": {"type": "array", "items": {"type": "string"}},
         },
     }
@@ -629,29 +549,6 @@ def field_schema(kind: str) -> dict[str, Any]:
         "required": ["value", "source", "confidence", "human_checked"],
         "properties": {
             "value": value_schema,
-            "source": {"type": "string"},
-            "confidence": {"type": "number"},
-            "human_checked": {"type": "boolean"},
-        },
-    }
-
-
-def structured_tags_schema(classification_labels: dict[str, list[str]] | None = None) -> dict[str, Any]:
-    classification_labels = classification_labels or DEFAULT_CLASSIFICATION_LABELS
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["value", "source", "confidence", "human_checked"],
-        "properties": {
-            "value": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": STRUCTURED_TAG_KEYS,
-                "properties": {
-                    key: {"type": "string", "enum": classification_labels.get(key, ["not specified"])}
-                    for key in STRUCTURED_TAG_KEYS
-                },
-            },
             "source": {"type": "string"},
             "confidence": {"type": "number"},
             "human_checked": {"type": "boolean"},
@@ -751,7 +648,6 @@ def merge_llm(base: dict[str, Any], llm: dict[str, Any]) -> dict[str, Any]:
         "authors",
         "year",
         "abstract",
-        "structured_tags",
     ]:
         if not isinstance(llm.get(key), dict):
             continue
@@ -762,18 +658,13 @@ def merge_llm(base: dict[str, Any], llm: dict[str, Any]) -> dict[str, Any]:
         new_conf = float(llm[key].get("confidence") or 0)
         old_conf = float(current.get("confidence") or 0)
         current_value = current.get("value") if isinstance(current, dict) else None
-        schema_changed = key == "structured_tags" and (
-            not isinstance(current_value, dict) or set(current_value) != set(STRUCTURED_TAG_KEYS)
-        )
-        if has_value(new_value) and (schema_changed or new_conf >= old_conf or not has_value(current_value)):
+        if has_value(new_value) and (new_conf >= old_conf or not has_value(current_value)):
             base[key] = {
                 "value": new_value,
                 "source": llm[key].get("source") or "llm",
                 "confidence": round(new_conf, 3),
                 "human_checked": bool(llm[key].get("human_checked", False)),
             }
-    if isinstance(base.get("structured_tags"), dict):
-        apply_structured_tags_to_compat_fields(base)
     warnings = llm.get("warnings") or []
     if isinstance(warnings, list):
         base["quality"]["warnings"].extend(str(w) for w in warnings if str(w).strip())
@@ -789,69 +680,6 @@ def normalize_structured_tags(value: Any) -> dict[str, str]:
     else:
         tags = {key: "not specified" for key in STRUCTURED_TAG_KEYS}
     return tags
-
-
-def taxonomy_profile_for_text(text: str) -> str:
-    """Auto-select a profile only when no operator override is configured."""
-    if os.environ.get("REVIEW_CLASSIFICATION_RULES", "").strip():
-        return ""
-    configured = os.environ.get("REVIEW_TAXONOMY_PROFILE", "").strip()
-    return configured or suggest_taxonomy_profile(text)
-
-
-def taxonomy_phrase_matches(needle: str, haystack: str) -> bool:
-    """Match one taxonomy alias as a token/phrase instead of a substring.
-
-    Short chemistry aliases such as ``Cu``, ``Au``, and ``Ni`` must not match
-    ordinary words such as ``molecular`` or ``calculation``.  The taxonomy is
-    user-configurable, so the matcher keeps punctuation in aliases intact and
-    only treats whitespace between words as flexible.
-    """
-
-    chunks = re.split(r"\s+", str(needle or "").strip())
-    if not chunks or not chunks[0]:
-        return False
-    pattern = r"(?<![A-Za-z0-9])" + r"\s+".join(
-        re.escape(chunk) for chunk in chunks
-    ) + r"(?![A-Za-z0-9])"
-    return re.search(pattern, str(haystack or ""), re.I) is not None
-
-
-def structured_tags_from_classification_rules(
-    review_root: Path,
-    text: str,
-    profile: str = "",
-) -> dict[str, str]:
-    """Assign only labels defined by the repository's active taxonomy."""
-    values = {key: "not specified" for key in STRUCTURED_TAG_KEYS}
-    rules = load_taxonomy_rules(
-        review_root,
-        profile=profile or taxonomy_profile_for_text(text),
-    )
-    matches: dict[str, tuple[int, str]] = {}
-    for item in rules:
-        if not isinstance(item, tuple) or len(item) < 3:
-            continue
-        label, category, needles = item[0], item[1], item[2]
-        if category not in values:
-            continue
-        matched_needles = [
-            str(needle).strip()
-            for needle in [label, *needles]
-            if str(needle).strip() and taxonomy_phrase_matches(str(needle), text)
-        ]
-        if not matched_needles:
-            continue
-        # Prefer the most specific explicit phrase when several labels in one
-        # category occur.  Taxonomy declaration order is no longer allowed to
-        # make the first short symbol (historically ``Cu``) win every paper.
-        specificity = max(len(re.sub(r"[^A-Za-z0-9]+", "", needle)) for needle in matched_needles)
-        current = matches.get(category)
-        if current is None or specificity > current[0]:
-            matches[category] = (specificity, str(label))
-    for category, (_specificity, label) in matches.items():
-        values[category] = label
-    return values
 
 
 def structured_tag_values(meta: dict[str, Any]) -> dict[str, str]:
@@ -1133,13 +961,12 @@ def run(args: argparse.Namespace) -> int:
     api_key = resolve_api_key(args.api_key, base_url)
     model = args.model or os.environ.get("REVIEW_METADATA_MODEL", DEFAULT_TEXT_MODEL)
     reasoning_effort = args.reasoning_effort or os.environ.get("REVIEW_METADATA_REASONING_EFFORT", "high")
-    classification_labels = labels_by_category(
-        load_validation_taxonomy_rules(review_root),
-        STRUCTURED_TAG_KEYS,
-    )
     use_llm = bool(args.use_llm)
     if use_llm and not api_key:
-        print("WARN: --use-llm was set but OPENAI_API_KEY is missing; using rules only.", file=sys.stderr)
+        print(
+            "WARN: --use-llm was set but OPENAI_API_KEY is missing; using local bibliographic extraction only.",
+            file=sys.stderr,
+        )
         use_llm = False
 
     existing_rows = read_registry_rows(out_registry) if args.append_registry else []
@@ -1175,7 +1002,7 @@ def run(args: argparse.Namespace) -> int:
         meta, blocks, md, reg_rows = build_metadata(paper_id, job, pdf_path, md_path, cpath, existing, review_root)
         if use_llm:
             try:
-                payload = build_llm_payload(meta, blocks, md, system_prompt, model, reasoning_effort, classification_labels)
+                payload = build_llm_payload(meta, blocks, md, system_prompt, model, reasoning_effort)
                 llm_data = call_openai_responses(payload, api_key or "", base_url)
                 merge_llm(meta, llm_data)
                 meta["extraction"]["mode"] = "rules+llm"

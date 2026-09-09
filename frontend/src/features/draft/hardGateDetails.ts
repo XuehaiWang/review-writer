@@ -30,7 +30,7 @@ function findingRows(
   for (const item of rows(value)) {
     const paragraphId = String(item.paragraph_id || "").trim();
     const severity = String(item.severity || "").trim();
-    if (!paragraphId || (requireBlockingSeverity && !["critical", "major"].includes(severity))) continue;
+    if (!paragraphId || (requireBlockingSeverity && (item.hard_gate === false || !["critical", "major"].includes(severity)))) continue;
     const finding: HardGateFinding = {
       paragraph_id: paragraphId,
       rule: String(item.rule || "").trim() || undefined,
@@ -49,7 +49,7 @@ function findingRows(
 function paragraphGateFindings(quality: JsonRecord): HardGateFinding[] {
   const preflight = isRecord(quality.preflight) ? quality.preflight : {};
   const exact = findingRows(preflight.paragraph_findings, { requireBlockingSeverity: true });
-  if (exact.length) return exact;
+  if (exact.length || Array.isArray(preflight.paragraph_findings)) return exact;
 
   // Older imported reports may not contain the preflight block.  Fall back to
   // the scored paragraph collections, but still show only blocking severities.

@@ -200,17 +200,6 @@ def _title_from_text(text: str, filename: str) -> str:
     return re.sub(r"[_-]+", " ", Path(filename).stem).strip()
 
 
-def _authors_from_info(raw: str) -> list[str]:
-    if not raw:
-        return []
-    parts = [
-        re.sub(r"\s+", " ", part).strip()
-        for part in re.split(r"\s*;\s*|\s+and\s+", raw)
-        if part.strip()
-    ]
-    return list(dict.fromkeys(parts))[:100]
-
-
 def _abstract_from_text(text: str) -> str:
     match = re.search(
         r"(?:^|\n)\s*abstract\s*[:.\-]?\s*(.{80,5000}?)(?=\n\s*(?:keywords?|introduction|1\.?\s+introduction)\b)",

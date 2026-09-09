@@ -11,6 +11,7 @@
 \usepackage{booktabs,longtable,tabularx,array}
 \usepackage{enumitem}
 \usepackage{titlesec}
+\usepackage{indentfirst}
 \usepackage{fancyhdr}
 \usepackage{caption}
 \usepackage{ragged2e}
@@ -64,9 +65,10 @@
 \titleformat{\subsection}{\fontsize{9.7}{11.2}\selectfont\bfseries\sffamily\color{AcademicBlue}}{\thesubsection}{0.55em}{}
 \titleformat{\subsubsection}{\fontsize{9.2}{10.6}\selectfont\bfseries\sffamily\color{AcademicBlue}}{\thesubsubsection}{0.5em}{}
 \titleformat{\paragraph}[runin]{\fontsize{9.1}{10.6}\selectfont\bfseries\sffamily\color{AcademicInk}}{}{0pt}{}[.]
-\titlespacing*{\section}{0pt}{1.15em}{0.45em}
-\titlespacing*{\subsection}{0pt}{0.9em}{0.28em}
-\titlespacing*{\subsubsection}{0pt}{0.75em}{0.22em}
+% Unstarred spacing preserves the first body paragraph's indentation.
+\titlespacing{\section}{0pt}{1.15em}{0.45em}
+\titlespacing{\subsection}{0pt}{0.9em}{0.28em}
+\titlespacing{\subsubsection}{0pt}{0.75em}{0.22em}
 \titlespacing*{\paragraph}{0pt}{0.45em}{0.35em}
 \tcbset{journalpanel/.style={enhanced,colback=AcademicPanel,colframe=AcademicPanel,boxrule=0pt,arc=3.5mm,left=5.5mm,right=5.5mm,top=5mm,bottom=4.5mm}}
 \pagestyle{fancy}

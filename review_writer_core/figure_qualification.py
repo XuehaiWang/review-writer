@@ -9,6 +9,26 @@ from typing import Any
 MINIMUM_AUTOMATIC_FIGURE_SCORE = 4
 
 
+def figure_requirement(value: Any) -> str:
+    """Adapt current structured needs and old prose without stringifying lists.
+
+    This only controls section recommendations, never the paper candidate pool
+    or the eligibility of manually selected figures.
+    """
+    if isinstance(value, list):
+        requirements = [figure_requirement(item) for item in value]
+        return next((level for level in ("required", "optional") if level in requirements), "none")
+    if isinstance(value, dict):
+        explicit = str(value.get("requirement") or "").casefold()
+        return explicit if explicit in {"required", "optional", "none"} else figure_requirement(value.get("purpose"))
+    text = _lower(value)
+    if not text or text in {"no", "none", "false", "not required"}:
+        return "none"
+    if text == "optional" or text.startswith("none unless "):
+        return "optional"
+    return "required"
+
+
 def _norm(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
@@ -202,4 +222,3 @@ def figure_source_kind(row: dict[str, Any]) -> str:
     if len(set(supporting)) > 1:
         return "multi_paper_synthesis"
     return "source_paper"
-

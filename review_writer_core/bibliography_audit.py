@@ -553,13 +553,58 @@ def _author_keys(authors: Any) -> set[str]:
     return keys
 
 
+def _first_author_query_value(authors: Any) -> str:
+    """Return one human-readable author name for a provider title query."""
+
+    values = authors if isinstance(authors, list) else [authors] if authors else []
+    if not values:
+        return ""
+    value = values[0]
+    if isinstance(value, dict):
+        value = value.get("name") or " ".join(
+            part for part in (value.get("given"), value.get("family")) if part
+        )
+    cleaned = html.unescape(re.sub(r"<[^>]*>", " ", str(value or "")))
+    cleaned = re.split(
+        r"\s+(?:and|&)\s+|\s*;\s*", cleaned, maxsplit=1, flags=re.IGNORECASE
+    )[0]
+    return re.sub(r"\s+", " ", cleaned).strip(" ,;*&†‡")
+
+
+def _provider_title(value: Any) -> str:
+    """Normalize harmless publisher markup without weakening title identity."""
+
+    cleaned = html.unescape(re.sub(r"<[^>]*>", " ", str(value or "")))
+    # Crossref titles sometimes retain a trailing HTML superscript footnote such
+    # as ``<sup>*1,2</sup>``.  It is layout metadata, not part of the title.
+    cleaned = re.sub(r"\s*[*†‡]?\s*\d+(?:\s*,\s*\d+)*\s*$", "", cleaned)
+    return normalize_title(cleaned)
+
+
+def _provider_exclusion_reason(metadata: dict[str, Any], candidate: dict[str, Any]) -> str:
+    """Separate a different publication from conflicting fields of one paper."""
+    expected_doi = normalize_doi(_value(metadata, "doi"))
+    candidate_doi = normalize_doi((candidate.get("identifiers") or {}).get("doi") or candidate.get("doi"))
+    if expected_doi and candidate_doi == expected_doi:
+        return ""
+    if (expected_doi and candidate_doi and expected_doi != candidate_doi
+            and (_field_human_checked(metadata, "doi") or _field_confidence(metadata, "doi") >= 0.9)):
+        return "different_publication_doi"
+    derivative = re.compile(r"^(?:(?:[\w-]+\s+){0,2}abstract\s*:|(?:correction|erratum|corrigendum|retraction|comment|reply)\s*(?:to|on)?\s*:)", re.I)
+    title = html.unescape(re.sub(r"<[^>]*>", " ", str(candidate.get("title") or ""))).strip()
+    expected = str(_value(metadata, "title") or "").strip()
+    if derivative.match(title) and not derivative.match(expected):
+        return "secondary_publication_record"
+    return ""
+
+
 def _candidate_score(metadata: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     expected_doi = normalize_doi(_value(metadata, "doi"))
     candidate_doi = normalize_doi(
         (candidate.get("identifiers") or {}).get("doi") or candidate.get("doi")
     )
     expected_title = normalize_title(_value(metadata, "title"))
-    candidate_title = normalize_title(candidate.get("title"))
+    candidate_title = _provider_title(candidate.get("title"))
     title_similarity = (
         SequenceMatcher(None, expected_title, candidate_title).ratio()
         if expected_title and candidate_title
@@ -581,6 +626,34 @@ def _candidate_score(metadata: dict[str, Any], candidate: dict[str, Any]) -> dic
             and str(_value(metadata, "year")) == str(candidate.get("year") or "")
         ),
     }
+
+
+def _strict_provider_identity(
+    metadata: dict[str, Any],
+    match: dict[str, Any],
+    *,
+    pdf_doi: bool = False,
+) -> bool:
+    """Accept only an exact DOI or a high-similarity title-and-author match."""
+
+    expected_title = normalize_title(_value(metadata, "title"))
+    expected_authors = _author_keys(_value(metadata, "authors", []))
+    title_identity = bool(
+        len(expected_title) >= 20
+        and expected_authors
+        and float(match.get("title_similarity") or 0.0) >= 0.96
+        and float(match.get("author_overlap") or 0.0) >= 0.5
+    )
+    doi_identity = bool(
+        match.get("doi_exact")
+        and float(match.get("title_similarity") or 0.0) >= 0.86
+        and (
+            pdf_doi
+            or not expected_authors
+            or float(match.get("author_overlap") or 0.0) >= 0.5
+        )
+    )
+    return title_identity or doi_identity
 
 
 def _source_state(error: str) -> str:
@@ -686,8 +759,16 @@ def audit_bibliography(
     normalized_network_mode = str(network_mode or "fallback").strip().casefold()
     if normalized_network_mode not in {"fallback", "force", "disabled"}:
         normalized_network_mode = "fallback"
+    document_type_hint = str(
+        _value(metadata, "document_type") or "journal_article"
+    ).strip().casefold()
+    journal_lookup_needed = bool(
+        document_type_hint == "journal_article"
+        and not _normalized_field("journal", _value(metadata, "journal"))
+    )
     network_used = normalized_network_mode == "force" or (
-        normalized_network_mode == "fallback" and local_status != "reliable"
+        normalized_network_mode == "fallback"
+        and (local_status != "reliable" or journal_lookup_needed)
     )
     agent_extraction = (
         dict(document_agent_extraction)
@@ -739,12 +820,18 @@ def audit_bibliography(
             or _field_confidence(metadata, "doi") >= 0.9
         )
     )
-    query = pdf_doi or (
-        canonical_doi
-        if doi_is_trusted
-        else agent_doi
-        or str(_value(identity_metadata, "title") or "").strip()
-    )
+    if pdf_doi:
+        query = pdf_doi
+    elif doi_is_trusted:
+        query = canonical_doi
+    elif agent_doi:
+        query = agent_doi
+    else:
+        query_title = str(_value(identity_metadata, "title") or "").strip()
+        query_author = _first_author_query_value(
+            _value(identity_metadata, "authors", [])
+        )
+        query = " ".join(part for part in (query_title, query_author) if part)
     if pdf_doi and pdf_doi != canonical_doi:
         identity_metadata = json.loads(json.dumps(identity_metadata, ensure_ascii=False))
         identity_metadata["doi"] = {
@@ -756,7 +843,7 @@ def audit_bibliography(
     # Preserve successful providers across a partial network retry, but discard
     # old unconditional lookup rows once reliable local evidence skips network.
     source_rows: dict[str, Any] = (
-        dict((previous_audit or {}).get("sources") or {}) if network_used else {}
+        json.loads(json.dumps((previous_audit or {}).get("sources") or {})) if network_used else {}
     )
     for connector in connectors if network_used else []:
         result = connector.search(PaperSearchRequest(query=query, limit=5))
@@ -768,7 +855,12 @@ def audit_bibliography(
             }
             continue
         ranked = []
+        excluded_candidates = []
         for candidate in result.candidates:
+            exclusion = _provider_exclusion_reason(identity_metadata, candidate)
+            if exclusion:
+                excluded_candidates.append({"candidate": candidate, "reason": exclusion})
+                continue
             score = _candidate_score(identity_metadata, candidate)
             ranked.append({"candidate": candidate, "match": score})
         ranked.sort(
@@ -784,27 +876,18 @@ def audit_bibliography(
             source_rows[connector.name] = {
                 "status": "not_found",
                 "elapsed_ms": result.elapsed_ms,
+                "excluded_candidates": excluded_candidates,
             }
             continue
         match = best["match"]
-        expected_authors = _author_keys(_value(metadata, "authors", []))
-        title_identity = bool(
-            len(normalize_title(_value(metadata, "title"))) >= 20
-            and match["title_similarity"] >= 0.94
-            and (not expected_authors or match["author_overlap"] >= 0.45)
+        verified = _strict_provider_identity(
+            identity_metadata,
+            match,
+            pdf_doi=bool(pdf_doi),
         )
-        doi_identity = bool(
-            match["doi_exact"]
-            and match["title_similarity"] >= 0.86
-            and (
-                bool(pdf_doi)
-                or not expected_authors
-                or match["author_overlap"] >= 0.5
-            )
-        )
-        verified = title_identity or doi_identity
         row = {
             "status": "verified" if verified else "conflict",
+            "excluded_candidates": excluded_candidates,
             "elapsed_ms": result.elapsed_ms,
             "match": match,
             "candidate": {
@@ -827,12 +910,10 @@ def audit_bibliography(
                     "candidate_id": _candidate_id(connector.name, dict(item["candidate"])),
                     "status": (
                         "verified"
-                        if bool(
-                            item["match"].get("doi_exact")
-                            or (
-                                float(item["match"].get("title_similarity") or 0.0) >= 0.94
-                                and float(item["match"].get("author_overlap") or 0.0) >= 0.45
-                            )
+                        if _strict_provider_identity(
+                            identity_metadata,
+                            item["match"],
+                            pdf_doi=bool(pdf_doi),
                         )
                         else "conflict"
                     ),
@@ -861,6 +942,15 @@ def audit_bibliography(
             ],
         }
         source_rows[connector.name] = row
+
+    # Recheck cached provider identities too: old unrelated candidates must
+    # not re-enter field conflict aggregation through a partial network retry.
+    for source_row in source_rows.values():
+        candidate = source_row.get("candidate") if isinstance(source_row, dict) else None
+        if isinstance(candidate, dict):
+            exclusion = _provider_exclusion_reason(identity_metadata, candidate)
+            if exclusion:
+                source_row.update(status="not_same_publication", exclusion_reason=exclusion)
     field_provenance: dict[str, list[dict[str, Any]]] = {}
     conflicts: list[dict[str, Any]] = []
     for field in (
@@ -942,6 +1032,8 @@ def audit_bibliography(
                 }
             )
         for source_name, source_row in source_rows.items():
+            if isinstance(source_row, dict) and source_row.get("status") == "not_same_publication":
+                continue
             candidate = source_row.get("candidate") if isinstance(source_row, dict) else None
             if not isinstance(candidate, dict):
                 continue
@@ -1117,6 +1209,8 @@ def audit_bibliography(
             "reason": (
                 "manual_force"
                 if normalized_network_mode == "force"
+                else "required_journal_missing"
+                if network_used and journal_lookup_needed
                 else "local_evidence_insufficient_or_conflicting"
                 if network_used
                 else "local_evidence_reliable"

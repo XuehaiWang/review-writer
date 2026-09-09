@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   arrowPath,
+  bindEraseOperation,
+  operationForSave,
   buildSvgDocument,
   mergeSavedSvg,
   moveOperation,
@@ -53,7 +55,7 @@ describe("React SVG editor model", () => {
       ...initial,
       crop: { x: 10, y: 5, width: 80, height: 40 },
       operations: normalizeAuditOperations([
-        { id: "erase-1", type: "erase", width: 8, points: [{ x: 3, y: 4 }, { x: 8, y: 9 }] },
+        { id: "erase-1", type: "erase", width: 8, points: [{ x: 3, y: 4 }, { x: 8, y: 9 }], targets: [{ id: "trace-0", dx: 0, dy: 0, matrix: [1, 0, 0, 1, 0, 0], bounds: { x: -100, y: -50, width: 300, height: 150 } }] },
         { id: "line-1", type: "line", color: "#111111", width: 2, start: { x: 10, y: 10 }, end: { x: 30, y: 10 } },
         { id: "arrow-1", type: "arrow", style: "orthogonal", color: "#123456", width: 2, start: { x: 20, y: 20 }, end: { x: 40, y: 35 }, orthogonalRoute: "vertical-first" },
       ]),
@@ -66,7 +68,7 @@ describe("React SVG editor model", () => {
     const documentNode = new DOMParser().parseFromString(markup, "image/svg+xml");
     expect(documentNode.querySelector("parsererror")).toBeNull();
     expect(documentNode.querySelector("#full-image-vector-trace path")).not.toBeNull();
-    expect(documentNode.querySelector("#editor-erase-mask")).not.toBeNull();
+    expect(documentNode.querySelector("#editor-object-erase-0")).not.toBeNull();
     expect(documentNode.querySelector("[data-editor-element-type='text']")?.textContent).toContain("R¹");
     expect(documentNode.querySelector("[data-editor-element-type='ketcher'] svg")).not.toBeNull();
     expect(documentNode.querySelector("[data-editor-element-type='ketcher']")?.getAttribute("data-editor-scale")).toBe("0.75");
@@ -135,4 +137,42 @@ describe("React SVG editor model", () => {
     }]);
     expect(buildSvgDocument(second)).toContain('transform="translate(15 7)"');
   });
+});
+
+
+it("keeps erasure attached to each object through move, crop and SVG-only reopen", () => {
+  const markup = SOURCE_SVG.replace('<path d="M2 2h8v1h-8z" fill="#111"/>',
+    '<g data-trace-object-id="a"><path d="M2 2h8v1h-8z"/></g><g data-trace-object-id="b"><path d="M50 2h8v1h-8z"/></g>');
+  const initial = parseFullSvg("P1", "source", markup, 200, 100);
+  const targets = ["a", "b"].map((id) => ({ id, dx: 0, dy: 0, matrix: [1, 0, 0, 1, 0, 0], bounds: { x: -100, y: -50, width: 300, height: 150 } }));
+  const erased = { ...initial, operations: normalizeAuditOperations([{ type: "erase", id: "e1", width: 8, points: [{ x: 2, y: 2 }, { x: 10, y: 2 }], targets }]) };
+  const moved = moveSelection(erased, ["trace:b"], { x: -48, y: 0 });
+  const exported = buildSvgDocument({ ...moved, crop: { x: 1, y: 1, width: 90, height: 40 } });
+  const doc = new DOMParser().parseFromString(exported, "image/svg+xml");
+  expect(doc.querySelector("#full-image-vector-trace")?.hasAttribute("mask")).toBe(false);
+  expect(doc.querySelector("#editor-object-erase-0 polyline")?.getAttribute("transform")).toBe("translate(0 0) matrix(1 0 0 1 0 0)");
+  expect(doc.querySelector("#editor-object-erase-1 polyline")?.getAttribute("transform")).toBe("translate(-48 0) matrix(1 0 0 1 0 0)");
+  const restored = mergeSavedSvg(parseFullSvg("P1", "source", exported, 200, 100), exported, []);
+  expect(restored.operations.map(operationForSave)).toEqual(moved.operations.map(operationForSave));
+  const reopened = new DOMParser().parseFromString(buildSvgDocument(restored), "image/svg+xml");
+  expect(reopened.querySelectorAll("[data-editor-erase-wrapper]")).toHaveLength(2);
+  expect(reopened.querySelectorAll("mask")).toHaveLength(2);
+  expect(reopened.querySelector("#editor-object-erase-1 polyline")?.getAttribute("transform")).toBe("translate(-48 0) matrix(1 0 0 1 0 0)");
+});
+
+it("captures transformed object coordinates and excludes deleted objects", () => {
+  const initial = parseFullSvg("P1", "source", SOURCE_SVG, 200, 100);
+  const canvas = document.createElement("div");
+  canvas.innerHTML = buildSvgDocument(initial);
+  const trace = canvas.querySelector("#full-image-vector-trace")!;
+  const matrix = { a: .5, b: 0, c: 0, d: .25, e: 7, f: -3 };
+  Object.assign(trace, { getScreenCTM: () => ({ inverse: () => ({ multiply: () => matrix }) }) });
+  Object.assign(canvas.querySelector("[data-trace-object-id]")!, {
+    getScreenCTM: () => ({}), getBBox: () => ({ x: 0, y: 0, width: 10, height: 10 }),
+  });
+  const op = normalizeAuditOperations([{ type: "erase", points: [{ x: 1, y: 2 }, { x: 8, y: 2 }], width: 8 }])[0];
+  if (op.type !== "erase") throw new Error("Missing erase fixture");
+  const bound = bindEraseOperation({ ...initial, traceEdits: [{ id: "trace-0", dx: 12, dy: 3 }] }, op, canvas);
+  expect(bound.targets?.[0]).toMatchObject({ id: "trace-0", dx: 12, dy: 3, matrix: [.5, 0, 0, .25, 7, -3] });
+  expect(bindEraseOperation({ ...initial, traceEdits: [{ id: "trace-0", dx: 0, dy: 0, hidden: true }] }, op, canvas).targets).toEqual([]);
 });

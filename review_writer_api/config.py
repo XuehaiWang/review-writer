@@ -89,6 +89,8 @@ class ApiSettings:
     embedded_gateway_routes_enabled: bool = True
     model_gateway_max_concurrency: int = 2
     model_gateway_user_concurrency: int = 1
+    text_job_max_provider_attempts: int = 1000
+    text_job_max_input_chars: int = 40_000_000
     image_gateway_max_concurrency: int = 1
     image_gateway_user_concurrency: int = 1
     embedding_gateway_max_concurrency: int = 2
@@ -378,6 +380,12 @@ class ApiSettings:
             embedded_gateway_routes_enabled=embedded_gateway_routes_enabled,
             model_gateway_max_concurrency=model_gateway_max_concurrency,
             model_gateway_user_concurrency=model_gateway_user_concurrency,
+            text_job_max_provider_attempts=_environment_integer(
+                "REVIEW_WRITER_TEXT_JOB_MAX_PROVIDER_ATTEMPTS", 1000, minimum=1, maximum=10000
+            ),
+            text_job_max_input_chars=_environment_integer(
+                "REVIEW_WRITER_TEXT_JOB_MAX_INPUT_CHARS", 40_000_000, minimum=1000, maximum=500_000_000
+            ),
             image_gateway_max_concurrency=image_gateway_max_concurrency,
             image_gateway_user_concurrency=image_gateway_user_concurrency,
             embedding_gateway_max_concurrency=embedding_gateway_max_concurrency,

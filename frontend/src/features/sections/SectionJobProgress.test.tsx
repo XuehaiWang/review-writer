@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { Job } from "../../api/types";
@@ -35,6 +35,34 @@ function job(overrides: Partial<Job> = {}): Job {
 }
 
 describe("SectionJobProgress", () => {
+  it("previews retained prose after a sibling failed without treating it as published", () => {
+    const failed = job({ status: "failed", result: {
+      section_progress: { completed_sections: [{ section_id: "S01", heading: "Introduction" }],
+        failed_sections: [{ section_id: "S02", heading: "Methods", error: "Source mismatch" }] },
+      section_checkpoint: { entries: {
+        S01: { output: { draft_md: "## Introduction\n\nRetained supported prose." } },
+        S02: { output: { draft_md: "Rejected prose must stay hidden." } },
+      } },
+    } });
+    const { rerender } = render(<SectionJobProgress job={failed} />);
+    expect(screen.getByText("部分结果已保留，任务待继续")).toBeInTheDocument();
+    expect(screen.queryByText("Retained supported prose.")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Introduction" }));
+    expect(screen.getByText("Retained supported prose.")).toBeInTheDocument();
+    expect(screen.queryByText("Rejected prose must stay hidden.")).not.toBeInTheDocument();
+    expect(screen.getByText(/未发布预览/)).toBeInTheDocument();
+    rerender(<SectionJobProgress job={{ ...failed, id: "different-job" }} />);
+    expect(screen.queryByText("Retained supported prose.")).not.toBeInTheDocument();
+  });
+
+  it("does not call a word-count recommendation an evidence failure", () => {
+    usePreferences.getState().setLanguage("en");
+    render(<SectionJobProgress job={job({ result: { section_progress: { completed_sections: [
+      { section_id: "S01", section_readiness: { status: "evidence_safe_but_shallow" } },
+    ] } } })} />);
+    expect(screen.getByText("Standard · Usable prose; below target length")).toBeInTheDocument();
+  });
+
   afterEach(() => {
     cleanup();
     usePreferences.getState().setLanguage("zh-CN");
@@ -75,5 +103,16 @@ describe("SectionJobProgress", () => {
     expect(screen.getByText("标准生成 · 科学就绪")).toBeInTheDocument();
     expect(screen.getByText("自动修复 · 需补证据")).toBeInTheDocument();
     expect(screen.getByText("安全保底 · 服务降级保底")).toBeInTheDocument();
+  });
+
+  it("shows the specific incomplete section instead of claiming all prose is complete", () => {
+    render(<SectionJobProgress job={job({ progress_current: 10, result: { section_progress: {
+      phase: "continuing_after_failure", current_heading: "Methods",
+      completed_sections: [{ section_id: "S01", heading: "Introduction" }],
+      failed_sections: [{ section_id: "S02", heading: "Methods", error: "S02: missing validated evidence for paper-b" }],
+    } } })} />);
+    expect(screen.queryByText("章节正文已全部生成")).not.toBeInTheDocument();
+    expect(screen.getByText("S02: missing validated evidence for paper-b")).toBeInTheDocument();
+    expect(screen.getByText("已保留 1 章的检查点；整批发布前不会替换当前正式版本。")).toBeInTheDocument();
   });
 });

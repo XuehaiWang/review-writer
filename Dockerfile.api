@@ -23,7 +23,8 @@ RUN apt-get update && \
 
 COPY requirements.txt ./
 RUN python -m pip install --upgrade pip && \
-    python -m pip install -r requirements.txt
+    python -m pip install -r requirements.txt && \
+    python -c "import rdkit; print('RDKit', rdkit.__version__)"
 
 COPY review_writer_core ./review_writer_core
 COPY review_writer_api ./review_writer_api

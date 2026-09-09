@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 
 from fastapi import APIRouter, Depends, Header, status
 
 from review_writer_api.domain_services.final import FinalService
-from review_writer_api.errors import WorkflowConflict
 from review_writer_api.job_service import JobService
 from review_writer_api.routers.jobs import _job_response
-from review_writer_api.security import Principal, Role
+from review_writer_api.security import Principal
 from review_writer_api.workflow_schemas import (
     FinalActionRequest,
     FinalFrontMatterRequest,
@@ -24,81 +23,8 @@ def build_final_router(
     principal_dependency: Callable[..., Principal],
     final_service: FinalService,
     job_service: JobService,
-    handlers: Mapping[str, Callable] | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/projects/{project_id}/final", tags=["final"])
-    available = dict(handlers or {})
-
-    def register(job_type: str, publisher, *, progress_total: int):
-        builder = available.get(job_type)
-        if builder is None:
-            return
-
-        def handler(context, payload):
-            principal = Principal(context.user_id, frozenset({Role.USER}))
-            context.report_progress(1, progress_total)
-            built = builder(context, payload)
-            context.checkpoint()
-            context.report_progress(max(1, progress_total - 1), progress_total)
-            result = publisher(principal, str(context.project_id), payload, built)
-            # Publication is the commit point. A cancellation arriving after
-            # this point must not turn an already-published artifact into a
-            # cancelled job, so the final progress update is non-checkpointing.
-            context.repository.update_job_progress(
-                context.job_id, progress_total, progress_total
-            )
-            return result
-
-        job_service.register_handler(job_type, handler)
-
-    register("final.conclusion", final_service.publish_conclusion, progress_total=3)
-    register("final.overview", final_service.publish_overview, progress_total=4)
-    register("final.export", final_service.publish_export, progress_total=3)
-    register("final.pdf", final_service.publish_pdf, progress_total=5)
-
-    def build_handler(context, payload):
-        principal = Principal(context.user_id, frozenset({Role.USER}))
-        builder = available.get("final.build")
-        context.report_progress(1, 4)
-        current = final_service.build_payload(principal, str(context.project_id))
-        if current["source_draft_artifact_id"] != payload.get(
-            "source_draft_artifact_id"
-        ):
-            raise WorkflowConflict(
-                "Draft changed while the final-build job was waiting to run."
-            )
-        if current.get("source_front_matter_artifact_id") != payload.get(
-            "source_front_matter_artifact_id"
-        ):
-            raise WorkflowConflict(
-                "Front matter changed while the final-build job was waiting to run."
-            )
-        context.checkpoint()
-        context.report_progress(2, 4)
-        generated: dict = {}
-        generation_error = ""
-        if current.get("generation_fields") and builder is not None:
-            try:
-                generated = dict(builder(context, current) or {})
-            except Exception as exc:
-                if context.cancellation_requested():
-                    raise
-                # Missing auto front matter is a publication warning, not a
-                # reason to discard an otherwise valid final manuscript.
-                generation_error = f"{type(exc).__name__}: {exc}"
-        final_service.publish_generated_front_matter(
-            principal,
-            str(context.project_id),
-            current,
-            generated,
-            generation_error=generation_error,
-        )
-        result = final_service.build(principal, str(context.project_id))
-        context.repository.update_job_progress(context.job_id, 4, 4)
-        return result
-
-    job_service.register_handler("final.build", build_handler)
-
     @router.get("")
     def get_final(
         project_id: str,

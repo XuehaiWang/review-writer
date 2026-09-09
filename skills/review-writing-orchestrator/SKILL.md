@@ -1,14 +1,57 @@
 ---
 name: review-writing-orchestrator
-description: Use when a review-writing project needs stage ordering, artifact gates, and human approval checkpoints from discovery through DOCX export.
+description: Explain current Web review-writing stage boundaries and the separate legacy filesystem status workflow without introducing extra scientific fact-card or planning gates.
 ---
 
 # Review Writing Orchestrator
 
-Use this skill to identify the next stage, enforce its artifact contract, and
-pause only at the established human checkpoints.
+Use this skill to identify the next stage and its actual runtime owner. The
+Web/API/PostgreSQL workflow is authoritative for hosted projects; local status
+files do not approve or advance its stages.
 
-## Workflow
+## Current Web workflow
+
+1. Discover papers and let the user confirm the selected set.
+2. Prepare Matrix context and choose/edit the outline. Discovery confirmation
+   does not launch a separate fact job.
+3. Generate provisional chapter objectives, questions, retrieval directions,
+   and paper roles with `review_writer_core.stages.planning.academic_planning`.
+   The same Planning job first performs bounded current-topic fact analysis,
+   reusing Matrix enrichment and checkpoints. Verified facts guide questions
+   and paper roles but do not predeclare claims. Provider failure falls back to
+   registered source passages. Preserve saved headings and confirm the candidate
+   through the current Planning API; confirmation atomically promotes the exact
+   Matrix, Outline, and Blueprint chain.
+4. Retrieve original passages and generate each chapter through
+   `review-section-drafting-figure-picking`. Check actual written claims once;
+   preserve supported prose and pending/limited-evidence outcomes. Resume
+   compatible completed sections when retrying.
+5. Review source-figure candidates, redraw selected figures when requested,
+   and use current source/output-bound approval for manuscript insertion.
+6. Assemble the Draft with current citations and paragraph/figure anchors.
+   Evaluation, optional optimization, and paragraph edits use the native Draft
+   API and immutable versions. The optional optimization target is not a new
+   mandatory publication gate; use the API's current approval/readiness state.
+7. The Final service assembles the approved current Draft, front matter, and any
+   generated conclusion/Overview. Present optional artifacts must be complete
+   and current. Overview generation uses `review-figure-style-redraw`, not the
+   Mermaid summary-chart skill. Final validation, release, and exports are
+   governed by `review_writer_api.domain_services.final`.
+8. Export the current final artifact to Word or PDF through the native jobs.
+
+The cross-study synthesis skill is prompt text included in chapter writing,
+not a separate model stage. The explicit fact helper remains available for
+retry/offline use, but the normal path is integrated into chapter planning.
+Neither section writing nor Draft optimization reconstructs the old fact-card
+repair chain. Preserve source identity, citation, version, and figure-approval
+checks that the runtime still enforces.
+
+## Legacy filesystem workflow
+
+The remaining sections document the standalone `project_status.py` contract.
+They apply when explicitly using that filesystem workflow, not as extra gates
+on a PostgreSQL-backed Web project. In particular, its ten-stage ordering and
+mandatory Mermaid chart do not describe the current Web Final builder.
 
 ```text
 1. review-topic-paper-discovery
@@ -23,7 +66,7 @@ pause only at the established human checkpoints.
 10. review-export-docx
 ```
 
-## Stage Contract
+## Legacy stage contract
 
 1. Discover the complete qualifying candidate set for the confirmed topic and use only the papers explicitly selected by the human reviewer.
 2. Build the fixed-field literature matrix and approved outline.
@@ -36,7 +79,7 @@ pause only at the established human checkpoints.
 9. Generate the single full-review chart without adding a checkpoint.
 10. Export DOCX only from the approved, current final-draft artifacts.
 
-## Human Check Points
+## Legacy human checkpoints
 
 Pause after discovery, matrix/outline, blueprint, section drafting, figure
 redraw, first draft, final audit, and final DOCX styling review. In particular:
@@ -47,7 +90,7 @@ redraw, first draft, final audit, and final DOCX styling review. In particular:
 
 Do not skip a human check unless the user explicitly says to continue.
 
-## Hard Gates
+## Legacy filesystem gates
 
 - First draft: `04_first_draft/first_draft.md` and a readable `citations.json`
   contract must exist; figures, numeric callouts, references, and image paths
@@ -81,7 +124,7 @@ unresolved source-figure placeholders or final-audit blockers.
 All-ten-stage completion is reported only when every stage artifact and semantic
 gate above passes in the exact workflow order.
 
-## Status
+## Standalone status command
 
 ```bash
 python skills/review-writing-orchestrator/scripts/project_status.py \

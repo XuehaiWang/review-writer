@@ -35,7 +35,7 @@ export function LandingPage({ authConfig, identity }: { authConfig: AuthConfig; 
             </div>
           </div>
           <div className="product-hero-visual" aria-label={text("综述工作流预览", "Review workflow preview")}>
-            <div className="hero-status-line"><span>{text("当前项目", "Current project")}</span><strong>{text("轴手性联烯综述", "Axially chiral allene review")}</strong><em>{text("阶段 06", "Stage 06")}</em></div>
+            <div className="hero-status-line"><span>{text("当前项目", "Current project")}</span><strong>{text("科研基础设施综述", "Research infrastructure review")}</strong><em>{text("阶段 06", "Stage 06")}</em></div>
             <div className="hero-flow-map">
               <article className="complete"><b>01</b><span>{text("文献库", "Library")}</span><small>{text("30 篇已解析", "30 parsed")}</small></article>
               <article className="complete"><b>03</b><span>{text("大纲", "Outline")}</span><small>{text("11 节已确认", "11 confirmed")}</small></article>

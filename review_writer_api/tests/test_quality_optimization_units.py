@@ -119,6 +119,7 @@ class QualityOptimizationUnitTests(unittest.TestCase):
         metadata = {
             "title": {"value": "Local evidence paper", "confidence": 1.0},
             "year": {"value": 2024, "confidence": 0.97},
+            "journal": {"value": "Local Evidence Journal", "confidence": 0.97},
         }
         connector = _Connector(
             "crossref",
@@ -152,6 +153,131 @@ class QualityOptimizationUnitTests(unittest.TestCase):
         self.assertEqual([], connector.requests)
         self.assertEqual("verified", audit["status"])
         self.assertFalse(audit["network_lookup"]["used"])
+
+    def test_missing_journal_uses_strict_provider_fallback_despite_reliable_date(self) -> None:
+        metadata = {
+            "title": {"value": "A Distinctive Catalytic Synthesis of Allenes", "confidence": 0.95},
+            "authors": {"value": ["Alice Author", "Bob Chemist"], "confidence": 0.95},
+            "year": {"value": 2024, "confidence": 0.97},
+            "journal": {"value": None, "confidence": 0.0},
+        }
+        connector = _Connector(
+            "crossref",
+            SourceSearchResult(
+                source="crossref",
+                status="completed",
+                candidates=[
+                    {
+                        "title": "A Distinctive Catalytic Synthesis of Allenes",
+                        "authors": ["Alice Author", "Bob Chemist"],
+                        "year": 2024,
+                        "journal": "Journal of Catalytic Allene Chemistry",
+                        "identifiers": {"doi": "10.1000/strict-match"},
+                    }
+                ],
+            ),
+        )
+        local = {
+            "basic_info": {"publication_year": 2024},
+            "publication_evidence": {
+                "source_text": "Published 2024",
+                "source_location": "pdf_page_1",
+                "date_type": "published",
+                "confidence": 0.98,
+            },
+            "status": "reliable",
+            "network_required": False,
+        }
+        with patch(
+            "review_writer_core.bibliography_audit._pdf_first_page",
+            return_value={"status": "available", "doi": "", "text": ""},
+        ):
+            audit = audit_bibliography(
+                metadata,
+                connectors=[connector],
+                local_extraction=local,
+                network_mode="fallback",
+            )
+        updated, changed = apply_bibliography_updates(metadata, audit)
+
+        self.assertEqual(1, len(connector.requests))
+        self.assertEqual(
+            "A Distinctive Catalytic Synthesis of Allenes Alice Author",
+            connector.requests[0].query,
+        )
+        self.assertTrue(audit["network_lookup"]["used"])
+        self.assertEqual("required_journal_missing", audit["network_lookup"]["reason"])
+        self.assertIn("journal", changed)
+        self.assertEqual(
+            "Journal of Catalytic Allene Chemistry", updated["journal"]["value"]
+        )
+
+    def test_title_only_provider_candidate_is_not_accepted_without_authors(self) -> None:
+        metadata = {
+            "title": {"value": "A Distinctive Catalytic Synthesis of Allenes", "confidence": 0.95},
+            "authors": {"value": [], "confidence": 0.0},
+            "journal": {"value": None, "confidence": 0.0},
+        }
+        connector = _Connector(
+            "crossref",
+            SourceSearchResult(
+                source="crossref",
+                status="completed",
+                candidates=[
+                    {
+                        "title": "A Distinctive Catalytic Synthesis of Allenes",
+                        "authors": ["Different Author"],
+                        "year": 2024,
+                        "journal": "Wrong Journal",
+                        "identifiers": {"doi": "10.1000/title-only"},
+                    }
+                ],
+            ),
+        )
+
+        audit = audit_bibliography(metadata, connectors=[connector])
+        updated, changed = apply_bibliography_updates(metadata, audit)
+
+        self.assertEqual("conflict", audit["sources"]["crossref"]["status"])
+        self.assertNotIn("journal", changed)
+        self.assertIsNone(updated["journal"]["value"])
+
+    def test_provider_title_footnote_markup_does_not_block_strict_match(self) -> None:
+        metadata = {
+            "title": {
+                "value": "Arylallenes via the Stereospecific Isomerization of Arylpropargyl Ethers",
+                "confidence": 0.95,
+            },
+            "authors": {"value": ["Thomas L. Jacobs", "David Dankner"], "confidence": 0.95},
+            "journal": {"value": None, "confidence": 0.0},
+        }
+        connector = _Connector(
+            "crossref",
+            SourceSearchResult(
+                source="crossref",
+                status="completed",
+                candidates=[
+                    {
+                        "title": (
+                            "Arylallenes via the Stereospecific Isomerization of "
+                            "Arylpropargyl Ethers<sup>*1,2</sup>"
+                        ),
+                        "authors": ["Thomas L. Jacobs", "David Dankner"],
+                        "year": 1977,
+                        "journal": "The Journal of Organic Chemistry",
+                        "identifiers": {"doi": "10.1021/jo00434a008"},
+                    }
+                ],
+            ),
+        )
+
+        audit = audit_bibliography(metadata, connectors=[connector])
+        updated, changed = apply_bibliography_updates(metadata, audit)
+
+        self.assertEqual("verified", audit["sources"]["crossref"]["status"])
+        self.assertEqual(1.0, audit["sources"]["crossref"]["match"]["title_similarity"])
+        self.assertIn("journal", changed)
+        self.assertEqual("The Journal of Organic Chemistry", updated["journal"]["value"])
 
     def test_pdf_doi_selects_the_matching_publisher_version(self) -> None:
         metadata = {

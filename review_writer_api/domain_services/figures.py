@@ -36,6 +36,7 @@ from review_writer_api.figure_rules import (
 )
 from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
+from review_writer_core.figure_caption import caption_fields
 from review_writer_core.figure_insertion import build_figure_insertion_plan
 from review_writer_core.figure_qualification import (
     candidate_qualification,
@@ -46,18 +47,18 @@ from review_writer_core.publication_caption import (
     canonical_figure_role,
     figure_rights_fields,
     infer_figure_role,
-    publication_caption_fields,
+)
+from review_writer_core.workflow.artifacts import (
+    FIGURE_MANIFEST,
+    FIGURE_REVIEW_INPUTS as REVIEW_INPUTS,
+    FIGURE_REVIEW_SELECTIONS as REVIEW_SELECTIONS,
+    MATRIX as MATRIX_LOGICAL_NAME,
+    SECTION_DEFAULT_FIGURE_REVIEWS as DEFAULT_REVIEWS,
+    SECTION_DRAFTS as SECTION_INDEX,
+    SECTION_PAPER_FIGURE_CANDIDATES as PAPER_CANDIDATES,
 )
 
 
-SECTION_INDEX = "sections/section_drafts.json"
-PAPER_CANDIDATES = "sections/paper_figure_candidates.json"
-FIGURE_CANDIDATES = "sections/figure_candidates.json"
-DEFAULT_REVIEWS = "sections/default_figure_reviews.json"
-REVIEW_SELECTIONS = "figure-review/selections.json"
-REVIEW_INPUTS = "figure-review/selected_figures.json"
-FIGURE_MANIFEST = "figures/manifest.json"
-MATRIX_LOGICAL_NAME = "matrix/literature_matrix.json"
 PNG_DATA_URL = re.compile(r"^data:image/png;base64,(.+)$", re.DOTALL)
 SAFETY_ERROR = re.compile(
     r"adult content|sexual content|safety policy|safety review|moderation",
@@ -355,6 +356,7 @@ class FiguresService(OwnedProjectService):
                         {
                             "section_id": section_id,
                             "section_heading": section_heading,
+                            "section_role": str(section.get("section_role") or "body"),
                             "paragraph_id": paragraph_id,
                             "evidence_ids": evidence_ids,
                             "claim_ids": claim_ids,
@@ -369,6 +371,7 @@ class FiguresService(OwnedProjectService):
         if matches:
             matches.sort(
                 key=lambda item: (
+                    int(role != "conceptual_overview" and item["section_role"] != "body"),
                     -int(item["score"]),
                     str(item["section_id"]),
                     str(item["paragraph_id"]),
@@ -621,12 +624,7 @@ class FiguresService(OwnedProjectService):
                 principal, project_id, candidate
             )
             candidate.update(
-                publication_caption_fields(
-                    candidate.get("source_caption_text"),
-                    representative_role=candidate.get("representative_role"),
-                    source_label=candidate.get("source_label"),
-                    context_title=candidate.get("section_heading"),
-                )
+                caption_fields(candidate)
             )
             source_artifact, _source_path = self._validate_candidate(
                 principal, project_id, candidate
@@ -1192,12 +1190,7 @@ class FiguresService(OwnedProjectService):
                 }
             )
             row.update(
-                publication_caption_fields(
-                    item["figure"].get("source_caption_text"),
-                    representative_role=item["figure"].get("representative_role"),
-                    source_label=item["figure"].get("source_label"),
-                    context_title=item["figure"].get("section_heading"),
-                )
+                caption_fields(item["figure"])
             )
             row.update(figure_rights_fields(row))
             rows = [
@@ -1268,6 +1261,7 @@ class FiguresService(OwnedProjectService):
             if not isinstance(raw_row, dict):
                 continue
             row = deepcopy(raw_row)
+            row.update(caption_fields(row))
             for key, value in figure_rights_fields(row).items():
                 row.setdefault(key, value)
             figure_id = str(row.get("figure_id") or "")
@@ -1410,6 +1404,7 @@ class FiguresService(OwnedProjectService):
         public_figures: list[dict[str, Any]] = []
         for raw in figures:
             row = deepcopy(raw)
+            row.update(caption_fields(row))
             row["manuscript_selected"] = (
                 str(row.get("figure_id") or "") not in excluded_ids
             )
@@ -1931,12 +1926,7 @@ class FiguresService(OwnedProjectService):
             )
             row = {
                 **figure,
-                **publication_caption_fields(
-                    figure.get("source_caption_text"),
-                    representative_role=figure.get("representative_role"),
-                    source_label=figure.get("source_label"),
-                    context_title=figure.get("section_heading"),
-                ),
+                **caption_fields(figure),
                 "figure_id": figure_id,
                 "source_artifact_id": source_artifact.id,
                 "output_artifact_id": output_artifact.id,
@@ -2384,12 +2374,7 @@ class FiguresService(OwnedProjectService):
                     "updated_at": now.isoformat(),
                 }
                 row.update(
-                    publication_caption_fields(
-                        figure.get("source_caption_text"),
-                        representative_role=figure.get("representative_role"),
-                        source_label=figure.get("source_label"),
-                        context_title=figure.get("section_heading"),
-                    )
+                    caption_fields(figure)
                 )
                 row.update(figure_rights_fields(row))
                 preserved_rows.append(row)

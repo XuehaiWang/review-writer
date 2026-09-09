@@ -4,6 +4,7 @@ import concurrent.futures
 import http.server
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -13,6 +14,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from review_writer_api.errors import WorkflowValidationError
+from review_writer_api.job_service import JobCancellationRequested, JobLeaseLost
 
 
 def runner_api():
@@ -602,6 +604,36 @@ class ScientificRunnerTests(unittest.TestCase):
             with self.assertRaises(self.RunCancelled):
                 future.result(timeout=3)
         self.assertLess(time.monotonic() - started, 3)
+
+    def test_callback_failure_terminates_the_child_before_propagating(self) -> None:
+        spawn = subprocess.Popen
+        for signal in (JobCancellationRequested, JobLeaseLost, OSError):
+            with self.subTest(signal=signal.__name__):
+                children = []
+
+                def tracked_spawn(*args, **kwargs):
+                    process = spawn(*args, **kwargs)
+                    children.append(process)
+                    return process
+
+                def callback():
+                    raise signal("Project task stopped")
+
+                try:
+                    with patch("review_writer_api.scientific_runner.subprocess.Popen", side_effect=tracked_spawn):
+                        with self.assertRaises(signal):
+                            self.runner.run(
+                                [sys.executable, "-c", "import time; time.sleep(30)"],
+                                cwd=self.root, staging_directory=self.root,
+                                expected_outputs=("never.txt",),
+                                progress_callback=callback, timeout_seconds=5,
+                            )
+                    self.assertEqual(1, len(children))
+                    self.assertIsNotNone(children[0].poll())
+                finally:
+                    for child in children:
+                        if child.poll() is None:
+                            self.runner._terminate(child)
 
     def test_cancellation_terminates_spawned_descendants(self) -> None:
         cancel = threading.Event()

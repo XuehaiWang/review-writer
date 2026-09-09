@@ -12,10 +12,41 @@ from review_writer_core.academic_contracts import (
     scope_diagnostics,
     synthesis_requirements,
     taxonomy_diagnostics,
+    blueprint_taxonomy_diagnostics,
 )
 
 
 class AcademicContractTests(unittest.TestCase):
+    def test_blueprint_counts_documented_exclusions_and_supporting_roles(self):
+        blueprint = {"sections": [{"section_id": "S01", "title": "Defined synthesis", "section_role": "body",
+            "primary_papers": ["P001"], "supporting_papers": ["P002"]}],
+            "unused_papers": [{"paper_id": "P003", "reason_code": "out_of_scope", "reason": "Studies a different transformation."}]}
+        report = blueprint_taxonomy_diagnostics(blueprint, ["P001", "P002", "P003"])
+        self.assertTrue(report["can_confirm"])
+        self.assertEqual([], report["orphan_paper_ids"])
+        self.assertEqual(["P003"], report["excluded_paper_ids"])
+        self.assertEqual(3, report["selected_paper_count"])
+        self.assertEqual(1, report["contextual_paper_count"])
+        self.assertEqual("Studies a different transformation.", report["paper_exclusions"][0]["reason"])
+
+    def test_exclusion_without_reason_does_not_hide_an_unassigned_paper(self):
+        report = taxonomy_diagnostics(
+            [{"title": "Defined synthesis", "primary_papers": ["P001"]}], ["P001", "P002"],
+            unused_papers=[{"paper_id": "P002", "reason_code": "out_of_scope", "reason": "  "}])
+        self.assertFalse(report["can_confirm"])
+        self.assertEqual(["P002"], report["orphan_paper_ids"])
+        self.assertEqual([], report["excluded_paper_ids"])
+        self.assertIn("taxonomy.paper_exclusion_reason_missing", {i["rule_id"] for i in report["issues"]})
+
+    def test_global_and_legacy_exclusions_preserve_unknown_paper_checks(self):
+        report = taxonomy_diagnostics(
+            [{"title": "Defined synthesis", "primary_papers": ["P001"],
+              "excluded_papers": [{"paper_id": "P002", "reason": "Outside scope."}]}], ["P001", "P002"],
+            unused_papers=[{"paper_id": "P999", "reason": "Outside scope."}])
+        self.assertEqual([], report["orphan_paper_ids"])
+        self.assertFalse(report["can_confirm"])
+        self.assertEqual(["P999"], next(i["paper_ids"] for i in report["issues"] if i["rule_id"] == "taxonomy.unknown_papers"))
+
     def test_catch_all_detection_does_not_reject_meaningful_other_heading(self) -> None:
         self.assertTrue(is_catch_all_heading("02 Other or unspecified"))
         self.assertTrue(is_catch_all_heading("其他或未指定"))
@@ -71,7 +102,7 @@ class AcademicContractTests(unittest.TestCase):
         self.assertTrue(report["can_confirm"])
         self.assertEqual([], report["issues"])
 
-    def test_dominant_boundary_section_must_be_rerouted(self) -> None:
+    def test_dominant_boundary_size_triggers_analysis_not_a_blocker(self) -> None:
         report = taxonomy_diagnostics(
             [
                 {"section_id": "S01", "title": "Introduction", "section_role": "introduction"},
@@ -87,8 +118,10 @@ class AcademicContractTests(unittest.TestCase):
             ["P001", "P002", "P003", "P004", "P005", "P006", "P007", "P008"],
         )
 
-        self.assertFalse(report["can_confirm"])
+        self.assertTrue(report["can_confirm"])
         self.assertEqual(["S03"], report["dominant_boundary_section_ids"])
+        self.assertEqual("warning", next(item["severity"] for item in report["issues"]
+                                          if item["rule_id"] == "taxonomy.dominant_boundary_section"))
         self.assertIn(
             "taxonomy.dominant_boundary_section",
             {item["rule_id"] for item in report["issues"]},

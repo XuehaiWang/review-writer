@@ -7,13 +7,14 @@ import tempfile
 import unittest
 import uuid
 from datetime import timedelta
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
 import httpx2 as httpx
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -22,6 +23,9 @@ from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User, database_session, utc_now
 from review_writer_api.model_catalog import resolve_model_tier
 from review_writer_api.model_gateway import (
+    GatewayBudgetExceeded,
+    GatewayRequestConflict,
+    GatewayRequestNotFound,
     GatewaySafetyBlocked,
     InvalidTaskToken,
     ModelGatewayService,
@@ -36,6 +40,114 @@ TEST_KEY = base64.urlsafe_b64encode(b"g" * 32).decode("ascii")
 
 
 class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_structured_provider_quota_error_survives_original_result_lookup(self):
+        from review_writer_api.model_gateway import GatewayProviderError
+        from review_writer_api.schemas import ModelGatewayResultResponse
+        reply = httpx.Response(503, json={"error": {"code": "insufficient_quota", "message": "Translated provider message"}})
+        with mock.patch.object(self.service._provider_client, "post", new=mock.AsyncMock(return_value=reply)) as post:
+            with self.assertRaises(GatewayProviderError) as failure:
+                await self.service.complete(self.token(), request_key="quota", stage="rewrite", prompt="one")
+        self.assertEqual(1, post.await_count)
+        self.assertEqual("PROVIDER_QUOTA_EXHAUSTED", failure.exception.gateway_detail["code"])
+        result = ModelGatewayResultResponse.model_validate(self.service.request_result(self.token(), request_key="quota"))
+        self.assertEqual("failed", result.status)
+        self.assertEqual("quota_exhausted", result.error["category"])
+        self.assertEqual("insufficient_quota", result.error["provider_code"])
+        self.assertEqual(503, result.error["provider_status"])
+        self.assertNotIn("message", result.error)
+
+    async def test_shared_budget_counts_internal_retries_and_keeps_cached_results(self):
+        self.service.settings = replace(self.settings, text_job_max_provider_attempts=2)
+        reply = {"output_text": "bounded result",
+                 "usage": {"prompt_tokens": 5, "completion_tokens": 3}}
+        post = mock.AsyncMock(side_effect=[httpx.Response(503), httpx.Response(200, json=reply)])
+        with mock.patch.object(self.service._provider_client, "post", post), mock.patch("asyncio.sleep", new=mock.AsyncMock()):
+            first = await self.service.complete(self.token(), request_key="facts", stage="fact-verification", prompt="one")
+            cached = await self.service.complete(self.token(), request_key="facts", stage="fact-verification", prompt="one")
+            with self.assertRaises(GatewayBudgetExceeded):
+                await self.service.complete(self.token(), request_key="rewrite", stage="paragraph-rewrite", prompt="two")
+        self.assertEqual(2, first["provider_attempts"])
+        self.assertEqual(6, first["provider_input_chars"])
+        self.assertTrue(cached["cached"])
+        self.assertEqual(2, post.await_count)
+
+    async def test_input_budget_blocks_before_provider_request(self):
+        self.service.settings = replace(self.settings, text_job_max_input_chars=3)
+        with mock.patch.object(self.service._provider_client, "post", new=mock.AsyncMock()) as post:
+            with self.assertRaises(GatewayBudgetExceeded):
+                await self.service.complete(self.token(), request_key="too-large", stage="rewrite", prompt="four")
+        post.assert_not_awaited()
+
+    async def test_retry_job_id_does_not_reset_consumed_model_budget(self):
+        self.service.settings = replace(self.settings, text_job_max_provider_attempts=1)
+        post = mock.AsyncMock(return_value=httpx.Response(200, json={"output_text": "done"}))
+        with mock.patch.object(self.service._provider_client, "post", post):
+            await self.service.complete(self.token(), request_key="first", stage="facts", prompt="one")
+            retry_id = uuid.uuid4()
+            with database_session(self.sessions) as session:
+                session.get(WorkflowJob, self.job_id).status = "failed"
+                session.add(WorkflowJob(id=retry_id, user_id=self.user_id, project_id=self.project_id,
+                    scope="project", job_type="draft.evaluate", status="running", retry_of_job_id=self.job_id,
+                    idempotency_scope_key=str(self.project_id), idempotency_key="retry-budget"))
+            token = self.service.issue_task_token(job_id=str(retry_id), user_id=str(self.user_id),
+                                                 project_id=str(self.project_id), job_type="draft.evaluate")
+            with self.assertRaises(GatewayBudgetExceeded):
+                await self.service.complete(token, request_key="retry", stage="rewrite", prompt="two")
+        self.assertEqual(1, post.await_count)
+
+    async def test_cancel_during_provider_retry_prevents_next_paid_attempt(self):
+        async def cancel_then_fail(*args, **kwargs):
+            with database_session(self.sessions) as session:
+                session.get(WorkflowJob, self.job_id).cancellation_requested = True
+            return httpx.Response(503)
+        post = mock.AsyncMock(side_effect=cancel_then_fail)
+        with mock.patch.object(self.service._provider_client, "post", post), mock.patch("asyncio.sleep", new=mock.AsyncMock()):
+            with self.assertRaises(GatewayRequestConflict):
+                await self.service.complete(self.token(), request_key="cancel", stage="rewrite", prompt="one")
+        self.assertEqual(1, post.await_count)
+
+    async def test_lost_task_lease_prevents_another_provider_retry(self):
+        post = mock.AsyncMock(return_value=httpx.Response(503))
+        with mock.patch.object(self.service._provider_client, "post", post), \
+             mock.patch.object(self.service, "_validate_live_job", side_effect=[None, None, InvalidTaskToken("lost lease")]), \
+             mock.patch("asyncio.sleep", new=mock.AsyncMock()):
+            with self.assertRaises(InvalidTaskToken):
+                await self.service.complete(self.token(), request_key="lost-lease", stage="rewrite", prompt="one")
+        self.assertEqual(1, post.await_count)
+
+    async def test_deleted_project_stops_legacy_running_job_before_provider_call(self):
+        token = self.token()
+        with database_session(self.sessions) as session:
+            session.get(Project, self.project_id).deleted_at = utc_now()
+        with mock.patch.object(self.service._provider_client, "post", new=mock.AsyncMock()) as post:
+            with self.assertRaises(InvalidTaskToken):
+                await self.service.complete(token, request_key="deleted", stage="facts", prompt="one")
+        post.assert_not_awaited()
+
+    async def test_delete_during_provider_retry_prevents_next_attempt(self):
+        async def delete_then_fail(*args, **kwargs):
+            HostedProjectRepository(self.sessions).delete_for_user(str(self.user_id), str(self.project_id))
+            return httpx.Response(503)
+
+        post = mock.AsyncMock(side_effect=delete_then_fail)
+        with mock.patch.object(self.service._provider_client, "post", post), mock.patch("asyncio.sleep", new=mock.AsyncMock()):
+            with self.assertRaises(InvalidTaskToken):
+                await self.service.complete(self.token(), request_key="delete", stage="facts", prompt="one")
+        self.assertEqual(1, post.await_count)
+
+    def test_deleted_project_cannot_exchange_a_legacy_live_lease_for_token(self):
+        lease_token = uuid.uuid4()
+        with database_session(self.sessions) as session:
+            job = session.get(WorkflowJob, self.job_id)
+            job.lease_token = lease_token
+            job.lease_generation = 1
+            job.lease_expires_at = utc_now() + timedelta(minutes=5)
+            session.get(Project, self.project_id).deleted_at = utc_now()
+        with self.assertRaises(InvalidTaskToken):
+            self.service.issue_leased_task_token(
+                job_id=str(self.job_id), lease_token=str(lease_token), lease_generation=1
+            )
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.engine = create_engine(
@@ -409,6 +521,8 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             await asyncio.wait_for(provider_started.wait(), timeout=1)
+            self.assertEqual({"status": "running", "result": None}, self.service.request_result(
+                self.token(), request_key="joined-request"))
             second = asyncio.create_task(
                 self.service.complete_json(
                     self.token(),
@@ -426,6 +540,39 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(first_result["cached"])
         self.assertTrue(second_result["cached"])
         self.assertEqual(first_result["output_text"], second_result["output_text"])
+        recovered = self.service.request_result(self.token(), request_key="joined-request")
+        self.assertEqual("succeeded", recovered["status"])
+        self.assertEqual(first_result["request_id"], recovered["result"]["request_id"])
+        self.assertTrue(recovered["result"]["cached"])
+
+    async def test_result_lookup_is_task_bound_and_does_not_restart_failed_requests(self) -> None:
+        from review_writer_api.database import AIModelRequest
+        from review_writer_api.model_gateway import GatewayProviderError
+        token = self.token()
+        with mock.patch.object(self.service, "_provider_call", side_effect=GatewayProviderError("private upstream failure")) as provider:
+            with self.assertRaises(GatewayProviderError):
+                await self.service.complete(token, request_key="failed", stage="facts", prompt="one")
+            for _ in range(2):
+                snapshot = self.service.request_result(token, request_key="failed")
+                self.assertEqual("failed", snapshot["status"])
+                self.assertIsNone(snapshot["result"])
+                self.assertEqual("transient", snapshot["error"]["category"])
+                self.assertNotIn("private upstream failure", json.dumps(snapshot))
+            with self.assertRaises(GatewayRequestNotFound):
+                self.service.request_result(token, request_key="missing")
+            with self.assertRaises(GatewayRequestNotFound):
+                self.service.request_result(self.embedding_token(), request_key="failed")
+        self.assertEqual(1, provider.await_count)
+        with database_session(self.sessions) as session:
+            row = session.scalar(select(AIModelRequest).where(AIModelRequest.job_id == self.job_id))
+            self.assertEqual(1, row.attempt_count)
+            session.get(WorkflowJob, self.job_id).cancellation_requested = True
+        with self.assertRaises(GatewayRequestConflict):
+            self.service.request_result(token, request_key="failed")
+        with database_session(self.sessions) as session:
+            session.get(WorkflowJob, self.job_id).status = "succeeded"
+        with self.assertRaises(InvalidTaskToken):
+            self.service.request_result(token, request_key="failed")
 
     async def test_provider_client_injects_server_key_and_selected_model(self) -> None:
         observed = {}

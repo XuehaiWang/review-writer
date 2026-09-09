@@ -20,9 +20,14 @@ from review_writer_api.errors import (
     WorkflowNotFound,
     WorkflowValidationError,
 )
-from review_writer_api.workflow_contracts import INTERNAL_STAGES, current_user_stage
+from review_writer_api.workflow_contracts import (
+    ARTIFACT_OWNER_STAGE_BY_PREFIX,
+    INTERNAL_STAGES,
+    current_user_stage,
+)
 from review_writer_api.job_queues import queue_for_job_type
 from review_writer_api.job_lease_context import active_job_lease
+from review_writer_api.job_lifecycle import active_job_project, cancel_project_jobs
 from review_writer_api.workflow_models import (
     WorkflowApproval,
     WorkflowArtifact,
@@ -1047,9 +1052,10 @@ class WorkflowRepository:
         approvals = dict(approve_stages or {})
         pending_approvals = [dict(event) for event in approval_events or []]
         expected_currents = {
+            # An explicit empty identity means the input must still be absent.
             str(logical_name): self._uuid(
                 artifact_id, not_found_message="Expected current artifact not found."
-            )
+            ) if artifact_id else None
             for logical_name, artifact_id in (
                 expected_current_artifacts or {}
             ).items()
@@ -1282,9 +1288,19 @@ class WorkflowRepository:
                     "revision": row.revision,
                 }
             if invalidate_stages:
+                artifact_owner_stage = case(
+                    *(
+                        (
+                            WorkflowArtifact.logical_name.like(f"{prefix}/%"),
+                            owner_stage,
+                        )
+                        for prefix, owner_stage in ARTIFACT_OWNER_STAGE_BY_PREFIX.items()
+                    ),
+                    else_=WorkflowArtifact.producer_stage,
+                )
                 derived_artifacts = select(WorkflowArtifact.id).where(
                     WorkflowArtifact.project_id == project_uuid,
-                    WorkflowArtifact.producer_stage.in_(invalidate_stages),
+                    artifact_owner_stage.in_(invalidate_stages),
                 )
                 session.execute(
                     delete(WorkflowCurrentArtifact).where(
@@ -1372,6 +1388,19 @@ class WorkflowRepository:
 
         try:
             with database_session(self.session_factory) as session:
+                if project_uuid is not None:
+                    # Lock before the idempotency lookup: a concurrent creator
+                    # may commit while this call waits for the project lock.
+                    # This also serializes enqueue with project deletion.
+                    project = session.scalar(
+                        select(Project).where(
+                            Project.id == project_uuid,
+                            Project.user_id == user_uuid,
+                            Project.deleted_at.is_(None),
+                        ).with_for_update()
+                    )
+                    if project is None:
+                        raise WorkflowNotFound("Project not found.")
                 existing = session.scalar(
                     select(WorkflowJob).where(
                         WorkflowJob.user_id == user_uuid,
@@ -1387,10 +1416,6 @@ class WorkflowRepository:
                             details={"existing_job_id": str(existing.id)},
                         )
                     return self._job_record(existing)
-                if project_uuid is not None and self._owned_project(
-                    session, user_uuid, project_uuid
-                ) is None:
-                    raise WorkflowNotFound("Project not found.")
                 if retry_uuid is not None:
                     retry_source = session.scalar(
                         select(WorkflowJob).where(
@@ -2124,6 +2149,7 @@ class WorkflowRepository:
                 ),
                 WorkflowJob.status == "running",
                 WorkflowJob.cancellation_requested.is_(False),
+                active_job_project(),
             )
         )
         if owned is None:
@@ -2195,16 +2221,20 @@ class WorkflowRepository:
 
         job_uuid = self._uuid(job_id, not_found_message="Job not found.")
         with database_session(self.session_factory) as session:
+            now = self._database_now(session)
+            cancel_project_jobs(
+                session, now, WorkflowJob.id == job_uuid, ~active_job_project()
+            )
             query = select(WorkflowJob).where(
                 WorkflowJob.id == job_uuid,
                 WorkflowJob.status == "queued",
+                active_job_project(),
             )
             if session.get_bind().dialect.name == "postgresql":
                 query = query.with_for_update(skip_locked=True)
             job = session.scalar(query)
             if job is None:
                 return None
-            now = self._database_now(session)
             self._apply_claim(job, owner=owner, now=now, lease_seconds=lease_seconds)
             session.flush()
             return self._job_record(job)
@@ -2228,6 +2258,9 @@ class WorkflowRepository:
             raise WorkflowValidationError("A worker lease owner is required.")
         with database_session(self.session_factory) as session:
             now = self._database_now(session)
+            # Repair jobs left behind by older deletion code before evaluating
+            # per-user queue fairness, including unexpired running leases.
+            cancel_project_jobs(session, now, ~active_job_project())
             session.execute(
                 update(WorkflowJob)
                 .where(
@@ -2264,7 +2297,9 @@ class WorkflowRepository:
                     active.lease_expires_at > now,
                 )
             )
-            query = select(WorkflowJob).where(eligible, ~another_live_lease)
+            query = select(WorkflowJob).where(
+                eligible, active_job_project(), ~another_live_lease
+            )
             if job_types is not None:
                 if not job_types:
                     return None
@@ -2304,6 +2339,7 @@ class WorkflowRepository:
                         job_uuid, lease_token, lease_generation, now
                     ),
                     WorkflowJob.status.in_(("running", "cancel_requested")),
+                    active_job_project(),
                 )
                 .values(
                     lease_expires_at=now
@@ -2423,13 +2459,17 @@ class WorkflowRepository:
     def job_cancellation_requested(self, job_id: str) -> bool:
         job_uuid = self._uuid(job_id, not_found_message="Job not found.")
         with database_session(self.session_factory) as session:
-            job = session.get(WorkflowJob, job_uuid)
-            return bool(
-                job
-                and (
-                    job.cancellation_requested
-                    or job.status in {"cancel_requested", "cancelled"}
+            job = session.scalar(
+                select(WorkflowJob).where(
+                    WorkflowJob.id == job_uuid, active_job_project()
                 )
+            )
+            # Reusing a deleted project slug can cascade-delete the old job.
+            # Absence must stop its subprocess just like explicit cancellation.
+            return (
+                job is None
+                or job.cancellation_requested
+                or job.status in {"cancel_requested", "cancelled"}
             )
 
     def update_job_progress(

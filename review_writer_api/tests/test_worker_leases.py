@@ -18,6 +18,9 @@ from review_writer_api.config import ApiSettings
 from review_writer_api.billing import InsufficientCredit
 from review_writer_api.database import Base, Project, User, utc_now
 from review_writer_api.gateway_app import create_gateway_app
+from review_writer_api.errors import WorkflowConflict
+from review_writer_api.job_lease_context import bind_job_lease
+from review_writer_api.repositories import HostedProjectRepository
 from review_writer_api.worker_service import WorkerService
 from review_writer_api.workflow_models import WorkflowJob
 from review_writer_api.workflow_repository import WorkflowRepository
@@ -84,6 +87,130 @@ class WorkerLeaseTests(unittest.TestCase):
             "queued",
             self.repository.get_job(self.first_user, blocked_same_user.id).status,
         )
+
+    def _replacement_project(self) -> str:
+        with self.sessions.begin() as session:
+            project = Project(
+                user_id=uuid.UUID(self.first_user), slug="replacement", topic="New review"
+            )
+            session.add(project)
+            session.flush()
+            return str(project.id)
+
+    def test_delete_cancels_project_jobs_fences_writes_and_releases_user_slot(self) -> None:
+        old = self._create(self.first_user, self.first_project, "matrix.enrich", "old")
+        queued = self._create(self.first_user, self.first_project, "figures.redraw", "queued")
+        claimed = self.repository.claim_job(old.id)
+        new = self._create(self.first_user, self._replacement_project(), "discovery.search", "new")
+        other = self._create(self.second_user, self.second_project, "matrix.enrich", "other")
+        library = self.repository.create_or_get_job(
+            self.first_user, None, "library", "library.ingest", "library", {}
+        )
+
+        deleted = HostedProjectRepository(self.sessions).delete_for_user(
+            self.first_user, self.first_project
+        )
+
+        self.assertTrue(deleted)
+        for job in (old, queued):
+            result = self.repository.get_job(self.first_user, job.id)
+            self.assertEqual("cancelled", result.status)
+            self.assertTrue(result.cancellation_requested)
+            self.assertIsNotNone(result.finished_at)
+            self.assertIsNone(result.lease_token)
+            self.assertIsNone(result.lease_expires_at)
+        for job in (new, other, library):
+            self.assertEqual("queued", self.repository.get_job(job.user_id, job.id).status)
+        self.assertIsNone(self.repository.update_job_progress(
+            old.id, 1, 2, lease_token=claimed.lease_token,
+            lease_generation=claimed.lease_generation,
+        ))
+        self.assertIsNone(self.repository.mark_job_succeeded(
+            old.id, {"late": True}, lease_token=claimed.lease_token,
+            lease_generation=claimed.lease_generation,
+        ))
+        admitted = self.repository.claim_next_job(owner="new-worker", job_types={"discovery.search"})
+        self.assertEqual(new.id, admitted.id)
+
+    def test_legacy_deleted_project_lease_cannot_renew_or_block_new_search(self) -> None:
+        old = self._create(self.first_user, self.first_project, "matrix.enrich", "legacy")
+        queued = self._create(self.first_user, self.first_project, "figures.redraw", "legacy-queued")
+        claimed = self.repository.claim_job(old.id)
+        new = self._create(self.first_user, self._replacement_project(), "discovery.search", "new")
+        with self.sessions.begin() as session:
+            session.get(Project, uuid.UUID(self.first_project)).deleted_at = utc_now()
+
+        self.assertTrue(self.repository.job_cancellation_requested(old.id))
+        self.assertIsNone(self.repository.renew_job_lease(
+            old.id, lease_token=claimed.lease_token,
+            lease_generation=claimed.lease_generation,
+        ))
+        with bind_job_lease(claimed.id, claimed.lease_token, claimed.lease_generation):
+            with self.assertRaises(WorkflowConflict):
+                self.repository.require_bound_job_lease()
+        admitted = self.repository.claim_next_job(owner="new-worker", job_types={"discovery.search"})
+        self.assertEqual(new.id, admitted.id)
+        for job in (old, queued):
+            self.assertEqual("cancelled", self.repository.get_job(self.first_user, job.id).status)
+
+    def test_legacy_executor_does_not_claim_deleted_project(self) -> None:
+        old = self._create(self.first_user, self.first_project, "matrix.enrich", "legacy")
+        with self.sessions.begin() as session:
+            session.get(Project, uuid.UUID(self.first_project)).deleted_at = utc_now()
+        self.assertIsNone(self.repository.claim_job(old.id))
+        self.assertEqual("cancelled", self.repository.get_job(self.first_user, old.id).status)
+
+    def test_reusing_deleted_slug_still_stops_removed_job(self) -> None:
+        old = self._create(self.first_user, self.first_project, "matrix.enrich", "old")
+        self.repository.claim_job(old.id)
+        projects = HostedProjectRepository(self.sessions)
+        projects.delete_for_user(self.first_user, self.first_project)
+        projects.create_for_user(
+            self.first_user, slug="lease-a", topic="Replacement", taxonomy_profile="general_academic"
+        )
+        with self.sessions() as session:
+            self.assertIsNone(session.get(WorkflowJob, uuid.UUID(old.id)))
+        self.assertTrue(self.repository.job_cancellation_requested(old.id))
+
+    def test_single_worker_stops_deleted_project_and_runs_new_search(self) -> None:
+        old = self._create(self.first_user, self.first_project, "matrix.enrich", "old")
+        new = self._create(self.first_user, self._replacement_project(), "discovery.search", "new")
+        started = threading.Event()
+        stopped = threading.Event()
+        searched = threading.Event()
+        release = threading.Event()
+
+        def enrich(context, _payload):
+            started.set()
+            try:
+                while not release.wait(0.01):
+                    context.checkpoint()
+            finally:
+                stopped.set()
+
+        def search(_context, _payload):
+            searched.set()
+            return {"found": True}
+
+        worker = WorkerService(
+            self.repository, {"matrix.enrich": enrich, "discovery.search": search},
+            max_workers=1, poll_seconds=0.05, lease_seconds=30, heartbeat_seconds=2,
+            worker_id="delete-test-worker",
+        )
+        thread = threading.Thread(target=worker.run_forever, daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(started.wait(5))
+            self.assertFalse(searched.is_set())
+            HostedProjectRepository(self.sessions).delete_for_user(self.first_user, self.first_project)
+            self.assertTrue(stopped.wait(5))
+            self.assertTrue(searched.wait(5))
+            self.assertEqual("cancelled", self.repository.get_job(self.first_user, old.id).status)
+            self.assertFalse(self.repository.job_cancellation_requested(new.id))
+        finally:
+            release.set()
+            worker.stop()
+            thread.join(timeout=5)
 
     def test_twenty_users_each_receive_one_scientific_slot(self) -> None:
         users = [(self.first_user, self.first_project), (self.second_user, self.second_project)]
@@ -235,6 +362,7 @@ class WorkerLeaseTests(unittest.TestCase):
             ),
             hosted_workspace_root=Path(self.temporary.name) / "workspaces",
             internal_worker_token="private-worker-secret",
+            text_provider_api_key="test-provider-key",
         )
         app = create_gateway_app(settings)
         payload = {
@@ -260,6 +388,22 @@ class WorkerLeaseTests(unittest.TestCase):
             self.assertEqual(queued.id, claims.job_id)
             self.assertEqual(claimed.lease_generation, claims.lease_generation)
 
+            headers = {"Authorization": "Bearer " + issued.json()["task_token"]}
+            with mock.patch.object(app.state.model_gateway, "billing_service", None), mock.patch.object(app.state.model_gateway, "_provider_call", new=mock.AsyncMock(
+                return_value={"id": "late-result", "output_text": '{"facts": []}', "usage": {}}
+            )) as provider:
+                generated = client.post("/api/internal/v1/model-responses", headers=headers,
+                                        json={"request_key": "late-facts", "stage": "facts", "prompt": "extract"})
+                self.assertEqual(200, generated.status_code, generated.text)
+                recovered = client.get("/api/internal/v1/model-responses/late-facts", headers=headers)
+                self.assertEqual(200, recovered.status_code, recovered.text)
+                self.assertEqual("succeeded", recovered.json()["status"])
+                self.assertEqual(generated.json()["request_id"], recovered.json()["result"]["request_id"])
+                self.assertTrue(recovered.json()["result"]["cached"])
+                self.assertEqual(1, provider.await_count)
+            self.assertEqual(401, client.get("/api/internal/v1/model-responses/late-facts").status_code)
+            self.assertEqual(404, client.get("/api/internal/v1/model-responses/missing", headers=headers).status_code)
+
             self.repository.mark_job_succeeded(
                 claimed.id,
                 {"ok": True},
@@ -274,6 +418,7 @@ class WorkerLeaseTests(unittest.TestCase):
                 },
             )
             self.assertEqual(401, stale.status_code)
+            self.assertEqual(401, client.get("/api/internal/v1/model-responses/late-facts", headers=headers).status_code)
 
     def test_private_gateway_preserves_insufficient_credit_status(self) -> None:
         settings = ApiSettings(

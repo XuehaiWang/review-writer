@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import base64
+import json
 import tempfile
 import unittest
 import uuid
+import time
+import httpx
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, select
@@ -19,6 +23,7 @@ from review_writer_api.database import Base, Project, User
 from review_writer_api.domain_services.planning import (
     MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION,
     MATRIX_FACT_PROMPT_VERSION,
+    ROUTING_REQUIRED_LABEL,
     TOPIC_PARTITION_BOUNDARY_LABEL,
     _matrix_classification_axes,
     _required_topic_partitions_from_outline,
@@ -30,13 +35,129 @@ from review_writer_api.domain_services.planning import (
 )
 from review_writer_api.domain_services.library_index import EvidenceHit
 from review_writer_api.security import Principal, Role
+from review_writer_api.errors import WorkflowConflict, WorkflowValidationError
 from review_writer_api.workflow_models import LibraryPaper
+from review_writer_core.scientific_facts import FACT_PROMPT_VERSION
+from review_writer_api.tests.planning_fixtures import seed_verified_matrix, offline_argument_planner
 
 
 TEST_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("=")
 
 
 class PlanningV1Tests(unittest.TestCase):
+    def test_fact_supplement_uses_linked_si_without_changing_citation_identity(self):
+        service = self.app.state.planning_service
+        with self.sessions.begin() as session:
+            linked = session.scalar(select(LibraryPaper).where(LibraryPaper.user_id == uuid.UUID(self.first.user_id), LibraryPaper.paper_id == "P002"))
+            linked.metadata_json = {**linked.metadata_json, "document_type": "supporting_information", "parent_paper_id": "P001"}
+        current = service.get(self.first, self.project_id)
+        paper = {"paper_id": "P001", "source_lineages": {"P001": "main", "P002": "si"}, "evidence_candidates": []}
+        payload = {"source_matrix_artifact_id": current["matrix_artifact_id"], "papers": [paper]}
+        hit = EvidenceHit(paper_id="P002", chunk_id="table", content="Entry 1 gave 91% yield.",
+            page_start=3, page_end=3, section_path=("Experimental",), content_type="table", asset_refs=(),
+            score=1, match_reason="test", is_neighbor=False, index_id="idx", source_lineage_hash="si")
+        previous = service.library_index
+        index = SimpleNamespace(enabled=True, summaries=lambda *_: {"P001": {"source_lineage_hash": "main"}, "P002": {"source_lineage_hash": "si"}},
+            retrieve=lambda *a, **k: [hit])
+        service.library_index = index
+        try:
+            found = service.retrieve_matrix_fact_evidence(self.first, self.project_id, payload,
+                {"paper_id": "P001", "questions": [{"field_id": "quantitative_results", "query": "yield"}]})
+            self.assertEqual("P001", found[0]["paper_id"])
+            self.assertEqual("P002", found[0]["source_file_id"])
+            self.assertEqual("supporting_information", found[0]["source_type"])
+            with self.sessions.begin() as session:
+                linked = session.scalar(select(LibraryPaper).where(LibraryPaper.user_id == uuid.UUID(self.first.user_id), LibraryPaper.paper_id == "P002"))
+                linked.metadata_json = {**linked.metadata_json, "parent_paper_id": "P003"}
+            with self.assertRaises(WorkflowConflict):
+                service._validate_fact_sources(self.first, [paper])
+        finally:
+            service.library_index = previous
+
+    def test_agent_retrieval_registers_only_current_owned_paper_sources(self):
+        service = self.app.state.planning_service
+        current = service.get(self.first, self.project_id)
+        payload = {"source_matrix_artifact_id": current["matrix_artifact_id"], "papers": [
+            {"paper_id": "P001", "index_summary": {"source_lineage_hash": "lineage"}, "evidence_candidates": []}
+        ]}
+        def hit(paper, lineage):
+            return EvidenceHit(paper_id=paper, chunk_id="results", content="The result was 91% yield.",
+                page_start=2, page_end=2, section_path=("Results",), content_type="text", asset_refs=(),
+                score=1, match_reason="test", is_neighbor=False, index_id="idx", source_lineage_hash=lineage)
+        index = SimpleNamespace(enabled=True, summaries=lambda _principal, _ids: {"P001": {"source_lineage_hash": "lineage"}},
+            retrieve=lambda *a, **k: [hit("P001", "lineage"), hit("P002", "lineage"), hit("P001", "old")])
+        previous = service.library_index
+        service.library_index = index
+        try:
+            request = {"paper_id": "P001", "questions": [{"field_id": "quantitative_results", "query": "reported yield"}]}
+            found = service.retrieve_matrix_fact_evidence(self.first, self.project_id, payload, request)
+            self.assertEqual(1, len(found))
+            self.assertEqual(found, payload["papers"][0]["evidence_candidates"])
+            with self.assertRaises(WorkflowValidationError):
+                service.retrieve_matrix_fact_evidence(self.first, self.project_id, payload, {**request, "paper_id": "P002"})
+            index.summaries = lambda _principal, _ids: {"P001": {"source_lineage_hash": "changed"}}
+            with self.assertRaises(WorkflowConflict):
+                service.retrieve_matrix_fact_evidence(self.first, self.project_id, payload, request)
+        finally:
+            service.library_index = previous
+
+    def test_fact_agent_recovers_long_question_with_one_semantic_pass(self):
+        service = self.app.state.planning_service
+        current = service.get(self.first, self.project_id)
+        payload = {"source_matrix_artifact_id": current["matrix_artifact_id"], "papers": [
+            {"paper_id": "P001", "index_summary": {"source_lineage_hash": "lineage"}, "evidence_candidates": []}]}
+        calls = []
+        def retrieve(principal, query, **kwargs):
+            calls.append((query, kwargs))
+            if len(calls) < 3:
+                return []
+            return [EvidenceHit(paper_id="P001", chunk_id="table", content="External cohort accuracy was 84%.",
+                page_start=3, page_end=3, section_path=("Validation",), content_type="table", asset_refs=(),
+                score=1, match_reason="test", is_neighbor=False, index_id="idx", source_lineage_hash="lineage")]
+        old = service.library_index
+        service.library_index = SimpleNamespace(enabled=True, summaries=lambda *_: {"P001": {"source_lineage_hash": "lineage"}}, retrieve=retrieve)
+        try:
+            question = "Please identify all the quantitative results for the external cohort and surrounding discussion."
+            found = service.retrieve_matrix_fact_evidence(self.first, self.project_id, payload, {"paper_id": "P001", "questions": [
+                {"field_id": "quantitative_results", "query": question, "target_terms": ["external cohort", "accuracy"]}]})
+            self.assertEqual(1, len(found))
+            self.assertEqual([True, False, False], [kwargs["use_semantic"] for _, kwargs in calls])
+            self.assertTrue(all(kwargs["allowed_papers"] == ["P001"] for _, kwargs in calls))
+            self.assertTrue(all(query != question for query, _ in calls))
+            self.assertEqual(question, calls[0][1]["semantic_query"])
+        finally:
+            service.library_index = old
+
+    def test_fact_source_recovery_uses_only_registered_pages_and_retains_provenance(self):
+        service = self.app.state.planning_service
+        current = service.get(self.first, self.project_id)
+        payload = {"source_matrix_artifact_id": current["matrix_artifact_id"], "papers": [
+            {"paper_id": "P001", "index_summary": {"source_lineage_hash": "lineage"}, "evidence_candidates": [
+                {"evidence_key": "registered", "paper_id": "P001", "source_file_id": "P001", "page_start": 3,
+                 "content": "The temperature was damaged in extraction.", "question_ids": ["method_conditions"]}]}]}
+        recovered = EvidenceHit(paper_id="P001", chunk_id="pdf-text:current:p3", content="The annealing temperature was 245 K.",
+            page_start=3, page_end=3, section_path=("Registered PDF text layer",), content_type="pdf_text", asset_refs=(),
+            score=0, match_reason="source_text_recovery", is_neighbor=False, index_id="", source_lineage_hash="lineage")
+        calls = []
+        def recover(principal, paper_id, pages, **kwargs):
+            calls.append((paper_id, pages, kwargs["expected_lineage"]))
+            return [recovered]
+        old = service.library_index
+        service.library_index = SimpleNamespace(enabled=True, summaries=lambda *_: {"P001": {"source_lineage_hash": "lineage"}},
+            recover_pdf_pages=recover, retrieve=lambda *a, **k: self.fail("Do not query the index again after recovering new PDF text"))
+        try:
+            found = service.retrieve_matrix_fact_evidence(self.first, self.project_id, payload, {"paper_id": "P001", "questions": [
+                {"field_id": "method_conditions", "query": "Exact experimental temperature", "source_recovery": True,
+                 "evidence_keys": ["registered", "unregistered-foreign-page"], "page_start": 999}]})
+            self.assertEqual([("P001", [3], "lineage")], calls)
+            self.assertEqual(1, len(found))
+            self.assertEqual("P001", found[0]["source_file_id"])
+            self.assertEqual("lineage", found[0]["source_lineage_hash"])
+            self.assertEqual("pdf_text", found[0]["content_type"])
+            self.assertEqual(2, len(payload["papers"][0]["evidence_candidates"]))
+        finally:
+            service.library_index = old
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         root = Path(self.temporary.name)
@@ -56,7 +177,12 @@ class PlanningV1Tests(unittest.TestCase):
             second = User(email="second@example.com", display_name="Second", password_hash="hash")
             session.add_all([first, second])
             session.flush()
-            project = Project(user_id=first.id, slug="planning", topic="Copper allenation")
+            project = Project(
+                user_id=first.id,
+                slug="planning",
+                topic="Copper allenation",
+                taxonomy_profile="chemistry_general",
+            )
             hidden = Project(user_id=second.id, slug="hidden", topic="Hidden")
             session.add_all([project, hidden])
             session.flush()
@@ -127,6 +253,7 @@ class PlanningV1Tests(unittest.TestCase):
             settings,
             principal_provider=lambda: self.current,
             session_factory_override=self.sessions,
+            native_workflow_overrides={"planning.blueprint": offline_argument_planner},
         )
         self._seed_discovery(range(1, 36))
 
@@ -134,6 +261,20 @@ class PlanningV1Tests(unittest.TestCase):
         Base.metadata.drop_all(self.engine)
         self.engine.dispose()
         self.temporary.cleanup()
+
+    def generate_candidate(self, client, **kwargs):
+        """Exercise the async endpoint, then expose its completed candidate to assertions."""
+        response = client.post(f"/api/v1/projects/{self.project_id}/planning/blueprint", **kwargs)
+        if response.status_code != 202:
+            return response
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            job = client.get(f"/api/v1/jobs/{response.json()['id']}").json()
+            if job["status"] in {"succeeded", "failed", "cancelled"}:
+                self.assertEqual("succeeded", job["status"], job)
+                return httpx.Response(200, json=job["result"])
+            time.sleep(0.02)
+        self.fail("Planning job did not finish.")
 
     @staticmethod
     def headers() -> dict[str, str]:
@@ -221,6 +362,7 @@ class PlanningV1Tests(unittest.TestCase):
                     {
                         "paper_id": paper["paper_id"],
                         "status": "complete",
+                        "fact_extraction_profile": {"stop_reason": "checks_completed"},
                         "facts": [],
                         "failed_fields": [],
                     }
@@ -347,8 +489,8 @@ class PlanningV1Tests(unittest.TestCase):
             paper["retrieval_summary"]["relaxed_question_hit_count"], 0
         )
         self.assertEqual(payload["required_fact_roles"], paper["required_fact_roles"])
-        self.assertIn("object_input", paper["required_fact_roles"])
-        self.assertEqual("fact-extraction/3", MATRIX_FACT_PROMPT_VERSION)
+        self.assertEqual([], paper["required_fact_roles"])
+        self.assertEqual(FACT_PROMPT_VERSION, MATRIX_FACT_PROMPT_VERSION)
 
     def test_path_only_mineru_image_is_not_a_fact_candidate(self) -> None:
         self.assertFalse(
@@ -429,7 +571,7 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertEqual(202, response.status_code, response.text)
         self.assertEqual("current", response.json()["status"])
 
-    def test_all_fact_failures_require_explicit_limited_mode(self) -> None:
+    def test_all_fact_failures_allow_provisional_planning_without_limited_mode(self) -> None:
         service = self.app.state.planning_service
         current = service.get(self.first, self.project_id)
         rows = current["literature_matrix"]["rows"]
@@ -464,30 +606,22 @@ class PlanningV1Tests(unittest.TestCase):
 
         with TestClient(self.app) as client:
             blocked = self.planning(client)
-            self.assertTrue(blocked["matrix_enrichment"]["planning_blocked"])
+            self.assertFalse(blocked["matrix_enrichment"]["planning_blocked"])
             self.choose_outline(client)
             blocked = self.planning(client)
-            response = client.post(
-                f"/api/v1/projects/{self.project_id}/planning/blueprint",
+            response = self.generate_candidate(client,
                 json={"revision": blocked["blueprint_revision"]},
                 headers=self.headers(),
             )
-            self.assertEqual(409, response.status_code, response.text)
-
-            limited = client.post(
-                f"/api/v1/projects/{self.project_id}/planning/matrix/enrichment/limited-mode",
-                json={"revision": blocked["matrix_revision"]},
-                headers=self.headers(),
-            )
-            self.assertEqual(200, limited.status_code, limited.text)
-            self.choose_outline(client)
-            allowed = self.planning(client)
-            response = client.post(
-                f"/api/v1/projects/{self.project_id}/planning/blueprint",
-                json={"revision": allowed["blueprint_revision"]},
-                headers=self.headers(),
-            )
             self.assertEqual(200, response.status_code, response.text)
+            candidate = response.json()
+            self.assertEqual("completed", candidate["section_blueprint"]["academic_planning"]["status"])
+            confirmed = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/blueprint/confirm",
+                json={"revision": candidate["blueprint_revision"], "artifact_id": candidate["blueprint_artifact_id"]},
+                headers=self.headers(),
+            )
+            self.assertEqual(200, confirmed.status_code, confirmed.text)
 
     def test_fact_publish_tolerates_outline_revision_drift(self) -> None:
         service = self.app.state.planning_service
@@ -534,6 +668,53 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertEqual(35, reloaded["matrix_enrichment"]["counts"]["failed"])
         self.assertEqual(0, reloaded["matrix_enrichment"]["counts"]["pending"])
         self.assertTrue(reloaded["outline_current"])
+
+    def test_candidate_only_fact_enrichment_does_not_move_current_matrix(self) -> None:
+        service = self.app.state.planning_service
+        current = service.get(self.first, self.project_id)
+        rows = current["literature_matrix"]["rows"]
+        source_payload = {
+            "source_matrix_artifact_id": current["matrix_artifact_id"],
+            "expected_matrix_revision": current["matrix_revision"],
+            "papers": [
+                {
+                    "paper_id": row["paper_id"],
+                    "source_fingerprint": f"candidate-{row['paper_id']}",
+                    "index_summary": {},
+                    "evidence_candidates": [],
+                }
+                for row in rows
+            ],
+        }
+        built = {
+            "papers": [
+                {
+                    "paper_id": row["paper_id"],
+                    "status": "failed",
+                    "facts": [],
+                    "failed_fields": ["all"],
+                    "error": "no source-addressable evidence",
+                }
+                for row in rows
+            ]
+        }
+
+        candidate = service.publish_matrix_enrichment(
+            self.first,
+            self.project_id,
+            source_payload,
+            built,
+            candidate_only=True,
+        )
+        reloaded = service.get(self.first, self.project_id)
+
+        self.assertEqual(current["matrix_artifact_id"], reloaded["matrix_artifact_id"])
+        self.assertEqual(current["matrix_revision"], reloaded["matrix_revision"])
+        self.assertEqual(len(rows), len(candidate["matrix_snapshot"]["rows"]))
+        self.assertTrue(all(
+            row["fact_enrichment"]["status"] == "failed"
+            for row in candidate["matrix_snapshot"]["rows"]
+        ))
 
     def test_fact_publish_uses_shared_excerpt_rules_and_required_roles(self) -> None:
         service = self.app.state.planning_service
@@ -588,6 +769,7 @@ class PlanningV1Tests(unittest.TestCase):
                                 "confidence": 0.95,
                                 "support_level": "direct",
                                 "evidence_ceiling": "Only the stated inputs are supported.",
+                                "assertion_ceiling": "direct_source_report",
                                 "evidence_refs": [{"evidence_key": evidence_key}],
                             }
                         ],
@@ -668,18 +850,21 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertNotIn("selection_fingerprint", payload["discovery_selection"])
 
     def test_reconfirmation_replaces_matrix_selection(self) -> None:
+        seed_verified_matrix(self.app.state.planning_service, self.first, self.project_id)
         with TestClient(self.app) as client:
             self.choose_outline(client)
             blueprint_revision = self.app.state.workflow_repository.get_stage_state(
                 self.first.user_id, self.project_id, "blueprint"
             )
             if blueprint_revision is None:
-                response = client.post(
-                    f"/api/v1/projects/{self.project_id}/planning/blueprint",
+                response = self.generate_candidate(client,
                     json={"revision": 0},
                     headers=self.headers(),
                 )
                 self.assertEqual(200, response.status_code, response.text)
+                confirmed_blueprint = client.post(f"/api/v1/projects/{self.project_id}/planning/blueprint/confirm",
+                    json={"revision": 0, "artifact_id": response.json()["blueprint_artifact_id"]}, headers=self.headers())
+                self.assertEqual(200, confirmed_blueprint.status_code, confirmed_blueprint.text)
             previous_blueprint = (
                 self.app.state.workflow_repository.get_current_artifact(
                     self.first.user_id,
@@ -964,7 +1149,7 @@ class PlanningV1Tests(unittest.TestCase):
             rows,
             tags_by_paper=tags_by_paper,
             text_by_paper=text_by_paper,
-            taxonomy_profile="chemistry_general",
+            taxonomy_profile="allene",
             intent=intent,
         )
 
@@ -1227,16 +1412,26 @@ class PlanningV1Tests(unittest.TestCase):
             "P007": "terminal alkynes as allene precursors; the abstract later compares propargylic alcohol chemistry",
         }
 
-        groups = service._semantic_outline_groups(
+        groups = service._lexical_outline_candidates(
             rows,
             text_by_paper,
             tag_key="substrate",
-            taxonomy_profile="chemistry_general",
+            taxonomy_profile="allene",
         )
 
         self.assertEqual(["P001", "P002"], groups["propargylic alcohols"])
         self.assertEqual(["P003", "P004", "P007"], groups["terminal alkynes"])
-        self.assertEqual(["P005", "P006"], groups["conjugated enynes"])
+        self.assertEqual(["P005", "P006"], groups["enynes"])
+
+    def test_paper_text_cannot_activate_allene_rules_without_topic_routing(self) -> None:
+        groups = self.app.state.planning_service._lexical_outline_candidates(
+            [{"paper_id": "P001"}],
+            {"P001": "allene synthesis from a propargylic alcohol"},
+            tag_key="substrate",
+            taxonomy_profile="chemistry_general",
+        )
+
+        self.assertEqual({ROUTING_REQUIRED_LABEL: ["P001"]}, groups)
 
     def test_chemistry_outline_reroutes_allene_evidence_without_catch_all(self) -> None:
         service = self.app.state.planning_service
@@ -1255,7 +1450,7 @@ class PlanningV1Tests(unittest.TestCase):
             rows,
             tags_by_paper={paper_id: {} for paper_id in text_by_paper},
             text_by_paper=text_by_paper,
-            taxonomy_profile="chemistry_general",
+            taxonomy_profile="allene",
         )
 
         self.assertNotIn("Routing required", outline)
@@ -1268,14 +1463,14 @@ class PlanningV1Tests(unittest.TestCase):
     def test_chemistry_outline_routes_resolution_and_enynamide_titles(self) -> None:
         service = self.app.state.planning_service
         rows = [{"paper_id": "P001"}, {"paper_id": "P002"}]
-        groups = service._semantic_outline_groups(
+        groups = service._lexical_outline_candidates(
             rows,
             {
                 "P001": "chemoenzymatic dynamic kinetic resolution of axially chiral allenes",
                 "P002": "rhodium-catalyzed 1,6-addition of arylboronic acids to enynamides",
             },
             tag_key="substrate",
-            taxonomy_profile="chemistry_general",
+            taxonomy_profile="allene",
         )
 
         self.assertEqual(["P001"], groups["preformed substituted allenes"])
@@ -1319,7 +1514,7 @@ class PlanningV1Tests(unittest.TestCase):
                 "P002": "enantioselective 1,6-addition to enynamides",
             },
             outline_style="substrate",
-            taxonomy_profile="chemistry_general",
+            taxonomy_profile="allene",
         )
 
         by_title = {section["title"]: section for section in repaired}
@@ -1349,7 +1544,7 @@ class PlanningV1Tests(unittest.TestCase):
                 "P002": "activated enynes are converted to axially chiral allenes",
             },
             outline_style="substrate",
-            taxonomy_profile="chemistry_general",
+            taxonomy_profile="allene",
         )
 
         by_title = {section["title"]: section for section in repaired}
@@ -1482,7 +1677,7 @@ class PlanningV1Tests(unittest.TestCase):
 
         self.assertEqual(["P001"], contextual)
 
-    def test_generated_body_is_realigned_from_input_object_not_product_title(self) -> None:
+    def test_generated_body_is_not_realigned_from_unverified_object_words(self) -> None:
         repaired, adjustments = (
             self.app.state.planning_service._realign_generated_body_sections(
                 [
@@ -1512,14 +1707,13 @@ class PlanningV1Tests(unittest.TestCase):
                     )
                 },
                 outline_style="substrate",
-                taxonomy_profile="chemistry_general",
+                taxonomy_profile="allene",
             )
         )
 
         by_title = {section["title"]: section for section in repaired}
-        self.assertNotIn("allenoates", by_title)
-        self.assertEqual(["P001"], by_title["enynes"]["paper_ids"])
-        self.assertEqual("scientific_object_reassignment", adjustments[0]["method"])
+        self.assertEqual(["P001"], by_title["allenoates"]["paper_ids"])
+        self.assertEqual([], adjustments)
 
     def test_equivalent_generated_body_sections_merge_without_cross_category_guessing(self) -> None:
         repaired, adjustments = (
@@ -1580,7 +1774,7 @@ class PlanningV1Tests(unittest.TestCase):
                     )
                 },
                 outline_style="topic-guided",
-                taxonomy_profile="chemistry_general",
+                taxonomy_profile="allene",
                 tag_key_override="substrate",
                 axis_label_override="substrate class",
             )
@@ -1588,7 +1782,7 @@ class PlanningV1Tests(unittest.TestCase):
 
         self.assertEqual(1, len(repaired))
         self.assertEqual("randomized evidence", repaired[0]["topic_partition"])
-        self.assertEqual("enynes", repaired[0]["title"])
+        self.assertEqual("Randomized evidence — Allenoates", repaired[0]["title"])
 
     def test_topic_boundary_rationale_survives_primary_axis_realignment(self) -> None:
         rationale = (
@@ -1618,7 +1812,7 @@ class PlanningV1Tests(unittest.TestCase):
                 ],
                 {"P001": "terminal alkyne allenation furnished an allene"},
                 outline_style="topic-guided",
-                taxonomy_profile="chemistry_general",
+                taxonomy_profile="allene",
                 tag_key_override="reaction_type",
                 axis_label_override="reaction type",
             )
@@ -1675,7 +1869,7 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertEqual("cross-coupling", pending_tags["P001"]["reaction_type"])
         self.assertEqual("cross-coupling", automatic_tags["P001"]["reaction_type"])
 
-    def test_outline_sources_use_evidence_bounded_agent_routing_as_fallback(self) -> None:
+    def test_outline_sources_do_not_promote_unreviewed_agent_routing(self) -> None:
         with patch(
             "review_writer_api.domain_services.planning.verified_structured_tags",
             return_value={},
@@ -1696,10 +1890,7 @@ class PlanningV1Tests(unittest.TestCase):
                 ],
             )
 
-        self.assertEqual(
-            ["aldehyde-based three-component ATA"],
-            tags["P001"]["reaction_type"],
-        )
+        self.assertNotIn("reaction_type", tags["P001"])
 
     def test_outline_sources_include_bounded_fact_excerpt_for_routing(self) -> None:
         with patch(
@@ -1715,6 +1906,8 @@ class PlanningV1Tests(unittest.TestCase):
                             {
                                 "field_id": "catalyst_or_method",
                                 "value": "Copper-based system",
+                                "support_level": "direct",
+                                "evidence_refs": [{"evidence_key": "registered"}],
                                 "support_excerpt": (
                                     "CuI and paraformaldehyde were added to the terminal "
                                     "alkyne substrate."
@@ -1752,6 +1945,101 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertEqual("", selected["selected_outline_md"])
         self.assertFalse(selected["outline_complete"])
 
+    def test_whole_outline_recommendation_uses_evidence_and_never_falls_back_to_first_papers(self) -> None:
+        service = self.app.state.planning_service
+        original_gateway = service.model_gateway
+        service.model_gateway = None
+        try:
+            with patch.object(
+                service,
+                "_outline_sources",
+                return_value=(
+                    {},
+                    {
+                        "P001": "ketone ata allenylation evidence",
+                        "P002": "aldehyde ata three component evidence",
+                    },
+                ),
+            ), TestClient(self.app) as client:
+                current = self.planning(client)
+                response = client.post(
+                    f"/api/v1/projects/{self.project_id}/planning/outline/recommendations",
+                    json={
+                        "revision": current["matrix_revision"],
+                        "outline_md": (
+                            "## 1. Ketone ATA\n"
+                            "Purpose: Compare ketone reactions.\n\n"
+                            "## 2. Aldehyde ATA\n"
+                            "Purpose: Compare aldehyde three-component reactions.\n"
+                        ),
+                    },
+                    headers=self.headers(),
+                )
+            self.assertEqual(200, response.status_code, response.text)
+            payload = response.json()
+            by_section = {
+                item["section_index"]: item["paper_ids"] for item in payload["sections"]
+            }
+            self.assertEqual(["P001"], by_section[0])
+            self.assertEqual(["P002"], by_section[1])
+            self.assertEqual(2, payload["summary"]["recommended_paper_count"])
+            self.assertEqual(33, payload["summary"]["unassigned_paper_count"])
+        finally:
+            service.model_gateway = original_gateway
+
+    def test_whole_outline_recommendation_uses_one_model_pass_for_ambiguous_papers(self) -> None:
+        service = self.app.state.planning_service
+        original_gateway = service.model_gateway
+        gateway = SimpleNamespace(
+            environment_for_job=lambda _job: ({}, {"REVIEW_WRITER_TASK_TOKEN": "token"}),
+            complete=AsyncMock(
+                return_value={
+                    "output_text": json.dumps(
+                        {
+                            "assignments": [
+                                {
+                                    "paper_id": "P001",
+                                    "section_index": 1,
+                                    "confidence": 0.9,
+                                    "reason": "The extracted object matches aldehyde ATA.",
+                                }
+                            ]
+                        }
+                    )
+                }
+            ),
+        )
+        service.model_gateway = gateway
+        try:
+            with (
+                patch.object(service, "_outline_sources", return_value=({}, {})),
+                patch.object(
+                    service,
+                    "_begin_gateway_job",
+                    return_value=SimpleNamespace(job_id=str(uuid.uuid4())),
+                ),
+                patch.object(service, "_finish_gateway_job"),
+                TestClient(self.app) as client,
+            ):
+                current = self.planning(client)
+                response = client.post(
+                    f"/api/v1/projects/{self.project_id}/planning/outline/recommendations",
+                    json={
+                        "revision": current["matrix_revision"],
+                        "outline_md": (
+                            "## 1. Ketone ATA\nPurpose: Compare ketone reactions.\n\n"
+                            "## 2. Aldehyde ATA\nPurpose: Compare aldehyde reactions.\n"
+                        ),
+                    },
+                    headers=self.headers(),
+                )
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertEqual(["P001"], response.json()["sections"][1]["paper_ids"])
+            self.assertEqual(1, response.json()["summary"]["model_resolved_paper_count"])
+            gateway.complete.assert_awaited_once()
+        finally:
+            service.model_gateway = original_gateway
+
     def test_manual_outline_save_versions_content(self) -> None:
         with TestClient(self.app) as client:
             selected = self.choose_outline(client, "custom")
@@ -1767,15 +2055,17 @@ class PlanningV1Tests(unittest.TestCase):
             )
             self.assertEqual(200, response.status_code, response.text)
             saved = response.json()
-            stale = client.put(
-                f"/api/v1/projects/{self.project_id}/planning/outline",
-                json={
-                    "revision": selected["matrix_revision"],
-                    "outline_style": "custom",
-                    "outline_md": outline.replace("scope", "stale"),
-                },
-                headers=self.headers(),
-            )
+            with patch.object(self.app.state.planning_service, "_publish_files") as publish:
+                stale = client.put(
+                    f"/api/v1/projects/{self.project_id}/planning/outline",
+                    json={
+                        "revision": selected["matrix_revision"],
+                        "outline_style": "custom",
+                        "outline_md": outline.replace("scope", "stale"),
+                    },
+                    headers=self.headers(),
+                )
+                publish.assert_not_called()
             reloaded = self.planning(client)
         self.assertEqual(409, stale.status_code)
         self.assertEqual(saved["outline_artifact_id"], reloaded["outline_selection"]["artifact_id"])
@@ -1788,6 +2078,73 @@ class PlanningV1Tests(unittest.TestCase):
         candidates = {item["candidate_id"]: item for item in payload["outline_candidates"]}
         self.assertIn("saved-current", candidates)
         self.assertEqual(payload["selected_outline_md"], candidates["saved-current"]["outline_md"])
+
+    def test_empty_sections_survive_outline_blueprint_and_writing_handoff(self) -> None:
+        all_papers = ", ".join(f"P{index:03d}" for index in range(1, 36))
+        outline = (
+            "## Introduction\nPurpose: Frame the review.\n\n"
+            "## Historical development\nPurpose: Explain the field's development.\n\n"
+            f"## Catalyst comparison\nAssigned papers: {all_papers}.\n\n"
+            "## Conclusion\nPurpose: Synthesize body evidence.\n"
+        )
+        with TestClient(self.app) as client:
+            selected = self.choose_outline(client, "custom")
+            saved = client.put(
+                f"/api/v1/projects/{self.project_id}/planning/outline",
+                json={"revision": selected["matrix_revision"], "outline_style": "custom", "outline_md": outline},
+                headers=self.headers(),
+            )
+            self.assertEqual(200, saved.status_code, saved.text)
+            self.assertIn("## Historical development", self.planning(client)["selected_outline_md"])
+            generated = self.generate_candidate(client,
+                json={"revision": 0},
+                headers=self.headers(),
+            )
+            self.assertEqual(200, generated.status_code, generated.text)
+            blueprint = generated.json()["section_blueprint"]
+            self.assertEqual(saved.json()["outline_artifact_id"], blueprint["candidate_base_outline_artifact_id"])
+            history = next(section for section in blueprint["sections"] if section["title"] == "Historical development")
+            self.assertEqual([], history["primary_papers"])
+            self.assertEqual([], history["scientific_claims"])
+            self.assertEqual("not_reviewed", history["evidence_readiness"]["status"])
+            for section in blueprint["sections"]:
+                if section["section_role"] in {"introduction", "conclusion"}:
+                    self.assertEqual("synthesis", section["evidence_readiness"]["status"])
+                    self.assertTrue(section["supporting_papers"])
+            confirmed = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/blueprint/confirm",
+                json={"revision": generated.json()["blueprint_revision"]},
+                headers=self.headers(),
+            )
+            self.assertEqual(200, confirmed.status_code, confirmed.text)
+        self.assertTrue(history["generation_eligible"])
+        tasks = self.app.state.sections_service.tasks_from_blueprint(blueprint)
+        self.assertIn(history["section_id"], {task["section_id"] for task in tasks})
+        self.assertNotEqual("excluded_from_section_generation", history["automatic_resolution"]["action"])
+
+    def test_optional_papers_do_not_bypass_outline_structure_or_matrix_validation(self) -> None:
+        with TestClient(self.app) as client:
+            selected = self.choose_outline(client, "custom")
+            for outline in (
+                "# No sections",
+                "## 1. <!-- outline-untitled -->",
+                "## History\nAssigned papers: P999.",
+                "## History\nContext papers: P999.",
+            ):
+                with self.subTest(outline=outline):
+                    response = client.put(
+                        f"/api/v1/projects/{self.project_id}/planning/outline",
+                        json={"revision": selected["matrix_revision"], "outline_style": "custom", "outline_md": outline},
+                        headers=self.headers(),
+                    )
+                    self.assertEqual(422, response.status_code, response.text)
+            saved = client.put(
+                f"/api/v1/projects/{self.project_id}/planning/outline",
+                json={"revision": selected["matrix_revision"], "outline_style": "custom", "outline_md": "## History\n\n## Mechanistic comparison\n"},
+                headers=self.headers(),
+            )
+            self.assertEqual(200, saved.status_code, saved.text)
+            self.assertTrue(saved.json()["outline_complete"])
 
     def test_reference_outline_is_registered(self) -> None:
         raw = "# Reference\n\n## 1. Mechanisms\nAssigned papers: P001.\nPurpose: compare.\n".encode()
@@ -1867,10 +2224,10 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertIn("Copper allenation evidence", candidate["outline_md"])
 
     def test_blueprint_uses_current_matrix_and_outline(self) -> None:
+        seed_verified_matrix(self.app.state.planning_service, self.first, self.project_id)
         with TestClient(self.app) as client:
             selected = self.choose_outline(client, "substrate")
-            response = client.post(
-                f"/api/v1/projects/{self.project_id}/planning/blueprint",
+            response = self.generate_candidate(client,
                 json={"revision": 0},
                 headers=self.headers(),
             )
@@ -1903,9 +2260,29 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertTrue(
             all(section["writing_requirements"] for section in blueprint["sections"])
         )
+        self.assertEqual(2, blueprint["schema_version"])
+        body_sections = [
+            section
+            for section in blueprint["sections"]
+            if section["section_role"] == "body" and section["primary_papers"]
+        ]
+        self.assertTrue(body_sections)
+        # Abstract-only fixtures can guide a provisional plan without becoming
+        # executable detailed claims or requiring an independent planning audit.
+        self.assertTrue(all(section["thesis_status"] == "provisional" for section in body_sections))
+        self.assertTrue(all(section["questions_to_answer"] and section["retrieval_directions"] for section in body_sections))
+        self.assertTrue(all(not section["scientific_claims"] for section in body_sections))
         self.assertTrue(
-            all(section["scientific_claims"] == [] for section in blueprint["sections"])
+            all(
+                claim["claim_id"].startswith(f"{section['section_id']}-")
+                and claim["primary_papers"]
+                and claim["required_fact_roles"]
+                for section in body_sections
+                for claim in section["scientific_claims"]
+            )
         )
+        self.assertEqual([], introduction["scientific_claims"])
+        self.assertEqual([], conclusion["scientific_claims"])
         self.assertTrue(
             all(
                 section["review_claims"][0]["legacy_role"]
@@ -1918,7 +2295,7 @@ class PlanningV1Tests(unittest.TestCase):
                 "introduction_and_conclusion_are_synthesis_only"
             ]
         )
-        self.assertEqual(selected["outline_artifact_id"], blueprint["source_outline_artifact_id"])
+        self.assertEqual(selected["outline_artifact_id"], blueprint["candidate_base_outline_artifact_id"])
         self.assertEqual(
             blueprint["classification_contract"]["fingerprint"],
             blueprint["classification_basis"]["axis_contract_fingerprint"],
@@ -1927,12 +2304,18 @@ class PlanningV1Tests(unittest.TestCase):
             blueprint["classification_contract"]["fingerprint"],
             blueprint["classification_contract_lineage"]["effective_fingerprint"],
         )
+        structure_contract = blueprint["overview_structure_contract"]
+        self.assertEqual("target_product", structure_contract["role"])
+        self.assertEqual("resolved", structure_contract["status"])
+        self.assertEqual("allene", structure_contract["motif"])
+        self.assertEqual("*C=C=C*", structure_contract["smiles"])
+        self.assertEqual("allenation", blueprint["rule_pack"])
+        self.assertEqual(64, len(blueprint["rule_pack_sha256"]))
 
     def test_planning_bundle_exposes_scope_and_synthesis_requirements(self) -> None:
         with TestClient(self.app) as client:
             self.choose_outline(client, "reaction")
-            generated = client.post(
-                f"/api/v1/projects/{self.project_id}/planning/blueprint",
+            generated = self.generate_candidate(client,
                 json={"revision": 0},
                 headers=self.headers(),
             )
@@ -1949,7 +2332,8 @@ class PlanningV1Tests(unittest.TestCase):
             all("academic_contract" in section for section in blueprint["sections"])
         )
 
-    def test_catch_all_taxonomy_cannot_be_confirmed(self) -> None:
+    def test_catch_all_taxonomy_is_advisory_for_chapter_planning(self) -> None:
+        seed_verified_matrix(self.app.state.planning_service, self.first, self.project_id)
         all_papers = ", ".join(f"P{index:03d}" for index in range(1, 36))
         outline = (
             "# Review\n\n"
@@ -1970,8 +2354,7 @@ class PlanningV1Tests(unittest.TestCase):
                 headers=self.headers(),
             )
             self.assertEqual(200, saved.status_code, saved.text)
-            generated = client.post(
-                f"/api/v1/projects/{self.project_id}/planning/blueprint",
+            generated = self.generate_candidate(client,
                 json={"revision": 0},
                 headers=self.headers(),
             )
@@ -1983,11 +2366,7 @@ class PlanningV1Tests(unittest.TestCase):
                 headers=self.headers(),
             )
         self.assertFalse(blueprint["taxonomy_diagnostics"]["can_confirm"])
-        self.assertEqual(409, confirmed.status_code, confirmed.text)
-        self.assertEqual(
-            "taxonomy.catch_all_body_section",
-            confirmed.json()["error"]["details"]["issues"][0]["rule_id"],
-        )
+        self.assertEqual(200, confirmed.status_code, confirmed.text)
 
     def test_scope_can_be_edited_with_the_existing_outline_save(self) -> None:
         with TestClient(self.app) as client:
@@ -2041,8 +2420,7 @@ class PlanningV1Tests(unittest.TestCase):
                 headers=self.headers(),
             )
             self.assertEqual(200, saved.status_code, saved.text)
-            generated = client.post(
-                f"/api/v1/projects/{self.project_id}/planning/blueprint",
+            generated = self.generate_candidate(client,
                 json={"revision": 0},
                 headers=self.headers(),
             )
@@ -2054,44 +2432,169 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertEqual(["P003"], second["primary_papers"])
         self.assertEqual(["P001"], second["supporting_papers"])
 
-    def test_blueprint_confirmation_advances_to_sections(self) -> None:
+    def test_blueprint_confirmation_advances_to_sections(self):
+        service = self.app.state.planning_service
+        with TestClient(self.app) as client:
+            seed_verified_matrix(service, self.first, self.project_id)
+            self.choose_outline(client, "reaction")
+            generated = self.generate_candidate(client, json={"revision": 0}, headers=self.headers()).json()
+            self.assertEqual("completed", generated["section_blueprint"]["academic_planning"]["status"])
+            self.assertIsNone(self.planning(client)["active_blueprint_artifact_id"])
+            response = client.post(f"/api/v1/projects/{self.project_id}/planning/blueprint/confirm",
+                json={"revision": 0, "artifact_id": generated["blueprint_artifact_id"]}, headers=self.headers())
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertEqual("sections", client.get(f"/api/v1/projects/{self.project_id}").json()["current_stage"])
+
+    def test_both_blueprint_routes_queue_the_same_idempotent_default_job(self):
+        with patch.object(self.app.state.job_service, "execution_enabled", False), TestClient(self.app) as client:
+            self.choose_outline(client, "reaction")
+            headers = {**self.headers(), "Idempotency-Key": "default-argument-planning"}
+            responses = [client.post(f"/api/v1/projects/{self.project_id}/planning/{route}",
+                         json={"revision": 0}, headers=headers) for route in ("blueprint", "blueprint/jobs")]
+            self.assertTrue(all(r.status_code == 202 for r in responses), [r.text for r in responses])
+            self.assertEqual(responses[0].json()["id"], responses[1].json()["id"])
+            self.assertIsNone(self.planning(client)["active_blueprint_artifact_id"])
+            cancelled = client.post(f"/api/v1/jobs/{responses[0].json()['id']}/cancel", headers=self.headers())
+            self.assertEqual(200, cancelled.status_code, cancelled.text)
+            self.assertIsNone(self.planning(client)["active_blueprint_artifact_id"])
+
+    def test_candidate_fact_outline_and_blueprint_commit_or_roll_back_together(self):
+        from copy import deepcopy
+        from review_writer_core.scientific_facts import review_fingerprint
+        from review_writer_core.workflow.artifacts import MATRIX, PLANNING_OUTLINE, BLUEPRINT
+        service, repo = self.app.state.planning_service, self.app.state.workflow_repository
+        seed_verified_matrix(service, self.first, self.project_id)
         with TestClient(self.app) as client:
             self.choose_outline(client, "reaction")
-            generated = client.post(
-                f"/api/v1/projects/{self.project_id}/planning/blueprint",
-                json={"revision": 0},
-                headers=self.headers(),
+            prepared = service.blueprint_job_payload(self.first, self.project_id, revision=0)
+            self.assertTrue(prepared["integrated_fact_enrichment"]["enabled"])
+            self.assertEqual(
+                prepared["section_blueprint"]["source_matrix_artifact_id"],
+                prepared["integrated_fact_enrichment"]["source_matrix_artifact_id"],
             )
-            self.assertEqual(200, generated.status_code, generated.text)
-            confirmed = client.post(
-                f"/api/v1/projects/{self.project_id}/planning/blueprint/confirm",
-                json={"revision": generated.json()["blueprint_revision"]},
-                headers=self.headers(),
-            )
-            project = client.get(f"/api/v1/projects/{self.project_id}").json()
-        self.assertEqual(200, confirmed.status_code, confirmed.text)
-        self.assertEqual("sections", project["current_stage"])
+            row = prepared["matrix_snapshot"]["rows"][0]
+            fact = deepcopy(row["scientific_facts"][0])
+            fact.update(fact_id="F-SUPPLEMENT", field_id="scope")
+            fact["verification"]["input_fingerprint"] = review_fingerprint(fact)
+            row["scientific_facts"].append(fact)
+            built = offline_argument_planner(None, prepared)
+            before = {name: (record.id if (record := repo.get_current_artifact(self.first.user_id, self.project_id, name)) else None)
+                      for name in (MATRIX, PLANNING_OUTLINE, BLUEPRINT)}
+            matrix_state = repo.get_stage_state(self.first.user_id, self.project_id, "matrix")
+            candidate = service.publish_blueprint_candidate(self.first, self.project_id, built)
+            first_candidate = candidate
+            built["section_blueprint"]["recovery_note"] = "Revised argument, unchanged supplemented inputs"
+            candidate = service.publish_blueprint_candidate(self.first, self.project_id, built)
+            self.assertNotEqual(first_candidate["blueprint_artifact_id"], candidate["blueprint_artifact_id"])
+            for key in ("source_matrix_artifact_id", "source_outline_artifact_id"):
+                self.assertEqual(first_candidate["section_blueprint"][key], candidate["section_blueprint"][key])
+            artifact = service.artifacts.resolve_owned_artifact(self.first.user_id, candidate["blueprint_artifact_id"]).artifact
+            self.assertEqual({MATRIX: candidate["section_blueprint"]["source_matrix_artifact_id"],
+                              PLANNING_OUTLINE: candidate["section_blueprint"]["source_outline_artifact_id"]},
+                             artifact.metadata["planning_candidate_inputs"])
+            matrix_artifact = service.artifacts.resolve_owned_artifact(self.first.user_id, candidate["section_blueprint"]["source_matrix_artifact_id"]).artifact
+            self.assertNotEqual(artifact.producer_run_id, matrix_artifact.producer_run_id)
+            from dataclasses import replace
+            original_read = service._owned_blueprint_input
+            def mismatched_registry(*args):
+                document, record = original_read(*args)
+                if record.id == artifact.id:
+                    record = replace(record, metadata={"planning_candidate_inputs": {
+                        MATRIX: before[MATRIX], PLANNING_OUTLINE: document["source_outline_artifact_id"]}})
+                return document, record
+            with patch.object(service, "_owned_blueprint_input", side_effect=mismatched_registry):
+                with self.assertRaisesRegex(WorkflowValidationError, "registered planning artifact"):
+                    service.confirm_blueprint(self.first, self.project_id, revision=0, artifact_id=candidate["blueprint_artifact_id"])
+            snapshot = service.get(self.first, self.project_id)
+            self.assertTrue(snapshot["blueprint_current"])
+            self.assertIsNone(snapshot["active_blueprint_artifact_id"])
+            self.assertIn("F-SUPPLEMENT", str(snapshot["blueprint_candidate_inputs"]))
+            self.assertNotIn("F-SUPPLEMENT", str(snapshot["literature_matrix"]))
+            original_upsert, writes = repo._upsert_current_artifact, []
+            def fail_mid_transaction(*args, **kwargs):
+                original_upsert(*args, **kwargs)
+                writes.append(True)
+                if len(writes) == 2:
+                    raise RuntimeError("simulated interrupted promotion")
+            with patch.object(repo, "_upsert_current_artifact", side_effect=fail_mid_transaction):
+                with self.assertRaisesRegex(RuntimeError, "interrupted promotion"):
+                    service.confirm_blueprint(self.first, self.project_id, revision=0, artifact_id=candidate["blueprint_artifact_id"])
+            self.assertEqual(2, len(writes))
+            after = {name: (record.id if (record := repo.get_current_artifact(self.first.user_id, self.project_id, name)) else None)
+                     for name in before}
+            self.assertEqual(before, after)
+            self.assertEqual(matrix_state.revision, repo.get_stage_state(self.first.user_id, self.project_id, "matrix").revision)
+            accepted = service.confirm_blueprint(self.first, self.project_id, revision=0, artifact_id=candidate["blueprint_artifact_id"])
+            service.confirm_blueprint(self.first, self.project_id, revision=accepted["revision"], artifact_id=candidate["blueprint_artifact_id"])
+            self.assertEqual(matrix_state.revision + 1, repo.get_stage_state(self.first.user_id, self.project_id, "matrix").revision)
+
+    def test_stale_candidate_cannot_replace_newer_matrix_or_outline(self):
+        service = self.app.state.planning_service
+        seed_verified_matrix(service, self.first, self.project_id)
+        with TestClient(self.app) as client:
+            self.choose_outline(client, "reaction")
+            generated = self.generate_candidate(client, json={"revision": 0}, headers=self.headers()).json()
+            self.choose_outline(client, "substrate")
+            with self.assertRaises(WorkflowConflict):
+                service.confirm_blueprint(self.first, self.project_id, revision=0, artifact_id=generated["blueprint_artifact_id"])
+            self.assertIsNone(service.get(self.first, self.project_id)["active_blueprint_artifact_id"])
+
+    def test_unused_paper_remains_excluded_in_generation_display_and_confirmation(self):
+        service = self.app.state.planning_service
+        seed_verified_matrix(service, self.first, self.project_id)
+        with TestClient(self.app) as client:
+            self.choose_outline(client, "reaction")
+            prepared = service.prepare_blueprint(self.first, self.project_id, revision=0)
+            for section in prepared["section_blueprint"]["sections"]:
+                for key in ("primary_papers", "major_papers", "supporting_papers", "context_papers"):
+                    section[key] = [pid for pid in section.get(key) or [] if pid != "P002"]
+            prepared["section_blueprint"]["sections"] = [s for s in prepared["section_blueprint"]["sections"]
+                if s["section_role"] != "body" or s.get("primary_papers")]
+            built = offline_argument_planner(None, prepared)
+            self.assertIn("P002", built["section_blueprint"]["taxonomy_diagnostics"]["excluded_paper_ids"])
+            # A legacy stored diagnostic must not contradict current documented exclusions.
+            built["section_blueprint"]["taxonomy_diagnostics"]["issues"] = [{"rule_id": "taxonomy.orphan_papers",
+                "severity": "planning_blocker", "paper_ids": ["P002"]}]
+            candidate = service.publish_blueprint_candidate(self.first, self.project_id, built)
+            page = self.planning(client)
+            self.assertEqual([], page["taxonomy_diagnostics"]["orphan_paper_ids"])
+            self.assertIn("P002", page["taxonomy_diagnostics"]["excluded_paper_ids"])
+            self.assertIn("P002", [row["paper_id"] for row in page["literature_matrix"]["rows"]])
+            confirmed = service.confirm_blueprint(self.first, self.project_id, revision=0, artifact_id=candidate["blueprint_artifact_id"])
+            self.assertEqual("approved", confirmed["status"])
 
     def test_previous_blueprint_can_be_restored_as_a_new_review_version(self) -> None:
+        seed_verified_matrix(self.app.state.planning_service, self.first, self.project_id)
         with TestClient(self.app) as client:
             self.choose_outline(client, "reaction")
-            first = client.post(
-                f"/api/v1/projects/{self.project_id}/planning/blueprint",
+            first = self.generate_candidate(client,
                 json={"revision": 0},
                 headers=self.headers(),
             )
             self.assertEqual(200, first.status_code, first.text)
             first_payload = first.json()
-            second = client.post(
-                f"/api/v1/projects/{self.project_id}/planning/blueprint",
-                json={"revision": first_payload["blueprint_revision"]},
+            approval = client.post(f"/api/v1/projects/{self.project_id}/planning/blueprint/confirm",
+                json={"revision": 0, "artifact_id": first_payload["blueprint_artifact_id"]}, headers=self.headers())
+            self.assertEqual(200, approval.status_code, approval.text)
+            second = self.generate_candidate(client,
+                json={"revision": approval.json()["revision"]},
                 headers=self.headers(),
             )
             self.assertEqual(200, second.status_code, second.text)
+            self.assertTrue(second.json()["candidate_pending"])
+            snapshot = self.planning(client)
+            self.assertEqual(first_payload["blueprint_artifact_id"], snapshot["active_blueprint_artifact_id"])
+            self.assertEqual(approval.json()["revision"], second.json()["blueprint_revision"])
+            accepted = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/blueprint/confirm",
+                json={"revision": second.json()["blueprint_revision"], "artifact_id": second.json()["blueprint_artifact_id"]},
+                headers=self.headers(),
+            )
+            self.assertEqual(200, accepted.status_code, accepted.text)
             restored = client.post(
                 f"/api/v1/projects/{self.project_id}/planning/blueprint/restore",
                 json={
-                    "revision": second.json()["blueprint_revision"],
+                    "revision": accepted.json()["revision"],
                     "artifact_id": first_payload["blueprint_artifact_id"],
                 },
                 headers=self.headers(),

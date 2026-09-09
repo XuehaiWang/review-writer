@@ -34,6 +34,11 @@ from review_writer_core.project_config import (  # noqa: E402
     save_project_config,
 )
 from review_writer_core.sciatlas_client import load_config as load_sciatlas_config  # noqa: E402
+from review_writer_core.stages.sections.blueprint_builder import infer_logic  # noqa: E402
+from review_writer_core.stages.sections.rule_packs import (  # noqa: E402
+    RulePackConfigurationError,
+    resolve_rule_pack,
+)
 from review_writer_core.workspace import WorkspacePaths, discover_review_root  # noqa: E402
 
 
@@ -116,25 +121,24 @@ class AdaptabilityChecks(unittest.TestCase):
             )
 
     def test_rule_pack_selection_and_section_writer_are_connected(self) -> None:
-        skill_root = ROOT / "skills" / "review-section-blueprint"
-        general_name, general_path = BLUEPRINT.select_rule_pack(
-            skill_root,
-            "Graph neural networks for drug discovery",
+        general = resolve_rule_pack(
+            ROOT, topic="Graph neural networks for drug discovery",
         )
-        allene_name, _ = BLUEPRINT.select_rule_pack(
-            skill_root,
-            "Axially chiral allene synthesis",
+        allene = resolve_rule_pack(
+            ROOT, topic="Axially chiral allene synthesis",
         )
-        self.assertEqual(general_name, "general")
-        self.assertEqual(allene_name, "allenation")
+        self.assertEqual(general["name"], "general")
+        self.assertEqual(allene["name"], "allenation")
         rules = SECTION_WRITER.load_blueprint_rule_pack(
             ROOT,
-            {"rule_pack": general_name, "rule_pack_path": general_path},
+            {"rule_pack": general["name"], "rule_pack_path": general["path"],
+             "rule_pack_sha256": general["sha256"]},
         )
         self.assertIn("General scientific review style", rules)
         self.assertNotIn("ATA Introduction", rules)
 
     def test_section_writer_loads_application_rules_for_hosted_workspace(self) -> None:
+        selected = resolve_rule_pack(ROOT, name="allenation")
         with tempfile.TemporaryDirectory() as raw:
             hosted_workspace = Path(raw)
             self.assertFalse((hosted_workspace / "skills").exists())
@@ -143,22 +147,23 @@ class AdaptabilityChecks(unittest.TestCase):
                 {
                     "rule_pack": "allenation",
                     "rule_pack_path": "references/rule_packs/allenation",
+                    "rule_pack_sha256": selected["sha256"],
                 },
             )
         self.assertIn("Organic Review Style", rules)
 
-    def test_blueprint_logic_is_generic_unless_specialized_pack_is_selected(self) -> None:
+    def test_blueprint_logic_is_generic_without_injecting_domain_rules(self) -> None:
         self.assertEqual(
-            BLUEPRINT.infer_logic("Advances in graph neural networks", "general"),
+            infer_logic("Advances in graph neural networks"),
             "thematic_synthesis",
         )
         self.assertEqual(
-            BLUEPRINT.infer_logic("Model prediction and benchmark performance", "general"),
+            infer_logic("Model prediction and benchmark performance"),
             "comparative_performance",
         )
         self.assertEqual(
-            BLUEPRINT.infer_logic("Propargylic carbonate methods", "allenation"),
-            "precursor_class",
+            infer_logic("Propargylic carbonate methods"),
+            "thematic_synthesis",
         )
         generic = BLUEPRINT.build_section(
             {"section_id": "sec1", "title": "Graph representations", "assigned_papers": ["P001"]},
@@ -175,14 +180,13 @@ class AdaptabilityChecks(unittest.TestCase):
             {},
             "",
             "Applications",
-            "general",
         )
         serialized = json.dumps(generic).casefold()
         for leaked_term in ("allene", "propargyl", "substrate class", "activation mode"):
             self.assertNotIn(leaked_term, serialized)
 
     def test_rule_pack_path_cannot_escape_skill(self) -> None:
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(RulePackConfigurationError):
             SECTION_WRITER.load_blueprint_rule_pack(
                 ROOT,
                 {"rule_pack": "custom", "rule_pack_path": "../../../.git"},

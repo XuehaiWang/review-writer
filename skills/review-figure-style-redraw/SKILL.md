@@ -9,6 +9,34 @@ Use this skill after `figure_candidates.json` has been human-checked.
 
 This stage uses a script because file resolution, API calls, and manifests must be stable.
 
+## Current Overview integration
+
+The Web Final Overview action calls `scripts/generate_overview_figure.py`.
+It uses the versioned `assets/overview-templates/` catalog and the current
+manuscript's source-bound content. New source-passage drafts supply
+`source_claim_bindings` from actual written claims; quantitative comparisons
+can include source-specific result-context records. Do not require separate
+scientific fact-card extraction or populate diagram panels with unproven
+outline conclusions. Historical fact bindings remain compatibility inputs.
+
+The Overview template/structure handling and RDKit-assisted chemistry rendering
+belong to this skill. `review-outline-summary-chart` is a separate local
+Mermaid structure-chart tool and is not the Web Overview generator. In the
+current Web Final builder an Overview is optional; if present, its image and
+editable text must be complete and belong to the current Draft.
+
+The sections below describe source-figure redraw behavior and standalone
+artifacts. They do not make every chapter contain an image or introduce an
+additional fact-card or Overview generation prerequisite.
+
+Source-figure captions use the shared `figure-caption/1` derivation. Preserve
+`caption_source_text`, `caption_source_ref`, `source_image_sha256`, and any
+`caption_generation` through selection, redraw, source retention, and manual
+image editing. Display the short publication caption separately from the
+immutable original caption. When content cannot be established, show a pending
+caption in the UI and allow other operations to continue. Never substitute a
+generic description inferred solely from the image role or paper title.
+
 In the normal full review workflow, do not silently skip this stage. A no-image manuscript is allowed only when the user explicitly says to skip figures or when the section drafting report gives a defensible no-figure reason.
 
 ## Inputs
@@ -210,7 +238,13 @@ redrawn/
 
 `redrawn_figure_manifest.json` must keep `needs_human_check: true` for redrawn images. New AI outputs record `chemistry_integrity`, the exact Stage 6 `source_image`, and its SHA-256 identity. Stage 8 inserts completed Stage 7 rows with an existing `redrawn_image`, but an output with `chemistry_integrity: failed`, `needs_human_arrow_check`, or `output_disposition: saved_with_integrity_warning` remains preview-only until an explicit `human_approval` is stored. That approval must be bound to the current source-image and output-image hashes, and it must be invalidated whenever Stage 6 selects a different source. Do not filter otherwise-safe outputs by a hard-coded render-mode list, so future safe profiles remain coupled to the draft.
 
-If no figure is redrawn successfully, return to `review-section-drafting-figure-picking` and fix `source_image_path`, `source_caption_text`, or the selected candidate list instead of moving to draft merge. To intentionally produce a no-figure manuscript (only when the user explicitly approves), create `03_figure_redraw/skip_reason.md` with a one-line justification. The orchestrator and final audit treat this file as the only valid opt-out; without it, drafts with zero figures fail the hard gate.
+If no selected figure is usable, report its resolution or integrity issue and
+retain reviewable outputs. Use the Web service's current readiness and human
+approval state for manuscript insertion; do not insert an unapproved failed
+image to satisfy a quota. In the standalone filesystem workflow,
+`03_figure_redraw/skip_reason.md` records an explicitly approved no-figure
+manuscript for the legacy status/audit tools. Creating that file does not alter
+PostgreSQL-owned Web approvals.
 
 ## Human Check
 

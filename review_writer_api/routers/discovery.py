@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, status
@@ -13,7 +13,7 @@ from review_writer_api.domain_services.planning import PlanningService
 from review_writer_api.errors import WorkflowConflict
 from review_writer_api.job_service import JobService
 from review_writer_api.routers.jobs import _job_response
-from review_writer_api.security import Principal, Role
+from review_writer_api.security import Principal
 from review_writer_api.workflow_schemas import (
     DiscoveryConfirmRequest,
     DiscoveryReviewSaveRequest,
@@ -28,55 +28,8 @@ def build_discovery_router(
     discovery_service: DiscoveryService,
     job_service: JobService,
     planning_service: PlanningService | None = None,
-    handlers: Mapping[str, Callable] | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/projects/{project_id}/discovery", tags=["discovery"])
-    builder = dict(handlers or {}).get("discovery.search")
-
-    def candidate_refresh_handler(context, payload):
-        context.report_progress(0, 2)
-        principal = Principal(context.user_id, frozenset({Role.USER}))
-        context.report_progress(1, 2)
-        result = discovery_service.refresh_external_candidate(
-            principal,
-            str(payload.get("project_id") or context.project_id or ""),
-            candidate_id=str(payload.get("candidate_id") or ""),
-            paper_id=str(payload.get("paper_id") or ""),
-            source_revision=(
-                int(payload["source_revision"])
-                if type(payload.get("source_revision")) is int
-                else None
-            ),
-        )
-        context.report_progress(2, 2)
-        return result
-
-    job_service.register_handler("discovery.candidate-refresh", candidate_refresh_handler)
-    if builder is not None:
-
-        def discovery_handler(context, payload):
-            # Discovery exposes stable milestones so the UI can show useful
-            # progress even though provider and local-search runtimes vary.
-            context.report_progress(0, 6)
-            built = builder(context, payload)
-            context.report_progress(4, 6)
-            context.checkpoint()
-            principal = Principal(context.user_id, frozenset({Role.USER}))
-            built = discovery_service.enrich_hybrid(
-                principal,
-                str(context.project_id),
-                dict(built or {}),
-            )
-            context.report_progress(5, 6)
-            context.checkpoint()
-            result = discovery_service.replace_from_job(
-                principal, str(context.project_id), payload, built
-            )
-            context.report_progress(6, 6)
-            return result
-
-        job_service.register_handler("discovery.search", discovery_handler)
-
     @router.post("/jobs", status_code=status.HTTP_202_ACCEPTED)
     def run_discovery(
         project_id: str,
@@ -84,7 +37,7 @@ def build_discovery_router(
         idempotency_key: str = Header(default="", alias="Idempotency-Key"),
         principal: Principal = Depends(principal_dependency),
     ):
-        project = discovery_service._owned_project(principal, project_id)
+        discovery_service._owned_project(principal, project_id)
         current = job_service.repository.get_current_job(
             principal.user_id,
             scope="project",
@@ -100,7 +53,7 @@ def build_discovery_router(
             # Reattach it to the persisted job instead of surfacing a conflict
             # or submitting a duplicate provider request.
             return _job_response(current)
-        payload_data = payload.model_dump()
+        payload_data = discovery_service.search_payload(principal, project_id, payload.model_dump())
         try:
             job = job_service.submit(
                 principal,
@@ -108,11 +61,7 @@ def build_discovery_router(
                 project_id=project_id,
                 job_type="discovery.search",
                 idempotency_key=idempotency_key.strip() or str(uuid.uuid4()),
-                payload={
-                    **payload_data,
-                    "project_id": project_id,
-                    "taxonomy_profile": project.taxonomy_profile,
-                },
+                payload=payload_data,
             )
         except WorkflowConflict as exc:
             # Close the narrow race between the current-job lookup and atomic
@@ -207,20 +156,6 @@ def build_discovery_router(
         result = discovery_service.confirm(
             principal, project_id, payload.revision
         )
-        if planning_service is not None and "matrix.enrich" in job_service.handlers:
-            job = job_service.submit(
-                principal,
-                scope="project",
-                project_id=project_id,
-                job_type="matrix.enrich",
-                idempotency_key=f"matrix-enrich:{result['matrix_artifact_id']}",
-                operation_key="matrix-enrichment",
-                payload={
-                    "prepare_on_start": True,
-                    "source_matrix_artifact_id": result["matrix_artifact_id"],
-                },
-            )
-            result["matrix_enrichment_job"] = _job_response(job).model_dump()
         return result
 
     return router

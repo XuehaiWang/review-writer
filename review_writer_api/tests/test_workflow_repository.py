@@ -80,6 +80,27 @@ class WorkflowRepositoryTests(unittest.TestCase):
         Base.metadata.drop_all(self.engine)
         self.engine.dispose()
 
+    def test_publication_checks_explicitly_absent_input_atomically(self) -> None:
+        owner, project = self.ids["user_a"], self.ids["project_a"]
+        run = self.repository.create_stage_run(owner, project, "draft", status="succeeded")
+        artifact = self.repository.create_artifact(
+            owner, project, logical_name="draft/quality.json", artifact_type="json",
+            relative_path=".artifacts/quality.json", content_sha256="a" * 64,
+            size_bytes=2, mtime_ns=1, producer_stage="draft", producer_run_id=run.id,
+        )
+        state = self.repository.promote_stage_artifacts_atomically(
+            owner, project, "draft", artifact_ids={"draft/quality.json": artifact.id},
+            run_id=run.id, expected_revision=0, status="review",
+            expected_current_artifacts={"draft/quality.json": ""},
+        )
+        with self.assertRaises(self.errors.WorkflowConflict):
+            self.repository.promote_stage_artifacts_atomically(
+                owner, project, "draft", artifact_ids={"draft/quality.json": artifact.id},
+                run_id=run.id, expected_revision=state.revision, status="review",
+                expected_current_artifacts={"draft/quality.json": ""},
+            )
+        self.assertEqual(state.revision, self.repository.get_stage_state(owner, project, "draft").revision)
+
     def test_stage_reads_and_writes_are_project_owner_scoped(self) -> None:
         created = self.repository.compare_and_set_stage(
             self.ids["user_a"],
@@ -357,6 +378,86 @@ class WorkflowRepositoryTests(unittest.TestCase):
         )
         self.assertEqual(migration.id, updated.id)
         self.assertTrue(updated.report["validated"])
+
+    def test_downstream_invalidation_preserves_upstream_artifact_republished_by_draft(
+        self,
+    ) -> None:
+        draft_run = self.repository.create_stage_run(
+            self.ids["user_a"], self.ids["project_a"], "draft", status="succeeded"
+        )
+
+        def current_draft_artifact(logical_name: str, seed: int):
+            artifact = self.repository.create_artifact(
+                self.ids["user_a"],
+                self.ids["project_a"],
+                logical_name=logical_name,
+                artifact_type="json",
+                relative_path=f".artifacts/draft/{seed}.json",
+                content_sha256=f"{seed:064x}",
+                size_bytes=seed,
+                mtime_ns=seed,
+                producer_stage="draft",
+                producer_run_id=draft_run.id,
+            )
+            self.repository.set_current_artifact(
+                self.ids["user_a"],
+                self.ids["project_a"],
+                logical_name,
+                artifact.id,
+            )
+            return artifact
+
+        repaired_matrix = current_draft_artifact(
+            "matrix/literature_matrix.json", 1201
+        )
+        current_draft_artifact("draft/manuscript.md", 1202)
+        current_draft_artifact("legacy-draft-output.json", 1203)
+
+        sections_run = self.repository.create_stage_run(
+            self.ids["user_a"], self.ids["project_a"], "sections", status="succeeded"
+        )
+        section_index = self.repository.create_artifact(
+            self.ids["user_a"],
+            self.ids["project_a"],
+            logical_name="sections/section_drafts.json",
+            artifact_type="json",
+            relative_path=".artifacts/sections/section_drafts.json",
+            content_sha256=f"{1204:064x}",
+            size_bytes=1204,
+            mtime_ns=1204,
+            producer_stage="sections",
+            producer_run_id=sections_run.id,
+        )
+
+        self.repository.promote_stage_artifacts_atomically(
+            self.ids["user_a"],
+            self.ids["project_a"],
+            "sections",
+            artifact_ids={"sections/section_drafts.json": section_index.id},
+            run_id=sections_run.id,
+            expected_revision=0,
+            invalidate_stages=("draft", "final"),
+        )
+
+        current_matrix = self.repository.get_current_artifact(
+            self.ids["user_a"],
+            self.ids["project_a"],
+            "matrix/literature_matrix.json",
+        )
+        self.assertIsNotNone(current_matrix)
+        self.assertEqual(repaired_matrix.id, current_matrix.id)
+        self.assertIsNone(
+            self.repository.get_current_artifact(
+                self.ids["user_a"], self.ids["project_a"], "draft/manuscript.md"
+            )
+        )
+        self.assertIsNone(
+            self.repository.get_current_artifact(
+                self.ids["user_a"],
+                self.ids["project_a"],
+                "legacy-draft-output.json",
+            )
+        )
 
     def test_readiness_is_required_only_after_legacy_inventory_is_recorded(self) -> None:
         self.assertTrue(self.repository.workflow_is_ready())
