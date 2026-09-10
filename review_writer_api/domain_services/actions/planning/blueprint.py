@@ -192,7 +192,7 @@ class PlanningBlueprintActionsMixin:
         if blueprint.get("argument_contract") != ARGUMENT_CONTRACT or (blueprint.get("academic_planning") or {}).get("status") != "completed":
             raise WorkflowConflict("Chapter planning is unfinished. Continue generation to reuse the completed work.")
         unused = blueprint.get("unused_papers") or []
-        assigned = {pid for s in blueprint.get("sections") or [] for pid in [*(s.get("primary_papers") or []), *(s.get("supporting_papers") or [])]}
+        assigned = {pid for s in blueprint.get("sections") or [] for pid in [*(s.get("primary_papers") or []), *(s.get("supporting_papers") or []), *(s.get("context_papers") or [])]}
         selected = {row["paper_id"] for row in matrix.get("rows") or []}
         if (len({item.get("paper_id") for item in unused}) != len(unused)
             or {item.get("paper_id") for item in unused} != selected - assigned or assigned - selected

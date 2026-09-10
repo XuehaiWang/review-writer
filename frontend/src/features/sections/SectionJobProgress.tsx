@@ -70,7 +70,9 @@ export function SectionJobProgress({ job }: { job: Job }) {
       title = text("本轮处理结束，部分章节待修复", "Pass finished; some sections need repair");
       detail = text(`已保留 ${completed.length}/${total} 章；下次继续未完成章节及依赖它们的总结。`, `${completed.length}/${total} sections retained; resume unfinished sections and their dependent conclusion.`);
     } else if (total > 0 && current >= total) {
-      title = text("章节正文已全部生成", "All section prose generated");
+      title = completed.some(section => section.generation_mode === "pending_evidence")
+        ? text("章节处理完成，部分章节暂不生成", "Sections processed; some have no prose")
+        : text("章节正文已全部生成", "All section prose generated");
       detail = text("正在整理章节报告和图像候选。", "Finalizing the report and figure candidates.");
     } else if (live.current_heading) {
       const phaseTitle: Record<string, string> = {

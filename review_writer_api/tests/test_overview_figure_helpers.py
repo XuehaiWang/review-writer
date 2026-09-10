@@ -154,7 +154,7 @@ class OverviewFigureHelperTests(unittest.TestCase):
         contract = features["overview_content_contract"]
         self.assertEqual("substrate", contract["primary_axis"])
         self.assertEqual(
-            ["Propargylic alcohol", "Terminal alkyne"], contract["modules"]
+            ["Propargylic alcohol substrates", "Terminal alkyne substrates"], contract["modules"]
         )
         self.assertNotIn("Fe", contract["approved_labels"])
 
@@ -349,7 +349,7 @@ class OverviewFigureHelperTests(unittest.TestCase):
 
     def test_existing_integrity_fallbacks_and_blueprint_contract_remain(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn('skeleton_source = "programmatic_fallback"', source)
+        self.assertIn('skeleton_source = "product_motif_2d"', source)
         self.assertIn('return False, "structure_panel_not_detected", ""', source)
         self.assertNotIn('return True, "", "appended-dock"', source)
         self.assertIn('"overview_axis_contract": {}', source)

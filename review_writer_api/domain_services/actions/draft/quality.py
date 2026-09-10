@@ -182,6 +182,20 @@ class DraftQualityActionsMixin:
             principal, project_id, DRAFT_OVERLAYS, required=False
         )
         saved_quality, _ = self._read_json(principal, project_id, DRAFT_QUALITY, required=False)
+        # Stage confirmation adopts the available prose. Project a read-only
+        # writing scope so later assessment cannot demand the omitted chapters
+        # again. The original Blueprint and section artifacts stay immutable.
+        section_state = self.repository.get_stage_state(principal.user_id, project_id, "sections")
+        if (section_state and section_state.status == "approved" and blueprint_artifact
+                and sections.get("source_blueprint_artifact_id") == blueprint_artifact.id):
+            deferred = [s["section_id"] for s in sections.get("sections") or []
+                        if s.get("generation_mode") == "pending_evidence"]
+            if deferred or any(s.get("organizing_only") for s in blueprint.get("sections") or []):
+                blueprint = {**blueprint, "deferred_section_ids": deferred,
+                             "sections": [s for s in blueprint.get("sections") or []
+                                          if s.get("section_id") not in deferred and not s.get("organizing_only")]}
+                sections = {**sections, "sections": [s for s in sections.get("sections") or []
+                                                     if s.get("section_id") not in deferred]}
         artifact_paths: dict[str, str] = {}
         for row in figures.get("figures") or []:
             if not isinstance(row, dict):

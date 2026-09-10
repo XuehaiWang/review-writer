@@ -8,6 +8,15 @@ import { displayFigureLabel, replacePaperIdsForDisplay } from "../../utils/paper
 afterEach(cleanup);
 
 describe("visual outline format", () => {
+  it("keeps IDs and nested headings when editing and reordering", () => {
+    const draft = parseOutlineMarkdown("## Methods\n<!-- section_id: S-methods -->\n### Details\n<!-- section_id: S-details -->\n");
+    draft.sections[1].title = "Updated details";
+    const saved = parseOutlineMarkdown(serializeOutlineMarkdown(draft));
+    expect(saved.sections[1]).toMatchObject({ sectionId: "S-details", headingLevel: 3, title: "Updated details" });
+    const flat = parseOutlineMarkdown("## A\n## B\n");
+    flat.sections.reverse();
+    expect(parseOutlineMarkdown(serializeOutlineMarkdown(flat)).sections.map(s => s.sectionId)).toEqual(["S02", "S01"]);
+  });
   it("round-trips beginner fields into Blueprint-compatible Markdown", () => {
     const markdown = serializeOutlineMarkdown({
       preamble: "# Selected Outline",
@@ -15,7 +24,7 @@ describe("visual outline format", () => {
     });
     expect(markdown).toContain("## 1. Catalyst families");
     expect(markdown).toContain("Assigned papers: P001, P002.");
-    expect(parseOutlineMarkdown(markdown).sections[0]).toEqual({ title: "Catalyst families", purpose: "Compare catalyst systems.", paperIds: ["P001", "P002"], contextPaperIds: [], notes: "Figure plan: overview." });
+    expect(parseOutlineMarkdown(markdown).sections[0]).toMatchObject({ title: "Catalyst families", purpose: "Compare catalyst systems.", paperIds: ["P001", "P002"], contextPaperIds: [], notes: "Figure plan: overview." });
   });
 
   it("preserves format-only introduction roles without requiring uploaded content", () => {

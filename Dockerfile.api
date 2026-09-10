@@ -26,6 +26,13 @@ RUN python -m pip install --upgrade pip && \
     python -m pip install -r requirements.txt && \
     python -c "import rdkit; print('RDKit', rdkit.__version__)"
 
+# RDKit's drawing module needs these runtime libraries even without a display.
+# Importing rdkit alone does not exercise the drawing backend.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libxrender1 libxext6 && \
+    rm -rf /var/lib/apt/lists/* && \
+    python -c "from rdkit import Chem; from rdkit.Chem import rdDepictor; from rdkit.Chem.Draw import rdMolDraw2D; m=Chem.MolFromSmiles('*C=C=C'); rdDepictor.Compute2DCoords(m); d=rdMolDraw2D.MolDraw2DCairo(320,240); d.DrawMolecule(m); d.FinishDrawing(); assert d.GetDrawingText().startswith(bytes.fromhex('89504e470d0a1a0a')); print('RDKit 2D PNG rendering OK')"
+
 COPY review_writer_core ./review_writer_core
 COPY review_writer_api ./review_writer_api
 COPY --from=frontend-builder /frontend/dist ./frontend/dist

@@ -4573,10 +4573,8 @@ class PlanningService(
                     automatically_adjusted=True,
                 )
         else:
-            # Preserve a user's grouping and ordering.  If every paper in one
-            # manually edited section resolves to exactly the same supported
-            # primary-axis category, correcting only that factual heading is
-            # safe; splits, merges and moves remain suggestions.
+            # Custom headings are user-owned. Keep evidence-based corrections
+            # as suggestions rather than rewriting the saved structure.
             _tags, text_by_paper = self._outline_sources(
                 principal, matrix["rows"]
             )
@@ -4589,55 +4587,7 @@ class PlanningService(
                 tag_key_override=routing_tag_key,
                 axis_label_override=routing_axis_label,
             )
-            candidate_by_papers = {
-                frozenset(str(value) for value in section.get("paper_ids") or []): section
-                for section in candidate
-                if infer_section_role(
-                    section.get("title"), section.get("section_role")
-                )
-                == "body"
-                and section.get("paper_ids")
-            }
-            for section in parsed:
-                if infer_section_role(
-                    section.get("title"), section.get("section_role")
-                ) != "body":
-                    continue
-                paper_set = frozenset(
-                    str(value) for value in section.get("paper_ids") or []
-                )
-                corrected = candidate_by_papers.get(paper_set)
-                corrected_title = str((corrected or {}).get("title") or "").strip()
-                current_title = str(section.get("title") or "").strip()
-                if corrected_title and corrected_title.casefold() != current_title.casefold():
-                    section["title"] = corrected_title
-                    auto_routing_adjustments.append(
-                        {
-                            "source_section": current_title,
-                            "target_section": corrected_title,
-                            "paper_ids": sorted(paper_set),
-                            "method": "manual_outline_factual_title_correction",
-                            "created_section": False,
-                        }
-                    )
-            structure_change_suggestions = [
-                row
-                for row in candidate_adjustments
-                if isinstance(row, dict)
-                and str(row.get("method") or "")
-                == "scientific_object_reassignment"
-                and not any(
-                    set(row.get("paper_ids") or [])
-                    == set(applied.get("paper_ids") or [])
-                    for applied in auto_routing_adjustments
-                )
-            ]
-            if auto_routing_adjustments:
-                resolved_outline_md = _outline_markdown_from_sections(
-                    parsed,
-                    outline_style=outline_style,
-                    automatically_adjusted=True,
-                )
+            structure_change_suggestions = candidate_adjustments
         prepared = []
         for index, section in enumerate(parsed, start=1):
             role = infer_section_role(
@@ -4661,7 +4611,7 @@ class PlanningService(
             prepared.append(
                 {
                     **section,
-                    "section_id": f"S{len(prepared) + 1:02d}",
+                    "section_id": (section.get("section_id") if outline.get("manually_edited") else None) or f"S{len(prepared) + 1:02d}",
                     "section_role": role,
                     "paper_ids": assigned,
                     "context_paper_ids": list(
@@ -4670,6 +4620,8 @@ class PlanningService(
                 }
             )
 
+        if len({section["section_id"] for section in prepared}) != len(prepared):
+            raise WorkflowValidationError("Custom outline section IDs must be unique.")
         scope = derive_scope_contract(
             matrix.get("review_topic") or (discovery or {}).get("topic"),
             outline.get("outline_style"),
@@ -4837,6 +4789,11 @@ class PlanningService(
                 {
                     "section_id": section["section_id"],
                     "title": section["title"],
+                    "heading_level": section.get("heading_level", 2),
+                    "parent_headings": section.get("parent_headings") or [],
+                    "organizing_only": bool(section.get("organizing_only")),
+                    "notes": str(section.get("notes") or ""),
+                    "excluded_papers": section.get("excluded_papers") or [],
                     "section_role": role,
                     "topic_partition": str(
                         section.get("topic_partition") or ""

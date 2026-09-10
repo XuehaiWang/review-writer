@@ -18,6 +18,12 @@ const base = {
 };
 
 describe("SectionStageActions", () => {
+  it("explains omitted sections before the existing confirmation", () => {
+    render(<SectionStageActions {...base} pendingHeadings={["Development history"]} />);
+    expect(screen.getByRole("status")).toHaveTextContent("本次不包含：Development history");
+    fireEvent.click(screen.getByRole("button", { name: "确认并进入图像处理" }));
+    expect(base.onConfirm).toHaveBeenCalledOnce();
+  });
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();

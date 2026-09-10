@@ -13,11 +13,12 @@ type Props = {
   onRegenerate: () => void;
   onConfirm: () => void;
   error?: { message: string } | null;
+  pendingHeadings?: string[];
 };
 
 export function SectionStageActions({
   current, active, resumable, progress, total, generating, regenerating, confirming,
-  onGenerate, onRegenerate, onConfirm, error,
+  onGenerate, onRegenerate, onConfirm, error, pendingHeadings = [],
 }: Props) {
   const { text } = useUiText();
   const title = active
@@ -40,7 +41,12 @@ export function SectionStageActions({
         : text("根据当前 Blueprint 写作要求生成全部章节。", "Generate every section from the current blueprint requirements.");
 
   return <div className="stage-action-bar">
-    <div><strong>{title}</strong><p>{detail}</p></div>
+    <div><strong>{title}</strong><p>{detail}</p>
+      {current && pendingHeadings.length > 0 ? <p role="status">
+        {text(`本次不包含：${pendingHeadings.join("、")}。确认后，其余正文进入下一阶段；这些章节仍保留在大纲中。`,
+          `Not included this time: ${pendingHeadings.join(", ")}. Confirm to continue with the available prose; these sections remain in your outline.`)}
+      </p> : null}
+    </div>
     <div className="stage-action-buttons">
       {current ? <>
         {resumable ? <button className="button button-primary" type="button" disabled={generating || regenerating || confirming || active} onClick={onGenerate}>

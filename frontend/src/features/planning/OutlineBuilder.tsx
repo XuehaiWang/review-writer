@@ -13,6 +13,8 @@ export type OutlinePaper = {
 };
 
 export type OutlineSectionDraft = {
+  sectionId?: string;
+  headingLevel?: number;
   title: string;
   purpose: string;
   paperIds: string[];
@@ -40,12 +42,13 @@ function unique(values: string[]): string[] {
 export function parseOutlineMarkdown(value: string): VisualOutlineDraft {
   const preamble: string[] = [];
   const sections: OutlineSectionDraft[] = [];
+  const explicitIds = new Set<OutlineSectionDraft>();
   let current: OutlineSectionDraft | null = null;
   for (const rawLine of String(value || "").replace(/\r\n?/g, "\n").split("\n")) {
-    const heading = rawLine.trim().match(/^##\s+(?:\d+[.)]\s*)?(.+?)\s*$/);
+    const heading = rawLine.trim().match(/^(#{2,6})\s+(?:\d+(?:\.\d+)*[.)]?\s+)?(.+?)\s*$/);
     if (heading) {
-      const parsedTitle = heading[1].trim();
-      current = { title: parsedTitle === EMPTY_TITLE_SENTINEL ? "" : parsedTitle, purpose: "", paperIds: [], contextPaperIds: [], notes: "" };
+      const parsedTitle = heading[2].trim();
+      current = { sectionId: `S${String(sections.length + 1).padStart(2, "0")}`, headingLevel: heading[1].length, title: parsedTitle === EMPTY_TITLE_SENTINEL ? "" : parsedTitle, purpose: "", paperIds: [], contextPaperIds: [], notes: "" };
       sections.push(current);
       continue;
     }
@@ -53,6 +56,8 @@ export function parseOutlineMarkdown(value: string): VisualOutlineDraft {
       preamble.push(rawLine);
       continue;
     }
+    const identity = rawLine.trim().match(/^<!-- section_id: (S[A-Za-z0-9_-]{1,64}) -->$/);
+    if (identity) { current.sectionId = identity[1]; explicitIds.add(current); continue; }
     const assigned = rawLine.trim().match(/^Assigned papers:\s*(.*)$/i);
     if (assigned) {
       current.paperIds = unique(assigned[1].replace(/[.。]\s*$/, "").split(/[,，;；]/));
@@ -75,16 +80,30 @@ export function parseOutlineMarkdown(value: string): VisualOutlineDraft {
     }
     current.notes = [current.notes, rawLine].filter(Boolean).join("\n");
   }
+  const used = new Set([...explicitIds].map(section => section.sectionId));
+  let serial = 1;
+  for (const section of sections) {
+    if (explicitIds.has(section)) continue;
+    while (used.has(`S${String(serial).padStart(2, "0")}`)) serial++;
+    section.sectionId = `S${String(serial).padStart(2, "0")}`;
+    used.add(section.sectionId);
+  }
   return { preamble: preamble.join("\n").trim(), sections };
 }
 
 export function serializeOutlineMarkdown(draft: VisualOutlineDraft): string {
   const preamble = draft.preamble.trim() || "# Selected Outline\n\nPrimary structure: user-edited visual outline.";
+  const used = new Set(draft.sections.map(section => section.sectionId).filter(Boolean));
+  let serial = 1;
   const blocks = draft.sections.map((section, index) => {
+    while (used.has(`S${String(serial).padStart(2, "0")}`)) serial++;
+    const sectionId = section.sectionId || `S${String(serial).padStart(2, "0")}`;
+    used.add(sectionId);
     const title = section.title.trim() || EMPTY_TITLE_SENTINEL;
     const purpose = section.purpose.trim() || "Synthesize and compare the assigned Matrix evidence.";
     const lines = [
-      `## ${index + 1}. ${title}`,
+      `${"#".repeat(section.headingLevel || 2)} ${index + 1}. ${title}`,
+      `<!-- section_id: ${sectionId} -->`,
     ];
     if (section.sectionRole) lines.push(`Section role: ${section.sectionRole}`);
     if (section.paperIds.length) lines.push(`Assigned papers: ${unique(section.paperIds).join(", ")}.`);
@@ -184,6 +203,9 @@ export function OutlineBuilder({ value, papers, onChange }: { value: string; pap
         const visible = papers.filter((paper) => `${paperText(paper)} ${paperLabels.get(paper.paper_id) || ""}`.includes(filter));
         return <article className="outline-builder-card" key={`outline-section-${index}`}><div className="outline-builder-card-head"><strong>{text(`第 ${index + 1} 节`, `Section ${index + 1}`)}</strong><div><button type="button" className="button button-quiet" disabled={index === 0} onClick={() => move(index, -1)}>↑</button><button type="button" className="button button-quiet" disabled={index === draft.sections.length - 1} onClick={() => move(index, 1)}>↓</button><button type="button" className="button button-quiet danger" onClick={() => commit({ ...draft, sections: draft.sections.filter((_, sectionIndex) => sectionIndex !== index) })}>{text("删除", "Delete")}</button></div></div>
           <label className="outline-builder-field"><span>{text("章节标题", "Section title")}</span><input value={section.title} onChange={(event) => updateSection(index, { title: event.target.value })} placeholder={text("例如：芳香族底物的反应范围", "e.g. Scope of aromatic substrates")} /></label>
+          <label className="outline-builder-field"><span>{text("章节层级", "Heading level")}</span><select value={section.headingLevel || 2} onChange={(event) => updateSection(index, { headingLevel: Number(event.target.value) })}>
+            {[2, 3, 4, 5, 6].map(level => <option key={level} value={level} disabled={index === 0 && level !== 2}>{level === 2 ? text("一级章节", "Main section") : text(`${level - 1} 级小节（属于前面的上级章节）`, `Level ${level - 1} subsection (under the preceding parent)`)}</option>)}
+          </select></label>
           <label className="outline-builder-field"><span>{text("本节要回答什么问题", "What should this section answer?")}</span><textarea value={section.purpose} onChange={(event) => updateSection(index, { purpose: event.target.value })} placeholder={text("说明本节比较哪些工作、解决什么问题。", "Describe the papers and question this section should compare.")} /></label>
           {section.contextPaperIds?.length ? <p className="outline-context-note">{text(`系统已将 ${section.contextPaperIds.length} 篇综述或观点文献作为背景证据，不计入正文主分类。`, `${section.contextPaperIds.length} review or perspective paper(s) are retained as contextual evidence rather than primary body evidence.`)}</p> : null}
           <details className="outline-paper-picker"><summary>{text(`选择论文（已选 ${section.paperIds.length} 篇）`, `Select papers (${section.paperIds.length} selected)`)}</summary><div className="outline-paper-picker-body"><input type="search" value={paperFilters[index] || ""} onChange={(event) => setPaperFilters((current) => ({ ...current, [index]: event.target.value }))} placeholder={text("按短序号或标题筛选", "Filter by short number or title")} /><div className="outline-paper-options">{visible.map((paper) => <label key={paper.paper_id} title={text(`内部论文 ID：${paper.paper_id}`, `Internal paper ID: ${paper.paper_id}`)}><input type="checkbox" checked={section.paperIds.includes(paper.paper_id)} onChange={(event) => updateSection(index, { paperIds: event.target.checked ? unique([...section.paperIds, paper.paper_id]) : section.paperIds.filter((paperId) => paperId !== paper.paper_id) })} /><span><strong>{paperLabels.get(paper.paper_id) || paper.paper_id}</strong> · {typeof paper.title === "string" ? paper.title : JSON.stringify(paper.title || "")}</span></label>)}</div></div></details>

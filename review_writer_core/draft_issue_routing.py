@@ -20,7 +20,7 @@ from .evidence_queries import COMPARISON_FIELD_IDS, fact_request_identity, norma
 from .writing_contracts import paragraph_finding_is_blocking
 from .source_attribution import source_grounded_repair
 
-REPAIR_ROUTING_VERSION = 9
+REPAIR_ROUTING_VERSION = 10
 
 
 def requires_user_decision(issue):
@@ -78,12 +78,12 @@ def repair_capability(issue: dict[str, Any], repair: dict[str, Any], *, source_s
     elif source_status == "contradicted" and issue.get('source_corrections'):
         kind, state, auto, eligible, rescue = 'draft_rewrite', 'candidate_confirmation_required', True, True, False
         required = ['current_paragraph', 'local_source']
-    elif source_status == "contradicted" or repair.get("evidence_problem_type") == "conflict":
-        kind, state, auto, eligible, rescue = "human_confirmation", "awaiting_human_confirmation", False, False, False
     elif repair.get("repair_action") == "correct_source_grounded_prose":
         kind, required = "draft_rewrite", ["current_paragraph", "local_source"]
         auto = eligible = bool(source_ready and concrete and located)
         rescue = False
+    elif source_status == "contradicted" or repair.get("evidence_problem_type") == "conflict":
+        kind, state, auto, eligible, rescue = "human_confirmation", "awaiting_human_confirmation", False, False, False
     elif repair.get("repair_stage") == "evidence_package":
         kind, required = "evidence_rescue_then_rewrite", ["current_paragraph", "local_source", "claim_trace"]
         if not concrete and source_status == "partially_supported" and source_ready:

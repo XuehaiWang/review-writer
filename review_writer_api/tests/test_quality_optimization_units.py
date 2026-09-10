@@ -491,7 +491,9 @@ class QualityOptimizationUnitTests(unittest.TestCase):
         metadata = (
             '<!-- inserted_figure: {"figure_id":"P001-F01","paper_id":"P001",'
             '"output_artifact_id":"11111111-1111-1111-1111-111111111111",'
-            '"published_label":"Figure 1","interpretation_basis":"source_caption"} -->'
+            '"published_label":"Figure 1","interpretation_basis":"source_caption",'
+            '"source_relationship":"source_attributed","source_label":"Scheme 2",'
+            '"permission_status":"unknown"} -->'
         )
         image = "![Scheme](/api/v1/artifacts/11111111-1111-1111-1111-111111111111/content)"
         caption = "*Figure 1. Scheme*"

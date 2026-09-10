@@ -303,11 +303,18 @@ class DraftsService(
         citation_numbers: dict[str, int] = {}
         cited_paper_ids: set[str] = set()
         table_number = 0
+        rendered_parents: set[str] = set()
         for section in section_index.get("sections") or []:
             if not isinstance(section, dict):
                 continue
+            if section.get("generation_mode") == "pending_evidence":
+                continue
+            for depth, parent in enumerate(section.get("parent_headings") or [], start=2):
+                if parent["section_id"] not in rendered_parents:
+                    parts.append("#" * depth + " " + parent["title"])
+                    rendered_parents.add(parent["section_id"])
             heading = str(section.get("heading") or section.get("section_id") or "Section")
-            parts.append(f"## {heading}")
+            parts.append("#" * int(section.get("heading_level") or 2) + " " + heading)
             paragraphs = [
                 row for row in section.get("paragraphs") or [] if isinstance(row, dict)
             ]
@@ -2118,7 +2125,8 @@ class DraftsService(
             issue["claim_ids"] = list(dict.fromkeys(issue_claim_ids))
             issue["core_claim_ids"] = [cid for cid in issue_claim_ids
                                        if claims_by_id.get(cid, {}).get("required_for_section")]
-            for key in ("unsupported_claims", "evidence_rescue_status", "observed_problem"):
+            for key in ("unsupported_claims", "evidence_rescue_status", "observed_problem",
+                        "source_attribution_repair"):
                 if key in score:
                     issue[key] = score[key]
             issue["paper_ids"] = quality_issue_paper_ids(

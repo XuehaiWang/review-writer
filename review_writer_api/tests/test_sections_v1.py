@@ -1681,6 +1681,9 @@ class SectionsV1Tests(unittest.TestCase):
             sections = client.get(f"/api/v1/projects/{self.project_id}/sections").json()
             self.assertTrue(sections["handoff"]["current"])
             self.assertIn("Evidence pending", sections["section_files"][0]["content"])
+            self.assertNotIn("Evidence pending", sections["section_drafts_md"])
+            self.assertEqual(len(sections["section_files"]) - 1, sections["report"]["current_output_count"])
+            self.assertEqual(1, sections["report"]["pending_section_count"])
             self.assertTrue(any("Grounded synthesis" in f["content"] for f in sections["section_files"][1:]))
             response = client.post(f"/api/v1/projects/{self.project_id}/sections/confirm",
                 json={"revision": sections["revision"]}, headers=self.headers())

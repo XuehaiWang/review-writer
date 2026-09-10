@@ -116,6 +116,9 @@ def test_generation_acceptance(tmp_path, chemical, confidence, modules, blank_sl
         assert image_call.call_count == (1 if blank_slot else 2)
     else:
         assert report["skeleton"]["smiles"] == ""
+        assert "Draw a SINGLE 3D ball-and-stick" not in report["adapted_prompt"]
+        assert "CONCEPT-ONLY LAYOUT" in report["adapted_prompt"]
+        assert "REQUIRED MODULE COVERAGE" in report["adapted_prompt"]
         assert report["composite"]["status"] == "not_applicable"
         if chemical:
             assert "do not reserve a structure panel" in report["adapted_prompt"]

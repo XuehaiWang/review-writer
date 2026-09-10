@@ -302,6 +302,16 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("text", claims.capabilities)
         self.assertIn("embedding", claims.capabilities)
 
+    def test_overview_token_allows_text_planning_and_image_generation(self) -> None:
+        token = self.service.issue_task_token(
+            job_id=str(self.job_id), user_id=str(self.user_id),
+            project_id=str(self.project_id), job_type="final.overview",
+        )
+        claims = self.service.verify_task_token(token)
+        self.assertIn("text", claims.capabilities)
+        self.assertIn("image", claims.capabilities)
+        self.assertNotIn("embedding", claims.capabilities)
+
     def test_semantic_backfill_uses_ingest_queue_and_embedding_capability(self) -> None:
         token = self.service.issue_task_token(
             job_id=str(self.embedding_job_id),

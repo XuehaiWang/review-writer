@@ -16,20 +16,17 @@ The script:
 3. Selects the best-matching template.
 4. Adapts the template prompt with review-specific content.
 5. Calls the OpenAI-compatible image edit API with the template reference image.
-6. Composites the exact ball-and-stick skeleton into the figure's structure
+6. Composites the exact 2D reaction scheme or product motif into the structure
    panel (calibrated regions first, automatic blank-panel detection for every
    other layout).
 7. Saves the generated overview figure.
 
 Chemistry reviews whose structure contract requires a molecular skeleton run
 in strict *chemical* skeleton mode: an exact
-programmatic skeleton is mandatory.  The optional ai3d style transfer is
-retried up to three times and falls back to that exact programmatic skeleton
-when its probabilistic style gate rejects every attempt.  ``--require-ai-skeleton``
-keeps the stronger opt-in behavior and also requires the AI-styled rendering.
-This guarantees a chemistry overview never fails merely because an aesthetic
-style transfer was rejected, while still refusing a missing or uncomposited
-chemical structure.
+programmatic 2D structure is mandatory. Evidence-supported reactions are
+preferred; when only the product is verified, render that product in 2D
+without inventing reactants. Legacy 3D CLI options remain accepted but no
+longer trigger style transfer or ball-and-stick output.
 """
 from __future__ import annotations
 
@@ -114,8 +111,8 @@ _TEXT_INTEGRITY_GUARD = (
 
 OVERVIEW_SUMMARY_GUIDANCE = (
     "OVERVIEW DISPLAY POLICY (overrides template requests to fill every cell or copy evidence verbatim): "
-    "This is a graphical summary, not a literature evidence table. Each module has one short heading "
-    "(at most 6 words) and ONE concise summary sentence (at most 18 English words). "
+    "This is a graphical summary, not a literature evidence table. Each module preserves its supplied heading "
+    "(wrap long headings without truncation) and ONE concise summary sentence (at most 18 English words). "
     "Describe the supported scientific approach or distinguishing feature directly. "
     "Do not narrate individual papers: no 'a study reported', 'the authors', article titles, "
     "source-study labels, paper IDs, claim IDs, DOIs or reference numbers anywhere on the image. "
@@ -2209,11 +2206,11 @@ def resolve_skeleton_smiles(features: dict[str, Any]) -> str:
 def render_skeleton_model(features: dict[str, Any], output_path: Path,
                           img_size: tuple[int, int] = (900, 640),
                           style: str = "3d") -> Path | None:
-    """Render the review's core motif as an accurate ball-and-stick PNG."""
+    """Render the verified product motif as a paper-style 2D structure."""
     smiles = resolve_skeleton_smiles(features)
     if not smiles:
         return None
-    return render_smiles_ball_and_stick(smiles, output_path, img_size, style)
+    return _render_motif_2d(smiles, output_path, img_size)
 
 
 def skeleton_atom_counts(smiles: str) -> tuple[int, int] | None:
@@ -2611,7 +2608,7 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
                 "substrate_classes": "substrate",
                 "catalyst_or_method": "catalyst_or_method",
                 "reaction_strategy": "reaction_type",
-                "user_defined": "document_scope",
+                "user_defined": "user_defined",
             }
             if axis:
                 features["overview_axis_contract"] = basis
@@ -2631,7 +2628,11 @@ def extract_review_features(project_dir: Path) -> dict[str, Any]:
                     continue
                 section_id = str(section.get("section_id") or "").strip()
                 title = str(section.get("title") or section.get("heading") or "").strip()
-                label = _heading_to_category(title)
+                # Confirmed headings are not two-word hexagon labels. Preserve
+                # their scientific distinction and the full section binding.
+                label = " ".join(title.split())
+                if section.get("organizing_only"):
+                    continue
                 if not label or label in features["overview_modules"]:
                     continue
                 features["overview_modules"].append(label)
@@ -3000,7 +3001,7 @@ def score_template(template: dict[str, Any], features: dict[str, Any]) -> float:
                 or "metal" in layout or "catal" in prompt):
             score += 4.0
     elif group_by in {"substrate", "leaving_group", "product", "ligand_or_chiral_source",
-                      "organometallic_partner", "reaction_type", "document_scope"}:
+                      "organometallic_partner", "reaction_type", "document_scope", "user_defined"}:
         # Non-catalyst dimensions: penalize metal-centric framing, reward
         # layouts that generalize to arbitrary category families
         if "metal-centered" in prompt or "metal" in layout:
@@ -3406,7 +3407,7 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any],
         else:
             structure_rule = (
                 "- Leave the reserved structure panel COMPLETELY EMPTY (plain white, "
-                "no molecule, no drawing): an exact ball-and-stick model is inserted "
+                "no molecule, no drawing): an exact 2D skeletal formula is inserted "
                 "programmatically after generation. Only the short caption below it is drawn.\n"
                 "- Do NOT draw ANY molecule, product structure, reaction scheme, or "
                 "transformation sketch anywhere else in the figure, even where the layout "
@@ -3419,8 +3420,8 @@ def build_adapted_prompt(template: dict[str, Any], features: dict[str, Any],
             )
     elif chemistry_project:
         structure_rule = (
-            "- The left-page structure area shows ONLY a single representative "
-            "skeleton/motif."
+            "- Use only the supplied exact 2D reaction scheme or product motif in the "
+            "structure area. Never draw 3D molecules or ball-and-stick models."
         )
         blank_rule = (
             "- Omit redundant optional cells and panels; keep generous whitespace."
@@ -3449,6 +3450,9 @@ ADAPTATION INSTRUCTIONS FOR THIS REVIEW:
 Banner title (English, for the navy banner; render EXACTLY this concise title and no request text): "{english_title}"
 Time window: {time_window}
 Classification rule: "{classification_rule}"
+REQUIRED MODULE COVERAGE: Render every module below exactly once, in the supplied order.
+The template's example slot count is not authoritative. Adapt rows/columns to fit all modules;
+remove optional sidebars before reducing module space. Never drop or merge a required module.
 
 {skeleton_desc}
 
@@ -3464,7 +3468,7 @@ CRITICAL RULES:
 - Never print the user's search/query instruction (for example, "Please write a review...") anywhere in the figure.
 - Do NOT draw a reaction equation (no arrow, no substrate-to-product transformation).
 {structure_rule}
-- Keep all text concise. Category labels stay SHORT (symbols or max 2 words). No long names in hexagons.
+- Wrap complete module headings across lines. Do not truncate their scientific meaning to fit a template.
 - Each module contains one supported summary, at most 18 words. No dotted placeholders.
 {blank_rule}
 - Use the same visual style, layout, color scheme, and icon design as the reference template.
@@ -3490,6 +3494,12 @@ def _build_skeleton_description(features: dict[str, Any]) -> str:
     For chemistry reviews with a resolved SMILES: use composite/skeleton image.
     For non-chemistry reviews: use a generic concept illustration.
     """
+    if (features.get("_chemistry_decision") or {}).get("mode") == "concept":
+        return (
+            "CONCEPT-ONLY LAYOUT: Use the entire content area for the required review modules. "
+            "Do not reserve a structure panel or draw molecules, chemical formulas, ball-and-stick "
+            "models, or reaction arrows. Use neutral abstract icons only."
+        )
     products = features.get("product_keywords", [])
     prod_label = products[0] if products else "product"
 
@@ -3537,60 +3547,42 @@ Draw ONE EMPTY white rounded panel with a thin light-gray border — NO molecule
 Position: below the horizontal lane rows, on the left half of the page, above the bottom band.
 Size: roughly 30% of the page width and 45% of the content height (a large landscape rectangle).
 Keep every arrow, box, icon, and label CLEAR of this panel — nothing may cross or overlap it.
-A chemically accurate ball-and-stick model will be inserted into this panel afterwards.
+A chemically accurate 2D skeletal formula will be inserted into this panel afterwards. Never draw a ball-and-stick model.
 Caption below the panel: "{label}"."""
         return f"""LEFT-PAGE STRUCTURE AREA (center of left page):
 Draw an EMPTY white rounded panel here — NO molecule, NO atoms, NO bonds.
-A chemically accurate ball-and-stick model will be inserted into this panel afterwards.
+A chemically accurate 2D skeletal formula will be inserted into this panel afterwards. Never draw a ball-and-stick model.
 Label below: "{label}"."""
 
     if features.get("_skeleton_image"):
         return f"""LEFT-PAGE STRUCTURE AREA (center of left page):
-The SECOND attached image is a chemically accurate 3D ball-and-stick model of "{label}".
+The SECOND attached image is a chemically accurate 2D skeletal formula or reaction scheme for "{label}". Never convert it to a ball-and-stick model.
 Reproduce it EXACTLY in the structure area: identical atoms, bond angles, bond orders,
 colors, and orientation. Do NOT redraw, modify, extend, or substitute its geometry.
 Label below: "{label}"."""
 
-    # No skeleton image available: provide generic 3D ball-and-stick instructions
-    skeleton_desc = f"A 3D ball-and-stick model representing '{label}'. Use standard CPK coloring."
-
+    # Without an exact render, never ask the image model to invent chemistry.
     return f"""LEFT-PAGE STRUCTURE AREA (center of left page):
-Draw a SINGLE 3D ball-and-stick molecular model (NOT a reaction equation, NO arrow, NO 2D bond-line):
-  Model: {skeleton_desc}
-  Label below: "{label}"
-
-BALL-AND-STICK RENDERING RULES:
-- Bond angles must be chemically correct: sp3 ~109°, sp2 ~120°, sp ~180°. NO 90° angles.
-- Render as a 3D BALL-AND-STICK model (not 2D bond-line notation)
-- Atoms = colored spheres (CPK): C=dark gray, H=white, O=red, N=blue, S=yellow, P=orange, metals=distinct colors
-- Bonds = gray cylinders/sticks connecting spheres
-- Double bonds = two parallel sticks; triple bonds = three parallel sticks
-- R-group substituents = colored spheres labeled R1, R2, R3, R4
-- Use a clean 3D perspective view (slightly rotated) so the spatial arrangement is clear
-- White or light gray background
-
-QUALITY CHECK:
-- Verify ALL bond angles are chemically plausible
-- Verify the 3D arrangement clearly shows the molecular geometry
-- Verify no atoms are missing or misplaced"""
+Use the supported text label "{label}" only. No exact structure image is available.
+Do not invent reactants, bonds, stereochemistry, conditions, or reaction arrows.
+Do not draw 3D molecules or ball-and-stick models."""
 
 
 def _build_metal_rows_text(features: dict[str, Any]) -> str:
     """Build right-page category rows using fully dynamic multi-pass extraction."""
     execution = features.get("argument_execution")
     if isinstance(execution, dict):
-        sections = {row["section_id"]: row for row in execution.get("sections") or []}
-        lines = ["EVIDENCE INPUT FOR SUMMARIZATION ONLY (not text to copy onto the image).",
-                 OVERVIEW_SUMMARY_GUIDANCE]
+        summaries = (features.get("_content_pack") or {}).get("module_summaries") or {}
+        lines = ["EXACT MODULE DISPLAY TEXT (do not expand or add study details).",
+                 "Each summary is at most 18 English words; preserve complete sentences."]
         bindings = features.get("overview_evidence_bindings") or {}
         for label in features.get("overview_modules") or []:
-            section = sections.get(str((bindings.get(label) or {}).get("section_id")), {})
-            claims = section.get("claims") or []
             lines.append(f"Module: {label}")
-            if not claims:
+            summary = summaries.get(str((bindings.get(label) or {}).get("section_id")))
+            if summary:
+                lines.append(f"Summary: {summary}")
+            else:
                 lines.append("Use the category label only; omit unsupported performance/condition cells.")
-            for claim in claims[:2]:
-                lines.append(f"  Supporting assertion: {claim['claim']}")
         return "\n".join(lines)
     metals = _clean_categories(features.get("metal_categories", []))
     if not metals:
@@ -4868,6 +4860,31 @@ def _text_list_from_data(data: dict[str, Any], key: str,
     return items if len(items) >= min_count else []
 
 
+def _validated_module_summaries(data, features):
+    """Keep concise, section-bound display text; never truncate a scientific sentence."""
+    bindings = features.get("overview_evidence_bindings") or {}
+    sections = {str(row.get("section_id")): row for row in
+                (features.get("argument_execution") or {}).get("sections") or []}
+    allowed = {str(row.get("section_id")) for row in bindings.values()}
+    result = {}
+    rows = data.get("module_summaries")
+    if not isinstance(rows, list):
+        return result
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sid, summary = str(row.get("section_id") or ""), str(row.get("summary") or "").strip()
+        claims = {str(c.get("claim_id")) for c in sections.get(sid, {}).get("claims") or []}
+        refs = row.get("claim_ids")
+        if (sid not in allowed or sid in result or not summary or len(summary.split()) > 18
+                or len(summary) > 180 or "\n" in summary
+                or not isinstance(refs, list) or not refs
+                or not all(isinstance(ref, str) and ref in claims for ref in refs)):
+            continue
+        result[sid] = summary
+    return result
+
+
 def _llm_content_pack(features: dict[str, Any]) -> dict[str, Any] | None:
     """Ask the text model for the overview's full text content in one call.
 
@@ -4901,6 +4918,18 @@ def _llm_content_pack(features: dict[str, Any]) -> dict[str, Any] | None:
         prompt += "\n" + OVERVIEW_SUMMARY_GUIDANCE
         prompt += "\nAuthoritative Overview contract (retain its axis and modules):\n" + json.dumps(
             features.get("overview_content_contract") or {}, ensure_ascii=False
+        )
+        prompt += (
+            '\nAlso return module_summaries: [{section_id, summary, claim_ids}]. '
+            'Provide one complete summary sentence per module, at most 18 English words, using only '
+            'claims belonging to that section. Cite their exact claim_ids in JSON, never in display text. '
+            'Summarize its approach, not individual experimental recipes or performance lists. '
+            'If no supported summary exists, omit that entry; its heading will still be displayed.\n'
+            + json.dumps([{"section_id": section.get("section_id"), "claims": [
+                {"claim_id": claim.get("claim_id"), "claim": claim.get("claim")}
+                for claim in section.get("claims") or []]}
+                for section in (features.get("argument_execution") or {}).get("sections") or []],
+                ensure_ascii=False)
         )
         prompt += "\nRepresentative product constraint:\n" + json.dumps(
             features.get("overview_structure_contract") or {}, ensure_ascii=False
@@ -4939,7 +4968,8 @@ def _llm_content_pack(features: dict[str, Any]) -> dict[str, Any] | None:
     key_findings = _text_list_from_data(data, "key_findings", min_count=1, max_len=80)
     cross_cutting = _text_list_from_data(data, "cross_cutting", min_count=1, max_len=48)
     take_home = _text_list_from_data(data, "take_home", min_count=1, max_len=60)
-    if scheme is None and not (key_findings or cross_cutting or take_home):
+    module_summaries = _validated_module_summaries(data, features)
+    if scheme is None and not (key_findings or cross_cutting or take_home or module_summaries):
         echoed = {k: str(v)[:70] for k, v in data.items()}
         _fail(f"invalid content pack: {problem} | model_returned={echoed}")
         return None
@@ -4950,6 +4980,7 @@ def _llm_content_pack(features: dict[str, Any]) -> dict[str, Any] | None:
     _fail("ok" if scheme is not None else "text-only pack (reaction invalid)")
     return {
         "reaction": scheme,
+        "module_summaries": module_summaries,
         "key_findings": key_findings,
         "cross_cutting": cross_cutting,
         "take_home": take_home,
@@ -5044,14 +5075,15 @@ def _render_motif_2d(smiles: str, output_path: Path,
 
     Wildcard atoms are relabeled R1..Rn.  The white canvas is converted to
     transparency with ``_skeleton_rgba`` so compositing stays seamless.
-    Returns None when RDKit is unavailable or rendering fails, so callers fall
-    back to the ball-and-stick renderer.
+    Returns None when RDKit is unavailable or rendering fails; never substitute
+    a ball-and-stick model for the requested paper-style formula.
     """
     try:
         from rdkit import Chem
         from rdkit.Chem import rdDepictor
         from rdkit.Chem.Draw import rdMolDraw2D
-    except ImportError:
+    except ImportError as exc:
+        print(f"  2D renderer dependency unavailable: {exc}", file=sys.stderr)
         return None
     try:
         import io
@@ -5076,17 +5108,15 @@ def _render_motif_2d(smiles: str, output_path: Path,
         output_path.parent.mkdir(parents=True, exist_ok=True)
         img.save(output_path, format="PNG")
         return output_path
-    except Exception:
+    except Exception as exc:
+        print(f"  2D structure rendering failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return None
 
 
 def _render_scheme_molecule(smi: str, out_path: Path,
                             mol_size: tuple[int, int], style: str) -> Path | None:
-    """Render one scheme molecule, preferring 2D bond-line over ball-and-stick."""
-    path = _render_motif_2d(smi, out_path, mol_size)
-    if path:
-        return path
-    return render_smiles_ball_and_stick(smi, out_path, mol_size, style)
+    """Render a scheme molecule exclusively as a 2D skeletal formula."""
+    return _render_motif_2d(smi, out_path, mol_size)
 
 
 def render_reaction_scheme(reaction: dict[str, str], output_path: Path,
@@ -5094,9 +5124,8 @@ def render_reaction_scheme(reaction: dict[str, str], output_path: Path,
                            style: str = "3d") -> Path | None:
     """Render substrate(s) -> product (+ catalyst label) as a programmatic scheme.
 
-    Every molecule is drawn as a 2D bond-line structure via RDKit when
-    available (paper-style skeletal formulae), falling back to the 3D
-    ball-and-stick renderer otherwise.  A transformation that needs several
+    Every molecule is drawn as a 2D bond-line structure via RDKit, without a
+    3D fallback. A transformation that needs several
     reactants arrives as a dot-disconnected SMILES and is split into its
     fragments here, each rendered on its own and joined with a "+": handing the
     dot string to a renderer as one molecule would either read as stray
@@ -5366,7 +5395,7 @@ def resolve_reaction_scheme(features: dict[str, Any]) -> dict[str, str] | None:
         if pack:
             features["_content_pack"] = {
                 key: pack.get(key) or []
-                for key in ("key_findings", "cross_cutting", "take_home")
+                for key in ("key_findings", "cross_cutting", "take_home", "module_summaries")
             }
         return None
     # Respect an explicit deterministic override; don't replace it with a scheme.
@@ -5383,11 +5412,12 @@ def resolve_reaction_scheme(features: dict[str, Any]) -> dict[str, str] | None:
         # the automatic concept-overview fallback instead.
         features["_chemistry_decision"] = _automatic_chemistry_decision(features, None)
         return None
-    if pack.get("key_findings") or pack.get("cross_cutting") or pack.get("take_home"):
+    if pack.get("key_findings") or pack.get("cross_cutting") or pack.get("take_home") or pack.get("module_summaries"):
         features["_content_pack"] = {
             "key_findings": pack.get("key_findings") or [],
             "cross_cutting": pack.get("cross_cutting") or [],
             "take_home": pack.get("take_home") or [],
+            "module_summaries": pack.get("module_summaries") or {},
         }
     scheme = pack.get("reaction")
     if scheme:
@@ -5503,19 +5533,14 @@ def main():
     )
     parser.add_argument(
         "--skeleton-style",
-        default="ai3d",
-        choices=["3d", "flat", "ai3d"],
-        help="Ball-and-stick skeleton rendering style; 'flat' restores the original 2D vector look; "
-             "'ai3d' asks the image model to restyle the exact skeleton into a 3D render, gated by a "
-             "programmatic sanity check with automatic fallback to the programmatic 3D skeleton.",
+        default="2d",
+        choices=["2d", "3d", "flat", "ai3d"],
+        help="Overview chemistry uses 2D skeletal formulae. Legacy style values are accepted as aliases.",
     )
     parser.add_argument(
         "--require-ai-skeleton",
         action="store_true",
-        help="Stronger opt-in strict mode: require both the exact chemical skeleton and "
-             "an AI-styled 3D skeleton. Chemistry reviews always require the exact "
-             "chemical skeleton, but normally fall back to the exact programmatic 3D "
-             "render when AI style transfer is rejected.",
+        help="Deprecated compatibility flag; overview chemistry remains exact 2D, never AI-restyled 3D.",
     )
     parser.add_argument("--output", default="", help="Output path for generated figure")
     parser.add_argument("--dry-run", action="store_true", help="Only show template matching, don't call API")
@@ -5580,8 +5605,9 @@ def main():
     extra_images: list[Path] = []
     skeleton_png = out_dir / "skeleton_model.png"
     layout_type = best_template["layout_type"]
-    program_style = "3d" if args.skeleton_style == "ai3d" else args.skeleton_style
-    ai_style_required = bool(args.require_ai_skeleton)
+    program_style = "2d"
+    # Legacy 3D CLI flags remain parseable, but overview chemistry is now 2D.
+    ai_style_required = False
     # Low-confidence candidates deliberately produce a concept overview.  This
     # is an automatic safety fallback, not a missing-skeleton error.
     strict_skeleton = (
@@ -5603,7 +5629,7 @@ def main():
             skeleton={
                 "strict": True,
                 "ai_style_required": ai_style_required,
-                "style": args.skeleton_style,
+                "style": program_style,
                 "smiles": smiles,
                 "attempts": skeleton_attempts,
             },
@@ -5621,7 +5647,7 @@ def main():
             "an exact molecule.",
         )
     skeleton_rendered = None
-    skeleton_source = "programmatic"
+    skeleton_source = "product_motif_2d"
     if reaction is not None:
         skeleton_rendered = render_reaction_scheme(reaction, skeleton_png,
                                                    style=program_style)
@@ -5637,33 +5663,13 @@ def main():
     if strict_skeleton and not skeleton_rendered:
         _fail_skeleton(
             "skeleton_render_failed",
-            f"Strict skeleton mode: the ball-and-stick renderer rejected SMILES {smiles!r}.",
+            f"The 2D structure renderer could not render SMILES {smiles!r}; check RDKit availability and the validated structure.",
         )
     if skeleton_source == "reaction_scheme":
         ai_redraw_note = "skipped_reaction_scheme"
         print("  Reaction scheme kept programmatic (AI restyle gate is single-molecule only).")
-    elif skeleton_rendered and args.skeleton_style == "ai3d" and not args.dry_run:
-        ai_png, ai_redraw_note, skeleton_attempts = attempt_ai_skeleton_redraw(
-            features, skeleton_png, out_dir / "skeleton_model_ai3d.png",
-            api_key, base_url, args.model, wire_api)
-        if ai_png is not None:
-            skeleton_png = ai_png
-            skeleton_source = "ai_redraw"
-            print(f"  AI 3D skeleton redraw accepted by the sanity gate: {ai_png}")
-        elif ai_style_required:
-            _fail_skeleton(
-                "skeleton_redraw_failed",
-                "Strict skeleton mode: the AI 3D skeleton redraw failed every "
-                f"attempt ({'; '.join(skeleton_attempts)}). Refusing to ship a "
-                "degraded overview; re-run the overview generation to retry.",
-            )
-        else:
-            skeleton_source = "programmatic_fallback"
-            print(
-                f"  WARNING: AI 3D skeleton redraw not used ({ai_redraw_note}); "
-                "using the exact programmatic 3D skeleton.",
-                file=sys.stderr,
-            )
+    elif skeleton_rendered:
+        ai_redraw_note = "skipped_product_motif_2d"
     # Composite whenever an exact skeleton exists: calibrated layouts use the
     # measured regions, every other layout auto-detects its blank panel, so
     # the molecule is always pixel-exact instead of model-drawn.
@@ -5675,7 +5681,7 @@ def main():
         # always provide the exact model as an extra reference: the model draws
         # a faithful fallback in case the guarded compositing later skips
         extra_images.append(skeleton_png)
-        print(f"  Accurate ball-and-stick model rendered: {skeleton_png}")
+        print(f"  Exact 2D chemistry rendered ({skeleton_source}): {skeleton_png}")
     adapted_prompt = build_adapted_prompt(best_template, features,
                                           composite_mode=will_composite)
     print(f"\n  Adapted prompt length: {len(adapted_prompt)} chars")
@@ -5784,7 +5790,7 @@ def main():
         )
         composited, skip_reason, panel_source = composite_skeleton_into_figure(
             output_path, skeleton_png, layout_type,
-            allow_rotate=(skeleton_source != "reaction_scheme"),
+            allow_rotate=False,
             scheme_mode=(skeleton_source == "reaction_scheme"),
             scheme_title=(reaction.get("reaction_name", "")
                           if isinstance(reaction, dict) else ""),
@@ -5834,7 +5840,7 @@ def main():
     skeleton_report = {
         "strict": strict_skeleton,
         "ai_style_required": ai_style_required,
-        "style": args.skeleton_style,
+        "style": program_style,
         "source": skeleton_source,
         "smiles": smiles,
         "attempts": skeleton_attempts,

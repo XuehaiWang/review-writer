@@ -3,14 +3,46 @@
 from .quality_rules import finding_category
 
 
+def validated_attribution_repair(text, proposal, evidence):
+    """Source-addressable rewrite guidance, not permission to bypass candidate QA."""
+    if not isinstance(proposal, dict) or proposal.get("kind") != "wrong_study_attribution":
+        return {}
+    span = proposal.get("claim_span")
+    direction = proposal.get("correction")
+    if (not isinstance(span, str) or not span or text.count(span) != 1
+            or not isinstance(direction, str) or not direction.strip() or len(direction) > 1200):
+        return {}
+    passages = {p.get("ref"): p.get("text", "")
+                for paper in evidence.get("evidence") or []
+                for p in paper.get("original_passages") or []}
+    quotes = proposal.get("context")
+    if not isinstance(quotes, list) or not 2 <= len(quotes) <= 4:
+        return {}
+    checked = []
+    for row in quotes:
+        if not isinstance(row, dict):
+            return {}
+        ref, quote = row.get("source_ref"), row.get("quote")
+        if (not isinstance(ref, str) or not isinstance(quote, str) or len(quote.strip()) < 20
+                or quote not in passages.get(ref, "")):
+            return {}
+        checked.append({"source_ref": ref, "quote": quote})
+    if len({r["quote"] for r in checked}) < 2:
+        return {}
+    return {"kind": proposal["kind"], "claim_span": span,
+            "correction": direction, "context": checked}
+
+
 def source_grounded_repair(finding):
     """A concrete evidence defect with sufficient checked context, not missing evidence."""
     return bool(
         finding_category(finding) == "evidence"
-        and finding.get("source_check_status") == "verified"
+        and (finding.get("source_check_status") == "verified"
+             or bool(finding.get("source_attribution_repair")))
         and (finding.get("failed_dimensions") or finding.get("unsupported_claims"))
         and not finding.get("missing_core_claim_ids")
-        and finding.get("evidence_problem_type") in {None, "", "none", "binding_mismatch"}
+        and (finding.get("evidence_problem_type") in {None, "", "none", "binding_mismatch"}
+             or bool(finding.get("source_attribution_repair")))
     )
 
 SOURCE_ATTRIBUTION_POLICY = (

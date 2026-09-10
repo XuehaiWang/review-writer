@@ -56,7 +56,7 @@ from review_writer_core.draft_quality import (  # noqa: E402
 )
 from review_writer_core.publication_voice import publication_voice_issues  # noqa: E402
 from review_writer_core.source_attribution import (  # noqa: E402
-    SOURCE_ATTRIBUTION_POLICY, attribution_repair_instruction,
+    SOURCE_ATTRIBUTION_POLICY, attribution_repair_instruction, validated_attribution_repair,
 )
 from review_writer_core.section_narrative_contracts import (  # noqa: E402
     canonical_argument_role,
@@ -1894,6 +1894,13 @@ def evaluation_prompt(
         "before is an exact short span in current prose; source_quote is verbatim from the passage and contains after. "
         "Do not propose these for ambiguous parsing, missing subscripts without corroborating context, inference, "
         "conflicting experiments, citation changes or disputed interpretations. Corrections are reviewable candidates only. "
+        "For wrong study/method attribution (prior work confused with this study), also return source_attribution_repair: "
+        "{kind:'wrong_study_attribution',claim_span,correction,context:[{source_ref,quote},{source_ref,quote}]}. "
+        "claim_span must occur exactly in the current paragraph. Quote verbatim local context identifying the original "
+        "owner AND the transition or current study results; retain enough surrounding text to resolve attribution. "
+        "correction is a concise instruction, not a new fact. Do not use this for genuine conflicting experiments, "
+        "uncertain source identity or absent evidence. Keep the current erroneous assertion marked unsupported or "
+        "contradicted until the rewritten candidate is checked. Use the same repair for each affected paragraph. "
         f"Overall goal: {goal}; paragraph goal: {paragraph_goal}.\n"
         f"Draft structure index: {json.dumps(draft_structure or [], ensure_ascii=False)}\n"
         f"Rubric: {json.dumps(rubric, ensure_ascii=False)}\n"
@@ -2338,6 +2345,9 @@ def normalize_evaluation(
             if route in {"pass", "final_polish"}:
                 route = "section_rewrite"
         record = {
+            "source_attribution_repair": validated_attribution_repair(
+                str(paragraph_by_id.get(paragraph_id, {}).get('text') or ''),
+                item.get('source_attribution_repair'), paragraph_evidence),
             "source_corrections": verified_corrections(str(paragraph_by_id.get(paragraph_id, {}).get('text') or ''),
                                                       item.get('source_corrections'), paragraph_evidence),
             "paragraph_id": paragraph_id,
@@ -3560,7 +3570,7 @@ def targeted_source_recheck(project, batch, raw, evidence, score_one):
             text_hash = hashlib.sha256(str(paragraph['text']).encode()).hexdigest()
             citation_binding = paragraph_citation_binding(project, paragraph)
             scope_hash = hashlib.sha256(json.dumps([
-                DRAFT_QUALITY_RULE_VERSION, 'targeted-source-check/2', text_hash,
+                DRAFT_QUALITY_RULE_VERSION, 'targeted-source-check/3', text_hash,
                 citation_binding,
                 sorted(clean_text(q).casefold() for q in queries),
                 sorted((p['paper_id'], str(p.get('source_content_hash') or ''),
@@ -3577,7 +3587,10 @@ def targeted_source_recheck(project, batch, raw, evidence, score_one):
             expanded.update(paragraph_text_hash=text_hash, citation_binding=citation_binding, targeted_source_recheck=record)
             evidence[pid] = expanded
             old = expanded
-            if (not new_texts or (not new_texts - old_texts and not previous) or (previous.get('input_fingerprint') == scope_hash
+            needs_attribution_check = bool(finding.get('unsupported_claims')
+                and finding.get('source_check_status') in {'contradicted', 'partially_supported'}
+                and not validated_attribution_repair(paragraph['text'], finding.get('source_attribution_repair'), expanded))
+            if (not new_texts or (not new_texts - old_texts and not previous and not needs_attribution_check) or (previous.get('input_fingerprint') == scope_hash
                     and previous.get('status') == 'checked_no_new_support')):
                 retained.append(paragraph)
                 continue

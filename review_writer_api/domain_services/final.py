@@ -44,7 +44,7 @@ from review_writer_core.chemical_typography import normalize_chemical_typography
 from review_writer_core.draft_quality import QUALITY_INPUT_ARTIFACTS
 from review_writer_core.stages.discovery.records import discovery_search_record
 from review_writer_core.bibliography_audit import bibliography_field_readiness
-from review_writer_core.final_issue_details import final_issue_details
+from review_writer_core.final_issue_details import final_issue_details, without_permission_checks
 from review_writer_core.manuscript_state import build_manuscript_state
 from review_writer_core.markdown_images import (
     malformed_markdown_image_lines,
@@ -295,11 +295,6 @@ def _figure_argument_findings(markdown: str) -> list[dict[str, Any]]:
             issues.append("paper_level_interpretation_missing")
         if (metadata.get("caption_quality") or {}).get("status") == "pending":
             issues.append("figure_caption_pending")
-        if (
-            str(metadata.get("source_relationship") or "") == "source_attributed"
-            and str(metadata.get("permission_status") or "") != "verified"
-        ):
-            issues.append("source_reuse_permission_unverified")
         if issues:
             findings.append(
                 {
@@ -2151,14 +2146,7 @@ class FinalService(ArtifactBackedService):
             release_integrity_issues.append("overview_semantics_invalid")
         figure_findings = validation.get("figure_argument_findings") or []
         if any(
-            "source_reuse_permission_unverified" in (row.get("issues") or [])
-            for row in figure_findings
-            if isinstance(row, dict)
-        ):
-            release_integrity_issues.append("figure_rights_unresolved")
-        if any(
             set(row.get("issues") or [])
-            - {"source_reuse_permission_unverified"}
             for row in figure_findings
             if isinstance(row, dict)
         ):
@@ -2676,6 +2664,9 @@ class FinalService(ArtifactBackedService):
         release, release_artifact = self._read_json(
             principal, project_id, FINAL_RELEASE
         )
+        # Apply current policy to historical reports without rewriting immutable artifacts.
+        release = without_permission_checks(release, validation.get("figure_argument_findings"))
+        validation = without_permission_checks(validation)
         docx = self._artifact(principal, project_id, FINAL_DOCX)
         docx_qa, docx_qa_artifact = self._read_json(
             principal, project_id, FINAL_DOCX_QA

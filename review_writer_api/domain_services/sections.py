@@ -245,6 +245,8 @@ class SectionsService(OwnedProjectService):
         for section in normalized_sections:
             if not isinstance(section, dict) or not str(section.get("section_id") or ""):
                 continue
+            if section.get("organizing_only"):
+                continue
             if policy_mode != "argument_based":
                 section = apply_single_paper_policy(section)
             claim_contract = normalize_section_claim_contract(section)
@@ -309,6 +311,8 @@ class SectionsService(OwnedProjectService):
             tasks.append(
                 {
                     "section_id": str(section["section_id"]),
+                    "heading_level": section.get("heading_level", 2),
+                    "parent_headings": section.get("parent_headings") or [],
                     "heading": str(section.get("title") or section["section_id"]),
                     "section_role": str(section.get("section_role") or "body"),
                     "core_argument": core_argument,
@@ -1359,6 +1363,9 @@ class SectionsService(OwnedProjectService):
                         and legacy_fallback_authorized
                     ),
                     "status": section_status,
+                    "source_lookup_complete": bool(allowed) and all(
+                        (index_summaries.get(pid) or {}).get("fulltext") == "ready" for pid in allowed
+                    ),
                     "hit_count": len(hit_rows),
                     "claim_eligible_hit_count": len(usable_hits),
                     "paper_count": len(evidence_papers),
@@ -2377,13 +2384,16 @@ class SectionsService(OwnedProjectService):
             index_sections.append(
                 {
                     **section,
+                    "heading_level": task.get("heading_level", 2),
+                    "parent_headings": task.get("parent_headings") or [],
                     "draft_md": markdown + "\n",
                     "logical_name": logical,
                 }
             )
-        merged = str(built.get("section_drafts_md") or "").strip()
-        if not merged:
-            merged = "\n\n".join(section["draft_md"] for section in index_sections)
+        # The index retains empty evidence slots for review/recovery; manuscript
+        # text contains only actual prose, never internal pending notices.
+        merged = "\n\n".join(section["draft_md"] for section in index_sections
+                               if section.get("generation_mode") != "pending_evidence")
         report_md = str(built.get("report_md") or "").strip()
         index = {
             "project_id": project_id,
@@ -2849,10 +2859,11 @@ class SectionsService(OwnedProjectService):
         for section in public_blueprint.get("sections") or []:
             if not isinstance(section, dict):
                 continue
-            section["title"] = sanitize_internal_section_title(
-                section.get("title"),
-                topic_partition=section.get("topic_partition"),
-            )
+            if not section.get("custom_outline"):
+                section["title"] = sanitize_internal_section_title(
+                    section.get("title"),
+                    topic_partition=section.get("topic_partition"),
+                )
         tasks = self.tasks_from_blueprint(public_blueprint)
         assigned = list(
             dict.fromkeys(
@@ -2992,7 +3003,8 @@ class SectionsService(OwnedProjectService):
             },
             "report": {
                 "current_task_count": len(tasks),
-                "current_output_count": len(section_files),
+                "current_output_count": sum(s.get("generation_mode") != "pending_evidence" for s in (index or {}).get("sections") or []) if current else 0,
+                "pending_section_count": sum(s.get("generation_mode") == "pending_evidence" for s in (index or {}).get("sections") or []) if current else 0,
                 "jobs": [_job_payload(job) for job in jobs],
             },
             "workspace": {
@@ -3031,6 +3043,11 @@ class SectionsService(OwnedProjectService):
             raise SectionOutputsMissing(
                 "One or more current Blueprint sections have no current draft output."
             )
+        if not any(section.get("generation_mode") != "pending_evidence"
+                   and section.get("section_role", "body") == "body"
+                   and section.get("paragraphs")
+                   for section in (payload.get("section_drafts") or {}).get("sections") or []):
+            raise SectionOutputsMissing("No body section has usable prose yet. Add sources or retry the unfinished sections.")
         state = self.repository.compare_and_set_stage(
             principal.user_id,
             project_id,

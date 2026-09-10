@@ -2326,7 +2326,8 @@ def main() -> int:
             )
             record_section_failure(
                 section_id, str(task.get("heading") or section_id), message,
-                evidence_failure=retrieval_mode != "unsupported_retrieval_mode"
+                evidence_failure=(retrieval_mode != "unsupported_retrieval_mode"
+                                  and section_evidence.get("source_lookup_complete", False))
             )
             continue
         evidence_paper_count = len(
@@ -2371,8 +2372,12 @@ def main() -> int:
                     + ("\nCompleted body claims (synthesize only these):\n" + json.dumps(body_synthesis_context, ensure_ascii=False)
                        if role == "conclusion" else "")), call=source_call)
             if not writing_section["paragraphs"]:
+                malformed = any(row.get("reason") in {
+                    "invalid_paragraph", "invalid_claim", "missing_or_invalid_source_span", "invalid_result_context"
+                } for row in source_review.get("omitted") or [])
                 record_section_failure(section_id, str(task.get("heading") or section_id),
-                    "No source-supported prose remained after checking the actual claims.", evidence_failure=True)
+                    "Source response needs repair." if malformed else
+                    "No source-supported prose remained after checking the actual claims.", evidence_failure=not malformed)
                 continue
             overview, paragraphs, validations, reviews = validate_and_realize_section(
                 section_id=section_id, generated=generated_draft, writing_section=writing_section,
@@ -2393,7 +2398,7 @@ def main() -> int:
                 if generation_mode != "standard" else "pass", **source_review})
         except (RuntimeError, urllib.error.HTTPError, urllib.error.URLError) as exc:
             record_section_failure(section_id, str(task.get("heading") or section_id),
-                str(exc), evidence_failure=True)
+                str(exc))
             continue
         write_generation_progress(
             stage,

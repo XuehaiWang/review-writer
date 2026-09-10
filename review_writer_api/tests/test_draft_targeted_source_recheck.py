@@ -19,6 +19,22 @@ def test_query_variants_keep_each_claim_instead_of_only_highest_scoring_topic():
     assert {h['page'] for h in hits} >= {1, 2}
 
 
+def test_conflict_with_existing_context_gets_one_bounded_recheck(tmp_path):
+    p, raw, expanded, _ = _views()
+    raw['paragraph_scores'][0]['source_check_status'] = 'contradicted'
+    evidence = {p['paragraph_id']: deepcopy(expanded)}
+    calls = []
+    def scorer(*args):
+        calls.append(args)
+        return deepcopy(raw)
+    _recheck(tmp_path, p, raw, expanded, evidence, scorer)
+    assert len(calls) == 1  # no new passages are required to resolve attribution
+    history = {'entries': [{'paragraph_id': p['paragraph_id'],
+                           'targeted_source_recheck': evidence[p['paragraph_id']]['targeted_source_recheck']}]}
+    _recheck(tmp_path, p, raw, expanded, evidence, scorer, history)
+    assert len(calls) == 1  # identical unresolved input does not loop forever
+
+
 def _views():
     paragraph = {'paragraph_id': 'S1-p1', 'text': 'The result was 96% ee [1].'}
     raw = {'paragraph_scores': [{'paragraph_id': 'S1-p1', 'source_check_status': 'partially_supported',

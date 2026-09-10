@@ -75,11 +75,12 @@ def outline_sections(markdown: str) -> list[dict[str, Any]]:
     current: dict[str, Any] | None = None
     for raw_line in str(markdown or "").replace("\r\n", "\n").splitlines():
         line = raw_line.strip()
-        heading = re.match(r"^##\s+(?:\d+[.)]\s*)?(.+?)\s*$", line)
+        heading = re.match(r"^(#{2,6})\s+(?:\d+(?:\.\d+)*[.)]?\s+)?(.+?)\s*$", line)
         if heading:
-            title = heading.group(1).strip()
+            title = heading.group(2).strip()
             current = {
                 "title": title,
+                "heading_level": len(heading.group(1)),
                 "paper_ids": [],
                 "context_paper_ids": [],
                 "excluded_papers": [],
@@ -92,6 +93,10 @@ def outline_sections(markdown: str) -> list[dict[str, Any]]:
             sections.append(current)
             continue
         if current is None:
+            continue
+        identity = re.fullmatch(r"<!-- section_id: (S[A-Za-z0-9_-]{1,64}) -->", line)
+        if identity:
+            current["section_id"] = identity.group(1)
             continue
         lowered = line.casefold()
         if lowered.startswith("section role:"):
@@ -116,6 +121,24 @@ def outline_sections(markdown: str) -> list[dict[str, Any]]:
                 current["topic_partition"] = line.split(":", 1)[1].strip().rstrip(".。")
             elif lowered.startswith("boundary rationale:"):
                 current["boundary_rationale"] = line.split(":", 1)[1].strip()
+            elif line:
+                current["notes"] = "\n".join(filter(None, [current["notes"], line]))
+    used = {s["section_id"] for s in sections if s.get("section_id")}
+    serial = 1
+    parents = []
+    for section in sections:
+        if not section.get("section_id"):
+            while f"S{serial:02d}" in used:
+                serial += 1
+            section["section_id"] = f"S{serial:02d}"
+            used.add(section["section_id"])
+        while parents and parents[-1]["heading_level"] >= section["heading_level"]:
+            parents.pop()
+        if parents:
+            section["parent_section_id"] = parents[-1]["section_id"]
+            section["parent_headings"] = [{"section_id": p["section_id"], "title": p["title"]} for p in parents]
+            parents[-1]["organizing_only"] = True
+        parents.append(section)
     return sections
 
 
@@ -170,7 +193,10 @@ def outline_markdown_from_sections(
             heading = f"## {body_number}. {title}"
         else:
             heading = f"## {title}"
+        heading = "#" * int(section.get("heading_level") or 2) + heading[2:]
         lines.extend([heading, f"Section role: {role}"])
+        if section.get("section_id"):
+            lines.append(f"<!-- section_id: {section['section_id']} -->")
         _append_rendered_section(lines, section)
         lines.append("")
     return "\n".join(lines).strip() + "\n"

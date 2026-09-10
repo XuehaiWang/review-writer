@@ -12,6 +12,7 @@ import { jobIsActive } from "../../hooks/useJob";
 import { applyOutlinePaperRecommendations, buildPaperDisplayLabels, OutlineBuilder, parseOutlineMarkdown, validateVisualOutline } from "./OutlineBuilder";
 import { MatrixLiveProgress } from "./MatrixLiveProgress";
 import { BibliographyResolutionPanel } from "./BibliographyResolutionPanel";
+import { usePlanningCompletionSync } from "./usePlanningCompletionSync";
 
 type MatrixPaper = Record<string, unknown> & {
   paper_id: string;
@@ -780,6 +781,10 @@ export function PlanningPage() {
     await queryClient.invalidateQueries({ queryKey: ["planning", project?.project_id || ""] });
     return planning.refetch();
   };
+  usePlanningCompletionSync(project?.project_id || "", [
+    ...(planning.data?.matrix_enrichment?.jobs || []),
+    ...(planning.data?.blueprint_jobs || []),
+  ], planning.refetch);
   const generateBlueprint = useMutation({
     mutationFn: () => apiRequest(`/api/v1/projects/${encodeURIComponent(project!.project_id)}/planning/blueprint/jobs`, {
       method: "POST", ...jsonBody({ revision: planning.data!.blueprint_revision }),

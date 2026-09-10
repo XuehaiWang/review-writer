@@ -53,7 +53,8 @@ class DraftExcerptTests(unittest.TestCase):
         original = copy.deepcopy(features)
         text = overview._build_metal_rows_text(features)
         self.assertIn("at most 18 English words", text)
-        self.assertIn("Supporting assertion:", text)
+        self.assertNotIn("Supporting assertion:", text)
+        self.assertIn("Use the category label only", text)
         self.assertNotIn("source studies:", text)
         self.assertNotIn("P123456789", text)
         self.assertNotIn('"unit":', text)
@@ -61,6 +62,31 @@ class DraftExcerptTests(unittest.TestCase):
         notes = overview._build_take_home_text({"_content_pack": {"take_home": ["A", "B", "C", "D"]}})
         self.assertIn("omit duplicates", notes)
         self.assertNotIn("4. D", notes)
+
+    def test_module_summaries_are_short_and_bound_to_the_correct_section(self):
+        features = {"overview_modules": ["Old method", "New method"],
+                    "overview_evidence_bindings": {"Old method": {"section_id": "S1"},
+                                                   "New method": {"section_id": "S2"}},
+                    "argument_execution": {"sections": [
+                        {"section_id": "S1", "claims": [{"claim_id": "C1"}]},
+                        {"section_id": "S2", "claims": [{"claim_id": "C2"}]}]}}
+        data = {"module_summaries": [
+            {"section_id": "S1", "summary": "Enables controlled conversion.", "claim_ids": ["C1"]},
+            {"section_id": "S2", "summary": "Wrong source.", "claim_ids": ["C1"]}]}
+        self.assertEqual({"S1": "Enables controlled conversion."},
+                         overview._validated_module_summaries(data, features))
+        data["module_summaries"][0]["summary"] = "word " * 19
+        self.assertEqual({}, overview._validated_module_summaries(data, features))
+
+    def test_five_modules_keep_order_without_copying_long_claims(self):
+        labels = [f"Complete scientific heading {n}" for n in range(5)]
+        features = {"overview_modules": labels, "argument_execution": {"sections": []},
+                    "overview_evidence_bindings": {label: {"section_id": str(n)} for n, label in enumerate(labels)},
+                    "_content_pack": {"module_summaries": {str(n): "Concise finding." for n in range(5)}}}
+        text = overview._build_metal_rows_text(features)
+        self.assertEqual(5, text.count("Module:"))
+        self.assertEqual(5, text.count("Summary: Concise finding."))
+        self.assertEqual(sorted(text.index(label) for label in labels), [text.index(label) for label in labels])
 
     def test_excerpt_reaches_later_sections(self) -> None:
         body = "# Topic\n\n## Introduction\n\n" + "intro filler. " * 300 + "\n\n## Deep section\n\nNEEDLE catalyst conditions."
@@ -238,6 +264,33 @@ class TemplateSelectionTests(unittest.TestCase):
             selected = overview.select_best_template(templates, features)
         self.assertEqual(99, selected["id"])
         self.assertEqual("ai", features["_template_selection"]["mode"])
+
+
+class TwoDimensionalChemistryTests(unittest.TestCase):
+    def test_product_motif_never_uses_legacy_3d_renderer(self):
+        path = Path("motif.png")
+        with patch.object(overview, "resolve_skeleton_smiles", return_value="CCO"), patch.object(
+            overview, "_render_motif_2d", return_value=path
+        ) as render, patch.object(overview, "render_smiles_ball_and_stick") as legacy:
+            self.assertEqual(path, overview.render_skeleton_model({}, path, style="ai3d"))
+            render.assert_called_once()
+            legacy.assert_not_called()
+
+    def test_missing_2d_renderer_does_not_substitute_ball_and_stick(self):
+        with patch.object(overview, "_render_motif_2d", return_value=None), patch.object(
+            overview, "render_smiles_ball_and_stick"
+        ) as legacy:
+            self.assertIsNone(overview._render_scheme_molecule("CCO", Path("a.png"), (200, 200), "3d"))
+            legacy.assert_not_called()
+
+    def test_chemistry_prompt_reserves_reaction_band(self):
+        features = {"has_reaction_focus": True, "product_keywords": ["ethanol"],
+                    "_chemistry_decision": {"mode": "reaction"},
+                    "_composite_layout": "module-cards-crosscut-sidebar", "_skeleton_is_scheme": True}
+        with patch.object(overview, "is_chemistry_context", return_value=True):
+            prompt = overview._build_skeleton_description(features)
+        self.assertIn("horizontal reaction band", prompt)
+        self.assertNotIn("3D", prompt)
 
 
 if __name__ == "__main__":

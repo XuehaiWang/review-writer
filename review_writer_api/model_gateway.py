@@ -109,6 +109,8 @@ TEXT_GATEWAY_JOB_TYPES = frozenset(
         "draft.accept-rewrite",
         "final.build",
         "final.conclusion",
+        # Overview uses text planning before image generation (same leased job).
+        "final.overview",
     }
 )
 IMAGE_GATEWAY_JOB_TYPES = frozenset({"figures.redraw", "final.overview"})
