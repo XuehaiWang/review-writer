@@ -335,6 +335,12 @@ def test_final_consumers_use_current_prose_bindings(tmp_path, monkeypatch, edite
     assert "Provisional unsupported superiority" not in prompt
     features = overview.extract_review_features(project)
     assert len(features["overview_content_contract"]["realized_claim_ids"]) == (0 if edited else 1)
+    # Display text now comes from the concise content pack, not raw claims.
+    assert sentence not in overview._build_metal_rows_text(features)
+    features["_content_pack"] = {"module_summaries": overview._validated_module_summaries(
+        {"module_summaries": [{"section_id": "S1", "summary": sentence, "claim_ids": ["C1"]}]},
+        features,
+    )}
     rows_text = overview._build_metal_rows_text(features)
     assert (sentence in rows_text) is not edited
     if edited:

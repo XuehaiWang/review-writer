@@ -27,6 +27,12 @@ SPEC.loader.exec_module(PIPELINE)
 
 class SectionAcademicPipelineTests(unittest.TestCase):
     def test_empty_evidence_finishes_all_sections_without_model_and_reuses_notices(self):
+        self._run_empty_evidence_case(lookup_complete=True)
+
+    def test_unfinished_source_lookup_is_not_saved_as_completed_empty_evidence(self):
+        self._run_empty_evidence_case(lookup_complete=False)
+
+    def _run_empty_evidence_case(self, *, lookup_complete):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             project = root / "review-projects" / "test"
@@ -36,7 +42,8 @@ class SectionAcademicPipelineTests(unittest.TestCase):
             tasks = [{"section_id": sid, "heading": sid, "section_role": role,
                       "allowed_papers": ["P001"], "primary_papers": ["P001"], "supporting_papers": []}
                      for sid, role in [("S01", "body"), ("S02", "conclusion")]]
-            packages = [{"section_id": t["section_id"], "retrieval_mode": "insufficient_evidence", "hits": []} for t in tasks]
+            packages = [{"section_id": t["section_id"], "retrieval_mode": "insufficient_evidence",
+                         "source_lookup_complete": lookup_complete, "hits": []} for t in tasks]
             for path, value in {stage / "section_tasks.json": tasks,
                     stage / "section_evidence.json": {"sections": packages},
                     matrix / "literature_matrix.json": {"rows": [{"paper_id": "P001", "title": "A paper"}]},
@@ -47,6 +54,11 @@ class SectionAcademicPipelineTests(unittest.TestCase):
                  patch.object(PIPELINE, "load_blueprint_rule_pack", return_value="Use evidence"), \
                  patch.object(PIPELINE, "load_cross_study_synthesis_skill", return_value="Use evidence"), \
                  patch.object(PIPELINE, "call_structured_llm") as model:
+                if not lookup_complete:
+                    with self.assertRaisesRegex(SystemExit, "2 section\\(s\\) failed"):
+                        PIPELINE.main()
+                    model.assert_not_called()
+                    return
                 self.assertEqual(0, PIPELINE.main())
                 checkpoint = json.loads((stage / "section_checkpoints.json").read_text(encoding="utf-8"))
                 self.assertEqual({"S01", "S02"}, set(checkpoint["entries"]))
