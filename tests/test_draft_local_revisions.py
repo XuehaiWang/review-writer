@@ -112,6 +112,9 @@ def test_joint_candidate_is_never_auto_accepted():
 def test_published_draft_points_to_matching_overlay_for_restore(tmp_path):
     from review_writer_api.domain_services.drafts import DraftsService, DRAFT_DOCUMENT, DRAFT_OVERLAYS, DRAFT_QUALITY
     service = object.__new__(DraftsService)
+    # This publication-order unit test has no previously saved manuscript.
+    # Paragraph identity preservation reads that state before publishing.
+    service._read_text = Mock(return_value=("", None))
     service.repository = Mock()
     service.repository.create_stage_run.return_value = SimpleNamespace(id='run')
     service.artifacts = Mock()
@@ -129,6 +132,8 @@ def test_published_draft_points_to_matching_overlay_for_restore(tmp_path):
     assert records[DRAFT_DOCUMENT]['source_rewrite_overlay_artifact_id'] == 'new:' + DRAFT_OVERLAYS
     assert records[DRAFT_QUALITY]['source_rewrite_overlay_artifact_id'] == 'new:' + DRAFT_OVERLAYS
     assert service.repository.promote_stage_artifacts_atomically.call_count == 1
+    service._read_text.assert_called_once_with(
+        SimpleNamespace(user_id='owner'), 'project', DRAFT_DOCUMENT, required=False)
 
 
 def load_script(name):

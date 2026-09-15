@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { apiRequest } from "../../api/client";
 import { AdminPage } from "./AdminPage";
 
-vi.mock("../../api/client", () => ({ apiRequest: vi.fn(), jsonBody: (body: unknown) => ({ body: JSON.stringify(body) }), newIdempotencyKey: () => crypto.randomUUID() }));
+vi.mock("../../api/client", () => ({ apiRequest: vi.fn(), jsonBody: (body: unknown) => ({ body: JSON.stringify(body) }), newIdempotencyKey: () => "admin-page-test-request" }));
 vi.mock("../../i18n/useUiText", () => ({ useUiText: () => ({ text: (zh: string) => zh }) }));
 
 const users = ["admin", "reader"].map(id => ({ user_id: id, email: `${id}@test.invalid`, display_name: id, role: id === "admin" ? "admin" : "user", status: "active", available_usd: "5", reserved_usd: "0", estimated_cost_usd: "1", project_count: 2 }));
