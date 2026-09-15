@@ -13,7 +13,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
-from review_writer_api.database import Project, database_session, utc_now
+from review_writer_api.database import Project, User, database_session, utc_now
 from review_writer_api.errors import (
     WorkflowConflict,
     WorkflowMigrationRequired,
@@ -29,6 +29,8 @@ from review_writer_api.job_queues import queue_for_job_type
 from review_writer_api.job_lease_context import active_job_lease
 from review_writer_api.job_lifecycle import active_job_project, cancel_project_jobs
 from review_writer_api.workflow_models import (
+    DraftParagraphTask,
+    LibraryUploadBatchCancellation,
     WorkflowApproval,
     WorkflowArtifact,
     WorkflowCurrentArtifact,
@@ -180,8 +182,9 @@ class WorkflowRepository:
         }
     )
 
-    def __init__(self, session_factory):
+    def __init__(self, session_factory, *, default_text_wire_api: str = "responses"):
         self.session_factory = session_factory
+        self.default_text_wire_api = default_text_wire_api
 
     @staticmethod
     def _uuid(value: str, *, not_found_message: str) -> uuid.UUID:
@@ -1384,10 +1387,17 @@ class WorkflowRepository:
         )
         if len(scope_key) > 255:
             raise WorkflowValidationError("The job operation key is too long.")
-        requested_payload = dict(payload or {})
+        from .model_catalog import SNAPSHOT_KEY, snapshot_for_job
+        from .model_gateway import TEXT_GATEWAY_JOB_TYPES
+        requested_payload = {k: v for k, v in dict(payload or {}).items() if k != SNAPSHOT_KEY}
 
         try:
             with database_session(self.session_factory) as session:
+                if normalized_scope == "library" and normalized_job_type == "library.upload" and requested_payload.get("batch_id"):
+                    batch_uuid = self._uuid(requested_payload["batch_id"], not_found_message="Invalid upload batch.")
+                    self._lock_upload_owner(session, user_uuid)
+                    if session.get(LibraryUploadBatchCancellation, (user_uuid, batch_uuid)):
+                        raise WorkflowConflict("本批剩余上传已取消，请重新选择文件开始新批次。")
                 if project_uuid is not None:
                     # Lock before the idempotency lookup: a concurrent creator
                     # may commit while this call waits for the project lock.
@@ -1410,12 +1420,17 @@ class WorkflowRepository:
                     )
                 )
                 if existing:
-                    if dict(existing.payload_json or {}) != requested_payload:
+                    if {k: v for k, v in (existing.payload_json or {}).items() if k != SNAPSHOT_KEY} != requested_payload:
                         raise WorkflowConflict(
                             "The idempotency key was already used with a different payload.",
                             details={"existing_job_id": str(existing.id)},
                         )
                     return self._job_record(existing)
+                if requested_payload.get("revision_mode") == "dialogue":
+                    occupied = session.get(DraftParagraphTask, (project_uuid, requested_payload["dialogue"]["paragraph_key"]))
+                    holder = session.get(WorkflowJob, occupied.job_id) if occupied else None
+                    if holder is not None and holder.status in {"queued", "running", "cancel_requested"}:
+                        raise WorkflowConflict("This paragraph already has an active revision.", details={"current_job_id": str(holder.id)})
                 if retry_uuid is not None:
                     retry_source = session.scalar(
                         select(WorkflowJob).where(
@@ -1455,6 +1470,15 @@ class WorkflowRepository:
                                 "current_status": current.status,
                             },
                         )
+                stored_payload = dict(requested_payload)
+                if normalized_job_type in TEXT_GATEWAY_JOB_TYPES:
+                    try:
+                        previous_snapshot = (retry_source.payload_json or {}).get(SNAPSHOT_KEY) if retry_uuid else None
+                        stored_payload[SNAPSHOT_KEY] = dict(previous_snapshot) if previous_snapshot else snapshot_for_job(
+                            session, project.model_tier if project_uuid else None,
+                            default_wire=self.default_text_wire_api)
+                    except ValueError as exc:
+                        raise WorkflowValidationError(str(exc)) from exc
                 job = WorkflowJob(
                     user_id=user_uuid,
                     project_id=project_uuid,
@@ -1464,11 +1488,18 @@ class WorkflowRepository:
                     status="queued",
                     idempotency_scope_key=scope_key,
                     idempotency_key=normalized_idempotency_key,
-                    payload_json=requested_payload,
+                    payload_json=stored_payload,
                     retry_of_job_id=retry_uuid,
                 )
                 session.add(job)
                 session.flush()
+                if requested_payload.get("revision_mode") == "dialogue":
+                    paragraph_key = requested_payload["dialogue"]["paragraph_key"]
+                    occupied = session.get(DraftParagraphTask, (project_uuid, paragraph_key))
+                    if occupied:
+                        occupied.job_id = job.id
+                    else:
+                        session.add(DraftParagraphTask(project_id=project_uuid, paragraph_key=paragraph_key, job_id=job.id))
                 if pointer is None:
                     session.add(
                         WorkflowCurrentJob(
@@ -1496,7 +1527,7 @@ class WorkflowRepository:
                     )
                 )
                 if existing:
-                    if dict(existing.payload_json or {}) != requested_payload:
+                    if {k: v for k, v in (existing.payload_json or {}).items() if k != SNAPSHOT_KEY} != requested_payload:
                         raise WorkflowConflict(
                             "The idempotency key was already used with a different payload.",
                             details={"existing_job_id": str(existing.id)},
@@ -1537,6 +1568,31 @@ class WorkflowRepository:
             )
             return self._job_record(job) if job else None
 
+    def paragraph_task_slot(self, user_id, project_id, paragraph_key, job_id, *, release=False):
+        """Short project-serialized transaction; never held during model calls."""
+        with database_session(self.session_factory) as session:
+            project = session.scalar(select(Project).where(Project.id == uuid.UUID(project_id),
+                Project.user_id == uuid.UUID(user_id), Project.deleted_at.is_(None)).with_for_update())
+            if project is None:
+                raise WorkflowNotFound("Project not found.")
+            self._require_bound_job_lease(session)
+            own_job = session.get(WorkflowJob, uuid.UUID(job_id))
+            if own_job is None or own_job.project_id != project.id or str(own_job.user_id) != user_id:
+                raise WorkflowNotFound("Job not found.")
+            slot = session.get(DraftParagraphTask, (project.id, paragraph_key))
+            if release:
+                if slot and slot.job_id == own_job.id:
+                    session.delete(slot)
+                return True
+            holder = session.get(WorkflowJob, slot.job_id) if slot else None
+            if holder and holder.id != own_job.id and holder.status in {"queued", "running", "cancel_requested"}:
+                return False
+            if slot:
+                slot.job_id = own_job.id
+            else:
+                session.add(DraftParagraphTask(project_id=project.id, paragraph_key=paragraph_key, job_id=own_job.id))
+            return True
+
     def list_project_jobs(
         self,
         user_id: str,
@@ -1544,6 +1600,8 @@ class WorkflowRepository:
         *,
         job_type: str | None = None,
         limit: int = 100,
+        operation_key: str = "",
+        idempotency_key: str = "",
     ) -> list[JobRecord]:
         user_uuid = self._uuid(user_id, not_found_message="Project not found.")
         project_uuid = self._uuid(project_id, not_found_message="Project not found.")
@@ -1556,6 +1614,10 @@ class WorkflowRepository:
             )
             if job_type:
                 statement = statement.where(WorkflowJob.job_type == str(job_type))
+            if operation_key:
+                statement = statement.where(WorkflowJob.idempotency_scope_key == f"{project_uuid}:{operation_key}")
+            if idempotency_key:
+                statement = statement.where(WorkflowJob.idempotency_key == idempotency_key)
             rows = session.scalars(
                 statement.order_by(WorkflowJob.created_at.desc()).limit(
                     max(1, min(int(limit), 500))
@@ -1631,6 +1693,11 @@ class WorkflowRepository:
             )
 
         with database_session(self.session_factory) as session:
+            cancelled_batches = {
+                str(value) for value in session.scalars(select(LibraryUploadBatchCancellation.batch_id).where(
+                    LibraryUploadBatchCancellation.user_id == user_uuid,
+                ))
+            }
             rows = session.execute(
                 select(
                     batch_id.label("batch_id"),
@@ -1639,6 +1706,8 @@ class WorkflowRepository:
                     status_count("running").label("running"),
                     status_count("cancel_requested").label("cancel_requested"),
                     status_count("succeeded").label("succeeded"),
+                    func.sum(case(((WorkflowJob.status == "succeeded") &
+                        (WorkflowJob.result_json["status"].as_string() == "duplicate_file"), 1), else_=0)).label("duplicate_count"),
                     status_count("failed").label("failed"),
                     status_count("cancelled").label("cancelled"),
                     status_count("interrupted").label("interrupted"),
@@ -1660,11 +1729,13 @@ class WorkflowRepository:
         return [
             {
                 "batch_id": str(row.batch_id),
+                "remaining_cancelled": str(row.batch_id) in cancelled_batches,
                 "total": int(row.total or 0),
                 "queued": int(row.queued or 0),
                 "running": int(row.running or 0),
                 "cancel_requested": int(row.cancel_requested or 0),
                 "succeeded": int(row.succeeded or 0),
+                "duplicate_count": int(row.duplicate_count or 0),
                 "failed": int(row.failed or 0),
                 "cancelled": int(row.cancelled or 0),
                 "interrupted": int(row.interrupted or 0),
@@ -2210,6 +2281,26 @@ class WorkflowRepository:
         job.finished_at = None
         job.updated_at = now
 
+    @staticmethod
+    def _earlier_planning_job():
+        """Serialize Matrix writers and their planner without occupying a worker."""
+        earlier = aliased(WorkflowJob)
+        kinds = ("matrix.enrich", "planning.blueprint")
+        return and_(WorkflowJob.job_type.in_(kinds), exists(select(earlier.id).where(
+            earlier.project_id == WorkflowJob.project_id,
+            earlier.user_id == WorkflowJob.user_id,
+            earlier.job_type.in_(kinds),
+            earlier.status.in_(("queued", "running", "cancel_requested")),
+            or_(earlier.created_at < WorkflowJob.created_at,
+                and_(earlier.created_at == WorkflowJob.created_at, earlier.id < WorkflowJob.id)),
+        )))
+
+    def planning_job_blocked(self, job_id: str) -> bool:
+        with database_session(self.session_factory) as session:
+            return session.scalar(select(WorkflowJob.id).where(
+                WorkflowJob.id == self._uuid(job_id, not_found_message="Job not found."),
+                self._earlier_planning_job())) is not None
+
     def claim_job(
         self,
         job_id: str,
@@ -2229,6 +2320,7 @@ class WorkflowRepository:
                 WorkflowJob.id == job_uuid,
                 WorkflowJob.status == "queued",
                 active_job_project(),
+                ~self._earlier_planning_job(),
             )
             if session.get_bind().dialect.name == "postgresql":
                 query = query.with_for_update(skip_locked=True)
@@ -2298,14 +2390,15 @@ class WorkflowRepository:
                 )
             )
             query = select(WorkflowJob).where(
-                eligible, active_job_project(), ~another_live_lease
+                eligible, active_job_project(), ~another_live_lease, ~self._earlier_planning_job()
             )
             if job_types is not None:
                 if not job_types:
                     return None
                 query = query.where(WorkflowJob.job_type.in_(sorted(job_types)))
             query = query.order_by(
-                WorkflowJob.created_at.asc(), WorkflowJob.id.asc()
+                case((WorkflowJob.payload_json["revision_mode"].as_string() == "dialogue_batch", WorkflowJob.updated_at),
+                     else_=WorkflowJob.created_at).asc(), WorkflowJob.id.asc()
             ).limit(1)
             if session.get_bind().dialect.name == "postgresql":
                 query = query.with_for_update(skip_locked=True)
@@ -2455,6 +2548,36 @@ class WorkflowRepository:
                     )
                 )
             return self._job_record(job) if job else None
+
+    @staticmethod
+    def _lock_upload_owner(session, user_uuid: uuid.UUID) -> None:
+        # A real write serializes admission/cancel on both PostgreSQL and SQLite.
+        result = session.execute(update(User).where(User.id == user_uuid).values(id=user_uuid))
+        if not result.rowcount:
+            raise WorkflowNotFound("User not found.")
+
+    def cancel_remaining_uploads(self, user_id: str, batch_id: str) -> list[JobRecord]:
+        user_uuid = self._uuid(user_id, not_found_message="User not found.")
+        batch_uuid = self._uuid(batch_id, not_found_message="Invalid upload batch.")
+        now = utc_now()
+        with database_session(self.session_factory) as session:
+            self._lock_upload_owner(session, user_uuid)
+            if not session.get(LibraryUploadBatchCancellation, (user_uuid, batch_uuid)):
+                session.add(LibraryUploadBatchCancellation(user_id=user_uuid, batch_id=batch_uuid, cancelled_at=now))
+            predicates = (
+                WorkflowJob.user_id == user_uuid,
+                WorkflowJob.scope == "library",
+                WorkflowJob.project_id.is_(None),
+                WorkflowJob.job_type == "library.upload",
+                WorkflowJob.payload_json["batch_id"].as_string() == str(batch_uuid),
+            )
+            # Atomic queued-only update: a worker that already claimed a file
+            # keeps running; no check-then-cancel race can stop it.
+            session.execute(update(WorkflowJob).where(*predicates, WorkflowJob.status == "queued").values(
+                status="cancelled", cancellation_requested=True, updated_at=now, finished_at=now,
+            ))
+            rows = session.scalars(select(WorkflowJob).where(*predicates, WorkflowJob.status == "cancelled")).all()
+            return [self._job_record(row) for row in rows]
 
     def job_cancellation_requested(self, job_id: str) -> bool:
         job_uuid = self._uuid(job_id, not_found_message="Job not found.")

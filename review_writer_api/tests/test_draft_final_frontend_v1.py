@@ -6,7 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DRAFT = ROOT / "frontend" / "src" / "features" / "draft" / "DraftPage.tsx"
-DRAFT_STATUS = ROOT / "frontend" / "src" / "features" / "draft" / "DraftJobStatus.tsx"
+DRAFT_STATUS = ROOT / "frontend" / "src" / "features" / "draft" / "SectionDialogue.tsx"
 FINAL = ROOT / "frontend" / "src" / "features" / "final" / "FinalPage.tsx"
 FINAL_STATUS = ROOT / "frontend" / "src" / "features" / "final" / "FinalJobStatus.tsx"
 API_CLIENT = ROOT / "frontend" / "src" / "api" / "client.ts"
@@ -16,28 +16,26 @@ class DraftFinalFrontendV1Tests(unittest.TestCase):
     def test_draft_uses_only_native_versioned_workflow_routes(self) -> None:
         source = DRAFT.read_text(encoding="utf-8")
         self.assertIn("/api/v1/projects/", source)
-        self.assertIn("/draft/assemble", source)
-        self.assertIn("/draft/evaluation-jobs", source)
-        self.assertIn("/draft/optimization-jobs", source)
-        self.assertIn("/rewrite-jobs", source)
-        self.assertIn("/rewrite-candidates/", source)
-        self.assertIn("/draft/restore", source)
-        self.assertIn("payload.versions", source)
+        self.assertIn('"/assemble"', source)
+        self.assertIn("/dialogue-batch", source)
+        self.assertIn("/dialogue-candidates/", source)
+        self.assertNotIn("/evaluation-jobs", source)
+        self.assertNotIn("/optimization-jobs", source)
+        self.assertIn('"/restore"', source)
+        self.assertIn("data.versions", source)
         self.assertIn("/api/v1/jobs/", source)
         self.assertNotIn("/api/project/", source)
         self.assertNotIn("/file?path", source)
 
-    def test_draft_renders_live_score_issue_paragraph_images_and_job_status(self) -> None:
+    def test_draft_renders_dialogue_comparisons_and_persisted_job_status(self) -> None:
         source = DRAFT.read_text(encoding="utf-8")
         for token in (
-            "payload.quality.score",
-            "issue.paragraph?.text",
-            "issue.paragraph?.images",
-            "payload.rewrite_states",
-            "rewriteActive",
-            "DraftJobStatus",
-            "Generating and scoring candidate",
-            "Candidate generated and scored",
+            "CandidateComparison",
+            "ParagraphManualEditor",
+            "section_task_states",
+            "refetchInterval",
+            "base_hashes",
+            "useDraftScratch",
         ):
             self.assertIn(token, source + DRAFT_STATUS.read_text(encoding="utf-8"))
 
@@ -71,7 +69,7 @@ class DraftFinalFrontendV1Tests(unittest.TestCase):
         self.assertIn("error.message", client)
         self.assertIn("error.code", client)
         self.assertIn("throw new ApiError", client)
-        for path in (DRAFT_STATUS, FINAL_STATUS):
+        for path in (FINAL_STATUS,):
             source = path.read_text(encoding="utf-8")
             self.assertIn('"cancel_requested"', source)
             self.assertIn('status === "failed"', source)

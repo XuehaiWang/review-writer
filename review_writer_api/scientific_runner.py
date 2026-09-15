@@ -141,6 +141,7 @@ class ScientificRunner:
         cancel_requested: Callable[[], bool] | None = None,
         progress_callback: Callable[[], None] | None = None,
         timeout_seconds: float = 900,
+        max_attempts: int | None = None,
     ) -> ScientificRunResult:
         safe_command = self._validate_command(command)
         working = Path(cwd).resolve()
@@ -209,11 +210,12 @@ class ScientificRunner:
                 )
         cancellation = cancel_requested or (lambda: False)
         timeout = max(self.poll_interval, float(timeout_seconds))
+        attempt_limit = self.max_attempts if max_attempts is None else max(1, min(int(max_attempts), self.max_attempts))
 
         last_stdout = ""
         last_stderr = ""
         timed_out = False
-        for attempt in range(1, self.max_attempts + 1):
+        for attempt in range(1, attempt_limit + 1):
             if cancellation():
                 raise ScientificRunCancelled(attempts=attempt)
             self._remove_previous_outputs(outputs)
@@ -321,7 +323,7 @@ class ScientificRunner:
                 (timed_out or category in TRANSIENT_ERROR_CATEGORIES)
                 and not provider_call_completed
             )
-            if not transient or attempt >= self.max_attempts:
+            if not transient or attempt >= attempt_limit:
                 http_status = envelope.get("http_status")
                 provider_timed_out = bool(
                     category == "transient_timeout"
@@ -382,7 +384,7 @@ class ScientificRunner:
 
         raise ScientificRunFailed(
             "Scientific task failed.",
-            attempts=self.max_attempts,
+            attempts=attempt_limit,
             retryable=timed_out,
         )
 
@@ -396,6 +398,10 @@ class ScientificRunner:
                 for line in value.splitlines()
                 if line.strip()
                 and not line.lstrip().startswith(ERROR_ENVELOPE_PREFIX)
+                and not line.strip().startswith((
+                    "The above exception was the direct cause",
+                    "During handling of the above exception",
+                ))
             ]
 
         # Scientific scripts write failures to stderr and progress to stdout.
@@ -411,8 +417,7 @@ class ScientificRunner:
             line
             for line in lines
             if re.search(
-                r"(?:^|\b)(?:ERROR|RuntimeError|ValueError|PermissionError|"
-                r"FileNotFoundError|Exception)\s*:",
+                r"^(?:[\w.]+(?:Error|Exception)|ERROR)\s*:",
                 line,
                 re.IGNORECASE,
             )

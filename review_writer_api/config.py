@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
+from .origin_policy import parse_browser_origins
+
 from sqlalchemy.engine import URL, make_url
 
 from review_writer_core.workspace import discover_review_root
@@ -43,6 +45,7 @@ class ApiSettings:
     deployment_mode: DeploymentMode = "local"
     database_url: str = ""
     public_origin: str = ""
+    allowed_browser_origins: tuple[str, ...] = ()
     credential_encryption_key: str = ""
     session_cookie_name: str = "review_writer_session"
     session_days: int = 7
@@ -97,6 +100,7 @@ class ApiSettings:
     embedding_gateway_user_concurrency: int = 1
     document_retrieval_enabled: bool = True
     vector_retrieval_enabled: bool = False
+    sqlite_vector_extension: str = ""
     retrieval_tuning: RetrievalTuning = field(default_factory=RetrievalTuning)
 
     @classmethod
@@ -332,6 +336,7 @@ class ApiSettings:
             deployment_mode=raw_mode,  # type: ignore[arg-type]
             database_url=database_url,
             public_origin=public_origin,
+            allowed_browser_origins=parse_browser_origins(os.environ.get("REVIEW_WRITER_ALLOWED_BROWSER_ORIGINS", "")),
             credential_encryption_key=credential_key,
             session_cookie_name=cookie_name,
             session_days=session_days,
@@ -392,6 +397,7 @@ class ApiSettings:
             embedding_gateway_user_concurrency=embedding_gateway_user_concurrency,
             document_retrieval_enabled=document_retrieval_enabled,
             vector_retrieval_enabled=vector_retrieval_enabled,
+            sqlite_vector_extension=str(os.environ.get("REVIEW_WRITER_SQLITE_VECTOR_EXTENSION") or "").strip(),
         )
 
 

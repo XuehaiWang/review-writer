@@ -83,3 +83,8 @@
 # Runtime skill instructions, prompts, and templates remain trackable.
 /docs/
 /skills/README.md
+/examples/
+/review_writer_core/CONFIGURATION.md
+/skills/*/README.md
+/skills/*/docs/
+/skills/技能工作流说明.md

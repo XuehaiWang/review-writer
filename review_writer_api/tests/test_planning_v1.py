@@ -45,6 +45,53 @@ TEST_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("="
 
 
 class PlanningV1Tests(unittest.TestCase):
+    def test_candidate_source_failure_is_local_and_retains_valid_previous_fact(self):
+        from copy import deepcopy
+        from review_writer_core.scientific_facts import fact_is_usable
+        service = self.app.state.planning_service
+        seed_verified_matrix(service, self.first, self.project_id)
+        original, _ = service._matrix(self.first, self.project_id)
+        candidate = deepcopy(original)
+        row = candidate["rows"][0]
+        old = deepcopy(row["scientific_facts"][0])
+        row["scientific_facts"][0]["value"] = "Unsupported changed conclusion 99%."
+        added = deepcopy(old)
+        added.update(fact_id="NEW-UNSUPPORTED", value="Unverified new result 98%.")
+        row["scientific_facts"].append(added)
+        issues = service._validate_candidate_matrix(self.first, original, candidate)
+        self.assertEqual(["retained_previous", "withheld"], [i["action"] for i in issues])
+        self.assertEqual(old, row["scientific_facts"][0])
+        self.assertFalse(fact_is_usable(row["scientific_facts"][1]))
+        self.assertEqual(original["rows"][1]["scientific_facts"], candidate["rows"][1]["scientific_facts"])
+        self.assertIn("verification_outdated", issues[0]["reasons"])
+        self.assertEqual([], service._validate_candidate_matrix(self.first, original, candidate))
+        missing = deepcopy(candidate)
+        missing["rows"].pop()
+        with self.assertRaises(WorkflowValidationError):
+            service._validate_candidate_matrix(self.first, original, missing)
+
+    def test_withheld_fact_candidate_can_be_planned_published_and_confirmed(self):
+        from copy import deepcopy
+        from review_writer_core.scientific_facts import fact_is_usable
+        service = self.app.state.planning_service
+        seed_verified_matrix(service, self.first, self.project_id)
+        with TestClient(self.app) as client:
+            self.choose_outline(client, "reaction")
+            prepared = service.blueprint_job_payload(self.first, self.project_id, revision=0)
+            added = deepcopy(prepared["matrix_snapshot"]["rows"][0]["scientific_facts"][0])
+            added.update(fact_id="NEW-UNSUPPORTED", value="Unverified result 99%.")
+            prepared["matrix_snapshot"]["rows"][0]["scientific_facts"].append(added)
+            prepared["planning_matrix_snapshot"] = deepcopy(prepared["matrix_snapshot"])
+            service.reconcile_blueprint_facts(self.first, self.project_id, prepared)
+            self.assertFalse(fact_is_usable(prepared["planning_matrix_snapshot"]["rows"][0]["scientific_facts"][-1]))
+            built = offline_argument_planner(None, prepared)
+            for section in built["section_blueprint"]["sections"]:
+                self.assertNotIn("NEW-UNSUPPORTED", (section.get("planning_fact_context") or {}).get("fact_ids", []))
+            result = service.publish_blueprint_candidate(self.first, self.project_id, built)
+            self.assertEqual("withheld", result["section_blueprint"]["fact_source_issues"][0]["action"])
+            confirmed = service.confirm_blueprint(self.first, self.project_id, revision=0, artifact_id=result["blueprint_artifact_id"])
+            self.assertEqual("approved", confirmed["status"])
+
     def test_fact_supplement_uses_linked_si_without_changing_citation_identity(self):
         service = self.app.state.planning_service
         with self.sessions.begin() as session:
@@ -346,6 +393,28 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertEqual(200, response.status_code, response.text)
         return response.json()
 
+    def test_real_matrix_publication_handoff_reuses_extraction_cache(self):
+        service, repo = self.app.state.planning_service, self.app.state.workflow_repository
+        with TestClient(self.app) as client:
+            self.choose_outline(client, "reaction")
+            source = service.matrix_enrichment_payload(self.first, self.project_id)
+            job = repo.create_or_get_job(self.first.user_id, self.project_id, "project", "matrix.enrich",
+                "handoff", {"source_matrix_artifact_id": source["source_matrix_artifact_id"]},
+                operation_key="matrix-enrichment")
+            prepared = service.blueprint_job_payload(self.first, self.project_id, revision=0)
+            self.assertEqual(job.id, prepared["await_matrix_job_id"])
+            claimed = repo.claim_job(job.id)
+            result = service.publish_matrix_enrichment(self.first, self.project_id, source,
+                {"papers": [{"paper_id": paper["paper_id"], "status": "complete",
+                    "fact_extraction_profile": {"stop_reason": "checks_completed"},
+                    "facts": [], "failed_fields": []} for paper in source["papers"]]})
+            repo.mark_job_succeeded(job.id, result, lease_token=claimed.lease_token,
+                lease_generation=claimed.lease_generation)
+            refreshed = service.resume_blueprint_after_matrix(self.first, self.project_id, prepared)
+            self.assertEqual(result["matrix_artifact_id"], refreshed["section_blueprint"]["source_matrix_artifact_id"])
+            self.assertEqual(0, service.matrix_enrichment_payload(self.first, self.project_id)["pending_paper_count"])
+            service.validate_prepared_blueprint(self.first, self.project_id, refreshed)
+
     def test_fact_contract_version_invalidates_old_cache_and_force_can_reextract(self) -> None:
         service = self.app.state.planning_service
         source = service.matrix_enrichment_payload(self.first, self.project_id)
@@ -559,6 +628,7 @@ class PlanningV1Tests(unittest.TestCase):
             "matrix_enrichment_payload",
             return_value={
                 "project_id": self.project_id,
+                "source_matrix_artifact_id": service._matrix(self.first, self.project_id)[1].id,
                 "pending_paper_count": 0,
                 "fulltext_candidate_paper_count": 0,
             },
@@ -569,7 +639,40 @@ class PlanningV1Tests(unittest.TestCase):
             )
 
         self.assertEqual(202, response.status_code, response.text)
-        self.assertEqual("current", response.json()["status"])
+        self.assertEqual("queued", response.json()["status"])
+        # The cache check is deferred to the worker, not performed by POST.
+        job = self.app.state.workflow_repository.get_job(self.first.user_id, response.json()["id"])
+        self.assertTrue(job.payload["prepare_on_start"])
+
+    def test_fact_retry_route_passes_only_requested_papers(self) -> None:
+        service = self.app.state.planning_service
+        with patch.object(service, "matrix_enrichment_payload", return_value={"pending_paper_count": 0}) as prepare, TestClient(self.app) as client:
+            response = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/matrix/enrichment/jobs?paper_ids=P001&force=true",
+                headers=self.headers(),
+            )
+        self.assertEqual(202, response.status_code, response.text)
+        prepare.assert_not_called()
+        job = self.app.state.workflow_repository.get_job(self.first.user_id, response.json()["id"])
+        self.assertEqual(["P001"], job.payload["selected_paper_ids"])
+        self.assertTrue(job.payload["force_refresh"])
+
+    def test_failed_fact_retry_keeps_valid_same_source_result(self) -> None:
+        service = self.app.state.planning_service
+        matrix, artifact = service._matrix(self.first, self.project_id)
+        row = matrix["rows"][0]
+        fact = {"fact_id": "previous", "field_id": "object_input", "value": "Source result",
+                "evidence_refs": [{"evidence_key": "original"}]}
+        row["scientific_facts"] = [fact]
+        row["fact_enrichment"] = {"status": "complete", "source_fingerprint": "same-source"}
+        payload = {"papers": [{"paper_id": row["paper_id"], "source_fingerprint": "same-source"}]}
+        built = {"papers": [{"paper_id": row["paper_id"], "status": "failed", "facts": [], "error": "provider timed out"}]}
+        with patch.object(service, "validate_matrix_enrichment_inputs", return_value=(matrix, artifact)):
+            result = service.publish_matrix_enrichment(self.first, self.project_id, payload, built, candidate_only=True)
+        restored = result["matrix_snapshot"]["rows"][0]
+        self.assertEqual([fact], restored["scientific_facts"])
+        self.assertEqual("complete", restored["fact_enrichment"]["status"])
+        self.assertEqual("failed", restored["fact_enrichment"]["last_attempt"]["status"])
 
     def test_all_fact_failures_allow_provisional_planning_without_limited_mode(self) -> None:
         service = self.app.state.planning_service

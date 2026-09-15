@@ -136,6 +136,8 @@ class DraftRewriteActionsMixin:
         job_payload: dict[str, Any],
         built: dict[str, Any],
     ) -> dict[str, Any]:
+        if job_payload.get("revision_mode") == "dialogue":
+            return self.publish_dialogue(principal, project_id, job_payload, built)
         expected_inputs = self.validate_task_inputs(principal, project_id, job_payload)
         current = self._artifact(principal, project_id, DRAFT_DOCUMENT)
         current_quality = self._artifact(principal, project_id, DRAFT_QUALITY)
@@ -186,6 +188,7 @@ class DraftRewriteActionsMixin:
         store, _artifact = self._read_json(
             principal, project_id, DRAFT_REWRITES, required=False
         )
+        expected_inputs[DRAFT_REWRITES] = _artifact.id if _artifact else ""
         entries = dict(store.get("entries") or {})
         candidate_id = str(uuid.uuid4())
         entries[candidate_id] = {
@@ -228,7 +231,7 @@ class DraftRewriteActionsMixin:
                         "json",
                     )
                 },
-                expected_revision=int(job_payload["expected_revision"]),
+                expected_revision=self._revision(principal, project_id),
                 metadata={"operation": "rewrite-candidate", "paragraph_id": job_payload["paragraph_id"]},
                 expected_current_artifacts=expected_inputs,
                 invalidate_final=False,

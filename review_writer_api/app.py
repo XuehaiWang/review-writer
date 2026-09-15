@@ -17,6 +17,7 @@ from fastapi import (
     FastAPI,
     Header,
     HTTPException,
+    Query,
     Request,
     Response,
     status,
@@ -39,9 +40,11 @@ from .container import ApplicationContainer
 from .credentials import ProviderSettingsError
 from .database import create_session_factory, utc_now
 from .errors import ProjectArchiveFailed, WorkflowError
+from .system_errors import FailureRecorder, list_failures, record_failure
 from .job_service import JobService
 from .gateway_client import test_provider_through_gateway
-from .model_catalog import DEFAULT_MODEL_TIER, MODEL_TIERS
+from .model_catalog import read_catalog, save_catalog, public_catalog
+from .text_connections import list_connections, save_connection
 from .model_gateway import ModelGatewayError, ModelGatewayService
 from .native_handlers import NativeWorkflowHandlers
 from .domain_services.library import LibraryService
@@ -76,6 +79,8 @@ from .schemas import (
     PasswordResetCompleteRequest,
     PasswordResetRequest,
     ModelCatalogResponse,
+    AdminModelCatalogResponse,
+    TextConnectionUpdateRequest,
     ModelGatewayRequest,
     ModelGatewayResponse,
     ModelGatewayResultResponse,
@@ -83,7 +88,6 @@ from .schemas import (
     EmbeddingGatewayResponse,
     ImageGatewayRequest,
     ImageGatewayResponse,
-    ModelTierResponse,
     PrincipalResponse,
     ProviderSettingsListResponse,
     ProviderSettingsResponse,
@@ -197,7 +201,7 @@ def create_app(
         window_seconds=resolved.auth_rate_limit_window_seconds,
     )
     workflow_repository = (
-        workflow_repository_override or WorkflowRepository(session_factory)
+        workflow_repository_override or WorkflowRepository(session_factory, default_text_wire_api=resolved.text_provider_wire_api)
         if resolved.deployment_mode == "hosted"
         else None
     )
@@ -262,6 +266,7 @@ def create_app(
             hosted_workspace_manager,
             enabled=resolved.document_retrieval_enabled,
             vector_enabled=resolved.vector_retrieval_enabled,
+            sqlite_vector_extension=resolved.sqlite_vector_extension,
             tuning=resolved.retrieval_tuning,
         )
         if session_factory is not None and hosted_workspace_manager is not None
@@ -357,6 +362,7 @@ def create_app(
         )
         else None
     )
+    failure_recorder = FailureRecorder()
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         heartbeat_task = None
@@ -379,6 +385,7 @@ def create_app(
                 heartbeat_task = asyncio.create_task(heartbeat_loop())
             yield
         finally:
+            failure_recorder.close()
             if job_service is not None:
                 job_service.shutdown(wait=True)
             if heartbeat_task is not None:
@@ -412,6 +419,7 @@ def create_app(
     app.state.auth_throttle = auth_throttle
     app.state.auth_ip_throttle = auth_ip_throttle
     app.state.session_factory = session_factory
+    app.state.failure_recorder = failure_recorder
     app.state.hosted_workspace_manager = hosted_workspace_manager
     app.state.workflow_repository = workflow_repository
     app.state.artifact_service = artifact_service
@@ -447,16 +455,23 @@ def create_app(
             )
         )
 
+    from .origin_policy import browser_origin_allowed, normalize_browser_origin
+
+    allowed_browser_origins = frozenset(
+        normalize_browser_origin(value)
+        for value in (resolved.public_origin, *resolved.allowed_browser_origins) if value
+    )
+
     @app.middleware("http")
     async def production_headers(request: Request, call_next):
-        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        request_id = request.state.request_id
         if (
             resolved.deployment_mode == "hosted"
             and request.method in {"POST", "PUT", "PATCH", "DELETE"}
             and request.url.path.startswith("/api/")
         ):
             origin = str(request.headers.get("Origin") or "").rstrip("/")
-            if origin and origin != resolved.public_origin:
+            if origin and not browser_origin_allowed(origin, allowed_browser_origins):
                 return JSONResponse(
                     status_code=status.HTTP_403_FORBIDDEN,
                     content={"detail": "Request origin is not allowed."},
@@ -539,12 +554,46 @@ def create_app(
                 return workflow_error_response(exc)
         return await call_next(request)
 
+    @app.middleware("http")
+    async def system_failure_log(request: Request, call_next):
+        request.state.request_id = str(uuid.uuid4())
+        async def retain_failure(status_code, exc=None):
+            # Errors before dependency resolution (e.g. origin checks) still
+            # belong to the authenticated session, never a client-supplied ID.
+            def persist():
+                if auth_service is not None and not getattr(request.state, "principal", None):
+                    token = request.cookies.get(resolved.session_cookie_name, "")
+                    if token:
+                        with suppress(Exception):
+                            request.state.principal = auth_service.resolve(token)
+                record_failure(session_factory, request, status_code, exc)
+            future = failure_recorder.submit(persist, request.state.request_id)
+            if future is not None:
+                # Fast writes remain immediately visible. Slow writes continue
+                # in the single bounded worker, never delaying an error response.
+                with suppress(Exception):
+                    await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout=0.05)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            await retain_failure(500, exc)
+            return JSONResponse(status_code=500, content={"error": {
+                "code": "INTERNAL_SERVER_ERROR", "message": "Internal server error.",
+                "request_id": request.state.request_id}},
+                headers={"X-Request-ID": request.state.request_id})
+        if response.status_code >= 400:
+            await retain_failure(response.status_code)
+        response.headers["X-Request-ID"] = request.state.request_id
+        return response
+
     if principal_provider is not None:
-        def current_principal() -> Principal:
-            return principal_provider()
+        def current_principal(request: Request) -> Principal:
+            request.state.principal = principal_provider()
+            return request.state.principal
     elif resolved.deployment_mode == "local":
-        def current_principal() -> Principal:
-            return local_owner_principal()
+        def current_principal(request: Request) -> Principal:
+            request.state.principal = local_owner_principal()
+            return request.state.principal
     else:
         def current_principal(request: Request) -> Principal:
             raw_token = request.cookies.get(resolved.session_cookie_name, "")
@@ -554,6 +603,7 @@ def create_app(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="请先登录。",
                 )
+            request.state.principal = principal
             return principal
 
     @app.exception_handler(AuthorizationError)
@@ -565,6 +615,7 @@ def create_app(
 
     @app.exception_handler(WorkflowError)
     async def workflow_error(_request: Request, exc: WorkflowError):
+        _request.state.failure_code = exc.code
         return workflow_error_response(exc)
 
     @app.exception_handler(ProjectOperationError)
@@ -574,6 +625,18 @@ def create_app(
     @app.exception_handler(ProviderSettingsError)
     async def provider_settings_error(_request: Request, exc: ProviderSettingsError):
         return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)})
+
+    @app.get("/api/v1/admin/errors", tags=["admin"])
+    def admin_errors(q: str = Query("", max_length=160),
+                     source: str = Query("", pattern="^(api|job)?$"),
+                     days: int = Query(30, ge=1, le=30),
+                     limit: int = Query(50, ge=1, le=100),
+                     offset: int = Query(0, ge=0, le=100000),
+                     principal: Principal = Depends(current_principal)):
+        principal.require(Permission.PROVIDER_MANAGE)
+        if session_factory is None:
+            return {"items": [], "has_more": False}
+        return list_failures(session_factory, query=q, source=source, days=days, limit=limit, offset=offset)
 
     @app.get("/api/v1/health", response_model=HealthResponse, tags=["system"])
     def health() -> HealthResponse:
@@ -602,25 +665,22 @@ def create_app(
 
     @app.get("/api/v1/model-catalog", response_model=ModelCatalogResponse, tags=["models"])
     def model_catalog(_principal: Principal = Depends(current_principal)) -> ModelCatalogResponse:
-        return ModelCatalogResponse(
-            default_tier=DEFAULT_MODEL_TIER,
-            items=[
-                ModelTierResponse(
-                    id=tier.id,
-                    model=tier.model,
-                    label_zh=tier.label_zh,
-                    label_en=tier.label_en,
-                    description_zh=tier.description_zh,
-                    description_en=tier.description_en,
-                    input_usd_per_million=format(tier.input_usd_per_million, "f"),
-                    cached_input_usd_per_million=format(
-                        tier.cached_input_usd_per_million, "f"
-                    ),
-                    output_usd_per_million=format(tier.output_usd_per_million, "f"),
-                )
-                for tier in MODEL_TIERS
-            ],
-        )
+        return ModelCatalogResponse.model_validate(public_catalog(session_factory))
+
+    @app.get("/api/v1/admin/model-catalog", response_model=AdminModelCatalogResponse, tags=["admin"])
+    def admin_model_catalog(principal: Principal = Depends(current_principal)):
+        principal.require(Permission.PROVIDER_MANAGE)
+        return read_catalog(session_factory)
+
+    @app.put("/api/v1/admin/model-catalog", response_model=AdminModelCatalogResponse, tags=["admin"])
+    def update_model_catalog(payload: AdminModelCatalogResponse, principal: Principal = Depends(current_principal)):
+        principal.require(Permission.PROVIDER_MANAGE)
+        if session_factory is None:
+            raise HTTPException(status_code=422, detail="Model administration requires a hosted database.")
+        try:
+            return save_catalog(session_factory, principal, payload.model_dump())
+        except (ValueError, ArithmeticError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get(
         "/api/v1/auth/config",
@@ -631,7 +691,7 @@ def create_app(
         hosted = resolved.deployment_mode == "hosted"
         return BrowserAuthConfigResponse(
             enabled=hosted,
-            registration_enabled=hosted,
+            registration_enabled=hosted and password_reset_mailer is not None,
             password_reset_enabled=hosted and password_reset_mailer is not None,
             password_reset_expiry_minutes=resolved.password_reset_minutes,
             password_min_length=PASSWORD_MIN_LENGTH,
@@ -688,6 +748,31 @@ def create_app(
                     recipient_hash,
                 )
 
+        @app.post("/api/v1/auth/registration-code", response_model=AuthMessageResponse,
+                  status_code=status.HTTP_202_ACCEPTED, tags=["identity"])
+        def request_registration_code(payload: PasswordResetRequest, request: Request) -> AuthMessageResponse:
+            if password_reset_mailer is None:
+                raise HTTPException(status_code=503, detail="注册邮件服务暂不可用，请稍后再试。")
+            try:
+                password_reset_ip_throttle.consume(f"registration-code:{request.client.host if request.client else 'unknown'}")
+                code = auth_service.issue_registration_code(email=payload.email)
+            except AuthRateLimited as exc:
+                raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "60"}) from exc
+            except AuthError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            try:
+                password_reset_mailer.send_registration_code(payload.email.strip().casefold(), code, 10)
+            except Exception as exc:
+                auth_service.invalidate_registration_code(email=payload.email, code=code)
+                # Log classification only: SMTP messages may contain private data.
+                smtp_code = getattr(exc, "smtp_code", None)
+                LOGGER.warning(
+                    "Registration email delivery failed error_type=%s smtp_code=%s",
+                    type(exc).__name__, smtp_code if isinstance(smtp_code, int) else None,
+                )
+                raise HTTPException(status_code=503, detail="验证码发送失败，请稍后重新获取。") from None
+            return AuthMessageResponse(message="验证码已发送，10分钟内有效。")
+
         @app.post(
             "/api/v1/auth/register",
             response_model=PrincipalResponse,
@@ -704,6 +789,7 @@ def create_app(
                     email=payload.email,
                     password=payload.password,
                     display_name=payload.display_name,
+                    verification_code=payload.verification_code,
                 )
             except AuthRateLimited as exc:
                 raise HTTPException(
@@ -823,8 +909,8 @@ def create_app(
         def logout(
             request: Request,
             response: Response,
-            _principal: Principal = Depends(current_principal),
         ) -> None:
+            # Logout also clears missing, expired, or already-revoked sessions.
             raw_token = request.cookies.get(resolved.session_cookie_name, "")
             if raw_token:
                 auth_service.logout(raw_token)
@@ -1044,6 +1130,18 @@ def create_app(
 
     if provider_settings_service is not None:
 
+        @app.get("/api/v1/admin/text-connections", tags=["admin"])
+        def admin_text_connections(principal: Principal = Depends(current_principal)):
+            return list_connections(provider_settings_service, principal)
+
+        @app.post("/api/v1/admin/text-connections", tags=["admin"])
+        def create_text_connection(payload: TextConnectionUpdateRequest, principal: Principal = Depends(current_principal)):
+            return save_connection(provider_settings_service, principal, None, payload.model_dump())
+
+        @app.put("/api/v1/admin/text-connections/{connection_id}", tags=["admin"])
+        def update_text_connection(connection_id: str, payload: TextConnectionUpdateRequest, principal: Principal = Depends(current_principal)):
+            return save_connection(provider_settings_service, principal, connection_id, payload.model_dump())
+
         @app.get(
             "/api/v1/provider-settings",
             response_model=ProviderSettingsListResponse,
@@ -1114,8 +1212,10 @@ def create_app(
         )
         async def test_admin_provider_settings(
             provider_kind: str,
+            model_id: str | None = None,
             principal: Principal = Depends(current_principal),
         ) -> AdminProviderTestResponse:
+            principal.require(Permission.PROVIDER_MANAGE)
             if (
                 not resolved.embedded_gateway_routes_enabled
                 and resolved.internal_worker_token
@@ -1126,10 +1226,11 @@ def create_app(
                     resolved.internal_worker_token,
                     provider_kind=provider_kind,
                     actor_user_id=principal.user_id,
+                    model_id=model_id,
                 )
             else:
                 result = await provider_settings_service.test_connection(
-                    principal, provider_kind
+                    principal, provider_kind, model_id=model_id
                 )
             return AdminProviderTestResponse.model_validate(result, from_attributes=True)
 

@@ -101,6 +101,22 @@ class WorkflowRepositoryTests(unittest.TestCase):
             )
         self.assertEqual(state.revision, self.repository.get_stage_state(owner, project, "draft").revision)
 
+    def test_upload_duplicate_counts_are_owner_scoped_and_only_count_successes(self):
+        with self.sessions.begin() as session:
+            for index, (owner, status, outcome) in enumerate([
+                (self.ids["user_a"], "succeeded", "duplicate_file"),
+                (self.ids["user_a"], "succeeded", "uploaded"),
+                (self.ids["user_a"], "failed", "duplicate_file"),
+                (self.ids["user_b"], "succeeded", "duplicate_file"),
+            ]):
+                session.add(WorkflowJob(user_id=uuid.UUID(owner), scope="library", job_type="library.upload",
+                    status=status, idempotency_scope_key="_library_", idempotency_key=str(index),
+                    payload_json={"batch_id": "batch"}, result_json={"status": outcome}))
+        summary = self.repository.summarize_library_upload_batches(self.ids["user_a"])[0]
+        self.assertEqual(3, summary["total"])
+        self.assertEqual(2, summary["succeeded"])
+        self.assertEqual(1, summary["duplicate_count"])
+
     def test_stage_reads_and_writes_are_project_owner_scoped(self) -> None:
         created = self.repository.compare_and_set_stage(
             self.ids["user_a"],

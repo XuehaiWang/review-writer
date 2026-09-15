@@ -9,6 +9,7 @@ import hmac
 import json
 import math
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -33,7 +34,7 @@ from .database import (
     database_session,
     utc_now,
 )
-from .model_catalog import DEFAULT_MODEL_TIER, ModelTier, resolve_model_tier
+from .model_catalog import ModelTier, resolve_model_tier, SNAPSHOT_KEY, model_dict, model_from_dict
 from .job_lifecycle import active_job_project
 from .server_providers import ServerProviderRuntime, ServerProviderSettingsService
 from .workflow_models import WorkflowJob
@@ -68,6 +69,8 @@ class GatewayProviderError(ModelGatewayError):
     def __init__(self, message: str, *, provider_error: dict | None = None):
         super().__init__(message)
         normalized = provider_error or normalize_provider_error(self.status_code, message)
+        if normalized["category"] == "model_unavailable":
+            self.status_code = 422
         self.gateway_detail = {"code": normalized["code"], "message": message, "details": normalized}
 
 
@@ -93,6 +96,7 @@ class TaskClaims:
     expires_at: int
     lease_token: str | None = None
     lease_generation: int | None = None
+    model_snapshot: dict | None = None
 
 
 TEXT_GATEWAY_JOB_TYPES = frozenset(
@@ -205,13 +209,20 @@ class ModelGatewayService:
             timeout=httpx.Timeout(300.0, connect=30.0)
         )
 
-    def _text_runtime(self) -> ServerProviderRuntime:
+    def _text_runtime(self, tier: ModelTier | None = None) -> ServerProviderRuntime:
+        if tier is not None and (tier.connection_revision or tier.connection_id != "default"):
+            from .text_connections import runtime_for_connection
+            service = self.provider_settings
+            if service is None:
+                from .server_providers import ServerProviderSettingsService
+                service = ServerProviderSettingsService(self.settings, self.session_factory)
+            return runtime_for_connection(service, tier.connection_id, tier.connection_revision)
         if self.provider_settings is not None:
             return self.provider_settings.runtime_config("text")
         secret = self.settings.text_provider_api_key
         return ServerProviderRuntime(
             "text", self.settings.text_provider_base_url,
-            resolve_model_tier(DEFAULT_MODEL_TIER).model,
+            resolve_model_tier(None, self.session_factory).model,
             self.settings.text_provider_wire_api, secret, bool(secret),
             "environment", "",
         )
@@ -270,13 +281,24 @@ class ModelGatewayService:
         lease_generation: int | None = None,
         lifetime_seconds: int = 8 * 60 * 60,
     ) -> str:
-        model_tier = DEFAULT_MODEL_TIER
+        model_tier = None
         if project_id:
             with database_session(self.session_factory) as session:
                 project = session.get(Project, uuid.UUID(project_id))
                 if project is None or str(project.user_id) != user_id:
                     raise InvalidTaskToken("Task project does not belong to the task user.")
-                model_tier = resolve_model_tier(project.model_tier).id
+                model_tier = project.model_tier
+        with database_session(self.session_factory) as session:
+            job = session.scalar(select(WorkflowJob).where(WorkflowJob.id == uuid.UUID(job_id)).with_for_update())
+            model_snapshot = (job.payload_json or {}).get(SNAPSHOT_KEY) if job else None
+            if model_snapshot is None:
+                # Pin legacy jobs once as well; a lease renewal must not switch models.
+                from .model_catalog import snapshot_for_job
+                model_snapshot = (snapshot_for_job(session, model_tier, default_wire=self.settings.text_provider_wire_api)
+                                  if job_type in TEXT_GATEWAY_JOB_TYPES else model_dict(resolve_model_tier(model_tier, self.session_factory)))
+                if job is not None:
+                    job.payload_json = {**(job.payload_json or {}), SNAPSHOT_KEY: model_snapshot}
+        model_tier = model_snapshot["id"]
         capabilities: list[str] = []
         if job_type in TEXT_GATEWAY_JOB_TYPES:
             capabilities.append("text")
@@ -291,6 +313,7 @@ class ModelGatewayService:
             "project_id": str(uuid.UUID(project_id)) if project_id else None,
             "job_type": str(job_type),
             "model_tier": model_tier,
+            "model_snapshot": model_snapshot,
             "capabilities": capabilities,
             "exp": int(time.time()) + max(60, int(lifetime_seconds)),
             "jti": uuid.uuid4().hex,
@@ -327,7 +350,8 @@ class ModelGatewayService:
                     else None
                 ),
                 job_type=str(payload["job_type"]),
-                model_tier=resolve_model_tier(str(payload["model_tier"])).id,
+                model_tier=str(payload["model_tier"]),
+                model_snapshot=payload.get("model_snapshot"),
                 capabilities=tuple(
                     str(item)
                     for item in payload.get("capabilities") or []
@@ -348,6 +372,19 @@ class ModelGatewayService:
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, UnicodeError) as exc:
             raise InvalidTaskToken("The internal task token is invalid or expired.") from exc
         return claims
+
+    def _claims_model(self, claims: TaskClaims) -> ModelTier:
+        if claims.model_snapshot:
+            snapshot = dict(claims.model_snapshot)
+            # Pre-connection snapshots always used the original default service.
+            if "connection_revision" not in snapshot:
+                from .text_connections import connection_in_session
+                with database_session(self.session_factory) as session:
+                    original = connection_in_session(session, "default", 1)
+                if original:
+                    snapshot.update(connection_id="default", connection_revision=1)
+            return model_from_dict(snapshot)
+        return resolve_model_tier(claims.model_tier, self.session_factory)
 
     @staticmethod
     def _require_capability(claims: TaskClaims, capability: str) -> None:
@@ -373,9 +410,7 @@ class ModelGatewayService:
                 # Scientific subprocesses use it in cache fingerprints so a
                 # project model change cannot silently reuse an old Agent
                 # classification or extraction result.
-                "REVIEW_WRITING_MODEL": resolve_model_tier(
-                    claims.model_tier
-                ).model,
+                "REVIEW_WRITING_MODEL": self._claims_model(claims).model,
                 "REVIEW_WRITER_IMAGE_GATEWAY_URL": (
                     self.settings.internal_gateway_url.rsplit("/", 1)[0]
                     + "/image-generations"
@@ -699,11 +734,12 @@ class ModelGatewayService:
         response_format: str = "json",
         request_id: str = "",
         claims: TaskClaims | None = None,
+        stream: bool = False,
     ) -> dict[str, Any]:
-        runtime = self._text_runtime()
+        runtime = self._text_runtime(tier)
         if not runtime.enabled:
             raise GatewayConfigurationError("The server text provider is not configured.")
-        wire = runtime.wire_api
+        wire = tier.wire_api or runtime.wire_api
         if wire in {"chat", "chat-completion", "chat-completions"}:
             endpoint = f"{runtime.base_url}/chat/completions"
             payload = {
@@ -733,9 +769,14 @@ class ModelGatewayService:
                 self._validate_live_job(claims)
             counters = self._reserve_text_attempt(request_id, len(prompt)) if request_id else {}
             try:
-                response = await self._provider_client.post(
-                    endpoint, json=payload, headers=headers
-                )
+                if stream:
+                    result = await self._stream_text_response(endpoint, payload, headers, request_id, wire, claims)
+                    result["_gateway_metering"] = counters
+                    return result
+                response = await self._provider_client.post(endpoint, json=payload, headers=headers)
+            except GatewayProviderError as exc:
+                if attempt >= 3 or exc.gateway_detail.get("details", {}).get("category") not in {"transient", "rate_limited"}:
+                    raise
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 if attempt >= 3:
                     raise GatewayProviderError(
@@ -761,6 +802,75 @@ class ModelGatewayService:
                     )
             await asyncio.sleep(min(8.0, (2 ** (attempt - 1)) + random.random()))
         raise GatewayProviderError("Model provider request failed.")
+
+    async def _stream_text_response(self, endpoint, payload, headers, request_id, wire, claims):
+        from review_writer_core.dialogue_stream import partial_reply
+        chat = wire in {"chat", "chat-completion", "chat-completions"}
+        body = {**payload, "stream": True}
+        if chat:
+            body["stream_options"] = {"include_usage": True}
+        text, usage, provider_id, finished = "", {}, "", False
+        last_update = 0.0
+        started = asyncio.get_running_loop().time()
+        diagnostics = {"transport": "sse", "chunks": 0, "first_chunk_ms": None, "last_chunk_ms": None}
+        def publish():
+            with database_session(self.session_factory) as session:
+                row = session.get(AIModelRequest, uuid.UUID(request_id))
+                if row is not None and row.status == "running":
+                    row.response_json = {"partial_reply": partial_reply(text), "stream_diagnostics": dict(diagnostics)}
+        publish()  # Reset an interrupted attempt before publishing replacement text.
+        async with self._provider_client.stream("POST", endpoint, json=body, headers={**headers, "Accept": "text/event-stream"}) as response:
+            if response.status_code >= 400:
+                await response.aread()
+                raise GatewayProviderError(f"Model provider returned HTTP {response.status_code}",
+                    provider_error=normalize_provider_error(response.status_code, response.text))
+            if "text/event-stream" not in response.headers.get("content-type", ""):
+                await response.aread()
+                diagnostics["transport"] = "buffered_json"
+                publish()
+                return response.json()  # Providers may ignore stream; do not simulate it.
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    finished = True
+                    break
+                if not data:
+                    continue
+                event = json.loads(data)
+                if event.get("error") or event.get("type") in {"error", "response.failed", "response.incomplete"}:
+                    raise GatewayProviderError("Model stream failed before completion.")
+                previous_length = len(text)
+                if chat:
+                    provider_id = event.get("id") or provider_id
+                    usage = event.get("usage") or usage
+                    for choice in event.get("choices") or []:
+                        if choice.get("index", 0) == 0:
+                            delta = (choice.get("delta") or {}).get("content")
+                            if isinstance(delta, str):
+                                text += delta
+                elif event.get("type") == "response.output_text.delta":
+                    text += event.get("delta") or ""
+                elif event.get("type") == "response.completed":
+                    publish()
+                    return event["response"]
+                now = asyncio.get_running_loop().time()
+                if len(text) > previous_length:
+                    diagnostics["chunks"] += 1
+                    elapsed = round((now - started) * 1000)
+                    if diagnostics["first_chunk_ms"] is None:
+                        diagnostics["first_chunk_ms"] = elapsed
+                    diagnostics["last_chunk_ms"] = elapsed
+                if now - last_update >= 0.25:
+                    if claims is not None:
+                        self._validate_live_job(claims)
+                    publish()
+                    last_update = now
+        if not finished or not chat:
+            raise GatewayProviderError("Model stream ended before completion.")
+        publish()
+        return {"id": provider_id, "choices": [{"message": {"content": text}}], "usage": usage}
 
     async def _provider_embedding_call(
         self,
@@ -877,7 +987,8 @@ class ModelGatewayService:
             row.reasoning_tokens = int(usage.get("reasoning_tokens") or 0)
             row.total_tokens = int(usage.get("total_tokens") or 0)
             row.provider_cost_usd = Decimal(str(response_payload.get("cost_usd") or "0"))
-            row.response_json = response_payload
+            row.response_json = {**response_payload, **{key: row.response_json[key]
+                for key in ("partial_reply", "stream_diagnostics") if key in (row.response_json or {})}}
             row.error_message = ""
             row.finished_at = utc_now()
 
@@ -902,7 +1013,7 @@ class ModelGatewayService:
             raise GatewayRequestConflict("The response format must be json or text.")
         if not prompt or len(prompt) > 4_000_000:
             raise GatewayRequestConflict("The model prompt is empty or too large.")
-        tier = resolve_model_tier(claims.model_tier)
+        tier = self._claims_model(claims)
         digest = self._request_sha256(normalized_stage, prompt, normalized_format)
         request_id, cached, in_flight, attempt_number = self._begin_request(
             claims,
@@ -969,6 +1080,7 @@ class ModelGatewayService:
                     response_format=normalized_format,
                     request_id=request_id,
                     claims=claims,
+                    **({"stream": True} if normalized_stage in {"Paragraph analysis and revision", "Paragraph revision after local lookup"} else {}),
                 )
             usage = self._usage(provider_data)
             cost = calculate_provider_cost(tier, **{
@@ -982,7 +1094,7 @@ class ModelGatewayService:
                 "model_tier": tier.id,
                 "model": tier.model,
                 "output_text": self._output_text(
-                    provider_data, self._text_runtime().wire_api
+                    provider_data, tier.wire_api or self._text_runtime(tier).wire_api
                 ),
                 "usage": usage,
                 "cost_usd": format(cost, "f"),
@@ -1433,6 +1545,7 @@ class ModelGatewayService:
             "Accept": "application/json, text/event-stream",
             "Idempotency-Key": idempotency_key,
         }
+        quality_adjusted = False
         for attempt in range(1, 4):
             try:
                 if wire in {"chat", "chat-completion", "chat-completions"}:
@@ -1547,6 +1660,22 @@ class ModelGatewayService:
                         )
                 elif response.status_code not in self.TRANSIENT_STATUSES or attempt >= 3:
                     detail = response.text[:500].replace("\n", " ")
+                    # A rejected parameter has not generated an image. Adapt only
+                    # to a single explicit supported quality, never a model-name list.
+                    try:
+                        error = response.json().get("error", {})
+                        message = str(error.get("message", "")) if isinstance(error, dict) else str(error)
+                    except (ValueError, AttributeError):
+                        message = ""
+                    supported = re.search(r"supports? only\s+['\"](low|medium|high|auto|standard|hd)['\"]", message, re.I)
+                    if (response.status_code == 400 and attempt < 3 and not quality_adjusted
+                            and "quality" in message.casefold() and supported
+                            and wire not in {"chat", "chat-completion", "chat-completions"}
+                            and supported.group(1).casefold() != quality):
+                        quality = supported.group(1).casefold()
+                        quality_adjusted = True
+                        headers["Idempotency-Key"] = f"{idempotency_key}:quality-{quality}"
+                        continue
                     if any(
                         marker.casefold() in detail.casefold()
                         for marker in self.IMAGE_SAFETY_MARKERS

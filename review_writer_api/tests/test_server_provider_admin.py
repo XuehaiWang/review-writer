@@ -139,6 +139,7 @@ class ServerProviderAdminTests(unittest.TestCase):
             email="OWNER@example.com",
             password="strong-password-123",
             display_name="Owner",
+            verification_code=auth.issue_registration_code(email="owner@example.com"),
         )
         self.assertIn(Role.ADMIN, authenticated.principal.roles)
 

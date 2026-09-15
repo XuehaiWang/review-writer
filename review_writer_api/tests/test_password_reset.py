@@ -71,6 +71,7 @@ class PasswordResetTests(unittest.TestCase):
             headers=ORIGIN,
             json={
                 "email": "chemist@example.com",
+                "verification_code": client.app.state.auth_service.issue_registration_code(email="chemist@example.com"),
                 "password": "old-password-123",
                 "display_name": "Chemist",
             },

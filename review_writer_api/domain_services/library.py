@@ -47,6 +47,7 @@ from review_writer_core.bibliography_audit import (
     apply_bibliography_updates,
     bibliography_candidates,
     resolve_bibliography,
+    refresh_edited_bibliography,
 )
 
 
@@ -1042,6 +1043,7 @@ class LibraryService:
                     row.markdown_relative_path = markdown_relative
                     row.status = "active"
                     row.deleted_at = None
+                    row.created_at = utc_now()
                     row.updated_at = utc_now()
                     outcome = "restored"
                 session.flush()
@@ -1264,6 +1266,7 @@ class LibraryService:
                         row.markdown_relative_path = markdown_relative
                         row.status = "active"
                         row.deleted_at = None
+                        row.created_at = utc_now()
                         row.updated_at = utc_now()
                         catalog_outcome = "restored"
                     session.flush()
@@ -1320,7 +1323,7 @@ class LibraryService:
                     LibraryPaper.user_id == user_uuid,
                     LibraryPaper.deleted_at.is_(None),
                 )
-                .order_by(LibraryPaper.updated_at.desc())
+                .order_by(LibraryPaper.created_at.asc(), LibraryPaper.id.asc())
             ).all()
             records = [self._record(row) for row in rows]
         needle = str(query or "").strip().casefold()
@@ -1400,13 +1403,19 @@ class LibraryService:
                     "Library metadata changed while bibliography resolution was being saved."
                 )
             session.add(metadata_artifact)
-            title = unwrap_metadata_value(stored_metadata.get("title")) or row.title
+            title = (unwrap_metadata_value(stored_metadata["title"]) or "") if "title" in stored_metadata else row.title
             authors = unwrap_metadata_value(stored_metadata.get("authors")) or []
             keywords = unwrap_metadata_value(stored_metadata.get("keywords")) or []
             row.title = str(title)
             row.authors_json = authors if isinstance(authors, list) else [authors]
             row.keywords_json = keywords if isinstance(keywords, list) else [keywords]
             row.tags_json = verified_structured_tags(stored_metadata)
+            if bibliography_audit is None:
+                bibliography_audit = refresh_edited_bibliography(
+                    dict(row.metadata_json or {}), stored_metadata,
+                    dict(row.bibliography_audit_row.audit_json or {})
+                    if row.bibliography_audit_row is not None else {},
+                )
             row.metadata_json = stored_metadata
             row.updated_at = utc_now()
             if bibliography_audit is not None:

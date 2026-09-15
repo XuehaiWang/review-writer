@@ -214,13 +214,14 @@ def test_provider_through_gateway(
     *,
     provider_kind: str,
     actor_user_id: str,
+    model_id: str | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
     endpoint = str(model_endpoint or "").rstrip("/").rsplit("/", 1)[0]
     request = urllib.request.Request(
         endpoint + "/provider-test",
         data=json.dumps(
-            {"provider_kind": provider_kind, "actor_user_id": actor_user_id},
+            {"provider_kind": provider_kind, "actor_user_id": actor_user_id, "model_id": model_id},
             separators=(",", ":"),
         ).encode("utf-8"),
         method="POST",

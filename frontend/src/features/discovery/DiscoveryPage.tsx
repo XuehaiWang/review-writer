@@ -165,6 +165,7 @@ export function DiscoveryPage() {
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.projects });
+      await queryClient.invalidateQueries({ queryKey: ["planning", project!.project_id] });
       navigate(`/planning?tab=matrix&project=${encodeURIComponent(project!.project_id)}`);
     },
   });

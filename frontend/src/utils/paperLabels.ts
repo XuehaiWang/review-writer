@@ -1,10 +1,10 @@
-export type PaperIdentity = { paper_id: string };
+export type PaperIdentity = { paper_id: string; display_label?: string };
 
 export function buildPaperDisplayLabels(papers: PaperIdentity[]): Map<string, string> {
   const labels = new Map<string, string>();
   const width = Math.max(3, String(papers.length).length);
   papers.forEach((paper, index) => {
-    if (!labels.has(paper.paper_id)) labels.set(paper.paper_id, `P${String(index + 1).padStart(width, "0")}`);
+    if (!labels.has(paper.paper_id)) labels.set(paper.paper_id, paper.display_label || `P${String(index + 1).padStart(width, "0")}`);
   });
   return labels;
 }

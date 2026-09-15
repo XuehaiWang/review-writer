@@ -109,7 +109,7 @@ class PlanningMatrixActionsMixin:
                 "required_fact_roles": (row.get("fact_enrichment") or {}).get("required_fact_roles") or []})
         state = self.repository.get_stage_state(principal.user_id, project_id, "matrix")
         return {"schema_version": 2, "operation": "fact_revision", "project_id": project_id,
-            "actual_model_id": resolve_model_tier(project.model_tier).model,
+            "actual_model_id": resolve_model_tier(project.model_tier, self.repository.session_factory).model,
             "source_matrix_artifact_id": artifact.id, "expected_matrix_revision": state.revision,
             "papers": papers, "pending_paper_count": len(papers), "fulltext_candidate_paper_count": len(papers)}
 
@@ -159,6 +159,7 @@ class PlanningMatrixActionsMixin:
             input_snapshot={"operation": "fact_revision", "source_matrix_artifact_id": artifact.id})
         return {"project_id": project_id, "matrix_artifact_id": published[MATRIX_LOGICAL_NAME].id,
                 "matrix_revision": state.revision, "fact_enrichment_summary": updated["fact_enrichment_summary"],
+                "blueprint_invalidated": True,
                 "matrix_enrichment_checkpoint": built.get("matrix_enrichment_checkpoint") or {}}
 
     def update_matrix_row(

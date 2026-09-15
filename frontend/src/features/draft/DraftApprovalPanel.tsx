@@ -37,9 +37,7 @@ export function DraftApprovalPanel({ quality, approved, busy, onApprove, onNext,
   return (
     <section className={approved ? "approval-card good" : "approval-card"}>
       <h2>{approved ? text("初稿已人工确认", "Draft manually approved") : text("等待人工确认", "Waiting for human approval")}</h2>
-      <p>{quality.current
-        ? text(`当前评估分数：${quality.score ?? "—"}`, `Current evaluation score: ${quality.score ?? "—"}`)
-        : text("请先评估当前保存版本。", "Evaluate the current saved version first.")}</p>
+      <p>{text("确认的是当前已保存正文，不包含未保存编辑和未采用候选。", "Approval covers saved text, not unsaved edits or unaccepted candidates.")}</p>
       {Number(quality.blocking_issue_count || 0) > 0 ? (
         <p className="message message-warning">{text(
           `仍有 ${quality.blocking_issue_count} 项事实或论证提醒。可知悉后确认进入终稿，问题记录会保留。`,
@@ -60,20 +58,20 @@ export function DraftApprovalPanel({ quality, approved, busy, onApprove, onNext,
               </header>
               {detail.findings.length ? <div className="hard-gate-paragraphs">
                 {detail.findings.map((finding, index) => (
-                  <section key={`${detail.gate_id}-${finding.paragraph_id}-${finding.rule || index}`}>
-                    <div><strong>{finding.paragraph_id}</strong><span>{[finding.rule, finding.severity].filter(Boolean).join(" · ")}</span></div>
+                  <details key={`${detail.gate_id}-${finding.paragraph_id}-${finding.rule || index}`}>
+                    <summary><strong>{finding.paragraph_id}</strong> · {gateDiagnosis(finding).slice(0, 100)}</summary>
                     <p>{gateDiagnosis(finding)}</p>
                     <footer>
                       <small>{text("建议处理：", "Suggested action: ")}{gateRoute(finding.route)}</small>
                       <button className="button button-secondary" type="button" onClick={() => onReview(finding.paragraph_id)}>
-                        {text("在评估与重写中处理", "Review in evaluation and rewriting")}
+                        {text("在章节对话中处理", "Review in chapter dialogue")}
                       </button>
                     </footer>
-                  </section>
+                  </details>
                 ))}
               </div> : <p className="muted">{text(
-                `检查标识：${detail.gate_id}。旧报告没有段落明细，可在“评估与重写”查看；仍可知悉后继续。`,
-                `Check: ${detail.gate_id}. This legacy report has no paragraph details; you can review Evaluation and rewriting or acknowledge and continue.`,
+                `检查标识：${detail.gate_id}。旧报告没有段落明细，可在“章节对话”查看；仍可知悉后继续。`,
+                `Check: ${detail.gate_id}. This legacy report has no paragraph details; you can review Chapter dialogue or acknowledge and continue.`,
               )}</p>}
             </article>
           ))}
@@ -93,10 +91,10 @@ export function DraftApprovalPanel({ quality, approved, busy, onApprove, onNext,
         </div>
       ) : null}
       <p className="muted">{text(
-        "点击确认表示知悉评估提醒并允许继续，不代表系统已核实所有科学事实。正文、分数和问题记录不会因此改变。",
-        "Approval acknowledges the evaluation and allows progression; it does not verify every scientific claim or change the draft, score or findings.",
+        "点击确认允许继续，不代表系统已核实所有科学事实。正文和已有问题记录不会因此改变。",
+        "Approval allows progression; it does not verify every scientific claim or change the saved text or findings.",
       )}</p>
-      <button className="button button-primary" type="button" disabled={busy || !quality.current || approved} onClick={onApprove}>
+      <button className="button button-primary" type="button" disabled={busy || approved} onClick={onApprove}>
         {approved ? text("已确认", "Approved") : text("确认并允许进入终稿", "Approve and allow final stage")}
       </button>
       {approved ? <button className="button button-secondary" type="button" onClick={onNext}>

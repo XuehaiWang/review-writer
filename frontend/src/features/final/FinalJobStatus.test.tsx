@@ -29,6 +29,19 @@ function job(overrides: Partial<Job> = {}): Job {
 }
 
 describe("FinalJobStatus", () => {
+  it("shows persisted PDF source locations after remount without claiming a repair", () => {
+    const saved = job({ job_type: "final.pdf", status: "failed", result: { pdf_diagnostics: {
+      total: 1, source_modified: false, issues: [{ kind: "reference", reference_number: "10", section: "References",
+        figure_number: "", paragraph_number: 1, line: 227, column: 20, codepoint: "U+0001", excerpt: "SEEBACH. ⟦U+0001⟧-Peptidic" }],
+    } } });
+    const mounted = render(<FinalJobStatus job={saved} />);
+    expect(screen.getByText("参考文献第 10 条")).toBeInTheDocument();
+    mounted.unmount();
+    render(<FinalJobStatus job={saved} />);
+    expect(screen.getByText(/SEEBACH/)).toBeInTheDocument();
+    expect(screen.getByText(/原始正文未修改/)).toBeInTheDocument();
+    expect(screen.getByText(/字符位置 20/)).toBeInTheDocument();
+  });
   afterEach(() => {
     cleanup();
     usePreferences.getState().setLanguage("zh-CN");

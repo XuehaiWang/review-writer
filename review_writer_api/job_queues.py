@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 
+JOB_QUEUES = frozenset({"scientific", "image", "ingest", "document", "bibliography"})
 IMAGE_JOB_TYPES = frozenset({"figures.redraw", "final.overview"})
 DOCUMENT_JOB_TYPES = frozenset({"final.export", "final.pdf"})
 INGEST_JOB_TYPES = frozenset(
@@ -12,7 +13,6 @@ INGEST_JOB_TYPES = frozenset(
         "library.semantic-backfill",
         "library.search",
         "library.download",
-        "library.bibliography-audit",
     }
 )
 
@@ -21,6 +21,8 @@ def queue_for_job_type(job_type: str) -> str:
     """Map a public job type to a small, deployment-stable worker queue."""
 
     normalized = str(job_type or "").strip()
+    if normalized == "library.bibliography-audit":
+        return "bibliography"
     if normalized in IMAGE_JOB_TYPES:
         return "image"
     if normalized in DOCUMENT_JOB_TYPES:

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
-import { ACTIVE_JOB_POLL_INTERVAL_MS, TRANSIENT_RESULT_VISIBLE_MS } from "../../api/polling";
+import { ACTIVE_JOB_POLL_INTERVAL_MS } from "../../api/polling";
 import { libraryQuery, queryKeys } from "../../api/queries";
 import type { Job, LibraryPaper, UploadBatchSummary, UploadJob, UploadJobList } from "../../api/types";
 import { ErrorState } from "../../components/ErrorState";
@@ -24,10 +24,12 @@ type UploadStatus = {
   id: string;
   batchId: string;
   name: string;
-  status: "queued" | "uploading" | "done" | "failed";
+  status: "queued" | "uploading" | "done" | "failed" | "cancelled";
   message: string;
   messageEn?: string;
   updatedAt?: string;
+  duplicate?: boolean;
+  paperId?: string;
 };
 type Candidate = Record<string, unknown> & { candidate_id?: string; title?: string; year?: number; journal?: string; doi?: string; score?: number; landing_url?: string };
 type DownloadResult = {
@@ -37,31 +39,42 @@ type DownloadResult = {
   results?: Array<{ status?: string; error?: string }>;
 };
 
-function uploadResultIsVisible(updatedAt: string | undefined, now: number): boolean {
-  const timestamp = Date.parse(updatedAt || "");
-  return Number.isFinite(timestamp) && timestamp + TRANSIENT_RESULT_VISIBLE_MS > now;
-}
-
-function UploadBatchProgress({
+export function UploadBatchProgress({
   uploads,
   localUploads,
   summary,
   expectedTotal,
+  onCancelRemaining,
+  cancelling = false,
+  cancelNotice,
+  cancelError,
+  onViewPaper,
 }: {
   uploads: UploadStatus[];
   localUploads: UploadStatus[];
   summary?: UploadBatchSummary;
   expectedTotal?: number;
+  onCancelRemaining?: () => void;
+  cancelling?: boolean;
+  cancelNotice?: string;
+  cancelError?: string;
+  onViewPaper?: (paperId: string) => void;
 }) {
   const { language, text } = useUiText();
-  const { total, done, failed, uploading, queued } = buildUploadBatchCounts(
+  const { total, done, failed, cancelled, uploading, queued } = buildUploadBatchCounts(
     summary,
     localUploads.map((row) => row.status),
     expectedTotal,
   );
   if (!total) return null;
 
-  const finished = done + failed;
+  const duplicateRows = uploads.filter(row => row.status === "done" && row.duplicate);
+  const duplicates = Math.min(done, summary?.duplicate_count !== undefined
+    ? summary.duplicate_count + localUploads.filter(row => row.status === "done" && row.duplicate).length
+    : duplicateRows.length);
+  const added = done - duplicates;
+
+  const finished = done + failed + cancelled;
   const active = uploading > 0 || queued > 0;
   const progress = Math.round((finished / total) * 100);
   const current = uploads.find((row) => row.status === "uploading");
@@ -71,7 +84,11 @@ function UploadBatchProgress({
     ? text("正在批量上传并执行 MinerU 解析", "Uploading and running MinerU parsing")
     : failed > 0
       ? text("批量处理已结束，部分文件失败", "Batch processing finished with failures")
-      : text("批量上传与解析完成", "Batch upload and parsing completed");
+      : cancelled > 0
+        ? text("批量处理已结束，剩余文件已取消", "Batch finished; remaining files cancelled")
+        : duplicates === total
+          ? text("文件均已存在，已跳过重复解析", "All files already exist; duplicate parsing skipped")
+          : text("批量上传与解析完成", "Batch upload and parsing completed");
 
   return (
     <section className={`upload-progress-panel ${stateClass}`} aria-live="polite">
@@ -81,7 +98,10 @@ function UploadBatchProgress({
           <strong>{title}</strong>
         </div>
         <span className="upload-progress-count">{finished}/{total}</span>
+        {onCancelRemaining && (active || cancelError) ? <button type="button" className="button button-secondary" disabled={cancelling || Boolean(cancelNotice && !cancelError)} onClick={onCancelRemaining}>{cancelling ? text("正在取消…", "Cancelling…") : text("取消剩余", "Cancel remaining")}</button> : null}
       </div>
+      {cancelNotice ? <p className="upload-progress-detail">{cancelNotice}</p> : null}
+      {cancelError ? <p className="upload-progress-error" role="alert">{cancelError}</p> : null}
       <div
         className="upload-progress-track"
         role="progressbar"
@@ -93,12 +113,27 @@ function UploadBatchProgress({
         <span style={{ width: `${progress}%` }} />
       </div>
       <div className="upload-progress-stats">
-        <span><b>{done}</b>{text("已完成", "Completed")}</span>
+        <span><b>{added}</b>{text("新增完成", "Newly added")}</span>
+        {duplicates > 0 ? <span><b>{duplicates}</b>{text("重复跳过", "Duplicates skipped")}</span> : null}
         <span><b>{uploading}</b>{text("处理中", "Processing")}</span>
         <span><b>{queued}</b>{text("等待中", "Waiting")}</span>
         <span className={failed ? "has-failures" : ""}><b>{failed}</b>{text("失败", "Failed")}</span>
+        {cancelled > 0 ? <span><b>{cancelled}</b>{text("已取消", "Cancelled")}</span> : null}
       </div>
       {current ? <p className="upload-progress-detail">{text("当前文件：", "Current file: ")}<strong>{current.name}</strong></p> : null}
+      {duplicates > 0 ? <details className="upload-duplicate-details">
+        <summary>{text(`查看重复文件（${duplicates}）`, `View duplicate files (${duplicates})`)}</summary>
+        <p>{text("按文件内容匹配当前账户的文献库，不按文件名判断；已有文件不会再次执行 MinerU 解析。", "Matched by file content within your library, not filename. Existing files are not parsed by MinerU again.")}</p>
+        <ul>{duplicateRows.map(row => <li key={row.id}><span>{row.name}</span>{row.paperId && onViewPaper ? <button type="button" className="button button-quiet" onClick={() => onViewPaper(row.paperId!)}>{text("查看已有论文", "View existing paper")}</button> : null}</li>)}</ul>
+        {duplicates > duplicateRows.length ? <small>{text("当前仅展示最近任务的明细；上方数量包含整个批次。", "Only recent task details are shown; counts cover the entire batch.")}</small> : null}
+      </details> : null}
+      {uploads.length ? <details className="upload-duplicate-details">
+        <summary>{text("查看文件处理结果", "View file results")}</summary>
+        <ul>{uploads.map(row => <li key={row.id}><span><strong>{row.name}</strong><br />{language === "en" ? row.messageEn || row.message : row.message}</span>
+          {row.status === "done" && row.paperId && onViewPaper ? <button type="button" className="button button-quiet" onClick={() => onViewPaper(row.paperId!)}>{text("查看论文", "View paper")}</button> : null}
+        </li>)}</ul>
+        <small>{text("任务记录来自服务器；浏览器刷新前尚未提交到服务器的文件无法自动续传。", "Task records come from the server. Files not yet submitted before a browser refresh cannot automatically resume.")}</small>
+      </details> : null}
       {!active && firstFailure ? (
         <p className="upload-progress-error" role="alert">
           {text("失败原因：", "Failure: ")}{language === "en" ? firstFailure.messageEn || firstFailure.message : firstFailure.message}
@@ -371,38 +406,37 @@ export function LibraryPage() {
   const [localUploads, setLocalUploads] = useState<UploadStatus[]>([]);
   const [uploadBatchExpectation, setUploadBatchExpectation] = useState<{ batchId: string; total: number } | null>(null);
   const [uploadSubmitting, setUploadSubmitting] = useState(false);
-  const [uploadStatusNow, setUploadStatusNow] = useState(() => Date.now());
+  const stoppedUploadBatches = useRef(new Set<string>());
+  const cancelBatch = useMutation({
+    mutationFn: (batchId: string) => apiRequest<{ cancelled_count: number }>(`/api/v1/library/upload-batches/${encodeURIComponent(batchId)}/cancel-remaining`, { method: "POST" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.libraryUploadJobs }),
+  });
   const uploadJobStatuses = useRef(new Map<string, Job["status"]>());
   const locallySubmittedUploadJobs = useRef(new Set<string>());
   const refreshedUploadJobs = useRef(new Set<string>());
   const uploadJobs = useQuery({
     queryKey: queryKeys.libraryUploadJobs,
     queryFn: () => apiRequest<UploadJobList>("/api/v1/library/upload-jobs/recent?limit=100&include_active=true"),
-    refetchInterval: (query) => query.state.data?.items.some((job) => ["queued", "running", "cancel_requested"].includes(job.status)) ? ACTIVE_JOB_POLL_INTERVAL_MS : false,
+    refetchInterval: (query) => query.state.data?.items.some((job) => ["queued", "running", "cancel_requested"].includes(job.status)) ? ACTIVE_JOB_POLL_INTERVAL_MS : 15_000,
   });
-  const persistedUploads = useMemo<UploadStatus[]>(() => (uploadJobs.data?.items || []).filter((job) => {
-    if (["queued", "running", "cancel_requested"].includes(job.status)) return true;
-    return uploadResultIsVisible(job.updated_at, uploadStatusNow);
-  }).map((job) => {
+  const persistedUploads = useMemo<UploadStatus[]>(() => (uploadJobs.data?.items || []).map((job) => {
     if (job.status === "queued") return { id: job.id, batchId: job.batch_id, name: job.filename, status: "queued", message: "等待服务器处理", messageEn: "Waiting for server processing", updatedAt: job.updated_at };
+    if (job.status === "cancelled") return { id: job.id, batchId: job.batch_id, name: job.filename, status: "cancelled", message: "已取消，未继续解析", messageEn: "Cancelled; parsing will not continue", updatedAt: job.updated_at };
     if (job.status === "running" || job.status === "cancel_requested") return { id: job.id, batchId: job.batch_id, name: job.filename, status: "uploading", message: job.status === "cancel_requested" ? "正在取消解析" : "正在执行 MinerU 解析", messageEn: job.status === "cancel_requested" ? "Cancelling parsing" : "Running MinerU parsing", updatedAt: job.updated_at };
     if (job.status === "succeeded") {
       const duplicate = job.result?.status === "duplicate_file";
-      return { id: job.id, batchId: job.batch_id, name: job.filename, status: "done", message: duplicate ? "文件已存在，已复用解析结果和全文索引" : "上传与解析完成，全文索引已进入后台队列", messageEn: duplicate ? "Already exists; parsing and full-text index reused" : "Upload and parsing completed; full-text indexing was queued", updatedAt: job.updated_at };
+      return { id: job.id, batchId: job.batch_id, name: job.filename, status: "done", duplicate, paperId: typeof job.result?.paper_id === "string" ? job.result.paper_id : undefined, message: duplicate ? "文件已存在，已跳过重复解析" : "上传与解析完成，全文索引已进入后台队列", messageEn: duplicate ? "Already exists; duplicate parsing skipped" : "Upload and parsing completed; full-text indexing was queued", updatedAt: job.updated_at };
     }
     return { id: job.id, batchId: job.batch_id, name: job.filename, status: "failed", message: job.error_message || "上传或解析失败", messageEn: job.error_message || "Upload or parsing failed", updatedAt: job.updated_at };
-  }), [uploadJobs.data?.items, uploadStatusNow]);
-  const visibleLocalUploads = useMemo(() => localUploads.filter((row) => {
-    if (row.status === "queued" || row.status === "uploading") return true;
-    return uploadResultIsVisible(row.updatedAt, uploadStatusNow);
-  }), [localUploads, uploadStatusNow]);
+  }), [uploadJobs.data?.items]);
+  const visibleLocalUploads = localUploads;
   const batchSummaries = uploadJobs.data?.batch_summaries || [];
   const expectedBatchHasVisibleRows = Boolean(uploadBatchExpectation) && (
     visibleLocalUploads.some((row) => row.batchId === uploadBatchExpectation?.batchId)
     || persistedUploads.some((row) => row.batchId === uploadBatchExpectation?.batchId)
   );
   const activeBatchSummary = batchSummaries.find((summary) => summary.queued + summary.running + summary.cancel_requested > 0);
-  const recentBatchSummary = batchSummaries.find((summary) => uploadResultIsVisible(summary.updated_at, uploadStatusNow));
+  const recentBatchSummary = batchSummaries[0];
   const currentUploadBatchId = expectedBatchHasVisibleRows
     ? uploadBatchExpectation?.batchId || ""
     : activeBatchSummary?.batch_id || recentBatchSummary?.batch_id || "";
@@ -412,20 +446,6 @@ export function LibraryPage() {
     () => [...visibleLocalUploads, ...persistedUploads].filter((row) => row.batchId === currentUploadBatchId),
     [visibleLocalUploads, persistedUploads, currentUploadBatchId],
   );
-  useEffect(() => {
-    const expirations = [
-      ...localUploads
-        .filter((row) => row.status === "done" || row.status === "failed")
-        .map((row) => Date.parse(row.updatedAt || "") + TRANSIENT_RESULT_VISIBLE_MS),
-      ...(uploadJobs.data?.items || [])
-        .filter((job) => !["queued", "running", "cancel_requested"].includes(job.status))
-        .map((job) => Date.parse(job.updated_at) + TRANSIENT_RESULT_VISIBLE_MS),
-    ].filter((value) => Number.isFinite(value) && value > uploadStatusNow);
-    if (!expirations.length) return;
-    const delay = Math.max(100, Math.min(...expirations) - Date.now() + 25);
-    const timeout = window.setTimeout(() => setUploadStatusNow(Date.now()), delay);
-    return () => window.clearTimeout(timeout);
-  }, [localUploads, uploadJobs.data?.items, uploadStatusNow]);
   const library = useQuery(libraryQuery(query));
   const libraryIndex = useQuery(libraryQuery(""));
   const semanticBackfill = libraryIndex.data?.semantic_backfill || library.data?.semantic_backfill;
@@ -437,6 +457,7 @@ export function LibraryPage() {
     async () => {
       const refreshes = [queryClient.invalidateQueries({ queryKey: queryKeys.library(""), exact: true })];
       if (query) refreshes.push(queryClient.invalidateQueries({ queryKey: queryKeys.library(query), exact: true }));
+      refreshes.push(queryClient.invalidateQueries({ predicate: ({ queryKey }) => ["planning", "discovery", "sections", "figures", "draft", "final"].includes(String(queryKey[0])) }));
       await Promise.all(refreshes);
     },
     [query, queryClient],
@@ -464,8 +485,10 @@ export function LibraryPage() {
     void refreshLibrary();
   }, [refreshLibrary, uploadJobs.data?.items]);
   const selectedPaper = useMemo(
-    () => library.data?.items.find((paper) => paper.paper_id === selectedId) || library.data?.items[0],
-    [library.data?.items, selectedId],
+    () => library.data?.items.find((paper) => paper.paper_id === selectedId)
+      || libraryIndex.data?.items.find((paper) => paper.paper_id === selectedId)
+      || library.data?.items[0],
+    [library.data?.items, libraryIndex.data?.items, selectedId],
   );
   useEffect(() => {
     if (selectedPaper && selectedPaper.paper_id !== selectedId) setSelectedId(selectedPaper.paper_id);
@@ -494,7 +517,8 @@ export function LibraryPage() {
     onSuccess: async (saved, { paperId }) => {
       queryClient.setQueryData(queryKeys.libraryMetadata(paperId), saved);
       if (selectedPaper?.paper_id === paperId) setMetadataDraft(cloneMetadata(saved));
-      await queryClient.invalidateQueries({ queryKey: queryKeys.library(query) });
+      await refreshLibrary();
+      await queryClient.invalidateQueries({ queryKey: queryKeys.libraryBibliographyAudit(paperId) });
     },
   });
   const deletePaper = useMutation({
@@ -502,6 +526,7 @@ export function LibraryPage() {
     onSuccess: async () => {
       setSelectedId("");
       await queryClient.invalidateQueries({ queryKey: ["library"] });
+      await refreshLibrary();
     },
   });
   const reindexPaper = useMutation({
@@ -534,6 +559,7 @@ export function LibraryPage() {
       queryClient.setQueryData(queryKeys.libraryMetadata(paperId), saved);
       if (selectedPaper?.paper_id === paperId) setMetadataDraft(cloneMetadata(saved));
       await queryClient.invalidateQueries({ queryKey: ["library"] });
+      await refreshLibrary();
     },
   });
   const metadataDirty = Boolean(metadataDraft && metadata.data && JSON.stringify(metadataDraft) !== JSON.stringify(metadata.data));
@@ -546,7 +572,6 @@ export function LibraryPage() {
       const validationBatchId = newIdempotencyKey();
       setUploadBatchExpectation({ batchId: validationBatchId, total: 1 });
       setLocalUploads([{ id: validationBatchId, batchId: validationBatchId, name: invalid.name, status: "failed", message: "该文件不是PDF，未开始上传。", messageEn: "This file is not a PDF. Upload was not started.", updatedAt: new Date().toISOString() }]);
-      setUploadStatusNow(Date.now());
       return;
     }
     const batchId = newIdempotencyKey();
@@ -556,6 +581,7 @@ export function LibraryPage() {
     setUploadSubmitting(true);
     try {
       for (const [index, file] of queue.entries()) {
+        if (stoppedUploadBatches.current.has(batchId)) break;
         const localId = `${batchId}:${index}`;
         setLocalUploads((rows) => rows.map((row) => row.id === localId ? { ...row, status: "uploading", message: "正在上传到服务器", messageEn: "Uploading to server" } : row));
         try {
@@ -570,14 +596,24 @@ export function LibraryPage() {
           await uploadJobs.refetch();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          setLocalUploads((rows) => rows.map((row) => row.id === localId ? { ...row, status: "failed", message, updatedAt: new Date().toISOString() } : row));
-          setUploadStatusNow(Date.now());
+          const cancelled = stoppedUploadBatches.current.has(batchId);
+          setLocalUploads((rows) => rows.map((row) => row.id === localId ? { ...row, status: cancelled ? "cancelled" : "failed", message: cancelled ? "已取消上传" : message, messageEn: cancelled ? "Upload cancelled" : undefined, updatedAt: new Date().toISOString() } : row));
         }
       }
       await refreshLibrary();
     } finally {
       setUploadSubmitting(false);
     }
+  }
+
+  function cancelRemainingUploads() {
+    const batchId = currentUploadBatchId;
+    if (!batchId || cancelBatch.isPending) return;
+    stoppedUploadBatches.current.add(batchId);
+    setLocalUploads((rows) => rows.map((row) => row.batchId === batchId && row.status === "queued"
+      ? { ...row, status: "cancelled", message: "已取消，未上传", messageEn: "Cancelled before upload", updatedAt: new Date().toISOString() }
+      : row));
+    cancelBatch.mutate(batchId);
   }
 
   return (
@@ -591,13 +627,19 @@ export function LibraryPage() {
         uploads={uploads}
         localUploads={currentLocalUploads}
         summary={currentBatchSummary}
+        onViewPaper={(paperId) => { setQuery(""); setSelectedId(paperId); setTab("metadata"); }}
         expectedTotal={uploadBatchExpectation?.batchId === currentUploadBatchId ? uploadBatchExpectation.total : undefined}
+        onCancelRemaining={cancelRemainingUploads}
+        cancelling={cancelBatch.isPending && cancelBatch.variables === currentUploadBatchId}
+        cancelNotice={currentBatchSummary?.remaining_cancelled || (cancelBatch.isSuccess && cancelBatch.variables === currentUploadBatchId) ? text("已取消剩余文件，正在解析的文件将继续完成。", "Remaining files cancelled; parsing already in progress will finish.") : undefined}
+        cancelError={cancelBatch.isError && cancelBatch.variables === currentUploadBatchId ? text("后续文件已停止上传，但服务器取消未成功，请点击“取消剩余”重试。", "Further uploads stopped, but server cancellation failed. Click Cancel remaining to retry.") : undefined}
       />
+      {uploadJobs.error ? <div role="alert" className="message message-error">{text("上传状态暂时无法更新，不代表上传失败或完成。已显示的状态为上次结果。", "Upload status could not be refreshed. This does not mean uploads failed or completed; displayed results may be outdated.")}<button type="button" className="button button-quiet" onClick={() => void uploadJobs.refetch()}>{text("重新查询", "Refresh status")}</button></div> : null}
       <AcquisitionPanel projectId={project?.project_id || ""} onLibraryChanged={refreshLibrary} />
       <div className="three-pane library-workspace">
         <section className="pane list-pane">
           <div className="pane-head"><div><span className="step-label">{text("论文", "Papers")}</span><h2>{text("文献", "Papers")} <span aria-live="polite">{libraryIndex.data?.count ?? library.data?.count ?? 0}</span></h2></div></div>
-          <input className="pane-search" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={text("检索标题、作者、关键词或正文", "Search title, author, keyword, or full text")} />
+          <input className="pane-search" type="search" value={query} onChange={(event) => { setQuery(event.target.value); setSelectedId(""); }} placeholder={text("检索标题、作者、关键词或正文", "Search title, author, keyword, or full text")} />
           <div className="list-pane-notices" aria-live="polite">
             {library.error ? <ErrorState error={library.error} onRetry={() => library.refetch()} /> : null}
             {semanticBackfill?.enabled && semanticBackfill.total_count > 0 && semanticBackfill.status !== "complete" ? (
@@ -631,6 +673,7 @@ export function LibraryPage() {
             <>
               <div className="pane-head paper-title"><div><span className="step-label" title={selectedPaper.paper_id}>{paperLabels.get(selectedPaper.paper_id) || selectedPaper.paper_id}</span><h2>{selectedPaper.title}</h2><p>{selectedPaper.authors?.join(", ")}</p></div><div className="paper-title-actions"><button className="button button-secondary" type="button" disabled={reindexPaper.isPending || ["queued", "building"].includes(selectedPaper.index_status?.fulltext || "")} onClick={() => reindexPaper.mutate()}>{reindexPaper.isPending ? text("提交中…", "Submitting…") : text("重建全文索引", "Rebuild full-text index")}</button><button className="button button-quiet danger" type="button" disabled={deletePaper.isPending} onClick={() => { if (window.confirm(text(`确认删除 ${paperLabels.get(selectedPaper.paper_id) || selectedPaper.paper_id}？`, `Delete ${paperLabels.get(selectedPaper.paper_id) || selectedPaper.paper_id}?`))) deletePaper.mutate(); }}>{text("删除", "Delete")}</button></div></div>
               <DocumentIndexStatus paper={selectedPaper} />
+              {query && !library.isFetching && !library.data?.items.some((paper) => paper.paper_id === selectedPaper.paper_id) ? <p className="message" role="status">{text("当前论文已不匹配筛选条件，仍保留在此处供您继续查看。", "This paper no longer matches the filter; it remains open for your review.")}</p> : null}
               {selectedPaper.search_match ? <button type="button" className="library-search-match" onClick={() => setTab("markdown")}><span>{text(`正文命中 · 第 ${selectedPaper.search_match.page_start || "?"} 页`, `Full-text match · Page ${selectedPaper.search_match.page_start || "?"}`)}</span><p>{selectedPaper.search_match.content}</p><code>{selectedPaper.search_match.chunk_id}</code></button> : null}
               {reindexPaper.error ? <p className="message message-error index-error">{reindexPaper.error.message}</p> : null}
               <nav className="detail-tabs">{(["metadata", "markdown", "pdf"] as const).map((value) => <button key={value} className={tab === value ? "active" : ""} type="button" onClick={() => setTab(value)}>{value === "metadata" ? "Metadata" : value === "markdown" ? "Markdown" : "PDF"}</button>)}</nav>

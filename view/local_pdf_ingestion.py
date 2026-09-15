@@ -141,7 +141,10 @@ def _document_info(reader: Any) -> dict[str, str]:
 
     def get(*keys: str) -> str:
         for key in keys:
-            value = getattr(raw, key, None)
+            try:
+                value = getattr(raw, key, None)
+            except (ValueError, TypeError):
+                value = None
             if not value and isinstance(raw, dict):
                 value = raw.get(key) or raw.get("/" + key.lstrip("/"))
             cleaned = _clean_text(value)
@@ -153,7 +156,9 @@ def _document_info(reader: Any) -> dict[str, str]:
         "title": get("title", "Title"),
         "author": get("author", "Author"),
         "subject": get("subject", "Subject"),
-        "creation_date": get("creation_date", "CreationDate"),
+        # Document-info dates are untrusted strings, not publication dates.
+        # pypdf's creation_date property raises on common non-PDF date formats.
+        "creation_date": get("CreationDate"),
     }
 
 

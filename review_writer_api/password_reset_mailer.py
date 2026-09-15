@@ -1,4 +1,4 @@
-"""SMTP delivery for short-lived password reset links."""
+"""Shared SMTP delivery for account verification and password reset."""
 
 from __future__ import annotations
 
@@ -58,6 +58,23 @@ class SmtpPasswordResetMailer:
             )
         )
 
+        self._deliver(message)
+
+    def send_registration_code(self, recipient: str, code: str, expires_minutes: int = 10) -> None:
+        message = EmailMessage()
+        message["Subject"] = "验证 Review Writer 注册邮箱"
+        message["From"] = self.from_email
+        message["To"] = recipient
+        message.set_content(
+            f"你的 Review Writer 注册验证码是：{code}\n\n"
+            f"验证码在 {int(expires_minutes)} 分钟内有效，只能使用一次。请勿将验证码告诉他人。\n"
+            "如果这不是你的操作，请忽略本邮件；不会创建账户。\n\n"
+            f"Your Review Writer registration code is {code}. "
+            f"It expires in {int(expires_minutes)} minutes. Do not share it."
+        )
+        self._deliver(message)
+
+    def _deliver(self, message: EmailMessage) -> None:
         if self.security == "tls":
             with smtplib.SMTP_SSL(
                 self.host,

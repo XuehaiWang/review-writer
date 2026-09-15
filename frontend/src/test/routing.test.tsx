@@ -162,7 +162,8 @@ describe("public and authenticated routing", () => {
     });
 
     renderApp("/workspace");
-    fireEvent.click(await screen.findByRole("button", { name: "退出登录" }));
+    fireEvent.click(await screen.findByRole("button", { name: /用户菜单/ }));
+    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "登录 Review Writer" })).toBeInTheDocument());
   });

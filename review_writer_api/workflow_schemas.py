@@ -213,6 +213,7 @@ class DraftTextSaveRequest(BaseModel):
 class DraftParagraphSaveRequest(BaseModel):
     revision: StrictInt = Field(ge=0)
     text: StrictStr = Field(min_length=1, max_length=2_000_000)
+    base_text_sha256: StrictStr = Field(default="", pattern=r"^$|^[a-f0-9]{64}$")
 
 
 class DraftRestoreRequest(BaseModel):
@@ -244,6 +245,25 @@ class DraftOptimizationRequest(DraftEvaluationRequest):
 
 class DraftRewriteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class DraftSectionDialogueRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    action: Literal["discuss", "revise"] = "discuss"
+    message: StrictStr = Field(min_length=1, max_length=12000)
+    base_hashes: dict[StrictStr, StrictStr]
+    paragraph_keys: list[StrictStr] = Field(default_factory=list, max_length=10000)
+    use_saved: StrictBool = False
+
+
+class DraftDialogueRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    message: StrictStr = Field(min_length=1, max_length=12000)
+    base_text_sha256: StrictStr = Field(pattern=r"^[a-f0-9]{64}$")
+    parent_candidate_id: StrictStr = Field(default="", max_length=36)
+    use_saved: StrictBool = False
+    context_keys: list[StrictStr] = Field(default_factory=list, max_length=8)
+    preferences: StrictStr = Field(default="", max_length=4000)
 
 
 class DraftRewriteDecisionRequest(BaseModel):
@@ -286,3 +306,5 @@ class FinalFrontMatterRequest(BaseModel):
     omitted_fields: list[
         Literal["authors", "affiliations", "abstract", "keywords"]
     ] = Field(default_factory=list, max_length=4)
+
+

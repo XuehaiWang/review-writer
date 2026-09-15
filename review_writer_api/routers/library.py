@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from review_writer_api.paper_labels import library_paper_labels
+
 import asyncio
 import mimetypes
 import uuid
@@ -31,7 +33,7 @@ from review_writer_api.errors import (
 from review_writer_api.job_service import JobService
 from review_writer_api.routers.files import _byte_range, _read_range
 from review_writer_api.routers.jobs import _job_response
-from review_writer_api.security import Principal, Role
+from review_writer_api.security import Permission, Principal, Role
 from review_writer_api.workflow_schemas import (
     BibliographyResolutionRequest,
     LiteratureDownloadRequest,
@@ -182,49 +184,19 @@ def build_library_router(
         )[:25]
         total = len(paper_ids)
         context.report_progress(0, total)
-        results: dict[str, dict[str, Any]] = {}
-        ready_count = 0
-        for position, paper_id in enumerate(paper_ids, start=1):
-            context.checkpoint()
-            result = dict(
-                library_index_service.build_embeddings(principal, paper_id) or {}
-            )
-            results[paper_id] = result
-            if result.get("status") == "ready":
-                ready_count += 1
-            if result.get("error_code") == "INSUFFICIENT_CREDIT":
-                remaining = paper_ids[position:]
-                library_index_service.mark_semantic_backfill_failed(
-                    principal,
-                    remaining,
-                    code="INSUFFICIENT_CREDIT",
-                    message=str(result.get("error") or "余额不足，语义索引回填已暂停。"),
-                )
-                for deferred_paper_id in remaining:
-                    results[deferred_paper_id] = {
-                        "status": "deferred",
-                        "error_code": "INSUFFICIENT_CREDIT",
-                    }
-                context.report_partial_result(
-                    {
-                        "paper_ids": paper_ids,
-                        "completed_count": total,
-                        "ready_count": ready_count,
-                        "credit_blocked": True,
-                        "results": results,
-                    }
-                )
-                context.report_progress(total, total)
-                break
-            context.report_partial_result(
-                {
-                    "paper_ids": paper_ids,
-                    "completed_count": position,
-                    "ready_count": ready_count,
-                    "results": results,
-                }
-            )
+        def progress(position, results):
+            context.report_partial_result({
+                "paper_ids": paper_ids, "completed_count": position,
+                "ready_count": sum(r.get("status") == "ready" for r in results.values()),
+                "results": results,
+            })
             context.report_progress(position, total)
+
+        results = library_index_service.build_embedding_batch(
+            principal, paper_ids, progress=progress, checkpoint=context.checkpoint
+        )
+        ready_count = sum(r.get("status") == "ready" for r in results.values())
+        context.report_progress(total, total)
         return {
             "paper_ids": paper_ids,
             "completed_count": total,
@@ -561,16 +533,17 @@ def build_library_router(
                     },
                 )
             retrieval_mode = "lexical_only" if normalized_mode == "hybrid" else "lexical"
+        labels = library_paper_labels(library_service.session_factory, principal.user_id)
         summaries = library_index_service.summaries(
             principal, [row.paper_id for row in rows]
         )
         return {
             "items": [
-                _paper_payload(
+                dict(_paper_payload(
                     row,
                     summaries.get(row.paper_id),
                     search_matches.get(row.paper_id),
-                )
+                ), display_label=labels.get(row.paper_id, row.paper_id))
                 for row in rows
             ],
             "count": len(rows),
@@ -698,6 +671,20 @@ def build_library_router(
         finally:
             if not submitted:
                 staged.unlink(missing_ok=True)
+
+    @router.post("/upload-batches/{batch_id}/cancel-remaining")
+    def cancel_remaining_uploads(
+        batch_id: uuid.UUID,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        principal.require(Permission.PROJECT_WRITE)
+        cancelled = job_service.repository.cancel_remaining_uploads(principal.user_id, str(batch_id))
+        for job in cancelled:
+            # Only committed cancelled jobs are cleaned; running jobs retain
+            # their inputs. Repeated cancellation also retries this cleanup.
+            with suppress(WorkflowNotFound):
+                library_service.staged_upload_path(principal, str(job.payload.get("staging_id") or "")).unlink(missing_ok=True)
+        return {"batch_id": str(batch_id), "cancelled_count": len(cancelled)}
 
     @router.get("/upload-jobs/recent")
     def recent_upload_jobs(

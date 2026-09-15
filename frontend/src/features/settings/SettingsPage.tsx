@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiRequest, jsonBody } from "../../api/client";
 import { balanceQuery, balanceTransactionsQuery, modelCatalogQuery, providerSettingsQuery, queryKeys, usageSummaryQuery, usageTimelineQuery } from "../../api/queries";
-import type { CreditTransaction, ModelTier, Project, UsageTimelineItem } from "../../api/types";
+import type { CreditTransaction, Project, UsageTimelineItem } from "../../api/types";
+import { ModelOptions } from "../../components/ModelOptions";
 import { ErrorState } from "../../components/ErrorState";
 import { useSelectedProject } from "../../components/ProjectSelector";
 import { useUiText } from "../../i18n/useUiText";
@@ -69,35 +70,29 @@ export function SettingsPage() {
   const queryClient = useQueryClient();
   const { projects, selected: project, selectProject } = useSelectedProject();
   const providers = useQuery(providerSettingsQuery);
-  const catalog = useQuery(modelCatalogQuery);
+  const catalog = useQuery({ ...modelCatalogQuery, refetchOnMount: "always" });
   const usage = useQuery(usageSummaryQuery(project?.project_id || ""));
   const timeline = useQuery(usageTimelineQuery(30, project?.project_id || ""));
   const balance = useQuery(balanceQuery);
   const transactions = useQuery(balanceTransactionsQuery);
-  const [pendingTier, setPendingTier] = useState<Project["model_tier"]>("terra");
-  const [saved, setSaved] = useState(false);
+  const [selection, setSelection] = useState<{ projectId: string; modelId: string; savedModelId: string } | null>(null);
+  const pendingTier = project && selection?.projectId === project.project_id && selection.savedModelId === project.model_tier
+    ? selection.modelId : project?.model_tier || "";
   const records = new Map(providers.data?.items.map((item) => [item.provider_kind, item]));
-  const tiers = useMemo(() => {
-    const order: Record<string, number> = { terra: 0, luna: 1, sol: 2 };
-    return [...(catalog.data?.items || [])].sort((left, right) => order[left.id] - order[right.id]);
-  }, [catalog.data?.items]);
+  const models = catalog.data?.items || [];
+  const pendingModel = models.find(item => item.id === pendingTier);
+  const hasEnabledModels = models.some(item => item.enabled !== false);
   const selectedProjectModel = catalog.data?.items.find(
     (tier) => tier.id === project?.model_tier,
   )?.model;
 
-  useEffect(() => {
-    if (project) setPendingTier(project.model_tier);
-    setSaved(false);
-  }, [project]);
-
   const saveModel = useMutation({
-    mutationFn: () => apiRequest<Project>(`/api/v1/projects/${encodeURIComponent(project!.project_id)}/model-tier`, {
+    mutationFn: ({ projectId, modelId }: { projectId: string; modelId: string }) => apiRequest<Project>(`/api/v1/projects/${encodeURIComponent(projectId)}/model-tier`, {
       method: "PATCH",
-      ...jsonBody({ model_tier: pendingTier }),
+      ...jsonBody({ model_tier: modelId }),
     }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.projects });
-      setSaved(true);
     },
   });
 
@@ -117,7 +112,7 @@ export function SettingsPage() {
         <div>
           <p className="eyebrow">{text("服务器统一配置", "Server-managed configuration")}</p>
           <h1>{text("模型配置与用量", "Model configuration and usage")}</h1>
-          <p className="muted">{text("密钥由服务器统一保管。你只需要为当前项目选择文本模型，任务启动时会锁定所选档位。", "Keys are managed by the server. Choose a text model for the current project; each job locks its tier when it starts.")}</p>
+          <p className="muted">{text("密钥由服务器统一保管。请选择文本模型；任务提交时锁定模型和价格，切换不会影响已提交的任务。", "Keys are managed by the server. Model and prices are locked when a job is submitted; switching does not affect submitted jobs.")}</p>
         </div>
         <button className="button button-quiet" type="button" disabled={isRefreshing} onClick={refresh}>{isRefreshing ? text("刷新中…", "Refreshing…") : text("刷新数据", "Refresh data")}</button>
       </div>
@@ -134,7 +129,7 @@ export function SettingsPage() {
                 <article key={kind}>
                   <span className={`service-status-dot ${record?.enabled ? "online" : ""}`} />
                   <div><strong>{title}</strong><small>{kind === "text" ? selectedProjectModel || text("按当前项目选择", "Selected per project") : record?.model_name || text("由服务器管理员维护", "Managed by server administrator")}</small></div>
-                  <em>{record?.enabled ? text("已就绪", "Ready") : text("未配置", "Not configured")}</em>
+                  <em>{providers.isPending ? text("加载中", "Loading") : providers.error ? text("状态未知", "Unknown") : record?.enabled ? text("已启用", "Enabled") : text("未启用", "Disabled")}</em>
                 </article>
               );
             })}
@@ -147,31 +142,40 @@ export function SettingsPage() {
             <div><span className="step-label">{text("当前项目", "Current project")}</span><h2>{text("选择文本模型", "Choose text model")}</h2></div>
             <label className="settings-project-select">
               <span>{text("应用到", "Apply to")}</span>
-              <select value={project?.project_id || ""} disabled={!projects.data?.items.length} onChange={(event) => selectProject(event.target.value)}>
+              <select value={project?.project_id || ""} disabled={!projects.data?.items.length || saveModel.isPending} onChange={(event) => { setSelection(null); saveModel.reset(); selectProject(event.target.value); }}>
                 {projects.data?.items.map((item) => <option key={item.project_id} value={item.project_id}>{item.slug}</option>)}
               </select>
             </label>
           </div>
           {!project ? <div className="empty-state compact-empty">{text("请先创建项目，再选择模型。", "Create a project before choosing a model.")}</div> : null}
-          <div className="model-tier-grid">
-            {tiers.map((tier: ModelTier) => (
-              <button className={pendingTier === tier.id ? "model-tier-card selected" : "model-tier-card"} type="button" key={tier.id} disabled={!project || saveModel.isPending} onClick={() => { setPendingTier(tier.id); setSaved(false); }} aria-pressed={pendingTier === tier.id}>
-                <span className="model-tier-check">{pendingTier === tier.id ? "✓" : ""}</span>
-                <strong>{tier.id === "terra" ? "Terra" : tier.id === "luna" ? "Luna" : "Sol"}</strong>
-                <small>{text(tier.description_zh, tier.description_en)}</small>
-                <em>Input ${tier.input_usd_per_million} · Output ${tier.output_usd_per_million}</em>
-              </button>
-            ))}
-          </div>
+          {catalog.error ? <ErrorState title={text("无法加载模型目录", "Unable to load models")} error={catalog.error} onRetry={() => catalog.refetch()} /> : null}
+          <label className="settings-model-select"><span>{text("文本模型", "Text model")}</span>
+            <select value={pendingTier} disabled={!project || saveModel.isPending || catalog.isPending || !!catalog.error || !hasEnabledModels} onChange={(event) => { if (project) setSelection({ projectId: project.project_id, savedModelId: project.model_tier, modelId: event.target.value }); saveModel.reset(); }}>
+              {!pendingTier ? <option value="" disabled>{catalog.isPending ? text("正在加载模型…", "Loading models…") : text("请选择模型", "Choose a model")}</option> : null}
+              <ModelOptions selected={pendingTier} />
+            </select>
+          </label>
+          <p className="settings-model-help">{text("可选模型与价格由管理员统一维护，不再按固定档位区分。", "Available models and prices are managed by the administrator, without fixed tiers.")}</p>
+          {catalog.isSuccess && project && !hasEnabledModels ? <p className="message" role="status">{text("当前没有可用的文本模型，请联系管理员启用模型。", "No text models are available. Ask the administrator to enable one.")}</p> : null}
+          {catalog.isSuccess && project && (!pendingModel || pendingModel.enabled === false) ? <p className="message" role="status">{text("当前选择的模型已停用或不在目录中，请改选可用模型；已提交任务不受影响。", "The selected model is disabled or missing from the catalog. Choose an available model; submitted jobs are unaffected.")}</p> : null}
+          {pendingModel ? <section className="settings-model-detail" aria-label={text("所选模型信息", "Selected model details")}>
+            <div className="settings-model-identity"><div><strong>{text(pendingModel.label_zh, pendingModel.label_en) || pendingModel.model}</strong><small>{pendingModel.model}</small></div>{catalog.data?.default_tier === pendingModel.id ? <span className="model-badge default">{text("后台默认", "Catalog default")}</span> : null}</div>
+            <p className="settings-model-price-unit">{text("价格单位：USD / 百万 Token", "Prices: USD / million tokens")}</p>
+            <dl className="settings-model-prices">
+              <div><dt>{text("输入", "Input")}</dt><dd>${pendingModel.input_usd_per_million}</dd></div>
+              <div><dt>{text("缓存输入", "Cached input")}</dt><dd>${pendingModel.cached_input_usd_per_million}</dd></div>
+              <div><dt>{text("输出", "Output")}</dt><dd>${pendingModel.output_usd_per_million}</dd></div>
+            </dl>
+          </section> : null}
           <div className="model-save-row">
             <div>
-              <strong>{text("当前已保存：", "Currently saved: ")}{project?.model_tier ? project.model_tier.toUpperCase() : "—"}</strong>
+              <strong>{text("当前已保存：", "Currently saved: ")}{selectedProjectModel || project?.model_tier || "—"}</strong>
               <small>{text("只影响之后启动的任务，不改变正在运行的任务。", "Only future jobs are affected; running jobs remain unchanged.")}</small>
             </div>
-            <button className="button button-primary" type="button" disabled={!project || saveModel.isPending || pendingTier === project.model_tier} onClick={() => saveModel.mutate()}>{saveModel.isPending ? text("保存中…", "Saving…") : text("确认并保存", "Confirm and save")}</button>
+            <button className="button button-primary" type="button" disabled={!project || saveModel.isPending || catalog.isPending || !!catalog.error || pendingTier === project.model_tier || !pendingModel || pendingModel.enabled === false} onClick={() => project && saveModel.mutate({ projectId: project.project_id, modelId: pendingTier })}>{saveModel.isPending ? text("保存中…", "Saving…") : text("确认并保存", "Confirm and save")}</button>
           </div>
-          {saved ? <p className="message" role="status">{text("文本模型已保存。", "Text model saved.")}</p> : null}
-          {saveModel.error ? <p className="message message-error" role="alert">{saveModel.error.message}</p> : null}
+          {saveModel.isSuccess && saveModel.variables.projectId === project?.project_id ? <p className="message" role="status">{text("文本模型已保存。", "Text model saved.")}</p> : null}
+          {saveModel.error && saveModel.variables?.projectId === project?.project_id ? <p className="message message-error" role="alert">{saveModel.error.message}</p> : null}
         </section>
       </div>
 

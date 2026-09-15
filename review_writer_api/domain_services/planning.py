@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from review_writer_api.paper_labels import library_paper_labels
+
 import base64
 import hashlib
 import json
@@ -64,6 +66,7 @@ from review_writer_core.claim_contracts import (
 from review_writer_core.scientific_facts import (
     FACT_PROMPT_VERSION, FACT_VALIDATION_VERSION, fact_is_usable, fact_support_spans,
     fact_usage, merge_facts, normalize_assertion_ceiling,
+    fact_needs_verification, review_fingerprint,
 )
 from review_writer_core.academic_contracts import (
     ACADEMIC_SCHEMA_VERSION,
@@ -414,7 +417,7 @@ class PlanningService(
                 value = metadata.get(field)
                 if isinstance(value, dict) and "value" in value:
                     value = value.get("value")
-                if value not in (None, "", []):
+                if field in metadata:
                     row[field] = deepcopy(value)
             metadata_artifact_id = str(
                 (metadata.get("_artifact_ids") or {}).get("metadata") or ""
@@ -808,7 +811,7 @@ class PlanningService(
                 "deterministic_routing_label": deterministic_routing_by_paper.get(
                     paper_id, ""
                 ),
-                "actual_model_id": resolve_model_tier(project.model_tier).model,
+                "actual_model_id": resolve_model_tier(project.model_tier, self.repository.session_factory).model,
             }
             if topic_partitions or classification_axes:
                 fingerprint_input.update(
@@ -839,7 +842,7 @@ class PlanningService(
                         "source_content_sha256": summary.get("content_sha256") or "",
                         "chunker_version": summary.get("chunker_version") or "",
                         "taxonomy_profile": project.taxonomy_profile,
-                        "actual_model_id": resolve_model_tier(project.model_tier).model,
+                        "actual_model_id": resolve_model_tier(project.model_tier, self.repository.session_factory).model,
                     },
                     ensure_ascii=False,
                     sort_keys=True,
@@ -849,6 +852,7 @@ class PlanningService(
             existing = dict(row.get("fact_enrichment") or {})
             if (
                 not force
+                and (existing.get("last_attempt") or {}).get("status") != "failed"
                 and existing.get("source_fingerprint") == source_fingerprint
                 and fact_processing_complete(row.get("scientific_facts") or [], existing)
             ):
@@ -1168,7 +1172,7 @@ class PlanningService(
             "routing_categories": routing_categories,
             "routing_adjudicator_version": 1,
             "taxonomy_profile": project.taxonomy_profile,
-            "actual_model_id": resolve_model_tier(project.model_tier).model,
+            "actual_model_id": resolve_model_tier(project.model_tier, self.repository.session_factory).model,
             "source_matrix_artifact_id": matrix_artifact.id,
             "expected_matrix_revision": state.revision,
             "paper_count": len(rows),
@@ -1421,6 +1425,13 @@ class PlanningService(
                         "support_excerpt": excerpt,
                     }
                 )
+                # Source registration may fill previously null metadata. Rebind
+                # only when the shared checker proves the old audit still fits.
+                if ((fact.get("verification") or {}).get("input_fingerprint")
+                        and not fact_needs_verification(fact)
+                        and not fact_needs_verification(facts[-1])):
+                    facts[-1]["verification"] = {**fact["verification"],
+                        "input_fingerprint": review_fingerprint(facts[-1])}
             raw_classification = result.get("topic_partition_classification")
             if not declared_partitions:
                 partition_classification = {
@@ -1783,6 +1794,19 @@ class PlanningService(
             status = str(result.get("status") or "failed")
             if result.get("facts") and len(facts) < len(result.get("facts") or []):
                 status = "partial" if facts else "failed"
+            previous_enrichment = row.get("fact_enrichment") or {}
+            if (
+                status == "failed" and not facts
+                and source.get("source_fingerprint")
+                and previous_enrichment.get("source_fingerprint") == source.get("source_fingerprint")
+                and any(fact_is_usable(fact) for fact in row.get("scientific_facts") or [])
+            ):
+                row["fact_enrichment"] = {
+                    **previous_enrichment,
+                    "last_attempt": {"status": "failed", "error": str(result.get("error") or "")[:1000],
+                                     "updated_at": utc_now().isoformat()},
+                }
+                continue
             row["scientific_facts"] = merge_facts(facts)
             row["topic_partition_classification"] = partition_classification
             row["evidence_backed_tags"] = evidence_backed_tags
@@ -2018,6 +2042,7 @@ class PlanningService(
         def enrichment_cache_state(document: dict[str, Any]) -> dict[str, Any]:
             return {
                 str(row.get("paper_id") or ""): {
+                    "last_attempt": (row.get("fact_enrichment") or {}).get("last_attempt"),
                     "source_fingerprint": str(
                         (row.get("fact_enrichment") or {}).get("source_fingerprint") or ""
                     ),
@@ -2149,6 +2174,7 @@ class PlanningService(
             "matrix_artifact_id": published[MATRIX_LOGICAL_NAME].id,
             "matrix_revision": state.revision,
             "fact_enrichment_summary": updated["fact_enrichment_summary"],
+            "blueprint_invalidated": bool(changed_paper_ids or classification_contract_changed),
             "changed_paper_ids": changed_paper_ids,
             "refreshed_paper_ids": refreshed_paper_ids,
             "classification_contract_changed": classification_contract_changed,
@@ -3448,6 +3474,11 @@ class PlanningService(
         matrix, bibliography_metadata_artifact_ids = self._with_current_bibliography(
             principal, matrix
         )
+        labels = library_paper_labels(self.repository.session_factory, principal.user_id)
+        for row in matrix.get("rows") or []:
+            if isinstance(row, dict):
+                paper_id = str(row.get("paper_id") or "")
+                row["display_label"] = labels.get(paper_id, paper_id)
         discovery, _discovery_artifact = self._read_json(
             principal, project_id, DISCOVERY_LOGICAL_NAME, required=False
         )

@@ -106,6 +106,7 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
             payload = dict(payload)
             principal = Principal(context.user_id, frozenset({Role.USER}))
             # Revalidate deterministic inputs before paying for model calls.
+            payload = planning_service.resume_blueprint_after_matrix(principal, str(context.project_id), payload)
             planning_service.validate_prepared_blueprint(principal, str(context.project_id), payload)
             integration = dict(payload.get("integrated_fact_enrichment") or {})
             fact_result = {
@@ -130,6 +131,9 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
                     fact_payload.get("pending_paper_count") or 0
                 )
                 if pending_fact_count and has_fact_sources(fact_payload):
+                    saved_facts = payload.get("matrix_enrichment_checkpoint")
+                    if isinstance(saved_facts, dict):
+                        fact_payload["resume_checkpoint"] = saved_facts
                     if context.retry_of_job_id:
                         previous_job = context.repository.get_job(
                             context.user_id, context.retry_of_job_id
@@ -252,6 +256,7 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
                 previous = context.repository.get_job(context.user_id, context.retry_of_job_id)
                 if previous:
                     payload["blueprint_checkpoint"] = (previous.result or {}).get("blueprint_checkpoint") or {}
+            planning_service.reconcile_blueprint_facts(principal, str(context.project_id), payload)
             context.report_progress(0, len(payload["section_blueprint"]["sections"]))
             built = blueprint_builder(context, payload)
             context.checkpoint()
@@ -273,13 +278,16 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
             payload = dict(payload)
             principal = Principal(context.user_id, frozenset({Role.USER}))
             if payload.get("prepare_on_start"):
+                request = payload
                 expected_artifact_id = str(
                     payload.get("source_matrix_artifact_id") or ""
                 )
                 planning_service.validate_matrix_enrichment_inputs(principal, str(context.project_id), payload)
                 payload = (planning_service.fact_revision_payload(principal, str(context.project_id),
                     source_matrix_artifact_id=expected_artifact_id) if payload.get("operation") == "fact_revision"
-                    else planning_service.matrix_enrichment_payload(principal, str(context.project_id)))
+                    else planning_service.matrix_enrichment_payload(principal, str(context.project_id),
+                        force=bool(request.get("force_refresh")),
+                        selected_paper_ids=request.get("selected_paper_ids") or None))
                 if (
                     expected_artifact_id
                     and payload.get("source_matrix_artifact_id") != expected_artifact_id
@@ -308,15 +316,11 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
                 return {
                     "project_id": str(context.project_id),
                     "status": "current",
+                    "matrix_artifact_id": payload.get("source_matrix_artifact_id"),
                     "message": "Matrix scientific facts are already current.",
                 }
             if not has_fact_sources(payload):
-                return {
-                    "project_id": str(context.project_id),
-                    "status": "awaiting_fulltext_index",
-                    "pending_paper_count": total,
-                    "message": "Build full-text indexes before extracting Matrix scientific facts.",
-                }
+                raise WorkflowConflict("Build full-text indexes before extracting Matrix scientific facts.")
             built = enrichment_builder(context, payload)
             context.checkpoint()
             result = planning_service.publish_matrix_enrichment(

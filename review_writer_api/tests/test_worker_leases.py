@@ -27,6 +27,50 @@ from review_writer_api.workflow_repository import WorkflowRepository
 
 
 class WorkerLeaseTests(unittest.TestCase):
+    def test_compatibility_executor_wakes_planning_after_matrix(self):
+        from review_writer_api.job_service import JobService
+        matrix = self._create(self.first_user, self.first_project, "matrix.enrich", "compat-facts")
+        blueprint = self._create(self.first_user, self.first_project, "planning.blueprint", "compat-plan")
+        started, release, planned = threading.Event(), threading.Event(), threading.Event()
+        def extract(context, payload):
+            started.set()
+            if not release.wait(5):
+                raise RuntimeError("Test did not release extraction")
+            return {}
+        def plan(context, payload):
+            self.assertEqual("succeeded", self.repository.get_job(self.first_user, matrix.id).status)
+            planned.set()
+            return {}
+        service = JobService(self.repository, max_workers=2)
+        service.register_handler("matrix.enrich", extract)
+        service.register_handler("planning.blueprint", plan)
+        try:
+            service.start()
+            self.assertTrue(started.wait(3))
+            self.assertFalse(planned.is_set())
+            self.assertEqual("queued", self.repository.get_job(self.first_user, blueprint.id).status)
+            release.set()
+            self.assertTrue(planned.wait(5))
+        finally:
+            release.set()
+            service.shutdown()
+
+    def test_planning_waits_for_earlier_matrix_without_claiming_a_worker(self):
+        matrix = self._create(self.first_user, self.first_project, "matrix.enrich", "facts")
+        blueprint = self._create(self.first_user, self.first_project, "planning.blueprint", "plan")
+        self.assertTrue(self.repository.planning_job_blocked(blueprint.id))
+        self.assertIsNone(self.repository.claim_job(blueprint.id))
+        self.assertIsNone(self.repository.claim_next_job(owner="planner", job_types={"planning.blueprint"}))
+        other = self._create(self.second_user, self.second_project, "planning.blueprint", "other")
+        self.assertEqual(other.id, self.repository.claim_next_job(owner="other", job_types={"planning.blueprint"}).id)
+        claimed = self.repository.claim_job(matrix.id)
+        self.assertIsNotNone(claimed)
+        self.assertIsNone(self.repository.claim_job(blueprint.id))
+        self.repository.mark_job_succeeded(matrix.id, {}, lease_token=claimed.lease_token,
+            lease_generation=claimed.lease_generation)
+        self.assertFalse(self.repository.planning_job_blocked(blueprint.id))
+        self.assertEqual(blueprint.id, self.repository.claim_job(blueprint.id).id)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.engine = create_engine(
@@ -66,6 +110,18 @@ class WorkerLeaseTests(unittest.TestCase):
         return self.repository.create_or_get_job(
             user, project, "project", job_type, key, {}
         )
+
+    def test_bibliography_cannot_block_same_users_upload_slot(self):
+        audit = self._create(self.first_user, self.first_project, "library.bibliography-audit", "audit")
+        upload = self._create(self.first_user, self.first_project, "library.upload", "upload")
+        claimed_audit = self.repository.claim_next_job(owner="bibliography-worker", job_types={"library.bibliography-audit"})
+        self.assertEqual(audit.id, claimed_audit.id)
+        self.assertEqual("bibliography", claimed_audit.queue_name)
+        claimed_upload = self.repository.claim_next_job(owner="upload-worker", job_types={"library.upload"})
+        self.assertEqual(upload.id, claimed_upload.id)
+        self.assertEqual("ingest", claimed_upload.queue_name)
+        worker = WorkerService(self.repository, {"library.upload": lambda *_: {}, "library.bibliography-audit": lambda *_: {}}, queues={"ingest"})
+        self.assertEqual({"library.upload"}, worker.supported_job_types)
 
     def test_claim_is_fair_per_user_and_queue(self) -> None:
         first = self._create(
@@ -308,6 +364,23 @@ class WorkerLeaseTests(unittest.TestCase):
 
         self.assertEqual("succeeded", final.status)
         self.assertEqual({"worker": True}, final.result)
+
+    def test_worker_unhandled_log_does_not_include_exception_secrets(self):
+        queued = self._create(self.first_user, self.first_project, "sections.generate", "safe-log")
+        claimed = self.repository.claim_next_job(owner="safe-log", lease_seconds=30,
+                                                 job_types={"sections.generate"})
+        def fail(context, payload):
+            raise RuntimeError("sk-private-secret password=hidden response-body")
+        worker = WorkerService(self.repository, {"sections.generate": fail}, max_workers=1)
+        try:
+            with self.assertLogs("review_writer_api.worker_service", level="ERROR") as captured:
+                worker._execute(claimed)
+            self.assertIn("RuntimeError", str(captured.output))
+            for secret in ("sk-private-secret", "hidden", "response-body"):
+                self.assertNotIn(secret, str(captured.output))
+            self.assertEqual("failed", self.repository.get_job(self.first_user, queued.id).status)
+        finally:
+            worker._executor.shutdown(wait=False, cancel_futures=True)
 
     def test_worker_queue_filter_does_not_claim_an_unsupported_queue(self) -> None:
         image = self._create(

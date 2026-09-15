@@ -12,6 +12,7 @@ from review_writer_api.domain_services.discovery import DiscoveryService
 from review_writer_api.domain_services.planning import PlanningService
 from review_writer_api.errors import WorkflowConflict
 from review_writer_api.job_service import JobService
+from review_writer_api.planning_jobs import queue_matrix_enrichment
 from review_writer_api.routers.jobs import _job_response
 from review_writer_api.security import Principal
 from review_writer_api.workflow_schemas import (
@@ -156,6 +157,9 @@ def build_discovery_router(
         result = discovery_service.confirm(
             principal, project_id, payload.revision
         )
+        if planning_service is not None:
+            job = queue_matrix_enrichment(planning_service, job_service, principal, project_id)
+            result["matrix_analysis_job"] = _job_response(job).model_dump()
         return result
 
     return router

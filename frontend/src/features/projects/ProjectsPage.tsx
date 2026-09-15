@@ -7,6 +7,7 @@ import { ApiError, apiRequest, jsonBody } from "../../api/client";
 import { modelCatalogQuery, projectsQuery, queryKeys, taxonomyProfilesQuery } from "../../api/queries";
 import type { Project, ProjectTaxonomyProfileUpdate, TaxonomyProfile } from "../../api/types";
 import { DeleteProjectDialog } from "../../components/DeleteProjectDialog";
+import { ModelOptions } from "../../components/ModelOptions";
 import { ErrorState } from "../../components/ErrorState";
 import { useUiText } from "../../i18n/useUiText";
 
@@ -14,7 +15,7 @@ type ProjectFields = {
   slug: string;
   topic: string;
   taxonomy_profile: string;
-  model_tier: "sol" | "terra" | "luna";
+  model_tier: string;
 };
 
 function publicTaxonomyProfileId(profile: string) {
@@ -53,9 +54,7 @@ function ProjectCard({ project, deleting, modelUpdating, taxonomyUpdating, taxon
           <label className="project-card-field project-model-field">
             <span className="project-card-field-label">{text("模型", "Model")}</span>
             <select value={project.model_tier} disabled={modelUpdating} onChange={(event) => onModelChange(project, event.target.value as Project["model_tier"])}>
-              <option value="sol">Sol</option>
-              <option value="terra">Terra</option>
-              <option value="luna">Luna</option>
+              <ModelOptions selected={project.model_tier} />
             </select>
           </label>
         </div>
@@ -81,7 +80,7 @@ export function ProjectsPage() {
   const modelCatalog = useQuery(modelCatalogQuery);
   const taxonomyProfiles = useQuery(taxonomyProfilesQuery);
   const { register, handleSubmit, reset, formState } = useForm<ProjectFields>({
-    defaultValues: { slug: "", topic: "", taxonomy_profile: "general_academic", model_tier: "terra" },
+    defaultValues: { slug: "", topic: "", taxonomy_profile: "general_academic", model_tier: "" },
   });
   const createProject = useMutation({
     mutationFn: (values: ProjectFields) =>
@@ -91,7 +90,7 @@ export function ProjectsPage() {
           slug: values.slug.trim(),
           topic: values.topic.trim(),
           taxonomy_profile: values.taxonomy_profile,
-          model_tier: values.model_tier,
+          model_tier: values.model_tier || null,
         }),
       }),
     onSuccess: async (created) => {
@@ -202,8 +201,8 @@ export function ProjectsPage() {
             <label>
               {text("文本模型", "Text model")}
               <select {...register("model_tier")}>
-                {(modelCatalog.data?.items || []).map((tier) => <option key={tier.id} value={tier.id}>{text(tier.label_zh, tier.label_en)}</option>)}
-                {!modelCatalog.data ? <option value="terra">Terra</option> : null}
+                <option value="">{text("服务器默认模型", "Server default model")} · {modelCatalog.data?.items.find(item => item.id === modelCatalog.data?.default_tier)?.model || "…"}</option>
+                <ModelOptions />
               </select>
               <small>{text("当前用于评估与重写；任务启动时锁定档位，进行中的任务不受后续切换影响。", "Currently used for evaluation and rewriting. The tier is fixed when a job starts, so later changes do not affect a running job.")}</small>
             </label>

@@ -20,7 +20,7 @@ export type Project = {
   owner_user_id: string;
   topic: string;
   taxonomy_profile: string;
-  model_tier: "sol" | "terra" | "luna";
+  model_tier: string;
   discovery_status: string;
   current_stage: string;
   completed_stages: string[];
@@ -70,6 +70,17 @@ export type ProviderSettingsList = {
   items: ProviderSettings[];
 };
 
+export type TextConnection = {
+  id: string;
+  revision: number;
+  name: string;
+  base_url: string;
+  wire_api: string;
+  enabled: boolean;
+  api_key_configured: boolean;
+  api_key_hint: string;
+};
+
 export type AdminProviderAudit = {
   id: string;
   actor_email: string;
@@ -92,7 +103,7 @@ export type AdminProviderTestResult = {
 };
 
 export type ModelTier = {
-  id: "sol" | "terra" | "luna";
+  id: string;
   model: string;
   label_zh: string;
   label_en: string;
@@ -101,11 +112,15 @@ export type ModelTier = {
   input_usd_per_million: string;
   cached_input_usd_per_million: string;
   output_usd_per_million: string;
+  enabled?: boolean;
+  wire_api?: string;
+  connection_id?: string;
 };
 
 export type ModelCatalog = {
   items: ModelTier[];
   default_tier: ModelTier["id"];
+  revision?: number;
 };
 
 export type UsageSummary = {
@@ -209,6 +224,7 @@ export type UsageTimeline = {
 };
 
 export type LibraryPaper = {
+  display_label?: string;
   id: string;
   paper_id: string;
   title: string;
@@ -350,6 +366,8 @@ export type UploadJob = Job & {
 
 export type UploadBatchSummary = {
   batch_id: string;
+  duplicate_count?: number;
+  remaining_cancelled?: boolean;
   total: number;
   queued: number;
   running: number;

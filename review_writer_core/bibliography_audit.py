@@ -273,6 +273,25 @@ def bibliography_field_readiness(
     }
 
 
+def refresh_edited_bibliography(
+    before: dict[str, Any], metadata: dict[str, Any], audit: dict[str, Any]
+) -> dict[str, Any]:
+    """Refresh local checks without treating an ordinary save as source verification."""
+    updated = dict(audit or {})
+    changed = [field for field in RESOLVABLE_FIELDS
+               if _value(before, field) != _value(metadata, field)]
+    if changed:
+        updated.update(status="not_audited", manual_review_status="not_reviewed",
+                       resolved_by="", resolved_at=None, resolved_fields=[],
+                       canonical_updates={}, edited_fields=changed)
+    readiness = bibliography_field_readiness(metadata, updated)
+    updated["field_readiness"] = readiness
+    updated["automatic_resolution_missing_fields"] = list(dict.fromkeys(
+        readiness["missing_fields"] + readiness["polluted_fields"]
+    ))
+    return updated
+
+
 def _manual_evidence(payload: dict[str, Any]) -> dict[str, str]:
     raw = payload.get("manual_evidence")
     evidence = dict(raw) if isinstance(raw, dict) else {}

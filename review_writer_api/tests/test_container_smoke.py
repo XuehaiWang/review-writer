@@ -10,6 +10,9 @@ import unittest
 import urllib.error
 import urllib.request
 import uuid
+from email import policy
+from email.parser import BytesParser
+from email.utils import getaddresses
 from pathlib import Path
 from unittest.mock import patch
 
@@ -172,6 +175,10 @@ class MigrationBootstrapTests(unittest.TestCase):
 class LiveContainerSmokeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        mailbox = os.environ.get("REVIEW_WRITER_SMOKE_MAILBOX_DIR", "")
+        if not mailbox or not Path(mailbox).is_dir():
+            raise unittest.SkipTest("Set REVIEW_WRITER_SMOKE_MAILBOX_DIR to the test SMTP sink's .eml directory.")
+        cls.mailbox = Path(mailbox)
         cls.base_url = os.environ.get(
             "REVIEW_WRITER_CONTAINER_BASE_URL", "http://127.0.0.1:8770"
         ).rstrip("/")
@@ -204,6 +211,22 @@ class LiveContainerSmokeTests(unittest.TestCase):
             payload = json.loads(raw) if raw else None
             self.fail(f"{method} {path} returned {exc.code}: {payload}")
 
+    def registration_code(self, email: str) -> str:
+        status_code, _ = self.request("POST", "/api/v1/auth/registration-code", {"email": email})
+        self.assertEqual(202, status_code)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            for path in self.mailbox.rglob("*.eml"):
+                message = BytesParser(policy=policy.default).parsebytes(path.read_bytes())
+                if email not in {address for _, address in getaddresses(message.get_all("To", []))}:
+                    continue
+                body = message.get_body(preferencelist=("plain",)) if message.is_multipart() else message
+                match = re.search(r"(?<!\d)\d{6}(?!\d)", body.get_content() if body else "")
+                if match:
+                    return match[0]
+            time.sleep(0.2)
+        self.fail("Registration email did not arrive in the test SMTP sink.")
+
     def test_health_auth_project_and_native_workflow(self) -> None:
         health_status, health = self.request("GET", "/api/v1/health")
         self.assertEqual(200, health_status)
@@ -215,7 +238,8 @@ class LiveContainerSmokeTests(unittest.TestCase):
         register_status, registered = self.request(
             "POST",
             "/api/v1/auth/register",
-            {"email": email, "password": password, "display_name": "Container smoke"},
+            {"email": email, "password": password, "display_name": "Container smoke",
+             "verification_code": self.registration_code(email)},
         )
         self.assertEqual(201, register_status)
         self.assertEqual(email, registered["email"])
@@ -273,6 +297,7 @@ class LiveContainerSmokeTests(unittest.TestCase):
             "/api/v1/auth/register",
             {
                 "email": second_email,
+                "verification_code": self.registration_code(second_email),
                 "password": password,
                 "display_name": "Container smoke second",
             },

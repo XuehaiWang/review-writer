@@ -13,6 +13,7 @@ from review_writer_api.app import create_app
 from review_writer_api.config import ApiSettings
 from review_writer_api.gateway_client import GatewayTaskEnvironmentClient
 from review_writer_api.worker_service import WorkerService
+from review_writer_api.job_queues import JOB_QUEUES
 
 
 def main() -> None:
@@ -21,9 +22,9 @@ def main() -> None:
     parser.add_argument(
         "--queues",
         default=os.environ.get(
-            "REVIEW_WRITER_WORKER_QUEUES", "scientific,image,ingest,document"
+            "REVIEW_WRITER_WORKER_QUEUES", ",".join(sorted(JOB_QUEUES))
         ),
-        help="Comma-separated worker queues: scientific,image,ingest,document.",
+        help="Comma-separated worker queues: " + ",".join(sorted(JOB_QUEUES)),
     )
     parser.add_argument(
         "--workers",
@@ -66,6 +67,7 @@ def main() -> None:
         lease_seconds=settings.worker_lease_seconds,
         heartbeat_seconds=settings.worker_heartbeat_seconds,
         queues=queues,
+        maintenance=(lambda: maintain_storage(application)) if "ingest" in queues else None,
     )
 
     def request_stop(_signum, _frame) -> None:
@@ -74,6 +76,23 @@ def main() -> None:
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     worker.run_forever()
+
+
+def maintain_storage(application):
+    from sqlalchemy import select
+    from review_writer_api.database import database_session
+    from review_writer_api.workflow_models import LibraryVectorStore
+    from review_writer_api.system_errors import prune_failures
+    sessions = application.state.session_factory
+    prune_failures(sessions)
+    with database_session(sessions) as session:
+        users = list(session.scalars(select(LibraryVectorStore.user_id)))
+    for user_id in users:
+        try:
+            application.state.library_index_service.vector_store.prune(user_id)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("vector_prune_failed user_id=%s exception=%s",
+                                              user_id, type(exc).__name__)
 
 
 if __name__ == "__main__":

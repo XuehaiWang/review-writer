@@ -78,7 +78,7 @@ class ProjectRepository(Protocol):
 
     def create_for_user(
         self, user_id: str, *, slug: str, topic: str, taxonomy_profile: str,
-        model_tier: str = DEFAULT_MODEL_TIER,
+        model_tier: str | None = None,
     ) -> ProjectRecord: ...
 
     def update_model_tier_for_user(
@@ -170,7 +170,7 @@ class LocalProjectRepository:
 
     def create_for_user(
         self, user_id: str, *, slug: str, topic: str, taxonomy_profile: str,
-        model_tier: str = DEFAULT_MODEL_TIER,
+        model_tier: str | None = None,
     ) -> ProjectRecord:
         if user_id != self.user_id:
             raise ProjectOperationError("Project owner does not match the local workspace user.")
@@ -342,7 +342,7 @@ class HostedProjectRepository:
 
     def create_for_user(
         self, user_id: str, *, slug: str, topic: str, taxonomy_profile: str,
-        model_tier: str = DEFAULT_MODEL_TIER,
+        model_tier: str | None = None,
     ) -> ProjectRecord:
         try:
             safe_slug = validate_project_id(slug)
@@ -350,7 +350,7 @@ class HostedProjectRepository:
             raise ProjectOperationError(str(exc)) from exc
         user_uuid = uuid.UUID(user_id)
         try:
-            selected_tier = resolve_model_tier(model_tier).id
+            selected_tier = resolve_model_tier(model_tier, self.session_factory, require_enabled=True).id
         except ValueError as exc:
             raise ProjectOperationError(str(exc)) from exc
         with database_session(self.session_factory) as session:
@@ -395,7 +395,7 @@ class HostedProjectRepository:
         self, user_id: str, project_id: str, *, model_tier: str
     ) -> ProjectRecord:
         try:
-            selected_tier = resolve_model_tier(model_tier).id
+            selected_tier = resolve_model_tier(model_tier, self.session_factory, require_enabled=True).id
         except ValueError as exc:
             raise ProjectOperationError(str(exc)) from exc
         with database_session(self.session_factory) as session:

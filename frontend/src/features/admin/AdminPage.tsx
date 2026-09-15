@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { ModelCatalogEditor } from "./ModelCatalogEditor";
+import { TextConnectionsEditor } from "./TextConnectionsEditor";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
@@ -19,6 +21,7 @@ import type {
 } from "../../api/types";
 import { ErrorState } from "../../components/ErrorState";
 import { useUiText } from "../../i18n/useUiText";
+import { SystemErrors } from "./SystemErrors";
 
 type ProviderDraft = {
   base_url: string;
@@ -28,7 +31,12 @@ type ProviderDraft = {
   enabled: boolean;
 };
 
-const providerOrder: ProviderKind[] = ["text", "image", "embedding", "mineru"];
+const providerSections: { id: ProviderKind; zh: string; en: string; description: string; descriptionEn: string }[] = [
+  { id: "text", zh: "文本与模型", en: "Text & models", description: "接口连接、可选模型与价格", descriptionEn: "Connection, models and prices" },
+  { id: "image", zh: "图像生成", en: "Images", description: "图像生成与重绘服务", descriptionEn: "Generation and redrawing" },
+  { id: "mineru", zh: "文档解析", en: "Document parsing", description: "PDF 解析服务", descriptionEn: "PDF parsing service" },
+  { id: "embedding", zh: "向量检索", en: "Embeddings", description: "语义检索的向量服务", descriptionEn: "Semantic retrieval provider" },
+];
 
 function draftFrom(record: ProviderSettings): ProviderDraft {
   return {
@@ -43,12 +51,9 @@ function draftFrom(record: ProviderSettings): ProviderDraft {
 function ProviderEditor({ record }: { record: ProviderSettings }) {
   const { text } = useUiText();
   const queryClient = useQueryClient();
-  const [draft, setDraft] = useState<ProviderDraft>(() => draftFrom(record));
+  const [changes, setDraft] = useState<ProviderDraft | null>(null);
+  const draft = changes ?? draftFrom(record);
   const [message, setMessage] = useState("");
-
-  useEffect(() => {
-    setDraft(draftFrom(record));
-  }, [record]);
 
   const refresh = async () => {
     await Promise.all([
@@ -68,8 +73,9 @@ function ProviderEditor({ record }: { record: ProviderSettings }) {
         }),
       },
     ),
-    onSuccess: async () => {
-      setDraft((current) => ({ ...current, api_key: "" }));
+    onSuccess: async (saved) => {
+      queryClient.setQueryData(queryKeys.adminProviderSettings, (current: { items: ProviderSettings[] } | undefined) => current ? { ...current, items: current.items.map(item => item.provider_kind === saved.provider_kind ? saved : item) } : current);
+      setDraft(null);
       setMessage(text("配置已保存，之后启动的任务会立即使用新配置。", "Saved. New tasks will use this configuration immediately."));
       await refresh();
     },
@@ -80,6 +86,7 @@ function ProviderEditor({ record }: { record: ProviderSettings }) {
       { method: "DELETE" },
     ),
     onSuccess: async () => {
+      setDraft(null);
       setMessage(text("已恢复服务器环境变量配置。", "Restored the server environment fallback."));
       await refresh();
     },
@@ -114,21 +121,21 @@ function ProviderEditor({ record }: { record: ProviderSettings }) {
         </div>
         <div className="admin-provider-status">
           <span className={`service-status-dot ${record.enabled ? "online" : ""}`} />
-          <strong>{record.enabled ? text("已就绪", "Ready") : text("未启用", "Disabled")}</strong>
-          <small>{record.source === "database" ? text("数据库实时配置", "Live database override") : text("环境变量后备", "Environment fallback")}</small>
+          <strong>{record.enabled ? text("已启用", "Enabled") : text("未启用", "Disabled")}</strong>
+          <small>{record.source === "database" ? text("后台配置", "Admin configuration") : text("服务器默认配置", "Server defaults")}</small>
         </div>
       </header>
 
       <div className="admin-provider-form">
-        <label className="admin-wide-field">
+        {record.provider_kind !== "mineru" ? <label className="admin-wide-field">
           <span>{text("API Base URL", "API base URL")}</span>
           <input
             type="url"
             value={draft.base_url}
-            disabled={record.provider_kind === "mineru" || busy}
+            disabled={busy}
             onChange={(event) => setDraft({ ...draft, base_url: event.target.value })}
           />
-        </label>
+        </label> : <p className="muted admin-wide-field">{text("使用固定的 MinerU 解析接口，只需配置密钥并启用服务。", "Uses the fixed MinerU endpoint. Configure the key and enable the service.")}</p>}
         {record.provider_kind !== "mineru" ? (
           <label>
             <span>{text("接口协议", "Wire API")}</span>
@@ -154,7 +161,7 @@ function ProviderEditor({ record }: { record: ProviderSettings }) {
             />
           </label>
         ) : null}
-        <label className="admin-wide-field">
+        <label className={record.provider_kind === "text" ? undefined : "admin-wide-field"}>
           <span>API Key</span>
           <input
             type="password"
@@ -180,23 +187,27 @@ function ProviderEditor({ record }: { record: ProviderSettings }) {
 
       <footer>
         <div>
-          <small>{record.updated_at ? text(`最近更新：${new Date(record.updated_at).toLocaleString()}`, `Updated: ${new Date(record.updated_at).toLocaleString()}`) : text("当前未设置数据库覆盖", "No database override")}</small>
+          <small>{changes ? text("有未保存修改；保存后再测试连接。", "Unsaved changes; save before testing.") : text("启用不代表连接正常，可测试已保存的配置。", "Enabled does not confirm connectivity. Test the saved configuration.")}</small>
           {message ? <p className="admin-provider-message" role="status">{message}</p> : null}
           {save.error || reset.error || testConnection.error ? (
             <p className="message message-error" role="alert">{(save.error || reset.error || testConnection.error)?.message}</p>
           ) : null}
         </div>
         <div className="admin-provider-actions">
-          <button className="button button-quiet" type="button" disabled={busy || !record.enabled} onClick={() => testConnection.mutate()}>
+          <button className="button button-quiet" type="button" disabled={busy || !record.enabled || !!changes} onClick={() => testConnection.mutate()}>
             {testConnection.isPending ? text("测试中…", "Testing…") : text("测试连接", "Test connection")}
           </button>
-          <button className="button button-quiet" type="button" disabled={busy || record.source !== "database"} onClick={() => reset.mutate()}>
-            {text("恢复环境配置", "Restore environment")}
-          </button>
-          <button className="button button-primary" type="button" disabled={busy} onClick={() => save.mutate()}>
-            {save.isPending ? text("保存中…", "Saving…") : text("保存并实时生效", "Save and apply")}
+          <button className="button button-primary" type="button" disabled={busy || !changes} onClick={() => save.mutate()}>
+            {save.isPending ? text("保存中…", "Saving…") : text("保存服务配置", "Save provider")}
           </button>
         </div>
+        <details className="admin-advanced">
+          <summary>{text("高级维护", "Advanced maintenance")}</summary>
+          <p className="muted">{text("恢复后将移除该服务的后台覆盖设置，后续任务改用服务器环境配置。", "Restoring removes this provider's admin override. New tasks use server environment settings.")}</p>
+          <small>{record.updated_at ? text(`最近更新：${new Date(record.updated_at).toLocaleString()}`, `Updated: ${new Date(record.updated_at).toLocaleString()}`) : text("当前使用服务器默认配置", "Using server defaults")}</small>
+          <div className="button-row"><button className="button button-quiet" type="button" disabled={busy || !!changes || record.source !== "database"} onClick={() => reset.mutate()}>{text("恢复服务器默认配置", "Restore server defaults")}</button>
+          {changes ? <button className="button button-quiet" type="button" disabled={busy} onClick={() => { setDraft(null); setMessage(""); save.reset(); }}>{text("放弃未保存修改", "Discard changes")}</button> : null}</div>
+        </details>
       </footer>
     </article>
   );
@@ -206,15 +217,13 @@ function UserAndCreditManagement({ users, currentUserId }: { users: AdminUser[];
   const { text } = useUiText();
   const queryClient = useQueryClient();
   const [query, setQuery] = useState("");
-  const [targetUserId, setTargetUserId] = useState(users[0]?.user_id || "");
+  const [targetUserId, setTargetUserId] = useState("");
   const [amount, setAmount] = useState("");
   const [reason, setReason] = useState("");
   const [message, setMessage] = useState("");
   const [adjustmentKey, setAdjustmentKey] = useState(() => newIdempotencyKey());
 
-  useEffect(() => {
-    if (!targetUserId && users[0]) setTargetUserId(users[0].user_id);
-  }, [targetUserId, users]);
+  const targetUser = users.find(user => user.user_id === targetUserId);
 
   const refreshBilling = async () => {
     await Promise.all([
@@ -234,6 +243,7 @@ function UserAndCreditManagement({ users, currentUserId }: { users: AdminUser[];
       setMessage(text("额度调整已写入不可变资金流水。", "Adjustment was written to the append-only ledger."));
       setAmount("");
       setReason("");
+      setTargetUserId("");
       setAdjustmentKey(newIdempotencyKey());
       await refreshBilling();
     },
@@ -253,22 +263,24 @@ function UserAndCreditManagement({ users, currentUserId }: { users: AdminUser[];
   return (
     <section className="surface admin-user-panel">
       <div className="section-heading admin-user-heading">
-        <div><span className="step-label">ACCOUNTS</span><h2>{text("用户与额度管理", "Users and credits")}</h2><p>{text("停用账户会立即撤销其登录会话；额度调整必须填写原因，并完整保留管理员审计信息。", "Disabling an account immediately revokes its sessions. Credit changes require a reason and preserve administrator audit data.")}</p></div>
+        <div><h2>{text("用户与余额", "Users & balances")}</h2><p>{text("在用户行中调整余额或管理权限。停用会立即撤销登录会话；余额调整保留完整流水。", "Adjust balances or access from each user row. Disabling revokes sessions; balance changes are recorded in the ledger.")}</p></div>
         <label className="admin-user-search"><span>{text("查找用户", "Find user")}</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={text("邮箱或显示名称", "Email or display name")} /></label>
       </div>
 
-      <div className="admin-credit-form">
-        <label><span>{text("目标用户", "Target user")}</span><select value={targetUserId} onChange={(event) => setTargetUserId(event.target.value)}>{users.map((user) => <option value={user.user_id} key={user.user_id}>{user.display_name || user.email} · {user.email}</option>)}</select></label>
-        <label><span>{text("调整金额（USD）", "Amount (USD)")}</span><input type="number" step="0.01" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder={text("增加填正数，扣减填负数", "Positive to add, negative to deduct")} /></label>
+      {targetUser ? <section key={targetUserId} className="admin-credit-editor" aria-label={text("调整用户余额", "Adjust user balance")}>
+        <div className="admin-credit-target"><div><strong>{text("调整余额：", "Adjust balance: ")}{targetUser.display_name || targetUser.email}</strong><small>{targetUser.email} · {text("可用余额", "Available")} ${Number(targetUser.available_usd).toFixed(4)}</small></div><button className="button button-quiet" type="button" disabled={adjustment.isPending} onClick={() => setTargetUserId("")}>{text("取消调整", "Cancel adjustment")}</button></div>
+        <fieldset className="admin-credit-form" disabled={adjustment.isPending}>
+        <label><span>{text("调整金额（USD）", "Amount (USD)")}</span><input autoFocus type="number" step="0.01" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder={text("增加填正数，扣减填负数", "Positive to add, negative to deduct")} /></label>
         <label className="admin-credit-reason"><span>{text("调整原因", "Reason")}</span><input value={reason} maxLength={2000} onChange={(event) => setReason(event.target.value)} placeholder={text("例如：测试额度、人工退款或纠正记录", "For example: test credit, refund, or correction")} /></label>
-        <button className="button button-primary" type="button" disabled={adjustment.isPending || !targetUserId || !amount || !reason.trim()} onClick={() => adjustment.mutate()}>{adjustment.isPending ? text("写入中…", "Posting…") : text("确认调整额度", "Post adjustment")}</button>
-      </div>
+        <button className="button button-primary" type="button" disabled={adjustment.isPending || !Number.isFinite(Number(amount)) || Number(amount) === 0 || !reason.trim()} onClick={() => adjustment.mutate()}>{adjustment.isPending ? text("写入中…", "Posting…") : text("确认调整余额", "Post adjustment")}</button>
+        </fieldset>
+      </section> : null}
       {message ? <p className="message" role="status">{message}</p> : null}
       {adjustment.error || updateUser.error ? <p className="message message-error" role="alert">{(adjustment.error || updateUser.error)?.message}</p> : null}
 
       <div className="admin-user-table-wrap">
         <table className="admin-user-table">
-          <thead><tr><th>{text("用户", "User")}</th><th>{text("可用余额", "Available")}</th><th>{text("累计成本", "Usage cost")}</th><th>{text("项目", "Projects")}</th><th>{text("角色", "Role")}</th><th>{text("状态", "Status")}</th></tr></thead>
+          <thead><tr><th>{text("用户", "User")}</th><th>{text("可用余额", "Available")}</th><th>{text("累计成本", "Usage cost")}</th><th>{text("项目", "Projects")}</th><th>{text("角色", "Role")}</th><th>{text("状态", "Status")}</th><th>{text("操作", "Actions")}</th></tr></thead>
           <tbody>{visibleUsers.map((user) => {
             const isSelf = user.user_id === currentUserId;
             return <tr key={user.user_id}>
@@ -278,6 +290,7 @@ function UserAndCreditManagement({ users, currentUserId }: { users: AdminUser[];
               <td>{user.project_count.toLocaleString()}</td>
               <td><select aria-label={text(`${user.email} 的角色`, `Role for ${user.email}`)} value={user.role} disabled={updateUser.isPending || isSelf} onChange={(event) => updateUser.mutate({ userId: user.user_id, patch: { role: event.target.value } })}><option value="user">User</option><option value="admin">Admin</option></select></td>
               <td><select aria-label={text(`${user.email} 的状态`, `Status for ${user.email}`)} value={user.status} disabled={updateUser.isPending || isSelf} onChange={(event) => updateUser.mutate({ userId: user.user_id, patch: { status: event.target.value } })}><option value="active">{text("正常", "Active")}</option><option value="disabled">{text("停用", "Disabled")}</option></select></td>
+              <td><button className="button button-quiet" type="button" aria-label={text(`调整 ${user.email} 的余额`, `Adjust balance for ${user.email}`)} disabled={adjustment.isPending} onClick={() => { setTargetUserId(user.user_id); setAmount(""); setReason(""); setMessage(""); adjustment.reset(); setAdjustmentKey(newIdempotencyKey()); }}>{text("调整余额", "Adjust balance")}</button></td>
             </tr>;
           })}</tbody>
         </table>
@@ -289,23 +302,44 @@ function UserAndCreditManagement({ users, currentUserId }: { users: AdminUser[];
 
 export function AdminPage() {
   const { text } = useUiText();
-  const providers = useQuery(adminProviderSettingsQuery);
-  const audit = useQuery(adminProviderAuditQuery);
-  const users = useQuery(adminUsersQuery);
+  const client = useQueryClient();
+  const [section, setSection] = useState("accounts");
+  const [visited, setVisited] = useState(() => new Set(["accounts"]));
+  const [providerKind, setProviderKind] = useState<ProviderKind>("text");
+  const providers = useQuery({ ...adminProviderSettingsQuery, enabled: section === "services" });
+  const audit = useQuery({ ...adminProviderAuditQuery, enabled: section === "activity" });
+  const users = useQuery({ ...adminUsersQuery, enabled: section === "accounts" });
   const usage = useQuery(adminUsageQuery);
   const me = useQuery(meQuery);
   const records = new Map(providers.data?.items.map((item) => [item.provider_kind, item]));
+  const sections = [
+    { id: "accounts", zh: "用户与余额", en: "Users & balances", description: "账户、权限与余额调整", descriptionEn: "Accounts, access and balances" },
+    { id: "services", zh: "模型与服务", en: "Models & services", description: "服务连接、模型与价格", descriptionEn: "Connections, models and prices" },
+    { id: "activity", zh: "运行记录", en: "Activity", description: "故障排查与配置记录", descriptionEn: "Failures and configuration history" },
+  ];
+  const refresh = useMutation({ mutationFn: async () => {
+    await Promise.all([
+      usage.refetch(),
+      section === "accounts" ? users.refetch() : undefined,
+      section === "services" ? providers.refetch() : undefined,
+      section === "services" && providerKind === "text" ? client.invalidateQueries({ queryKey: queryKeys.modelCatalog }) : undefined,
+      section === "services" && providerKind === "text" ? client.invalidateQueries({ queryKey: queryKeys.adminModelCatalog }) : undefined,
+      section === "services" && providerKind === "text" ? client.invalidateQueries({ queryKey: queryKeys.textConnections }) : undefined,
+      section === "activity" ? audit.refetch() : undefined,
+      section === "activity" ? client.invalidateQueries({ queryKey: ["admin-system-errors"] }) : undefined,
+    ]);
+  } });
 
   return (
     <main className="workspace page-container admin-page">
       <div className="workspace-heading admin-heading">
         <div>
           <p className="eyebrow">{text("管理员后台", "Administration")}</p>
-          <h1>{text("用户、额度与 Provider 管理", "Users, credits, and providers")}</h1>
-          <p className="muted">{text("集中查看全站用量、管理用户状态与额度，并维护服务器外部服务连接。所有资金变化都会写入可追溯流水。", "Review site-wide usage, manage user access and credits, and maintain external provider connections. Every balance change is written to an auditable ledger.")}</p>
+          <h1>{text("管理后台", "Administration")}</h1>
+          <p className="muted">{text("管理账户和余额，配置生成服务，查看运行情况。", "Manage accounts and balances, configure services, and review activity.")}</p>
         </div>
-        <button className="button button-quiet" type="button" disabled={providers.isFetching || audit.isFetching || users.isFetching || usage.isFetching} onClick={() => { void providers.refetch(); void audit.refetch(); void users.refetch(); void usage.refetch(); }}>
-          {providers.isFetching || audit.isFetching || users.isFetching || usage.isFetching ? text("刷新中…", "Refreshing…") : text("刷新后台", "Refresh")}
+        <button className="button button-quiet" type="button" disabled={refresh.isPending} onClick={() => refresh.mutate()}>
+          {refresh.isPending ? text("刷新中…", "Refreshing…") : text("刷新当前页面", "Refresh current view")}
         </button>
       </div>
 
@@ -318,25 +352,42 @@ export function AdminPage() {
         <article><span>{text("用户余额总额", "Account balances")}</span><strong>{usage.data ? `$${Number(usage.data.account_balance_total_usd).toFixed(4)}` : "—"}</strong><small>{usage.data ? text(`冻结 $${Number(usage.data.reserved_total_usd).toFixed(4)}`, `$${Number(usage.data.reserved_total_usd).toFixed(4)} reserved`) : "—"}</small></article>
       </section>
 
-      {users.error ? <ErrorState error={users.error} onRetry={() => users.refetch()} /> : null}
-      {users.data && me.data ? <UserAndCreditManagement users={users.data.items} currentUserId={me.data.user_id} /> : null}
+      <nav className="admin-section-nav" aria-label={text("后台分区", "Administration sections")}>
+        {sections.map(item => <button key={item.id} type="button" aria-pressed={section === item.id} aria-controls={`admin-${item.id}`} onClick={() => { setSection(item.id); setVisited(current => new Set([...current, item.id])); }}><strong>{text(item.zh, item.en)}</strong><small>{text(item.description, item.descriptionEn)}</small></button>)}
+      </nav>
 
-      <div className="section-heading admin-provider-section-heading"><div><span className="step-label">PROVIDERS</span><h2>{text("服务器外部服务", "Server providers")}</h2><p>{text("密钥采用 AES-256-GCM 加密保存；浏览器不会再次读取明文密钥。", "Secrets are encrypted with AES-256-GCM and plaintext keys are never returned to the browser.")}</p></div></div>
-      {providers.error ? <ErrorState error={providers.error} onRetry={() => providers.refetch()} /> : null}
-      <section className="admin-provider-stack">
-        {providerOrder.map((kind) => {
-          const record = records.get(kind);
-          return record ? <ProviderEditor key={kind} record={record} /> : null;
-        })}
-      </section>
+      <div id="admin-accounts" className="admin-content-panel" hidden={section !== "accounts"}>
+        {users.isPending || me.isPending ? <p role="status">{text("正在加载用户…", "Loading users…")}</p> : null}
+        {users.error || me.error ? <ErrorState error={users.error || me.error} onRetry={() => { void users.refetch(); void me.refetch(); }} /> : null}
+        {users.data && me.data ? <UserAndCreditManagement users={users.data.items} currentUserId={me.data.user_id} /> : null}
+      </div>
 
+      {visited.has("services") ? <div id="admin-services" className="admin-services-layout" hidden={section !== "services"}>
+        <nav className="admin-service-nav" aria-label={text("服务类型", "Service types")}>
+          {providerSections.map(item => <button type="button" key={item.id} aria-pressed={providerKind === item.id} aria-controls={`admin-service-${item.id}`} onClick={() => setProviderKind(item.id)}><strong>{text(item.zh, item.en)}</strong><small>{text(item.description, item.descriptionEn)}</small></button>)}
+        </nav>
+        <div className="admin-service-content">
+          {providers.isPending ? <p role="status">{text("正在加载服务配置…", "Loading providers…")}</p> : null}
+          {providers.error ? <ErrorState error={providers.error} onRetry={() => providers.refetch()} /> : null}
+          {providerSections.map(({ id }) => <div id={`admin-service-${id}`} className="admin-content-panel" key={id} hidden={providerKind !== id}>
+            {id === "text" ? <TextConnectionsEditor active={section === "services" && providerKind === "text"} /> : records.get(id) ? <ProviderEditor record={records.get(id)!} /> : providers.isSuccess ? <p className="empty-state">{text("暂未获取到此服务配置，请刷新重试。", "Configuration unavailable. Refresh to retry.")}</p> : null}
+            {id === "text" ? <ModelCatalogEditor active={section === "services" && providerKind === "text"} /> : null}
+            {id === "embedding" ? <p className="muted">{text("此处仅配置向量服务，不改变系统的检索启用策略。", "This configures the embedding provider; it does not change the system's retrieval enablement policy.")}</p> : null}
+          </div>)}
+          <p className="muted admin-security-note">{text("密钥加密保存，浏览器不会读取已保存的明文密钥。", "Keys are encrypted; saved plaintext secrets are never returned to the browser.")}</p>
+        </div>
+      </div> : null}
+
+      {visited.has("activity") ? <div id="admin-activity" className="admin-content-panel" hidden={section !== "activity"}>
+      <SystemErrors active={section === "activity"} />
       <section className="surface admin-audit-panel">
+        {audit.isPending ? <p role="status">{text("正在加载配置记录…", "Loading configuration history…")}</p> : null}
         {audit.error ? <ErrorState error={audit.error} onRetry={() => audit.refetch()} /> : null}
         <details className="admin-audit-disclosure">
           <summary className="admin-audit-summary">
             <div>
               <span className="step-label">AUDIT</span>
-              <h2>{text("最近管理记录", "Recent administrative activity")}</h2>
+              <h2>{text("服务与模型配置记录", "Service & model configuration history")}</h2>
               <small>{audit.data?.items.length ? text(`${audit.data.items.length} 条记录，展开后可滚动查看`, `${audit.data.items.length} records · scroll after expanding`) : text("还没有管理记录", "No administrative activity yet")}</small>
             </div>
             <span className="admin-audit-toggle">{text("查看记录", "View activity")}</span>
@@ -352,6 +403,7 @@ export function AdminPage() {
           </div>
         </details>
       </section>
+      </div> : null}
     </main>
   );
 }

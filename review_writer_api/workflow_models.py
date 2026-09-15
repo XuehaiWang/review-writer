@@ -24,6 +24,69 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from review_writer_api.database import Base, TimestampMixin, new_uuid, utc_now
 
 
+class LibraryUploadBatchCancellation(Base):
+    """Durable, user-scoped fence for files arriving after batch cancellation."""
+
+    __tablename__ = "library_upload_batch_cancellations"
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    batch_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    cancelled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class SystemErrorEvent(Base):
+    """Bounded request failure metadata; never request bodies or credentials."""
+    __tablename__ = "system_error_events"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("projects.id", ondelete="SET NULL"))
+    request_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    method: Mapped[str] = mapped_column(String(12), nullable=False)
+    route: Mapped[str] = mapped_column(String(240), nullable=False)
+    status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    error_code: Mapped[str] = mapped_column(String(96), nullable=False)
+    location: Mapped[str] = mapped_column(String(240), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False, index=True)
+
+
+class LibraryVectorStore(Base):
+    """One fenced SQLite publication stream per authenticated user."""
+    __tablename__ = "library_vector_stores"
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    heads_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LibraryVectorVersion(Base, TimestampMixin):
+    __tablename__ = "library_vector_versions"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    profile_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    dimension: Mapped[int] = mapped_column(Integer, nullable=False)
+    object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+
+
+class LibraryVectorJobPin(Base):
+    __tablename__ = "library_vector_job_pins"
+    job_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("workflow_jobs.id", ondelete="CASCADE"), primary_key=True)
+    profile_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    version_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("library_vector_versions.id", ondelete="CASCADE"), nullable=False)
+
+
+class LibraryVectorReadLease(Base):
+    __tablename__ = "library_vector_read_leases"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid)
+    version_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("library_vector_versions.id", ondelete="CASCADE"), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class WorkflowSystemState(Base):
     __tablename__ = "workflow_system_state"
 
@@ -412,6 +475,13 @@ class WorkflowJob(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DraftParagraphTask(Base):
+    __tablename__ = "draft_paragraph_tasks"
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    paragraph_key: Mapped[str] = mapped_column(String(36), primary_key=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("workflow_jobs.id", ondelete="CASCADE"), nullable=False)
 
 
 class WorkflowCurrentJob(Base):

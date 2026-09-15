@@ -17,6 +17,7 @@ from threading import Event
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from review_writer_api.errors import WorkflowConflict
 from sqlalchemy import create_engine, event
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
@@ -55,6 +56,31 @@ def fake_pdf(seed: bytes = b"A") -> bytes:
 
 
 class LibraryV1Tests(unittest.TestCase):
+    def test_display_labels_follow_admission_not_metadata_edits(self) -> None:
+        with TestClient(self.app) as client:
+            first = self.upload(client, "first.pdf", fake_pdf(b"1")).json()["paper_id"]
+            second = self.upload(client, "second.pdf", fake_pdf(b"2")).json()["paper_id"]
+            metadata = client.get(f"/api/v1/library/papers/{first}/metadata").json()
+            metadata["title"] = {"value": "Corrected title"}
+            metadata["journal"] = {"value": ""}
+            saved = client.put(f"/api/v1/library/papers/{first}/metadata", json=metadata, headers={"Origin": "http://testserver"})
+            self.assertEqual(200, saved.status_code, saved.text)
+            matrix = {"rows": [{"paper_id": first, "journal": "Stale journal", "facts": ["kept"]}]}
+            overlaid, _ = self.app.state.planning_service._with_current_bibliography(self.first, matrix)
+            self.assertEqual("", overlaid["rows"][0]["journal"])
+            self.assertEqual(["kept"], overlaid["rows"][0]["facts"])
+            self.assertIn("journal", overlaid["rows"][0]["bibliography_identity"]["missing_fields"])
+            self.assertEqual("Stale journal", matrix["rows"][0]["journal"])
+            rows = client.get("/api/v1/library/papers").json()["items"]
+            self.assertEqual([first, second], [row["paper_id"] for row in rows])
+            self.assertEqual(["P001", "P002"], [row["display_label"] for row in rows])
+            deleted = client.delete(f"/api/v1/library/papers/{first}", headers={"Origin": "http://testserver"})
+            self.assertLess(deleted.status_code, 300)
+            third = self.upload(client, "third.pdf", fake_pdf(b"3")).json()["paper_id"]
+            rows = client.get("/api/v1/library/papers").json()["items"]
+            self.assertEqual([second, third], [row["paper_id"] for row in rows])
+            self.assertEqual(["P001", "P002"], [row["display_label"] for row in rows])
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         root = Path(self.temporary.name)
@@ -223,6 +249,21 @@ class LibraryV1Tests(unittest.TestCase):
                 ],
             }
 
+        self.audit_started = Event()
+        self.audit_release = Event()
+        self.audit_release.set()
+        self.addCleanup(self.audit_release.set)
+
+        def bibliography_audit(context, payload):
+            # Exercise the real job and persistence paths without PDF subprocesses,
+            # network lookups, or model calls. Individual audit tests cover extraction.
+            self.audit_started.set()
+            if not self.audit_release.wait(5):
+                raise AssertionError("The test did not release the bibliography audit.")
+            context.checkpoint()
+            return {"paper_id": payload["paper_id"], "status": "needs_review",
+                    "manual_review_status": "not_reviewed", "resolved_by": "automatic"}
+
         self.app = create_app(
             self.settings,
             principal_provider=lambda: self.current,
@@ -231,6 +272,7 @@ class LibraryV1Tests(unittest.TestCase):
                 "library.precise_ingest": precise_ingest,
                 "library.search": search_provider,
                 "library.download": download_provider,
+                "library.bibliography-audit": bibliography_audit,
             },
         )
 
@@ -249,11 +291,17 @@ class LibraryV1Tests(unittest.TestCase):
         self.fail("Job did not finish.")
 
     def upload(self, client: TestClient, filename: str, body: bytes):
-        return client.post(
+        response = client.post(
             f"/api/v1/library/papers?filename={filename}",
             content=body,
             headers={"Content-Type": "application/pdf", "Origin": "http://testserver"},
         )
+        if response.status_code == 201 and self.audit_release.is_set():
+            job_id = response.json().get("bibliography_audit_job_id")
+            if job_id:
+                completed = self.wait_job(client, job_id)
+                self.assertEqual("succeeded", completed["status"], completed)
+        return response
 
     def test_upload_admits_only_precisely_parsed_pdf(self) -> None:
         with TestClient(self.app) as client:
@@ -270,11 +318,13 @@ class LibraryV1Tests(unittest.TestCase):
         self.assertFalse(papers["items"][0]["structured_tags_verified"])
 
     def test_bibliography_resolution_updates_metadata_and_survives_audit_job(self) -> None:
+        self.audit_release.clear()
         with TestClient(self.app) as client:
             admitted = self.upload(client, "resolved.pdf", fake_pdf(b"R"))
             self.assertEqual(201, admitted.status_code, admitted.text)
             body = admitted.json()
             paper_id = body["paper_id"]
+            self.assertTrue(self.audit_started.wait(3), "Background audit did not start.")
             resolved = client.post(
                 f"/api/v1/library/papers/{paper_id}/bibliography-resolution",
                 json={
@@ -294,11 +344,12 @@ class LibraryV1Tests(unittest.TestCase):
                     },
                 },
             )
+            self.audit_release.set()
             self.assertEqual(200, resolved.status_code, resolved.text)
             audit_job_id = str(body.get("bibliography_audit_job_id") or "")
-            if audit_job_id:
-                completed = self.wait_job(client, audit_job_id)
-                self.assertEqual("succeeded", completed["status"], completed)
+            self.assertTrue(audit_job_id)
+            completed = self.wait_job(client, audit_job_id)
+            self.assertEqual("succeeded", completed["status"], completed)
             audit = client.get(
                 f"/api/v1/library/papers/{paper_id}/bibliography-audit"
             ).json()
@@ -327,6 +378,61 @@ class LibraryV1Tests(unittest.TestCase):
 
         self.assertEqual(422, rejected.status_code, rejected.text)
         self.assertIn("manual bibliography resolution", rejected.text.lower())
+
+    def test_cancel_remaining_is_scoped_durable_and_preserves_running_upload(self) -> None:
+        self.app.state.job_service.execution_enabled = False
+        batch_id = str(uuid.uuid4())
+        other_batch = str(uuid.uuid4())
+        repository = self.app.state.workflow_repository
+        with TestClient(self.app) as client:
+            def submit(batch, name):
+                return client.post("/api/v1/library/upload-jobs", params={"filename": name, "batch_id": batch},
+                    content=fake_pdf(), headers={"Content-Type": "application/pdf", "Origin": "http://testserver"})
+
+            queued = submit(batch_id, "queued.pdf").json()
+            running = submit(batch_id, "running.pdf").json()
+            other = submit(other_batch, "other.pdf").json()
+            repository.claim_job(running["id"])
+            self.current = self.second
+            foreign = submit(batch_id, "foreign.pdf").json()
+            self.current = self.first
+            response = client.post(f"/api/v1/library/upload-batches/{batch_id}/cancel-remaining", headers={"Origin": "http://testserver"})
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertEqual(1, response.json()["cancelled_count"])
+            self.assertEqual("cancelled", repository.get_job(self.first.user_id, queued["id"]).status)
+            self.assertEqual("running", repository.get_job(self.first.user_id, running["id"]).status)
+            self.assertFalse(repository.get_job(self.first.user_id, running["id"]).cancellation_requested)
+            self.assertEqual("queued", repository.get_job(self.first.user_id, other["id"]).status)
+            self.assertEqual("queued", repository.get_job(self.second.user_id, foreign["id"]).status)
+            self.assertEqual(409, submit(batch_id, "late.pdf").status_code)
+            repeated = client.post(f"/api/v1/library/upload-batches/{batch_id}/cancel-remaining", headers={"Origin": "http://testserver"})
+            self.assertEqual(200, repeated.status_code)
+            empty_batch = str(uuid.uuid4())
+            self.assertEqual(200, client.post(f"/api/v1/library/upload-batches/{empty_batch}/cancel-remaining", headers={"Origin": "http://testserver"}).status_code)
+            self.assertEqual(409, submit(empty_batch, "first-late.pdf").status_code)
+            recent = client.get("/api/v1/library/upload-jobs/recent").json()
+            self.assertEqual(1, next(row for row in recent["batch_summaries"] if row["batch_id"] == batch_id)["cancelled"])
+        staging = self.settings.hosted_workspace_root / self.first.user_id / "review-library" / ".upload-staging"
+        self.assertEqual(2, len(list(staging.glob("*.pdf.part"))))
+        self.assertEqual(0, self.parse_calls)
+
+    def test_batch_cancellation_races_upload_admission_without_leaving_queued_work(self) -> None:
+        repository = self.app.state.workflow_repository
+        for _ in range(8):
+            batch_id = str(uuid.uuid4())
+            def enqueue():
+                try:
+                    return repository.create_or_get_job(self.first.user_id, None, "library", "library.upload",
+                        str(uuid.uuid4()), {"batch_id": batch_id}, operation_key=batch_id)
+                except WorkflowConflict:
+                    return None
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                future = pool.submit(enqueue)
+                cancellation = pool.submit(repository.cancel_remaining_uploads, self.first.user_id, batch_id)
+                job = future.result(timeout=5)
+                cancellation.result(timeout=5)
+            if job:
+                self.assertEqual("cancelled", repository.get_job(self.first.user_id, job.id).status)
 
     def test_upload_job_persists_status_and_links_mineru_usage(self) -> None:
         batch_id = str(uuid.uuid4())
@@ -715,7 +821,6 @@ class LibraryV1Tests(unittest.TestCase):
         service.vector_enabled = True
         service.embedding_gateway = InsufficientCreditGateway()
         service.embedding_profile_provider = service.embedding_gateway
-        service._vector_available = True
 
         result = service.build_embeddings(self.first, paper_id)
 
@@ -1238,7 +1343,7 @@ class LibraryV1Tests(unittest.TestCase):
             )
             extracted_dir = Path(stored.metadata["source_paths"]["extracted_dir"])
             artifact_ids = {
-                uuid.UUID(artifact_id) for artifact_id in paper["artifact_ids"].values()
+                uuid.UUID(artifact_id) for artifact_id in stored.artifact_ids.values()
             }
             metadata = (
                 self.settings.hosted_workspace_root

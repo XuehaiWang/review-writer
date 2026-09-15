@@ -25,6 +25,7 @@ class BrowserAuthConfigResponse(BaseModel):
 
 
 class RegisterRequest(BaseModel):
+    verification_code: str = Field(default="", max_length=6, pattern=r"^[0-9]{0,6}$")
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=256)
     display_name: str = Field(default="", max_length=200)
@@ -79,7 +80,7 @@ class ProjectCreateRequest(BaseModel):
     slug: str = Field(min_length=1, max_length=96)
     topic: str = Field(default="", max_length=10_000)
     taxonomy_profile: str = Field(default="general_academic", min_length=1, max_length=96)
-    model_tier: str = Field(default="terra", min_length=1, max_length=32)
+    model_tier: str | None = Field(default=None, min_length=1, max_length=32)
 
 
 class ProjectModelTierUpdateRequest(BaseModel):
@@ -122,11 +123,31 @@ class ModelTierResponse(BaseModel):
     input_usd_per_million: str
     cached_input_usd_per_million: str
     output_usd_per_million: str
+    enabled: bool = True
+    wire_api: str = ""
 
 
 class ModelCatalogResponse(BaseModel):
     items: list[ModelTierResponse]
     default_tier: str
+    revision: int = 0
+
+
+class AdminModelTierResponse(ModelTierResponse):
+    connection_id: str = Field(default="default", min_length=1, max_length=64)
+
+
+class AdminModelCatalogResponse(ModelCatalogResponse):
+    items: list[AdminModelTierResponse]
+
+
+class TextConnectionUpdateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    base_url: str = Field(min_length=1, max_length=2048)
+    wire_api: str = Field(pattern="^(responses|chat-completions)$")
+    api_key: str | None = Field(default=None, max_length=16384)
+    enabled: bool = True
+    revision: int = Field(default=0, ge=0)
 
 
 class ModelGatewayRequest(BaseModel):

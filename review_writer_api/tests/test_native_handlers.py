@@ -662,6 +662,7 @@ class NativeWorkflowHandlerTests(unittest.TestCase):
                     context,
                     {
                         "project_id": "project-1",
+                        "revision_mode": "dialogue",
                         "paragraph_id": "p1",
                         "paragraph_text": "Evidence paragraph.",
                     },
@@ -670,228 +671,29 @@ class NativeWorkflowHandlerTests(unittest.TestCase):
             self.assertIn("current Draft content", str(failed.exception))
             self.assertEqual([], runner.commands)
 
-    def test_style_only_candidate_cannot_clear_manual_confirmation_route(self) -> None:
-        evaluation = NativeWorkflowHandlers._retain_manual_confirmation_route(
-            {
-                "evaluation_scope": "single_paragraph",
-                "paragraph_id": "p1",
-                "paragraph_score": {
-                    "paragraph_id": "p1",
-                    "score": 94,
-                    "severity": "none",
-                    "route": "pass",
-                    "failed_dimensions": [],
-                },
-            },
-            {
-                "requires_manual_confirmation": True,
-                "diagnosis": "The displayed figure identity needs source confirmation.",
-            },
-        )
-
-        self.assertEqual(79.0, evaluation["paragraph_score"]["score"])
-        self.assertEqual("major", evaluation["paragraph_score"]["severity"])
-        self.assertEqual(
-            "human_confirmation", evaluation["paragraph_score"]["route"]
-        )
-        self.assertIn(
-            "manual_source_confirmation",
-            evaluation["paragraph_score"]["failed_dimensions"],
-        )
-        self.assertTrue(evaluation["requires_manual_confirmation"])
-
-    def test_draft_rewrite_scores_only_the_selected_paragraph_before_rewriting(self) -> None:
+    def test_dialogue_uses_one_revision_script_without_score_arguments(self):
+        from unittest.mock import patch
         with tempfile.TemporaryDirectory() as temporary:
-            workspaces = HostedWorkspaceManager(Path(temporary) / "users")
-            runner = _WorkflowRunner()
-            handlers = NativeWorkflowHandlers(runner, workspaces, None)
+            root = Path(temporary)
+            project = root / "draft-workspace" / "review-projects" / "project-1"
+            first = project / "04_first_draft"
+            first.mkdir(parents=True)
+            handlers = NativeWorkflowHandlers(_WorkflowRunner(), HostedWorkspaceManager(root / "users"), None)
             context = _Context(str(uuid.uuid4()))
-
-            result = handlers.draft_rewrite(
-                context,
-                {
-                    "project_id": "project-1",
-                    "draft_text": "Evidence paragraph.\n\n<!-- paragraph_id: p1 -->\n",
-                    "paragraph_id": "p1",
-                    "paragraph_text": "Evidence paragraph.",
-                    "quality": {"score": 70, "goal": 90},
-                    "issues": [
-                        {
-                            "issue_id": "PAR-001",
-                            "paragraph_id": "p1",
-                            "score": 70,
-                            "route": "section_rewrite",
-                        }
-                    ],
-                    "matrix": {"rows": []},
-                    "section_index": {"sections": []},
-                    "figure_manifest": {"figures": []},
-                    "figure_artifact_paths": {},
-                    "library_metadata": {},
-                },
-            )
-
-            scripts = [Path(command[1]).name for command in runner.commands]
-            self.assertEqual(
-                [
-                    "propose_paragraph_rewrite.py",
-                    "evaluate_paragraph_candidate.py",
-                ],
-                scripts,
-            )
-            self.assertEqual(
-                "stored_source_score",
-                result["source_paragraph_evaluation"]["evaluation_mode"],
-            )
-            self.assertEqual(
-                "accepted_candidate",
-                result["candidate_evaluation"]["evaluation_mode"],
-            )
-            self.assertEqual("Improved evidence comparison [1].", result["candidate_text"])
-
-    def test_draft_handlers_build_isolated_workspace_and_normalize_results(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            workspaces = HostedWorkspaceManager(Path(temporary) / "users")
-            runner = _WorkflowRunner()
-            handlers = NativeWorkflowHandlers(runner, workspaces, None)
-            context = _Context(str(uuid.uuid4()))
-            source = workspaces.user_root(context.user_id) / "paper.md"
-            source.write_text("Original paper evidence.", encoding="utf-8")
-            common = {
-                "project_id": "project-1",
-                "draft_text": "Evidence paragraph.\n\n<!-- paragraph_id: p1 -->\n",
-                "matrix": {"rows": [{"paper_id": "P001"}]},
-                "section_index": {
-                    "sections": [
-                        {
-                            "section_id": "s1",
-                            "paragraphs": [
-                                {
-                                    "paragraph_id": "p1",
-                                    "text": "Evidence paragraph.",
-                                    "cited_paper_ids": ["P001"],
-                                }
-                            ],
-                        }
-                    ]
-                },
-                "figure_manifest": {"figures": []},
-                "figure_artifact_paths": {},
-                "library_metadata": {
-                    "P001": {"source_paths": {"markdown": str(source)}}
-                },
-            }
-
-            evaluated = handlers.draft_evaluate(
-                context, {**common, "goal": 90, "paragraphs": []}
-            )
-            optimized = handlers.draft_optimize(
-                context,
-                {
-                    **common,
-                    "goal": 92,
-                    "paragraph_goal": 86,
-                    "max_iterations": 4,
-                    "min_case_words": 120,
-                    "max_case_words": 260,
-                },
-            )
-            rewritten = handlers.draft_rewrite(
-                context,
-                {
-                    **common,
-                    "paragraph_id": "p1",
-                    "paragraph_text": "Evidence paragraph.",
-                    "quality": {
-                        **evaluated,
-                        "issues": [
-                            *evaluated["issues"],
-                            {
-                                "issue_id": "PAR-999",
-                                "paragraph_id": "p2",
-                                "message": "Unrelated paragraph issue.",
-                            },
-                        ],
-                    },
-                    "issues": evaluated["issues"],
-                },
-            )
-            accepted_evaluation = handlers.draft_accept_rewrite(
-                context,
-                {
-                    **common,
-                    "paragraph_id": "p1",
-                    "paragraph_text": "Evidence paragraph.",
-                    "candidate_text": "Improved evidence comparison [1].",
-                    "candidate_draft_text": common["draft_text"].replace(
-                        "Evidence paragraph.",
-                        "Improved evidence comparison [1].",
-                    ),
-                    "goal": 90,
-                    "paragraph_goal": 85,
-                    "min_case_words": 1,
-                    "max_case_words": 280,
-                    "word_range_applicable": False,
-                },
-            )
-
-            self.assertEqual(81.5, evaluated["score"])
-            self.assertEqual("PAR-001", evaluated["issues"][0]["issue_id"])
-            self.assertEqual(70, evaluated["issues"][0]["score"])
-            self.assertIn("Batch optimized evidence", optimized["draft_text"])
-            self.assertEqual(1, optimized["feedback_status"]["rewrite_accepted"])
-            handlers.draft_optimize(context, {**common, "issues": [{
-                "paragraph_id": "p1", "repair_class": "planning_adjustment", "claim_ids": ["C1"]}]})
-            joint_command = next(command for command in runner.commands if "--local-revision" in command)
-            self.assertEqual("feedback_loop.py", Path(joint_command[1]).name)
-            joint_workspace = Path(joint_command[joint_command.index("--review-root") + 1])
-            requests = json.loads((joint_workspace / "review-projects/project-1/04_first_draft/local_revision_issues.json").read_text(encoding="utf-8"))
-            self.assertEqual(["C1"], requests[0]["claim_ids"])
-            optimize_command = next(
-                command
-                for command in runner.commands
-                if Path(command[1]).name == "feedback_loop.py"
-                and "--evaluate-only" not in command
-            )
-            self.assertEqual("92.0", optimize_command[optimize_command.index("--goal") + 1])
-            self.assertEqual("86.0", optimize_command[optimize_command.index("--paragraph-goal") + 1])
-            self.assertEqual("4", optimize_command[optimize_command.index("--max-iterations") + 1])
-            optimize_index = runner.commands.index(optimize_command)
-            self.assertGreaterEqual(
-                runner.run_options[optimize_index]["timeout_seconds"],
-                3 * 60 * 60,
-            )
-            self.assertEqual("Improved evidence comparison [1].", rewritten["candidate_text"])
-            self.assertEqual(["PAR-001"], rewritten["resolved_issue_ids"])
-            self.assertEqual(
-                "single_paragraph",
-                rewritten["candidate_evaluation"]["evaluation_scope"],
-            )
-            self.assertEqual(
-                "accepted_candidate",
-                rewritten["candidate_evaluation"]["evaluation_mode"],
-            )
-            self.assertEqual("single_paragraph", accepted_evaluation["evaluation_scope"])
-            self.assertEqual(92, accepted_evaluation["paragraph_score"]["score"])
-            workspace = (
-                workspaces.user_root(context.user_id)
-                / ".review-writer"
-                / "job-staging"
-                / context.job_id
-                / "draft-workspace"
-            )
-            metadata = json.loads(
-                (
-                    workspace
-                    / "review-library"
-                    / "metadata"
-                    / "papers"
-                    / "P001.metadata.json"
-                ).read_text(encoding="utf-8")
-            )
-            copied = Path(metadata["source_paths"]["markdown"])
-            self.assertTrue(copied.is_file())
-            self.assertTrue(copied.is_relative_to(workspace))
+            def run(command, **kwargs):
+                self.assertEqual("revise_paragraph.py", Path(command[1]).name)
+                self.assertNotIn("--goal", command)
+                self.assertEqual(1, kwargs["max_attempts"])
+                (first / "paragraph_revision_result.json").write_text(
+                    json.dumps({"reply": "Clarified", "candidate_text": "Revised text."}), encoding="utf-8")
+            with patch.object(handlers, "_compatibility_workspace", return_value=(root, root, project)), \
+                 patch.object(handlers.runner, "run", side_effect=run):
+                result = handlers.draft_rewrite(context, {"revision_mode": "dialogue",
+                    "draft_text": "Saved text.", "dialogue": {"message": "Clarify"}})
+            self.assertEqual("Revised text.", result["candidate_text"])
+            self.assertNotIn("draft.evaluate", handlers.mapping())
+            self.assertNotIn("draft.accept-rewrite", handlers.mapping())
+            self.assertNotIn("draft.optimize", handlers.mapping())
 
     def test_section_progress_callback_publishes_each_completed_chapter(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1097,10 +899,7 @@ class NativeWorkflowHandlerTests(unittest.TestCase):
             self.assertEqual("substrate", overview["editable_text"]["primary_axis"])
             self.assertTrue(Path(exported["output_path"]).is_file())
             expected = {
-                "draft.evaluate",
-                "draft.optimize",
                 "draft.rewrite",
-                "draft.accept-rewrite",
                 "final.conclusion",
                 "final.overview",
                 "final.export",

@@ -169,4 +169,18 @@ def build_final_router(
             ),
         )
 
+    @router.put("/paragraphs/{paragraph_id}")
+    def save_paragraph(project_id: str, paragraph_id: str,
+                       principal: Principal = Depends(principal_dependency)) -> dict:
+        from fastapi import HTTPException
+        final_service._owned_project(principal, project_id)
+        raise HTTPException(status_code=410, detail="Final manuscripts are read-only. Edit the paragraph in Draft, then rebuild Final.")
+
+    @router.post("/versions/{artifact_id}/restore")
+    def restore_version(project_id: str, artifact_id: str,
+                        principal: Principal = Depends(principal_dependency)) -> dict:
+        from fastapi import HTTPException
+        final_service._owned_project(principal, project_id)
+        raise HTTPException(status_code=410, detail="Historical Final versions are read-only and remain downloadable. Make changes in Draft.")
+
     return router

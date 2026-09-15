@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 
 import type { AuthConfig, Principal } from "../api/types";
-import { useSessionLogout } from "../hooks/useSessionLogout";
+import { UserMenu } from "./UserMenu";
 import { translate } from "../i18n/messages";
 import { usePreferences } from "../state/preferences";
 
@@ -14,7 +14,6 @@ type PublicHeaderProps = {
 export function PublicHeader({ authConfig, identity = null, compact = false }: PublicHeaderProps) {
   const language = usePreferences((state) => state.language);
   const setLanguage = usePreferences((state) => state.setLanguage);
-  const logout = useSessionLogout();
 
   return (
     <header className={compact ? "public-header compact" : "public-header"}>
@@ -36,26 +35,21 @@ export function PublicHeader({ authConfig, identity = null, compact = false }: P
         ) : null}
 
         <div className="top-actions public-header-actions">
-          <div className="language-switch" aria-label={language === "en" ? "Language" : "语言"}>
+          {!identity ? <div className="language-switch" aria-label={language === "en" ? "Language" : "语言"}>
             <button type="button" className={language === "zh-CN" ? "active" : ""} onClick={() => setLanguage("zh-CN")}>中</button>
             <button type="button" className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>EN</button>
-          </div>
+          </div> : null}
           {compact ? <Link className="button button-quiet" to="/">{language === "en" ? "Home" : "首页"}</Link> : null}
           {identity ? (
             <>
               <Link className="button button-primary" to="/workspace">{language === "en" ? "Open workspace" : "进入工作台"}</Link>
-              {authConfig.enabled ? (
-                <button className="button button-quiet" type="button" disabled={logout.isPending} onClick={() => logout.mutate()}>
-                  {logout.isPending ? (language === "en" ? "Signing out…" : "正在退出…") : translate(language, "logout")}
-                </button>
-              ) : null}
+              <UserMenu identity={identity} authConfig={authConfig} />
             </>
           ) : (
             <Link className="button button-primary" to="/login">{language === "en" ? "Sign in" : "登录"}</Link>
           )}
         </div>
       </div>
-      {logout.error ? <p className="public-header-error" role="alert">{logout.error.message}</p> : null}
     </header>
   );
 }

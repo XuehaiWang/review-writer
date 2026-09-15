@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from review_writer_api.paper_labels import library_paper_labels
+
 import json
 import hashlib
 import math
@@ -1046,6 +1048,11 @@ class DiscoveryService(OwnedProjectService):
             principal.user_id, project_id, MATRIX_LOGICAL_NAME
         )
         review = normalize_review(payload)
+        labels = library_paper_labels(self.repository.session_factory, principal.user_id)
+        for group in review.get("results") or []:
+            for row in group.get("local_results") or []:
+                paper_id = _candidate_id(row, external=False)
+                row["display_label"] = labels.get(paper_id, paper_id)
         return {
             **review,
             "project_id": project_id,

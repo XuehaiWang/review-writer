@@ -21,6 +21,7 @@ from pathlib import Path
 
 from review_writer_api.errors import WorkflowValidationError
 from review_writer_core.review_titles import build_publication_overview_text
+from review_writer_core.pdf_diagnostics import pdf_character_diagnostics
 
 
 class FinalJobHandlers:
@@ -251,6 +252,8 @@ class FinalJobHandlers:
     def final_pdf(self, context, payload):
         """Render the released manuscript through the locked LuaLaTeX path."""
 
+        diagnostics = pdf_character_diagnostics(str(payload.get("final_markdown") or ""))
+        context.report_partial_result({"pdf_diagnostics": diagnostics})
         staging = self._staging(context.user_id, context.job_id)
         bundle = staging / "pdf-render-bundle"
         bundle.mkdir(parents=True, exist_ok=True)
@@ -303,6 +306,7 @@ class FinalJobHandlers:
             "manuscript_state": self._read_bundle_json(bundle, "manuscript_state.json"),
             "render_manifest": self._read_bundle_json(bundle, "render_manifest.json"),
             "pdf_qa": self._read_bundle_json(bundle, "pdf_qa.json"),
+            "pdf_diagnostics": diagnostics,
             "download_name": f"final_draft.{profile}.pdf",
         }
 
@@ -372,7 +376,7 @@ class FinalJobHandlers:
 
     @staticmethod
     def _raise_pdf_renderer_http_error(exc):
-        renderer_body = exc.read(4000).decode("utf-8", "replace")
+        renderer_body = exc.read(32000).decode("utf-8", "replace")
         if exc.code != 422:
             raise RuntimeError(
                 f"The isolated PDF renderer rejected the job (HTTP {exc.code})."
@@ -400,11 +404,14 @@ class FinalJobHandlers:
             if blocking_checks
             else ""
         )
+        if "Text line contains an invalid character" in renderer_detail:
+            message = "PDF compilation failed: an invalid character was rejected. See the source locations in this task's PDF diagnostics; no automatic character repair was applied."
+        elif blocking_checks:
+            message = "PDF publication checks failed." + check_suffix
+        else:
+            message = "PDF rendering failed. The renderer rejected an input or compilation failed; this does not necessarily require regenerating the Final manuscript."
         raise WorkflowValidationError(
-            "PDF publication checks failed. Rebuild the current Final "
-            "manuscript to remove unsupported markup or unresolved "
-            "placeholders, then generate the PDF again."
-            + check_suffix,
+            message,
             details={"renderer_status": 422, "blocking_checks": blocking_checks},
         ) from exc
 

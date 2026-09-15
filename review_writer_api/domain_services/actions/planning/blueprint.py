@@ -18,6 +18,8 @@ from review_writer_api.errors import (
 from review_writer_api.security import Permission, Principal
 from review_writer_core.stages.planning.blueprint import _blueprint_restructure_record
 from review_writer_core.stages.planning.matrix import _json_bytes
+from review_writer_core.stages.planning.matrix import refresh_matrix_fact_summary
+from review_writer_core.stages.planning.fact_revision import refresh_row_facts
 from review_writer_core.workflow.artifacts import (
     BLUEPRINT as BLUEPRINT_LOGICAL_NAME,
     MATRIX as MATRIX_LOGICAL_NAME,
@@ -31,6 +33,7 @@ class PlanningBlueprintActionsMixin:
         rows = candidate.get("rows") or []
         if len(rows) != len(original_rows) or {row["paper_id"] for row in rows} != set(original_rows):
             raise WorkflowValidationError("Argument planning must retain the selected Matrix papers.")
+        issues = []
         for row in rows:
             before = {f["fact_id"]: f for f in original_rows[row["paper_id"]].get("scientific_facts") or []}
             facts = row.get("scientific_facts") or []
@@ -40,15 +43,62 @@ class PlanningBlueprintActionsMixin:
             if not changed:
                 continue
             lineages = self.fact_source_lineages(row)
-            registry = self.fact_source_candidates(principal, row, changed, lineages)
-            if any(fact_needs_verification(fact) or not fact_support_spans(fact, registry) for fact in changed):
-                raise WorkflowValidationError("A candidate fact lacks current audited source support.")
+            registry = self.fact_source_candidates(principal, row, [*changed, *before.values()], lineages)
+            for fact in changed:
+                reasons = []
+                if fact_needs_verification(fact):
+                    reasons.append("verification_outdated")
+                fact_support_spans(fact, registry, issues=reasons)
+                if not reasons:
+                    continue
+                old = before.get(fact["fact_id"])
+                restored = bool(old and fact_is_usable(old) and not fact_needs_verification(old)
+                                and fact_support_spans(old, registry))
+                issue = {"paper_id": row["paper_id"], "fact_id": fact["fact_id"],
+                         "reasons": reasons, "action": "retained_previous" if restored else "withheld",
+                         "value": str(fact.get("value") or "")}
+                if restored:
+                    fact.clear()
+                    fact.update(deepcopy(old))
+                else:
+                    # Retain the record for inspection, but never count it as
+                    # evidence or send it downstream as a supported proposition.
+                    fact["verification"] = {**(fact.get("verification") or {}),
+                                            "status": "unavailable", "source_validation_issues": reasons}
+                    fact["review_status"] = "pending_verification"
+                issues.append(issue)
+            if any(issue["paper_id"] == row["paper_id"] for issue in issues):
+                refresh_row_facts(row)
+        if issues:
+            refresh_matrix_fact_summary(candidate)
+        return issues
+
+    def reconcile_blueprint_facts(self, principal, project_id, prepared):
+        """Check optional fact supplements before planning, without extra model calls."""
+        original, _ = self._matrix(principal, project_id)
+        candidate = prepared.get("matrix_snapshot")
+        if candidate is None:
+            return
+        issues = self._validate_candidate_matrix(principal, original, candidate)
+        if not issues:
+            return
+        prepared["section_blueprint"]["fact_source_issues"] = issues
+        # Preserve retrieval-only context while sharing the corrected fact state.
+        by_id = {row["paper_id"]: row for row in candidate.get("rows") or []}
+        for row in (prepared.get("planning_matrix_snapshot") or {}).get("rows") or []:
+            source = by_id.get(row["paper_id"])
+            if source:
+                for key in ("scientific_facts", "fact_enrichment", "comparison_evidence"):
+                    if key in source:
+                        row[key] = deepcopy(source[key])
 
     def blueprint_job_payload(self, principal, project_id, *, revision):
+        matrix_job = self.repository.get_current_job(principal.user_id, scope="project",
+            project_id=project_id, job_type="matrix.enrich", operation_key="matrix-enrichment")
         prepared = self.prepare_blueprint(principal, project_id, revision=revision)
         prepared["integrated_fact_enrichment"] = {
             "enabled": True,
-            "mode": "current_topic_before_chapter_planning",
+            "mode": "reuse_current_facts_and_fill_gaps",
             "failure_policy": "continue_with_registered_source_passages",
             "source_matrix_artifact_id": prepared["section_blueprint"][
                 "source_matrix_artifact_id"
@@ -58,7 +108,67 @@ class PlanningBlueprintActionsMixin:
         if previous:
             # The planner checks content fingerprints before reusing each group.
             prepared["blueprint_checkpoint"] = (previous[0].result or {}).get("blueprint_checkpoint") or {}
+        if matrix_job and matrix_job.payload.get("operation") != "fact_revision":
+            checkpoint = (matrix_job.result or {}).get("matrix_enrichment_checkpoint") or (matrix_job.result or {}).get("section_checkpoint")
+            if isinstance(checkpoint, dict):
+                # The fact worker validates every per-paper fingerprint before
+                # reuse, including partial results of a failed extraction.
+                prepared["matrix_enrichment_checkpoint"] = deepcopy(checkpoint)
+        if matrix_job and matrix_job.status in {"queued", "running", "cancel_requested"}:
+            if matrix_job.payload.get("source_matrix_artifact_id") != prepared["section_blueprint"]["source_matrix_artifact_id"]:
+                completed = self.repository.get_job(principal.user_id, matrix_job.id)
+                if (completed and completed.status == "succeeded" and
+                        completed.result.get("matrix_artifact_id") == prepared["section_blueprint"]["source_matrix_artifact_id"]):
+                    return prepared
+                raise WorkflowConflict("Earlier Matrix analysis uses a different selection. Wait for it to finish.")
+            prepared["await_matrix_job_id"] = matrix_job.id
+            state = self.repository.get_stage_state(principal.user_id, project_id, "blueprint")
+            prepared["blueprint_state_exists"] = state is not None
         return prepared
+
+    def resume_blueprint_after_matrix(self, principal, project_id, prepared):
+        """Accept only the expected extraction publication, never unrelated edits."""
+        dependency = prepared.get("await_matrix_job_id")
+        if not dependency:
+            return prepared
+        job = self.repository.get_job(principal.user_id, dependency)
+        if job and job.status in {"failed", "cancelled", "interrupted"}:
+            # A retry of this planner retains its original input contract. Follow
+            # only the extraction's explicit retry lineage, never another run.
+            latest = self.repository.get_current_job(principal.user_id, scope="project",
+                project_id=project_id, job_type="matrix.enrich", operation_key="matrix-enrichment")
+            cursor, seen = latest, set()
+            while cursor and cursor.id not in seen:
+                seen.add(cursor.id)
+                if cursor.id == dependency:
+                    job = latest
+                    break
+                if cursor.project_id != project_id or cursor.job_type != "matrix.enrich" or not cursor.retry_of_job_id:
+                    break
+                cursor = self.repository.get_job(principal.user_id, cursor.retry_of_job_id)
+        if (job is None or job.project_id != project_id or job.job_type != "matrix.enrich"
+                or job.status != "succeeded"):
+            raise WorkflowConflict("Scientific fact analysis did not complete. Retry it before generating the chapter plan.")
+        result = job.result or {}
+        expected = result.get("matrix_artifact_id")
+        original = prepared["section_blueprint"]["source_matrix_artifact_id"]
+        if not expected or job.payload.get("source_matrix_artifact_id") != original:
+            raise WorkflowConflict("Scientific fact analysis has no compatible published Matrix.")
+        rebased = deepcopy(prepared)
+        rebased.pop("await_matrix_job_id", None)
+        if expected != original:
+            rebased["section_blueprint"]["source_matrix_artifact_id"] = expected
+            rebased["matrix_revision"] = result["matrix_revision"]
+            invalidated = bool(result.get("blueprint_invalidated",
+                bool(result.get("changed_paper_ids") or result.get("classification_contract_changed"))))
+            if invalidated:
+                rebased["base_blueprint_artifact_id"] = None
+                rebased["blueprint_revision"] += int(prepared.get("blueprint_state_exists", False))
+        self.validate_prepared_blueprint(principal, project_id, rebased)
+        refreshed = self.blueprint_job_payload(principal, project_id, revision=rebased["blueprint_revision"])
+        # Pinning and request metadata remain the original job's responsibility.
+        refreshed.pop("await_matrix_job_id", None)
+        return refreshed
 
     def validate_prepared_blueprint(self, principal, project_id, prepared):
         for name, expected in (prepared.get("draft_repair_input_artifacts") or {}).items():
@@ -114,7 +224,26 @@ class PlanningBlueprintActionsMixin:
             original_outline, _ = self._owned_blueprint_input(principal, project_id, outline_artifact.id, OUTLINE_LOGICAL_NAME)
             matrix = deepcopy(prepared.get("matrix_snapshot") or original_matrix)
             outline = deepcopy(prepared.get("outline_snapshot") or original_outline)
-            self._validate_candidate_matrix(principal, original_matrix, matrix)
+            issues = self._validate_candidate_matrix(principal, original_matrix, matrix)
+            if issues:
+                previous = blueprint.get("fact_source_issues") or []
+                blueprint["fact_source_issues"] = list({(i["paper_id"], i["fact_id"]): i
+                                                       for i in [*previous, *issues]}.values())
+                # The plan is provisional; it must not advertise withheld facts
+                # as verified context if source state changed during generation.
+                usable = {r["paper_id"]: {f["fact_id"] for f in r.get("scientific_facts") or [] if fact_is_usable(f)}
+                          for r in matrix.get("rows") or []}
+                for section in blueprint.get("sections") or []:
+                    context = section.get("planning_fact_context")
+                    if isinstance(context, dict):
+                        ids = set(context.get("fact_ids") or [])
+                        papers = [pid for pid in context.get("paper_ids") or [] if ids & usable.get(pid, set())]
+                        kept = [fid for fid in context.get("fact_ids") or [] if any(fid in usable[pid] for pid in papers)]
+                        context.update(fact_ids=kept, paper_ids=papers, fact_count=len(kept), paper_count=len(papers),
+                                       mode="verified_fact_guided" if kept else "source_passage_only")
+                        if not kept:
+                            section["evidence_readiness"] = {"status": "not_reviewed",
+                                "reason": "Original passages will be checked during drafting."}
             blueprint.update(candidate_base_revision=revision, candidate_base_artifact_id=current.id if current else None,
                 candidate_base_matrix_artifact_id=matrix_artifact.id, candidate_base_outline_artifact_id=outline_artifact.id,
                 candidate_base_matrix_revision=prepared["matrix_revision"])

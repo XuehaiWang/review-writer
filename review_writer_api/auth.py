@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .database import (
     PasswordResetToken,
+    RegistrationCode,
     User,
     UserCreditAccount,
     UserSession,
@@ -214,7 +215,59 @@ class AuthService:
             expires_at=expires_at,
         )
 
-    def register(self, *, email: str, password: str, display_name: str) -> AuthenticatedSession:
+    def issue_registration_code(self, *, email: str) -> str:
+        email = normalize_email(email)
+        now = utc_now()
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        # Slow salted hashing also protects the small code space at rest.
+        code_hash = self.passwords.hash(_session_token_hash(email) + ":" + code)
+        try:
+            with database_session(self.session_factory) as database:
+                if database.scalar(select(User.id).where(User.email == email)) is not None:
+                    raise AuthError("该邮箱已经注册，请直接登录。")
+                row = database.scalar(select(RegistrationCode).where(RegistrationCode.email == email).with_for_update())
+                if row is not None and _aware(row.sent_at) + timedelta(seconds=60) > now:
+                    raise AuthRateLimited("请等待60秒后再发送验证码。")
+                if row is None:
+                    row = RegistrationCode(email=email)
+                    database.add(row)
+                row.code_hash = code_hash
+                row.sent_at = now
+                row.expires_at = now + timedelta(minutes=10)
+                row.attempts = 0
+                row.used_at = None
+                database.flush()
+        except IntegrityError as exc:
+            raise AuthRateLimited("请等待60秒后再发送验证码。") from exc
+        return code
+
+    def invalidate_registration_code(self, *, email: str, code: str) -> None:
+        with database_session(self.session_factory) as database:
+            row = database.scalar(select(RegistrationCode).where(RegistrationCode.email == normalize_email(email)).with_for_update())
+            if row is not None and self.passwords.verify(_session_token_hash(normalize_email(email)) + ":" + code, row.code_hash):
+                row.used_at = utc_now()
+
+    def _consume_registration_code(self, email: str, code: str) -> None:
+        valid = False
+        with database_session(self.session_factory) as database:
+            row = database.scalar(select(RegistrationCode).where(RegistrationCode.email == email).with_for_update())
+            now = utc_now()
+            if row is not None and row.used_at is None and _aware(row.expires_at) > now and row.attempts < 5:
+                # Commit failed attempts as well; raising inside this transaction
+                # would roll them back and allow unlimited guesses.
+                attempts = database.execute(update(RegistrationCode).where(
+                    RegistrationCode.email == email, RegistrationCode.used_at.is_(None),
+                    RegistrationCode.attempts < 5,
+                ).values(attempts=RegistrationCode.attempts + 1))
+                if attempts.rowcount and self.passwords.verify(_session_token_hash(email) + ":" + str(code or "").strip(), row.code_hash):
+                    consumed = database.execute(update(RegistrationCode).where(
+                        RegistrationCode.email == email, RegistrationCode.used_at.is_(None),
+                    ).values(used_at=now))
+                    valid = consumed.rowcount == 1
+        if not valid:
+            raise AuthError("邮箱验证码错误、已失效或尝试次数过多，请重新获取。")
+
+    def register(self, *, email: str, password: str, display_name: str, verification_code: str = "") -> AuthenticatedSession:
         normalized_email = normalize_email(email)
         normalized_name = str(display_name or "").strip()
         if not normalized_name:
@@ -222,6 +275,7 @@ class AuthService:
         if len(normalized_name) > 200:
             raise AuthError("显示名称不能超过 200 个字符。")
         password_hash = self.passwords.hash(password)
+        self._consume_registration_code(normalized_email, verification_code)
         with database_session(self.session_factory) as database:
             if database.scalar(select(User.id).where(User.email == normalized_email)) is not None:
                 raise AuthError("该邮箱已经注册，请直接登录。")

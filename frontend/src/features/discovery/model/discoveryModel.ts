@@ -3,6 +3,7 @@ import { buildPaperDisplayLabels } from "../../../utils/paperLabels";
 
 export type DiscoveryRow = Record<string, unknown> & {
   paper_id?: string;
+  display_label?: string;
   candidate_id?: string;
   title?: string;
   authors?: string[];
@@ -252,8 +253,8 @@ export function candidateMatchesFilter(
 }
 
 export function buildDiscoveryPaperLabels(groups: DiscoveryGroup[]): Map<string, string> {
-  const ranked = new Map<string, { paper_id: string; score: number; order: number }>();
-  const remaining: Array<{ paper_id: string }> = [];
+  const ranked = new Map<string, { paper_id: string; display_label?: string; score: number; order: number }>();
+  const remaining: Array<{ paper_id: string; display_label?: string }> = [];
   const seenRemaining = new Set<string>();
   let order = 0;
   for (const group of groups) {
@@ -263,12 +264,12 @@ export function buildDiscoveryPaperLabels(groups: DiscoveryGroup[]): Map<string,
       if (!paperId) continue;
       if (!seenRemaining.has(paperId)) {
         seenRemaining.add(paperId);
-        remaining.push({ paper_id: paperId });
+        remaining.push({ paper_id: paperId, display_label: row.display_label });
       }
       if (selectedForMatrix(row)) {
         const score = Number(row.score || row.raw_score || 0);
         const previous = ranked.get(paperId);
-        if (!previous || score > previous.score) ranked.set(paperId, { paper_id: paperId, score, order });
+        if (!previous || score > previous.score) ranked.set(paperId, { paper_id: paperId, display_label: row.display_label, score, order });
       }
       order += 1;
     }

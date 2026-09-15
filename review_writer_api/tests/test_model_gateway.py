@@ -40,6 +40,61 @@ TEST_KEY = base64.urlsafe_b64encode(b"g" * 32).decode("ascii")
 
 
 class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dialogue_stream_publishes_before_completion(self):
+        from review_writer_api.database import AIModelRequest
+        service = self.service
+        sessions = self.sessions
+        observed = []
+
+        class Chunks(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                event = {"choices": [{"delta": {"content": '{"reply":"Hello'}}]}
+                yield ("data: " + json.dumps(event) + "\n\n").encode()
+                with database_session(sessions) as session:
+                    row = session.scalar(select(AIModelRequest))
+                    observed.append((row.status, row.response_json.get("partial_reply")))
+                event = {"choices": [{"delta": {"content": ' world","candidate_text":""}'}}],
+                         "usage": {"prompt_tokens": 5, "completion_tokens": 9}}
+                yield ("data: " + json.dumps(event) + "\n\ndata: [DONE]\n\n").encode()
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request:
+            httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=Chunks())))
+        runtime = replace(service._text_runtime(), wire_api="chat-completions")
+        tier = replace(resolve_model_tier(None, self.sessions), wire_api="chat-completions")
+        try:
+            with mock.patch.object(service, "_provider_client", client), mock.patch.object(service, "_text_runtime", return_value=runtime), mock.patch.object(service, "_claims_model", return_value=tier):
+                result = await service.complete(self.token(), request_key="stream", stage="Paragraph analysis and revision", prompt="reply")
+            self.assertEqual(observed, [("running", "Hello")])
+            self.assertEqual(json.loads(result["output_text"])["reply"], "Hello world")
+            with database_session(sessions) as session:
+                row = session.scalar(select(AIModelRequest))
+                self.assertEqual(row.response_json["partial_reply"], "Hello world")
+                self.assertEqual(row.response_json["stream_diagnostics"]["chunks"], 2)
+                self.assertIsNotNone(row.response_json["stream_diagnostics"]["first_chunk_ms"])
+        finally:
+            await client.aclose()
+
+    async def test_stream_protocol_completion_and_interruption(self):
+        from review_writer_api.model_gateway import GatewayProviderError
+        completed = {"output_text": '{"reply":"Ready"}', "usage": {"input_tokens": 3, "output_tokens": 4}}
+        cases = [
+            ("responses", [{"type": "response.output_text.delta", "delta": '{"reply":"Ready"}'},
+                           {"type": "response.completed", "response": completed}], False),
+            ("chat-completions", [{"choices": [{"delta": {"content": '{"reply":"Partial'}}]}], True),
+        ]
+        for wire, events, fails in cases:
+            with self.subTest(wire=wire):
+                body = ''.join('data: ' + json.dumps(event) + '\n\n' for event in events)
+                async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request:
+                        httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body))) as client:
+                    with mock.patch.object(self.service, "_provider_client", client):
+                        call = self.service._stream_text_response("https://provider.example/v1", {}, {}, str(uuid.uuid4()), wire, None)
+                        if fails:
+                            with self.assertRaises(GatewayProviderError):
+                                await call
+                        else:
+                            self.assertEqual(await call, completed)
+
     async def test_structured_provider_quota_error_survives_original_result_lookup(self):
         from review_writer_api.model_gateway import GatewayProviderError
         from review_writer_api.schemas import ModelGatewayResultResponse
@@ -643,6 +698,28 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
             "write a paragraph",
             observed["payload"]["input"][0]["content"],
         )
+
+    async def test_image_quality_adapts_to_explicit_provider_requirement(self) -> None:
+        for wire in ("images", "responses"):
+            observed = []
+            def provider(request):
+                from urllib.parse import parse_qs
+                if wire == "responses":
+                    quality = json.loads(request.content)["tools"][0]["quality"]
+                else:
+                    quality = parse_qs(request.content.decode())["quality"][0]
+                observed.append(quality)
+                if quality != "low":
+                    return httpx.Response(400, json={"error": {"message": "Invalid quality: This model supports only 'low'."}})
+                return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(b"image" * 10).decode()}]})
+            await self.service._provider_client.aclose()
+            self.service._provider_client = httpx.AsyncClient(transport=httpx.MockTransport(provider))
+            result = await self.service._provider_image_call(operation="generate", prompt="diagram", images=[], quality="high",
+                background="auto", output_format="png", size="", idempotency_key="quality-test",
+                runtime=replace(self.service._image_runtime(), wire_api=wire))
+            self.assertEqual(["high", "low"], observed)
+            self.assertEqual(b"image" * 10, result[0])
+            self.assertEqual(2, result[3])
 
     async def test_image_request_is_cached_and_metered_separately(self) -> None:
         calls = 0

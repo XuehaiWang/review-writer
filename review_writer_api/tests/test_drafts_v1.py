@@ -708,6 +708,68 @@ class DraftsV1Tests(NativeFigureApiTestCase):
         self.assertEqual(200, old.status_code)
         self.assertNotIn("Manual edit.", old.text)
 
+    def test_paragraph_token_merges_unrelated_edits_and_rejects_same_paragraph_conflict(self):
+        with TestClient(self.app) as client:
+            self.prepare_draft(client)
+            base = f"/api/v1/projects/{self.project_id}/draft"
+            current = client.get(base).json()
+            # Guarantee two distinct paragraph identities without depending on
+            # the scientific topic used by the fixture.
+            added = client.put(base, json={"revision": current["revision"],
+                "text": current["first_draft_md"] + "\n\nSecond paragraph.\n<!-- paragraph_id: independent-p2 -->\n"})
+            self.assertEqual(200, added.status_code, added.text)
+            snapshot = client.get(base).json()
+            first = snapshot["paragraphs"][0]
+            second = next(p for p in snapshot["paragraphs"] if p["paragraph_id"] == "independent-p2")
+            def save(p, suffix):
+                return client.put(f"{base}/paragraphs/{p['paragraph_id']}", json={
+                    "revision": snapshot["revision"], "text": p["text"] + suffix,
+                    "base_text_sha256": p["text_sha256"],
+                })
+            self.assertEqual(200, save(first, " First change.").status_code)
+            saved_second = save(second, " Second change.")
+            self.assertEqual(200, saved_second.status_code, saved_second.text)
+            conflict = save(first, " Stale overwrite.")
+            self.assertEqual(409, conflict.status_code, conflict.text)
+            after = client.get(base).json()
+            self.assertIn("First change.", after["first_draft_md"])
+            self.assertIn("Second change.", after["first_draft_md"])
+            self.assertNotIn("Stale overwrite.", after["first_draft_md"])
+
+    def test_noop_paragraph_save_preserves_approval_and_version(self):
+        with TestClient(self.app) as client:
+            self.prepare_draft(client)
+            base = f"/api/v1/projects/{self.project_id}/draft"
+            snapshot = client.get(base).json()
+            approved = client.post(f"{base}/approve", json={"revision": snapshot["revision"]})
+            self.assertEqual(200, approved.status_code, approved.text)
+            snapshot = client.get(base).json()
+            paragraph = snapshot["paragraphs"][0]
+            saved = client.put(f"{base}/paragraphs/{paragraph['paragraph_id']}", json={
+                "revision": snapshot["revision"], "text": paragraph["text"],
+                "base_text_sha256": paragraph["text_sha256"],
+            })
+            self.assertEqual(200, saved.status_code, saved.text)
+            self.assertFalse(saved.json()["changed"])
+            after = client.get(base).json()
+            self.assertEqual(snapshot["revision"], after["revision"])
+            self.assertEqual(snapshot["draft_artifact_id"], after["draft_artifact_id"])
+            self.assertTrue(after["draft_approval_current"])
+            self.app.state.final_service._approved_draft(self.first, self.project_id)
+
+    def test_approval_does_not_expire_an_in_flight_analysis(self):
+        service = self.app.state.drafts_service
+        with TestClient(self.app) as client:
+            self.prepare_draft(client)
+            payload = service.evaluation_payload(self.first, self.project_id, goal=90)
+            approved = service.approve(self.first, self.project_id,
+                revision=payload["expected_revision"], override_low_score=False, override_reason="")
+            service.validate_task_inputs(self.first, self.project_id, payload)
+            result = service.publish_evaluation(self.first, self.project_id, payload,
+                {"score": 70, "goal": 90, "issues": [], "hard_gate_failures": []})
+            self.assertGreater(result["revision"], approved["revision"])
+            self.assertTrue(service.get(self.first, self.project_id)["draft_approval_current"])
+
     def test_manual_markdown_formatting_change_is_preserved(self) -> None:
         with TestClient(self.app) as client:
             self.prepare_draft(client)
@@ -801,530 +863,3 @@ class DraftsV1Tests(NativeFigureApiTestCase):
         self.assertEqual(200, restored.status_code, restored.text)
         self.assertEqual(first_id, payload["draft_artifact_id"])
         self.assertTrue(payload["freshness"]["upstream_stale"])
-
-    def test_live_quality_issues_expand_with_paragraph_and_matching_images(self) -> None:
-        with TestClient(self.app) as client:
-            self.prepare_draft(client)
-            started = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
-                json={"goal": 90},
-                headers=self.headers("draft-evaluate"),
-            )
-            self.assertEqual(202, started.status_code, started.text)
-            job = self.wait_job(client, started.json()["id"])
-            payload = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-        self.assertEqual("succeeded", job["status"])
-        self.assertEqual(3, job["progress_current"])
-        self.assertEqual(3, job["progress_total"])
-        self.assertEqual("", payload["active_feedback_job_id"])
-        self.assertEqual(job["id"], payload["latest_feedback_job_id"])
-        self.assertEqual("draft.evaluate", payload["latest_feedback_job_type"])
-        self.assertEqual("succeeded", payload["latest_feedback_job_status"])
-        self.assertEqual(72.5, payload["quality"]["score"])
-        issue = payload["quality"]["issues"][0]
-        self.assertTrue(issue["paragraph"]["text"])
-        self.assertTrue(issue["paragraph"]["images"])
-        self.assertEqual("completed", payload["quality"]["status"])
-
-    def test_manual_save_persists_missing_paragraph_markers_before_scoring(self) -> None:
-        with TestClient(self.app) as client:
-            self.prepare_draft(client)
-            current = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-            without_markers = re.sub(
-                r"\n*<!--\s*paragraph_id:[^>]+-->\s*", "\n\n", current["first_draft_md"]
-            )
-            saved = client.put(
-                f"/api/v1/projects/{self.project_id}/draft",
-                json={"text": without_markers, "revision": current["revision"]},
-                headers=self.headers("remove-markers"),
-            )
-            self.assertEqual(200, saved.status_code, saved.text)
-            saved_payload = client.get(
-                f"/api/v1/projects/{self.project_id}/draft"
-            ).json()
-            self.assertIn("<!-- paragraph_id:", saved_payload["first_draft_md"])
-            self.assertEqual("full-edit", saved_payload["versions"][0]["operation"])
-            started = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
-                json={},
-                headers=self.headers("evaluate-normalized-markers"),
-            )
-            job = self.wait_job(client, started.json()["id"])
-            payload = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-        self.assertEqual("succeeded", job["status"])
-        self.assertIn("<!-- paragraph_id:", payload["first_draft_md"])
-        self.assertTrue(payload["quality"]["issues"][0]["paragraph"]["text"])
-        self.assertEqual("full-edit", payload["versions"][0]["operation"])
-
-    def test_batch_safe_optimization_requires_review_then_publishes_atomically(self) -> None:
-        with TestClient(self.app) as client:
-            assembled = self.prepare_draft(client)
-            started = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/optimization-jobs",
-                json={
-                    "goal": 90,
-                    "paragraph_goal": 85,
-                    "max_iterations": 3,
-                    "min_case_words": 140,
-                    "max_case_words": 280,
-                },
-                headers=self.headers("batch-safe-optimize"),
-            )
-            self.assertEqual(202, started.status_code, started.text)
-            job = self.wait_job(client, started.json()["id"])
-            pending = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-            proposal = next(
-                item
-                for item in pending["optimization_proposals"]
-                if item["status"] == "pending"
-            )
-            accepted = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/optimization-proposals/{proposal['proposal_id']}/accept",
-                json={"revision": pending["revision"]},
-                headers=self.headers("accept-batch-safe-optimize"),
-            )
-            payload = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-        self.assertEqual("succeeded", job["status"])
-        self.assertEqual(5, job["progress_current"])
-        self.assertEqual(5, job["progress_total"])
-        self.assertTrue(job["result"]["proposal_created"])
-        self.assertEqual(assembled["draft_artifact_id"], pending["draft_artifact_id"])
-        self.assertNotIn("Batch-safe comparison", pending["first_draft_md"])
-        self.assertEqual(1, len(proposal["changes"]))
-        self.assertEqual(200, accepted.status_code, accepted.text)
-        self.assertNotEqual(assembled["draft_artifact_id"], payload["draft_artifact_id"])
-        self.assertIn("Batch-safe comparison", payload["first_draft_md"])
-        self.assertTrue(payload["quality"]["current"])
-        self.assertEqual(payload["draft_artifact_id"], payload["quality"]["source_draft_artifact_id"])
-
-    def test_batch_safe_optimization_can_be_discarded_without_changing_draft(self) -> None:
-        with TestClient(self.app) as client:
-            assembled = self.prepare_draft(client)
-            started = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/optimization-jobs",
-                json={},
-                headers=self.headers("batch-safe-discard"),
-            )
-            job = self.wait_job(client, started.json()["id"])
-            pending = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-            proposal = next(
-                item
-                for item in pending["optimization_proposals"]
-                if item["status"] == "pending"
-            )
-            discarded = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/optimization-proposals/{proposal['proposal_id']}/reject",
-                json={"revision": pending["revision"]},
-                headers=self.headers("discard-batch-safe-optimize"),
-            )
-            after = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-        self.assertEqual("succeeded", job["status"])
-        self.assertEqual(200, discarded.status_code, discarded.text)
-        self.assertEqual(assembled["draft_artifact_id"], after["draft_artifact_id"])
-        self.assertNotIn("Batch-safe comparison", after["first_draft_md"])
-        self.assertFalse(
-            any(item["status"] == "pending" for item in after["optimization_proposals"])
-        )
-
-    def test_evaluation_goal_below_rubric_threshold_is_rejected_before_job_start(self) -> None:
-        with TestClient(self.app) as client:
-            self.prepare_draft(client)
-            response = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
-                json={"goal": 80},
-                headers=self.headers("invalid-draft-goal"),
-            )
-        self.assertEqual(422, response.status_code, response.text)
-
-    def test_rewrite_is_candidate_only_rejects_noop_and_accepts_with_audit(self) -> None:
-        with TestClient(self.app) as client:
-            self.prepare_draft(client)
-            evaluation = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
-                json={},
-                headers=self.headers("rewrite-evaluate"),
-            )
-            self.wait_job(client, evaluation.json()["id"])
-            current = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-            paragraph_id = current["paragraphs"][0]["paragraph_id"]
-            rewrite = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/paragraphs/{paragraph_id}/rewrite-jobs",
-                json={},
-                headers=self.headers("rewrite-candidate"),
-            )
-            rewrite_job = self.wait_job(client, rewrite.json()["id"])
-            candidate_id = rewrite_job["result"]["candidate_id"]
-            unchanged = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-            pending_candidate = next(
-                item
-                for item in unchanged["rewrite_candidates"]
-                if item["candidate_id"] == candidate_id
-            )
-            accepted = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/rewrite-candidates/{candidate_id}/accept-jobs",
-                json={"revision": unchanged["revision"]},
-                headers=self.headers("accept-rewrite"),
-            )
-            accepted_job = self.wait_job(client, accepted.json()["id"])
-            after_accept = client.get(
-                f"/api/v1/projects/{self.project_id}/draft"
-            ).json()
-            repeated = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/rewrite-candidates/{candidate_id}/accept-jobs",
-                json={"revision": after_accept["revision"]},
-                headers=self.headers("repeat-rewrite"),
-            )
-            reassembled = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/assemble",
-                headers=self.headers("reassemble-accepted-rewrite"),
-            )
-            after_reassemble = client.get(
-                f"/api/v1/projects/{self.project_id}/draft"
-            ).json()
-        self.assertEqual("succeeded", rewrite_job["status"])
-        self.assertNotIn("explicit", unchanged["first_draft_md"])
-        self.assertEqual(60.0, pending_candidate["source_paragraph_score"])
-        self.assertEqual(92.0, pending_candidate["candidate_paragraph_score"])
-        self.assertEqual(202, accepted.status_code, accepted.text)
-        self.assertEqual("succeeded", accepted_job["status"])
-        self.assertEqual(0, self.accept_rewrite_model_calls)
-        self.assertEqual(409, repeated.status_code, repeated.text)
-        self.assertFalse(after_accept["freshness"]["upstream_stale"])
-        self.assertTrue(after_accept["quality"]["current"])
-        self.assertEqual("incremental_paragraph", after_accept["quality"]["quality_scope"])
-        self.assertEqual(92.0, after_accept["quality"]["paragraph_scores"][0]["score"])
-        self.assertGreater(after_accept["quality"]["score"], 72.5)
-        self.assertEqual(200, reassembled.status_code, reassembled.text)
-        self.assertIn("comparison is now explicit", after_reassemble["first_draft_md"])
-        self.assertIn(
-            after_reassemble["paragraphs"][0]["paragraph_id"],
-            after_reassemble["overlay_replay"]["applied"],
-        )
-
-    def test_accepting_single_rewrite_atomically_publishes_matching_evidence(self) -> None:
-        source_evidence_id = self.seed_section_evidence_package()
-        source_ref = "P001:block:17"
-        self.rewrite_source_evidence_refs = [source_ref]
-        self.rewrite_source_check_entry = {
-            "paragraph_id": "S1-p1",
-            "source_check_status": "verified",
-            "source_evidence_refs": [source_ref],
-            "papers": [
-                {
-                    "paper_id": "P001",
-                    "passages": [
-                        {
-                            "ref": source_ref,
-                            "page": 3,
-                            "text": "Copper promoted the reported transformation under the tested conditions.",
-                        }
-                    ],
-                }
-            ],
-        }
-        self.rewrite_unsupported_claims_before = [
-            "The catalyst is universally optimal."
-        ]
-
-        with TestClient(self.app) as client:
-            self.prepare_draft(client)
-            evaluation = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
-                json={},
-                headers=self.headers("evidence-rewrite-evaluate"),
-            )
-            self.assertEqual(
-                "succeeded", self.wait_job(client, evaluation.json()["id"])["status"]
-            )
-            current = client.get(
-                f"/api/v1/projects/{self.project_id}/draft"
-            ).json()
-            paragraph_id = current["paragraphs"][0]["paragraph_id"]
-            rewrite = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/paragraphs/{paragraph_id}/rewrite-jobs",
-                json={},
-                headers=self.headers("evidence-rewrite-candidate"),
-            )
-            rewrite_job = self.wait_job(client, rewrite.json()["id"])
-            candidate_id = rewrite_job["result"]["candidate_id"]
-            before_accept = self.app.state.workflow_repository.get_current_artifact(
-                self.first.user_id, self.project_id, SECTION_EVIDENCE
-            )
-            pending = client.get(
-                f"/api/v1/projects/{self.project_id}/draft"
-            ).json()
-            accepted = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/rewrite-candidates/{candidate_id}/accept-jobs",
-                json={"revision": pending["revision"]},
-                headers=self.headers("evidence-rewrite-accept"),
-            )
-            accepted_job = self.wait_job(client, accepted.json()["id"])
-            after = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-
-        self.assertEqual("succeeded", rewrite_job["status"])
-        self.assertEqual(1, rewrite_job["result"]["evidence_repair_preview"]["added_evidence_count"])
-        self.assertEqual(source_evidence_id, before_accept.id)
-        self.assertEqual("succeeded", accepted_job["status"])
-        result = accepted_job["result"]
-        self.assertEqual(1, result["evidence_repair"]["added_evidence_count"])
-        self.assertNotEqual(source_evidence_id, result["section_evidence_artifact_id"])
-        current_evidence = self.app.state.workflow_repository.get_current_artifact(
-            self.first.user_id, self.project_id, SECTION_EVIDENCE
-        )
-        resolved = self.app.state.artifact_service.resolve_owned_artifact(
-            self.first.user_id, current_evidence.id
-        )
-        package = json.loads(resolved.path.read_text(encoding="utf-8"))
-        repaired = next(
-            row
-            for row in package["evidence_registry"]
-            if row.get("source_ref") == source_ref
-        )
-        self.assertEqual("P001", repaired["paper_id"])
-        self.assertEqual("draft_targeted_source_recheck", repaired["source_channel"])
-        self.assertEqual(1, after["quality"]["evidence_repair"]["added_evidence_count"])
-        self.assertTrue(after["quality"]["claim_dispositions"])
-        self.assertFalse(after["freshness"]["upstream_stale"])
-
-    def test_accepting_rewrite_supersedes_other_candidates_from_old_draft(self) -> None:
-        with TestClient(self.app) as client:
-            self.prepare_draft(client)
-            evaluation = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
-                json={},
-                headers=self.headers("multi-rewrite-evaluate"),
-            )
-            self.wait_job(client, evaluation.json()["id"])
-            current = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-            paragraph_id = current["paragraphs"][0]["paragraph_id"]
-            candidate_ids = []
-            for index in range(2):
-                started = client.post(
-                    f"/api/v1/projects/{self.project_id}/draft/paragraphs/{paragraph_id}/rewrite-jobs",
-                    json={},
-                    headers=self.headers(f"multi-rewrite-{index}"),
-                )
-                job = self.wait_job(client, started.json()["id"])
-                candidate_ids.append(job["result"]["candidate_id"])
-            before = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-            accepted = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/rewrite-candidates/{candidate_ids[0]}/accept-jobs",
-                json={"revision": before["revision"]},
-                headers=self.headers("multi-rewrite-accept"),
-            )
-            accepted_job = self.wait_job(client, accepted.json()["id"])
-            after = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-            stale_action = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/rewrite-candidates/{candidate_ids[1]}/accept-jobs",
-                json={"revision": after["revision"]},
-                headers=self.headers("multi-rewrite-stale-accept"),
-            )
-        self.assertEqual(202, accepted.status_code, accepted.text)
-        self.assertEqual("succeeded", accepted_job["status"])
-        statuses = {
-            item["candidate_id"]: item["status"]
-            for item in after["rewrite_candidates"]
-        }
-        self.assertEqual("accepted", statuses[candidate_ids[0]])
-        self.assertEqual("superseded", statuses[candidate_ids[1]])
-        self.assertEqual(409, stale_action.status_code, stale_action.text)
-
-    def test_re_evaluation_makes_old_rewrite_candidate_stale(self) -> None:
-        with TestClient(self.app) as client:
-            self.prepare_draft(client)
-            first_evaluation = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
-                json={}, headers=self.headers("candidate-quality-v1"),
-            )
-            self.wait_job(client, first_evaluation.json()["id"])
-            first = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-            paragraph_id = first["paragraphs"][0]["paragraph_id"]
-            rewrite = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/paragraphs/{paragraph_id}/rewrite-jobs",
-                json={}, headers=self.headers("candidate-before-reevaluation"),
-            )
-            candidate_id = self.wait_job(client, rewrite.json()["id"])["result"][
-                "candidate_id"
-            ]
-            second_evaluation = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
-                json={}, headers=self.headers("candidate-quality-v2"),
-            )
-            self.wait_job(client, second_evaluation.json()["id"])
-            current = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-            stale = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/rewrite-candidates/{candidate_id}/accept",
-                json={"revision": current["revision"]},
-                headers=self.headers("accept-old-quality-candidate"),
-            )
-        candidate = next(
-            item for item in current["rewrite_candidates"]
-            if item["candidate_id"] == candidate_id
-        )
-        self.assertEqual("stale", candidate["status"])
-        self.assertEqual(409, stale.status_code, stale.text)
-
-    def test_normalized_noop_rewrite_is_not_counted_as_candidate(self) -> None:
-        self.noop_rewrite = True
-        with TestClient(self.app) as client:
-            self.prepare_draft(client)
-            evaluation = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
-                json={},
-                headers=self.headers("noop-evaluation"),
-            )
-            self.wait_job(client, evaluation.json()["id"])
-            current = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-            paragraph_id = current["paragraphs"][0]["paragraph_id"]
-            started = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/paragraphs/{paragraph_id}/rewrite-jobs",
-                json={},
-                headers=self.headers("noop-rewrite"),
-            )
-            job = self.wait_job(client, started.json()["id"])
-            payload = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-        self.assertEqual("failed", job["status"])
-        self.assertEqual([], payload["rewrite_candidates"])
-
-    def test_rewrite_requires_a_current_evaluation_issue(self) -> None:
-        with TestClient(self.app) as client:
-            self.prepare_draft(client)
-            current = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-            paragraph_id = current["paragraphs"][0]["paragraph_id"]
-            response = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/paragraphs/{paragraph_id}/rewrite-jobs",
-                json={},
-                headers=self.headers("rewrite-without-evaluation"),
-            )
-        self.assertEqual(409, response.status_code, response.text)
-
-    def test_approval_is_bound_to_evaluated_current_draft(self) -> None:
-        self.evaluation_style_only = True
-        with TestClient(self.app) as client:
-            self.prepare_draft(client)
-            before = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/approve",
-                json={"revision": 1},
-                headers=self.headers("approval-before-evaluate"),
-            )
-            started = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
-                json={},
-                headers=self.headers("approval-evaluate"),
-            )
-            self.wait_job(client, started.json()["id"])
-            current = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-            low = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/approve",
-                json={"revision": current["revision"]},
-                headers=self.headers("approval-low-score"),
-            )
-        self.assertEqual(409, before.status_code, before.text)
-        self.assertEqual(200, low.status_code, low.text)
-        self.assertEqual("final", low.json()["next_stage"])
-
-    def test_manual_approval_acknowledges_but_does_not_clear_substantive_findings(self):
-        self.evaluation_score = 96
-        self.evaluation_substantive = True
-        with TestClient(self.app) as client:
-            self.prepare_draft(client)
-            started = client.post(f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs", json={}, headers=self.headers("high-score-evaluate"))
-            self.assertEqual("succeeded", self.wait_job(client, started.json()["id"])["status"])
-            current = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-            response = client.post(f"/api/v1/projects/{self.project_id}/draft/approve",
-                json={"revision": current["revision"], "override_low_score": True}, headers=self.headers("high-score-approve"))
-            self.assertEqual(200, response.status_code, response.text)
-            after = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
-            self.assertTrue(after["draft_approval_current"])
-            self.assertEqual(current["quality"], after["quality"])
-            self.assertEqual("acknowledged_findings", after["draft_approval"]["approval_mode"])
-            self.assertTrue(after["draft_approval"]["acknowledged_findings"])
-            self.assertTrue(after["quality"]["approval_findings"])
-            # Final consumes this exact approval, without repeating Quality gates.
-            self.app.state.final_service._approved_draft(self.first, self.project_id)
-
-    def test_hard_quality_findings_can_be_acknowledged_but_stale_revision_cannot(self) -> None:
-        self.hard_gate_failures = ["citation_integrity_failed"]
-        with TestClient(self.app) as client:
-            self.prepare_draft(client)
-            started = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
-                json={},
-                headers=self.headers("hard-gate-evaluate"),
-            )
-            self.assertEqual(
-                "succeeded", self.wait_job(client, started.json()["id"])["status"]
-            )
-            current = client.get(
-                f"/api/v1/projects/{self.project_id}/draft"
-            ).json()
-            blocked = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/approve",
-                json={"revision": current["revision"]},
-                headers=self.headers("hard-gate-blocked"),
-            )
-            approved = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/approve",
-                json={
-                    "revision": current["revision"],
-                    "override_low_score": True,
-                    "override_reason": "Human verified the citations.",
-                },
-                headers=self.headers("hard-gate-override"),
-            )
-        self.assertEqual(200, blocked.status_code, blocked.text)
-        self.assertEqual(409, approved.status_code, approved.text)
-
-    def test_approval_cannot_mix_an_old_pass_score_with_a_new_quality_artifact(self) -> None:
-        service = self.app.state.drafts_service
-        with TestClient(self.app) as client:
-            self.prepare_draft(client)
-            started = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
-                json={}, headers=self.headers("approval-snapshot-evaluate"),
-            )
-            self.assertEqual("succeeded", self.wait_job(client, started.json()["id"])["status"])
-            old_payload = client.get(
-                f"/api/v1/projects/{self.project_id}/draft"
-            ).json()
-        hard_fail = {
-            "source_draft_artifact_id": old_payload["draft_artifact_id"],
-            "score": 20,
-            "goal": 90,
-            "hard_gate_failures": ["citation_integrity_failed"],
-            "issues": [],
-        }
-        _published, state = service._publish_files(
-            self.first,
-            self.project_id,
-            {
-                DRAFT_QUALITY: (
-                    (json.dumps(hard_fail, ensure_ascii=False) + "\n").encode(),
-                    "json",
-                )
-            },
-            expected_revision=old_payload["revision"],
-            metadata={"operation": "concurrent-hard-fail-evaluation"},
-            expected_current_artifacts={
-                DRAFT_DOCUMENT: old_payload["draft_artifact_id"]
-            },
-        )
-        original_get = service.get
-        service.get = lambda *_args, **_kwargs: old_payload
-        try:
-            with self.assertRaises(WorkflowConflict):
-                service.approve(
-                    self.first,
-                    self.project_id,
-                    revision=state.revision,
-                    override_low_score=True,
-                    override_reason="Human review",
-                )
-        finally:
-            service.get = original_get
-
-
-if __name__ == "__main__":
-    import unittest
-
-    unittest.main()

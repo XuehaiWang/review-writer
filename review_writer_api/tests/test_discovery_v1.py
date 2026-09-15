@@ -1007,15 +1007,12 @@ class DiscoveryV1Tests(unittest.TestCase):
                 "save_discovery_atomically",
                 side_effect=RuntimeError("injected atomic save failure"),
             ):
-                with self.assertRaises(RuntimeError):
-                    client.put(
-                        f"/api/v1/projects/{self.project_id}/discovery",
-                        json={
-                            "revision": before["revision"],
-                            "results": changed,
-                        },
-                        headers=self.headers(),
-                    )
+                response = client.put(
+                    f"/api/v1/projects/{self.project_id}/discovery",
+                    json={"revision": before["revision"], "results": changed},
+                    headers=self.headers(),
+                )
+                self.assertEqual(500, response.status_code)
             after = client.get(
                 f"/api/v1/projects/{self.project_id}/discovery"
             ).json()
@@ -1070,15 +1067,36 @@ class DiscoveryV1Tests(unittest.TestCase):
         self.assertEqual(422, rejected.status_code)
         self.assertEqual("DISCOVERY_SELECTION_NOT_IN_LIBRARY", rejected.json()["error"]["code"])
 
+    def test_confirmation_queues_facts_once_and_get_never_submits(self):
+        with TestClient(self.app) as client:
+            self.discover(client)
+            selected = client.post(f"/api/v1/projects/{self.project_id}/discovery/selection/top",
+                json={"count": 1}, headers=self.headers()).json()
+            with patch.object(self.app.state.job_service, "execution_enabled", False):
+                first = client.post(f"/api/v1/projects/{self.project_id}/discovery/confirm",
+                    json={"revision": selected["revision"]}, headers=self.headers())
+                self.assertEqual(200, first.status_code, first.text)
+                current = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+                second = client.post(f"/api/v1/projects/{self.project_id}/discovery/confirm",
+                    json={"revision": current["revision"]}, headers=self.headers())
+                self.assertEqual(200, second.status_code, second.text)
+            self.assertEqual(first.json()["matrix_analysis_job"]["id"], second.json()["matrix_analysis_job"]["id"])
+            for _ in range(2):
+                client.get(f"/api/v1/projects/{self.project_id}/planning")
+            jobs = self.app.state.workflow_repository.list_project_jobs(self.first.user_id, self.project_id, job_type="matrix.enrich")
+            self.assertEqual(1, len(jobs))
+
     def test_failed_atomic_confirmation_keeps_old_matrix_and_discovery_state_current(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client)
             selected = client.post(f"/api/v1/projects/{self.project_id}/discovery/selection/top", json={"count": 1}, headers=self.headers()).json()
             before = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
             with patch.object(self.app.state.workflow_repository, "confirm_discovery_atomically", side_effect=RuntimeError("injected")):
-                with self.assertRaises(RuntimeError):
-                    client.post(f"/api/v1/projects/{self.project_id}/discovery/confirm", json={"revision": selected["revision"]}, headers=self.headers())
+                response = client.post(f"/api/v1/projects/{self.project_id}/discovery/confirm", json={"revision": selected["revision"]}, headers=self.headers())
+                self.assertEqual(500, response.status_code)
             after = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+        self.assertEqual([], self.app.state.workflow_repository.list_project_jobs(
+            self.first.user_id, self.project_id, job_type="matrix.enrich"))
         self.assertEqual(before["artifact_id"], after["artifact_id"])
         self.assertIsNone(self.app.state.workflow_repository.get_current_artifact(self.first.user_id, self.project_id, "matrix/literature_matrix.json"))
 

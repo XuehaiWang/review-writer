@@ -9,6 +9,11 @@ type FinalJobStatusProps = {
   submissionError?: Error | null;
 };
 
+type PdfCharacterIssue = {
+  kind: string; section: string; reference_number: string; figure_number: string;
+  paragraph_number: number; line: number; column: number; codepoint: string; excerpt: string;
+};
+
 const activeStatuses = new Set(["queued", "running", "cancel_requested"]);
 
 function actionFromJob(job: Job | undefined, fallback: FinalAction): FinalAction {
@@ -21,6 +26,7 @@ function actionFromJob(job: Job | undefined, fallback: FinalAction): FinalAction
 export function FinalJobStatus({ job, startingAction = "build", submissionError = null }: FinalJobStatusProps) {
   const { text } = useUiText();
   const action = actionFromJob(job, startingAction);
+  const diagnostics = job?.result?.pdf_diagnostics as { total?: number; issues?: PdfCharacterIssue[]; truncated?: boolean } | undefined;
   const status = submissionError ? "failed" : job?.status || "submitting";
   const active = status === "submitting" || activeStatuses.has(status);
   const total = Math.max(0, Number(job?.progress_total || 0));
@@ -125,6 +131,21 @@ export function FinalJobStatus({ job, startingAction = "build", submissionError 
         <span style={percentage === undefined ? undefined : { width: `${percentage}%` }} />
       </div>
       <p>{detail}</p>
+      {action === "pdf" && Number(diagnostics?.total) > 0 ? <details open={status === "failed"}>
+        <summary>{text(`发现 ${diagnostics?.total} 处异常字符（未自动修改）`, `${diagnostics?.total} invalid character(s) found (not automatically modified)`)}</summary>
+        <p>{text("以下为本次导出输入的位置，不代表已修复。段落序号按终稿文本块计；核对原文时可使用片段定位。", "Locations refer to this export input; no repair is implied. Paragraph numbers count Final manuscript text blocks. Use the excerpts to locate the source.")}</p>
+        <ul>{diagnostics?.issues?.map((issue) => <li key={`${issue.line}:${issue.column}`}>
+          <strong>{issue.kind === "reference" ? text(`参考文献第 ${issue.reference_number} 条`, `Reference ${issue.reference_number}`)
+            : issue.kind === "figure" ? text(`图注${issue.figure_number ? ` ${issue.figure_number}` : ""}`, `Figure caption ${issue.figure_number}`)
+            : issue.kind === "heading" ? text("标题", "Heading")
+            : text(`第 ${issue.paragraph_number} 个文本段落`, `Text paragraph ${issue.paragraph_number}`)}</strong>
+          {issue.section ? <span> · {issue.section}</span> : null}
+          <p>{text(`行 ${issue.line}，字符位置 ${issue.column}：不可见字符 ${issue.codepoint}`, `Line ${issue.line}, character ${issue.column}: invisible character ${issue.codepoint}`)}</p>
+          <p style={{ overflowWrap: "anywhere", whiteSpace: "pre-wrap" }}>{issue.excerpt}</p>
+        </li>)}</ul>
+        {diagnostics?.truncated ? <p>{text("仅展示前 100 处位置。", "Only the first 100 locations are shown.")}</p> : null}
+        <p>{text("无法从异常编码确定原来的字符，请核对来源。原始正文未修改。", "The original character cannot be inferred from the invalid code. Check the source. The original manuscript is unchanged.")}</p>
+      </details> : null}
     </section>
   );
 }

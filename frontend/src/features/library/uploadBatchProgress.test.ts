@@ -26,6 +26,7 @@ describe("buildUploadBatchCounts", () => {
       total: 205,
       done: 26,
       failed: 0,
+      cancelled: 0,
       uploading: 1,
       queued: 178,
     });
@@ -36,8 +37,15 @@ describe("buildUploadBatchCounts", () => {
       total: 8,
       done: 1,
       failed: 0,
+      cancelled: 0,
       uploading: 2,
       queued: 5,
+    });
+  });
+
+  it("counts cancelled files as finished without labelling them failures", () => {
+    expect(buildUploadBatchCounts(summary({ total: 3, queued: 0, running: 1, succeeded: 1, cancelled: 1 }), ["cancelled"], 4)).toEqual({
+      total: 4, done: 1, failed: 0, cancelled: 2, uploading: 1, queued: 0,
     });
   });
 });

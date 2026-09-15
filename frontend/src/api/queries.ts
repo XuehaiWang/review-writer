@@ -11,6 +11,7 @@ import type {
   CreditTransactionList,
   LibraryList,
   ModelCatalog,
+  TextConnection,
   Principal,
   ProjectList,
   ProviderSettingsList,
@@ -28,6 +29,8 @@ export const queryKeys = {
   adminProviderSettings: ["admin", "provider-settings"] as const,
   adminProviderAudit: ["admin", "provider-audit"] as const,
   modelCatalog: ["model-catalog"] as const,
+  adminModelCatalog: ["admin", "model-catalog"] as const,
+  textConnections: ["admin", "text-connections"] as const,
   usageSummary: (projectId = "") => ["usage-summary", projectId] as const,
   usageTimeline: (days: number, projectId = "") => ["usage-timeline", projectId, days] as const,
   balance: ["balance"] as const,
@@ -84,6 +87,16 @@ export const modelCatalogQuery = queryOptions({
   queryKey: queryKeys.modelCatalog,
   queryFn: () => apiRequest<ModelCatalog>("/api/v1/model-catalog"),
   staleTime: 30 * 60 * 1000,
+});
+
+export const adminModelCatalogQuery = queryOptions({
+  queryKey: queryKeys.adminModelCatalog,
+  queryFn: () => apiRequest<ModelCatalog>("/api/v1/admin/model-catalog"),
+});
+
+export const textConnectionsQuery = queryOptions({
+  queryKey: queryKeys.textConnections,
+  queryFn: () => apiRequest<{ items: TextConnection[] }>("/api/v1/admin/text-connections"),
 });
 
 export function usageSummaryQuery(projectId = "") {

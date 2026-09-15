@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from review_writer_api.paper_labels import library_paper_labels
+
 import hashlib
 import json
 import re
@@ -35,6 +37,8 @@ from review_writer_api.domain_services.actions.draft.quality import (
 from review_writer_api.domain_services.actions.draft.rewrite import (
     DraftRewriteActionsMixin,
 )
+from review_writer_api.domain_services.actions.draft.dialogue import DraftDialogueMixin
+from review_writer_core.paragraph_revision import paragraph_keys, dialogue_sections
 from review_writer_api.errors import (
     WorkflowConflict,
     WorkflowNotFound,
@@ -93,6 +97,7 @@ from review_writer_core.workflow.artifacts import (
 
 
 class DraftsService(
+    DraftDialogueMixin,
     DraftDecisionActionsMixin,
     DraftOptimizationActionsMixin,
     DraftQualityActionsMixin,
@@ -109,6 +114,10 @@ class DraftsService(
         self.repository = repository
         self.artifacts = artifacts
         self._write_lock = threading.RLock()
+
+    def _revision(self, principal: Principal, project_id: str) -> int:
+        state = self.repository.get_stage_state(principal.user_id, project_id, "draft")
+        return state.revision if state else 0
 
     def _validate_repair_lineages(self, principal, evidence_repair):
         expected = evidence_repair.get("fact_agent_source_lineages") or {}
@@ -148,6 +157,11 @@ class DraftsService(
         expected_stage_states: dict[str, dict[str, Any]] | None = None,
         invalidate_final: bool = True,
     ) -> tuple[dict[str, ArtifactRecord], Any]:
+        # Observational results do not revoke approval of unchanged prose.
+        if not invalidate_final and DRAFT_DOCUMENT not in files and DRAFT_APPROVAL not in files:
+            previous_state = self.repository.get_stage_state(principal.user_id, project_id, "draft")
+            if previous_state is not None and previous_state.status == "approved":
+                status = "approved"
         run = self.repository.create_stage_run(
             principal.user_id,
             project_id,
@@ -182,6 +196,23 @@ class DraftsService(
             (staging / filename).write_bytes(content)
             artifact_metadata = (metadata_builder(logical_name, published)
                                  if metadata_builder is not None else dict(metadata or {}))
+            if logical_name == DRAFT_DOCUMENT:
+                old_text, old_artifact = self._read_text(principal, project_id, DRAFT_DOCUMENT, required=False)
+                old_keys = paragraph_keys(old_text, old_artifact.metadata, old_artifact.id) if old_artifact else {}
+                operation = artifact_metadata.get("operation")
+                if operation == "assemble":
+                    old_keys = {}
+                if str(operation or "").startswith("paragraph-edit:") and len(old_keys) != len(self._paragraph_spans(content.decode("utf-8"))):
+                    # Splitting a saved paragraph retires its dialogue identity.
+                    old_keys.pop(operation.split(":", 1)[1], None)
+                if operation == "full-edit":
+                    before = {p["paragraph_id"]: p["text"] for p in self._paragraph_spans(old_text)}
+                    old_keys = {p["paragraph_id"]: old_keys[p["paragraph_id"]]
+                                for p in self._paragraph_spans(content.decode("utf-8"))
+                                if p["paragraph_id"] in old_keys and before.get(p["paragraph_id"]) == p["text"]}
+                artifact_metadata["paragraph_keys"] = {
+                    p["paragraph_id"]: old_keys.get(p["paragraph_id"]) or str(uuid.uuid4())
+                    for p in self._paragraph_spans(content.decode("utf-8"))}
             if logical_name in {DRAFT_DOCUMENT, DRAFT_QUALITY} and DRAFT_OVERLAYS in published:
                 artifact_metadata["source_rewrite_overlay_artifact_id"] = published[DRAFT_OVERLAYS].id
             published[logical_name] = self.artifacts.publish(
@@ -765,6 +796,10 @@ class DraftsService(
         )
         state = self.repository.get_stage_state(principal.user_id, project_id, "draft")
         paragraphs = self._paragraph_spans(text)
+        stable_keys = paragraph_keys(text, draft_artifact.metadata, draft_artifact.id) if draft_artifact else {}
+        for paragraph in paragraphs:
+            paragraph["text_sha256"] = hashlib.sha256(paragraph["text"].encode("utf-8")).hexdigest()
+            paragraph["paragraph_key"] = stable_keys[paragraph["paragraph_id"]]
         paragraph_by_id = {row["paragraph_id"]: row for row in paragraphs}
         manifest, _manifest_artifact = self._read_json(
             principal, project_id, FIGURE_MANIFEST, required=False
@@ -772,16 +807,7 @@ class DraftsService(
         matrix, matrix_artifact = self._read_json(
             principal, project_id, MATRIX_LOGICAL_NAME, required=False
         )
-        matrix_paper_ids = [
-            str(row.get("paper_id") or "")
-            for row in matrix.get("rows") or []
-            if isinstance(row, dict) and str(row.get("paper_id") or "").strip()
-        ]
-        display_width = max(3, len(str(len(matrix_paper_ids))))
-        paper_display_labels = {
-            paper_id: f"P{index:0{display_width}d}"
-            for index, paper_id in enumerate(matrix_paper_ids, start=1)
-        }
+        paper_display_labels = library_paper_labels(self.repository.session_factory, principal.user_id)
         images_by_paragraph: dict[str, list[dict[str, str]]] = {}
         for row in manifest.get("figures") or []:
             if not isinstance(row, dict):
@@ -848,9 +874,7 @@ class DraftsService(
             and state.status == "approved"
             and approval.get("status") == "approved"
             and approval.get("draft_artifact_id") == draft_artifact.id
-            and quality_artifact
-            and approval.get("quality_artifact_id") == quality_artifact.id
-            and quality_current
+            and not freshness["upstream_stale"]
         )
         versions = self.repository.list_artifacts(
             principal.user_id, project_id, DRAFT_DOCUMENT
@@ -860,8 +884,14 @@ class DraftsService(
             if not isinstance(value, dict):
                 continue
             candidate = dict(value)
+            if candidate.get("revision_mode") == "dialogue" and candidate.get("status") == "pending":
+                current_target = next((p for p in paragraphs if stable_keys.get(p["paragraph_id"]) == candidate.get("paragraph_key")), None)
+                if (not current_target or current_target["text_sha256"] != candidate.get("base_text_sha256")
+                        or freshness["upstream_stale"]):
+                    candidate["status"] = "stale"
             if (
                 candidate.get("status") == "pending"
+                and candidate.get("revision_mode") != "dialogue"
                 and (
                     not draft_artifact
                     or candidate.get("source_draft_artifact_id") != draft_artifact.id
@@ -910,6 +940,15 @@ class DraftsService(
             ]
             optimization_proposals.append(proposal)
         jobs = self.repository.list_project_jobs(principal.user_id, project_id)
+        dialogue_batch_job = next((job for job in jobs if job.payload.get("revision_mode") == "dialogue_batch" and not job.payload.get("section_id")), None)
+        paragraph_task_states = {}
+        for job in jobs:
+            if job.status not in {"queued", "running", "cancel_requested"}:
+                continue
+            key = (job.payload.get("dialogue") or {}).get("paragraph_key") or (job.result or {}).get("active_paragraph_key")
+            if key:
+                paragraph_task_states[key] = {"id": job.id, "status": job.status,
+                    "batch": job.payload.get("revision_mode") == "dialogue_batch"}
         feedback_jobs = [
             job
             for job in jobs
@@ -969,6 +1008,14 @@ class DraftsService(
             "quality": public_quality,
             "quality_artifact_id": quality_artifact.id if quality_artifact else "",
             "rewrite_candidates": rewrite_candidates,
+            "dialogue_batch_job": ({"id": dialogue_batch_job.id, "status": dialogue_batch_job.status,
+                "result": dialogue_batch_job.result, "progress_current": dialogue_batch_job.progress_current,
+                "progress_total": dialogue_batch_job.progress_total, "error_message": dialogue_batch_job.error_message}
+                if dialogue_batch_job else None),
+            "sections": dialogue_sections(text, draft_artifact.metadata, draft_artifact.id) if draft_artifact else [],
+            "section_task_states": {job.payload["section_id"]: {"id": job.id, "status": job.status}
+                for job in jobs if job.payload.get("section_id") and job.status in {"queued", "running", "cancel_requested"}},
+            "paragraph_task_states": paragraph_task_states,
             "optimization_proposals": optimization_proposals,
             "rewrite_states": rewrite_states,
             "active_feedback_job_id": (
@@ -1018,9 +1065,12 @@ class DraftsService(
         revision: int,
         operation: str = "full-edit",
         approval_events: list[dict[str, Any]] | None = None,
+        expected_draft_artifact_id: str | None = None,
     ) -> dict[str, Any]:
         principal.require(Permission.PROJECT_WRITE)
         current_text, current = self._read_text(principal, project_id, DRAFT_DOCUMENT)
+        if expected_draft_artifact_id and current.id != expected_draft_artifact_id:
+            raise WorkflowConflict("Draft changed while merging the paragraph edit.")
         if self._freshness(principal, project_id, current)["upstream_stale"]:
             raise DraftNotReady("Draft inputs changed. Reassemble Draft before editing.")
         canonical = str(text).rstrip() + "\n"
@@ -1028,7 +1078,8 @@ class DraftsService(
             canonical, _marker_report = ensure_prose_paragraph_markers(canonical)
             canonical = canonical.rstrip() + "\n"
         if canonical == current_text:
-            raise WorkflowValidationError("The edited draft has no content change.")
+            return {"draft_artifact_id": current.id,
+                    "revision": self._revision(principal, project_id), "changed": False}
         metadata = dict(current.metadata)
         metadata["operation"] = operation
         metadata["previous_draft_artifact_id"] = current.id
@@ -1079,22 +1130,32 @@ class DraftsService(
         *,
         text: str,
         revision: int,
+        base_text_sha256: str = "",
     ) -> dict[str, Any]:
-        markdown, _current = self._read_text(principal, project_id, DRAFT_DOCUMENT)
-        paragraph = next(
-            (row for row in self._paragraph_spans(markdown) if row["paragraph_id"] == paragraph_id),
-            None,
-        )
-        if paragraph is None:
-            raise WorkflowNotFound("Draft paragraph not found.")
-        updated = markdown[: paragraph["start"]] + str(text).strip() + markdown[paragraph["end"] :]
-        return self.save_text(
-            principal,
-            project_id,
-            text=updated,
-            revision=revision,
-            operation=f"paragraph-edit:{paragraph_id}",
-        )
+        # A paragraph token permits unrelated edits, never a stale whole-document
+        # overwrite. The existing atomic artifact promotion remains the CAS.
+        principal.require(Permission.PROJECT_WRITE)
+        for attempt in range(3):
+            current_revision = self._revision(principal, project_id)
+            markdown, current = self._read_text(principal, project_id, DRAFT_DOCUMENT)
+            paragraph = next((row for row in self._paragraph_spans(markdown)
+                              if row["paragraph_id"] == paragraph_id), None)
+            if paragraph is None:
+                raise WorkflowNotFound("Draft paragraph not found.")
+            if base_text_sha256 and hashlib.sha256(paragraph["text"].encode("utf-8")).hexdigest() != base_text_sha256:
+                raise WorkflowConflict("This paragraph changed. Compare the latest saved text before saving.")
+            updated = markdown[:paragraph["start"]] + str(text).strip() + markdown[paragraph["end"]:]
+            try:
+                return self.save_text(
+                    principal, project_id, text=updated,
+                    revision=current_revision if base_text_sha256 else revision,
+                    operation=f"paragraph-edit:{paragraph_id}",
+                    expected_draft_artifact_id=current.id,
+                )
+            except WorkflowConflict:
+                if not base_text_sha256 or attempt == 2:
+                    raise
+        raise WorkflowConflict("Draft is busy. Retry saving this paragraph.")
 
     def restore(
         self,

@@ -63,6 +63,18 @@ class JobLeaseLost(Exception):
     """The current executor no longer owns the PostgreSQL fencing lease."""
 
 
+class JobYieldRequested(Exception):
+    """A checkpointed batch gives its worker slot back after one paragraph."""
+
+
+def release_yielded_job(context):
+    released = context.repository.release_job_lease(context.job_id,
+        lease_token=str(context.lease_token or ""), lease_generation=context.lease_generation)
+    if released is None and context.repository.job_cancellation_requested(context.job_id):
+        context.repository.mark_job_cancelled(context.job_id,
+            lease_token=context.lease_token, lease_generation=context.lease_generation)
+
+
 class JobHandler(Protocol):
     def __call__(
         self, context: "JobContext", payload: dict[str, Any]
@@ -273,6 +285,9 @@ class JobService:
     def retry_interrupted(self, principal: Principal, job_id: str) -> JobRecord:
         principal.require(Permission.PROJECT_WRITE)
         source = self.status(principal, job_id)
+        if (source.job_type in {"draft.evaluate", "draft.optimize", "draft.rewrite", "draft.accept-rewrite"}
+                and source.payload.get("revision_mode") not in {"dialogue", "dialogue_batch"}):
+            raise WorkflowValidationError("Scored Draft jobs were retired. Open Draft to start paragraph dialogue or batch analysis.")
         if source.status not in self.RETRYABLE_STATUSES:
             raise WorkflowConflict(
                 "Only failed, interrupted, or cancelled jobs can be retried.",
@@ -311,11 +326,27 @@ class JobService:
                 return
             future = self._executor.submit(self._execute, job.id)
             self._futures[job.id] = future
-            future.add_done_callback(lambda _future, job_id=job.id: self._forget(job_id))
+            future.add_done_callback(lambda _future: self._forget(job))
 
-    def _forget(self, job_id: str) -> None:
+    def _forget(self, job: JobRecord) -> None:
         with self._lock:
-            self._futures.pop(job_id, None)
+            self._futures.pop(job.id, None)
+        if not self._shutdown_event.is_set():
+            latest = self.repository.get_job(job.user_id, job.id)
+            planning_job = job.job_type in {"matrix.enrich", "planning.blueprint"}
+            if latest and latest.status == "queued" and (not planning_job or not self.repository.planning_job_blocked(latest.id)):
+                self._schedule(latest)
+            elif latest and latest.status != "queued" and planning_job and job.project_id:
+                # Wake dependents in the compatibility executor. Independent
+                # workers already poll runnable jobs; blocked jobs hold no slot.
+                try:
+                    pending = self.repository.list_project_jobs(job.user_id, job.project_id)
+                except WorkflowNotFound:
+                    return  # Project deletion already cancels its queued jobs.
+                for queued in pending:
+                    if (queued.status == "queued" and queued.job_type in {"matrix.enrich", "planning.blueprint"}
+                            and not self.repository.planning_job_blocked(queued.id)):
+                        self._schedule(queued)
 
     def _execute(self, job_id: str) -> None:
         claimed = self.repository.claim_job(
@@ -371,6 +402,8 @@ class JobService:
                         lease_token=context.lease_token,
                         lease_generation=context.lease_generation,
                     )
+        except JobYieldRequested:
+            release_yielded_job(context)
         except JobShutdownRequested:
             self.repository.mark_job_interrupted(
                 claimed.id,

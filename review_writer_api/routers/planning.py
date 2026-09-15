@@ -6,11 +6,11 @@ from collections.abc import Callable
 from typing import Any
 import uuid
 
-from fastapi import APIRouter, Depends, Header, status
+from fastapi import APIRouter, Depends, Header, Query, status
 
 from review_writer_api.domain_services.planning import PlanningService
 from review_writer_api.job_handlers.stage_execution import queue_fact_revision
-from review_writer_core.stages.planning.matrix import has_fact_sources
+from review_writer_api.planning_jobs import queue_matrix_enrichment
 from review_writer_api.errors import WorkflowConflict
 from review_writer_api.job_service import JobService
 from review_writer_api.routers.jobs import _job_response
@@ -66,33 +66,12 @@ def build_planning_router(
     def enrich_matrix(
         project_id: str,
         force: bool = False,
+        paper_ids: list[str] | None = Query(default=None),
         idempotency_key: str = Header(default="", alias="Idempotency-Key"),
         principal: Principal = Depends(principal_dependency),
     ):
-        payload = planning_service.matrix_enrichment_payload(
-            principal,
-            project_id,
-            force=force,
-        )
-        if not int(payload.get("pending_paper_count") or 0):
-            return {
-                "project_id": project_id,
-                "status": "current",
-                "message": "Matrix scientific facts are already current.",
-            }
-        if not has_fact_sources(payload):
-            raise WorkflowConflict(
-                "Build full-text indexes before extracting Matrix scientific facts."
-            )
-        job = job_service.submit(
-            principal,
-            scope="project",
-            project_id=project_id,
-            job_type="matrix.enrich",
-            idempotency_key=idempotency_key.strip() or str(uuid.uuid4()),
-            operation_key="matrix-enrichment",
-            payload=payload,
-        )
+        job = queue_matrix_enrichment(planning_service, job_service, principal, project_id,
+            force=force, paper_ids=paper_ids, idempotency_key=idempotency_key.strip() or str(uuid.uuid4()))
         return _job_response(job)
 
     @router.post("/matrix/enrichment/limited-mode")

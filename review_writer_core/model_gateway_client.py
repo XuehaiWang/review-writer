@@ -240,7 +240,7 @@ def _gateway_http_error(exc: urllib.error.HTTPError, *, image: bool = False) -> 
     failure = normalize_provider_error(exc.code, payload)
     if code == "INSUFFICIENT_CREDIT" or exc.code == 402:
         public = "余额不足，无法使用智能服务。请在“API 设置”中查看余额，或联系管理员添加额度。"
-    elif failure["category"] in {"quota_exhausted", "context_limit", "rate_limited"}:
+    elif failure["category"] in {"quota_exhausted", "context_limit", "rate_limited", "model_unavailable"}:
         public = provider_error_message(failure)
     elif exc.code in {408, 409, 425, 429, 500, 502, 503, 504}:
         public = "图像服务暂时不可用，请稍后重试。" if image else "文本模型服务暂时不可用，请稍后重试。"

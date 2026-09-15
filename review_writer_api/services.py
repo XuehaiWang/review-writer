@@ -34,7 +34,7 @@ class ProjectService:
         slug: str,
         topic: str,
         taxonomy_profile: str,
-        model_tier: str = "terra",
+        model_tier: str | None = None,
     ) -> ProjectRecord:
         principal.require(Permission.PROJECT_WRITE)
         try:

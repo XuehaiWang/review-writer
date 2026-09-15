@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from review_writer_api.paper_labels import library_paper_labels
+
 import base64
 import binascii
 import json
@@ -185,22 +187,7 @@ class FiguresService(OwnedProjectService):
         project_id: str,
         fallback_ids: list[str],
     ) -> dict[str, str]:
-        matrix, _artifact = self._read_json(
-            principal, project_id, MATRIX_LOGICAL_NAME, required=False
-        )
-        rows = matrix.get("rows") if isinstance(matrix, dict) else []
-        ordered = [
-            str(row.get("paper_id") or "").strip()
-            for row in rows or []
-            if isinstance(row, dict) and str(row.get("paper_id") or "").strip()
-        ]
-        ordered.extend(str(value or "").strip() for value in fallback_ids)
-        ordered = list(dict.fromkeys(value for value in ordered if value))
-        width = max(3, len(str(len(ordered))))
-        return {
-            paper_id: f"P{index:0{width}d}"
-            for index, paper_id in enumerate(ordered, start=1)
-        }
+        return library_paper_labels(self.repository.session_factory, principal.user_id)
 
     @staticmethod
     def _candidate(rows: list[dict[str, Any]], paper_id: str, index: int):

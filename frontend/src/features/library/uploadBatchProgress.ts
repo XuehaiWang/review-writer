@@ -1,11 +1,12 @@
 import type { UploadBatchSummary } from "../../api/types";
 
-export type LocalUploadState = "queued" | "uploading" | "done" | "failed";
+export type LocalUploadState = "queued" | "uploading" | "done" | "failed" | "cancelled";
 
 export type UploadBatchCounts = {
   total: number;
   done: number;
   failed: number;
+  cancelled: number;
   uploading: number;
   queued: number;
 };
@@ -27,7 +28,8 @@ export function buildUploadBatchCounts(
   return {
     total,
     done: (summary?.succeeded || 0) + localDone,
-    failed: (summary?.failed || 0) + (summary?.cancelled || 0) + (summary?.interrupted || 0) + localFailed,
+    failed: (summary?.failed || 0) + (summary?.interrupted || 0) + localFailed,
+    cancelled: (summary?.cancelled || 0) + localStates.filter((status) => status === "cancelled").length,
     uploading: (summary?.running || 0) + (summary?.cancel_requested || 0) + localUploading,
     queued: (summary?.queued || 0) + localQueued + unreportedQueued,
   };

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from review_writer_api.paper_labels import library_paper_labels
+
 from review_writer_core.stages.sections.source_writing import CONTRACT as SOURCE_CONTRACT, valid_source_claim, passage_eligible
 from review_writer_core.stages.sections.evidence_resolution import has_evidence_resolution, valid_pending_output
 
@@ -1428,7 +1430,7 @@ class SectionsService(OwnedProjectService):
             "retrieval_engine": (
                 "question_level_boolean+per_paper_targeted+global_comparison+"
                 + (
-                    "postgresql_fulltext+pgvector_rrf"
+                    "postgresql_fulltext+sqlite_vector_rrf"
                     if self.library_index is not None
                     and bool(getattr(self.library_index, "vector_enabled", False))
                     else "postgresql_fulltext"
@@ -2881,17 +2883,7 @@ class SectionsService(OwnedProjectService):
             for paper_id in assigned
             if paper_id in catalog
         ]
-        matrix_rows = matrix.get("rows") if isinstance(matrix, dict) else []
-        matrix_order = [
-            str(row.get("paper_id"))
-            for row in matrix_rows
-            if isinstance(row, dict) and str(row.get("paper_id") or "").strip()
-        ]
-        label_width = max(3, len(str(len(matrix_order))))
-        paper_display_labels = {
-            paper_id: f"P{index:0{label_width}d}"
-            for index, paper_id in enumerate(dict.fromkeys(matrix_order), start=1)
-        }
+        paper_display_labels = library_paper_labels(self.repository.session_factory, principal.user_id)
         index, index_artifact = self._read_json_artifact(
             principal, project_id, SECTION_INDEX_LOGICAL_NAME, required=False
         )

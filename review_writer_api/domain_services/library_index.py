@@ -8,6 +8,7 @@ import math
 import re
 import uuid
 import time
+import logging
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -99,6 +100,7 @@ class LibraryIndexService:
         embedding_gateway: Any | None = None,
         embedding_profile_provider: Any | None = None,
         tuning: RetrievalTuning | None = None,
+        sqlite_vector_extension: str = "",
     ):
         self.session_factory = session_factory
         self.workspace_manager = workspace_manager
@@ -109,11 +111,17 @@ class LibraryIndexService:
             embedding_profile_provider or embedding_gateway
         )
         self.tuning = tuning or RetrievalTuning()
-        self._vector_available: bool | None = None
-        self._query_embedding_cache: dict[
-            str, tuple[float, str, int, list[float]]
-        ] = {}
-        self._semantic_failure_until = 0.0
+        from review_writer_api.vector_store import LocalVectorStore
+        self.vector_store = LocalVectorStore(session_factory, workspace_manager, sqlite_vector_extension)
+        from review_writer_api.ttl_cache import TTLCache
+        self._query_embedding_cache = TTLCache(capacity=256, ttl=600)
+        self._semantic_failures = TTLCache(capacity=1024, ttl=300)
+
+    def _semantic_scope(self, principal):
+        return (str(principal.user_id), json.dumps(self._current_embedding_profile(), sort_keys=True))
+
+    def _semantic_cooling_down(self, principal):
+        return bool(self._semantic_failures.get(self._semantic_scope(principal)))
 
     def _current_embedding_profile(self) -> dict[str, Any]:
         provider = self.embedding_profile_provider or self.embedding_gateway
@@ -658,38 +666,51 @@ class LibraryIndexService:
                 )
                 if row is None:
                     raise WorkflowNotFound("Library document index not found.")
-                session.execute(
-                    delete(LibraryDocumentChunk).where(
-                        LibraryDocumentChunk.index_id == index_id
+                # Published SQLite snapshots refer to stable chunk row IDs.
+                # A forced rebuild of the same immutable source must not delete
+                # and recreate those IDs. A changed chunker requires a version bump.
+                existing_chunks = list(session.scalars(select(LibraryDocumentChunk).where(
+                    LibraryDocumentChunk.index_id == index_id))) if self.vector_store else []
+                reuse_chunks = bool(existing_chunks)
+                if reuse_chunks and {
+                    c.chunk_id: (c.content, c.ordinal) for c in existing_chunks
+                } != {c.chunk_id: (c.content, c.ordinal) for c in chunks}:
+                    raise WorkflowValidationError(
+                        "An immutable document index changed; create a new source/chunker version before rebuilding."
                     )
-                )
-                session.add_all(
-                    [
-                        LibraryDocumentChunk(
-                            index_id=index_id,
-                            user_id=user_id,
-                            paper_id=paper.paper_id,
-                            chunk_id=chunk.chunk_id,
-                            ordinal=chunk.ordinal,
-                            content=chunk.content,
-                            content_sha256=hashlib.sha256(
-                                chunk.content.encode("utf-8")
-                            ).hexdigest(),
-                            normalized_content=chunk.normalized_content,
-                            content_type=chunk.content_type,
-                            section_path_json=list(chunk.section_path),
-                            page_start=chunk.page_start,
-                            page_end=chunk.page_end,
-                            block_start=chunk.block_start,
-                            block_end=chunk.block_end,
-                            asset_refs_json=list(chunk.asset_refs),
-                            is_reference=chunk.is_reference,
-                            previous_chunk_id=chunk.previous_chunk_id,
-                            next_chunk_id=chunk.next_chunk_id,
+                if not reuse_chunks:
+                    session.execute(
+                        delete(LibraryDocumentChunk).where(
+                            LibraryDocumentChunk.index_id == index_id
                         )
-                        for chunk in chunks
-                    ]
-                )
+                    )
+                    session.add_all(
+                        [
+                            LibraryDocumentChunk(
+                                index_id=index_id,
+                                user_id=user_id,
+                                paper_id=paper.paper_id,
+                                chunk_id=chunk.chunk_id,
+                                ordinal=chunk.ordinal,
+                                content=chunk.content,
+                                content_sha256=hashlib.sha256(
+                                    chunk.content.encode("utf-8")
+                                ).hexdigest(),
+                                normalized_content=chunk.normalized_content,
+                                content_type=chunk.content_type,
+                                section_path_json=list(chunk.section_path),
+                                page_start=chunk.page_start,
+                                page_end=chunk.page_end,
+                                block_start=chunk.block_start,
+                                block_end=chunk.block_end,
+                                asset_refs_json=list(chunk.asset_refs),
+                                is_reference=chunk.is_reference,
+                                previous_chunk_id=chunk.previous_chunk_id,
+                                next_chunk_id=chunk.next_chunk_id,
+                            )
+                            for chunk in chunks
+                        ]
+                    )
                 session.execute(
                     update(LibraryDocumentIndex)
                     .where(
@@ -737,31 +758,6 @@ class LibraryIndexService:
                     row.updated_at = utc_now()
             raise
 
-    def _pgvector_available(self) -> bool:
-        if not self.vector_enabled:
-            return False
-        if self._vector_available is not None:
-            return self._vector_available
-        try:
-            with database_session(self.session_factory) as session:
-                if session.get_bind().dialect.name != "postgresql":
-                    self._vector_available = False
-                else:
-                    self._vector_available = bool(
-                        session.execute(
-                            text(
-                                """
-                                SELECT EXISTS (
-                                  SELECT 1 FROM pg_extension WHERE extname = 'vector'
-                                ) AND to_regclass('public.library_chunk_embeddings') IS NOT NULL
-                                """
-                            )
-                        ).scalar()
-                    )
-        except Exception:
-            self._vector_available = False
-        return bool(self._vector_available)
-
     @staticmethod
     def _embedding_input(chunk: LibraryDocumentChunk) -> str:
         section = " > ".join(
@@ -797,6 +793,7 @@ class LibraryIndexService:
         paper_id: str,
         *,
         index_id: str = "",
+        _deferred: dict | None = None,
     ) -> dict[str, Any]:
         """Populate optional chunk embeddings without failing lexical indexing."""
 
@@ -830,17 +827,6 @@ class LibraryIndexService:
             row.semantic_error_message = ""
             row.updated_at = utc_now()
 
-        if not self._pgvector_available():
-            self._set_semantic_failure(
-                resolved_index_id,
-                status="unavailable",
-                code="PGVECTOR_UNAVAILABLE",
-                message=(
-                    "The PostgreSQL vector extension or semantic table is unavailable; "
-                    "lexical retrieval remains active."
-                ),
-            )
-            return {"status": "unavailable", "embedding_count": 0}
         if self.embedding_gateway is None or not hasattr(
             self.embedding_gateway, "embed_for_active_job"
         ):
@@ -884,6 +870,8 @@ class LibraryIndexService:
             total = 0
             model_snapshot = ""
             dimension = 0
+            sqlite_rows = []
+            chunks_by_id = {chunk.id: chunk for chunk in chunks}
             for offset in range(0, len(prepared), batch_size):
                 batch = prepared[offset : offset + batch_size]
                 inputs = [item[1] for item in batch]
@@ -923,72 +911,21 @@ class LibraryIndexService:
                     )
                 model_snapshot = current_model
                 dimension = current_dimension
-                with database_session(self.session_factory) as session:
-                    for (chunk_row_id, source), vector in zip(batch, vectors):
-                        if not isinstance(vector, list) or len(vector) != dimension:
-                            raise RuntimeError(
-                                "The embedding gateway returned an invalid vector."
-                            )
-                        content_hash = hashlib.sha256(
-                            source.encode("utf-8")
-                        ).hexdigest()
-                        session.execute(
-                            text(
-                                """
-                                INSERT INTO library_chunk_embeddings (
-                                  id, chunk_row_id, user_id, paper_id,
-                                  content_sha256, embedding_profile,
-                                  embedding_model_snapshot, dimension, embedding,
-                                  status, error_code, error_message, created_at, updated_at
-                                ) VALUES (
-                                  CAST(:id AS uuid), CAST(:chunk_row_id AS uuid),
-                                  CAST(:user_id AS uuid), :paper_id,
-                                  :content_sha256, 'retrieval_embedding',
-                                  :model, :dimension, CAST(:embedding AS vector),
-                                  'ready', '', '', now(), now()
-                                )
-                                ON CONFLICT (chunk_row_id, embedding_model_snapshot)
-                                DO UPDATE SET
-                                  content_sha256 = EXCLUDED.content_sha256,
-                                  dimension = EXCLUDED.dimension,
-                                  embedding = EXCLUDED.embedding,
-                                  status = 'ready', error_code = '', error_message = '',
-                                  updated_at = now()
-                                """
-                            ),
-                            {
-                                "id": str(uuid.uuid4()),
-                                "chunk_row_id": str(chunk_row_id),
-                                "user_id": principal.user_id,
-                                "paper_id": str(paper_id),
-                                "content_sha256": content_hash,
-                                "model": model_snapshot,
-                                "dimension": dimension,
-                                "embedding": json.dumps(
-                                    [float(value) for value in vector],
-                                    separators=(",", ":"),
-                                ),
-                            },
-                        )
+                from review_writer_api.sqlite_vectors import VectorRow, vector_blob
+                for (chunk_row_id, _source), vector in zip(batch, vectors):
+                    vector_blob(vector, dimension)
+                    chunk = chunks_by_id[chunk_row_id]
+                    sqlite_rows.append(VectorRow(str(chunk.id), chunk.paper_id, str(chunk.index_id),
+                        chunk.content_sha256, chunk.ordinal, vector))
                 total += len(batch)
 
-            with database_session(self.session_factory) as session:
-                row = session.get(LibraryDocumentIndex, resolved_index_id)
-                if row is not None:
-                    row.semantic_status = "ready"
-                    row.embedding_profile = "retrieval_embedding"
-                    row.embedding_model_snapshot = model_snapshot
-                    row.embedding_dimension = dimension
-                    row.embedding_count = total
-                    row.semantic_error_code = ""
-                    row.semantic_error_message = ""
-                    row.updated_at = utc_now()
-            return {
-                "status": "ready",
-                "embedding_count": total,
-                "embedding_model": model_snapshot,
-                "embedding_dimension": dimension,
-            }
+            if _deferred is not None:
+                _deferred[str(paper_id)] = (model_snapshot, dimension, str(resolved_index_id), sqlite_rows)
+                return {"status": "building", "embedding_count": total}
+            self.vector_store.publish(principal.user_id, model_snapshot, dimension, sqlite_rows,
+                replace_indexes=(str(resolved_index_id),), ready_indexes=(str(resolved_index_id),))
+            return {"status": "ready", "embedding_count": total,
+                    "embedding_model": model_snapshot, "embedding_dimension": dimension}
         except Exception as exc:
             error_message = str(exc)
             normalized_error = error_message.casefold()
@@ -1019,12 +956,57 @@ class LibraryIndexService:
                 "error": stored_message,
             }
 
+    def build_embedding_batch(self, principal, paper_ids, *, progress=None, checkpoint=None):
+        """Compute individually, publish once per model for this bounded batch."""
+        deferred = {}
+        results = {}
+        paper_ids = list(dict.fromkeys(paper_ids))
+        try:
+            for position, paper_id in enumerate(paper_ids, start=1):
+                if checkpoint:
+                    checkpoint()
+                result = self.build_embeddings(principal, paper_id, _deferred=deferred)
+                results[paper_id] = result
+                if progress:
+                    progress(position, results)
+                if result.get("error_code") == "INSUFFICIENT_CREDIT":
+                    remaining = paper_ids[position:]
+                    self.mark_semantic_backfill_failed(principal, remaining,
+                        code="INSUFFICIENT_CREDIT", message=str(result.get("error") or "余额不足"))
+                    results.update({p: {"status":"deferred", "error_code":"INSUFFICIENT_CREDIT"} for p in remaining})
+                    break
+            grouped = {}
+            for paper_id, (model, dimension, index_id, rows) in deferred.items():
+                grouped.setdefault((model, dimension), []).append((paper_id,index_id,rows))
+            for (model, dimension), documents in grouped.items():
+                if checkpoint:
+                    checkpoint()
+                try:
+                    indexes = tuple(d[1] for d in documents)
+                    self.vector_store.publish(principal.user_id, model, dimension,
+                        [r for _,_,rows in documents for r in rows], replace_indexes=indexes, ready_indexes=indexes)
+                    for paper_id,_,rows in documents:
+                        results[paper_id] = {"status":"ready", "embedding_count":len(rows),
+                            "embedding_model":model, "embedding_dimension":dimension}
+                except Exception as exc:
+                    for paper_id,index_id,_ in documents:
+                        self._set_semantic_failure(uuid.UUID(index_id), status="failed",
+                            code="VECTOR_PUBLISH_FAILED", message=str(exc))
+                        results[paper_id] = {"status":"failed", "error_code":"VECTOR_PUBLISH_FAILED", "error":str(exc)}
+            return results
+        finally:
+            # Cancellation cannot leave computed-but-unpublished documents ready.
+            for paper_id,(_,_,index_id,_) in deferred.items():
+                if results[paper_id]["status"] == "building":
+                    self._set_semantic_failure(uuid.UUID(index_id), status="failed",
+                        code="VECTOR_PUBLISH_INTERRUPTED", message="Vector publication was interrupted; retry indexing.")
+
     def ensure_embeddings(
         self, principal: Principal, paper_ids: list[str]
     ) -> dict[str, str]:
         """Incrementally backfill semantic indexes for an active workflow job."""
 
-        if not self.vector_enabled or time.monotonic() < self._semantic_failure_until:
+        if not self.vector_enabled or self._semantic_cooling_down(principal):
             return {}
         if self.embedding_gateway is None or not hasattr(
             self.embedding_gateway, "embedding_profile"
@@ -1033,44 +1015,22 @@ class LibraryIndexService:
         try:
             profile = dict(self.embedding_gateway.embedding_profile() or {})
         except Exception:
-            self._semantic_failure_until = time.monotonic() + 60
+            self._semantic_failures[self._semantic_scope(principal)] = True
             return {}
         if not profile.get("enabled"):
-            self._semantic_failure_until = time.monotonic() + 5 * 60
+            self._semantic_failures[self._semantic_scope(principal)] = True
             return {}
         current_model = str(profile.get("model") or "")
         current_dimension = int(profile.get("dimension") or 0)
         summaries = self.summaries(principal, paper_ids)
-        results: dict[str, str] = {}
-        for paper_id in dict.fromkeys(str(item) for item in paper_ids if str(item)):
-            summary = dict(summaries.get(paper_id) or {})
-            if summary.get("fulltext") != "ready":
-                continue
-            if (
-                summary.get("semantic") == "ready"
-                and summary.get("embedding_model") == current_model
-                and int(summary.get("embedding_dimension") or 0)
-                == current_dimension
-            ):
-                results[paper_id] = "ready"
-                continue
-            result = self.build_embeddings(
-                principal,
-                paper_id,
-                index_id=str(summary.get("index_id") or ""),
-            )
-            status = str(result.get("status") or "failed")
-            results[paper_id] = status
-            if status in {"failed", "unavailable"}:
-                message = str(result.get("error") or "").casefold()
-                if (
-                    status == "unavailable"
-                    or "not configured" in message
-                    or "gateway" in message
-                ):
-                    self._semantic_failure_until = time.monotonic() + 5 * 60
-                    break
-        return results
+        ready = {p: "ready" for p, s in summaries.items() if
+            s.get("fulltext") == "ready" and s.get("semantic") == "ready"
+            and s.get("embedding_model") == current_model
+            and int(s.get("embedding_dimension") or 0) == current_dimension}
+        pending = [p for p in dict.fromkeys(paper_ids) if p not in ready
+            and summaries.get(p, {}).get("fulltext") == "ready"]
+        built = self.build_embedding_batch(principal, pending)
+        return {**ready, **{p: str(r.get("status") or "failed") for p,r in built.items()}}
 
     def _semantic_ranked_ids(
         self,
@@ -1083,8 +1043,7 @@ class LibraryIndexService:
     ) -> list[tuple[uuid.UUID, float]]:
         if (
             not self.vector_enabled
-            or time.monotonic() < self._semantic_failure_until
-            or not self._pgvector_available()
+            or self._semantic_cooling_down(principal)
             or self.embedding_gateway is None
             or not hasattr(self.embedding_gateway, "embed_for_active_job")
         ):
@@ -1092,7 +1051,10 @@ class LibraryIndexService:
         normalized = " ".join(str(query or "").casefold().split())
         if not normalized:
             return []
-        cache_key = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        # A process may serve multiple users/profiles; do not reuse another
+        # user's query space or a stale model after a provider configuration change.
+        cache_key = hashlib.sha256(json.dumps([principal.user_id,
+            self._current_embedding_profile(), normalized], sort_keys=True).encode("utf-8")).hexdigest()
         cached = self._query_embedding_cache.get(cache_key)
         if cached is not None and cached[0] > time.monotonic():
             _expires, model, dimension, query_vector = cached
@@ -1104,7 +1066,7 @@ class LibraryIndexService:
                     stage="retrieval.query.embedding",
                 )
             except Exception:
-                self._semantic_failure_until = time.monotonic() + 5 * 60
+                self._semantic_failures[self._semantic_scope(principal)] = True
                 raise
             vectors = response.get("embeddings")
             if not isinstance(vectors, list) or len(vectors) != 1:
@@ -1120,75 +1082,10 @@ class LibraryIndexService:
                 dimension,
                 query_vector,
             )
-        vector_text = json.dumps(query_vector, separators=(",", ":"))
-        user_id = uuid.UUID(principal.user_id)
         paper_limit = max(0, min(int(per_paper_limit or 0), 3))
-        sql = (
-            """
-            WITH ranked AS (
-                SELECT c.id,
-                       1 - (e.embedding <=> CAST(:query_vector AS vector)) AS similarity,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY c.paper_id
-                           ORDER BY e.embedding <=> CAST(:query_vector AS vector), c.ordinal
-                       ) AS paper_rank
-                FROM library_chunk_embeddings e
-                JOIN library_document_chunks c ON c.id = e.chunk_row_id
-                JOIN library_document_indexes i ON i.id = c.index_id
-                WHERE e.user_id = CAST(:user_id AS uuid)
-                  AND e.paper_id = ANY(CAST(:allowed_papers AS varchar[]))
-                  AND e.embedding_model_snapshot = :model
-                  AND e.dimension = :dimension
-                  AND e.status = 'ready'
-                  AND i.status = 'ready'
-                  AND i.is_current = true
-                  AND c.is_reference = false
-                  AND (e.embedding <=> CAST(:query_vector AS vector))
-                      <= :max_distance
-            )
-            SELECT id, similarity
-            FROM ranked
-            WHERE paper_rank <= :per_paper_limit
-            ORDER BY paper_rank, similarity DESC, id
-            LIMIT :limit
-            """
-            if paper_limit
-            else
-            """
-            SELECT c.id,
-                   1 - (e.embedding <=> CAST(:query_vector AS vector)) AS similarity
-            FROM library_chunk_embeddings e
-            JOIN library_document_chunks c ON c.id = e.chunk_row_id
-            JOIN library_document_indexes i ON i.id = c.index_id
-            WHERE e.user_id = CAST(:user_id AS uuid)
-              AND e.paper_id = ANY(CAST(:allowed_papers AS varchar[]))
-              AND e.embedding_model_snapshot = :model
-              AND e.dimension = :dimension
-              AND e.status = 'ready'
-              AND i.status = 'ready'
-              AND i.is_current = true
-              AND c.is_reference = false
-              AND (e.embedding <=> CAST(:query_vector AS vector))
-                  <= :max_distance
-            ORDER BY e.embedding <=> CAST(:query_vector AS vector), c.ordinal
-            LIMIT :limit
-            """
-        )
-        with database_session(self.session_factory) as session:
-            rows = session.execute(
-                text(sql),
-                {
-                    "query_vector": vector_text,
-                    "user_id": str(user_id),
-                    "allowed_papers": allowed_papers,
-                    "model": model,
-                    "dimension": dimension,
-                    "max_distance": 1.0 - float(self.tuning.semantic_min_similarity),
-                    "per_paper_limit": paper_limit or 1,
-                    "limit": max(1, min(int(limit), 400)),
-                },
-            ).all()
-        return [(uuid.UUID(str(row_id)), float(similarity or 0)) for row_id, similarity in rows]
+        return self.vector_store.rank(principal.user_id, model, dimension, query_vector,
+            allowed_papers, max(1, min(int(limit), 400)),
+            float(self.tuning.semantic_min_similarity), paper_limit)
 
     def _status_dict(
         self,
@@ -1386,7 +1283,7 @@ class LibraryIndexService:
             or not self.vector_enabled
             or self.embedding_gateway is None
             or not hasattr(self.embedding_gateway, "embed_for_active_job")
-            or time.monotonic() < self._semantic_failure_until
+            or self._semantic_cooling_down(principal)
         ):
             return {"status": "unavailable", "embeddings": []}
         all_vectors: list[Any] = []
@@ -1426,7 +1323,7 @@ class LibraryIndexService:
                 dimension = response_dimension
                 all_vectors.extend(vectors)
         except Exception as exc:
-            self._semantic_failure_until = time.monotonic() + 5 * 60
+            self._semantic_failures[self._semantic_scope(principal)] = True
             return {
                 "status": "failed",
                 "embeddings": [],
@@ -1743,19 +1640,15 @@ class LibraryIndexService:
         semantic_degraded = False
         semantic_errors: list[str] = []
         semantic_attempted = False
-        semantic_cooldown_active = time.monotonic() < self._semantic_failure_until
+        semantic_cooldown_active = self._semantic_cooling_down(principal)
         embedding_gateway_available = bool(
             self.embedding_gateway is not None
             and hasattr(self.embedding_gateway, "embed_for_active_job")
-        )
-        pgvector_available = bool(
-            self.vector_enabled and self._pgvector_available()
         )
         semantic_capable = bool(
             self.vector_enabled
             and not semantic_cooldown_active
             and embedding_gateway_available
-            and pgvector_available
         )
         candidate_limit = min(400, max(60, len(allowed) * max_chunks * 2))
 
@@ -1939,8 +1832,6 @@ class LibraryIndexService:
                 semantic_reason = "semantic_retry_cooldown"
             elif not embedding_gateway_available:
                 semantic_reason = "embedding_gateway_unavailable"
-            elif not pgvector_available:
-                semantic_reason = "pgvector_unavailable"
         return {
             "status": "degraded" if semantic_degraded else "ready",
             "semantic_status": (
@@ -2303,7 +2194,7 @@ class LibraryIndexService:
             # retrieval is an optional recall layer: any gateway/vector error
             # leaves the lexical result untouched.
             semantic_ranked: list[tuple[uuid.UUID, float]] = []
-            if dialect == "postgresql" and self.vector_enabled and use_semantic:
+            if self.vector_enabled and use_semantic:
                 try:
                     semantic_ranked = self._semantic_ranked_ids(
                         principal,
@@ -2311,7 +2202,10 @@ class LibraryIndexService:
                         allowed_papers=allowed,
                         limit=max(limit, self.tuning.semantic_top_k),
                     )
-                except Exception:
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("Semantic retrieval unavailable; using lexical evidence",
+                        extra={"user_id": principal.user_id, "error_code": "SEMANTIC_RETRIEVAL_UNAVAILABLE",
+                               "exception_type": type(exc).__name__})
                     semantic_ranked = []
             if semantic_ranked:
                 lexical_by_id = {item[0].id: item for item in scored}

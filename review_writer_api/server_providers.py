@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import json
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -29,8 +30,9 @@ from .database import (
     User,
     database_session,
 )
-from .model_catalog import DEFAULT_MODEL_TIER, resolve_model_tier
+from .model_catalog import resolve_model_tier
 from .security import Permission, Principal
+from .text_connections import ensure_default
 
 
 SERVER_CREDENTIAL_SUBJECT = "server-global"
@@ -88,6 +90,7 @@ class ServerProviderSettingsService:
         self.settings = settings
         self.session_factory = session_factory
         self.cipher = CredentialCipher(settings.credential_encryption_key)
+        ensure_default(self)
 
     @staticmethod
     def _kind(raw_kind: ProviderKind | str) -> ProviderKind:
@@ -102,7 +105,7 @@ class ServerProviderSettingsService:
 
     def _fallback(self, kind: ProviderKind) -> ServerProviderRuntime:
         if kind is ProviderKind.TEXT:
-            tier = resolve_model_tier(DEFAULT_MODEL_TIER)
+            tier = resolve_model_tier(None, self.session_factory)
             secret = self.settings.text_provider_api_key
             return ServerProviderRuntime(
                 kind.value, self.settings.text_provider_base_url.rstrip("/"), tier.model,
@@ -137,6 +140,12 @@ class ServerProviderSettingsService:
         )
 
     def runtime_config(self, provider_kind: ProviderKind | str) -> ServerProviderRuntime:
+        if self._kind(provider_kind) is ProviderKind.TEXT:
+            from .text_connections import runtime_for_connection
+            return runtime_for_connection(self)
+        return self._legacy_runtime_config(provider_kind)
+
+    def _legacy_runtime_config(self, provider_kind: ProviderKind | str) -> ServerProviderRuntime:
         """Return the effective secret-bearing configuration for internal use only."""
         kind = self._kind(provider_kind)
         fallback = self._fallback(kind)
@@ -173,6 +182,10 @@ class ServerProviderSettingsService:
         records: list[ServerProviderStatus] = []
         for kind in ProviderKind:
             runtime = self.runtime_config(kind)
+            text_available = None
+            if kind is ProviderKind.TEXT and not is_admin:
+                from .model_catalog import public_catalog
+                text_available = any(item["enabled"] for item in public_catalog(self.session_factory)["items"])
             records.append(ServerProviderStatus(
                 provider_kind=kind.value,
                 base_url=runtime.base_url if is_admin else "",
@@ -182,10 +195,10 @@ class ServerProviderSettingsService:
                     else "retrieval_embedding"
                 ),
                 wire_api=runtime.wire_api if is_admin else "",
-                api_key_configured=bool(runtime.api_key),
+                api_key_configured=bool(runtime.api_key) if text_available is None else text_available,
                 api_key_hint=((runtime.api_key_hint if is_admin else "服务器统一配置")
                               if runtime.api_key else ""),
-                enabled=runtime.enabled,
+                enabled=runtime.enabled if text_available is None else text_available,
                 source=runtime.source if is_admin else "server",
                 updated_at=runtime.updated_at if is_admin else None,
             ))
@@ -211,6 +224,7 @@ class ServerProviderSettingsService:
         )
         submitted_key = None if api_key is None else str(api_key).strip()
         fallback = self._fallback(kind)
+        current_text = self.runtime_config(kind) if kind is ProviderKind.TEXT else None
         normalized_model = str(model_name or "").strip()
         if (
             kind is ProviderKind.EMBEDDING
@@ -237,6 +251,9 @@ class ServerProviderSettingsService:
                 )
                 row.secret_hint = _secret_hint(submitted_key)
                 row.encryption_key_version = CredentialCipher.VERSION
+            elif current_text and current_text.api_key:
+                row.encrypted_secret = self.cipher.encrypt(SERVER_CREDENTIAL_SUBJECT, kind.value, current_text.api_key)
+                row.secret_hint = _secret_hint(current_text.api_key)
             if enabled and not (submitted_key or row.encrypted_secret or fallback.api_key):
                 raise ProviderSettingsError(
                     "An API key is required before this provider can be enabled."
@@ -246,6 +263,11 @@ class ServerProviderSettingsService:
             row.wire_api = normalized_wire
             row.enabled = bool(enabled)
             session.flush()
+            if kind is ProviderKind.TEXT:
+                from .text_connections import mirror_legacy_default
+                secret = submitted_key or (current_text.api_key if current_text else "") or fallback.api_key
+                mirror_legacy_default(self, session, ServerProviderRuntime("text", normalized_url,
+                    normalized_model, normalized_wire, secret, bool(enabled and secret), "database", _secret_hint(secret) if secret else ""))
             session.add(ServerProviderAuditEvent(
                 actor_user_id=actor_id, provider_kind=kind.value, action="update",
                 summary=f"Updated {kind.value} provider; enabled={bool(enabled)}.",
@@ -260,6 +282,9 @@ class ServerProviderSettingsService:
             session.execute(delete(ServerProviderCredential).where(
                 ServerProviderCredential.provider_kind == kind.value
             ))
+            if kind is ProviderKind.TEXT:
+                from .text_connections import mirror_legacy_default
+                mirror_legacy_default(self, session, self._fallback(kind))
             session.add(ServerProviderAuditEvent(
                 actor_user_id=uuid.UUID(principal.user_id), provider_kind=kind.value,
                 action="reset", summary=f"Reset {kind.value} provider to environment fallback.",
@@ -290,13 +315,25 @@ class ServerProviderSettingsService:
             ))
 
     async def test_connection(
-        self, principal: Principal, provider_kind: str
+        self, principal: Principal, provider_kind: str, *, model_id: str | None = None
     ) -> ServerProviderTestResult:
         principal.require(Permission.PROVIDER_MANAGE)
         kind = self._kind(provider_kind)
         runtime = self.runtime_config(kind)
+        model = None
+        if model_id is not None:
+            if kind is not ProviderKind.TEXT:
+                raise ProviderSettingsError("Model testing is only available for text models.")
+            try:
+                model = resolve_model_tier(model_id, self.session_factory)
+            except ValueError as exc:
+                raise ProviderSettingsError(str(exc)) from exc
+            from .text_connections import runtime_for_connection
+            runtime = runtime_for_connection(self, model.connection_id)
         if not runtime.enabled:
             raise ProviderSettingsError("The provider is disabled or has no API key.")
+        wire = (model.wire_api if model else "") or runtime.wire_api
+        is_chat = wire in {"chat", "chat-completion", "chat-completions"}
         endpoint = (
             runtime.base_url
             if kind is ProviderKind.MINERU
@@ -307,6 +344,8 @@ class ServerProviderSettingsService:
             )
         )
         started = time.perf_counter()
+        if model:
+            endpoint = f"{runtime.base_url.rstrip('/')}/" + ("chat/completions" if is_chat else "responses")
         status_code = 0
         try:
             async with httpx.AsyncClient(timeout=20.0, trust_env=True) as client:
@@ -315,7 +354,12 @@ class ServerProviderSettingsService:
                     "Accept": "application/json",
                     "User-Agent": "ReviewWriter-ProviderCheck/1.0",
                 }
-                if kind is ProviderKind.EMBEDDING:
+                if model:
+                    prompt = 'Return only this JSON object: {"ok":true}'
+                    body = {"model": model.model}
+                    body["messages" if is_chat else "input"] = [{"role": "user", "content": prompt}]
+                    response = await client.post(endpoint, headers=headers, json=body, follow_redirects=False)
+                elif kind is ProviderKind.EMBEDDING:
                     response = await client.post(
                         endpoint,
                         headers=headers,
@@ -335,11 +379,20 @@ class ServerProviderSettingsService:
             ok = 200 <= status_code < 300
             message = ("Provider connection succeeded." if ok else
                        f"Provider rejected the connection with HTTP {status_code}.")
+            if ok and model:
+                from .model_gateway import ModelGatewayService
+                try:
+                    result = json.loads(ModelGatewayService._output_text(response.json(), wire))
+                    ok = isinstance(result, dict) and result.get("ok") is True
+                except (ValueError, TypeError, AttributeError):
+                    ok = False
+                message = ("Model returned valid structured output. This test may incur provider charges." if ok else
+                           "The endpoint responded, but the model did not return the expected JSON object.")
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             ok = False
             message = f"Provider transport failed: {exc.__class__.__name__}."
         latency = max(0, int((time.perf_counter() - started) * 1000))
-        self._record_test(principal, kind, ok=ok, summary=f"{message} latency={latency}ms")
+        self._record_test(principal, kind, ok=ok, summary=f"{message} latency={latency}ms" + (f" model={model.model}" if model else ""))
         return ServerProviderTestResult(
             provider_kind=kind.value, ok=ok, status_code=status_code,
             latency_ms=latency, message=message,
@@ -357,19 +410,21 @@ class ServerProviderSettingsService:
             if runtime.enabled:
                 environment["MINERU_API_TOKEN"] = runtime.api_key
         if ProviderKind.TEXT.value in selected:
-            runtime = self.runtime_config(ProviderKind.TEXT)
+            from .text_connections import runtime_for_connection
+            tier = resolve_model_tier(None, self.session_factory)
+            runtime = runtime_for_connection(self, tier.connection_id)
             if runtime.enabled:
-                default_model = resolve_model_tier(DEFAULT_MODEL_TIER).model
+                default_model = tier.model
                 environment.update({
                     "OPENAI_API_KEY": runtime.api_key,
                     "OPENAI_BASE_URL": runtime.base_url,
                     "REVIEW_WRITING_API_KEY": runtime.api_key,
                     "REVIEW_WRITING_BASE_URL": runtime.base_url,
-                    "REVIEW_WRITING_WIRE_API": runtime.wire_api,
+                    "REVIEW_WRITING_WIRE_API": tier.wire_api or runtime.wire_api,
                     "REVIEW_WRITING_MODEL": default_model,
                     "REVIEW_CONCLUSION_API_KEY": runtime.api_key,
                     "REVIEW_CONCLUSION_BASE_URL": runtime.base_url,
-                    "REVIEW_CONCLUSION_WIRE_API": runtime.wire_api,
+                    "REVIEW_CONCLUSION_WIRE_API": tier.wire_api or runtime.wire_api,
                     "REVIEW_CONCLUSION_MODEL": default_model,
                 })
         if ProviderKind.IMAGE.value in selected:

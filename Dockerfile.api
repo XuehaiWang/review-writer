@@ -35,6 +35,8 @@ RUN apt-get update && \
 
 COPY review_writer_core ./review_writer_core
 COPY review_writer_api ./review_writer_api
+# Exercise the pinned wheel's native extension during the image build.
+RUN python -c "from pathlib import Path; from review_writer_api.sqlite_vectors import SQLiteVectors; import tempfile; t=tempfile.TemporaryDirectory(); a=SQLiteVectors(); a.build(Path(t.name)/'probe.sqlite',user_id='probe',model='probe',dimension=2,rows=[]); t.cleanup()"
 COPY --from=frontend-builder /frontend/dist ./frontend/dist
 COPY skills ./skills
 COPY view ./view

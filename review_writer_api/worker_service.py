@@ -19,9 +19,11 @@ from review_writer_api.job_service import (
     JobHandler,
     JobLeaseLost,
     JobShutdownRequested,
+    JobYieldRequested,
+    release_yielded_job,
 )
 from review_writer_api.job_lease_context import bind_job_lease
-from review_writer_api.job_queues import queue_for_job_type
+from review_writer_api.job_queues import JOB_QUEUES, queue_for_job_type
 from review_writer_api.workflow_repository import JobRecord, WorkflowRepository
 
 
@@ -42,20 +44,20 @@ class WorkerService:
         heartbeat_seconds: float = 30.0,
         worker_id: str = "",
         queues: set[str] | None = None,
+        maintenance=None,
     ):
         self.repository = repository
+        self.maintenance = maintenance
         self.handlers = dict(handlers)
         self.queues = frozenset(
             str(item).strip().casefold()
-            for item in (queues or {"scientific", "image", "ingest", "document"})
+            for item in (queues or JOB_QUEUES)
             if str(item).strip()
         )
-        unsupported = self.queues.difference(
-            {"scientific", "image", "ingest", "document"}
-        )
+        unsupported = self.queues.difference(JOB_QUEUES)
         if not self.queues or unsupported:
             raise ValueError(
-                "Worker queues must be selected from scientific, image, ingest, and document."
+                "Worker queues must be selected from: " + ", ".join(sorted(JOB_QUEUES))
             )
         self.supported_job_types = {
             job_type
@@ -82,6 +84,15 @@ class WorkerService:
         self._shutdown.set()
 
     def run_forever(self) -> None:
+        def maintain():
+            while not self._shutdown.is_set():
+                try:
+                    self.maintenance()
+                except Exception as exc:
+                    LOGGER.warning("worker_maintenance_failed exception=%s", type(exc).__name__)
+                self._shutdown.wait(3600)
+        if self.maintenance is not None:
+            threading.Thread(target=maintain, name="worker-maintenance", daemon=True).start()
         LOGGER.info(
             "worker_started worker_id=%s queues=%s concurrency=%s poll_seconds=%s lease_seconds=%s",
             self.worker_id,
@@ -246,6 +257,8 @@ class WorkerService:
                     lease_token=context.lease_token,
                     lease_generation=context.lease_generation,
                 )
+        except JobYieldRequested:
+            release_yielded_job(context)
         except JobShutdownRequested:
             self.repository.release_job_lease(
                 claimed.id,
@@ -263,7 +276,7 @@ class WorkerService:
         except WorkflowError as exc:
             self._fail(context, exc.code, str(exc))
         except Exception as exc:
-            LOGGER.exception(
+            LOGGER.error(
                 "job_unhandled_failure worker_id=%s job_id=%s exception=%s",
                 self.worker_id,
                 claimed.id,

@@ -20,6 +20,7 @@ from review_writer_api.artifact_service import ArtifactService
 from review_writer_api.database import User, database_session, utc_now
 from review_writer_api.domain_services.base import ArtifactBackedService
 from review_writer_api.domain_services.drafts import DraftsService
+from review_writer_api.domain_services.final_editing import FinalEditingMixin, final_paragraphs
 from review_writer_api.errors import (
     WorkflowConflict,
     WorkflowNotFound,
@@ -311,7 +312,7 @@ class FinalNotReady(WorkflowConflict):
     code = "FINAL_NOT_READY"
 
 
-class FinalService(ArtifactBackedService):
+class FinalService(FinalEditingMixin, ArtifactBackedService):
     def __init__(
         self,
         repository: WorkflowRepository,
@@ -772,17 +773,23 @@ class FinalService(ArtifactBackedService):
                 make_current=False,
                 metadata=metadata,
             )
-        state = self.repository.promote_stage_artifacts_atomically(
-            principal.user_id,
-            project_id,
-            "final",
-            artifact_ids={name: record.id for name, record in published.items()},
-            run_id=run.id,
-            expected_revision=expected_revision,
-            status=status,
-            expected_current_artifacts=expected_current_artifacts,
-            expected_stage_states=expected_stage_states,
-        )
+        try:
+            state = self.repository.promote_stage_artifacts_atomically(
+                principal.user_id,
+                project_id,
+                "final",
+                artifact_ids={name: record.id for name, record in published.items()},
+                run_id=run.id,
+                expected_revision=expected_revision,
+                status=status,
+                expected_current_artifacts=expected_current_artifacts,
+                expected_stage_states=expected_stage_states,
+            )
+        except WorkflowConflict:
+            if metadata.get("operation") != "final-build" or self._revision(principal, project_id) == expected_revision:
+                raise
+            # Files remain immutable candidates; never replace a newer saved version.
+            return published, None
         return published, state
 
     def _approved_draft(
@@ -1536,7 +1543,7 @@ class FinalService(ArtifactBackedService):
                         "json",
                     )
                 },
-                expected_revision=self._revision(principal, project_id),
+                expected_revision=int(job_payload["expected_revision"]),
                 metadata={
                     "operation": "front-matter-auto-merge",
                     "source_draft_artifact_id": draft.id,
@@ -1886,7 +1893,8 @@ class FinalService(ArtifactBackedService):
             )
         return active, available
 
-    def build(self, principal: Principal, project_id: str) -> dict[str, Any]:
+    def build(self, principal: Principal, project_id: str, *, expected_revision: int | None = None) -> dict[str, Any]:
+        build_revision = self._revision(principal, project_id) if expected_revision is None else expected_revision
         principal.require(Permission.PROJECT_WRITE)
         draft_text, draft, approval = self._approved_draft(principal, project_id)
         draft_state = self.repository.get_stage_state(
@@ -1898,10 +1906,8 @@ class FinalService(ArtifactBackedService):
             draft_state is None
             or draft_state.status != "approved"
             or approval_artifact is None
-            or quality_artifact is None
-            or approval.get("quality_artifact_id") != quality_artifact.id
         ):
-            raise FinalNotReady("Draft approval or evaluation changed before Final build.")
+            raise FinalNotReady("Draft approval changed before Final build.")
         conclusion, conclusion_artifact = self._read_text(
             principal, project_id, FINAL_CONCLUSION
         )
@@ -2255,7 +2261,7 @@ class FinalService(ArtifactBackedService):
         expected_currents = {
             DRAFT_DOCUMENT: draft.id,
             DRAFT_APPROVAL: approval_artifact.id,
-            DRAFT_QUALITY: quality_artifact.id,
+            DRAFT_QUALITY: quality_artifact.id if quality_artifact else "",
         }
         if conclusion_artifact:
             expected_currents[FINAL_CONCLUSION] = conclusion_artifact.id
@@ -2282,7 +2288,7 @@ class FinalService(ArtifactBackedService):
                         "json",
                     ),
                 },
-                expected_revision=self._revision(principal, project_id),
+                expected_revision=build_revision,
                 metadata={
                     "operation": "final-build",
                     "reference_metadata_artifact_ids": reference_metadata_artifact_ids,
@@ -2300,7 +2306,8 @@ class FinalService(ArtifactBackedService):
             "final_artifact_id": published[FINAL_DRAFT].id,
             "validation_artifact_id": published[FINAL_VALIDATION].id,
             "release_artifact_id": published[FINAL_RELEASE].id,
-            "revision": state.revision,
+            "revision": state.revision if state else self._revision(principal, project_id),
+            "candidate_pending": state is None,
         }
 
     def export_payload(self, principal: Principal, project_id: str) -> dict[str, Any]:
@@ -2635,6 +2642,7 @@ class FinalService(ArtifactBackedService):
             "pdf_artifact_id": published[FINAL_PDF].id,
             "tex_artifact_id": published[FINAL_TEX].id,
             "pdf_qa_artifact_id": published[FINAL_PDF_QA].id,
+            "pdf_diagnostics": dict(built.get("pdf_diagnostics") or {}),
             "language_profile": profile,
             "download_name": metadata["download_name"],
             "revision": stage.revision,
@@ -2906,6 +2914,8 @@ class FinalService(ArtifactBackedService):
                 **dict(draft_payload.get("draft_approval") or {}),
                 "record": dict(draft_payload.get("draft_approval") or {}),
             },
+            "final_paragraphs": [{"paragraph_id": p["paragraph_id"], "text": p["text"]} for p in final_paragraphs(final_text)],
+            "versions": self.manuscript_versions(principal, project_id, final_artifact.id if final_artifact else ""),
             "final_draft_md": _normalize_publication_markup(final_text),
             "final_artifact_id": final_artifact.id if final_artifact else "",
             "final_current": final_current,

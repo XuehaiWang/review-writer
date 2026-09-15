@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 from copy import deepcopy
+from itertools import product
 from typing import Any, Iterable, Mapping
 
 from review_writer_core.evidence_integrity import (
@@ -274,6 +275,40 @@ def review_fingerprint(fact: Mapping[str, Any]) -> str:
                                     ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
+def verification_matches(fact: Mapping[str, Any]) -> bool:
+    """Accept exact audits or proven source metadata hydration/legacy aliases.
+
+    Never ignore provenance in the hash: reconstruct the old input and require
+    its exact saved digest. Quotes, values, chunk IDs and lineage remain bound.
+    This also reads historical artifacts without rewriting their verdicts.
+    """
+    expected = (fact.get("verification") or {}).get("input_fingerprint")
+    if not expected or expected == review_fingerprint(fact):
+        return True
+    slots = [(collection, field) for collection in ("evidence_refs", "support_spans")
+             for field in ("source_file_id", "source_type")
+             if fact.get(collection) and all(
+                 isinstance(ref, dict) and ref.get("evidence_key")
+                 and ref.get("chunk_id") and ref.get("source_lineage_hash")
+                 and ref.get(field) for ref in fact[collection])]
+    # main_article was the legacy storage label for article, not an evidence
+    # channel. source_channel, paper, chunk and source lineage remain unchanged.
+    choices = [("keep", None, "main_article") if field == "source_type"
+               and all(ref[field] == "article" for ref in fact[collection])
+               else ("keep", None) for collection, field in slots]
+    for values in product(*choices):
+        if all(value == "keep" for value in values):
+            continue
+        previous = deepcopy(dict(fact))
+        for (collection, field), value in zip(slots, values):
+            if value != "keep":
+                for ref in previous[collection]:
+                    ref[field] = value
+        if review_fingerprint(previous) == expected:
+            return True
+    return False
+
+
 def fact_needs_verification(fact: Mapping[str, Any]) -> bool:
     if fact.get("superseded_by_fact_id"):
         return False
@@ -283,8 +318,7 @@ def fact_needs_verification(fact: Mapping[str, Any]) -> bool:
         return False
     return (verdict.get("contract") != FACT_VALIDATION_VERSION
             or verdict.get("status") not in {"supported", "uncertain", "rejected"}
-            or bool(verdict.get("input_fingerprint")
-                    and verdict["input_fingerprint"] != review_fingerprint(fact)))
+            or not verification_matches(fact))
 
 
 def verify_plain_source_quote(fact: dict[str, Any], sources: Mapping[str, Mapping[str, Any]]) -> bool:

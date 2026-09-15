@@ -13,8 +13,8 @@ from review_writer_api.errors import (
     WorkflowNotFound,
     WorkflowValidationError,
 )
-from review_writer_api.security import Principal
-from review_writer_core.writing_contracts import DRAFT_PASS_THRESHOLD, substantive_quality_findings
+from review_writer_api.security import Permission, Principal
+from review_writer_core.writing_contracts import substantive_quality_findings
 from review_writer_core.workflow.artifacts import (
     DRAFT_APPROVAL,
     DRAFT_MANUSCRIPT as DRAFT_DOCUMENT,
@@ -186,28 +186,22 @@ class DraftDecisionActionsMixin:
         override_low_score: bool,
         override_reason: str,
     ) -> dict[str, Any]:
+        principal.require(Permission.PROJECT_WRITE)
         payload = self.get(principal, project_id)
-        quality = payload.get("quality") or {}
-        if not quality.get("current"):
-            raise DraftApprovalBlocked("Evaluate the exact current Draft before approval.")
+        if not payload.get("draft_artifact_id") or payload.get("freshness", {}).get("upstream_stale"):
+            raise DraftApprovalBlocked("A current saved Draft is required for approval.")
+        quality = (payload.get("quality") or {}) if payload.get("quality", {}).get("current") else {}
         hard = [str(value) for value in quality.get("hard_gate_failures") or [] if str(value)]
-        score = float(quality.get("score") or 0)
-        goal = float(quality.get("goal") or DRAFT_PASS_THRESHOLD)
         # Approval authorizes workflow progression, not scientific verification.
         # Keep the exact Quality artifact and its findings unchanged for audit.
         findings = substantive_quality_findings(quality)
         draft_id = str(payload["draft_artifact_id"])
         quality_artifact_id = str(payload.get("quality_artifact_id") or "")
-        if not quality_artifact_id:
-            raise DraftApprovalBlocked("The current evaluation artifact is unavailable.")
         approval = {
             "status": "approved",
             "draft_artifact_id": draft_id,
             "quality_artifact_id": quality_artifact_id,
-            "score": score,
-            "goal": goal,
             "approval_mode": "acknowledged_findings" if hard or findings or quality.get("release_integrity_failure") else "standard",
-            "below_goal_override": score < goal,
             "overridden_hard_gate_failures": hard,
             "acknowledged_findings": findings,
             "acknowledged_release_integrity_failure": bool(quality.get("release_integrity_failure")),
@@ -240,7 +234,6 @@ class DraftDecisionActionsMixin:
                 approval_events=[event],
                 expected_current_artifacts={
                     DRAFT_DOCUMENT: draft_id,
-                    DRAFT_QUALITY: quality_artifact_id,
                 },
                 invalidate_final=False,
             )

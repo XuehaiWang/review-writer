@@ -322,6 +322,7 @@ class AuthProviderSecurityTests(unittest.TestCase):
                     headers={"Origin": "http://testserver"},
                     json={
                         "email": "chemist@example.com",
+                        "verification_code": app.state.auth_service.issue_registration_code(email="chemist@example.com"),
                         "password": "strong-password-123",
                         "display_name": "Chemist",
                     },
@@ -369,7 +370,8 @@ class AuthProviderSecurityTests(unittest.TestCase):
                     response = client.post(
                         "/api/v1/auth/register",
                         headers={"Origin": "http://testserver"},
-                        json={"email": email, "password": "strong-password-123"},
+                        json={"email": email, "password": "strong-password-123",
+                              "verification_code": app.state.auth_service.issue_registration_code(email=email)},
                     )
                     self.assertEqual(201, response.status_code, response.text)
                     client.post("/api/v1/auth/logout", headers={"Origin": "http://testserver"})

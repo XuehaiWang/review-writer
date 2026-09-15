@@ -46,6 +46,8 @@ from review_writer_core.workflow.artifacts import (
 class DraftQualityActionsMixin:
     def validate_task_inputs(self, principal, project_id, payload):
         """Reuse the evaluation dependency contract for all Draft jobs."""
+        if payload.get("revision_mode") == "dialogue":
+            return self.validate_dialogue_inputs(principal, project_id, payload)
         expected = self.validate_artifact_inputs(principal, project_id, payload, {
             **QUALITY_INPUT_ARTIFACTS,
             "source_draft_artifact_id": DRAFT_DOCUMENT,
@@ -55,7 +57,8 @@ class DraftQualityActionsMixin:
         state = self.repository.get_stage_state(principal.user_id, project_id, "draft")
         if state is not None and state.status == "stale":
             raise WorkflowConflict("Draft inputs changed. Reassemble Draft before running this task.")
-        if "expected_revision" in payload and (state.revision if state else 0) != payload["expected_revision"]:
+        if ("expected_revision" in payload and not payload.get("source_draft_artifact_id")
+                and (state.revision if state else 0) != payload["expected_revision"]):
             raise WorkflowConflict("Draft changed while the task was waiting or running.")
         return expected
 
@@ -359,7 +362,7 @@ class DraftQualityActionsMixin:
                         "json",
                     )
                 },
-                expected_revision=int(job_payload["expected_revision"]),
+                expected_revision=self._revision(principal, project_id),
                 metadata={"source_draft_artifact_id": current.id, "operation": "evaluate"},
                 expected_current_artifacts=expected_inputs,
                 invalidate_final=False,

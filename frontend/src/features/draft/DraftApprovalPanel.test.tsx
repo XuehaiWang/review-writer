@@ -24,10 +24,12 @@ it("allows explicit approval with unresolved findings and shows their paragraph"
   expect(onReview).toHaveBeenCalledWith("S2-p3");
 });
 
-it.each([{ current: false, busy: false }, { current: true, busy: true }])("preserves version and active-write protection: %j", ({ current, busy }) => {
+it.each([{ current: false, busy: false }, { current: true, busy: true }])("only disables approval for an actual blocking operation: %j", ({ current, busy }) => {
   usePreferences.getState().setLanguage("en");
   render(<DraftApprovalPanel quality={{ ...quality, current }} approved={false} busy={busy} onApprove={vi.fn()} onReview={vi.fn()} onNext={vi.fn()} />);
-  expect(screen.getByRole("button", { name: "Approve and allow final stage" })).toBeDisabled();
+  const button = screen.getByRole("button", { name: "Approve and allow final stage" });
+  if (busy) expect(button).toBeDisabled();
+  else expect(button).toBeEnabled();
 });
 
 it("keeps findings visible after approval and exposes Final navigation", () => {

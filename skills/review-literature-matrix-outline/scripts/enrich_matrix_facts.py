@@ -55,7 +55,7 @@ from review_writer_core.review_fact_readiness import (  # noqa: E402
 from review_writer_core.scientific_facts import (  # noqa: E402
     FACT_PROMPT_VERSION, FACT_VALIDATION_VERSION, fact_identity,
     fact_is_usable, fact_usage, fact_support_spans, merge_facts, numerical_tokens_supported,
-    fact_needs_verification, review_fingerprint, verify_plain_source_quote,
+    fact_needs_verification, review_fingerprint, verify_plain_source_quote, verification_matches,
 )
 
 
@@ -1503,7 +1503,7 @@ def restore_cached_verifications(paper: dict[str, Any], result: dict[str, Any]) 
                 not fact_id
                 or verdict.get("contract") != FACT_VALIDATION_VERSION
                 or verdict.get("status") not in {"supported", "uncertain", "rejected"}
-                or verdict.get("input_fingerprint") != review_fingerprint(fact)
+                or not verification_matches(fact)
                 or not fact_support_spans(fact, sources)
             ):
                 continue

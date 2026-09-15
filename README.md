@@ -32,7 +32,7 @@ Review Writer 是一个基于证据链的学术综述写作系统。它把论文
 ```mermaid
 flowchart LR
     B[React Web] --> A[FastAPI]
-    A --> DB[(PostgreSQL + pgvector)]
+    A --> DB[(PostgreSQL)]
     A --> FS[用户文件与版本化产物]
     A --> Q[持久任务队列]
     Q --> SW[科学写作 Worker]
@@ -45,10 +45,16 @@ flowchart LR
 
 - **React + TypeScript**：用户界面和七阶段工作台。
 - **FastAPI**：用户、项目、文献、任务、产物和管理接口。
-- **PostgreSQL + pgvector**：业务状态、全文索引、语义向量、任务和用量账本。
+- **PostgreSQL**：业务状态、全文索引、文件版本引用、任务和用量账本。语义向量使用独立 SQLite 文件。
 - **独立 Worker**：分别处理科学写作、论文解析/文档发布和图像任务。
 - **模型网关**：统一转发文本与图像模型请求，控制并发并记录费用。
 - **LuaLaTeX Renderer**：生成独立的出版级 PDF。
+
+## 开发文档
+
+- [本地项目目录与逐文件说明](docs/local-project-files-guide.zh-CN.md)
+- [项目模块边界](docs/project-module-boundaries.zh-CN.md)
+- [PostgreSQL 工作流迁移手册](docs/postgresql-workflow-migration.md)
 
 ## Docker 部署
 
@@ -118,7 +124,7 @@ docker compose --env-file .env.hosted up -d --build
 
 ```powershell
 docker compose --env-file .env.hosted ps
-docker compose --env-file .env.hosted logs -f api worker worker-ingest-document worker-image model-gateway
+docker compose --env-file .env.hosted logs -f api worker worker-ingest-document worker-bibliography worker-image model-gateway
 ```
 
 停止服务：
@@ -128,6 +134,18 @@ docker compose --env-file .env.hosted down
 ```
 
 不要执行 `docker compose down -v`，除非确定要永久删除数据库和用户文件。
+
+## 文本模型与分组配置
+
+在管理后台 → 模型与服务 → 文本生成中配置：
+
+1. **文本服务连接**：为每个平台或分组填写名称、Base URL、协议及该分组的 API Key。分组权限取决于密钥，名称只用于后台识别。
+2. **文本模型目录**：每个模型绑定一个连接，填写平台模型名称、用户可见名称及输入、缓存输入、输出价格。不同连接可以提供同一个平台模型，使用不同目录 ID 区分。
+3. 保存后点击“测试模型”验证实际调用及 JSON 输出。测试会产生真实请求，可能收费。
+
+用户只选择模型，不需要选择分组或配置密钥。系统不会自动切换连接。旧单连接配置会首次迁入“默认连接”，原模型选择不变；迁入后在后台管理连接，修改环境变量不会覆盖已保存连接。
+
+已提交任务保留模型、价格及连接版本；配置修改或停用只影响新任务。密钥留空表示保留原值，旧连接版本加密保留供已提交任务和重试使用。如果密钥泄漏，需要同时在上游平台撤销密钥并取消相关任务；仅停用连接不会撤销旧版本。
 
 ## 数据与备份
 

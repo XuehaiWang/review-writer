@@ -13,7 +13,7 @@ def report_committed_progress(context, current, total):
 
 
 def register_publishing_handler(job_service, job_type, builder, publisher, *,
-                                progress_total, validate=None, after_publish=None):
+                                progress_total, validate=None, after_publish=None, dispatch=None):
     if builder is None:
         return
 
@@ -32,4 +32,4 @@ def register_publishing_handler(job_service, job_type, builder, publisher, *,
         report_committed_progress(context, progress_total, progress_total)
         return result
 
-    job_service.register_handler(job_type, handler)
+    job_service.register_handler(job_type, dispatch(handler) if dispatch else handler)

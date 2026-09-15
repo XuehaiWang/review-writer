@@ -42,6 +42,7 @@ class LeaseTokenResponse(BaseModel):
 class ProviderTestRequest(BaseModel):
     provider_kind: str
     actor_user_id: str
+    model_id: str | None = None
 
 
 class EmbeddingProfileResponse(BaseModel):
@@ -175,7 +176,7 @@ def create_gateway_app(settings: ApiSettings | None = None) -> FastAPI:
                 frozenset({Role.ADMIN}),
             )
             return asdict(
-                await providers.test_connection(principal, payload.provider_kind)
+                await providers.test_connection(principal, payload.provider_kind, model_id=payload.model_id)
             )
         except Exception as exc:
             # ProviderSettingsError is intentionally kept behind the private

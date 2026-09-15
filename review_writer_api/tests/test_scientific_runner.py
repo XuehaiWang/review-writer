@@ -30,6 +30,16 @@ def runner_api():
     return ScientificOutputMissing, ScientificRunCancelled, ScientificRunFailed, ScientificRunner
 
 
+class DiagnosticSummaryTests(unittest.TestCase):
+    def test_chained_gateway_error_preserves_the_provider_reason(self):
+        runner = runner_api()[-1]
+        text = ("urllib.error.HTTPError: HTTP Error 503\n\n"
+                "The above exception was the direct cause of the following exception:\n\n"
+                "Traceback (most recent call last):\n"
+                "review_writer_core.model_gateway_client.GatewayRequestError: Model has no available channel")
+        self.assertIn("Model has no available channel", runner._diagnostic_summary(text))
+
+
 class ScientificRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -47,6 +57,22 @@ class ScientificRunnerTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_call_can_disable_replay_after_timeout(self):
+        from review_writer_api.scientific_runner import ScientificRunner, ScientificRunFailed
+        runner = ScientificRunner(max_attempts=3, retry_delay_seconds=0)
+        with patch("review_writer_api.scientific_runner.subprocess.Popen") as popen:
+            process = popen.return_value
+            process.communicate.side_effect = subprocess.TimeoutExpired("worker", 0.01)
+            process.poll.return_value = 0
+            with patch.object(runner, "_terminate", return_value=("", "")):
+                with self.assertRaises(ScientificRunFailed) as failed:
+                    runner.run([sys.executable, "-c", "pass"], cwd=self.root,
+                               staging_directory=self.root, expected_outputs=("done.txt",),
+                               timeout_seconds=0.01, max_attempts=1)
+            self.assertEqual(1, failed.exception.attempts)
+            self.assertEqual(1, popen.call_count)
+        self.assertEqual(3, runner.max_attempts)
 
     def test_connection_resolver_rejects_private_redirect_and_rebinding_targets(self) -> None:
         from review_writer_api.scientific_entrypoint import guarded_getaddrinfo

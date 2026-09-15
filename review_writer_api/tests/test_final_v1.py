@@ -23,6 +23,14 @@ from review_writer_core.manuscript_state import build_manuscript_state
 
 
 class FinalV1Tests(NativeFigureApiTestCase):
+    def seed_historical_evaluation(self):
+        # Simulate an old stored report or an already-running legacy job finishing.
+        # New users cannot submit the retired scoring HTTP endpoint.
+        service = self.app.state.drafts_service
+        payload = service.evaluation_payload(self.first, self.project_id, goal=90)
+        built = self.extra_native_workflow_overrides()["draft.evaluate"](None, payload)
+        return service.publish_evaluation(self.first, self.project_id, payload, built)
+
     def setUp(self) -> None:
         self.block_conclusion_return = False
         self.conclusion_built = threading.Event()
@@ -179,7 +187,7 @@ class FinalV1Tests(NativeFigureApiTestCase):
             "final.pdf": pdf,
         }
 
-    def prepare_approved_draft(self, client: TestClient) -> dict:
+    def prepare_approved_draft(self, client: TestClient, *, evaluate: bool = True) -> dict:
         self.confirm_review(client)
         self.assertEqual("succeeded", self.start_redraw(client, "final-redraw")["status"])
         figures = client.get(f"/api/v1/projects/{self.project_id}/figures").json()
@@ -196,12 +204,8 @@ class FinalV1Tests(NativeFigureApiTestCase):
             headers=self.headers("final-assemble"),
         )
         self.assertEqual(200, assembled.status_code, assembled.text)
-        evaluation = client.post(
-            f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
-            json={},
-            headers=self.headers("final-evaluate"),
-        )
-        self.assertEqual("succeeded", self.wait_job(client, evaluation.json()["id"])["status"])
+        if evaluate:
+            self.seed_historical_evaluation()
         draft = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
         approved = client.post(
             f"/api/v1/projects/{self.project_id}/draft/approve",
@@ -210,6 +214,16 @@ class FinalV1Tests(NativeFigureApiTestCase):
         )
         self.assertEqual(200, approved.status_code, approved.text)
         return approved.json()
+
+    def test_final_build_without_a_quality_artifact(self):
+        with TestClient(self.app) as client:
+            self.prepare_approved_draft(client, evaluate=False)
+            draft = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
+            self.assertEqual("", draft["quality_artifact_id"])
+            started = client.post(f"/api/v1/projects/{self.project_id}/final/build",
+                                 headers=self.headers("build-without-score"))
+            self.assertEqual(200, started.status_code, started.text)
+            self.assertTrue(started.json()["final_artifact_id"])
 
     def revise_and_approve_draft(self, client: TestClient, key: str) -> dict:
         draft = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
@@ -220,12 +234,6 @@ class FinalV1Tests(NativeFigureApiTestCase):
             headers=self.headers(f"{key}-edit"),
         )
         self.assertEqual(200, edited.status_code, edited.text)
-        evaluation = client.post(
-            f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
-            json={},
-            headers=self.headers(f"{key}-evaluate"),
-        )
-        self.assertEqual("succeeded", self.wait_job(client, evaluation.json()["id"])["status"])
         current = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
         approved = client.post(
             f"/api/v1/projects/{self.project_id}/draft/approve",
@@ -234,6 +242,20 @@ class FinalV1Tests(NativeFigureApiTestCase):
         )
         self.assertEqual(200, approved.status_code, approved.text)
         return approved.json()
+
+    def test_final_is_readonly_and_existing_manuscript_remains_downloadable(self):
+        with TestClient(self.app) as client:
+            self.prepare_approved_draft(client)
+            url = f"/api/v1/projects/{self.project_id}/final"
+            self.assertEqual(200, client.post(url + "/build").status_code)
+            original = client.get(url).json()
+            paragraph = original["final_paragraphs"][0]
+            request = {"text": paragraph["text"], "revision": original["revision"], "source_artifact_id": original["final_artifact_id"]}
+            self.assertEqual(410, client.put(url + "/paragraphs/" + paragraph["paragraph_id"], json=request).status_code)
+            self.assertEqual(410, client.post(url + "/versions/" + original["final_artifact_id"] + "/restore",
+                json={"revision": original["revision"], "source_artifact_id": original["final_artifact_id"]}).status_code)
+            self.assertEqual(original["final_artifact_id"], client.get(url).json()["final_artifact_id"])
+            self.assertEqual(200, client.get("/api/v1/artifacts/" + original["final_artifact_id"] + "/content").status_code)
 
     def test_final_is_blocked_until_exact_draft_is_approved(self) -> None:
         with TestClient(self.app) as client:
@@ -357,28 +379,21 @@ class FinalV1Tests(NativeFigureApiTestCase):
         visible = re.sub(r"<!--.*?-->", "", normalized, flags=re.DOTALL)
         self.assertIsNone(re.search(r"</?[A-Za-z][^>]*>", visible))
 
-    def test_re_evaluation_invalidates_old_draft_approval_and_blocks_final(self) -> None:
+    def test_re_evaluation_preserves_approval_of_unchanged_prose(self) -> None:
         with TestClient(self.app) as client:
             self.prepare_approved_draft(client)
             self.evaluation_score = 20
             self.evaluation_hard_failures = ["citation_integrity_failed"]
-            re_evaluation = client.post(
-                f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
-                json={}, headers=self.headers("re-evaluate-approved-draft"),
-            )
-            self.assertEqual(
-                "succeeded",
-                self.wait_job(client, re_evaluation.json()["id"])["status"],
-            )
+            self.seed_historical_evaluation()
             draft = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
             final = client.get(f"/api/v1/projects/{self.project_id}/final").json()
             blocked = client.post(
                 f"/api/v1/projects/{self.project_id}/final/build",
                 headers=self.headers("final-after-hard-fail-reevaluation"),
             )
-        self.assertFalse(draft["draft_approval_current"])
-        self.assertFalse(final["draft_approval_current"])
-        self.assertEqual(409, blocked.status_code, blocked.text)
+        self.assertTrue(draft["draft_approval_current"])
+        self.assertTrue(final["draft_approval_current"])
+        self.assertEqual(200, blocked.status_code, blocked.text)
 
     def test_concurrent_hard_fail_re_evaluation_blocks_in_flight_final_build(self) -> None:
         validation_started = threading.Event()
@@ -408,14 +423,7 @@ class FinalV1Tests(NativeFigureApiTestCase):
                 self.assertTrue(validation_started.wait(2))
                 self.evaluation_score = 20
                 self.evaluation_hard_failures = ["citation_integrity_failed"]
-                re_evaluation = client.post(
-                    f"/api/v1/projects/{self.project_id}/draft/evaluation-jobs",
-                    json={}, headers=self.headers("re-evaluate-during-final-build"),
-                )
-                self.assertEqual(
-                    "succeeded",
-                    self.wait_job(client, re_evaluation.json()["id"])["status"],
-                )
+                self.seed_historical_evaluation()
                 release_validation.set()
                 worker.join(3)
                 final = client.get(f"/api/v1/projects/{self.project_id}/final").json()

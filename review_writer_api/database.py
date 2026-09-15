@@ -14,6 +14,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     JSON,
     LargeBinary,
     MetaData,
@@ -78,6 +79,18 @@ class UserSession(Base, TimestampMixin):
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RegistrationCode(Base):
+    """Email ownership challenge; no user exists until it is consumed."""
+
+    __tablename__ = "registration_codes"
+    email: Mapped[str] = mapped_column(String(320), primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(512), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class PasswordResetToken(Base):

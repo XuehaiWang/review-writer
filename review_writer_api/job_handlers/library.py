@@ -78,7 +78,8 @@ class LibraryJobHandlers:
             env=normal,
             secret_env=secrets,
             cancel_requested=context.cancellation_requested,
-            timeout_seconds=5 * 60,
+            timeout_seconds=120,
+            max_attempts=1,
         )
         local_extraction = json.loads(local_output.read_text(encoding="utf-8"))
         if not isinstance(local_extraction, dict):
@@ -136,7 +137,8 @@ class LibraryJobHandlers:
                 env=normal,
                 secret_env=secrets,
                 cancel_requested=context.cancellation_requested,
-                timeout_seconds=5 * 60,
+                timeout_seconds=120,
+                max_attempts=1,
             )
             agent_extraction = json.loads(role_output.read_text(encoding="utf-8"))
             if not isinstance(agent_extraction, dict):

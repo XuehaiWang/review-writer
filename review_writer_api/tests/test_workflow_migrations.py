@@ -38,10 +38,17 @@ WORKFLOW_TABLES = {
     "library_artifacts",
     "library_document_indexes",
     "library_document_chunks",
+    "library_vector_stores",
+    "library_vector_versions",
+    "library_vector_read_leases",
+    "library_vector_job_pins",
     "user_credit_accounts",
     "credit_reservations",
     "credit_transactions",
     "password_reset_tokens",
+    "registration_codes",
+    "system_error_events",
+    "library_upload_batch_cancellations",
 }
 
 
@@ -52,7 +59,7 @@ class WorkflowMigrationTests(unittest.TestCase):
     def test_workflow_schema_has_separate_workflow_and_job_scope_revisions(self) -> None:
         script = ScriptDirectory.from_config(self.alembic_config())
 
-        self.assertEqual(["20260826_0017"], script.get_heads())
+        self.assertEqual(["20260914_0024"], script.get_heads())
         workflow_revision = script.get_revision("20260813_0002")
         self.assertEqual("20260811_0001", workflow_revision.down_revision)
         job_scope_revision = script.get_revision("20260813_0003")
@@ -104,6 +111,47 @@ class WorkflowMigrationTests(unittest.TestCase):
                 self.assertTrue(FOUNDATION_TABLES.issubset(all_tables))
                 self.assertTrue(WORKFLOW_TABLES.issubset(all_tables))
                 command.check(config)
+
+    def test_vector_retirement_drops_legacy_table_and_preserves_sqlite_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            url = f"sqlite+pysqlite:///{Path(temporary).as_posix()}/retirement.sqlite"
+            with patch.dict(os.environ, {"REVIEW_WRITER_DATABASE_URL": url}):
+                config = self.alembic_config()
+                command.upgrade(config, "20260910_0020")
+                engine = create_engine(url)
+                with engine.begin() as connection:
+                    connection.execute(text("CREATE TABLE library_chunk_embeddings (id INTEGER PRIMARY KEY)"))
+                    connection.execute(text("INSERT INTO library_chunk_embeddings VALUES (1)"))
+                with self.assertRaisesRegex(RuntimeError, "Legacy vectors remain"):
+                    command.upgrade(config, "head")
+                with engine.begin() as connection:
+                    connection.execute(text("DELETE FROM library_chunk_embeddings"))
+                command.upgrade(config, "head")
+                self.assertNotIn("library_chunk_embeddings", inspect(engine).get_table_names())
+                self.assertTrue({"library_vector_versions", "library_vector_job_pins", "library_document_chunks"}.issubset(inspect(engine).get_table_names()))
+                self.assertNotIn("backend", {c["name"] for c in inspect(engine).get_columns("library_vector_stores")})
+                with self.assertRaisesRegex(RuntimeError, "retired permanently"):
+                    command.downgrade(config, "20260910_0020")
+                engine.dispose()
+
+    def test_existing_bibliography_jobs_move_without_losing_pending_work(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            url = f"sqlite+pysqlite:///{Path(temporary).as_posix()}/queues.sqlite"
+            with patch.dict(os.environ, {"REVIEW_WRITER_DATABASE_URL": url}):
+                config = self.alembic_config()
+                command.upgrade(config, "20260910_0021")
+                engine = create_engine(url)
+                sessions = sessionmaker(engine)
+                with sessions.begin() as session:
+                    user = User(email="queue@test.invalid", password_hash="x")
+                    session.add(user); session.flush()
+                    job = WorkflowJob(user_id=user.id, scope="library", job_type="library.bibliography-audit", queue_name="ingest", status="queued", idempotency_key="old-audit")
+                    session.add(job); session.flush(); job_id = job.id
+                command.upgrade(config, "head")
+                with sessions() as session:
+                    job = session.get(WorkflowJob, job_id)
+                    self.assertEqual(("bibliography", "queued", "old-audit"), (job.queue_name, job.status, job.idempotency_key))
+                engine.dispose()
 
     def test_0005_backfills_existing_catalog_into_immutable_library_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -289,7 +337,7 @@ class WorkflowMigrationTests(unittest.TestCase):
             with patch.dict(
                 os.environ, {"REVIEW_WRITER_DATABASE_URL": database_url}, clear=False
             ):
-                command.upgrade(config, "head")
+                command.upgrade(config, "20260910_0020")
                 engine = create_engine(database_url)
                 sessions = sessionmaker(bind=engine, expire_on_commit=False)
                 with sessions.begin() as session:

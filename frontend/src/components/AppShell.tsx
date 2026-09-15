@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 
 import type { AuthConfig, Principal } from "../api/types";
-import { useSessionLogout } from "../hooks/useSessionLogout";
+import { UserMenu } from "./UserMenu";
 import { translate, type MessageKey } from "../i18n/messages";
 import { usePreferences } from "../state/preferences";
 
@@ -34,7 +34,6 @@ export function AppShell({ authConfig, identity, children }: AppShellProps) {
   const location = useLocation();
   const workflowNavRef = useRef<HTMLDivElement>(null);
   const language = usePreferences((state) => state.language);
-  const setLanguage = usePreferences((state) => state.setLanguage);
   useEffect(() => {
     document.documentElement.lang = language;
   }, [language]);
@@ -45,7 +44,6 @@ export function AppShell({ authConfig, identity, children }: AppShellProps) {
     const centered = active.offsetLeft - (nav.clientWidth - active.offsetWidth) / 2;
     nav.scrollLeft = Math.max(0, Math.min(centered, nav.scrollWidth - nav.clientWidth));
   }, [location.pathname, location.search]);
-  const logout = useSessionLogout();
 
   return (
     <div className="app-frame">
@@ -60,34 +58,7 @@ export function AppShell({ authConfig, identity, children }: AppShellProps) {
           </Link>
           <div className="top-actions">
             <Link className="button button-quiet topbar-home" to="/">{language === "en" ? "Home" : "首页"}</Link>
-            <div className="language-switch" aria-label={language === "en" ? "Language" : "语言"}>
-              <button
-                type="button"
-                className={language === "zh-CN" ? "active" : ""}
-                onClick={() => setLanguage("zh-CN")}
-              >
-                中
-              </button>
-              <button
-                type="button"
-                className={language === "en" ? "active" : ""}
-                onClick={() => setLanguage("en")}
-              >
-                EN
-              </button>
-            </div>
-            <span className="badge">{authConfig.enabled ? translate(language, "hosted") : translate(language, "local")}</span>
-            <span className="identity-chip" title={identity.email}>{identity.display_name || identity.email || "Researcher"}</span>
-            {authConfig.enabled ? (
-              <button
-                className="button button-quiet topbar-logout"
-                type="button"
-                disabled={logout.isPending}
-                onClick={() => logout.mutate()}
-              >
-                {logout.isPending ? (language === "en" ? "Signing out…" : "正在退出…") : translate(language, "logout")}
-              </button>
-            ) : null}
+            <UserMenu identity={identity} authConfig={authConfig} />
           </div>
         </div>
       </header>
@@ -108,16 +79,6 @@ export function AppShell({ authConfig, identity, children }: AppShellProps) {
               <span className="workflow-link-copy"><strong>{translate(language, item.label)}</strong><small>{language === "en" ? item.hintEn : item.hintZh}</small></span>
             </NavLink>
           ))}
-          <NavLink to="/settings" className={({ isActive }) => (isActive ? "workflow-link workflow-settings active" : "workflow-link workflow-settings")}>
-            <span className="workflow-link-index">⚙</span>
-            <span className="workflow-link-copy"><strong>{translate(language, "settings")}</strong><small>{language === "en" ? "Providers" : "模型配置"}</small></span>
-          </NavLink>
-          {identity.permissions.includes("provider:manage") ? (
-            <NavLink to="/admin" className={({ isActive }) => (isActive ? "workflow-link workflow-admin active" : "workflow-link workflow-admin")}>
-              <span className="workflow-link-index">◆</span>
-              <span className="workflow-link-copy"><strong>{language === "en" ? "Admin" : "管理后台"}</strong><small>{language === "en" ? "Server" : "服务器"}</small></span>
-            </NavLink>
-          ) : null}
         </div>
       </nav>
 
