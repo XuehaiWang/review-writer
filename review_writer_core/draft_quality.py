@@ -16,7 +16,7 @@ from review_writer_core.workflow.artifacts import (
 )
 
 
-DRAFT_QUALITY_RULE_VERSION = "draft-quality/10"
+DRAFT_QUALITY_RULE_VERSION = "draft-quality/11"
 FULL_DRAFT_QUALITY_SCOPE = "full_draft"
 DEFAULT_SCORE_TOLERANCE = 1.0
 QUALITY_INPUT_ARTIFACTS = {

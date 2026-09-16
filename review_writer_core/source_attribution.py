@@ -2,6 +2,63 @@
 
 from .quality_rules import finding_category
 
+CONTRIBUTION_WRITING_POLICY = (
+    "Understand each paper's research problem and actual contribution before choosing examples. "
+    "A passage located in a paper does not prove that paper owns the finding. Distinguish own results, "
+    "prior work and unknown ownership using context and citations, never section names alone. "
+    "Contribution summaries are navigation, not independently verified evidence. Never infer priority "
+    "or historical influence from publication order. Preserve counterexamples. "
+    "Write new scientific prose organized around the question, not copied source sentences, translations "
+    "or synonym substitution. Preserve technical names, formulas, quantities and experimental scope. "
+    "Exact quotations belong only in evidence fields. Include detailed conditions only when they explain "
+    "the argument; other supported records may go into comparison tables."
+)
+
+SECTION_THREAD_POLICY = (
+    "Use one clear section thread: explain the question and organizing rationale, then order paragraph "
+    "tasks so each example advances it, and end with a supported answer or bounded uncertainty. "
+    "Chronology, structural differences, problem progression and strategy comparison are examples, "
+    "not a mandatory taxonomy or paragraph quota. Explain why adjacent examples belong together; "
+    "adding 'furthermore' is not a scientific transition. Do not invent mechanistic explanations, "
+    "comparability or historical dependence to connect paragraphs. Single-study cases and parallel "
+    "organization are legitimate. Do not repeat a limitations disclaimer at every paragraph ending."
+)
+
+
+def contribution_context(analysis, *, limit=900):
+    """One compact navigation projection shared by planning and writing."""
+    if not isinstance(analysis, dict):
+        return {}
+    result = {key: " ".join(str(analysis.get(key) or "").split())[:limit]
+              for key in ("research_question", "contribution", "topic_relation")}
+    if not any(result.values()):
+        return {}
+    return {**result, "usage": "navigation_only", "fact_ids": list(analysis.get("fact_ids") or [])}
+
+
+def section_navigation_context(plan, paragraphs):
+    """Transient writing context; current prose is navigation, never source evidence."""
+    sections = {str(p.get("paragraph_id")): section
+                for section in plan.get("sections") or []
+                for p in section.get("paragraphs") or [] if p.get("paragraph_id")}
+    result = {}
+    for index, paragraph in enumerate(paragraphs):
+        pid = str(paragraph.get("paragraph_id") or "")
+        section = sections.get(pid)
+        if not section:
+            continue
+        context = {key: section.get(key) for key in
+                   ("section_id", "organizing_thread", "paragraph_tasks", "questions_to_answer", "paper_roles")}
+        context["usage"] = "navigation_only_not_source_evidence"
+        for label, position in (("previous", index - 1), ("next", index + 1)):
+            if 0 <= position < len(paragraphs):
+                neighbor = paragraphs[position]
+                if sections.get(str(neighbor.get("paragraph_id"))) is section:
+                    context[label] = {"paragraph_id": neighbor["paragraph_id"],
+                                      "text": str(neighbor.get("text") or "")[:900]}
+        result[pid] = context
+    return result
+
 
 def validated_attribution_repair(text, proposal, evidence):
     """Source-addressable rewrite guidance, not permission to bypass candidate QA."""

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from review_writer_core.provider_errors import public_model_error
+
 from review_writer_api.paper_labels import library_paper_labels
 
 import base64
@@ -1373,7 +1375,7 @@ class FiguresService(OwnedProjectService):
             "progress_current": job.progress_current,
             "progress_total": job.progress_total,
             "error_code": job.error_code,
-            "error_message": job.error_message,
+            "error_message": public_model_error(job.error_message or ""),
             "result": job.result,
             "retry_of_job_id": job.retry_of_job_id,
         }

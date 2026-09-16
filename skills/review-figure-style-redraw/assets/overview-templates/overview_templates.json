@@ -4,15 +4,22 @@
     "name": "top-strip-5col-table",
     "description": "Top visual strip, five equal columns, and one summary band",
     "layout_type": "top-reaction-5col-table",
-    "prompt": "Use a wide top visual strip, five equal-width content columns, and one full-width bottom band. Populate headings and short text only from the overview content contract. Each column may contain a heading, one visual slot, and up to three concise evidence-bound lines. Use a verified representative structure only when the structure contract is resolved; otherwise use an abstract subject icon. Do not invent names, dates, categories, structures, metrics, mechanisms, or conclusions.",
+    "prompt": "Use a wide top visual strip, up to five equal-width content columns, and one full-width bottom band. Populate headings and short text only from the overview display contract. Each column may contain a heading, one visual slot, and up to two distinct compact evidence-bound statements. Print each supplied statement exactly once and omit empty filler rows. Use a verified representative structure only when the structure contract is resolved; otherwise use an abstract subject icon. Never reproduce source paragraphs, paper-ID lists, or result-context records. Do not invent names, dates, categories, structures, metrics, mechanisms, or conclusions.",
     "reference_image": "template_1.png",
     "layout_capabilities": {
       "reaction_slot": "hero-horizontal",
       "reaction_slot_ratio": 0.24,
+      "nominal_columns": 5,
+      "words_per_card": 24,
+      "reaction_slot_fidelity": "high",
       "module_count_range": [
         2,
         6
       ],
+      "claims_per_module_range": [0, 2],
+      "unassigned_findings_capacity": 0,
+      "cross_cutting_capacity": 0,
+      "take_home_capacity": 6,
       "sidebar": false,
       "information_density": "high"
     }
@@ -22,7 +29,7 @@
     "name": "center-radial-classification",
     "description": "Central subject with up to five balanced branches",
     "layout_type": "center-radial-classification",
-    "prompt": "Place the evidence-bound review subject in the center and arrange up to five contract-provided modules around it. Each outer panel may contain one short heading, one icon or verified visual, and up to two concise lines. Preserve clear branch relationships and generous whitespace. Omit unused branches. Do not invent labels, categories, structures, metrics, dates, or conclusions.",
+    "prompt": "Place the evidence-bound review subject in the center and arrange up to five contract-provided modules around it. Each outer panel may contain one short heading, one icon or verified visual, and no more than one compact statement from the overview display contract. Preserve clear branch relationships and generous whitespace. Omit unused branches. Never reproduce source paragraphs or paper-ID lists. Do not invent labels, categories, structures, metrics, dates, or conclusions.",
     "reference_image": "template_9.png",
     "layout_capabilities": {
       "reaction_slot": "compact-central",
@@ -31,6 +38,9 @@
         3,
         6
       ],
+      "claims_per_module_range": [0, 1],
+      "cross_cutting_capacity": 4,
+      "take_home_capacity": 0,
       "sidebar": false,
       "information_density": "medium"
     }
@@ -40,7 +50,7 @@
     "name": "route-map-input-strategy-result",
     "description": "Horizontal lanes connecting inputs, approaches, and outcomes",
     "layout_type": "route-map-start-strategy-result",
-    "prompt": "Create up to five horizontal lanes with three sequential slots per lane: source or context, approach, and evidence-bound outcome. Use contract-provided module labels and short statements only. Add one narrow bottom band for remaining contract-provided synthesis points. A resolved structure contract may fill one visual slot; otherwise use an abstract icon. Do not fabricate structures, values, mechanisms, dates, or outcomes.",
+    "prompt": "Create up to five horizontal lanes with three sequential slots per lane: source or context, approach, and evidence-bound outcome. Use contract-provided module labels and at most one compact statement per lane from the overview display contract. Add one narrow bottom band only when a separate short synthesis point is supplied. Never reproduce source paragraphs or paper-ID lists. A resolved structure contract may fill one visual slot; otherwise use an abstract icon. Do not fabricate structures, values, mechanisms, dates, or outcomes.",
     "reference_image": "template_8.png",
     "layout_capabilities": {
       "reaction_slot": "compact-header",
@@ -49,6 +59,9 @@
         2,
         6
       ],
+      "claims_per_module_range": [0, 1],
+      "cross_cutting_capacity": 4,
+      "take_home_capacity": 4,
       "sidebar": true,
       "information_density": "high"
     }
@@ -58,7 +71,7 @@
     "name": "module-dimension-matrix",
     "description": "Five-column comparison matrix with four flexible rows",
     "layout_type": "metal-x-dimension-matrix",
-    "prompt": "Create a comparison matrix with up to five contract-provided module columns and up to four compact evidence dimensions. Column and row labels must come from the overview content contract. Cells may use a short phrase, small icon, or verified visual. Omit empty cells and preserve readable spacing. Add a bottom synthesis band only when the contract supplies a supported cross-module statement. Do not invent categories, metrics, structures, dates, or conclusions.",
+    "prompt": "Create a comparison matrix with up to five contract-provided module columns and up to four compact evidence dimensions. Column and row labels must come from the overview display contract. Cells may use only a short phrase, small icon, or verified visual. Never reproduce source paragraphs, paper-ID lists, or result-context records. Omit empty cells and preserve readable spacing. Add a bottom synthesis band only when the contract supplies a supported short cross-module statement. Do not invent categories, metrics, structures, dates, or conclusions.",
     "reference_image": "template_6.png",
     "layout_capabilities": {
       "reaction_slot": "none",
@@ -67,6 +80,9 @@
         3,
         8
       ],
+      "claims_per_module_range": [0, 1],
+      "cross_cutting_capacity": 4,
+      "take_home_capacity": 4,
       "sidebar": false,
       "information_density": "high"
     }
@@ -76,15 +92,22 @@
     "name": "module-cards-crosscut-sidebar",
     "description": "Five modular cards with a narrow cross-cutting sidebar",
     "layout_type": "module-cards-crosscut-sidebar",
-    "prompt": "Arrange up to five tall modular cards and one narrow sidebar. Each card may contain a contract-provided heading, one visual slot, and up to three short evidence-bound statements. The sidebar may contain only cross-module points supplied by the content contract. Omit unused cards or sidebar rows. Use a verified structure only when resolved. Do not add a fixed time window, abbreviations, domain labels, metrics, or conclusions.",
+    "prompt": "Arrange up to five tall modular cards, one narrow cross-cutting sidebar, and an optional compact bottom take-home band. Each card may contain a contract-provided heading, one visual slot, and up to two distinct compact evidence-bound statements from the overview display contract. Print every supplied statement exactly once. The sidebar may contain only separately supplied short cross-module points. Never reproduce source paragraphs, paper-ID lists, or result-context records. Omit unused cards, sidebar rows, and bottom items. Use a verified structure only when resolved. Do not add a fixed time window, unsupplied abbreviations, domain labels, metrics, or conclusions.",
     "reference_image": "template_3.png",
     "layout_capabilities": {
       "reaction_slot": "hero-horizontal",
       "reaction_slot_ratio": 0.22,
+      "nominal_columns": 5,
+      "words_per_card": 24,
+      "reaction_slot_fidelity": "high",
       "module_count_range": [
         2,
         6
       ],
+      "claims_per_module_range": [0, 2],
+      "unassigned_findings_capacity": 2,
+      "cross_cutting_capacity": 4,
+      "take_home_capacity": 4,
       "sidebar": true,
       "information_density": "high"
     }
@@ -94,7 +117,7 @@
     "name": "tree-classification",
     "description": "Central classification node with up to five branches",
     "layout_type": "tree-metal-classification",
-    "prompt": "Build a clean scientific classification tree with one central node and up to five branches from the content contract. Each branch may contain one heading and up to three compact leaf boxes. Leaf text and relationships must be evidence-bound. Add a shared bottom node only when a supported synthesis statement is supplied. Do not invent classifications, structures, metrics, mechanisms, dates, or take-home claims.",
+    "prompt": "Build a clean scientific classification tree with one central node and up to five branches from the overview display contract. Each branch may contain one heading and no more than one compact evidence leaf. Never reproduce source paragraphs or paper-ID lists. Add a shared bottom node only when a supported short synthesis statement is supplied. Do not invent classifications, structures, metrics, mechanisms, dates, or take-home claims.",
     "reference_image": "template_2.png",
     "layout_capabilities": {
       "reaction_slot": "compact-header",
@@ -103,6 +126,9 @@
         2,
         6
       ],
+      "claims_per_module_range": [0, 1],
+      "cross_cutting_capacity": 1,
+      "take_home_capacity": 1,
       "sidebar": false,
       "information_density": "medium"
     }
@@ -112,7 +138,7 @@
     "name": "context-strategy-outcome",
     "description": "Three-section context, strategy, and outcome layout",
     "layout_type": "why-strategy-what",
-    "prompt": "Use three connected sections: context, up to five contract-provided modules, and supported outcomes or implications. The middle section is visually dominant. Each module may contain one heading, one icon or verified visual, and up to two concise lines. All visible wording must come from the overview content contract. Do not invent domain concepts, structures, mechanisms, values, dates, or summary messages.",
+    "prompt": "Use three connected sections: context, up to five contract-provided modules, and supported outcomes or implications. The middle section is visually dominant. Each module may contain one heading, one icon or verified visual, and no more than one compact statement. All visible wording must come from the overview display contract; never reproduce source paragraphs or paper-ID lists. Do not invent domain concepts, structures, mechanisms, values, dates, or summary messages.",
     "reference_image": "template_10.png",
     "layout_capabilities": {
       "reaction_slot": "compact-left",
@@ -121,6 +147,9 @@
         2,
         6
       ],
+      "claims_per_module_range": [0, 1],
+      "cross_cutting_capacity": 4,
+      "take_home_capacity": 0,
       "sidebar": false,
       "information_density": "medium"
     }
@@ -130,7 +159,7 @@
     "name": "asymmetric-ring-sidebar",
     "description": "Asymmetric ring of modules with a right summary sidebar",
     "layout_type": "asymmetric-ring-right-sidebar",
-    "prompt": "Arrange up to five contract-provided modules on an intentionally asymmetric ring and reserve a tall right sidebar for supported cross-module statements. Each module may contain a short heading, one visual slot, and one concise line. Omit empty modules. Use verified structures only when the structure contract is resolved; otherwise use abstract icons. Do not fabricate labels, structures, metrics, dates, or conclusions.",
+    "prompt": "Arrange up to five contract-provided modules on an intentionally asymmetric ring and reserve a tall right sidebar for supported cross-module statements. Each module may contain a short heading, one visual slot, and no more than one compact statement from the overview display contract. Never reproduce source paragraphs or paper-ID lists. Omit empty modules. Use verified structures only when the structure contract is resolved; otherwise use abstract icons. Do not fabricate labels, structures, metrics, dates, or conclusions.",
     "reference_image": "template_7.png",
     "layout_capabilities": {
       "reaction_slot": "none",
@@ -139,6 +168,9 @@
         3,
         6
       ],
+      "claims_per_module_range": [0, 1],
+      "cross_cutting_capacity": 4,
+      "take_home_capacity": 0,
       "sidebar": true,
       "information_density": "medium"
     }
@@ -148,15 +180,19 @@
     "name": "dual-page-spread",
     "description": "Two-panel spread with classification and stacked modules",
     "layout_type": "dual-page-spread",
-    "prompt": "Create a balanced two-panel spread. The left panel holds the evidence-bound title, primary organizing axis, and one optional verified visual. The right panel holds up to five stacked contract-provided modules, each with a heading and up to two concise lines. Add a shared bottom band only for supported synthesis statements. Do not invent classifications, dates, structures, metrics, or conclusions.",
+    "prompt": "Create a balanced two-panel spread. The left panel holds the evidence-bound title, primary organizing axis, and one optional verified visual. The right panel holds up to five stacked modules, each with a heading and no more than one compact statement from the overview display contract. Never reproduce source paragraphs or paper-ID lists. Add a shared bottom band only for separately supplied short synthesis statements. Do not invent classifications, dates, structures, metrics, or conclusions.",
     "reference_image": "template_5.png",
     "layout_capabilities": {
-      "reaction_slot": "hero-horizontal",
-      "reaction_slot_ratio": 0.26,
+      "reaction_slot": "none",
+      "reaction_slot_ratio": 0.0,
+      "reaction_slot_fidelity": "low",
       "module_count_range": [
         2,
         6
       ],
+      "claims_per_module_range": [0, 1],
+      "cross_cutting_capacity": 0,
+      "take_home_capacity": 6,
       "sidebar": true,
       "information_density": "high"
     }
@@ -166,7 +202,7 @@
     "name": "mosaic-infographic",
     "description": "Five main mosaic tiles with two optional support tiles",
     "layout_type": "mosaic-infographic",
-    "prompt": "Create up to five aligned main mosaic tiles and no more than two smaller support tiles. Main tile headings and short evidence lines must come from the contract-provided modules. Support tiles may contain only evidence-bound cross-module synthesis points. A resolved representative structure may occupy one visual tile; otherwise use an abstract subject icon. Omit unused tiles and do not invent categories, structures, metrics, dates, trends, or conclusions.",
+    "prompt": "Create up to five aligned main mosaic tiles and no more than two smaller support tiles. Each main tile may contain its module heading and no more than one compact statement from the overview display contract. Support tiles may contain only separately supplied short cross-module synthesis points. Never reproduce source paragraphs, paper-ID lists, or result-context records. A resolved representative structure may occupy one visual tile; otherwise use an abstract subject icon. Omit unused tiles and do not invent categories, structures, metrics, dates, trends, or conclusions.",
     "reference_image": "template_4.png",
     "layout_capabilities": {
       "reaction_slot": "none",
@@ -175,6 +211,9 @@
         3,
         8
       ],
+      "claims_per_module_range": [0, 1],
+      "cross_cutting_capacity": 2,
+      "take_home_capacity": 0,
       "sidebar": false,
       "information_density": "high"
     }

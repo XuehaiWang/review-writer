@@ -318,6 +318,11 @@ class SectionsService(OwnedProjectService):
                     "heading": str(section.get("title") or section["section_id"]),
                     "section_role": str(section.get("section_role") or "body"),
                     "core_argument": core_argument,
+                    "organizing_thread": str(section.get("organizing_thread") or ""),
+                    "paragraph_tasks": [v for v in section.get("paragraph_tasks", []) if isinstance(v, str)]
+                        if isinstance(section.get("paragraph_tasks"), list) else [],
+                    "paper_roles": [v for v in section.get("paper_roles", []) if isinstance(v, dict)]
+                        if isinstance(section.get("paper_roles"), list) else [],
                     "primary_papers": primary_papers,
                     "supporting_papers": supporting_papers,
                     "context_papers": context_papers,

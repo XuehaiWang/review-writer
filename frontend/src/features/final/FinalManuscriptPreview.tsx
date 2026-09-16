@@ -6,11 +6,9 @@ import { MarkdownView } from "../../components/MarkdownView";
 import { useUiText } from "../../i18n/useUiText";
 
 export type FinalVersion = { artifact_id: string; created_at: string; operation: string; current: boolean; downloads?: { artifact_id: string; format: string }[] };
-type Props = { projectId: string; revision: number; artifactId: string; current: boolean; markdown: string;
-  paragraphs: Array<{ paragraph_id: string; text: string }>; versions: FinalVersion[]; refresh: () => Promise<unknown> };
+type Props = { projectId: string; markdown: string; versions: FinalVersion[] };
 
-// Kept as a compatibility component name; no mutation of final prose is exposed.
-export function FinalManuscriptEditor(props: Props) {
+export function FinalManuscriptPreview(props: Props) {
   const { text } = useUiText();
   const [viewed, setViewed] = useState<{ id: string; markdown: string } | null>(null);
   const inspect = useMutation({ mutationFn: async (id: string) => ({ id, markdown: await apiRequest<string>("/api/v1/artifacts/" + id + "/content") }), onSuccess: setViewed });

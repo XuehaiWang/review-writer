@@ -1,3 +1,4 @@
+import { sectionErrorMessage } from "./sectionErrorMessage";
 import { useState } from "react";
 import type { Job } from "../../api/types";
 import { MarkdownView } from "../../components/MarkdownView";
@@ -102,7 +103,7 @@ export function SectionJobProgress({ job }: { job: Job }) {
     title = completed.length
       ? text("部分结果已保留，任务待继续", "Results retained; task needs continuation")
       : text("章节生成失败", "Section generation failed");
-    detail = job.error_message || text("请查看错误信息并重试。", "Review the error and retry.");
+    detail = sectionErrorMessage(job.error_message || "", text);
   } else if (job.status === "cancelled") {
     title = text("章节生成已取消", "Section generation cancelled");
     detail = text("本次任务没有发布不完整章节。", "This job did not publish incomplete sections.");
@@ -129,7 +130,7 @@ export function SectionJobProgress({ job }: { job: Job }) {
       {job.status !== "succeeded" && completed.length ? <p>{text(`已保留 ${completed.length} 章的检查点；整批发布前不会替换当前正式版本。`, `${completed.length} section checkpoints retained; the current version is unchanged until the batch is published.`)}</p> : null}
       {completed.length ? <p className="section-progress-summary">{text(`标准生成 ${standardCount} · 自动修复 ${repairedCount} · 安全保底 ${fallbackCount}`, `Standard ${standardCount} · repaired ${repairedCount} · safe fallback ${fallbackCount}`)}{evidenceNoticeCount ? text(` · 证据有限/待补充 ${evidenceNoticeCount}（可继续）`, ` · limited/pending evidence ${evidenceNoticeCount} (can continue)`) : ""}</p> : null}
       {completed.length ? <ol className="section-progress-completed">{completed.map((section, index) => <li key={`${section.section_id || "section"}-${index}`}><span>{section.heading || section.section_id || text(`章节 ${index + 1}`, `Section ${index + 1}`)}</span><small>{[generationLabel(section), readinessLabel(section)].filter(Boolean).join(" · ")}</small></li>)}</ol> : null}
-      {failed.length ? <ol className="section-progress-completed failed">{failed.map((section, index) => <li key={`failed-${section.section_id || "section"}-${index}`}><span>{section.heading || section.section_id || text(`章节 ${index + 1}`, `Section ${index + 1}`)}</span><small>{section.error || text("待修复，重试时恢复此章", "Needs repair; retry resumes this section")}</small></li>)}</ol> : null}
+      {failed.length ? <ol className="section-progress-completed failed">{failed.map((section, index) => <li key={`failed-${section.section_id || "section"}-${index}`}><span>{section.heading || section.section_id || text(`章节 ${index + 1}`, `Section ${index + 1}`)}</span><small>{sectionErrorMessage(section.error || "", text)}</small></li>)}</ol> : null}
       {job.status !== "succeeded" && previews.length ? <div className="section-checkpoint-preview">
         <p>{text("查看本次任务已保留的正文（未发布预览，不会替换当前稿件或进入下游）。", "Preview prose retained by this task. Unpublished; it does not replace the current manuscript or enter downstream stages.")}</p>
         <div className="chip-list">{previews.map((section) => <button type="button" key={section.section_id}

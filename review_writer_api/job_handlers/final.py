@@ -108,9 +108,25 @@ class FinalJobHandlers:
         return self._result(staging, "final-front-matter-output.json")
 
     def final_overview(self, context, payload):
+        # Capture the previous step cache before compatibility materialization
+        # clears the current staging workspace. No shared/global user cache.
+        cache = payload.get("overview_generation_cache")
+        for job_id in (context.job_id, getattr(context, "retry_of_job_id", None)):
+            if isinstance(cache, dict) or not job_id:
+                continue
+            old = (self._staging(context.user_id, job_id) / "final-overview-workspace"
+                   / "review-projects" / self._assert_safe_project_id(str(payload["project_id"]))
+                   / "03_figure_redraw" / "overview_generation_cache.json")
+            if old.is_file() and not old.is_symlink():
+                try:
+                    cache = json.loads(old.read_text(encoding="utf-8"))
+                except (ValueError, OSError):
+                    cache = None
         staging, workspace, project = self._compatibility_workspace(
             context, payload, name="final-overview-workspace"
         )
+        if isinstance(cache, dict):
+            self._write_json(project / "03_figure_redraw" / "overview_generation_cache.json", cache)
         project_id = str(payload["project_id"])
         output = project / "03_figure_redraw" / "overview_figure.png"
         report_path = project / "03_figure_redraw" / "overview_template_match.json"
@@ -147,7 +163,9 @@ class FinalJobHandlers:
             env=normal,
             secret_env=secrets,
             cancel_requested=context.cancellation_requested,
-            timeout_seconds=15 * 60,
+            # Initial generation + at most two corrections, with bounded OCR
+            # and text audits. The shared runner still handles cancellation.
+            timeout_seconds=60 * 60,
         )
         report = json.loads(report_path.read_text(encoding="utf-8"))
         features = report.get("features") if isinstance(report, dict) else {}

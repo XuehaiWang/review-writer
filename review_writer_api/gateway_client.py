@@ -75,7 +75,7 @@ class GatewayTaskEnvironmentClient:
                 break
             except urllib.error.HTTPError as exc:
                 last_error = exc
-                if exc.code not in {408, 425, 429, 500, 502, 503, 504}:
+                if exc.code not in {408, 425, 429, 500, 502, 503, 504, 524}:
                     break
             except (urllib.error.URLError, TimeoutError, ValueError) as exc:
                 last_error = exc
@@ -159,7 +159,7 @@ class GatewayTaskEnvironmentClient:
                 return decoded
             except urllib.error.HTTPError as exc:
                 last_error = exc
-                if exc.code not in {408, 425, 429, 500, 502, 503, 504}:
+                if exc.code not in {408, 425, 429, 500, 502, 503, 504, 524}:
                     try:
                         detail_payload = json.loads(exc.read().decode("utf-8"))
                         detail = str(detail_payload.get("detail") or "").strip()

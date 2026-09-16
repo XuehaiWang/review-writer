@@ -1,3 +1,4 @@
+import { sectionErrorMessage } from "./sectionErrorMessage";
 import { useUiText } from "../../i18n/useUiText";
 
 type Props = {
@@ -46,6 +47,7 @@ export function SectionStageActions({
         {text(`本次不包含：${pendingHeadings.join("、")}。确认后，其余正文进入下一阶段；这些章节仍保留在大纲中。`,
           `Not included this time: ${pendingHeadings.join(", ")}. Confirm to continue with the available prose; these sections remain in your outline.`)}
       </p> : null}
+      {error ? <p role="alert" className="message message-error section-action-error">{sectionErrorMessage(error.message, text)}</p> : null}
     </div>
     <div className="stage-action-buttons">
       {current ? <>
@@ -62,6 +64,5 @@ export function SectionStageActions({
         {active ? text("正在生成…", "Generating…") : generating ? text("正在提交…", "Submitting…") : resumable ? text("继续生成", "Resume generation") : text("生成所有章节草稿", "Generate all section drafts")}
       </button>}
     </div>
-    {error ? <span className="message message-error">{error.message}</span> : null}
   </div>;
 }

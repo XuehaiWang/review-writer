@@ -219,20 +219,18 @@ def bibliography_field_readiness(
         document_type=document_type,
         parent_paper_id=parent_paper_id,
     )
+    optional_missing = []
     if document_type == "journal_article":
-        canonical_doi = normalize_doi(_value(metadata, "doi"))
-        online_first = str(
-            _value(metadata, "publication_status") or ""
-        ).casefold() in {"online_first", "early_view", "accepted_manuscript"}
         has_locator = bool(
             _value(metadata, "pages")
             or _value(metadata, "article_number")
             or _value(metadata, "locator")
         )
-        if not has_locator and not (canonical_doi and online_first):
-            missing.append("pages_or_article_number")
-        if not canonical_doi and not has_locator:
-            missing.append("doi_or_locator")
+        # Citation completeness is distinct from publication identity. Identity
+        # still requires the normal audit; missing pagination alone is not a gate,
+        # including articles whose identity was verified without a DOI.
+        if not has_locator:
+            optional_missing.append("pages_or_article_number")
     polluted: list[str] = []
     raw_authors = _value(metadata, "authors")
     author_issues = author_quality_issues(raw_authors)
@@ -266,6 +264,7 @@ def bibliography_field_readiness(
         "parent_paper_id": parent_paper_id,
         "required_fields": list(DOCUMENT_REQUIREMENTS[document_type]),
         "missing_fields": missing,
+        "optional_missing_fields": optional_missing,
         "polluted_fields": polluted,
         "author_quality_issues": author_issues,
         "unresolved_conflicts": unresolved_conflicts,

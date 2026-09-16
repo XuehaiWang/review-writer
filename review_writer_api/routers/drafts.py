@@ -35,6 +35,14 @@ def build_drafts_router(
     def get_section_dialogue(project_id: str, section_id: str, principal: Principal = Depends(principal_dependency)):
         return drafts_service.section_dialogue_history(principal, project_id, section_id)
 
+    @router.get("/section-dialogues/{section_id}/versions")
+    def section_versions(project_id: str, section_id: str, principal: Principal = Depends(principal_dependency)):
+        return drafts_service.section_versions(principal, project_id, section_id)
+
+    @router.get("/section-dialogues/{section_id}/versions/{artifact_id}")
+    def section_version(project_id: str, section_id: str, artifact_id: str, principal: Principal = Depends(principal_dependency)):
+        return drafts_service._section_version(principal, project_id, section_id, artifact_id)
+
     @router.post("/section-dialogues/{section_id}", status_code=status.HTTP_202_ACCEPTED)
     def start_section_dialogue(project_id: str, section_id: str, payload: DraftSectionDialogueRequest,
                                idempotency_key: str = Header(default="", alias="Idempotency-Key"),

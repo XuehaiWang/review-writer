@@ -7,6 +7,59 @@ from review_writer_api.errors import WorkflowConflict
 
 
 class ParagraphDialogueTests(fixtures.DraftsV1Tests):
+    def test_initial_chapter_is_immutable_and_restart_is_isolated_until_acceptance(self):
+        from review_writer_core.workflow.artifacts import DRAFT_INITIAL_MANUSCRIPT
+        with TestClient(self.app) as client:
+            self.prepare_draft(client)
+            base = f"/api/v1/projects/{self.project_id}/draft"
+            before = client.get(base).json()
+            section = before["sections"][0]
+            endpoint = base + "/section-dialogues/" + section["section_id"]
+            versions = client.get(endpoint + "/versions").json()
+            initial = versions["initial"]
+            self.assertIsNotNone(initial)
+            original = section["paragraphs"][0]
+            self.assertEqual(original["text"], initial["paragraphs"][0]["text"])
+            self.start_turn(client, original, "old-discussion")
+            service = self.app.state.drafts_service
+            candidate = service.dialogue_history(self.first, self.project_id, original["paragraph_key"])["messages"][-1]["candidate"]
+            service.decide_dialogue(self.first, self.project_id, candidate["candidate_id"], decision="accept")
+            saved = client.get(base).json()
+            current = saved["sections"][0]
+            self.assertNotEqual(original["text"], current["paragraphs"][0]["text"])
+            self.assertEqual(initial, client.get(endpoint + "/versions").json()["initial"])
+            body = {"message": "Start from the initial wording", "action": "revise", "branch_id": "new-branch",
+                    "initial_artifact_id": initial["artifact_id"],
+                    "base_hashes": {p["paragraph_key"]: p["text_sha256"] for p in current["paragraphs"]}}
+            response = client.post(endpoint, headers=self.headers("restart"), json=body)
+            self.assertEqual(202, response.status_code, response.text)
+            for _ in range(150):
+                job = client.get("/api/v1/jobs/" + response.json()["id"]).json()
+                if job["status"] not in {"queued", "running"}:
+                    break
+                time.sleep(.02)
+            self.assertEqual("succeeded", job["status"])
+            self.assertEqual(next(p["text"] for p in initial["paragraphs"] if p["paragraph_id"] == self.last_dialogue["paragraph_id"]), self.last_dialogue["discussion_text"])
+            self.assertEqual("", self.last_dialogue["parent_candidate_id"])
+            self.assertFalse(self.last_dialogue["section_context"]["conversation_memory"]["recent_turns"])
+            after = client.get(base).json()
+            self.assertEqual(saved["draft_artifact_id"], after["draft_artifact_id"])
+            new_candidate = next(c for c in after["rewrite_candidates"] if c.get("batch_job_id") == job["id"] and c["paragraph_key"] == original["paragraph_key"])
+            self.assertEqual("new-branch", new_candidate["branch_id"])
+            self.assertEqual(original["text"], new_candidate["discussion_text"])
+            self.assertEqual(current["paragraphs"][0]["text_sha256"], new_candidate["base_text_sha256"])
+            self.assertEqual(200, client.post(base + "/dialogue-candidates/" + new_candidate["candidate_id"] + "/accept").status_code)
+            accepted = client.get(base).json()
+            for other in accepted["paragraphs"]:
+                if other["paragraph_key"] != original["paragraph_key"]:
+                    self.assertEqual(other["text"], next(p["text"] for p in saved["paragraphs"] if p["paragraph_key"] == other["paragraph_key"]))
+            self.assertEqual(initial, client.get(endpoint + "/versions").json()["initial"])
+            self.assertEqual(1, len(service.repository.list_artifacts(self.first.user_id, self.project_id, DRAFT_INITIAL_MANUSCRIPT)))
+            forged = client.post(endpoint, headers=self.headers("forged-baseline"), json={**body,
+                "base_hashes": {p["paragraph_key"]: p["text_sha256"] for p in accepted["sections"][0]["paragraphs"]},
+                "initial_artifact_id": accepted["draft_artifact_id"]})
+            self.assertEqual(409, forged.status_code)
+
     def test_section_turn_is_scoped_persisted_and_does_not_save_automatically(self):
         with TestClient(self.app) as client:
             self.prepare_draft(client)
@@ -20,7 +73,7 @@ class ParagraphDialogueTests(fixtures.DraftsV1Tests):
             service.decide_dialogue(self.first, self.project_id, earlier["candidate_id"], decision="reject")
             body = {"message": "Improve the chapter's argument where needed",
                 "base_hashes": {p["paragraph_key"]: p["text_sha256"] for p in section["paragraphs"]},
-                "paragraph_keys": [target["paragraph_key"]], "use_saved": False, "action": "revise"}
+                "action": "revise"}
             endpoint = base + "/section-dialogues/" + section["section_id"]
             response = client.post(endpoint, headers=self.headers("section-turn"), json=body)
             self.assertEqual(202, response.status_code, response.text)

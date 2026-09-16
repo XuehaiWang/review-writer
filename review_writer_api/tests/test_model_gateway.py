@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager, contextmanager
+
 import base64
 import asyncio
 import json
@@ -39,7 +41,87 @@ from review_writer_api.workflow_models import WorkflowJob
 TEST_KEY = base64.urlsafe_b64encode(b"g" * 32).decode("ascii")
 
 
+@contextmanager
+def mock_stream_reply(client, reply_mock):
+    """Exercise the real streaming parser with buffered provider responses."""
+    @asynccontextmanager
+    async def stream(method, endpoint, **kwargs):
+        response = await reply_mock(endpoint, **kwargs)
+        try:
+            yield response
+        finally:
+            await response.aclose()
+    with mock.patch.object(client, "stream", stream):
+        yield reply_mock
+
+
 class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_524_retries_streaming_and_buffered_calls_with_same_key(self):
+        from review_writer_api.model_gateway import GatewayProviderError
+        for streaming in (True, False):
+            for recover in (True, False):
+                with self.subTest(streaming=streaming, recover=recover):
+                    requests = []
+                    def provider(request):
+                        requests.append(request)
+                        if recover and len(requests) == 2:
+                            return httpx.Response(200, json={"output_text": "ready"})
+                        return httpx.Response(524, text="Origin response timeout")
+                    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
+                        with mock.patch.object(self.service, "_provider_client", client), mock.patch("asyncio.sleep", new=mock.AsyncMock()):
+                            call = self.service._provider_call(tier=resolve_model_tier(None, self.sessions),
+                                prompt="facts", idempotency_key="same-request", stream=streaming,
+                                request_id=str(uuid.uuid4()))
+                            # This transport test has no persisted task/request budget.
+                            with mock.patch.object(self.service, "_reserve_text_attempt", return_value={}):
+                                if recover:
+                                    self.assertEqual("ready", (await call)["output_text"])
+                                else:
+                                    with self.assertRaises(GatewayProviderError) as failure:
+                                        await call
+                                    self.assertEqual(524, failure.exception.gateway_detail["details"]["provider_status"])
+                    self.assertEqual(2 if recover else 3, len(requests))
+                    self.assertEqual({"same-request"}, {request.headers["Idempotency-Key"] for request in requests})
+
+    async def test_major_text_stages_use_stream_and_preserve_completed_results(self):
+        stages = ("matrix-facts-P1", "fact-verify-P1", "blueprint-plan-S01", "section-source-writing")
+        requests = []
+        completed = {"output_text": '{"facts":[]}', "usage": {"input_tokens": 3, "output_tokens": 4}}
+        def provider(request):
+            requests.append(json.loads(request.content))
+            events = [{"type": "response.output_text.delta", "delta": '{"facts":[]}'},
+                      {"type": "response.completed", "response": completed}]
+            return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                content="".join("data: " + json.dumps(event) + "\n\n" for event in events))
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
+            with mock.patch.object(self.service, "_provider_client", client):
+                for stage in stages:
+                    result = await self.service.complete(self.token(), request_key=stage, stage=stage, prompt="facts")
+                    self.assertEqual(completed["output_text"], result["output_text"])
+                    cached = await self.service.complete(self.token(), request_key=stage, stage=stage, prompt="facts")
+                    self.assertTrue(cached["cached"])
+        self.assertEqual(len(stages), len(requests))
+        self.assertTrue(all(request["stream"] for request in requests))
+
+    async def test_interrupted_stream_keeps_attempt_budget_and_never_returns_partial_success(self):
+        from review_writer_api.database import AIModelRequest
+        self.service.settings = replace(self.settings, text_job_max_provider_attempts=2)
+        requests = []
+        def provider(request):
+            requests.append(request)
+            return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                content='data: {"type":"response.output_text.delta","delta":"partial"}\n\n')
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
+            with mock.patch.object(self.service, "_provider_client", client), mock.patch("asyncio.sleep", new=mock.AsyncMock()):
+                with self.assertRaises(GatewayBudgetExceeded):
+                    await self.service.complete(self.token(), request_key="interrupted", stage="section-source-writing", prompt="facts")
+        self.assertEqual(2, len(requests))
+        with database_session(self.sessions) as session:
+            row = session.scalar(select(AIModelRequest))
+            self.assertEqual("failed", row.status)
+            self.assertEqual(2, row.response_json["provider_attempts"])
+            self.assertEqual(10, row.response_json["provider_input_chars"])
+
     async def test_dialogue_stream_publishes_before_completion(self):
         from review_writer_api.database import AIModelRequest
         service = self.service
@@ -99,7 +181,7 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
         from review_writer_api.model_gateway import GatewayProviderError
         from review_writer_api.schemas import ModelGatewayResultResponse
         reply = httpx.Response(503, json={"error": {"code": "insufficient_quota", "message": "Translated provider message"}})
-        with mock.patch.object(self.service._provider_client, "post", new=mock.AsyncMock(return_value=reply)) as post:
+        with mock_stream_reply(self.service._provider_client, mock.AsyncMock(return_value=reply)) as post:
             with self.assertRaises(GatewayProviderError) as failure:
                 await self.service.complete(self.token(), request_key="quota", stage="rewrite", prompt="one")
         self.assertEqual(1, post.await_count)
@@ -116,7 +198,7 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
         reply = {"output_text": "bounded result",
                  "usage": {"prompt_tokens": 5, "completion_tokens": 3}}
         post = mock.AsyncMock(side_effect=[httpx.Response(503), httpx.Response(200, json=reply)])
-        with mock.patch.object(self.service._provider_client, "post", post), mock.patch("asyncio.sleep", new=mock.AsyncMock()):
+        with mock_stream_reply(self.service._provider_client, post), mock.patch("asyncio.sleep", new=mock.AsyncMock()):
             first = await self.service.complete(self.token(), request_key="facts", stage="fact-verification", prompt="one")
             cached = await self.service.complete(self.token(), request_key="facts", stage="fact-verification", prompt="one")
             with self.assertRaises(GatewayBudgetExceeded):
@@ -128,7 +210,7 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_input_budget_blocks_before_provider_request(self):
         self.service.settings = replace(self.settings, text_job_max_input_chars=3)
-        with mock.patch.object(self.service._provider_client, "post", new=mock.AsyncMock()) as post:
+        with mock_stream_reply(self.service._provider_client, mock.AsyncMock()) as post:
             with self.assertRaises(GatewayBudgetExceeded):
                 await self.service.complete(self.token(), request_key="too-large", stage="rewrite", prompt="four")
         post.assert_not_awaited()
@@ -136,7 +218,7 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_retry_job_id_does_not_reset_consumed_model_budget(self):
         self.service.settings = replace(self.settings, text_job_max_provider_attempts=1)
         post = mock.AsyncMock(return_value=httpx.Response(200, json={"output_text": "done"}))
-        with mock.patch.object(self.service._provider_client, "post", post):
+        with mock_stream_reply(self.service._provider_client, post):
             await self.service.complete(self.token(), request_key="first", stage="facts", prompt="one")
             retry_id = uuid.uuid4()
             with database_session(self.sessions) as session:
@@ -156,14 +238,14 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
                 session.get(WorkflowJob, self.job_id).cancellation_requested = True
             return httpx.Response(503)
         post = mock.AsyncMock(side_effect=cancel_then_fail)
-        with mock.patch.object(self.service._provider_client, "post", post), mock.patch("asyncio.sleep", new=mock.AsyncMock()):
+        with mock_stream_reply(self.service._provider_client, post), mock.patch("asyncio.sleep", new=mock.AsyncMock()):
             with self.assertRaises(GatewayRequestConflict):
                 await self.service.complete(self.token(), request_key="cancel", stage="rewrite", prompt="one")
         self.assertEqual(1, post.await_count)
 
     async def test_lost_task_lease_prevents_another_provider_retry(self):
         post = mock.AsyncMock(return_value=httpx.Response(503))
-        with mock.patch.object(self.service._provider_client, "post", post), \
+        with mock_stream_reply(self.service._provider_client, post), \
              mock.patch.object(self.service, "_validate_live_job", side_effect=[None, None, InvalidTaskToken("lost lease")]), \
              mock.patch("asyncio.sleep", new=mock.AsyncMock()):
             with self.assertRaises(InvalidTaskToken):
@@ -174,7 +256,7 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
         token = self.token()
         with database_session(self.sessions) as session:
             session.get(Project, self.project_id).deleted_at = utc_now()
-        with mock.patch.object(self.service._provider_client, "post", new=mock.AsyncMock()) as post:
+        with mock_stream_reply(self.service._provider_client, mock.AsyncMock()) as post:
             with self.assertRaises(InvalidTaskToken):
                 await self.service.complete(token, request_key="deleted", stage="facts", prompt="one")
         post.assert_not_awaited()
@@ -185,7 +267,7 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(503)
 
         post = mock.AsyncMock(side_effect=delete_then_fail)
-        with mock.patch.object(self.service._provider_client, "post", post), mock.patch("asyncio.sleep", new=mock.AsyncMock()):
+        with mock_stream_reply(self.service._provider_client, post), mock.patch("asyncio.sleep", new=mock.AsyncMock()):
             with self.assertRaises(InvalidTaskToken):
                 await self.service.complete(self.token(), request_key="delete", stage="facts", prompt="one")
         self.assertEqual(1, post.await_count)
@@ -720,6 +802,17 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(["high", "low"], observed)
             self.assertEqual(b"image" * 10, result[0])
             self.assertEqual(2, result[3])
+
+    async def test_sunburst_preserves_requested_quality_and_cache_identity(self):
+        runtime = replace(self.service._image_runtime(), model_name="gpt-image-2.5-sunburst")
+        with mock.patch.object(self.service, "_image_runtime", return_value=runtime), \
+             mock.patch.object(self.service, "_provider_image_call", new=mock.AsyncMock(return_value=(b"image", "image/png", "provider-id", 1))) as provider:
+            arguments = dict(request_key="sunburst", stage="figures.redraw", operation="generate", prompt="diagram", images=[])
+            await self.service.complete_image(self.image_token(), quality="high", **arguments)
+            cached = await self.service.complete_image(self.image_token(), quality="high", **arguments)
+        self.assertEqual("high", provider.call_args.kwargs["quality"])
+        self.assertEqual(1, provider.call_count)
+        self.assertTrue(cached["cached"])
 
     async def test_image_request_is_cached_and_metered_separately(self) -> None:
         calls = 0

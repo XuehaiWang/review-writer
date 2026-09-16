@@ -38,7 +38,7 @@ it("starts with batch analysis and every workspace column changes its actual con
   expect(buttons.map(b => b.textContent)).toEqual(["01 Batch analysis & candidates", "02 Chapter dialogue", "03 Manuscript", "04 Approval", "History"]);
   expect(screen.getByRole("button", { name: "Start batch revision" })).toBeEnabled();
   fireEvent.click(buttons[1]);
-  expect(await screen.findByText("Saved paragraph")).toBeTruthy();
+  expect(await screen.findByRole("button", { name: "View text" })).toBeTruthy();
   expect(screen.getByTestId("route")).toHaveTextContent("tab=dialogue");
   fireEvent.click(buttons[2]);
   expect(screen.getByText("Full manuscript text")).toBeTruthy();
@@ -57,9 +57,9 @@ it("restores the selected column from the URL and preserves paragraph deep links
   await screen.findByText("No historical versions yet.");
   view.unmount();
   mount("/draft?project=p&paragraph=S1-p1");
-  await screen.findByText("Saved paragraph");
-  fireEvent.click(screen.getByRole("button", { name: "More options" }));
-  expect(screen.getByLabelText("Revision scope")).toHaveValue("k");
+  fireEvent.click(await screen.findByRole("button", { name: "View text" }));
+  expect(await screen.findByText("Saved paragraph")).toBeVisible();
+  expect(screen.queryByLabelText("Revision scope")).not.toBeInTheDocument();
 });
 it("late batch submission does not pull the user away from another column", async () => {
   const original = vi.mocked(apiRequest).getMockImplementation()!;

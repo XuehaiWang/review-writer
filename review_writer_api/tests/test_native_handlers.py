@@ -861,6 +861,29 @@ class NativeWorkflowHandlerTests(unittest.TestCase):
 
         self.assertLessEqual(len(live["items"][0]["facts_preview"][0]["value"]), 261)
 
+    def test_overview_retry_preserves_only_user_scoped_step_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspaces = HostedWorkspaceManager(Path(temporary) / "users")
+            handlers = NativeWorkflowHandlers(_WorkflowRunner(), workspaces, None)
+            first = _Context(str(uuid.uuid4()))
+            common = {"project_id": "project-1", "draft_text": "# Review\n\nBody.",
+                      "matrix": {"rows": []}, "section_index": {"sections": []},
+                      "figure_manifest": {"figures": []}, "figure_artifact_paths": {}, "library_metadata": {}}
+            cache = {"entries": {"fixture": {"product_smiles": "CCO"}}}
+            handlers.final_overview(first, {**common, "overview_generation_cache": cache})
+            retry = _Context(first.user_id)
+            retry.retry_of_job_id = first.job_id
+            handlers.final_overview(retry, common)
+            path = (handlers._staging(retry.user_id, retry.job_id) / "final-overview-workspace"
+                    / "review-projects/project-1/03_figure_redraw/overview_generation_cache.json")
+            self.assertEqual(cache, json.loads(path.read_text(encoding="utf-8")))
+            other = _Context(str(uuid.uuid4()))
+            other.retry_of_job_id = first.job_id
+            handlers.final_overview(other, common)
+            other_path = (handlers._staging(other.user_id, other.job_id) / "final-overview-workspace"
+                          / "review-projects/project-1/03_figure_redraw/overview_generation_cache.json")
+            self.assertFalse(other_path.exists())
+
     def test_final_handlers_are_registered_and_return_publishable_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             workspaces = HostedWorkspaceManager(Path(temporary) / "users")

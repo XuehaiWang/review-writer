@@ -41,6 +41,27 @@ In the normal full review workflow, do not silently skip this stage. A no-image 
 
 ## Inputs
 
+### Overview integration contract (2026-09-16)
+
+Only confirmed product-role structures may constrain Overview products. Accept
+`target_product`, `product_smiles` and `target_product_smiles` through the shared
+Overview adapter, including current `field_id`/`value` fact cards with supported
+verification and direct source references. Never infer a product from substrate,
+untyped SMILES, list order or an arbitrary label. Preserve current source-claim
+bindings, section-bound rewritten module summaries and all source-figure workflows.
+
+Prefer reviewed 2D reactions; omit unsupported conditions from generic reactions.
+Only RDKit 2D may render Overview chemistry, including legacy 3D flag invocations.
+Cache successful text steps against their full prompts, product/content contracts
+and model identity. Provider failures propagate instead of implying absent evidence.
+Keep template selection capability/score-driven, enforce module capacity, and
+de-duplicate visible facts. Never use the same fact for multiple decorative roles.
+
+Reaction slots must be below the detected title. After a layout retry, a 12–16%
+in-canvas slot may compress only the body while preserving title pixels exactly.
+If title bounds cannot be established or the body has insufficient room, reject
+the composition. No ball-and-stick/3D fallback is permitted.
+
 Read:
 
 ```text

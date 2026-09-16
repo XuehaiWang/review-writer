@@ -20,7 +20,7 @@ from review_writer_api.artifact_service import ArtifactService
 from review_writer_api.database import User, database_session, utc_now
 from review_writer_api.domain_services.base import ArtifactBackedService
 from review_writer_api.domain_services.drafts import DraftsService
-from review_writer_api.domain_services.final_editing import FinalEditingMixin, final_paragraphs
+from review_writer_api.domain_services.final_history import FinalHistoryMixin
 from review_writer_api.errors import (
     WorkflowConflict,
     WorkflowNotFound,
@@ -312,7 +312,7 @@ class FinalNotReady(WorkflowConflict):
     code = "FINAL_NOT_READY"
 
 
-class FinalService(FinalEditingMixin, ArtifactBackedService):
+class FinalService(FinalHistoryMixin, ArtifactBackedService):
     def __init__(
         self,
         repository: WorkflowRepository,
@@ -639,6 +639,7 @@ class FinalService(FinalEditingMixin, ArtifactBackedService):
                             "verified" if field_readiness["ready"] else "incomplete"
                         ),
                         "missing_fields": field_readiness["missing_fields"],
+                        "optional_missing_fields": field_readiness["optional_missing_fields"],
                         "polluted_fields": field_readiness["polluted_fields"],
                         "unresolved_conflicts": field_readiness[
                             "unresolved_conflicts"
@@ -2914,7 +2915,6 @@ class FinalService(FinalEditingMixin, ArtifactBackedService):
                 **dict(draft_payload.get("draft_approval") or {}),
                 "record": dict(draft_payload.get("draft_approval") or {}),
             },
-            "final_paragraphs": [{"paragraph_id": p["paragraph_id"], "text": p["text"]} for p in final_paragraphs(final_text)],
             "versions": self.manuscript_versions(principal, project_id, final_artifact.id if final_artifact else ""),
             "final_draft_md": _normalize_publication_markup(final_text),
             "final_artifact_id": final_artifact.id if final_artifact else "",

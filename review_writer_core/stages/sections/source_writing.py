@@ -12,7 +12,7 @@ import json
 from copy import deepcopy
 
 from review_writer_core.evidence_integrity import unsupported_realization_anchors
-from review_writer_core.source_attribution import SOURCE_ATTRIBUTION_POLICY
+from review_writer_core.source_attribution import SOURCE_ATTRIBUTION_POLICY, CONTRIBUTION_WRITING_POLICY, SECTION_THREAD_POLICY
 from review_writer_core.scientific_facts import (
     REVIEW_COMPARISON_POLICY,
     claim_assertion_ceiling,
@@ -23,6 +23,7 @@ from review_writer_core.scientific_facts import (
 
 CONTRACT = "source_passages/1"
 BINDING_CONTRACT = "source-binding/2"
+AUTHORING_VERSION = "contribution-authoring/2"
 
 INTRODUCTION_GUIDANCE = (
     "This section is the INTRODUCTION of a narrative review. Its rhetorical purpose takes precedence over "
@@ -46,8 +47,12 @@ PARAGRAPH_GUIDANCE = (
     "Within one topic, connect conditions, findings, applicable scope and relevant limitations where supported. "
     "Start a new paragraph when the question or system changes; a short transition is allowed. "
     "Do not pad to meet word counts or force unrelated systems into one paragraph. "
-    "The confirmed outline assigns chapter responsibilities: discuss primary papers in depth here, "
-    "and use supporting papers or other chapters' systems only for brief necessary context or comparison. "
+    "The confirmed outline assigns chapter responsibilities: use representative primary papers here; "
+    "not every assigned paper needs its own paragraph. Respect paper_roles presentation choices: "
+    "table records still need audited source-bound result_context and a concise relevant claim, "
+    "while supporting citations must actually support their sentence. Never discard selected papers "
+    "or override an explicit user emphasis just to shorten prose. "
+    "Use supporting papers or other chapters' systems only for brief necessary context or comparison. "
     "Do not let contextual examples displace this chapter's central subject. Avoid repeating the same "
     "conditions, yields or study summary across chapters. In a conclusion or outlook, synthesize "
     "supported differences, boundaries and implications instead of replaying experimental details. "
@@ -210,8 +215,10 @@ CLAIM = _object({"text": STRING, "claim_kind": STRING, "support_spans": _array(S
 WRITE_SCHEMA = _object({"paragraphs": _array(_object({"role": STRING, "reader_takeaway": STRING,
                                                         "claims": _array(CLAIM)}))})
 CHECK_SCHEMA = _object({"claims": _array(_object({"claim_id": STRING,
-    "status": {"type": "string", "enum": ["supported", "narrowed", "unsupported"]},
-    "text": STRING, "reason": STRING}))})
+    "status": {"type": "string", "enum": ["supported", "narrowed", "rewritten", "unsupported"]},
+    "text": STRING, "reason": STRING})),
+    "section_review": _object({"status": {"type": "string", "enum": ["coherent", "needs_revision"]},
+                               "issues": _array(STRING), "paragraph_order": _array(STRING)})})
 
 
 def write_from_sources(*, section_id, task, evidence, context, call, prompt_evidence=None, domain_terms=None):
@@ -236,6 +243,7 @@ def write_from_sources(*, section_id, task, evidence, context, call, prompt_evid
                 "field_id": str(binding.get("field_id") or ""),
                 "value": str(binding.get("value") or ""),
                 "usage": fact_usage(binding),
+                "study_ownership": binding.get("study_ownership", "unknown"),
                 "assertion_ceiling": str(
                     binding.get("assertion_ceiling")
                     or binding.get("evidence_ceiling")
@@ -287,10 +295,11 @@ def write_from_sources(*, section_id, task, evidence, context, call, prompt_evid
         "An empty paragraphs array is allowed when no supported prose is possible.\n"
         + REVIEW_COMPARISON_POLICY + "\n" + context + "\n"
         + PARAGRAPH_GUIDANCE + "\n" + SOURCE_ATTRIBUTION_POLICY + "\n"
+        + CONTRIBUTION_WRITING_POLICY + "\n" + SECTION_THREAD_POLICY + "\n"
         + (INTRODUCTION_GUIDANCE + "\n" if str(task.get("section_role") or "").casefold() == "introduction" else "")
         + json.dumps({"task": {k: task.get(k) for k in ("heading", "section_role", "writing_objective",
             "questions_to_answer", "retrieval_directions", "core_argument", "avoid_points", "depth_contract",
-            "primary_papers", "supporting_papers")},
+            "primary_papers", "supporting_papers", "paper_roles", "organizing_thread", "paragraph_tasks")},
             "sources": prompt_sources}, ensure_ascii=False), WRITE_SCHEMA, "section-source-writing")
     if not isinstance(proposed, dict) or not isinstance(proposed.get("paragraphs"), list):
         raise RuntimeError("Source writer returned an invalid paragraphs object.")
@@ -341,6 +350,7 @@ def write_from_sources(*, section_id, task, evidence, context, call, prompt_evid
     # Audit only material that will be written, with its original context. Do not
     # ask for unused fact records or promote the model's own confidence to evidence.
     verdicts = {}
+    section_review = {"status": "not_reviewed", "issues": []}
     if candidates:
         used = {r["evidence_key"] for c in candidates for r in c["evidence_refs"]}
         audit = call("Check every supplied draft claim against its quoted source AND surrounding passage. "
@@ -351,10 +361,37 @@ def write_from_sources(*, section_id, task, evidence, context, call, prompt_evid
             "conditions without explicit support. Keep abstract-only text broadly attributed. Return one verdict "
             "per claim_id. supported means the exact original text is supported; copy it unchanged. narrowed means "
             "return a shorter, source-supported replacement using ONLY the same references, with all numbers and "
-            "qualifiers checked. unsupported means omit it. Do not add facts or new references.\n"
-            + REVIEW_COMPARISON_POLICY + "\n" + SOURCE_ATTRIBUTION_POLICY + "\n" + json.dumps({"claims": candidates,
+            "qualifiers checked. rewritten means a faithful new formulation repairing copied prose or an unclear "
+            "transition, checked against the same "
+            "sources; preserve exact technical names and quantities. unsupported means omit it. "
+            "Do not add facts or new references. Also review the ordered paragraphs as a whole: does the thread "
+            "explain the example selection, comparisons and transitions, and answer the section question? "
+            "Use this same audit to repair local wording and, if necessary, paragraph order. Return paragraph_order "
+            "as every supplied paragraph_id exactly once (or [] to retain order); never rename, merge or split paragraphs. "
+            "Assess coherence of the final text after your replacements and proposed order, not the superseded draft. "
+            "Return section_review with status coherent or needs_revision and concrete remaining issues. Style deficiencies "
+            "do not make a supported claim unsupported. Do not require a fixed paragraph count or mechanism discussion.\n"
+            + REVIEW_COMPARISON_POLICY + "\n" + SOURCE_ATTRIBUTION_POLICY + "\n"
+            + CONTRIBUTION_WRITING_POLICY + "\n" + SECTION_THREAD_POLICY + "\n"
+            + json.dumps({"claims": candidates, "paragraphs": paragraph_rows,
+                "section_question": task.get("questions_to_answer"), "organizing_thread": task.get("organizing_thread"),
                 "sources": [s for s in sources if s["evidence_key"] in used]}, ensure_ascii=False),
             CHECK_SCHEMA, "section-used-claim-check")
+        reviewed = audit.get("section_review") if isinstance(audit, dict) else None
+        if isinstance(reviewed, dict) and reviewed.get("status") in {"coherent", "needs_revision"}:
+            section_review = {"status": reviewed["status"],
+                "issues": reviewed.get("issues") if isinstance(reviewed.get("issues"), list)
+                    and all(isinstance(v, str) for v in reviewed["issues"]) else []}
+            order = reviewed.get("paragraph_order", [])
+            by_id = {p["paragraph_id"]: p for p in paragraph_rows}
+            if order != []:
+                if (isinstance(order, list) and all(isinstance(pid, str) for pid in order)
+                        and len(order) == len(by_id) and set(order) == set(by_id)):
+                    paragraph_rows = [by_id[pid] for pid in order]
+                    section_review["paragraph_order"] = order
+                else:
+                    section_review["status"] = "needs_revision"
+                    section_review["issues"].append("Invalid paragraph reorder was ignored; original identities were preserved.")
         for verdict in (audit.get("claims") or []) if isinstance(audit, dict) else []:
             if isinstance(verdict, dict):
                 cid = str(verdict.get("claim_id") or "")
@@ -365,13 +402,13 @@ def write_from_sources(*, section_id, task, evidence, context, call, prompt_evid
         verdict = verdicts.get(claim["claim_id"], {})
         text = clean(verdict.get("text"))
         status = verdict.get("status")
-        if (status not in {"supported", "narrowed"} or not text
+        if (status not in {"supported", "narrowed", "rewritten"} or not text
                 or (status == "supported" and text != claim["claim"])
                 or any(unsupported_realization_anchors(text, [r["quote"] for r in claim["evidence_refs"]],
                                                        domain_terms=domain_terms or []).values())):
             omitted.append({"claim_id": claim["claim_id"], "reason": clean(verdict.get("reason")) or "support_not_established"})
             continue
-        if status == "narrowed":
+        if status in {"narrowed", "rewritten"}:
             narrowed.append({"claim_id": claim["claim_id"], "reason": clean(verdict.get("reason"))})
         claim.update(claim=text, allowed_assertion=text, support_status="supported", required_for_section=False,
                      epistemic_status="review_inference" if claim["claim_kind"] in {"cross_study_comparison", "review_synthesis"} else "direct_source_report")
@@ -388,7 +425,12 @@ def write_from_sources(*, section_id, task, evidence, context, call, prompt_evid
             "paper_ids": list(dict.fromkeys(p for c in claims for p in c["citation_group"]))})
         realized.append({"paragraph_id": paragraph["paragraph_id"],
                          "claim_realizations": [{"claim_id": c["claim_id"], "text": c["claim"]} for c in claims]})
-    return ({"section_id": section_id, "evidence_mode": CONTRACT, "paragraphs": plans, "claims": accepted},
+    if omitted and section_review["status"] == "coherent":
+        section_review = {"status": "needs_revision", "issues": ["Claims were omitted; inspect the remaining transitions."]}
+    return ({"section_id": section_id, "evidence_mode": CONTRACT, "paragraphs": plans, "claims": accepted,
+             **{key: deepcopy(task.get(key)) for key in
+                ("organizing_thread", "paragraph_tasks", "questions_to_answer", "paper_roles")},
+             "section_review": section_review, "authoring_version": AUTHORING_VERSION},
             {"paragraphs": realized}, {"binding_contract": BINDING_CONTRACT,
-                "omitted": omitted, "narrowed": narrowed, "binding_repairs": binding_repairs,
+                "omitted": omitted, "narrowed": narrowed, "binding_repairs": binding_repairs, "section_review": section_review,
                 "written_claim_count": len(accepted), "checked_claim_count": len(candidates)})

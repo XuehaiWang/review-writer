@@ -146,6 +146,28 @@ def proposal():
             "counterevidence_fact_ids": [], "open_questions": ["How broad is the demonstrated scope?"]}
 
 
+def test_contribution_navigation_and_section_thread_are_preserved():
+    from review_writer_core.stages.planning.academic_planning import _structure_contributions
+    context = _structure_contributions([{"paper_id": "P1", "paper_analysis": {
+        "research_question": "Which problem is solved?", "contribution": "A bounded result", "fact_ids": []}}], 4000)
+    assert context[0]["paper_analysis"]["usage"] == "navigation_only"
+    planned = {**proposal(), "organizing_thread": "Scope then comparison", "paragraph_tasks": ["Explain scope"],
+               "paper_roles": [{"paper_id": "P1", "role": "main_progress", "presentation": "table", "reason": "Conditions are comparable"}]}
+    result = enhance_blueprint(prepared(), model_call=lambda *a, **k: planned, checkpoint={}, report=lambda *a: None)
+    section = result["section_blueprint"]["sections"][0]
+    assert section["organizing_thread"] == planned["organizing_thread"]
+    assert section["paragraph_tasks"] == ["Explain scope"]
+    assert section["paper_roles"][0]["presentation"] == "table"
+
+
+def test_malformed_paragraph_tasks_are_not_split_into_characters():
+    result = enhance_blueprint(prepared(), model_call=lambda *a, **k: {**proposal(), "paragraph_tasks": "bad"},
+                               checkpoint={}, report=lambda *a: None)
+    section = result["section_blueprint"]["sections"][0]
+    assert section["planning_status"] != "planned"
+
+
+
 def test_one_provisional_call_and_reuse_without_audit_or_repair():
     data, checkpoint, calls = prepared(), {"replan_rounds": 1, "fact_repair_completed": True}, []
     original = deepcopy(data)

@@ -1,4 +1,5 @@
 """Paragraph dialogue on existing persisted jobs and immutable candidate artifacts."""
+from review_writer_core.provider_errors import public_model_error
 import json
 import uuid
 
@@ -13,7 +14,10 @@ from review_writer_core.draft_bibliography import citation_entries_from_draft
 from review_writer_core.workflow.artifacts import DRAFT_MANUSCRIPT, DRAFT_REWRITE_CANDIDATES
 
 
-class DraftDialogueMixin:
+from .section_versions import SectionVersionsMixin
+
+
+class DraftDialogueMixin(SectionVersionsMixin):
     def section_stream_snapshot(self, principal, project_id, section_id, job_id):
         self._owned_project(principal, project_id)
         job = self.repository.get_job(principal.user_id, job_id)
@@ -36,22 +40,22 @@ class DraftDialogueMixin:
                 "streaming_reply": data.get("partial_reply", ""),
                 "stream_diagnostics": data.get("stream_diagnostics", {}),
                 "progress_current": job.progress_current, "progress_total": job.progress_total,
-                "error_message": job.error_message}
+                "error_message": public_model_error(job.error_message or "")}
 
-    def section_conversation_memory(self, principal, project_id, section, turns, *, exclude_job_id=""):
+    def section_conversation_memory(self, principal, project_id, section, turns, *, exclude_job_id="", branch_id=""):
         store, _ = self._read_json(principal, project_id, DRAFT_REWRITE_CANDIDATES, required=False)
         hashes = {p["paragraph_key"]: p["text_sha256"] for p in section["paragraphs"]}
         records = {t["id"]: {"id": t["id"], "created_at": t["created_at"], "user": t["message"],
-            "task_status": t["status"], "responses": []} for t in turns if t["id"] != exclude_job_id}
+            "task_status": t["status"], "responses": []} for t in turns if t["id"] != exclude_job_id and t.get("branch_id", "") == branch_id}
         jobs = self.repository.list_project_jobs(principal.user_id, project_id, job_type="draft.rewrite", limit=500)
         for job in reversed(jobs):
             request = job.payload.get("dialogue") or {}
-            if request.get("paragraph_key") in hashes and job.id != exclude_job_id:
+            if request.get("paragraph_key") in hashes and job.id != exclude_job_id and request.get("branch_id", "") == branch_id:
                 turn_id = request.get("turn_id") or job.id
                 records[turn_id] = {"id": turn_id, "created_at": job.created_at.isoformat(),
                     "user": request.get("message", ""), "task_status": job.status, "responses": []}
         for entry in (store.get("entries") or {}).values():
-            if entry.get("paragraph_key") not in hashes or entry.get("revision_mode") != "dialogue":
+            if entry.get("paragraph_key") not in hashes or entry.get("revision_mode") != "dialogue" or entry.get("branch_id", "") != branch_id:
                 continue
             turn_id = entry.get("batch_job_id") or entry["candidate_id"]
             if turn_id == exclude_job_id:
@@ -62,7 +66,7 @@ class DraftDialogueMixin:
         records = sorted(records.values(), key=lambda r: (r["created_at"], r["id"]))
         previous = self.repository.list_project_jobs(principal.user_id, project_id, job_type="draft.optimize",
             operation_key=f"section:{section['section_id']}", limit=1)
-        cached = (previous[0].payload.get("section_context") or {}).get("conversation_memory") if previous else None
+        cached = (previous[0].payload.get("section_context") or {}).get("conversation_memory") if previous and previous[0].payload.get("branch_id", "") == branch_id else None
         return conversation_memory(records, cached)
 
     def draft_dialogue_sections(self, principal, project_id):
@@ -92,17 +96,17 @@ class DraftDialogueMixin:
                     streaming[str(row.job_id)] = str((row.response_json or {}).get("partial_reply") or "")
         return {"section": section, "turns": [{"id": j.id, "status": j.status,
             "streaming_reply": streaming.get(j.id, ""),
-            "message": j.payload.get("message", ""), "action": j.payload.get("action", "discuss"), "created_at": j.created_at.isoformat(),
+            "branch_id": j.payload.get("branch_id", ""), "initial_artifact_id": j.payload.get("initial_artifact_id", ""), "message": j.payload.get("message", ""), "action": j.payload.get("action", "discuss"), "created_at": j.created_at.isoformat(),
             "progress_current": j.progress_current, "progress_total": j.progress_total or len(j.payload.get("paragraphs") or []),
             "result": j.result, "error_message": j.error_message} for j in reversed(jobs)]}
 
     def section_dialogue_payload(self, principal, project_id, section_id, *, message,
-                                 base_hashes, paragraph_keys, use_saved, idempotency_key, action="discuss"):
+                                 base_hashes, idempotency_key, action="discuss", branch_id="", initial_artifact_id=""):
         principal.require(Permission.PROJECT_WRITE)
         self._owned_project(principal, project_id)
         if action not in {"discuss", "revise"}:
             raise WorkflowValidationError("Unknown chapter conversation action.")
-        request = dict(message=message, base_hashes=base_hashes, paragraph_keys=paragraph_keys, use_saved=use_saved, action=action)
+        request = dict(message=message, base_hashes=base_hashes, action=action, branch_id=branch_id, initial_artifact_id=initial_artifact_id)
         existing = self.repository.list_project_jobs(principal.user_id, project_id,
             job_type="draft.optimize", operation_key=f"section:{section_id}", idempotency_key=idempotency_key, limit=1)
         if existing:
@@ -114,21 +118,27 @@ class DraftDialogueMixin:
         if section is None:
             raise WorkflowNotFound("This section no longer belongs to the current Draft.")
         paragraphs = section["paragraphs"]
-        keys = {p["paragraph_key"] for p in paragraphs}
-        if not set(paragraph_keys).issubset(keys):
-            raise WorkflowValidationError("A requested paragraph is outside this section.")
         if base_hashes != {p["paragraph_key"]: p["text_sha256"] for p in paragraphs}:
             raise WorkflowConflict("This section changed. Review the latest text before sending.")
         _, artifact = self._read_text(principal, project_id, DRAFT_MANUSCRIPT)
         if self._freshness(principal, project_id, artifact)["upstream_stale"]:
             raise WorkflowConflict("Draft sources changed; refresh the current Draft first.")
         history = self.section_dialogue_history(principal, project_id, section_id)["turns"]
-        memory = self.section_conversation_memory(principal, project_id, section, history)
+        if bool(branch_id) != bool(initial_artifact_id):
+            raise WorkflowValidationError("An initial-version discussion requires both its branch and version.")
+        initial = self.initial_section_for_restart(principal, project_id, section_id, initial_artifact_id) if initial_artifact_id else None
+        for turn in history:
+            if turn.get("branch_id") == branch_id and branch_id:
+                previous = self.repository.get_job(principal.user_id, turn["id"])
+                if previous.payload.get("initial_artifact_id") != initial_artifact_id:
+                    raise WorkflowConflict("This discussion branch belongs to another initial version.")
+        memory = self.section_conversation_memory(principal, project_id, section, history, branch_id=branch_id)
         return {"project_id": project_id, "revision_mode": "dialogue_batch", "section_id": section_id,
-            "section_input": request, "message": message, "use_saved": use_saved, "action": action,
-            "paragraphs": [p for p in paragraphs if action == "revise" or not paragraph_keys or p["paragraph_key"] in paragraph_keys],
+            "section_input": request, "message": message, "action": action,
+            "branch_id": branch_id, "initial_artifact_id": initial_artifact_id,
+            "paragraphs": paragraphs,
             "section_context": {"title": section["title"],
-                "paragraphs": [{"paragraph_id": p["paragraph_id"], "text": p["text"]} for p in paragraphs],
+                "paragraphs": [{"paragraph_id": p["paragraph_id"], "text": p["text"]} for p in (initial or section)["paragraphs"]],
                 "outline": [{"section_id": s["section_id"], "title": s["title"],
                     "saved_opening_excerpt": s["paragraphs"][0]["text"][:500]} for s in sections],
                 "conversation_memory": memory}}, None
@@ -181,13 +191,13 @@ class DraftDialogueMixin:
 
     def dialogue_payload(self, principal, project_id, key, *, message, base_text_sha256,
                          parent_candidate_id="", use_saved=False, context_keys=None, preferences="", idempotency_key,
-                         include_memory=True):
+                         include_memory=True, branch_id=""):
         principal.require(Permission.PROJECT_WRITE)
         existing = self.repository.list_project_jobs(principal.user_id, project_id,
             job_type="draft.rewrite", operation_key=f"paragraph:{key}", idempotency_key=idempotency_key, limit=1)
         request_input = {"message": message, "base_text_sha256": base_text_sha256,
                          "parent_candidate_id": parent_candidate_id, "use_saved": use_saved,
-                         "context_keys": context_keys or [], "preferences": preferences}
+                         "context_keys": context_keys or [], "preferences": preferences, "branch_id": branch_id}
         if existing:
             if existing[0].payload.get("dialogue_input") != request_input:
                 raise WorkflowConflict("This request key was used for a different message.")
@@ -198,7 +208,7 @@ class DraftDialogueMixin:
         if exact_hash(paragraph["text"]) != base_text_sha256:
             raise WorkflowConflict("The saved paragraph changed. Refresh before sending this message.")
         history = self.dialogue_history(principal, project_id, key)["messages"]
-        pending = [m["candidate"] for m in history if m["candidate"] and m["candidate"].get("status") == "pending"]
+        pending = [m["candidate"] for m in history if m["candidate"] and m["candidate"].get("status") == "pending" and m["candidate"].get("branch_id", "") == branch_id]
         parent = next((c for c in pending if c["candidate_id"] == parent_candidate_id), None) if parent_candidate_id else (pending[-1] if pending and not use_saved else None)
         if parent_candidate_id and not parent:
             raise WorkflowConflict("The selected candidate is no longer available for this discussion.")
@@ -214,7 +224,7 @@ class DraftDialogueMixin:
         related = [{"paragraph_id": p["paragraph_id"], "text": p["text"][:4000]} for p in neighbours]
         topic = self._owned_project(principal, project_id).topic
         dialogue = {"turn_id": str(uuid.uuid4()), "paragraph_key": key, "paragraph_id": paragraph["paragraph_id"],
-            "message": message, "topic": topic, "discussion_text": parent["candidate_text"] if parent else paragraph["text"],
+            "message": message, "topic": topic, "branch_id": branch_id, "discussion_text": parent["candidate_text"] if parent else paragraph["text"],
             "preferences": preferences,
             "parent_candidate_id": parent["candidate_id"] if parent else "", "base_text_sha256": base_text_sha256,
             "context": related, "context_hashes": {p["paragraph_id"]: exact_hash(p["text"]) for p in neighbours}}
@@ -261,7 +271,7 @@ class DraftDialogueMixin:
             if parent and (entries.get(parent) or {}).get("status") != "pending":
                 status = "stale"
             entries[turn_id] = {**built, "candidate_id": turn_id, "revision_mode": "dialogue",
-                "message": request["message"], "batch_job_id": request.get("batch_job_id", ""),
+                "branch_id": request.get("branch_id", ""), "message": request["message"], "batch_job_id": request.get("batch_job_id", ""),
                 "paragraph_key": request["paragraph_key"], "paragraph_id": payload["paragraph_id"],
                 "base_text_sha256": request["base_text_sha256"], "original_text": payload["paragraph_text"],
                 "discussion_text": request["discussion_text"], "parent_candidate_id": parent,

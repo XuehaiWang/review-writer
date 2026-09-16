@@ -45,7 +45,7 @@ def execute(source, checkpoint=None):
     return results, checkpoints, progress
 
 
-def test_plain_quotes_need_only_extraction_and_reuse_across_jobs(monkeypatch):
+def test_new_facts_check_ownership_once_and_reuse_audit_across_jobs(monkeypatch):
     item = paper("P1")
     item["required_fact_roles"] = ["object_input"]
     source = item["evidence_candidates"][0]
@@ -53,24 +53,26 @@ def test_plain_quotes_need_only_extraction_and_reuse_across_jobs(monkeypatch):
     calls = []
     def model(prompt, **kwargs):
         calls.append(kwargs["label"])
-        assert kwargs["required_list"] == "facts"
+        if kwargs["required_list"] == "verdicts":
+            assert '"study_ownership": "unknown"' in prompt
+            return verify_response(prompt)
         return {"facts": [{"field_id": "object_input", "value": source["content"],
                           "support_excerpt": source["content"], "evidence_key": source["evidence_key"], "confidence": 0.99}]}
     monkeypatch.setattr(PIPELINE, "call_json_model", model)
     results, checkpoints, _ = execute({"papers": [item], "attempt_id": "first"})
-    assert calls == ["matrix-facts-P1"]
+    assert calls == ["matrix-facts-P1", "fact-verify-P1"]
     fact = results[0]["facts"][0]
-    assert fact["verification"]["method"] == "exact_source_quote"
+    assert fact["verification"]["status"] == "supported"
     assert PIPELINE.fact_is_usable(fact, purpose="detail")
-    assert results[0]["fact_extraction_profile"]["source_quote_count"] == 1
-    assert results[0]["fact_extraction_profile"]["semantic_supported_count"] == 0
+    assert results[0]["fact_extraction_profile"]["source_quote_count"] == 0
+    assert results[0]["fact_extraction_profile"]["semantic_supported_count"] == 1
     execute({"papers": [item], "attempt_id": "retry"}, checkpoints[-1])
-    assert len(calls) == 1
+    assert len(calls) == 2
     other_stage = deepcopy(item)
     other_stage["source_fingerprint"] = "different-task-same-source"
     other_stage["reused_fact_cache"] = {"facts": results[0]["facts"]}
     execute({"papers": [other_stage], "attempt_id": "other-stage"})
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize("text", ["The sample contained 12 compounds.", "The method causes inhibition.",

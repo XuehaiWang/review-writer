@@ -33,21 +33,27 @@ it("distinguishes processing failures from scientific coverage gaps", () => {
   expect(analysisState({ paper_id: "P1", fact_enrichment: { status: "failed" } }, true)).toBe("running");
 });
 
-it("retries only failed papers, excludes missing sources and keeps details collapsed", async () => {
+it("resumes pending and failed papers while excluding completed and blocked papers", async () => {
   const fetch = vi.fn(async (_input: unknown) => Response.json({ id: "job", status: "queued" }));
   vi.stubGlobal("fetch", fetch);
   const refresh = vi.fn(async () => undefined);
   const papers = [
     { paper_id: "P1", fact_enrichment: { status: "failed", error: "provider timed out" } },
     { paper_id: "P2", fact_enrichment: { status: "complete" } },
+    { paper_id: "P4" },
+    { paper_id: "P5", fact_enrichment: { status: "limited", review_readiness: "limited" } },
+    { paper_id: "P6", fact_enrichment: { status: "failed", error: "Model x is not available for this group" } },
     { paper_id: "P3", fact_enrichment: { status: "failed", error: "source extraction missing" } },
   ];
   const client = new QueryClient();
-  render(<QueryClientProvider client={client}><MatrixAnalysisStatus paper={papers[0]} papers={papers} projectId="test" busy={false} refresh={refresh} /></QueryClientProvider>);
-  expect(screen.getByText("技术详情").closest("details")).not.toHaveAttribute("open");
-  fireEvent.click(screen.getByText("重试失败项（1）"));
+  render(<QueryClientProvider client={client}><MatrixAnalysisStatus papers={papers} projectId="test" busy={false} refresh={refresh} /></QueryClientProvider>);
+  expect(screen.getByText("查看原因").closest("details")).not.toHaveAttribute("open");
+  fireEvent.click(screen.getByText("继续未完成分析（2）"));
   await waitFor(() => expect(refresh).toHaveBeenCalled());
   expect(String(fetch.mock.calls[0][0])).toContain("paper_ids=P1");
+  expect(String(fetch.mock.calls[0][0])).toContain("paper_ids=P4");
+  expect(String(fetch.mock.calls[0][0])).not.toContain("P5");
+  expect(String(fetch.mock.calls[0][0])).not.toContain("P6");
   expect(String(fetch.mock.calls[0][0])).not.toContain("P2");
   expect(String(fetch.mock.calls[0][0])).not.toContain("P3");
   expect(String(fetch.mock.calls[0][0])).not.toContain("force=true");
@@ -57,7 +63,25 @@ it("retries only failed papers, excludes missing sources and keeps details colla
 it("disables retries while a task is running", () => {
   const paper = { paper_id: "P1", fact_enrichment: { status: "failed" } };
   const client = new QueryClient();
-  render(<QueryClientProvider client={client}><MatrixAnalysisStatus paper={paper} papers={[paper]} projectId="test" busy refresh={async () => undefined} /></QueryClientProvider>);
-  expect(screen.getByText("继续本篇未完成分析")).toBeDisabled();
+  render(<QueryClientProvider client={client}><MatrixAnalysisStatus papers={[paper]} projectId="test" busy refresh={async () => undefined} /></QueryClientProvider>);
+  expect(screen.getByText("分析进行中…")).toBeDisabled();
+  client.clear();
+});
+
+
+it("does not restart exhausted evidence searches but resumes unfinished verification", () => {
+  const fact = { status: "partial", fact_extraction_profile: { stop_reason: "no_new_evidence" }, processing: { extraction: "completed", verification: "completed", source_recovery: "pending" } };
+  expect(analysisState({ paper_id: "p", fact_enrichment: fact })).toBe("limited");
+  expect(analysisState({ paper_id: "p", fact_enrichment: { ...fact, processing: { ...fact.processing, verification: "pending" } } })).toBe("pending");
+});
+
+it("restores unpublished checkpoint before submitting new extraction", async () => {
+  const fetch = vi.fn(async (_input: unknown) => Response.json({ id: "job", status: "queued" }));
+  vi.stubGlobal("fetch", fetch);
+  const client = new QueryClient();
+  render(<QueryClientProvider client={client}><MatrixAnalysisStatus papers={[{ paper_id: "p" }]} projectId="test" busy={false} recoveryJobId="previous-job" refresh={async () => undefined} /></QueryClientProvider>);
+  fireEvent.click(screen.getByText("继续未完成分析（1）"));
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+  expect(fetch.mock.calls[0][0]).toBe("/api/v1/jobs/previous-job/retry");
   client.clear();
 });

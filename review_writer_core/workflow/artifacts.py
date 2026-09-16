@@ -25,6 +25,7 @@ FIGURE_REVIEW_INPUTS = "figure-review/selected_figures.json"
 FIGURE_MANIFEST = "figures/manifest.json"
 
 DRAFT_MANUSCRIPT = "draft/manuscript.md"
+DRAFT_INITIAL_MANUSCRIPT = "draft/initial-manuscript.md"
 DRAFT_QUALITY_REPORT = "draft/quality.json"
 DRAFT_REWRITE_CANDIDATES = "draft/rewrite-candidates.json"
 DRAFT_OPTIMIZATION_PROPOSALS = "draft/optimization-proposals.json"

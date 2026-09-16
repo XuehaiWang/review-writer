@@ -7,8 +7,50 @@ from review_writer_core.claim_contracts import (
     scientific_claim_evidence_state,
 )
 from review_writer_core.scientific_facts import fact_usage, registered_fact_bindings
-from review_writer_core.stages.sections.source_writing import CONTRACT as SOURCE_CONTRACT, valid_source_claim
+from review_writer_core.stages.sections.source_writing import CONTRACT as SOURCE_CONTRACT, valid_source_claim, fingerprint
 from review_writer_core.stages.sections.evidence_resolution import has_evidence_resolution, valid_pending_output
+
+
+def section_input_fingerprints(tasks, evidence_sections, matrix, blueprint, shared):
+    """Section-local authoring inputs; conclusions also depend on all body inputs.
+
+    Citation numbering is global: changing paper order invalidates every section.
+    Shared scope, rules and outline remain global by design, not best-effort guesses.
+    """
+    rows = matrix.get("rows", []) if isinstance(matrix, dict) else matrix
+    by_paper = {str(row.get("paper_id")): row for row in rows or [] if isinstance(row, dict)}
+    specs = {str(s.get("section_id")): s for s in blueprint.get("sections") or []}
+    common = fingerprint({"contract": "section-input/1", "shared": shared,
+        "blueprint": {k: v for k, v in blueprint.items() if k != "sections"},
+        "paper_order": list(by_paper)})
+    signatures = {}
+    for task in tasks:
+        sid = str(task.get("section_id"))
+        papers = task.get("allowed_papers", [*(task.get("primary_papers") or []), *(task.get("supporting_papers") or [])])
+        signatures[sid] = fingerprint({"common": common, "task": task,
+            "section": specs.get(sid), "evidence": evidence_sections.get(sid),
+            "papers": {pid: by_paper.get(pid) for pid in papers}})
+    body = {str(t.get("section_id")): signatures[str(t.get("section_id"))]
+            for t in tasks if t.get("section_role", "body") == "body"}
+    for task in tasks:
+        if task.get("section_role") == "conclusion":
+            sid = str(task.get("section_id"))
+            signatures[sid] = fingerprint({"section": signatures[sid], "body": body})
+    return signatures
+
+
+def matching_section_inputs(entries, signatures, *, legacy_validated=False):
+    """An old caller validation may admit legacy entries, never override a new mismatch."""
+    accepted, rejected = {}, {}
+    for sid, entry in entries.items():
+        if not isinstance(entry, dict) or sid not in signatures:
+            continue
+        saved = entry.get("input_fingerprint")
+        if saved == signatures[sid] or (not saved and legacy_validated):
+            accepted[sid] = entry
+        else:
+            rejected[sid] = "Section authoring inputs changed."
+    return accepted, rejected
 
 
 def direct_claim_papers(claim, sources, facts):

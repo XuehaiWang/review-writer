@@ -35,6 +35,27 @@ _GENERATED_TABLE_BLOCK = re.compile(
 )
 
 
+def paper_presentation_outcomes(task, section, rows, citation_numbers):
+    """Check planned table coverage using the same renderer as publication.
+
+    Ready is not published: final export still validates and projects its rows.
+    This record cannot authorize a citation or remove a selected paper.
+    """
+    plans = task.get("paper_roles") or []
+    if not plans:
+        return []
+    preview = render_section_comparison(section, rows, citation_numbers, table_number=1)
+    table = _GENERATED_TABLE_BLOCK.search(preview)
+    table_papers = {cell["paper_id"] for cell in json.loads(table["metadata"]).get("cells", [])} if table else set()
+    cited = {pid for p in section.get("paragraphs") or [] for pid in p.get("cited_paper_ids") or []}
+    return [{"paper_id": item["paper_id"], "requested": item.get("presentation", "prose"),
+             "planned_role": item.get("role"), "reason": item.get("reason", ""),
+             "actual": "table_ready" if item["paper_id"] in table_papers and item.get("presentation") == "table"
+                 else "cited_in_prose" if item["paper_id"] in cited else "unrepresented",
+             "table_fallback": item.get("presentation") == "table" and item["paper_id"] not in table_papers}
+            for item in plans if isinstance(item, dict) and item.get("paper_id")]
+
+
 def refresh_generated_comparison_tables(
     markdown: str, section_index: dict[str, Any], matrix_rows: list[dict[str, Any]],
 ) -> str:

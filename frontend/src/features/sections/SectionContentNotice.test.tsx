@@ -5,6 +5,22 @@ import { SectionStageActions } from "./SectionStageActions";
 
 afterEach(cleanup);
 
+it("does not equate a table preference with a generated comparison", () => {
+  render(<SectionContentNotice section={{ paper_presentation: [
+    { paper_id: "P1", requested: "table", actual: "cited_in_prose", table_fallback: true },
+  ] }} />);
+  expect(screen.getByText(/暂未形成可导出的比较表记录/)).toBeInTheDocument();
+  expect(screen.getByText(/已有正文引用仍保留/)).toBeInTheDocument();
+});
+
+it("shows semantic organization issues without labelling them evidence failures", () => {
+  render(<SectionContentNotice section={{ narrative_diagnostics: {
+    review_status: "needs_revision", issues: ["Explain why the next example follows."] } }} />);
+  expect(screen.getByText(/待优化草稿/)).toBeInTheDocument();
+  expect(screen.getByText("Explain why the next example follows.")).toBeInTheDocument();
+  expect(screen.queryByText(/来源绑定失败/)).not.toBeInTheDocument();
+});
+
 it("distinguishes binding failures from other omissions and leaves actions enabled", () => {
   render(<>
     <SectionContentNotice section={{ generation_mode: "limited_evidence", depth_diagnostics: { sufficient: false },

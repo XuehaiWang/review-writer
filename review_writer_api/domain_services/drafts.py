@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from review_writer_core.provider_errors import public_model_error
+
 from review_writer_api.paper_labels import library_paper_labels
 
 import hashlib
@@ -85,6 +87,7 @@ from review_writer_core.writing_contracts import (
 from review_writer_core.workflow.artifacts import (
     DRAFT_APPROVAL,
     DRAFT_MANUSCRIPT as DRAFT_DOCUMENT,
+    DRAFT_INITIAL_MANUSCRIPT,
     DRAFT_OPTIMIZATION_PROPOSALS as DRAFT_OPTIMIZATIONS,
     DRAFT_QUALITY_REPORT as DRAFT_QUALITY,
     DRAFT_REWRITE_CANDIDATES as DRAFT_REWRITES,
@@ -622,6 +625,7 @@ class DraftsService(
             matrix,
             evidence_package,
         )
+        initial_markdown = markdown
         markdown, overlay_replay = self._apply_rewrite_overlays(markdown, overlays)
         expected_current_artifacts = {
             SECTION_INDEX: sections_artifact.id,
@@ -631,10 +635,14 @@ class DraftsService(
         if evidence_package_artifact is not None:
             expected_current_artifacts[SECTION_EVIDENCE] = evidence_package_artifact.id
         with self._write_lock:
+            files = {DRAFT_DOCUMENT: (markdown.encode("utf-8"), "markdown")}
+            initial_versions = self.repository.list_artifacts(principal.user_id, project_id, DRAFT_INITIAL_MANUSCRIPT)
+            if not any(v.metadata.get("source_sections_artifact_id") == sections_artifact.id for v in initial_versions):
+                files[DRAFT_INITIAL_MANUSCRIPT] = (initial_markdown.encode("utf-8"), "markdown")
             published, next_state = self._publish_files(
                 principal,
                 project_id,
-                {DRAFT_DOCUMENT: (markdown.encode("utf-8"), "markdown")},
+                files,
                 expected_revision=expected_revision,
                 metadata={
                     "source_sections_artifact_id": sections_artifact.id,
@@ -1010,7 +1018,7 @@ class DraftsService(
             "rewrite_candidates": rewrite_candidates,
             "dialogue_batch_job": ({"id": dialogue_batch_job.id, "status": dialogue_batch_job.status,
                 "result": dialogue_batch_job.result, "progress_current": dialogue_batch_job.progress_current,
-                "progress_total": dialogue_batch_job.progress_total, "error_message": dialogue_batch_job.error_message}
+                "progress_total": dialogue_batch_job.progress_total, "error_message": public_model_error(dialogue_batch_job.error_message or "")}
                 if dialogue_batch_job else None),
             "sections": dialogue_sections(text, draft_artifact.metadata, draft_artifact.id) if draft_artifact else [],
             "section_task_states": {job.payload["section_id"]: {"id": job.id, "status": job.status}

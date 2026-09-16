@@ -20,6 +20,10 @@ def queue_matrix_enrichment(planning, jobs, principal, project_id, *, force=Fals
     # confirmation request. A reload/GET must never initiate paid work.
     payload = {"prepare_on_start": True, "source_matrix_artifact_id": artifact.id,
                "force_refresh": bool(force), "selected_paper_ids": sorted(set(paper_ids or []))}
+    if (current and not force and current.payload.get("source_matrix_artifact_id") == artifact.id
+            and any(isinstance((current.result or {}).get(key), dict)
+                    for key in ("matrix_enrichment_checkpoint", "section_checkpoint"))):
+        payload["resume_from_job_id"] = current.id
     key = idempotency_key or f"matrix:{artifact.id}:{int(force)}:{','.join(payload['selected_paper_ids'])}"
     try:
         return jobs.submit(principal, scope="project", project_id=project_id,

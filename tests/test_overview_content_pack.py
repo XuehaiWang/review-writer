@@ -42,6 +42,51 @@ DRAFT = "\n\n".join(
 
 
 class DraftExcerptTests(unittest.TestCase):
+    def test_oversized_summary_is_rewritten_once_with_source_binding(self):
+        features = {"review_title": "Synthesis", "overview_evidence_bindings": {"Route": {"section_id": "S1"}},
+                    "argument_execution": {"sections": [{"section_id": "S1", "claims": [{"claim_id": "C1"}]}]}}
+        long_row = {"section_id": "S1", "summary": "word " * 20, "claim_ids": ["C1"]}
+        short_row = {**long_row, "summary": "Catalysis enables selective allene synthesis."}
+        with patch.object(overview, "_text_gateway_configured", return_value=True), \
+             patch.object(overview, "_draft_excerpt", return_value="Source evidence."), \
+             patch.object(overview, "_cached_overview_json", side_effect=[
+                 {"module_summaries": [long_row]}, {"module_summaries": [short_row]}]) as model:
+            pack = overview._llm_content_pack(features)
+        self.assertEqual({"S1": short_row["summary"]}, pack["module_summaries"])
+        self.assertEqual(2, model.call_count)
+        self.assertEqual("overview-summary-rewrite", model.call_args.kwargs["label"])
+
+    def test_unsuccessful_summary_rewrite_does_not_publish_truncated_text(self):
+        features = {"review_title": "Synthesis", "overview_evidence_bindings": {"Route": {"section_id": "S1"}},
+                    "argument_execution": {"sections": [{"section_id": "S1", "claims": [{"claim_id": "C1"}]}]}}
+        data = {"module_summaries": [{"section_id": "S1", "summary": "word " * 20, "claim_ids": ["C1"]}]}
+        with patch.object(overview, "_text_gateway_configured", return_value=True), \
+             patch.object(overview, "_draft_excerpt", return_value="Source evidence."), \
+             patch.object(overview, "_cached_overview_json", return_value=data) as model:
+            with self.assertRaisesRegex(ValueError, "display budget"):
+                overview._llm_content_pack(features)
+        self.assertEqual(2, model.call_count)
+
+    def test_completed_steps_cache_but_failures_do_not(self):
+        with tempfile.TemporaryDirectory() as temp:
+            features = {"_project_dir": Path(temp)}
+            with patch.object(overview, "call_gateway_json", return_value={"value": "ok"}) as call:
+                first = overview._cached_overview_json(features, "prompt", label="test", timeout_seconds=1)
+                self.assertEqual(first, overview._cached_overview_json(features, "prompt", label="test", timeout_seconds=1))
+                self.assertEqual(1, call.call_count)
+                overview._cached_overview_json(features, "changed", label="test", timeout_seconds=1)
+                self.assertEqual(2, call.call_count)
+            with patch.object(overview, "call_gateway_json", side_effect=RuntimeError("provider offline")) as call:
+                for _ in range(2):
+                    with self.assertRaisesRegex(RuntimeError, "offline"):
+                        overview._cached_overview_json(features, "failure", label="test", timeout_seconds=1)
+                self.assertEqual(2, call.call_count)
+
+    def test_unavailable_provider_does_not_create_concept_pack(self):
+        with patch.object(overview, "_text_gateway_configured", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "not configured"):
+                overview._llm_content_pack({"review_title": "Topic"})
+
     def test_overview_summarizes_without_rendering_provenance_or_result_tables(self):
         import copy
         features = {"overview_modules": ["Method"],
@@ -52,7 +97,7 @@ class DraftExcerptTests(unittest.TestCase):
                     }]}]}}
         original = copy.deepcopy(features)
         text = overview._build_metal_rows_text(features)
-        self.assertIn("at most 18 English words", text)
+        self.assertIn("at most 12 words and 84 characters", text)
         self.assertNotIn("Supporting assertion:", text)
         self.assertIn("Use the category label only", text)
         self.assertNotIn("source studies:", text)
@@ -210,14 +255,11 @@ class AutomaticChemistryDecisionTests(unittest.TestCase):
         "reaction_name": "allenation",
     }
 
-    def test_unreviewed_scheme_uses_conservative_skeleton(self) -> None:
+    def test_unavailable_review_does_not_masquerade_as_skeleton_evidence(self) -> None:
         with patch.object(overview, "_text_gateway_configured", return_value=False):
-            decision = overview._automatic_chemistry_decision(
-                {"review_title": "Allene synthesis", "product_keywords": ["allenes"]},
-                self.SCHEME,
-            )
-        self.assertEqual("skeleton", decision["mode"])
-        self.assertLess(decision["confidence"], 70)
+            with self.assertRaisesRegex(RuntimeError, "unavailable"):
+                overview._automatic_chemistry_decision(
+                    {"review_title": "Allene synthesis", "product_keywords": ["allenes"]}, self.SCHEME)
 
     def test_low_confidence_second_review_uses_concept_overview(self) -> None:
         with patch.object(overview, "_text_gateway_configured", return_value=True), patch.object(

@@ -623,6 +623,9 @@ class SectionsV1Tests(unittest.TestCase):
                         "title": "Primary evidence theme",
                         "section_role": "body",
                         "major_papers": ["P001", "P002"],
+                        "organizing_thread": "Explain scope before comparison",
+                        "paragraph_tasks": ["Explain scope", "Compare compatible experiments"],
+                        "paper_roles": [{"paper_id": "P002", "presentation": "table"}],
                     },
                     {
                         "section_id": "S03",
@@ -638,6 +641,9 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertEqual([], by_id["S01"]["primary_papers"])
         self.assertEqual(["P001"], by_id["S01"]["supporting_papers"])
         self.assertEqual(["P001", "P002"], by_id["S02"]["primary_papers"])
+        self.assertEqual("Explain scope before comparison", by_id["S02"]["organizing_thread"])
+        self.assertEqual(["Explain scope", "Compare compatible experiments"], by_id["S02"]["paragraph_tasks"])
+        self.assertEqual("table", by_id["S02"]["paper_roles"][0]["presentation"])
         self.assertEqual("conclusion", by_id["S03"]["section_role"])
         self.assertEqual([], by_id["S03"]["primary_papers"])
 

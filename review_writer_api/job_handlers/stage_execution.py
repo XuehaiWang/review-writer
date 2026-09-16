@@ -276,6 +276,7 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
 
         def matrix_enrichment_handler(context, payload):
             payload = dict(payload)
+            resume_from_job_id = context.retry_of_job_id or payload.get("resume_from_job_id")
             principal = Principal(context.user_id, frozenset({Role.USER}))
             if payload.get("prepare_on_start"):
                 request = payload
@@ -296,9 +297,9 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
                         "Matrix changed before scientific fact extraction started."
                     )
             planning_service.validate_matrix_enrichment_inputs(principal, str(context.project_id), payload)
-            if context.retry_of_job_id:
+            if resume_from_job_id:
                 source_job = context.repository.get_job(
-                    context.user_id, context.retry_of_job_id
+                    context.user_id, resume_from_job_id
                 )
                 source_result = (source_job.result or {}) if source_job is not None else {}
                 checkpoint = source_result.get("matrix_enrichment_checkpoint")

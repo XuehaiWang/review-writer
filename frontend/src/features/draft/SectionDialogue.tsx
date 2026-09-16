@@ -4,20 +4,20 @@ import { apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
 import { MarkdownView } from "../../components/MarkdownView";
 import { jobIsActive } from "../../hooks/useJob";
 import { useUiText } from "../../i18n/useUiText";
-import { CandidateComparison, CandidateEvidenceReview, CandidateReply, CandidateStatus, ParagraphDialogue, type DialogueCandidate, type DialogueParagraph } from "./ParagraphDialogue";
-import { ParagraphManualEditor } from "./ParagraphManualEditor";
+import { CandidateComparison, CandidateEvidenceReview, CandidateReply, CandidateStatus, type DialogueCandidate, type DialogueParagraph } from "./ParagraphDialogue";
+import { ChapterVersions } from "./ChapterVersions";
 import { hasDraftScratch, useDraftScratch } from "./useDraftScratch";
 import { EvidenceLinks } from "./EvidenceLinks";
 
 
 export type DialogueSection = { section_id: string; title: string; paragraphs: DialogueParagraph[] };
 type SectionTurn = { id: string; status: string; message: string; action?: string; streaming_reply?: string; phase?: string; progress_current: number; progress_total: number;
-  error_message?: string; result?: { paragraph_results?: Record<string, { paragraph_id: string; status: string; reason?: string }> } };
+  branch_id?: string; initial_artifact_id?: string; error_message?: string; result?: { paragraph_results?: Record<string, { paragraph_id: string; status: string; reason?: string }> } };
 type Candidate = DialogueCandidate & { batch_job_id?: string };
 
-export function SectionDialogue({ section, projectId, userId, revision, blocked, candidates, activeTask, initialTarget,
+export function SectionDialogue({ section, projectId, userId, revision, blocked, candidates, activeTask,
   decisionPending, decide, refresh }: { section: DialogueSection; projectId: string; userId: string; revision: number;
-  blocked: boolean; candidates: Candidate[]; activeTask?: { id: string; status: string }; initialTarget?: string;
+  blocked: boolean; candidates: Candidate[]; activeTask?: { id: string; status: string };
   decisionPending: boolean; decide: (ids: string[], action: "accept" | "reject") => void; refresh: () => Promise<unknown> }) {
   const { text } = useUiText();
   const queryClient = useQueryClient();
@@ -29,16 +29,12 @@ export function SectionDialogue({ section, projectId, userId, revision, blocked,
   const hashes = Object.fromEntries(section.paragraphs.map(p => [p.paragraph_key, p.text_sha256]));
   const [baseHashes, setBaseHashes] = useDraftScratch(`${scratch}:base`, hashes);
   const [requestKey, setRequestKey] = useDraftScratch(`${scratch}:request`, newIdempotencyKey());
-  const [target, setTarget] = useState("");
-  useEffect(() => { setTarget(initialTarget || ""); }, [initialTarget]);
-  const [useSaved, setUseSaved] = useState(false);
-  const [showText, setShowText] = useState(false);
-  const [showOptions, setShowOptions] = useState(false);
+  const [showVersions, setShowVersions] = useState(false);
+  const [branch, setBranch] = useDraftScratch(`${scratch}:branch`, { id: "", initialArtifactId: "" });
   const logRef = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
   const olderScroll = useRef<{ height: number; top: number } | null>(null);
   const [newReply, setNewReply] = useState(false);
-  const [legacy, setLegacy] = useState("");
   const [historyLimit, setHistoryLimit] = useState(5);
   const [localError, setLocalError] = useState("");
   const messageRef = useRef(message); messageRef.current = message;
@@ -47,7 +43,15 @@ export function SectionDialogue({ section, projectId, userId, revision, blocked,
     queryFn: () => apiRequest<{ turns: SectionTurn[] }>(endpoint),
     refetchInterval: q => !streamConnected && (activeTask || q.state.data?.turns.some(t => jobIsActive(t.status))) ? 5000 : false,
     refetchIntervalInBackground: true });
-  const turns = history.data?.turns || [];
+  const allTurns = history.data?.turns || [];
+  useEffect(() => {
+    const latest = allTurns[allTurns.length - 1];
+    if (!branch.id && latest?.branch_id && latest.initial_artifact_id) {
+      setBranch({ id: latest.branch_id, initialArtifactId: latest.initial_artifact_id });
+    }
+  }, [history.data, branch.id, setBranch]);
+  const turns = allTurns.filter(t => (t.branch_id || "") === branch.id);
+  const completedVersion = turns.filter(t => !jobIsActive(t.status)).map(t => `${t.id}:${t.status}`).join("|");
   const updateToken = turns.map(t => t.id + t.status + t.progress_current + t.streaming_reply).join("|") + candidates.map(c => c.candidate_id + c.status).join("|");
   useEffect(() => {
     const log = logRef.current;
@@ -58,7 +62,7 @@ export function SectionDialogue({ section, projectId, userId, revision, blocked,
     } else if (atBottom.current) { log.scrollTop = log.scrollHeight; setNewReply(false); }
     else setNewReply(true);
   }, [updateToken, historyLimit]);
-  const active = turns.find(t => jobIsActive(t.status)) || activeTask;
+  const active = turns.find(t => jobIsActive(t.status)) || (activeTask && jobIsActive(activeTask.status) && !turns.some(t => t.id === activeTask.id && !jobIsActive(t.status)) ? activeTask : undefined);
   const activeId = active?.id;
   useEffect(() => {
     setStreamConnected(false);
@@ -74,7 +78,7 @@ export function SectionDialogue({ section, projectId, userId, revision, blocked,
         completedStreams.current.add(activeId);
         source.close(); setStreamConnected(false);
         void queryClient.invalidateQueries({ queryKey: ["draft-dialogue", projectId, "section", section.section_id] });
-        void refreshRef.current();
+        void refreshRef.current().catch(() => undefined);
       }
     });
     source.addEventListener("done", () => { source.close(); setStreamConnected(false); });
@@ -83,7 +87,7 @@ export function SectionDialogue({ section, projectId, userId, revision, blocked,
   const sync = async () => { await Promise.all([history.refetch(), refresh()]); };
   const send = useMutation({ mutationFn: ({ submitted, action }: { submitted: string; originalInput: string; action: "discuss" | "revise" }) => apiRequest(endpoint, { method: "POST",
     headers: { "Idempotency-Key": `${requestKey}:${action}` }, ...jsonBody({ message: submitted, base_hashes: message.trim() ? baseHashes : hashes,
-      paragraph_keys: action === "revise" ? [] : target ? [target] : [], use_saved: useSaved, action }) }),
+      branch_id: branch.id, initial_artifact_id: branch.initialArtifactId, action }) }),
     onSuccess: async (_data, { originalInput }) => { if (messageRef.current === originalInput) setMessage(""); setRequestKey(newIdempotencyKey()); await sync(); } });
   const cancel = useMutation({ mutationFn: () => apiRequest(`/api/v1/jobs/${active!.id}/cancel`, { method: "POST" }), onSuccess: sync });
   const changed = JSON.stringify(baseHashes) !== JSON.stringify(hashes);
@@ -95,7 +99,6 @@ export function SectionDialogue({ section, projectId, userId, revision, blocked,
     setLocalError(""); send.mutate({ action, originalInput: message, submitted: message.trim() || text("根据本章此前讨论生成完整章节修改候选。修改讨论涉及的内容，其余保留。", "Generate a complete chapter candidate from our discussion. Revise relevant content and retain the rest.") });
   };
 
-  const legacyCandidates = candidates.filter(c => !turns.some(t => t.id === c.batch_job_id));
   const jumpToLatest = () => {
     const log = logRef.current;
     if (log) log.scrollTop = log.scrollHeight;
@@ -104,20 +107,18 @@ export function SectionDialogue({ section, projectId, userId, revision, blocked,
   return <section className="section-dialogue chapter-chat">
     <header className="chapter-chat-header">
       <div><span className="step-label">{section.section_id}</span><h2>{section.title}</h2></div>
-      <button type="button" className="button button-secondary" aria-expanded={showText} onClick={() => setShowText(!showText)}>
-        {showText ? text("返回对话", "Back to conversation") : text("正文与手动编辑", "Text and manual editing")}
-      </button>
+      <button type="button" className="button button-secondary" onClick={() => setShowVersions(true)}>{text("查看正文", "View text")}</button>
     </header>
-    <div hidden={!showText} className="chapter-text-panel">
-      {section.paragraphs.map(p => <article className="dialogue-saved-paragraph" key={p.paragraph_key}>
-        <span className="step-label">{p.paragraph_id}</span><MarkdownView content={p.text} />
-        <div className="button-row"><ParagraphManualEditor scratchKey={`${userId}:${projectId}:${p.paragraph_key}:manual`}
-          projectId={projectId} paragraph={p} revision={revision} disabled={blocked || decisionPending} refresh={sync} />
-          <button className="button button-quiet" onClick={() => { setTarget(p.paragraph_key); setShowText(false); setRequestKey(newIdempotencyKey()); }}>{text("针对这段讨论", "Discuss this paragraph")}</button>
-        </div>
-      </article>)}
-    </div>
-    <div hidden={showText} className="chapter-chat-body">
+    {showVersions ? <ChapterVersions section={section} projectId={projectId} userId={userId} revision={revision}
+      disabled={blocked || decisionPending || !!active || send.isPending} candidates={candidates} turns={allTurns} refresh={sync}
+      close={() => setShowVersions(false)} restart={artifactId => {
+        if (section.paragraphs.some(p => hasDraftScratch(`${userId}:${projectId}:${p.paragraph_key}:manual`))) {
+          setLocalError(text("本章还有未保存的手动编辑，请先保存或取消。", "Save or cancel this chapter's manual edits first.")); return;
+        }
+        setBranch({ id: newIdempotencyKey(), initialArtifactId: artifactId }); setBaseHashes(hashes);
+        setRequestKey(newIdempotencyKey()); setMessage(""); setShowVersions(false); setLocalError("");
+      }} /> : null}
+    <div className="chapter-chat-body">
       <div className="chapter-chat-messages" ref={logRef} role="region" aria-label={text("章节聊天记录", "Chapter conversation")}
         onScroll={() => { const log = logRef.current; if (log) { atBottom.current = log.scrollHeight - log.scrollTop - log.clientHeight < 60; if (atBottom.current) setNewReply(false); } }}>
         {history.isPending ? <p role="status">{text("正在加载对话…", "Loading conversation…")}</p> : null}
@@ -130,14 +131,8 @@ export function SectionDialogue({ section, projectId, userId, revision, blocked,
           const items = candidates.filter(c => c.batch_job_id === turn.id);
           return <article className="chapter-chat-turn" key={turn.id}>
             <div className="chat-message chat-message-user"><span>{text("你", "You")}</span><p>{turn.message}</p></div>
-            <div className="chat-message chat-message-assistant"><span>AI</span>
-              {jobIsActive(turn.status) ? <div role="status"><p>{turn.phase === "scope" ? text("正在确定讨论范围", "Identifying discussion scope") : turn.phase === "answer" ? text("正在生成回答", "Generating answer") : turn.phase === "checking" ? text("正在整理与检查结果", "Checking the result") : text("正在排队或查阅证据", "Waiting or reading evidence")} · {turn.progress_current}/{turn.progress_total}</p><progress max={turn.progress_total || 1} value={turn.progress_current} /></div> : null}
-              {jobIsActive(turn.status) && turn.streaming_reply ? <div className="chat-reply-text"><small>{text("正在生成，尚未校验或保存", "Generating; not validated or saved")}</small><p style={{ whiteSpace: "pre-wrap" }}>{turn.streaming_reply}</p></div> : null}
-              {turn.error_message ? <p className="message message-error">{turn.error_message}</p> : null}
-              {Object.values(turn.result?.paragraph_results || {}).filter(r => r.status !== "completed").map(r => <p key={r.paragraph_id} className="message message-warning">{r.paragraph_id} · {r.reason || r.status}</p>)}
-              {!items.length && !jobIsActive(turn.status) && !turn.error_message ? <p>{text("本轮已结束，暂无可用修改。可继续说明你的要求。", "This turn ended without available changes. You can continue the discussion.")}</p> : null}
-              {items.length ? <ChapterReply items={items} section={turn.action === "revise" ? section : undefined} disabled={blocked || decisionPending || jobIsActive(turn.status)} decide={decide} /> : null}
-            </div>
+            <TurnReply turn={turn} items={items} projectId={projectId} section={section} completedVersion={completedVersion}
+              disabled={blocked || decisionPending} decide={decide} />
           </article>;
         })}
         {active && !turns.some(t => t.id === active.id) ? <p role="status">{text("任务已提交，正在等待回复…", "Request submitted. Waiting for a reply…")}</p> : null}
@@ -145,40 +140,63 @@ export function SectionDialogue({ section, projectId, userId, revision, blocked,
       {newReply ? <button className="button button-secondary chat-new-reply" onClick={jumpToLatest}>{text("查看最新回复 ↓", "Latest reply ↓")}</button> : null}
     </div>
     <div className="chapter-chat-composer">
-      {target ? <p className="chat-target">{text("本次讨论：", "Discussing: ")}{section.paragraphs.find(p => p.paragraph_key === target)?.paragraph_id}
-        <button className="button button-quiet" onClick={() => { setTarget(""); setRequestKey(newIdempotencyKey()); }}>{text("改为整章", "Whole chapter")}</button></p> : null}
-      {useSaved ? <p className="muted">{text("本次从已保存正文重新开始", "Restarting from saved text")}</p> : null}
+      {branch.id ? <p className="muted">{text("本轮讨论从初始版本开始。", "This discussion started from the initial version.")}</p> : null}
       <label className="sr-only" htmlFor={`chat-input-${section.section_id}`}>{text("告诉 AI 本章希望怎样改进", "Tell the AI how to improve this chapter")}</label>
-      <textarea id={`chat-input-${section.section_id}`} rows={3} maxLength={12000} value={message}
+      <textarea id={`chat-input-${section.section_id}`} rows={5} maxLength={12000} value={message}
         placeholder={text("输入问题或修改想法…", "Ask a question or describe your changes…")}
         onChange={e => { setMessage(e.target.value); setBaseHashes(hashes); setRequestKey(newIdempotencyKey()); }}
         onKeyDown={e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !e.nativeEvent.isComposing && !blocked && !active && !send.isPending && message.trim() && !changed) { e.preventDefault(); revise(); } }} />
       <div className="chapter-chat-actions">
-        <button type="button" className="button button-quiet" aria-expanded={showOptions} onClick={() => setShowOptions(!showOptions)}>{text("更多选项", "More options")}</button>
         <span className="muted">{text("修改不会自动保存", "Changes are not saved automatically")}</span>
         <button type="button" className="button button-secondary" disabled={blocked || !!active || send.isPending || (!!message && changed)} onClick={() => revise("revise")}>{text("根据讨论生成修改", "Generate revision from discussion")}</button>
         {active ? <button className="button button-secondary" disabled={cancel.isPending} onClick={() => cancel.mutate()}>{text("取消本章任务", "Cancel chapter task")}</button> :
           <button className="button button-primary" disabled={blocked || send.isPending || !message.trim() || changed} onClick={() => revise()}>{text("发送", "Send")}</button>}
       </div>
       <p className="muted">{text("生成修改面向当前整章，讨论未涉及的内容保留；保存后才更新正文。", "Generate revision covers this entire chapter, retaining unrelated content. Save to update the draft.")}</p>
-      {showOptions ? <div className="chapter-chat-options">
-        <label>{text("修改范围", "Revision scope")}<select value={target} onChange={e => { setTarget(e.target.value); setRequestKey(newIdempotencyKey()); }}>
-          <option value="">{text("当前章节（按需修改）", "Current chapter (revise as needed)")}</option>
-          {section.paragraphs.map(p => <option key={p.paragraph_key} value={p.paragraph_key}>{p.paragraph_id}</option>)}
-        </select></label>
-        <label className="check-label"><input type="checkbox" checked={useSaved} onChange={e => { setUseSaved(e.target.checked); setRequestKey(newIdempotencyKey()); }} />{text("从已保存正文重新讨论（默认接续待确认候选）", "Restart from saved text (otherwise continue pending candidates)")}</label>
-        {legacyCandidates.length ? <details><summary>{text("其他已保留候选", "Other retained candidates")}</summary><ChapterReply items={legacyCandidates} disabled={blocked || decisionPending} decide={decide} /></details> : null}
-        <details><summary>{text("查看旧段落对话", "Previous paragraph conversations")}</summary>
-          <select aria-label={text("旧对话段落", "Previous conversation paragraph")} value={legacy} onChange={e => setLegacy(e.target.value)}><option value="">{text("选择段落", "Select a paragraph")}</option>{section.paragraphs.map(p => <option key={p.paragraph_key} value={p.paragraph_key}>{p.paragraph_id}</option>)}</select>
-          {section.paragraphs.filter(p => p.paragraph_key === legacy).map(p => <ParagraphDialogue key={p.paragraph_key} projectId={projectId} paragraph={p} />)}
-        </details>
-      </div> : null}
       {message && changed ? <p className="message message-warning">{text("本章正文发生变化，请核对最新内容。", "This chapter changed. Review the latest text.")} <button className="button button-secondary" onClick={() => { setBaseHashes(hashes); setRequestKey(newIdempotencyKey()); }}>{text("已核对", "Reviewed")}</button></p> : null}
       {blocked ? <p className="message message-warning">{text("上游内容已变化，请先核对初稿。", "Upstream content changed. Review the draft first.")}</p> : null}
       {error || localError ? <p role="alert" className="message message-error">{error?.message || localError}</p> : null}
       {storageFailed ? <p role="alert">{text("浏览器暂存不可用，请保留输入。", "Browser storage unavailable; preserve your input.")}</p> : null}
     </div>
   </section>;
+}
+
+function TurnReply({ turn, items, projectId, section, completedVersion, disabled, decide }: {
+  turn: SectionTurn; items: Candidate[]; projectId: string; section: DialogueSection; completedVersion: string; disabled: boolean;
+  decide: (ids: string[], action: "accept" | "reject") => void;
+}) {
+  const { text } = useUiText();
+  const active = jobIsActive(turn.status);
+  const retainedReply = useRef("");
+  if (turn.streaming_reply) retainedReply.current = turn.streaming_reply;
+  // A terminal SSE/history status does not mean the separate draft cache has caught up.
+  // Read the published candidates after observing completion, including after a reload
+  // or polling fallback. Retrying this query never submits another generation task.
+  const result = useQuery({
+    queryKey: ["draft-dialogue", projectId, "section-result", section.section_id, completedVersion],
+    queryFn: () => apiRequest<{ rewrite_candidates: Candidate[] }>(`/api/v1/projects/${encodeURIComponent(projectId)}/draft`),
+    enabled: !active,
+    retry: false,
+  });
+  const published = result.data?.rewrite_candidates?.filter(c => c.batch_job_id === turn.id) || [];
+  const resolved = [...new Map([...items, ...published].map(c => [c.candidate_id, c])).values()];
+  const waiting = active || result.isPending || result.isFetching;
+  return <div className="chat-message chat-message-assistant"><span>AI</span>
+    {waiting ? <p role="status">{text("正在思考…", "Thinking…")}</p> : null}
+    {!resolved.length && retainedReply.current && (waiting || result.isError) ? <div className="chat-reply-text">
+      <small>{text("正在生成，尚未校验或保存", "Generating; not validated or saved")}</small>
+      <p style={{ whiteSpace: "pre-wrap" }}>{retainedReply.current}</p>
+    </div> : null}
+    {turn.error_message ? <p className="message message-error">{turn.error_message}</p> : null}
+    {Object.values(turn.result?.paragraph_results || {}).filter(r => r.status !== "completed").map(r => <p key={r.paragraph_id} className="message message-warning">{r.paragraph_id} · {r.reason || r.status}</p>)}
+    {!active && result.isError && !result.isFetching ? <div role="alert">
+      <p>{text("回复加载失败，请重试。", "Could not load the reply. Please retry.")}</p>
+      <button type="button" className="button button-secondary" onClick={() => void result.refetch()}>{text("重新加载回复", "Reload reply")}</button>
+    </div> : null}
+    {!resolved.length && !waiting && result.isSuccess && !turn.error_message ? <p>{text("本轮未生成回复，可继续说明你的要求。", "No reply was generated for this turn. You can continue the discussion.")}</p> : null}
+    {resolved.length ? <ChapterReply items={resolved} section={turn.action === "revise" ? section : undefined}
+      disabled={disabled || waiting || result.isError} decide={decide} /> : null}
+  </div>;
 }
 
 function ChapterReply({ items, section, disabled, decide }: { items: Candidate[]; section?: DialogueSection; disabled: boolean;
@@ -191,6 +209,7 @@ function ChapterReply({ items, section, disabled, decide }: { items: Candidate[]
     {items.map(c => <div key={c.candidate_id} className="chat-reply-text">
       {items.length > 1 ? <small>{c.paragraph_id}</small> : null}<CandidateReply candidate={c} />
       <CandidateEvidenceReview candidate={c} />
+      {c.validation_errors?.length && c.rejected_candidate_text ? <details><summary>{text("查看未通过技术校验的文本（不可保存）", "Inspect blocked text (read-only)")}</summary><MarkdownView content={c.rejected_candidate_text} /></details> : null}
       <EvidenceLinks sources={c.sources} legacyRefs={c.source_refs} />
     </div>)}
     {ordered ? <details open><summary>{text("完整章节候选预览", "Complete chapter candidate preview")}</summary>

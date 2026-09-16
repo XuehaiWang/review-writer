@@ -234,3 +234,11 @@ def test_additive_repair_proves_unchanged_old_evidence_not_just_matching_ids():
     changed = deepcopy(current)
     changed["rows"][0]["scientific_facts"].pop(0)
     assert not is_additive_fact_repair(previous, changed)
+def test_study_ownership_is_part_of_fact_audit_identity():
+    from review_writer_core.scientific_facts import review_fingerprint, verify_plain_source_quote
+    fact = {"value": "A result", "field_id": "scope"}
+    legacy = review_fingerprint(fact)
+    own = {**fact, "study_ownership": "own_results"}
+    prior = {**fact, "study_ownership": "prior_work"}
+    assert len({legacy, review_fingerprint(own), review_fingerprint(prior)}) == 3
+    assert verify_plain_source_quote(own, {}) is False

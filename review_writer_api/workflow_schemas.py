@@ -252,8 +252,8 @@ class DraftSectionDialogueRequest(BaseModel):
     action: Literal["discuss", "revise"] = "discuss"
     message: StrictStr = Field(min_length=1, max_length=12000)
     base_hashes: dict[StrictStr, StrictStr]
-    paragraph_keys: list[StrictStr] = Field(default_factory=list, max_length=10000)
-    use_saved: StrictBool = False
+    branch_id: StrictStr = Field(default="", max_length=36)
+    initial_artifact_id: StrictStr = Field(default="", max_length=36)
 
 
 class DraftDialogueRequest(BaseModel):

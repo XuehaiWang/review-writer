@@ -20,18 +20,21 @@ export function analysisState(paper: Paper, active = false): "pending" | "runnin
   const fact = paper.fact_enrichment;
   if (analysisFailed(paper)) return "failed";
   if (["provider_or_budget_unavailable", "retrieval_unavailable", "extraction_failed"].includes(fact?.fact_extraction_profile?.stop_reason || "")) return "failed";
+  const terminalGap = ["no_new_evidence", "supplement_budget_reached", "review_ready_deferred_supplements"].includes(fact?.fact_extraction_profile?.stop_reason || "");
+  if (terminalGap && !["pending", "failed"].includes(fact?.processing?.verification || "") && !["pending", "failed"].includes(fact?.processing?.extraction || "")) return "limited";
   if (fact?.processing && Object.values(fact.processing).some((status) => status === "pending" || status === "failed")) return "pending";
   if (fact && ["complete", "partial", "limited"].includes(fact.status || "")) {
     const limitedFacts = paper.scientific_facts?.some(item => {
       const value = item as { support_level?: string; verification?: { status?: string } } | null;
       return value?.support_level === "context_only" || ["uncertain", "rejected"].includes(value?.verification?.status || "");
     });
-    if (limitedFacts || (fact.review_readiness && fact.review_readiness !== "complete")) return "limited";
+    if (fact.status === "limited" || limitedFacts || (fact.review_readiness && fact.review_readiness !== "complete")) return "limited";
   }
   return fact && ["complete", "partial", "limited"].includes(fact.status || "") ? "complete" : "pending";
 }
 
-export function analysisFailureReason(error: string): "source" | "retrieval" | "network" | "format" | "unknown" {
+export function analysisFailureReason(error: string): "source" | "configuration" | "retrieval" | "network" | "format" | "unknown" {
+  if (/model.{0,120}(?:not available|not found)|api.?key|unauthorized|permission|insufficient.{0,20}(?:quota|credit)|401|403|模型.*(?:未.*开放|不存在)|(?:余额|额度).*(?:不足|耗尽)|授权.*(?:不可用|失效)/i.test(error)) return "configuration";
   if (/no .*evidence candidate|no source-addressable evidence/i.test(error)) return "retrieval";
   if (/missing.*(?:source|extraction)|source.*missing|build full-text indexes/i.test(error)) return "source";
   if (/timeout|timed out|unavailable|429|50[234]|connection|transport/i.test(error)) return "network";
@@ -50,47 +53,44 @@ export function MatrixEvidenceUse({ paper }: { paper: Paper }) {
   </details>;
 }
 
-export function MatrixAnalysisStatus({ paper, papers, projectId, busy, refresh }: {
-  paper?: Paper; papers: Paper[]; projectId: string; busy: boolean; refresh: () => Promise<unknown>;
+export function unfinishedAnalysis(papers: Paper[]) {
+  const unfinished = papers.filter(p => ["pending", "failed"].includes(analysisState(p)));
+  const blocked = unfinished.filter(p => ["source", "configuration"].includes(analysisFailureReason(p.fact_enrichment?.last_attempt?.error || p.fact_enrichment?.error || "")));
+  return { unfinished, blocked, retryable: unfinished.filter(p => !blocked.includes(p)) };
+}
+
+export function MatrixAnalysisStatus({ paper, papers, projectId, busy, refresh, recoveryJobId }: {
+  paper?: Paper; papers: Paper[]; projectId: string; busy: boolean; refresh: () => Promise<unknown>; recoveryJobId?: string;
 }) {
   const { text } = useUiText();
+  const { unfinished, blocked, retryable } = unfinishedAnalysis(papers);
   const retry = useMutation({
-    mutationFn: (ids: string[]) => {
+    mutationFn: () => {
+      if (recoveryJobId) return apiRequest(`/api/v1/jobs/${encodeURIComponent(recoveryJobId)}/retry`, { method: "POST" });
       const query = new URLSearchParams();
-      // Default to recovery: reuse current facts and completed verification.
-      ids.forEach((id) => query.append("paper_ids", id));
+      retryable.forEach(p => query.append("paper_ids", p.paper_id));
       return apiRequest(`/api/v1/projects/${encodeURIComponent(projectId)}/planning/matrix/enrichment/jobs?${query}`, {
         method: "POST", headers: { "Idempotency-Key": newIdempotencyKey() },
       });
     },
-    onSuccess: async () => { await refresh(); retry.reset(); },
+    onSuccess: async () => { await refresh(); },
   });
-  const failed = papers.filter((item) => analysisState(item) === "failed");
-  const error = paper?.fact_enrichment?.last_attempt?.error || paper?.fact_enrichment?.error || "";
-  const reason = analysisFailureReason(error);
-  const failedHere = paper && analysisState(paper) === "failed";
-  const pending = paper && analysisState(paper) === "pending" && Boolean(paper.fact_enrichment?.processing);
-  const retryable = failed.filter((item) => analysisFailureReason(item.fact_enrichment?.last_attempt?.error || item.fact_enrichment?.error || "") !== "source");
-  if (!failed.length && !pending && !retry.isPending && !retry.error) return null;
-  return <section className={`matrix-analysis-actions message ${failedHere ? "message-warning" : "message-info"}`} aria-live="polite">
-    {failedHere ? <>
-      <strong>{paper.fact_enrichment?.last_attempt?.status === "failed"
-        ? text("本次更新失败，保留上次有效分析结果。", "Update failed; the previous valid analysis is retained.")
-        : text("本篇论文科学事实分析未完成。", "Scientific fact analysis is incomplete for this paper.")}</strong>
-      <p>{reason === "source" ? text("可读取的原文不足或缺失，请先在文献库检查原文解析，再重新分析。", "Readable source content is missing or insufficient. Check the source extraction in Library before retrying.")
-        : reason === "retrieval" ? text("本次未检索到可用原文片段，不代表解析文件缺失，也不代表论文没有相关内容。可继续检索分析，或在写作时按具体问题补查。", "No usable passage was retrieved. This does not mean the source file or relevant findings are absent. Resume analysis or retrieve for specific writing questions.")
-        : reason === "network" ? text("模型或网络暂时不可用，可重试分析。", "The model or network is temporarily unavailable. Retry the analysis.")
-        : reason === "format" ? text("模型返回的分析结果未能正确读取，可重试分析。", "The model response could not be read. Retry the analysis.")
-        : text("本次分析未能完成，可以重试；若持续失败，请联系管理员查看任务记录。", "Analysis did not complete. Retry, or contact the administrator if failures persist.")}</p>
-      <p>{text("分析失败不代表论文没有科学证据，不会因此自动排除论文。", "Analysis failure does not mean the paper lacks scientific evidence and does not automatically exclude it.")}</p>
-      {reason === "source" ? <a className="button button-secondary" href={`/library?project=${encodeURIComponent(projectId)}`}>{text("查看文献库原文", "Check Library sources")}</a>
-        : <button className="button button-secondary" disabled={busy || retry.isPending} onClick={() => retry.mutate([paper.paper_id])}>{text("继续本篇未完成分析", "Resume this paper")}</button>}
-      {error ? <details><summary>{text("技术详情", "Technical details")}</summary><p>{error}</p></details> : null}
-    </> : pending && paper ? <><p>{text("已有结果会保留，可继续尚未完成的提取或核验。", "Existing results are retained; resume unfinished extraction or verification.")}</p><button className="button button-secondary" disabled={busy || retry.isPending} onClick={() => retry.mutate([paper.paper_id])}>{text("继续本篇未完成分析", "Resume this paper")}</button></> : null}
-    {retryable.length > 0 ? <button className="button button-secondary" disabled={busy || retry.isPending} onClick={() => retry.mutate(retryable.map((item) => item.paper_id))}>
-      {retry.isPending ? text("正在提交…", "Submitting…") : text(`重试失败项（${retryable.length}）`, `Retry failed papers (${retryable.length})`)}
-    </button> : null}
-    {retry.isPending ? <p role="status">{text("正在提交并更新任务状态…", "Submitting and updating task status…")}</p> : null}
-    {retry.error ? <p role="alert">{text("重试请求未完成：", "Retry request failed: ")}{retry.error.message}</p> : null}
+  if (paper) {
+    if (!["pending", "failed"].includes(analysisState(paper))) return null;
+    const error = paper.fact_enrichment?.last_attempt?.error || paper.fact_enrichment?.error || "";
+    return <details className="matrix-analysis-details"><summary>{text("分析详情", "Analysis details")}</summary>
+      <p>{paper.fact_enrichment?.last_attempt?.status === "failed" ? text("本次更新未完成，上次有效结果已保留。", "The update did not finish; previous valid results are retained.") : text("可通过列表顶部继续未完成分析。已有结果会保留。", "Resume unfinished analysis above the paper list. Existing results are retained.")}</p>
+      {error ? <p>{error}</p> : null}
+    </details>;
+  }
+  const count = recoveryJobId ? Math.max(unfinished.length, 1) : retryable.length;
+  return <section className="matrix-analysis-actions" aria-live="polite">
+    <button type="button" className="button button-secondary" disabled={busy || retry.isPending || count === 0} onClick={() => retry.mutate()}>
+      {busy ? text("分析进行中…", "Analysis in progress…") : retry.isPending ? text("正在提交…", "Submitting…") : text(`继续未完成分析（${count}）`, `Resume unfinished analysis (${count})`)}
+    </button>
+    {blocked.length && !recoveryJobId ? <p className="muted">{text(`另有 ${blocked.length} 篇需先恢复原文或服务配置，已有结果仍可使用。`, `${blocked.length} papers need source or service recovery first. Existing results remain usable.`)}</p> : null}
+    {blocked.length ? <details><summary>{text("查看原因", "Details")}</summary>{blocked.map(p => <p key={p.paper_id}>{p.paper_id}: {p.fact_enrichment?.last_attempt?.error || p.fact_enrichment?.error}</p>)}<a href={`/library?project=${encodeURIComponent(projectId)}`}>{text("查看文献库原文", "Check Library sources")}</a></details> : null}
+    {retry.isSuccess ? <p role="status">{text("已提交，系统将优先复用已有结果。", "Submitted. Existing results will be reused first.")}</p> : null}
+    {retry.error ? <p role="alert">{text("未能继续分析：", "Could not resume analysis: ")}{retry.error.message}</p> : null}
   </section>;
 }

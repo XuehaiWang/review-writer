@@ -12,10 +12,9 @@ import { useUiText } from "../../i18n/useUiText";
 import { FinalJobStatus, type FinalAction } from "./FinalJobStatus";
 import { readFinalJobId, writeFinalJobId } from "./finalJobPersistence";
 
-import { FinalManuscriptEditor, type FinalVersion } from "./FinalManuscriptEditor";
+import { FinalManuscriptPreview, type FinalVersion } from "./FinalManuscriptPreview";
 
 type FinalPayload = {
-  final_paragraphs?: Array<{ paragraph_id: string; text: string }>;
   versions?: FinalVersion[];
   project_id: string;
   revision: number;
@@ -232,9 +231,20 @@ export function FinalPage() {
     ),
     onSuccess: refresh,
   });
+  const resume = useMutation({
+    mutationFn: () => apiRequest<Job>(`/api/v1/jobs/${encodeURIComponent(currentJobId || "")}/retry`, {
+      method: "POST", headers: { "Idempotency-Key": newIdempotencyKey() },
+    }),
+    onSuccess: (started) => {
+      runJob.reset();
+      rememberJob(started.id);
+      if (["final.export", "final.pdf"].includes(started.job_type)) pendingDownloadJob.current = started.id;
+      void refresh();
+    },
+  });
   const cancel = useMutation({ mutationFn: () => apiRequest(`/api/v1/jobs/${encodeURIComponent(currentJobId || "")}/cancel`, { method: "POST" }) });
-  const active = runJob.isPending || Boolean(currentJob && jobIsActive(currentJob.status));
-  const error = saveFrontMatter.error || saveOverview.error || cancel.error || (currentJob?.status === "failed" ? new Error(currentJob.error_message || text("终稿任务失败。", "Final-stage task failed.")) : null);
+  const active = runJob.isPending || resume.isPending || Boolean(currentJob && jobIsActive(currentJob.status));
+  const error = saveFrontMatter.error || saveOverview.error || cancel.error || resume.error;
   const tabs: Array<[FinalTab, string]> = [
     ["preparation", text("终稿准备", "Final preparation")],
     ["conclusion", text("结论", "Conclusion")],
@@ -262,8 +272,8 @@ export function FinalPage() {
           <section className="evidence-boundary-card"><header><span className="step-label">{text("范围与证据边界", "Scope and evidence boundary")}</span><h3>{text("基于当前确认语料的叙述性专题综述", "Narrative review of the confirmed corpus")}</h3></header><p>{text("本稿只声明覆盖用户确认的论文集合，不声称穷尽全领域文献。", payload.evidence_boundary.statement || "This review is limited to the user-confirmed corpus and does not claim exhaustive global coverage.")}</p><dl><div><dt>{text("确认论文", "Selected papers")}</dt><dd>{payload.evidence_boundary.selected_paper_count || 0}</dd></div><div><dt>{text("可写主论文", "Writeable primary papers")}</dt><dd>{payload.evidence_boundary.writeable_primary_paper_count || 0}</dd></div><div><dt>{text("未解决主论文", "Unresolved primary papers")}</dt><dd>{payload.evidence_boundary.unresolved_primary_paper_ids?.length || 0}</dd></div><div><dt>{text("问题级缺口", "Question-level gaps")}</dt><dd>{payload.evidence_boundary.corpus_gap_questions?.length || 0}</dd></div></dl>{payload.evidence_boundary.warnings?.length ? <details><summary>{text(`查看 ${payload.evidence_boundary.warnings.length} 项边界警告`, `View ${payload.evidence_boundary.warnings.length} boundary warnings`)}</summary><ul>{payload.evidence_boundary.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></details> : <p className="message message-success">{text("当前未记录额外证据边界警告。", "No additional evidence-boundary warnings are recorded.")}</p>}</section>
         </> : null}
         {tab === "conclusion" ? <MarkdownView content={payload.conclusion_generated_md} empty={text("尚未生成结论；也可直接生成最终稿。", "No conclusion generated; you can also build the final draft directly.")} /> : null}
-        {tab === "overview" ? payload.overview_figure_exists ? <><figure className="overview-figure-react"><img src={payload.overview_figure_url} alt={text("综述总览图", "Review overview figure")} /></figure><section className="overview-text-editor"><h3>{text("可编辑总览图文字", "Editable overview figure text")}</h3><label>{text("标题", "Title")}<input value={overviewTitle} onChange={(event) => setOverviewTitle(event.target.value)} /></label><label>{text("副标题", "Subtitle")}<input value={overviewSubtitle} onChange={(event) => setOverviewSubtitle(event.target.value)} /></label><label>{text("标签（每行一个）", "Labels (one per line)")}<textarea rows={7} value={overviewLabels} onChange={(event) => setOverviewLabels(event.target.value)} /></label><button className="button button-primary" type="button" disabled={!overviewTitle.trim() || saveOverview.isPending} onClick={() => saveOverview.mutate()}>{text("保存总览图文字", "Save overview text")}</button></section></> : <div className="empty-state">{text("尚未生成总览图；也可直接生成最终稿。", "No overview figure generated; you can also build the final draft directly.")}</div> : null}
-        {tab === "final" ? <FinalManuscriptEditor key={project!.project_id} projectId={project!.project_id} revision={payload.revision} artifactId={payload.final_artifact_id} current={payload.final_current} markdown={payload.final_draft_md} paragraphs={payload.final_paragraphs || []} versions={payload.versions || []} refresh={refresh} /> : null}
+        {tab === "overview" ? payload.overview_figure_exists ? <><figure className="overview-figure-react"><img src={payload.overview_figure_url} alt={text("综述总览图", "Review overview figure")} /></figure><section className="overview-text-editor"><h3>{text("总览图图注（不修改图片内文字）", "Overview caption (does not change text inside the image)")}</h3><label>{text("标题", "Title")}<input value={overviewTitle} onChange={(event) => setOverviewTitle(event.target.value)} /></label><label>{text("副标题", "Subtitle")}<input value={overviewSubtitle} onChange={(event) => setOverviewSubtitle(event.target.value)} /></label><label>{text("标签（每行一个）", "Labels (one per line)")}<textarea rows={7} value={overviewLabels} onChange={(event) => setOverviewLabels(event.target.value)} /></label><button className="button button-primary" type="button" disabled={!overviewTitle.trim() || saveOverview.isPending} onClick={() => saveOverview.mutate()}>{text("保存总览图图注", "Save overview caption")}</button></section></> : <div className="empty-state">{text("尚未生成总览图；也可直接生成最终稿。", "No overview figure generated; you can also build the final draft directly.")}</div> : null}
+        {tab === "final" ? <FinalManuscriptPreview key={project!.project_id} projectId={project!.project_id} markdown={payload.final_draft_md} versions={payload.versions || []} /> : null}
         {tab === "audit" ? <MarkdownView content={payload.final_audit_report_md} empty={text("尚未执行终稿审计。", "Final audit has not run.")} /> : null}
         {tab === "release" ? <MarkdownView content={payload.release_report_md} empty={text("尚未生成发布报告。", "Release report not generated yet.")} /> : null}
         {tab === "pdf" ? <div className="pdf-qa-summary"><h3>{text("期刊型 PDF 渲染状态", "Journal-style PDF render status")}</h3>{payload.final_pdf_exists ? <><p><strong>{text("语言", "Language")}:</strong> {payload.pdf_language_profile}</p><p><strong>{text("编译器", "Compiler")}:</strong> {String(payload.render_manifest?.compiler || "LuaLaTeX")}</p><p><strong>{text("自动 QA", "Automatic QA")}:</strong> {String(payload.pdf_qa?.status || "")}</p><p><strong>{text("页数", "Pages")}:</strong> {String(payload.pdf_qa?.page_count || "")}</p><p><strong>{text("字体全部嵌入", "All fonts embedded")}:</strong> {payload.pdf_qa?.all_fonts_embedded ? text("是", "Yes") : text("否", "No")}</p><div className="final-download-row"><a className="button button-primary" href={payload.pdf_url} download={`final_draft.${payload.pdf_language_profile || "en"}.pdf`}>{text("下载当前 PDF", "Download current PDF")}</a><a className="button button-secondary" href={payload.tex_url} download="manuscript.tex">{text("下载 LaTeX 源文件", "Download LaTeX source")}</a></div></> : <div className="empty-state">{text("尚未生成 PDF。选择语言后一次点击即可后台编译和自动 QA。", "No PDF generated yet. Choose a language and compile with automatic QA in one click.")}</div>}</div> : null}
@@ -277,7 +287,7 @@ export function FinalPage() {
         <label className="pdf-language-field">{text("PDF 语言", "PDF language")}<select value={pdfLanguage} onChange={(event) => setPdfLanguage(event.target.value as "en" | "zh-CN")}><option value="en">English</option><option value="zh-CN">简体中文</option></select></label>
         <button className="button button-primary" type="button" disabled={!payload.final_current || !payload.release_current || active} onClick={() => startJob("pdf")}>{text("生成并下载 LaTeX PDF", "Generate and download LaTeX PDF")}</button>
         <button className="button button-quiet danger" type="button" disabled={!currentJob || !jobIsActive(currentJob.status) || cancel.isPending} onClick={() => cancel.mutate()}>{text("取消当前任务", "Cancel current task")}</button>
-        {runJob.isPending ? <FinalJobStatus startingAction={startingAction} /> : runJob.error ? <FinalJobStatus startingAction={startingAction} submissionError={runJob.error} /> : currentJob ? <FinalJobStatus job={currentJob} startingAction={currentAction} /> : null}
+        {runJob.isPending ? <FinalJobStatus startingAction={startingAction} /> : runJob.error ? <FinalJobStatus startingAction={startingAction} submissionError={runJob.error} /> : currentJob ? <FinalJobStatus job={currentJob} startingAction={currentAction} onResume={() => resume.mutate()} resuming={resume.isPending} /> : null}
         {currentJob?.status === "succeeded" && currentJob.result?.candidate_pending === true ? <p role="status">{text("生成期间终稿已有更新。本次结果已保留在版本历史，可查看后采用。", "The manuscript changed during generation. This result is available in version history for review and adoption.")}</p> : null}
         <div className="final-status-summary"><div><strong>{text("初稿", "Draft")}</strong><StatusPill exists current={payload.draft_approval_current} optional={false} /></div><div><strong>{text("结论", "Conclusion")}</strong><StatusPill exists={Boolean(payload.conclusion_artifact_id)} current={payload.conclusion_current} /></div><div><strong>{text("总览图", "Overview figure")}</strong><StatusPill exists={payload.overview_figure_exists} current={payload.overview_figure_current} /></div><div><strong>{text("最终稿", "Final draft")}</strong><StatusPill exists={Boolean(payload.final_artifact_id)} current={payload.final_current} optional={false} /></div><div><strong>{text("发布", "Release")}</strong><StatusPill exists={Boolean(payload.release?.status)} current={payload.release_current} optional={false} /></div><div><strong>PDF</strong><StatusPill exists={Boolean(payload.pdf_url)} current={payload.final_pdf_exists} /></div></div>
         {payload.final_draft_docx_exists ? <a className="button button-secondary" href={payload.docx_url} download="final_draft.docx">{text("下载当前DOCX", "Download current DOCX")}</a> : null}

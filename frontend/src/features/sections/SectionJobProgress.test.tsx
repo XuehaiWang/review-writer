@@ -112,7 +112,9 @@ describe("SectionJobProgress", () => {
       failed_sections: [{ section_id: "S02", heading: "Methods", error: "S02: missing validated evidence for paper-b" }],
     } } })} />);
     expect(screen.queryByText("章节正文已全部生成")).not.toBeInTheDocument();
-    expect(screen.getByText("S02: missing validated evidence for paper-b")).toBeInTheDocument();
+    expect(screen.getByText("Methods")).toBeInTheDocument();
+    expect(screen.queryByText("S02: missing validated evidence for paper-b")).not.toBeInTheDocument();
+    expect(screen.getByText("本次操作未完成，请重试；若仍失败，请联系管理员。")).toBeInTheDocument();
     expect(screen.getByText("已保留 1 章的检查点；整批发布前不会替换当前正式版本。")).toBeInTheDocument();
   });
 });

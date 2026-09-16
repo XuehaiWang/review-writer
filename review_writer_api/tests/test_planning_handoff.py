@@ -107,6 +107,37 @@ class PlanningHandoffTests(TestCase):
         self.service.publish_matrix_enrichment.assert_not_called()
         self.assertEqual(["P1"], self.service.matrix_enrichment_payload.call_args.kwargs["selected_paper_ids"])
 
+    def test_resume_queue_only_reuses_checkpoint_for_same_matrix_without_force(self):
+        jobs = Mock()
+        self.service._matrix.return_value = ({}, SimpleNamespace(id="before"))
+        self.job.id = "previous"
+        self.job.status = "failed"
+        self.job.result = {"section_checkpoint": {"papers": {"P1": {}}}}
+        jobs.repository.get_current_job.return_value = self.job
+        queue_matrix_enrichment(self.service, jobs, self.principal, "project", paper_ids=["P1"])
+        self.assertEqual("previous", jobs.submit.call_args.kwargs["payload"]["resume_from_job_id"])
+        queue_matrix_enrichment(self.service, jobs, self.principal, "project", force=True)
+        self.assertNotIn("resume_from_job_id", jobs.submit.call_args.kwargs["payload"])
+        self.job.payload = {"source_matrix_artifact_id": "older"}
+        queue_matrix_enrichment(self.service, jobs, self.principal, "project")
+        self.assertNotIn("resume_from_job_id", jobs.submit.call_args.kwargs["payload"])
+
+    def test_worker_passes_queued_resume_checkpoint_to_builder(self):
+        jobs, builder = Mock(), Mock()
+        register_planning_handlers(self.service, jobs, {"matrix.enrich": builder})
+        handler = jobs.register_handler.call_args.args[1]
+        checkpoint = {"papers": {"P1": {"status": "partial"}}}
+        context = Mock(user_id="owner", project_id="project", retry_of_job_id=None)
+        context.repository.get_job.return_value = SimpleNamespace(result={"section_checkpoint": checkpoint})
+        self.service.matrix_enrichment_payload.return_value = {
+            "source_matrix_artifact_id": "before", "pending_paper_count": 1,
+            "fulltext_indexed_paper_count": 1,
+            "papers": [{"paper_id": "P1", "evidence_candidates": [{"text": "Evidence"}]}]}
+        handler(context, {"prepare_on_start": True, "source_matrix_artifact_id": "before",
+            "resume_from_job_id": "previous", "selected_paper_ids": ["P1"]})
+        context.repository.get_job.assert_called_once_with("owner", "previous")
+        self.assertEqual(checkpoint, builder.call_args.args[1]["resume_checkpoint"])
+
     def test_worker_missing_sources_is_not_reported_as_success(self):
         jobs, builder = Mock(), Mock()
         register_planning_handlers(self.service, jobs, {"matrix.enrich": builder})

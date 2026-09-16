@@ -7,6 +7,8 @@ type FinalJobStatusProps = {
   job?: Job;
   startingAction?: FinalAction;
   submissionError?: Error | null;
+  onResume?: () => void;
+  resuming?: boolean;
 };
 
 type PdfCharacterIssue = {
@@ -23,7 +25,7 @@ function actionFromJob(job: Job | undefined, fallback: FinalAction): FinalAction
     : fallback;
 }
 
-export function FinalJobStatus({ job, startingAction = "build", submissionError = null }: FinalJobStatusProps) {
+export function FinalJobStatus({ job, startingAction = "build", submissionError = null, onResume, resuming = false }: FinalJobStatusProps) {
   const { text } = useUiText();
   const action = actionFromJob(job, startingAction);
   const diagnostics = job?.result?.pdf_diagnostics as { total?: number; issues?: PdfCharacterIssue[]; truncated?: boolean } | undefined;
@@ -131,6 +133,7 @@ export function FinalJobStatus({ job, startingAction = "build", submissionError 
         <span style={percentage === undefined ? undefined : { width: `${percentage}%` }} />
       </div>
       <p>{detail}</p>
+      {onResume && job?.available_actions.includes("retry") && ["failed", "interrupted", "cancelled"].includes(job.status) ? <button type="button" className="button button-secondary" disabled={resuming} onClick={onResume}>{resuming ? text("正在恢复…", "Resuming…") : text("继续未完成任务", "Resume unfinished task")}</button> : null}
       {action === "pdf" && Number(diagnostics?.total) > 0 ? <details open={status === "failed"}>
         <summary>{text(`发现 ${diagnostics?.total} 处异常字符（未自动修改）`, `${diagnostics?.total} invalid character(s) found (not automatically modified)`)}</summary>
         <p>{text("以下为本次导出输入的位置，不代表已修复。段落序号按终稿文本块计；核对原文时可使用片段定位。", "Locations refer to this export input; no repair is implied. Paragraph numbers count Final manuscript text blocks. Use the excerpts to locate the source.")}</p>

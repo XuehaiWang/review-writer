@@ -30,6 +30,40 @@ def task():
             "allowed_papers": ["A", "B"], "questions_to_answer": ["What was reported?"], "writing_objective": "Compare reported conditions."}
 
 
+def test_audited_rewrite_preserves_source_binding_without_an_extra_call():
+    replacement = "After 60 minutes at 25 C, Catalyst A achieved 90% pollutant degradation."
+    writing, generated, report, calls = write(audit_status="rewritten", replacement=replacement)
+    assert writing["claims"][0]["claim"] == replacement
+    assert writing["claims"][0]["evidence_refs"][0]["quote"] == source()["content"]
+    assert valid_source_claim(writing["claims"][0], {"a": source()})
+    assert len(calls) == 2
+    assert report["omitted"] == []
+
+
+def test_section_thread_and_presentation_reach_writer_and_style_does_not_reject_facts():
+    from review_writer_core.section_narrative_contracts import derive_narrative_diagnostics
+    calls = []
+    current = {**task(), "organizing_thread": "Compare scope before performance",
+               "paragraph_tasks": ["Explain substrate scope"],
+               "paper_roles": [{"paper_id": "B", "presentation": "table"}]}
+    def model(prompt, schema, label):
+        calls.append(prompt)
+        if label == "section-source-writing":
+            return {"paragraphs": [{"claims": [{"text": source()["content"],
+                "claim_kind": "reported_finding", "support_spans": [{"evidence_key": "E001", "quote": source()["content"]}]}]}]}
+        return {"claims": [{"claim_id": "S01-p1-C01", "status": "supported", "text": source()["content"]}],
+                "section_review": {"status": "needs_revision", "issues": ["Explain the transition."]}}
+    writing, _, _ = write_from_sources(section_id="S01", task=current, evidence=[source()], context="", call=model)
+    assert current["organizing_thread"] in calls[0]
+    assert '"presentation": "table"' in calls[0]
+    assert len(writing["claims"]) == 1
+    diagnostic = derive_narrative_diagnostics(writing)
+    assert diagnostic["review_status"] == "needs_revision"
+    assert diagnostic["issues"] == ["Explain the transition."]
+    writing["section_review"] = {"status": "coherent", "issues": []}
+    assert derive_narrative_diagnostics(writing, {"minimum_paragraphs": 20})["status"] == "complete"
+
+
 def write(evidence=None, *, text=None, audit_status="supported", replacement=None, span=None, records=None,
           fact_ids=None, section_task=None):
     evidence = evidence or [source()]

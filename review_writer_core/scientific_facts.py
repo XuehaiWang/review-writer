@@ -29,7 +29,7 @@ ASSERTION_CEILING_ORDER = (
     "direct_report_with_local_context",
     "direct_source_report",
 )
-FACT_PROMPT_VERSION = "fact-extraction/6"
+FACT_PROMPT_VERSION = "fact-extraction/7"
 
 # One writing/comparison policy for Blueprint, Sections and Draft evaluation.
 # This permits synthesis, not unverified aliases or new experimental facts.
@@ -271,7 +271,10 @@ def review_fingerprint(fact: Mapping[str, Any]) -> str:
             "predicate", "normalized_value", "unit", "qualifiers", "experiment_id",
             "epistemic_status", "evidence_refs", "support_spans", "support_excerpt",
             "classification_axis_id", "classification_partition_id", "revision_assertion_ceiling")
-    return hashlib.sha256(json.dumps({key: fact.get(key) for key in keys},
+    inputs = {key: fact.get(key) for key in keys}
+    if "study_ownership" in fact:
+        inputs["study_ownership"] = fact["study_ownership"]
+    return hashlib.sha256(json.dumps(inputs,
                                     ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
@@ -327,7 +330,8 @@ def verify_plain_source_quote(fact: dict[str, Any], sources: Mapping[str, Mappin
     This checks source attribution, not a paraphrase, classification, numeric
     relation or scientific inference. Those keep their independent audit.
     """
-    if (fact.get("field_id") not in {"object_input", "scope", "research_question", "contribution"}
+    if ("study_ownership" in fact
+            or fact.get("field_id") not in {"object_input", "scope", "research_question", "contribution"}
             or fact.get("fact_type") not in {"reported_object_or_input", "scope", "reported_fact", "study_description"}
             or fact_is_classification(fact)
             or fact.get("revision_of_fact_id") or fact.get("correction_of_fact_id")

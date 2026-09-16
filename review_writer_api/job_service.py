@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from review_writer_core.provider_errors import public_model_error
+
 import threading
 import uuid
 import logging
@@ -41,7 +43,7 @@ def job_payload(job: JobRecord) -> dict[str, Any]:
         "progress_total": job.progress_total,
         "cancellation_requested": job.cancellation_requested,
         "error_code": job.error_code,
-        "error_message": job.error_message,
+        "error_message": public_model_error(job.error_message or ""),
         "retry_of_job_id": job.retry_of_job_id,
         "created_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat(),

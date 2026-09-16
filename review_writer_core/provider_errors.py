@@ -53,6 +53,8 @@ def normalize_provider_error(status: int, payload) -> dict:
 
 
 def provider_error_message(error: dict) -> str:
+    if error.get("provider_status") in {408, 504, 524}:
+        return MODEL_TIMEOUT_MESSAGE
     return {
         "model_unavailable": "当前配置的模型不存在或未向此服务账号开放，请管理员调整模型或服务分组；重复重试不会解决。",
         "quota_exhausted": "模型提供方额度已耗尽或不足。请恢复额度或重新分配可用会话后重试未完成部分；继续等待不会恢复已失败的请求。",
@@ -60,3 +62,13 @@ def provider_error_message(error: dict) -> str:
         "authentication": "模型服务授权不可用，请检查服务配置后重试。",
         "rate_limited": "模型提供方当前请求过多，请稍后重试未完成部分。",
     }.get(error.get("category"), "文本模型服务暂时不可用，请稍后重试。")
+
+
+MODEL_TIMEOUT_MESSAGE = "模型服务响应超时，已完成内容已保留。"
+
+
+def public_model_error(message: str) -> str:
+    """Compact known model timeouts; leave unrelated errors and stored diagnostics intact."""
+    if re.search(r"(?:model|provider|模型|图像服务).{0,100}(?:timed? out|timeout|响应超时)|(?:HTTP|status_code\s*=|provider_status[\"':\s]+)\s*(?:408|504|524)\b|Proxy Read Timeout", message, re.I):
+        return MODEL_TIMEOUT_MESSAGE
+    return message

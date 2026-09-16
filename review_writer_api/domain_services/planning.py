@@ -1871,7 +1871,12 @@ class PlanningService(
             analysis = deepcopy(result.get("paper_analysis") or row.get("paper_analysis") or {})
             analysis["fact_ids"] = [f["fact_id"] for f in facts if fact_is_usable(f)
                                     and f.get("fact_id") in (analysis.get("fact_ids") or [])]
-            row["paper_analysis"] = analysis if analysis["fact_ids"] else {}
+            # Keep source-addressable navigation even before individual facts
+            # pass verification; it never substitutes for a supported claim.
+            allowed_keys = set(fact_candidates)
+            analysis["evidence_keys"] = [k for k in analysis.get("evidence_keys") or [] if isinstance(k, str) and k in allowed_keys]
+            analysis["usage"] = "navigation_only"
+            row["paper_analysis"] = analysis if analysis["fact_ids"] or analysis["evidence_keys"] else {}
         classification_axes = [
             deepcopy(axis)
             for axis in payload.get("classification_axes") or updated.get("classification_axes") or []
@@ -1996,6 +2001,7 @@ class PlanningService(
             return {
                 str(row.get("paper_id") or ""): {
                     "scientific_facts": row.get("scientific_facts") or [],
+                    "paper_analysis": row.get("paper_analysis") or {},
                     "topic_partition_classification": row.get(
                         "topic_partition_classification"
                     )

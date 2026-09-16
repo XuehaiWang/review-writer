@@ -586,6 +586,8 @@ def repair_input_fingerprint(paragraph, issue, evidence, *, constraints):
              "sources": sorted(sources, key=lambda row: str(row["paper_id"])),
              "argument_plan": evidence.get("argument_plan") or [],
              "contract_version": REPAIR_ROUTING_VERSION, "constraints": constraints}
+    if evidence.get("section_context"):
+        value["section_context"] = evidence["section_context"]
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 

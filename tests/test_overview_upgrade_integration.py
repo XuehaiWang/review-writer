@@ -29,7 +29,8 @@ def write_project(root, chemical=True, modules=2):
     project = root / "review-projects/acceptance"
     topic = "Allene synthesis" if chemical else "Digital learning methods"
     files = {
-        "project_config.json": {"taxonomy_profile": "allene" if chemical else "general_academic"},
+        # Regression: real chemistry projects can retain the generic profile.
+        "project_config.json": {"taxonomy_profile": "general_academic"},
         "00_discovery/query_plan.draft.json": {"topic": topic, "group_by": ["catalyst_or_method"]},
         "00_discovery/selected_discovery_results.json": {"group_by": ["catalyst_or_method"]},
         "01_matrix_outline/section_blueprint.json": {
@@ -63,7 +64,7 @@ def provider_png(blank_slot):
     for x in range(0, 1000, 28):
         draw.rectangle((x, 90, x + 7, 799), fill=(181, 93, 81))
     if blank_slot:
-        draw.rectangle((30, 105, 969, 330), fill="white", outline=(80, 100, 120), width=3)
+        draw.rectangle((30, 130, 969, 510), fill="white", outline=(80, 100, 120), width=3)
     output = io.BytesIO()
     fig.save(output, format="PNG")
     return output.getvalue()
@@ -72,6 +73,7 @@ def provider_png(blank_slot):
 @pytest.mark.parametrize("chemical,confidence,modules,blank_slot,expected_mode,template_id", [
     (True, 95, 2, True, "reaction", 1),
     (True, 15, 2, True, "concept", 1),
+    (True, -1, 2, True, "concept", 1),
     (False, 0, 3, True, "concept", 4),
     (False, 0, 7, True, "concept", 10),
     (True, 95, 4, False, "reaction", 5),
@@ -86,9 +88,12 @@ def test_generation_acceptance(tmp_path, chemical, confidence, modules, blank_sl
             return {"template_id": template_id, "reason": "Fits module count and declared slot."}
         if label == "overview-chemistry-review":
             return {"supported": confidence >= 70, "confidence": confidence, "reason": "Fixture evidence review."}
+        if label == "overview-display-audit":
+            return {"passed": True, "uncertain": False, "issues": []}
         assert "Authoritative Overview contract" in prompt
         return {
-            **(SCHEME if chemical else {}),
+            **(SCHEME if chemical and confidence >= 0 else {}),
+            "chemistry_applicable": chemical,
             "key_findings": ["CuI and base yield allenes" if chemical else "Flexible access"],
             "cross_cutting": ["Evidence boundaries"], "take_home": ["Evidence varies across methods"],
         }
@@ -98,30 +103,35 @@ def test_generation_acceptance(tmp_path, chemical, confidence, modules, blank_sl
          patch.object(overview, "resolve_api_key", return_value="fixture"), \
          patch.object(overview, "_text_gateway_configured", return_value=True), \
          patch.object(overview, "call_gateway_json", side_effect=text_model), \
-         patch.object(overview, "call_image_edit_api", return_value=provider_png(blank_slot)) as image_call:
+         patch.object(overview, "call_image_edit_api", side_effect=[provider_png(blank_slot),provider_png(True),provider_png(True)]) as image_call:
         overview.main()
     report = json.loads((project / "03_figure_redraw/overview_template_match.json").read_text(encoding="utf-8"))
     assert report["status"] == "success"
     assert report["chemistry_generation"]["mode"] == expected_mode
-    assert report["template_selection"]["mode"] == "ai"
-    assert report["selected_template_id"] == template_id
+    if expected_mode == "reaction":
+        assert report["template_selection"]["mode"] == "ai"
+        assert report["style_generation"]["mode"] == "single-pass"
+    else:
+        assert report["template_selection"]["mode"] == "ai"
+        assert report["selected_template_id"] == template_id
     assert len(report["overview_content_contract"]["modules"]) == modules
     assert len(report["overview_content_contract_sha256"]) == 64
     assert report["overview_content_contract"]["primary_axis"] == ("substrate" if chemical else "method")
     assert report["features"]["group_by"] == (["substrate"] if chemical else ["method"])
     if expected_mode == "reaction":
         assert report["skeleton"]["chemical_identity"]
-        assert report["composite"]["status"] == "success"
-        assert report["composite"]["panel_source"] == ("auto-detected" if blank_slot else "inserted-reaction-slot")
-        assert image_call.call_count == (1 if blank_slot else 2)
+        assert report["composite"]["status"] == "not_applicable"
+        assert image_call.call_args.kwargs["extra_images"]
+        assert image_call.call_count == 1
+        assert image_call.call_args.args[2].name != 'template_skeleton.png'
     else:
         assert report["skeleton"]["smiles"] == ""
         assert "Draw a SINGLE 3D ball-and-stick" not in report["adapted_prompt"]
-        assert "CONCEPT-ONLY LAYOUT" in report["adapted_prompt"]
-        assert "REQUIRED MODULE COVERAGE" in report["adapted_prompt"]
+        assert "AUTHORITATIVE DISPLAY CONTENT" in report["adapted_prompt"]
+        assert "STYLE REFERENCE" in report["adapted_prompt"]
         assert report["composite"]["status"] == "not_applicable"
         if chemical:
-            assert "do not reserve a structure panel" in report["adapted_prompt"]
+            assert "do not invent molecular structures" in report["adapted_prompt"]
     with Image.open(project / "03_figure_redraw/overview_figure.png") as image:
         assert image.size == (1000, 800)
 
@@ -150,14 +160,16 @@ def test_string_false_cannot_promote_a_reaction():
         assert overview._automatic_chemistry_decision({}, SCHEME)["mode"] != "reaction"
 
 
-def test_reaction_score_fallback_never_selects_a_slotless_template():
+def test_reference_without_original_slot_can_be_adapted_to_reaction():
     templates = [
         {"id": 7, "name": "slotless", "layout_type": "matrix", "layout_capabilities": {"reaction_slot": "none"}},
         {"id": 22, "name": "reaction", "layout_type": "hero", "layout_capabilities": {"reaction_slot": "hero-horizontal"}},
     ]
     with patch.object(overview, "score_template", side_effect=[100, 1]), \
          patch.object(overview, "_text_gateway_configured", return_value=False):
-        assert overview.select_best_template(templates, {"_chemistry_decision": {"mode": "reaction"}})["id"] == 22
+        chosen = overview.select_best_template(templates, {"_chemistry_decision": {"mode": "reaction"}})
+        assert chosen["id"] == 7
+        assert "reaction_box" not in overview.normalize_style_plan({}, reaction=True)
 
 
 def test_dry_run_never_calls_model_gateway(tmp_path):
@@ -170,3 +182,32 @@ def test_dry_run_never_calls_model_gateway(tmp_path):
         overview.main()
     text.assert_not_called()
     image.assert_not_called()
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_single_generation_no_output_audit_or_retry(tmp_path, valid):
+    project = write_project(tmp_path, chemical=False)
+    labels = []
+    def model(prompt, *, label, **kwargs):
+        labels.append(label)
+        if label == "overview-template-selection":
+            return {"template_id": 1, "reason": "Reference style"}
+        return {"key_findings": ["Flexible access"], "cross_cutting": [], "take_home": []}
+    argv = [str(SPEC.origin), "--review-root", str(tmp_path), "--project-id", "acceptance"]
+    png = provider_png(False) if valid else b"invalid image"
+    with patch.object(overview.sys, "argv", argv), patch.object(overview, "load_dotenv"), \
+         patch.object(overview, "resolve_api_key", return_value="fixture"), \
+         patch.object(overview, "_text_gateway_configured", return_value=True), \
+         patch.object(overview, "call_gateway_json", side_effect=model), \
+         patch.object(overview, "call_image_edit_api", return_value=png) as image:
+        if valid:
+            overview.main()
+        else:
+            with pytest.raises(Exception, match="cannot identify image"):
+                overview.main()
+    assert image.call_count == 1
+    assert "overview-display-audit" not in labels
+    output = project / "03_figure_redraw/overview_figure.png"
+    assert output.exists() == valid
+    if valid:
+        assert output.read_bytes() == png  # No post-generation image modification.

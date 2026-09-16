@@ -36,7 +36,7 @@ def _recover_model_result(url: str, token: str, request_key: str, *, label: str)
             ) as response:
                 snapshot = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            if exc.code not in {408, 429, 500, 502, 503, 504}:
+            if exc.code not in {408, 429, 500, 502, 503, 504, 524}:
                 raise _gateway_http_error(exc) from exc
             exc.close()
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
@@ -240,9 +240,9 @@ def _gateway_http_error(exc: urllib.error.HTTPError, *, image: bool = False) -> 
     failure = normalize_provider_error(exc.code, payload)
     if code == "INSUFFICIENT_CREDIT" or exc.code == 402:
         public = "余额不足，无法使用智能服务。请在“API 设置”中查看余额，或联系管理员添加额度。"
-    elif failure["category"] in {"quota_exhausted", "context_limit", "rate_limited", "model_unavailable"}:
+    elif failure.get("provider_status") in {408, 504, 524} or failure["category"] in {"quota_exhausted", "context_limit", "rate_limited", "model_unavailable"}:
         public = provider_error_message(failure)
-    elif exc.code in {408, 409, 425, 429, 500, 502, 503, 504}:
+    elif exc.code in {408, 409, 425, 429, 500, 502, 503, 504, 524}:
         public = "图像服务暂时不可用，请稍后重试。" if image else "文本模型服务暂时不可用，请稍后重试。"
     elif exc.code in {401, 403}:
         public = "任务授权已失效，请重新启动任务。"

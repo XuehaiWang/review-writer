@@ -10,6 +10,7 @@ from pathlib import Path
 
 from review_writer_core.writing_contracts import derive_writing_scope_contract
 from review_writer_core.scientific_facts import attach_fact_to_evidence
+from review_writer_core.stages.sections.plan_repair import complete_primary_claim_coverage
 
 
 SCRIPT = (
@@ -69,7 +70,7 @@ class SectionAcademicPipelineTests(unittest.TestCase):
                 self.assertEqual(0, PIPELINE.main())
                 model.assert_not_called()
 
-    def test_evidence_recovery_keeps_a_supported_subset_without_missing_paper_gate(self):
+    def test_failed_authoring_does_not_publish_source_quotes_as_fallback(self):
         source = deepcopy(self.evidence[0])
         source["content"] = "The optimized experiment gave 91% yield."
         attach_fact_to_evidence(source, {"fact_id": "F1", "field_id": "quantitative_results", "value": source["content"],
@@ -78,27 +79,11 @@ class SectionAcademicPipelineTests(unittest.TestCase):
                 "primary_papers": ["P001", "P002"]}
         package = {"retrieval_mode": "lexical", "hits": [source]}
         result = PIPELINE.recover_evidence_section(task, package, [source], {"P001": 1}, "P002 unavailable")
-        self.assertEqual("limited_evidence", result["output"]["generation_mode"])
-        self.assertIn("91%", result["output"]["draft_md"])
-        self.assertEqual({"P001"}, {p for paragraph in result["output"]["paragraphs"] for p in paragraph["cited_paper_ids"]})
+        self.assertEqual("pending_evidence", result["output"]["generation_mode"])
+        self.assertNotIn("91%", result["output"]["draft_md"])
+        self.assertEqual([], result["output"]["paragraphs"])
 
-    def test_format_retry_is_bounded_and_does_not_mask_transport_errors(self):
-        fallback = {"paragraphs": [{"claims": []}]}
-        with patch.object(PIPELINE, "build_source_plan_fallback", return_value=fallback) as build:
-            request = unittest.mock.Mock(side_effect=[RuntimeError("Model returned no complete JSON object."), self.proposed])
-            plan, recovery = PIPELINE.recover_plan_format(request, build)
-            self.assertEqual(self.proposed, plan)
-            self.assertEqual("format_retry", recovery["mode"])
-            build.assert_not_called()
-            request = unittest.mock.Mock(side_effect=RuntimeError("provider transport failed"))
-            with self.assertRaisesRegex(RuntimeError, "transport failed"):
-                PIPELINE.recover_plan_format(request, build)
-            self.assertEqual(1, request.call_count)
-            build.assert_not_called()
 
-    def test_source_plan_fallback_cannot_invent_evidence(self):
-        with self.assertRaisesRegex(RuntimeError, "no eligible registered findings"):
-            PIPELINE.build_source_plan_fallback(section_id="S08", primary=[], allowed=["P001"], evidence=self.evidence)
 
 
     def test_normalization_never_silently_truncates_paragraphs_or_claims(self):
@@ -305,7 +290,7 @@ class SectionAcademicPipelineTests(unittest.TestCase):
         self.assertEqual(original["components"][0], patched["components"][0])
         self.assertEqual("mechanism", patched["components"][1]["component_type"])
 
-    def test_realization_and_fallback_cannot_switch_selected_experiment(self):
+    def test_realization_cannot_switch_selected_experiment(self):
         source = self.evidence[0]
         source["content"] = "The optimized experiment gave 91% yield; the control gave 42% yield."
         for fid, value in (("F-opt", "91% yield"), ("F-control", "42% yield")):
@@ -319,10 +304,6 @@ class SectionAcademicPipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "selected facts"):
             PIPELINE.validate_and_realize_section(section_id="S02", generated=generated, writing_section=writing,
                                                   evidence=[source], citation_map={"P001": 1})
-        fallback = PIPELINE.build_safe_evidence_fallback(writing_section=writing, evidence=[source])
-        text = fallback["paragraphs"][0]["claim_realizations"][0]["text"]
-        self.assertIn("91%", text)
-        self.assertNotIn("42%", text)
 
     def test_explicit_claim_fact_selection_does_not_inherit_another_experiment(self):
         source = self.evidence[0]
@@ -608,7 +589,7 @@ class SectionAcademicPipelineTests(unittest.TestCase):
             synthesis["normalization_diagnostics"]["missing_primary_papers"],
         )
 
-        completed, repair = PIPELINE.complete_primary_claim_coverage(
+        completed, repair = complete_primary_claim_coverage(
             "S02",
             proposed,
             synthesis["normalization_diagnostics"]["missing_primary_papers"],
@@ -658,7 +639,7 @@ class SectionAcademicPipelineTests(unittest.TestCase):
             ]
         }
 
-        completed, repair = PIPELINE.complete_primary_claim_coverage(
+        completed, repair = complete_primary_claim_coverage(
             "S02",
             proposed,
             [],
@@ -824,128 +805,7 @@ class SectionAcademicPipelineTests(unittest.TestCase):
                 citation_map={"P001": 1},
             )
 
-    def test_safe_evidence_fallback_omits_an_unsupported_planned_value(self) -> None:
-        evidence = [
-            {
-                "evidence_id": "EV-A",
-                "evidence_key": "sha256:a",
-                "paper_id": "P001",
-                "chunk_id": "C001",
-                "content": "The cited experiment afforded the product in 81% yield.",
-            }
-        ]
-        writing = {
-            "overview_intent": "Summarize the cited experiment.",
-            "paragraphs": [
-                {
-                    "paragraph_id": "S02-p1",
-                    "claim_ids": ["S02-p1-C01"],
-                    "positive_synthesis": "A bounded result was reported.",
-                }
-            ],
-            "claims": [
-                {
-                    "claim_id": "S02-p1-C01",
-                    "paragraph_id": "S02-p1",
-                    "claim": "The product was obtained in 97% yield.",
-                    "allowed_assertion": "The product was obtained in 97% yield.",
-                    "claim_kind": "reported_finding",
-                    "citation_group": ["P001"],
-                    "evidence_refs": [
-                        {
-                            "evidence_id": "EV-A",
-                            "evidence_key": "sha256:a",
-                            "relationship": "supports",
-                        }
-                    ],
-                    "support_status": "supported",
-                }
-            ],
-        }
 
-        fallback = PIPELINE.build_safe_evidence_fallback(
-            writing_section=writing,
-            evidence=evidence,
-        )
-
-        self.assertNotIn("97%", json.dumps(fallback))
-        overview, paragraphs, _validations, _reviews = PIPELINE.validate_and_realize_section(
-            section_id="S02",
-            generated=fallback,
-            writing_section=writing,
-            evidence=evidence,
-            citation_map={"P001": 1},
-        )
-        self.assertTrue(overview)
-        self.assertIn("[1]", paragraphs[0]["text"])
-
-    def test_safe_evidence_fallback_rechecks_a_repaired_claim_instead_of_reusing_plan_failure(self) -> None:
-        evidence = [
-            {
-                "evidence_id": "EV-A",
-                "evidence_key": "sha256:a",
-                "paper_id": "P001",
-                "chunk_id": "C001",
-                "content": "The cited study reports the transformation under the investigated conditions.",
-            }
-        ]
-        writing = {
-            "overview_intent": "Summarize the cited study.",
-            "paragraphs": [
-                {
-                    "paragraph_id": "S02-p1",
-                    "claim_ids": ["S02-p1-C01"],
-                    "positive_synthesis": "The transformation was reported.",
-                }
-            ],
-            "claims": [
-                {
-                    "claim_id": "S02-p1-C01",
-                    "paragraph_id": "S02-p1",
-                    "claim": "The product was obtained in 97% yield.",
-                    "allowed_assertion": "The transformation was reported under the investigated conditions.",
-                    "claim_kind": "reported_finding",
-                    "citation_group": ["P001"],
-                    "evidence_refs": [
-                        {
-                            "evidence_id": "EV-A",
-                            "evidence_key": "sha256:a",
-                            "relationship": "supports",
-                        }
-                    ],
-                    "support_status": "partially_supported",
-                    "coverage": {
-                        "subject": True,
-                        "predicate": True,
-                        "value": False,
-                        "qualifiers": False,
-                        "paper_identity": True,
-                    },
-                    "failed_coverage_fields": ["value", "qualifiers"],
-                }
-            ],
-        }
-
-        fallback = PIPELINE.build_safe_evidence_fallback(
-            writing_section=writing,
-            evidence=evidence,
-        )
-        overview, paragraphs, _validations, reviews = PIPELINE.validate_and_realize_section(
-            section_id="S02",
-            generated=fallback,
-            writing_section=writing,
-            evidence=evidence,
-            citation_map={"P001": 1},
-        )
-
-        self.assertTrue(overview)
-        self.assertEqual([], paragraphs[0]["claim_realizations"][0]["failed_coverage_fields"])
-        self.assertEqual(
-            ["value", "qualifiers"],
-            paragraphs[0]["claim_realizations"][0]["planned_failed_coverage_fields"],
-        )
-        self.assertEqual("PASS_WITH_WARNINGS", reviews[0]["decision"])
-        self.assertEqual("planned_claim_scope_narrowed", reviews[0]["issues"][0]["type"])
 
     def test_legacy_prefix_fallback_requires_explicit_authorization(self) -> None:
         self.assertEqual(

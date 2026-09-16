@@ -546,6 +546,15 @@ def derive_narrative_diagnostics(
     """Measure paragraph-role and comparison coverage from a Writing Plan."""
 
     contract = depth_contract or {}
+    semantic_review = writing_section.get("section_review")
+    if isinstance(semantic_review, dict):
+        complete = semantic_review.get("status") == "coherent"
+        return {"status": "complete" if complete else "shallow",
+                "paragraph_count": len(writing_section.get("paragraphs") or []),
+                "missing_requirements": [] if complete else ["section_thread_review"],
+                "issues": list(semantic_review.get("issues") or []),
+                "review_status": semantic_review.get("status"),
+                "diagnostic_policy": "semantic_thread_not_role_quota"}
     paragraphs = [
         paragraph
         for paragraph in writing_section.get("paragraphs") or []

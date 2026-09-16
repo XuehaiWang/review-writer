@@ -1,5 +1,5 @@
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Job } from "../../api/types";
 import { usePreferences } from "../../state/preferences";
@@ -29,6 +29,20 @@ function job(overrides: Partial<Job> = {}): Job {
 }
 
 describe("FinalJobStatus", () => {
+  it("retains a resume entry for failed jobs and prevents duplicate submission", () => {
+    usePreferences.setState({ language: "zh-CN" });
+    const resume = vi.fn();
+    const failed = job({ status: "failed", available_actions: ["retry"],
+      error_message: "模型服务响应超时，已完成内容已保留。" });
+    const view = render(<FinalJobStatus job={failed} onResume={resume} />);
+    expect(screen.getByText(failed.error_message)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "继续未完成任务" }));
+    expect(resume).toHaveBeenCalledTimes(1);
+    view.rerender(<FinalJobStatus job={failed} onResume={resume} resuming />);
+    expect(screen.getByRole("button", { name: "正在恢复…" })).toBeDisabled();
+    view.rerender(<FinalJobStatus job={job({ status: "succeeded", available_actions: [] })} onResume={resume} />);
+    expect(screen.queryByRole("button", { name: "继续未完成任务" })).not.toBeInTheDocument();
+  });
   it("shows persisted PDF source locations after remount without claiming a repair", () => {
     const saved = job({ job_type: "final.pdf", status: "failed", result: { pdf_diagnostics: {
       total: 1, source_modified: false, issues: [{ kind: "reference", reference_number: "10", section: "References",

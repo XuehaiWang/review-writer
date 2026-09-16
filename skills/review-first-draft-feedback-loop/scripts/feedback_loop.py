@@ -56,7 +56,8 @@ from review_writer_core.draft_quality import (  # noqa: E402
 )
 from review_writer_core.publication_voice import publication_voice_issues  # noqa: E402
 from review_writer_core.source_attribution import (  # noqa: E402
-    SOURCE_ATTRIBUTION_POLICY, attribution_repair_instruction, validated_attribution_repair,
+    SOURCE_ATTRIBUTION_POLICY, CONTRIBUTION_WRITING_POLICY, SECTION_THREAD_POLICY,
+    section_navigation_context, attribution_repair_instruction, validated_attribution_repair,
 )
 from review_writer_core.section_narrative_contracts import (  # noqa: E402
     canonical_argument_role,
@@ -687,11 +688,14 @@ def claim_evidence_contract(project: Path) -> dict[str, Any]:
                 and not bool(current.get("claim_eligible"))
             ):
                 evidence_by_key[key] = row
+    draft_path = project / "04_first_draft" / "first_draft.md"
+    current_paragraphs = parse_marked_paragraphs(draft_path.read_text(encoding="utf-8", errors="replace")) if draft_path.is_file() else []
     return {
         "claims": claims,
         "paragraph_claim_ids": paragraph_claim_ids,
         "evidence_by_key": evidence_by_key,
         "paragraph_fact_supplements": package.get("paragraph_fact_supplements") or {},
+        "section_navigation": section_navigation_context(writing, current_paragraphs),
     }
 
 
@@ -1099,6 +1103,7 @@ def source_evidence(
     *, queries: list[str] | None = None,
 ) -> dict[str, Any]:
     contract = academic_contract or {}
+    navigation = (contract.get("section_navigation") or {}).get(str(paragraph.get("paragraph_id") or ""), {})
     planned_ids = (contract.get("paragraph_claim_ids") or {}).get(str(paragraph.get("paragraph_id") or "")) or []
     argument_plan = [{**argument_projection(claim), "required_for_section": claim.get("required_for_section", True),
                       **({"draft_revision": claim["draft_revision"]} if claim.get("draft_revision") else {})}
@@ -1135,6 +1140,7 @@ def source_evidence(
             if valid:
                 restored['local_source_available'] = True
                 restored['argument_plan'] = argument_plan
+                restored['section_context'] = navigation
                 restored['paragraph_text_hash'] = entry['paragraph_text_hash']
                 restored['targeted_source_recheck'] = entry['targeted_source_recheck']
                 return restored
@@ -1148,6 +1154,7 @@ def source_evidence(
             "original_source_ready": True,
             "evidence_scope": "claim_bound_indexed_evidence",
             "argument_plan": argument_plan,
+            "section_context": navigation,
             "evidence": [
                 {
                     "paper_id": paper_id,
@@ -1254,6 +1261,7 @@ def source_evidence(
         ),
         "evidence": evidence,
         "argument_plan": argument_plan,
+        "section_context": navigation,
     }
 
 
@@ -1745,6 +1753,7 @@ def compact_evidence_for_prompt(
         "evidence": compact_papers,
         "passage_texts": passage_texts,
         "argument_plan": raw.get("argument_plan") or [],
+        "section_context": raw.get("section_context") or {},
     }
 
 
@@ -1861,6 +1870,9 @@ def evaluation_prompt(
         f"{REVIEW_COMPARISON_POLICY} "
         "A protected-fact conflict must route to local_source_recheck or human_confirmation, never automatic invention. "
         f"{SOURCE_ATTRIBUTION_POLICY} "
+        f"{CONTRIBUTION_WRITING_POLICY} {SECTION_THREAD_POLICY} "
+        "section_context contains the organizing thread and adjacent CURRENT draft paragraphs, not verified evidence. "
+        "Check local continuity without treating neighbors as source support or scoring paragraphs outside this batch. "
         "Original-source checking is part of this evaluation. For each paragraph, compare its factual claims with the "
         f"retrieved original_passages. {REVIEW_EVIDENCE_POLICY} Return source_check_status "
         "(verified|partially_supported|unsupported|needs_human_review|contradicted|not_found_in_checked_scope|not_applicable), source_evidence_refs using only the "
@@ -2448,12 +2460,13 @@ def protection_prose(text: str) -> str:
     return MARKDOWN_IMAGE_RE.sub(" ", without_metadata)
 
 
-def protected_signature(text: str) -> dict[str, list[str]]:
+def protected_signature(text: str, *, exclude_citation_numbers: bool = False) -> dict[str, list[str]]:
     prose = protection_prose(text)
+    numeric_prose = CALLOUT_RE.sub("", prose) if exclude_citation_numbers else prose
     return {
         # Citation order is binding; [1] and [2] may not trade places.
         "callouts": [match.group(0) for match in CALLOUT_RE.finditer(prose)],
-        "numbers": [match.group(0).casefold() for match in PROTECTED_NUMBER_RE.finditer(prose)],
+        "numbers": [match.group(0).casefold() for match in PROTECTED_NUMBER_RE.finditer(numeric_prose)],
         "stereo": sorted(set(match.group(0).casefold() for match in STEREO_RE.finditer(prose))),
         "chemical_identities": chemical_identity_tokens(prose),
         "required_labels": sorted(
@@ -2543,6 +2556,9 @@ def rewrite_prompt(
         f"Rewrite mode: {rewrite_mode}. {mode_instruction}\n"
         f"{attribution_repair_instruction(score, evidence, rewrite_mode)}\n"
         f"{REVIEW_COMPARISON_POLICY} {REVIEW_EVIDENCE_POLICY}\n"
+        f"{CONTRIBUTION_WRITING_POLICY} {SECTION_THREAD_POLICY}\n"
+        "Use section_context to preserve the local thread and adjacency, not to add unverified facts. "
+        "Change only this paragraph; never copy a neighbor or change paragraph IDs, image bindings or citations.\n"
         f"Paragraph id: {paragraph['paragraph_id']}\n"
         f"Diagnosis: {json.dumps(score, ensure_ascii=False)}\n"
         "Local evidence: "

@@ -5,7 +5,7 @@ import { useUiText } from "../../i18n/useUiText";
 import { EvidenceLinks, type DialogueSource } from "./EvidenceLinks";
 
 export type DialogueParagraph = { paragraph_key: string; paragraph_id: string; text: string; text_sha256: string };
-export type DialogueCandidate = { candidate_id: string; paragraph_key: string; paragraph_id: string; original_text: string; candidate_text: string; reply: string; status: string; save_guidance?: "existing" | "missing"; validation_errors?: string[]; validation_warnings?: string[]; source_refs?: string[]; sources?: DialogueSource[]; context_paragraph_ids?: string[]; scientific_changes?: { field: string; before: string[]; after: string[] }[]; evidence_review?: string };
+export type DialogueCandidate = { candidate_id: string; paragraph_key: string; paragraph_id: string; original_text: string; candidate_text: string; rejected_candidate_text?: string; reply: string; status: string; save_guidance?: "existing" | "missing"; validation_errors?: string[]; validation_warnings?: string[]; source_refs?: string[]; sources?: DialogueSource[]; context_paragraph_ids?: string[]; scientific_changes?: { field: string; before: string[]; after: string[] }[]; evidence_review?: string };
 type Turn = { job_id: string; status: string; error?: string; message: string; candidate?: DialogueCandidate };
 
 export function CandidateReply({ candidate }: { candidate: DialogueCandidate }) {
@@ -20,7 +20,7 @@ export function CandidateReply({ candidate }: { candidate: DialogueCandidate }) 
 
 export function CandidateEvidenceReview({ candidate }: { candidate: DialogueCandidate }) {
   const { text } = useUiText();
-  const fields: Record<string, string> = { numbers: text("数值", "Numbers"), stereo: text("立体化学", "Stereochemistry"), chemical_identities: text("名称或缩写", "Names or abbreviations"), required_labels: text("科学标识", "Scientific labels") };
+  const fields: Record<string, string> = { callouts: text("引用标注（请核对来源与论述的对应关系）", "Citations (check source-to-claim attribution)"), numbers: text("数值", "Numbers"), stereo: text("立体化学", "Stereochemistry"), chemical_identities: text("名称或缩写", "Names or abbreviations"), required_labels: text("科学标识", "Scientific labels") };
   if (!candidate.evidence_review) return null;
   return <aside className="message message-warning">
     <p>{candidate.sources?.length ? text("以下证据供核对，不代表已验证修改正确；你可以确认并保存。", "Sources are provided for comparison, not verification of the changes. You may accept and save.") : text("未提供对应支持证据，请核对；仍可保存本次人工修改。", "No supporting passage was provided. Please review; you may still save this author-directed edit.")}</p>

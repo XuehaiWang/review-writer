@@ -16,12 +16,13 @@ from review_writer_core.scientific_facts import (
     fact_usage,
 )
 from review_writer_core.section_narrative_contracts import derive_section_depth_contract
+from review_writer_core.source_attribution import contribution_context, CONTRIBUTION_WRITING_POLICY, SECTION_THREAD_POLICY
 from review_writer_core.writing_contracts import derive_writing_scope_contract, section_constraint_prompt_block
 from review_writer_core.claim_contracts import ARGUMENT_CONTRACT
 from review_writer_core.academic_contracts import blueprint_taxonomy_diagnostics, section_academic_contract, synthesis_requirements
 from review_writer_core.stages.planning.outline import outline_markdown_from_sections
 
-CONTRACT = "chapter-planning/4"
+CONTRACT = "chapter-planning/5"
 PAPER_ROLES = {"foundation", "main_progress", "scope_extension", "mechanistic_evidence", "counterevidence", "background"}
 
 
@@ -69,6 +70,7 @@ def _structure_contributions(rows, budget):
                 "field_id": str(fact.get("field_id") or ""),
                 "value": str(fact.get("value") or "")[:700],
                 "usage": fact_usage(fact),
+                "study_ownership": fact.get("study_ownership", "unknown"),
                 "assertion_ceiling": str(
                     fact.get("assertion_ceiling")
                     or fact.get("evidence_ceiling")
@@ -89,6 +91,7 @@ def _structure_contributions(rows, budget):
         context.append({"paper_id": row["paper_id"], "title": str(row.get("title") or "")[:250],
             "abstract": abstract, "keywords": row.get("keywords") or [],
             "verified_facts": facts,
+            "paper_analysis": contribution_context(row.get("paper_analysis"), limit=250),
             "source_passages": excerpts,
             "classification": row.get("human_confirmed_tags") or row.get("project_tags") or {}})
     return context
@@ -211,6 +214,7 @@ def plan_structure(prepared, model_call, checkpoint):
         "Draft repair context describes unresolved claims, not new evidence. Keep the scientific categories and "
         "questions; use available verified premises to narrow expectations. A checked-source miss cannot justify "
         "asserting absence from the entire literature or repeating the unsupported conclusion.\n"
+        + CONTRIBUTION_WRITING_POLICY + "\n"
         + json.dumps({**identity, "current_sections": [{k: s.get(k) for k in
             ("section_id", "title", "section_role", "topic_partition", "primary_papers", "supporting_papers", "review_problem")} for s in blueprint.get("sections") or []],
             "previous_questions": [{k: s.get(k) for k in ("section_id", "title", "section_role", "review_problem")}
@@ -343,9 +347,15 @@ def _plan_section_once(prepared, section, cached, model_call):
                 "are supplied, use their bounded propositions to make the question and comparison plan more specific; do not "
                 "require every paper to have a fact and do not infer missing details. "
                 "Return JSON with question, purpose (nonempty strings), questions_to_answer, retrieval_directions, "
-                "comparison_axes, boundaries, open_questions (string arrays), and paper_roles:[{paper_id,role,reason}]. "
+                "comparison_axes, boundaries, open_questions (string arrays), and paper_roles:[{paper_id,role,reason,presentation}]. "
+                "presentation may be prose, table or supporting_citation; explain the choice in reason. "
+                "Preserve user-selected papers and explicit emphasis. This changes presentation, not selection. "
                 "Allowed roles: foundation/main_progress/scope_extension/mechanistic_evidence/counterevidence/background. "
                 "Paper IDs must belong to this chapter's assigned papers.\n"
+                "Also return organizing_thread (a short explanation, not a category label) and paragraph_tasks "
+                "as a short ordered string array. Each task states its purpose, relevant paper IDs and why it "
+                "follows the preceding task. These are provisional directions, not verified conclusions.\n"
+                + CONTRIBUTION_WRITING_POLICY + "\n" + SECTION_THREAD_POLICY + "\n"
                 + REVIEW_COMPARISON_POLICY + "\n" + section_constraint_prompt_block(section)
                 + "\n" + json.dumps(context, ensure_ascii=False), label=f"blueprint-plan-{sid}")
         if not isinstance(proposal, dict):
@@ -356,11 +366,18 @@ def _plan_section_once(prepared, section, cached, model_call):
         for key in ("questions_to_answer", "retrieval_directions", "comparison_axes", "boundaries", "open_questions"):
             if not isinstance(proposal.get(key), list) or not all(isinstance(v, str) for v in proposal[key]):
                 raise ValueError(f"Invalid planning field: {key}")
+        if "organizing_thread" in proposal and not isinstance(proposal["organizing_thread"], str):
+            raise ValueError("Invalid planning field: organizing_thread")
+        if "paragraph_tasks" in proposal and (not isinstance(proposal["paragraph_tasks"], list)
+                or any(not isinstance(v, str) for v in proposal["paragraph_tasks"])):
+            raise ValueError("Invalid planning field: paragraph_tasks")
         roles = proposal.get("paper_roles") or []
         if not isinstance(roles, list) or any(not isinstance(r, dict) or r.get("paper_id") not in papers for r in roles):
             raise ValueError("Paper roles must refer to this chapter's assigned papers.")
         declared = {r["paper_id"]: r for r in roles if r.get("role") in PAPER_ROLES and str(r.get("reason") or "").strip()}
         section.update(section_thesis=proposal["purpose"], review_problem=proposal["question"],
+            organizing_thread=str(proposal.get("organizing_thread") or proposal["purpose"]).strip(),
+            paragraph_tasks=[v.strip() for v in proposal.get("paragraph_tasks") or [] if isinstance(v, str) and v.strip()],
             scientific_thesis={"text": proposal["purpose"], "status": "provisional", "source": CONTRACT,
                 "provisional": True, "argument_purpose": proposal["purpose"], "evidence_scope": papers,
                 **{key: proposal[key] for key in ("comparison_axes", "boundaries", "open_questions")}},
@@ -384,6 +401,8 @@ def _plan_section_once(prepared, section, cached, model_call):
             },
             automatic_resolution={"action": "planned", "requires_user_action": False},
             paper_roles=[{"paper_id": paper, "role": declared.get(paper, {}).get("role", "background"),
+                "presentation": declared.get(paper, {}).get("presentation") if declared.get(paper, {}).get("presentation")
+                    in {"prose", "table", "supporting_citation"} else "prose",
                 "reason": declared.get(paper, {}).get("reason", proposal["purpose"]),
                 "claim_ids": []} for paper in papers])
         entry.update(status="planned", proposal=deepcopy(proposal))

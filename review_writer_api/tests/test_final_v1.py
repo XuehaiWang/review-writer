@@ -249,9 +249,9 @@ class FinalV1Tests(NativeFigureApiTestCase):
             url = f"/api/v1/projects/{self.project_id}/final"
             self.assertEqual(200, client.post(url + "/build").status_code)
             original = client.get(url).json()
-            paragraph = original["final_paragraphs"][0]
-            request = {"text": paragraph["text"], "revision": original["revision"], "source_artifact_id": original["final_artifact_id"]}
-            self.assertEqual(410, client.put(url + "/paragraphs/" + paragraph["paragraph_id"], json=request).status_code)
+            self.assertNotIn("final_paragraphs", original)
+            request = {"text": "Legacy client edit", "revision": original["revision"], "source_artifact_id": original["final_artifact_id"]}
+            self.assertEqual(410, client.put(url + "/paragraphs/legacy-paragraph", json=request).status_code)
             self.assertEqual(410, client.post(url + "/versions/" + original["final_artifact_id"] + "/restore",
                 json={"revision": original["revision"], "source_artifact_id": original["final_artifact_id"]}).status_code)
             self.assertEqual(original["final_artifact_id"], client.get(url).json()["final_artifact_id"])

@@ -31,10 +31,13 @@ def register_draft_handlers(drafts_service, job_service, handlers):
                 idempotency_key=f"scope:{context.job_id}", include_memory=False)
             route_request["dialogue"].update(route_only=True, section_context=payload["section_context"],
                 route_allowed_ids=[p["paragraph_id"] for p in payload["paragraphs"]])
+            if payload.get("initial_artifact_id"):
+                route_request["dialogue"]["discussion_text"] = "\n\n".join(p["text"] for p in payload["section_context"]["paragraphs"])
+                route_request["dialogue"]["context"] = []
             routing = available["draft.rewrite"](context, route_request).get("routing")
             allowed = {p["paragraph_id"] for p in payload["paragraphs"]}
             if not routing or routing.get("mode") not in {"question", "revision"} or not routing.get("targets") or not set(routing["targets"]).issubset(allowed):
-                raise ValueError("Unable to resolve chapter conversation scope. Specify a paragraph and retry.")
+                raise ValueError("Unable to interpret the chapter request. Please retry.")
             routing["mode"] = "question"
             routing["targets"] = routing["targets"][:1]
             context.report_partial_result({"paragraph_results": results, "routing": routing})
@@ -59,7 +62,7 @@ def register_draft_handlers(drafts_service, job_service, handlers):
                     result = {"candidate_id": entry["candidate_id"]}
                 else:
                     one, _ = drafts_service.dialogue_payload(principal, context.project_id, key,
-                        message=payload["message"], base_text_sha256=target["text_sha256"], use_saved=payload.get("use_saved", True),
+                        message=payload["message"], base_text_sha256=target["text_sha256"], use_saved=not bool(payload.get("section_id")), branch_id=payload.get("branch_id", ""),
                         idempotency_key=f"batch:{context.job_id}:{key}", include_memory=not bool(payload.get("section_context")))
                     one["dialogue"]["turn_id"] = turn_id
                     one["dialogue"]["batch_job_id"] = context.job_id
@@ -73,9 +76,19 @@ def register_draft_handlers(drafts_service, job_service, handlers):
                             history = drafts_service.section_dialogue_history(principal, context.project_id, section["section_id"])["turns"]
                             # This turn is represented below as provisional candidates, not past conversation.
                             section_context["conversation_memory"] = drafts_service.section_conversation_memory(
-                                principal, context.project_id, section, history, exclude_job_id=context.job_id)
-                            section_context["paragraphs"] = [{"paragraph_id": p["paragraph_id"], "text": p["text"]}
-                                for p in section["paragraphs"]]
+                                principal, context.project_id, section, history, exclude_job_id=context.job_id, branch_id=payload.get("branch_id", ""))
+                            if not payload.get("initial_artifact_id"):
+                                section_context["paragraphs"] = [{"paragraph_id": p["paragraph_id"], "text": p["text"]}
+                                    for p in section["paragraphs"]]
+                        if payload.get("initial_artifact_id") and not one["dialogue"].get("parent_candidate_id"):
+                            # Keep saved-text hashes for acceptance; use the immutable baseline only as the editing input.
+                            original = next((p for p in section_context["paragraphs"] if p["paragraph_id"] == target["paragraph_id"]), None)
+                            accepted_here = any(c.get("branch_id") == payload["branch_id"] and c.get("status") == "accepted"
+                                and c.get("paragraph_key") == key and c.get("candidate_text") == target["text"]
+                                for c in (cached.get("entries") or {}).values())
+                            one["dialogue"]["discussion_text"] = target["text"] if accepted_here else (original["text"] if original else "")
+                            one["dialogue"]["context"] = []
+
                         # Earlier candidates from this turn are provisional context, never saved text or evidence.
                         section_context["earlier_turn_candidates"] = [
                             {"paragraph_id": c["paragraph_id"], "candidate_text": c["candidate_text"]}
@@ -84,10 +97,12 @@ def register_draft_handlers(drafts_service, job_service, handlers):
                             and c.get("status") in {"pending", "accepted"}]
                         one["dialogue"]["section_context"] = section_context
                         one["dialogue"]["scope_instruction"] = (
-                            "The user is discussing the chapter as a whole. Read its context and previous requests; "
-                            "revise ONLY the current target paragraph if needed for that request. "
-                            "Retain it when the request concerns another paragraph. Avoid repeating content already "
-                            "covered by other paragraphs. Context is read-only and is not scientific evidence.")
+                            "The user is discussing the entire selected chapter. All its paragraphs are in scope. "
+                            "For a question, answer once about all relevant paragraphs; the target is only an internal "
+                            "evidence anchor. Do not tell the user to submit separate paragraph requests. "
+                            "For revision, this worker returns only its paragraph candidate; sibling workers process "
+                            "the rest in the same chapter request. Retain this paragraph if no change is needed and "
+                            "avoid duplicating earlier candidates. Chapter context is not scientific evidence.")
                     built = available["draft.rewrite"](context, one)
                     context.checkpoint()
                     result = drafts_service.publish_dialogue(principal, context.project_id, one, built)

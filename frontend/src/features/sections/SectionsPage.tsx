@@ -1,3 +1,4 @@
+import { sectionErrorMessage } from "./sectionErrorMessage";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -9,7 +10,7 @@ import { MarkdownView } from "../../components/MarkdownView";
 import { ProjectSelector, useSelectedProject } from "../../components/ProjectSelector";
 import { jobIsActive, useJob } from "../../hooks/useJob";
 import { useUiText } from "../../i18n/useUiText";
-import { SectionContentNotice } from "./SectionContentNotice";
+import { SectionContentNotice, type ContentDiagnostics } from "./SectionContentNotice";
 import { buildPaperDisplayLabels, replacePaperIdsForDisplay } from "../../utils/paperLabels";
 import { SectionJobProgress } from "./SectionJobProgress";
 import { SectionStageActions } from "./SectionStageActions";
@@ -167,9 +168,8 @@ type SectionReadiness = {
   depth_sufficient?: boolean;
 };
 
-type SectionDraftState = {
+type SectionDraftState = ContentDiagnostics & {
   section_id?: string;
-  generation_mode?: string;
   section_readiness?: SectionReadiness;
   depth_diagnostics?: {
     actual_word_count?: number;
@@ -177,8 +177,6 @@ type SectionDraftState = {
     sufficient?: boolean;
   };
   paragraphs?: DraftParagraph[];
-  validations?: Array<{ rule_id?: string; status?: string; target_id?: string; omitted?: Array<{ reason?: string }> }>;
-  narrative_diagnostics?: { status?: string };
   reviews?: DraftReview[];
 };
 
@@ -483,7 +481,7 @@ export function SectionsPage() {
             {tab === "evidence" ? <EvidenceView section={activeEvidence} paragraphs={activeDraftParagraphs} paperLabels={paperLabels} /> : null}
             {tab === "review" ? <ReviewView section={activeDraftState} /> : null}
             {tab === "tasks" ? <TaskRequirements task={activeTask} paperLabels={paperLabels} /> : null}
-            {tab === "report" ? <div className="job-report"><h2>{text("章节生成报告", "Section generation report")}</h2><p>{liveOutputCount}/{liveTaskCount} {currentJobActive ? text("章已实时完成", "sections completed live") : text("个当前章节产物", "current section artifacts")}</p>{currentJob ? <SectionJobProgress job={currentJob} /> : <div className="empty-state">{text("尚未启动章节生成。", "Section generation has not started.")}</div>}{reportJobs.map((job) => <details key={job.id}><summary>{job.status} · {job.id}</summary><p>{job.progress_current}/{job.progress_total} · {job.error_message || text("无错误", "No errors")}</p></details>)}</div> : null}
+            {tab === "report" ? <div className="job-report"><h2>{text("章节生成报告", "Section generation report")}</h2><p>{liveOutputCount}/{liveTaskCount} {currentJobActive ? text("章已实时完成", "sections completed live") : text("个当前章节产物", "current section artifacts")}</p>{currentJob ? <SectionJobProgress job={currentJob} /> : <div className="empty-state">{text("尚未启动章节生成。", "Section generation has not started.")}</div>}{reportJobs.map((job) => <details key={job.id}><summary>{job.status} · {job.id}</summary><p>{job.progress_current}/{job.progress_total} · {job.error_message ? sectionErrorMessage(job.error_message, text) : text("无错误", "No errors")}</p></details>)}</div> : null}
           </div></section>
           <aside className="pane section-gate-react"><div className="pane-head"><div><span className="step-label">{text("审核门", "Review gate")}</span><h2>{text("人工审核", "Human review")}</h2></div></div><div className="gate-body"><p>{payload.handoff.current ? text("当前草稿已生成，可审核后进入图像阶段。", "Current drafts are ready for review before the figure stage.") : currentJob && jobIsActive(currentJob.status) ? text("章节正在生成中。", "Sections are being generated.") : text("请从当前写作要求生成章节草稿。", "Generate section drafts from the current writing requirements.")}</p><ul><li>{text("证据有限或待补充的章节会明确标记，可继续后续编辑。", "Sections with limited or pending evidence are marked and allow continued editing.")}</li><li>{text("引用来自该节允许论文。", "Citations come from papers allowed for that section.")}</li><li>{text("保留证据边界与不确定性。", "Evidence boundaries and uncertainty are preserved.")}</li><li>{text("图像需求与段落论证一致。", "Figure needs align with paragraph arguments.")}</li></ul></div></aside>
         </div>

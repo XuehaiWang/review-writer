@@ -375,8 +375,10 @@ missing key result, condition, counterexample, or experiment. It does not author
 web access. Empty evidence_requests is allowed. Each fact must have:
 - field_id: exactly one question_id offered by its selected evidence, or one
   allowed_fact_role when a partition evidence candidate is used;
-- value: for ordinary object/scope descriptions, copy a complete source sentence verbatim;
-  normalize only when a numerical result, condition or scientific interpretation needs it;
+- value: summarize the bounded finding in your own words, retaining scientific objects,
+  quantities and conditions; never copy a source sentence as the fact's display value;
+- study_ownership: own_results, prior_work, or unknown. Determine ownership from surrounding
+  text and citation context, not from the section name. Do not assign prior results to this paper;
 - support_excerpt: an exact contiguous quotation copied from the selected content;
 - evidence_key: exactly one supplied evidence_key;
 - epistemic_status: direct_source_report, source_author_interpretation, or abstract_level_report;
@@ -1182,6 +1184,8 @@ def normalize_result(
                 },
             }
         )
+        ownership = str(raw.get("study_ownership") or "unknown")
+        facts[-1]["study_ownership"] = ownership if ownership in {"own_results", "prior_work", "unknown"} else "unknown"
         facts[-1]["fact_id"] = fact_identity(facts[-1])
         correction = str(raw.get("correction_of_fact_id") or "")
         previous = next((f for f in paper.get("repair_fact_candidates") or []
@@ -1233,6 +1237,7 @@ def normalize_result(
         else "not_required"
     )
     analysis = generated.get("paper_analysis") if isinstance(generated.get("paper_analysis"), dict) else {}
+    analysis_candidates = all_fact_candidates(paper)
     return refresh_fact_status(paper, {
         "paper_id": str(paper.get("paper_id") or ""),
         "status": status,
@@ -1240,6 +1245,9 @@ def normalize_result(
         "paper_analysis": {
             **{key: compact(analysis.get(key), 1500)
                for key in ("research_question", "contribution", "topic_relation")},
+            "evidence_keys": [key for key in analysis.get("evidence_keys") or []
+                              if isinstance(key, str) and key in analysis_candidates],
+            "usage": "navigation_only",
             "fact_ids": [fact["fact_id"] for fact in facts if any(ref.get("evidence_key") in
                 (analysis.get("evidence_keys") or [])
                 for ref in fact.get("evidence_refs") or [])],
@@ -1527,7 +1535,7 @@ def restore_cached_verifications(paper: dict[str, Any], result: dict[str, Any]) 
 def fact_audit_payload(fact):
     """Send scientific content once; storage metadata stays in the host record."""
     keys = ("fact_id", "paper_id", "field_id", "fact_type", "value", "subject", "predicate",
-            "qualifiers", "experiment_id", "epistemic_status", "evidence_ceiling", "assertion_ceiling",
+            "qualifiers", "experiment_id", "epistemic_status", "study_ownership", "evidence_ceiling", "assertion_ceiling",
             "source_channel", "normalized_value", "unit", "revision_of_fact_id", "correction_of_fact_id",
             "classification_axis_id", "classification_partition_id", "revision_assertion_ceiling")
     result = {key: fact[key] for key in keys if fact.get(key) not in (None, "", {}, [])}
@@ -1621,6 +1629,9 @@ def run_fact_agent(paper, result, *, model_call, retrieve, state, report):
                 "Check subject, SAME experiment, metric/value association, qualifiers, component roles, negation, "
                 "and observation versus author interpretation. Check the exact value AND its requested evidence_ceiling. "
                 "Classification candidates must describe this study's contribution, not related-work mentions or exclusions. "
+                "Check study_ownership as well: own_results must belong to this paper, prior_work must not be "
+                "presented as its contribution, and unknown ownership cannot establish an original contribution. "
+                "Check the rewritten value for faithful meaning, not word-for-word equality. "
                 "A number appearing somewhere is not sufficient. "
                 "Keep genuine conflicting experiments separate. Return JSON with verdicts: [{fact_id, "
                 "status: supported|uncertain|contradicted, reason, source_damage: boolean, correction_supported: boolean}], and evidence_requests: "

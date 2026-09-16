@@ -19,6 +19,19 @@ SPEC.loader.exec_module(PIPELINE)
 
 
 class MatrixFactEnrichmentTests(unittest.TestCase):
+    def test_source_addressable_contribution_survives_without_usable_facts(self):
+        result = PIPELINE.normalize_result(self.paper, {"facts": [], "paper_analysis": {
+            "research_question": "Which selectivity can be achieved?", "contribution": "A bounded protocol",
+            "evidence_keys": ["sha256:abc", "invented", {"bad": "key"}]}})
+        analysis = result["paper_analysis"]
+        self.assertEqual([], analysis["fact_ids"])
+        self.assertEqual(["sha256:abc"], analysis["evidence_keys"])
+        self.assertEqual("navigation_only", analysis["usage"])
+
+    def test_fact_audit_receives_ownership_not_just_the_quoted_result(self):
+        payload = PIPELINE.fact_audit_payload({"fact_id": "F1", "study_ownership": "prior_work", "value": "A result"})
+        self.assertEqual("prior_work", payload["study_ownership"])
+
     def test_correction_retires_damaged_fact_only_after_same_experiment_verification(self):
         for correction_supported in (True, False):
             with self.subTest(correction_supported=correction_supported):

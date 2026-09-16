@@ -159,7 +159,9 @@ type BlueprintSection = Record<string, unknown> & {
     fact_ids?: string[];
     evidence_refs?: Array<{ evidence_key?: string }>;
   }>;
-  paper_roles?: Array<{ paper_id: string; role: string; reason: string; claim_ids: string[] }>;
+  organizing_thread?: string;
+  paragraph_tasks?: string[];
+  paper_roles?: Array<{ paper_id: string; role: string; reason: string; claim_ids: string[]; presentation?: string }>;
   coverage_by_use?: Array<{ use_id: string; purpose: string; status: string; missing_requirements: string[] }>;
   generation_eligible?: boolean;
   executable_claim_count?: number;
@@ -336,7 +338,7 @@ function displayText(value: unknown): string {
 function factStatusLabel(status: string, text: (zh: string, en: string) => string): string {
   return ({
     complete: text("已完成", "Completed"),
-    limited: text("已完成·证据有限", "Completed · limited evidence"),
+    limited: text("已完成·部分可用", "Completed · partially usable"),
     failed: text("需恢复", "Recovery needed"),
     pending: text("待处理", "Pending"),
     running: text("分析中", "Analyzing"),
@@ -345,7 +347,9 @@ function factStatusLabel(status: string, text: (zh: string, en: string) => strin
 
 function factStatusClass(status: string): string {
   if (status === "complete") return "ok";
-  if (status === "failed") return "danger";
+  if (status === "failed") return "matrix-recovery";
+  if (status === "limited") return "matrix-limited";
+  if (status === "running") return "matrix-running";
   if (status === "pending") return "pending";
   return "warning";
 }
@@ -447,12 +451,6 @@ function MatrixWorkspace({ payload, projectId, refresh }: { payload: PlanningPay
     }),
     onSuccess: refresh,
   });
-  const recoverMatrix = useMutation({
-    mutationFn: () => apiRequest<Job>(`/api/v1/jobs/${encodeURIComponent(enrichmentJob!.id)}/retry`, {
-      method: "POST",
-    }),
-    onSuccess: refresh,
-  });
   const visiblePapers = papers.filter((paper) => [paper.paper_id, paperLabels.get(paper.paper_id), displayText(paper.title), paper.keywords?.join(" "), paper.abstract].join(" ").toLowerCase().includes(filter.toLowerCase()));
   const selectedStyle = String(payload.outline_selection?.outline_style || "");
   const isCurrentOutline = (style: string) => selectedStyle === style
@@ -493,7 +491,7 @@ function MatrixWorkspace({ payload, projectId, refresh }: { payload: PlanningPay
   const emptyFactMessage = enrichmentActive
     ? text("正在从全文证据中提取本篇论文的科学事实。", "Scientific facts are being extracted from this paper's evidence.")
     : enrichmentFailed && hasRecoveryCheckpoint && selectedFactStatus === "pending"
-      ? text("本篇事实已经完成提取，但尚未发布到 Matrix；请使用左侧的“恢复已有结果”。", "This paper was extracted but not published to the Matrix. Use Recover existing results on the left.")
+      ? text("本篇事实已经完成提取，但尚未发布到 Matrix；请使用左侧的“继续未完成分析”。", "This paper was extracted but not published to the Matrix. Use Resume unfinished analysis on the left.")
       : selectedFactStatus === "pending"
       ? text("生成章节规划时会自动分析当前主题需要的科学事实；原文证据仍是最终依据。", "Chapter planning will automatically analyze the facts needed for the current topic; source passages remain authoritative.")
         : selected?.fact_enrichment?.extraction_status === "failed" || selected?.fact_enrichment?.status === "failed"
@@ -506,11 +504,12 @@ function MatrixWorkspace({ payload, projectId, refresh }: { payload: PlanningPay
       {mode === "reading" ? (
         <div className="planning-grid">
           <section className="pane planning-list-pane">
-            <div className="pane-head matrix-fact-head"><div><span className="step-label">{text("文献Matrix", "Literature matrix")}</span><h2>{papers.length} {text("篇论文", "papers")}</h2><p>{enrichmentActive ? text(`正在提取科学事实 ${enrichmentJob?.progress_current || 0}/${enrichmentJob?.progress_total || papers.length}`, `Extracting scientific facts ${enrichmentJob?.progress_current || 0}/${enrichmentJob?.progress_total || papers.length}`) : text("确认采用文献后自动提取事实；章节规划复用有效结果并按需补证", "Facts are extracted after selection confirmation; chapter planning reuses results and fills evidence gaps")}</p><div className="matrix-fact-counts"><span className="complete">{text("已完成", "Completed")} {factCounts.complete}</span><span className="pending">{text("分析中", "Analyzing")} {factCounts.running}</span><span className="pending">{text("待分析或核验", "Pending analysis or verification")} {factCounts.pending}</span><span className="failed">{text("需恢复", "Recovery needed")} {factCounts.failed}</span></div>{bibliographyIssueCount ? <button type="button" className="matrix-bibliography-note" onClick={() => setSelectedId(papers.find((paper) => paper.bibliography_identity?.verified === false)?.paper_id || selectedId)}><strong>{text(`书目待核验 ${bibliographyIssueCount}`, `${bibliographyIssueCount} bibliography records pending`)}</strong><span>{text("点击定位并解决，不阻断内部写作。", "Open the affected paper and resolve it without blocking internal writing.")}</span></button> : null}</div>{!enrichmentActive && enrichmentFailed && enrichmentJob?.available_actions?.includes("retry") ? <button type="button" className="button button-secondary" disabled={recoverMatrix.isPending} onClick={() => recoverMatrix.mutate()}>{recoverMatrix.isPending ? text("恢复中…", "Recovering…") : hasRecoveryCheckpoint ? text("恢复已有结果", "Recover existing results") : text("重试事实分析", "Retry fact analysis")}</button> : null}</div>
+            <div className="pane-head matrix-fact-head"><div><span className="step-label">{text("文献Matrix", "Literature matrix")}</span><h2>{papers.length} {text("篇论文", "papers")}</h2><p>{enrichmentActive ? text(`正在提取科学事实 ${enrichmentJob?.progress_current || 0}/${enrichmentJob?.progress_total || papers.length}`, `Extracting scientific facts ${enrichmentJob?.progress_current || 0}/${enrichmentJob?.progress_total || papers.length}`) : text("确认采用文献后自动提取事实；章节规划复用有效结果并按需补证", "Facts are extracted after selection confirmation; chapter planning reuses results and fills evidence gaps")}</p><div className="matrix-fact-counts"><span className="complete">{text("已完成", "Completed")} {factCounts.complete}</span><span className="pending">{text("分析中", "Analyzing")} {factCounts.running}</span><span className="pending">{text("待分析或核验", "Pending analysis or verification")} {factCounts.pending}</span><span className="failed">{text("需恢复", "Recovery needed")} {factCounts.failed}</span></div><div className="matrix-header-actions">{bibliographyIssueCount ? <button type="button" className="matrix-bibliography-note" onClick={() => setSelectedId(papers.find((paper) => paper.bibliography_identity?.verified === false)?.paper_id || selectedId)}><strong>{text(`书目待核验 ${bibliographyIssueCount}`, `${bibliographyIssueCount} bibliography records pending`)}</strong><span>{text("点击定位并解决，不阻断内部写作。", "Open the affected paper and resolve it without blocking internal writing.")}</span></button> : null}
+              <MatrixAnalysisStatus key={projectId} papers={papers} projectId={projectId} busy={enrichmentActive || Boolean(payload.blueprint_jobs?.some(job => jobIsActive(job.status)))} refresh={refresh} recoveryJobId={enrichmentFailed && hasRecoveryCheckpoint && enrichmentJob?.error_code === "STATE_CONFLICT" && enrichmentJob.available_actions?.includes("retry") ? enrichmentJob.id : undefined} />
+            </div></div></div>
             <div className="matrix-list-notices" aria-live="polite">
               {enrichmentActive && enrichmentJob ? <MatrixLiveProgress job={enrichmentJob} papers={papers} /> : null}
-              {enrichmentFailed ? <div className="message message-error matrix-enrichment-error"><strong>{enrichmentJob?.error_code === "STATE_CONFLICT" && hasRecoveryCheckpoint ? text("事实已经提取，但尚未写入 Matrix。", "Facts were extracted but not published to the Matrix.") : text("上次科学事实分析未完成。", "The previous scientific fact analysis did not finish.")}</strong><p>{enrichmentJob?.error_code === "STATE_CONFLICT" && hasRecoveryCheckpoint ? text("Matrix状态在任务期间发生变化。点击“恢复已有结果”可复用检查点，不会重新调用模型。", "The Matrix state changed during the job. Recover the checkpoint without calling the model again.") : text("生成章节规划时会自动重新分析；该问题不会阻止继续规划。", "Chapter planning will analyze the evidence again automatically; this does not block planning.")}</p>{enrichmentJob?.error_message ? <details><summary>{text("技术详情", "Technical details")}</summary><p>{enrichmentJob.error_message}</p></details> : null}</div> : null}
-              {recoverMatrix.error ? <p className="message message-warning">{recoverMatrix.error.message}</p> : null}
+              {enrichmentFailed ? <div className="message message-error matrix-enrichment-error"><strong>{enrichmentJob?.error_message === "模型服务响应超时，已完成内容已保留。" ? text("模型服务响应超时，已完成内容已保留。", "The model service timed out. Completed content has been retained.") : enrichmentJob?.error_code === "STATE_CONFLICT" && hasRecoveryCheckpoint ? text("事实已经提取，但尚未写入 Matrix。", "Facts were extracted but not published to the Matrix.") : text("上次科学事实分析未完成。", "The previous scientific fact analysis did not finish.")}</strong><p>{enrichmentJob?.error_message === "模型服务响应超时，已完成内容已保留。" ? text("点击“继续未完成分析”恢复。", "Choose Resume unfinished analysis to continue.") : enrichmentJob?.error_code === "STATE_CONFLICT" && hasRecoveryCheckpoint ? text("Matrix状态在任务期间发生变化。点击“继续未完成分析”可复用检查点，不会重新调用模型。", "The Matrix state changed during the job. Recover the checkpoint without calling the model again.") : text("生成章节规划时会自动重新分析；该问题不会阻止继续规划。", "Chapter planning will analyze the evidence again automatically; this does not block planning.")}</p>{enrichmentJob?.error_message && enrichmentJob.error_message !== "模型服务响应超时，已完成内容已保留。" ? <details><summary>{text("技术详情", "Technical details")}</summary><p>{enrichmentJob.error_message}</p></details> : null}</div> : null}
             </div>
             <input className="pane-search" type="search" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder={text("检索Matrix", "Search matrix")} />
             <div className="paper-list">{visiblePapers.map((paper) => { const status = analysisState(paper, activeFactPaperIds.has(paper.paper_id)); return <button type="button" key={paper.paper_id} title={text(`内部论文 ID：${paper.paper_id}；事实状态：${factStatusLabel(status, text)}`, `Internal paper ID: ${paper.paper_id}; fact status: ${factStatusLabel(status, text)}`)} className={paper.paper_id === selected?.paper_id ? "paper-row active" : "paper-row"} onClick={() => setSelectedId(paper.paper_id)}><span className="paper-row-main"><strong>{paperLabels.get(paper.paper_id) || paper.paper_id} · {displayText(paper.title)}</strong><small>{paper.authors?.join(", ")}</small></span><span className={`status-pill ${factStatusClass(status)}`}>{factStatusLabel(status, text)}</span></button>; })}</div>
@@ -610,15 +609,19 @@ function BlueprintArgumentSummary({ section, paperTitles }: { section: Blueprint
   return <>
     <div className="blueprint-summary-grid">
       <section><h3>{section.thesis_status === "provisional" ? text("写作目标", "Writing objective") : text("核心论点", "Core argument")}</h3><p>{displayText(section.writing_objective || section.scientific_thesis?.text || section.section_thesis || section.section_goal) || "—"}</p></section>
-      <section><h3>{text("主要论文", "Primary papers")}</h3><strong>{(section.primary_papers || section.major_papers || section.assigned_papers || []).length}</strong></section>
-      <section><h3>{section.retrieval_directions ? text("检索方向", "Retrieval directions") : text("可写断言", "Writeable claims")}</h3><strong>{section.retrieval_directions?.length ?? section.executable_claim_count ?? 0}</strong></section>
-      <section><h3>{text("待回答问题", "Questions to answer")}</h3><strong>{section.questions_to_answer?.length ?? section.scientific_thesis?.open_questions?.length ?? section.pending_claim_count ?? 0}</strong></section>
+      <section><h3>{text("已分配论文", "Assigned papers")}</h3><strong>{(section.primary_papers || section.major_papers || section.assigned_papers || []).length}</strong></section>
+      <section><h3>{text("检索方向", "Retrieval directions")}</h3><strong>{section.retrieval_directions?.length ?? 0}</strong></section>
+      <section><h3>{text("待回答问题", "Questions to answer")}</h3><strong>{section.questions_to_answer?.length ?? section.scientific_thesis?.open_questions?.length ?? 0}</strong></section>
     </div>
+    {section.organizing_thread ? <section><h3>{text("小节论证主线", "Section thread")}</h3><p>{section.organizing_thread}</p>
+      {section.paragraph_tasks?.length ? <ol>{section.paragraph_tasks.map((task, index) => <li key={index}>{task}</li>)}</ol> : null}
+    </section> : null}
     {section.planning_notes?.map((note, index) => <p className="message message-info" key={index}>{note}</p>)}
     {section.evidence_readiness?.reason ? <p className={`message message-${section.generation_eligible ? "info" : "warning"}`}>{section.evidence_readiness.reason}</p> : null}
     {section.paper_roles?.length ? <section><h3>{text("论文在本章中的作用", "Paper roles in this section")}</h3>
       <ul>{section.paper_roles.map((paper) => <li key={paper.paper_id}><strong>{paperTitles.get(paper.paper_id) || paper.paper_id}</strong>
-        {" · "}{roles[paper.role] || paper.role}：{paper.reason}</li>)}</ul>
+        {" · "}{roles[paper.role] || paper.role}{paper.presentation === "table" ? text(" · 表格为主", " · Table-focused")
+          : paper.presentation === "supporting_citation" ? text(" · 辅助引用", " · Supporting citation") : ""}：{paper.reason}</li>)}</ul>
     </section> : null}
     {section.coverage_by_use?.length ? <section><h3>{text("论证证据覆盖", "Argument evidence coverage")}</h3>
       <ul>{section.coverage_by_use.map((use) => <li key={use.use_id}>{use.purpose}{" · "}
@@ -678,7 +681,21 @@ function BlueprintWorkspace({
           <ul>{payload.section_blueprint.unused_papers.map((item) => <li key={item.paper_id}><strong>{paperTitles.get(item.paper_id) || item.paper_id}</strong>：{item.reason}</li>)}</ul>
         </div>
       </details> : null}
-      <section className="pane blueprint-section-list"><div className="pane-head"><div><span className="step-label">{text("章节列表", "Chapter list")}</span><h2>{sections.length} {text("个章节", "sections")}</h2></div></div><div className="keyword-list">{sections.map((item) => { const papers = item.primary_papers || item.major_papers || item.assigned_papers || []; const role = String(item.section_role || "body"); const synthesisOnly = role === "introduction" || role === "conclusion"; const supported = item.executable_claim_count ?? item.scientific_claims?.filter((claim) => claim.support_status === "supported").length ?? 0; const pending = item.pending_claim_count ?? Math.max(0, (item.scientific_claims?.length || 0) - supported); const readiness = item.evidence_readiness?.status; const readinessLabel = item.planning_status === "planned" ? text("规划完成", "Plan complete") : item.generation_eligible === false ? text("生成未完成", "Generation incomplete") : pending ? text("关键证据待补充", "Core evidence pending") : readiness === "partial" ? text("部分证据", "Partial evidence") : readiness === "synthesis" || synthesisOnly ? text("综合章节", "Synthesis section") : text("就绪", "Ready"); return <button key={String(item.section_id)} type="button" className={item === section ? "active" : ""} onClick={() => setSelectedId(String(item.section_id))}><strong>{String(item.section_id || "")} · {String(item.title || text("无标题", "Untitled"))}</strong><small>{papers.length} {text("篇主要论文", "primary papers")} · {supported} {text("条可写断言", "writeable claims")} · {pending} {text("个缺口", "gaps")} · {readinessLabel}</small></button>; })}</div></section>
+      <section className="pane blueprint-section-list">
+        <div className="pane-head"><div><span className="step-label">{text("章节列表", "Chapter list")}</span><h2>{sections.length} {text("个章节", "sections")}</h2></div></div>
+        <div className="keyword-list">{sections.map((item) => {
+          const papers = item.primary_papers || item.major_papers || item.assigned_papers || [];
+          const planningLabel = item.planning_status === "planned"
+            ? text("规划完成", "Plan complete")
+            : item.planning_status === "incomplete"
+              ? text("规划未完成", "Plan incomplete")
+              : text("待规划", "Awaiting planning");
+          return <button key={String(item.section_id)} type="button" className={item === section ? "active" : ""} onClick={() => setSelectedId(String(item.section_id))}>
+            <strong>{String(item.section_id || "")} · {String(item.title || text("无标题", "Untitled"))}</strong>
+            <small>{text(`已分配 ${papers.length} 篇论文`, `${papers.length} assigned papers`)} · {planningLabel}</small>
+          </button>;
+        })}</div>
+      </section>
       <section className="pane blueprint-detail-react"><div className="pane-head blueprint-detail-head"><div><span className="step-label">{text("章节规划摘要", "Chapter plan summary")}</span><h2>{section?.title || text("章节规划", "Chapter plan")}</h2></div></div>{issues.length ? <div className="planning-diagnostics">{issues.map((issue) => <p className="message message-warning" key={`${issue.rule_id}-${issue.message}`}>{issue.message}</p>)}</div> : <div className="blueprint-health-row"><span className="blueprint-health-status"><i />{text("范围与论文分配检查通过", "Scope and paper assignment checks passed")}</span>{adjustments.length ? <details className="blueprint-routing-details"><summary><strong>{text(`${adjustedPaperCount} 篇论文路由已调整`, `${adjustedPaperCount} paper routes adjusted`)}</strong><span>{text("查看记录", "View log")}</span></summary><div className="blueprint-routing-detail-body"><p>{text("系统依据已核验事实和原文证据完成调整，无需逐项确认。", "Routes were adjusted from verified facts and source-addressable evidence; no separate confirmation is required.")}</p><div>{adjustedTargets.map((target) => <span key={target}>{target}</span>)}</div></div></details> : <span className="blueprint-routing-none">{text("无需调整论文路由", "No route adjustments needed")}</span>}</div>}
         {restructure?.is_restructure ? <details className="blueprint-restructure-note"><summary>{text("本版本包含结构调整", "This version contains structural changes")}</summary><p>{restructure.application_mode === "auto_applied_before_section_generation" ? text("章节尚未生成，系统已安全应用新结构；旧章节规划仍可回滚。", "No section prose existed, so the new structure was applied safely; the prior chapter plan remains available for rollback.") : text("旧结构和章节映射已保存。存在下游内容时，本版本仍使用现有章节规划确认流程，不会静默覆盖人工内容。", "The old structure and section map were retained. When downstream content exists, the chapter plan confirmation flow is used and manual content is not silently overwritten.")}</p><ul>{(restructure.section_mapping || []).filter((item) => item.previous_section_id || item.current_section_id).map((item, index) => <li key={`${item.previous_section_id || "new"}-${item.current_section_id || "retired"}-${index}`}>{item.previous_title || text("新增章节", "New section")} → {item.current_title || text("已撤销", "Retired")}</li>)}</ul>{restructure.rollback_supported && restructure.previous_blueprint_artifact_id && onRestorePrevious ? <button className="button button-secondary" type="button" disabled={restoring} onClick={() => onRestorePrevious(restructure.previous_blueprint_artifact_id!)}>{restoring ? text("正在恢复…", "Restoring…") : text("恢复上一版本", "Restore previous version")}</button> : null}</details> : null}
         {section ? <BlueprintArgumentSummary section={section} paperTitles={paperTitles} /> : <div className="empty-state">{text("请先生成章节规划。", "Generate a chapter plan first.")}</div>}
@@ -831,7 +848,7 @@ export function PlanningPage() {
       <nav className="workspace-step-tabs"><button type="button" className={tab === "matrix" ? "active" : ""} onClick={() => { const next = new URLSearchParams(searchParams); next.set("tab", "matrix"); setSearchParams(next); }}>1 {text("文献Matrix与大纲", "Literature matrix and outline")}</button><button type="button" className={tab === "blueprint" ? "active" : ""} onClick={() => { const next = new URLSearchParams(searchParams); next.set("tab", "blueprint"); setSearchParams(next); }}>2 {text("章节规划", "Chapter plan")}</button></nav>
       {planning.isPending ? <div className="empty-state">{text("正在加载Planning产物…", "Loading planning artifacts…")}</div> : null}
       {planning.error ? <ErrorState error={planning.error} onRetry={() => planning.refetch()} /> : null}
-      {planning.data && matrixEnrichmentPublishFailed ? <section className="message message-warning planning-limited-mode"><div><strong>{text("科学事实已经提取，但尚未写入 Matrix", "Scientific facts were extracted but not published")}</strong><p>{text("请回到“文献 Matrix”点击“恢复已有结果”。系统会复用已完成的检查点，不会重新调用模型。", "Return to the Literature Matrix and choose Recover existing results. The completed checkpoint will be reused without another model call.")}</p></div></section> : null}
+      {planning.data && matrixEnrichmentPublishFailed ? <section className="message message-warning planning-limited-mode"><div><strong>{text("科学事实已经提取，但尚未写入 Matrix", "Scientific facts were extracted but not published")}</strong><p>{text("请回到“文献 Matrix”点击“继续未完成分析”。系统会复用已完成的检查点，不会重新调用模型。", "Return to the Literature Matrix and choose Resume unfinished analysis. The completed checkpoint will be reused without another model call.")}</p></div></section> : null}
       {planning.data && allMatrixFactsFailed ? <section className="message message-warning"><strong>{text("科学事实提取尚未成功", "Scientific facts are not yet available")}</strong><p>{text("可以继续生成暂定章节规划，证据缺口留待正文阶段处理；也可以回到 Matrix 重试提取。", "You can generate a provisional chapter plan and address evidence gaps during drafting, or retry extraction in Matrix.")}</p></section> : null}
       {planning.data && project ? <>
         {tab === "matrix" ? <MatrixWorkspace payload={planning.data} projectId={project.project_id} refresh={refresh} /> : null}

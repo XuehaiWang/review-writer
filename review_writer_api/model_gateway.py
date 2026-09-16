@@ -155,7 +155,7 @@ def calculate_provider_cost(
 
 
 class ModelGatewayService:
-    TRANSIENT_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+    TRANSIENT_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 524})
     IMAGE_SAFETY_MARKERS = (
         "内容被安全审核拦截",
         "疑似成人内容",
@@ -817,7 +817,8 @@ class ModelGatewayService:
             with database_session(self.session_factory) as session:
                 row = session.get(AIModelRequest, uuid.UUID(request_id))
                 if row is not None and row.status == "running":
-                    row.response_json = {"partial_reply": partial_reply(text), "stream_diagnostics": dict(diagnostics)}
+                    row.response_json = {**(row.response_json or {}), "partial_reply": partial_reply(text),
+                                         "stream_diagnostics": dict(diagnostics)}
         publish()  # Reset an interrupted attempt before publishing replacement text.
         async with self._provider_client.stream("POST", endpoint, json=body, headers={**headers, "Accept": "text/event-stream"}) as response:
             if response.status_code >= 400:
@@ -828,7 +829,13 @@ class ModelGatewayService:
                 await response.aread()
                 diagnostics["transport"] = "buffered_json"
                 publish()
-                return response.json()  # Providers may ignore stream; do not simulate it.
+                try:
+                    result = response.json()
+                except ValueError as exc:
+                    raise GatewayProviderError("Model provider returned invalid JSON.") from exc
+                if not isinstance(result, dict):
+                    raise GatewayProviderError("Model provider returned an invalid payload.")
+                return result  # Providers may ignore stream; do not simulate it.
             async for line in response.aiter_lines():
                 if not line.startswith("data:"):
                     continue
@@ -838,9 +845,16 @@ class ModelGatewayService:
                     break
                 if not data:
                     continue
-                event = json.loads(data)
+                try:
+                    event = json.loads(data)
+                except ValueError as exc:
+                    raise GatewayProviderError("Model stream returned invalid JSON.") from exc
+                if not isinstance(event, dict):
+                    raise GatewayProviderError("Model stream returned an invalid event.")
                 if event.get("error") or event.get("type") in {"error", "response.failed", "response.incomplete"}:
-                    raise GatewayProviderError("Model stream failed before completion.")
+                    failure = event.get("error") or (event.get("response") or {}).get("error")
+                    raise GatewayProviderError("Model stream failed before completion.",
+                        provider_error=normalize_provider_error(502, failure) if failure else None)
                 previous_length = len(text)
                 if chat:
                     provider_id = event.get("id") or provider_id
@@ -1080,7 +1094,7 @@ class ModelGatewayService:
                     response_format=normalized_format,
                     request_id=request_id,
                     claims=claims,
-                    **({"stream": True} if normalized_stage in {"Paragraph analysis and revision", "Paragraph revision after local lookup"} else {}),
+                    stream=True,
                 )
             usage = self._usage(provider_data)
             cost = calculate_provider_cost(tier, **{

@@ -415,7 +415,7 @@ class QualityOptimizationUnitTests(unittest.TestCase):
             )
         )
 
-    def test_bibliography_field_readiness_rejects_residue_and_missing_locator(self) -> None:
+    def test_bibliography_field_readiness_rejects_residue_but_locator_is_optional(self) -> None:
         report = bibliography_field_readiness(
             {
                 "document_type": "journal_article",
@@ -428,7 +428,9 @@ class QualityOptimizationUnitTests(unittest.TestCase):
         )
         self.assertFalse(report["ready"])
         self.assertIn("authors", report["polluted_fields"])
-        self.assertIn("pages_or_article_number", report["missing_fields"])
+        self.assertNotIn("pages_or_article_number", report["missing_fields"])
+        self.assertNotIn("doi_or_locator", report["missing_fields"])
+        self.assertIn("pages_or_article_number", report["optional_missing_fields"])
 
     def test_bibliography_field_readiness_rejects_markup_only_author_items(self) -> None:
         report = bibliography_field_readiness(

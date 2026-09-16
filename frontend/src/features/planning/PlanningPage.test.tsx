@@ -158,7 +158,7 @@ describe("default argument planning and candidate confirmation", () => {
     expect(disclosure).toHaveAttribute("open");
     expect(screen.getByText(/Outside the selected review scope/)).toBeVisible();
     expect(screen.queryByText(/单篇证据章节已自动处理|章节论证规划|succeeded/)).not.toBeInTheDocument();
-    expect(screen.getByText(/1 篇主要论文/)).toBeInTheDocument();
+    expect(screen.getByText(/已分配 1 篇论文/)).toBeInTheDocument();
   });
 
   it("opens an existing plan from Matrix without generating another job", async () => {
