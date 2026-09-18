@@ -78,9 +78,10 @@ class HardeningTests(unittest.TestCase):
 
     def test_maintenance_continues_after_one_user_fails(self):
         from review_writer_api.worker_main import maintain_storage
-        app = SimpleNamespace(state=SimpleNamespace(session_factory=Mock(),
+        app = SimpleNamespace(state=SimpleNamespace(session_factory=Mock(), storage_maintenance=Mock(),
             library_index_service=SimpleNamespace(vector_store=Mock())))
         app.state.library_index_service.vector_store.prune.side_effect = [RuntimeError(), []]
+        app.state.storage_maintenance.run.side_effect = RuntimeError("Storage unavailable")
         with patch('review_writer_api.database.database_session') as db, \
              patch('review_writer_api.system_errors.prune_failures') as prune:
             db.return_value.__enter__.return_value.scalars.return_value = ['a', 'b']

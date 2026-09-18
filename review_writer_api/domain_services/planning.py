@@ -36,6 +36,8 @@ from review_writer_api.domain_services.actions.planning.matrix import (
 from review_writer_api.domain_services.actions.planning.outline import (
     PlanningOutlineActionsMixin,
 )
+from review_writer_api.domain_services.actions.planning.topic_recommendation import TopicRecommendationMixin
+from review_writer_core.stages.planning.topic_recommendation import normalize_recommended_outline
 from review_writer_api.database import database_session, utc_now
 from review_writer_api.errors import (
     WorkflowConflict,
@@ -61,7 +63,6 @@ from review_writer_core.bibliography_audit import bibliography_candidates
 from review_writer_core.evidence_integrity import source_contains_excerpt
 from review_writer_core.claim_contracts import (
     FACT_GROUNDED_BLUEPRINT_SCHEMA_VERSION,
-    claim_is_executable,
 )
 from review_writer_core.scientific_facts import (
     FACT_PROMPT_VERSION, FACT_VALIDATION_VERSION, fact_is_usable, fact_support_spans,
@@ -93,7 +94,6 @@ from review_writer_core.review_fact_readiness import (
     fact_readiness_report,
     fact_processing_complete,
     fact_processing_state,
-    required_fact_roles,
 )
 from review_writer_core.review_structure import (
     assign_primary_paper_sections,
@@ -130,7 +130,6 @@ from review_writer_core.stages.planning.outline import (
 from review_writer_core.stages.planning.topic import (
     TOPIC_AXIS_LABELS,
     TOPIC_GUIDED_STYLE,
-    TOPIC_PARTITION_BOUNDARY_LABEL,
     _basis_with_axis_contract,
     _canonical_declared_partition,
     _clean_topic_partition,
@@ -139,7 +138,6 @@ from review_writer_core.stages.planning.topic import (
     _required_topic_partitions_from_outline,
     _topic_outline_intent,
     _topic_partition_for_row,
-    _topic_partition_for_text,
     _topic_partition_routes,
     _topic_partitions,
     _usable_fact_candidate,
@@ -167,6 +165,7 @@ MATRIX_FACT_PROMPT_VERSION = FACT_PROMPT_VERSION
 
 
 class PlanningService(
+    TopicRecommendationMixin,
     PlanningBlueprintActionsMixin,
     PlanningMatrixActionsMixin,
     PlanningOutlineActionsMixin,
@@ -3347,15 +3346,7 @@ class PlanningService(
                     )
                     lines.append(f"Notes: {normalized_notes}")
                 lines.append("")
-        lines.extend(
-            [
-                "## Cross-regime comparison, limitations, and outlook",
-                "Section role: conclusion",
-                "Purpose: compare the primary categories, secondary axes, explicit focus dimensions, evidence boundaries, limitations, and future directions across the Topic-requested partitions.",
-                "",
-            ]
-        )
-        return "\n".join(lines)
+        return normalize_recommended_outline("\n".join(lines))
 
     def _outline_document(
         self,
@@ -3427,14 +3418,6 @@ class PlanningService(
                     "cross-category comparison until stronger routing evidence is available."
                 )
             lines.extend([*block, ""])
-        lines.extend(
-            [
-                "## Cross-category comparison and conclusion",
-                "Section role: conclusion",
-                "Purpose: compare the main systems, outcomes, evidence boundaries, limitations, and future directions.",
-                "",
-            ]
-        )
         return "\n".join(lines)
 
     @staticmethod
@@ -3565,6 +3548,12 @@ class PlanningService(
             for style, definition in OUTLINE_STYLES.items()
             if style != TOPIC_GUIDED_STYLE
         ]
+        topic_recommendation = None
+        if not topic_intent.get("available"):
+            topic_recommendation = self.topic_recommendation_status(principal, project_id)
+            if topic_recommendation.get("candidate"):
+                generated.insert(0, {**topic_recommendation["candidate"], "candidate_id": TOPIC_GUIDED_STYLE,
+                    "outline_style": TOPIC_GUIDED_STYLE, "source": "topic"})
         if topic_intent.get("available"):
             generated.insert(
                 0,
@@ -3771,6 +3760,7 @@ class PlanningService(
                 or outline_diagnostics
             ),
             "outline_candidates": generated + reference_candidates,
+            "topic_recommendation": topic_recommendation,
             "reference_outline_candidates": reference_candidates,
             "legacy_reference_outline_count": len(all_reference_candidates)
             - len(reference_candidates),
@@ -3813,6 +3803,7 @@ class PlanningService(
         outline_md: str | None,
         manual: bool,
         scope_contract: dict[str, Any] | None = None,
+        candidate_outline_md: str | None = None,
     ) -> dict[str, Any]:
         principal.require(Permission.PROJECT_WRITE)
         current_state = self.repository.get_stage_state(
@@ -3850,6 +3841,8 @@ class PlanningService(
             list(matrix.get("classification_axes") or []),
         )
         topic_text_by_paper: dict[str, str] = {}
+        if candidate_outline_md is not None and (manual or style != TOPIC_GUIDED_STYLE):
+            raise WorkflowValidationError("A recommendation snapshot is only valid when applying a topic outline.")
         if style == "custom" and not manual:
             markdown = ""
             complete = False
@@ -3883,21 +3876,26 @@ class PlanningService(
             complete = True
         elif style == TOPIC_GUIDED_STYLE:
             if not topic_intent.get("available"):
-                raise WorkflowValidationError(
-                    "The Topic does not contain a usable organization instruction."
+                candidate = self.require_topic_recommendation(principal, project_id)
+                topic_intent = candidate["topic_outline_intent"]
+                if candidate_outline_md is not None and candidate_outline_md.strip() != candidate["outline_md"].strip():
+                    raise WorkflowConflict("The recommendation changed. Refresh it before applying.")
+                markdown = self._validate_outline(candidate["outline_md"], matrix_ids)
+            elif candidate_outline_md is not None:
+                markdown = self._validate_outline(candidate_outline_md, matrix_ids)
+            else:
+                tags_by_paper, text_by_paper = self._outline_sources(principal, rows)
+                topic_text_by_paper = text_by_paper
+                markdown = self._validate_outline(
+                    self._topic_outline_document(
+                        rows,
+                        tags_by_paper=tags_by_paper,
+                        text_by_paper=text_by_paper,
+                        taxonomy_profile=planning_taxonomy_profile,
+                        intent=topic_intent,
+                    ),
+                    matrix_ids,
                 )
-            tags_by_paper, text_by_paper = self._outline_sources(principal, rows)
-            topic_text_by_paper = text_by_paper
-            markdown = self._validate_outline(
-                self._topic_outline_document(
-                    rows,
-                    tags_by_paper=tags_by_paper,
-                    text_by_paper=text_by_paper,
-                    taxonomy_profile=planning_taxonomy_profile,
-                    intent=topic_intent,
-                ),
-                matrix_ids,
-            )
             complete = True
         else:
             if style not in OUTLINE_STYLES:
@@ -3918,7 +3916,8 @@ class PlanningService(
             required=False,
         )
         parsed_sections = _outline_sections(markdown) if complete else []
-        if complete and not manual and style in OUTLINE_STYLES:
+        if (complete and not manual and candidate_outline_md is None and style in OUTLINE_STYLES
+                and topic_intent.get("source") != "topic_and_selected_papers"):
             generated_tags, generated_text = self._outline_sources(principal, rows)
             if not topic_text_by_paper:
                 topic_text_by_paper = generated_text
@@ -4006,7 +4005,7 @@ class PlanningService(
                 or topic_intent.get("partitions")
                 or []
             )
-            if not topic_text_by_paper:
+            if required_partitions and not topic_text_by_paper:
                 _topic_tags, topic_text_by_paper = self._outline_sources(
                     principal, rows
                 )

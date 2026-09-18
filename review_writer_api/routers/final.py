@@ -57,13 +57,9 @@ def build_final_router(
         idempotency_key: str = Header(default="", alias="Idempotency-Key"),
         principal: Principal = Depends(principal_dependency),
     ):
-        return submit(
-            principal,
-            project_id,
-            "final.conclusion",
-            idempotency_key,
-            final_service.conclusion_payload(principal, project_id),
-        )
+        from fastapi import HTTPException
+        final_service._owned_project(principal, project_id)
+        raise HTTPException(status_code=410, detail="Generate and edit conclusions in Draft, then rebuild Final.")
 
     @router.post("/overview-jobs", status_code=status.HTTP_202_ACCEPTED)
     def start_overview(
@@ -127,11 +123,8 @@ def build_final_router(
             principal,
             project_id,
             revision=payload.revision,
-            title=payload.title,
             authors=list(payload.authors),
             affiliations=list(payload.affiliations),
-            abstract=payload.abstract,
-            keywords=list(payload.keywords),
             omitted_fields=list(payload.omitted_fields),
         )
 

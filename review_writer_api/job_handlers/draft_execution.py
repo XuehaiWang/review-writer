@@ -121,6 +121,20 @@ def register_draft_handlers(drafts_service, job_service, handlers):
 
     def dispatch_revision(existing):
         def handler(context, payload):
+            if payload.get("revision_mode") == "section_synthesis":
+                principal = Principal(context.user_id, frozenset({Role.USER}))
+                drafts_service._owned_project(principal, context.project_id)
+                current = context.repository.get_job(context.user_id, context.job_id)
+                cached = (current.result or {}).get("synthesis_output")
+                context.report_progress(1, 3)
+                built = cached or available["draft.synthesis"](context, payload)
+                context.report_partial_result({"synthesis_output": built})
+                context.report_progress(2, 3)
+                context.checkpoint()
+                result = drafts_service.publish_synthesis(principal, context.project_id, payload, built)
+                from review_writer_api.job_handlers.lifecycle import report_committed_progress
+                report_committed_progress(context, 3, 3)
+                return result
             if payload.get("revision_mode") == "dialogue_batch":
                 return dialogue_batch(context, payload)
             if payload.get("revision_mode") == "dialogue":

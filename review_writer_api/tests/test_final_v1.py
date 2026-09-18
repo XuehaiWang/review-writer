@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import httpx
 import threading
 import uuid
 import zipfile
@@ -23,6 +24,19 @@ from review_writer_core.manuscript_state import build_manuscript_state
 
 
 class FinalV1Tests(NativeFigureApiTestCase):
+    def start_legacy_conclusion(self, _url, *, json, headers):
+        """Simulate a job already queued before creation moved to Draft."""
+        job = self.app.state.job_service.submit(self.first, scope="project",
+            project_id=self.project_id, job_type="final.conclusion",
+            idempotency_key=headers.get("Idempotency-Key") or str(uuid.uuid4()),
+            payload=self.app.state.final_service.conclusion_payload(self.first, self.project_id))
+        return httpx.Response(202, json={"id": job.id})
+
+    def test_final_conclusion_http_is_retired(self):
+        with TestClient(self.app) as client:
+            result = client.post(f"/api/v1/projects/{self.project_id}/final/conclusion-jobs", json={})
+            self.assertEqual(410, result.status_code)
+
     def seed_historical_evaluation(self):
         # Simulate an old stored report or an already-running legacy job finishing.
         # New users cannot submit the retired scoring HTTP endpoint.
@@ -308,9 +322,9 @@ class FinalV1Tests(NativeFigureApiTestCase):
         self.assertEqual("final.build", payload["latest_final_job_type"])
         self.assertEqual("succeeded", payload["latest_final_job_status"])
         self.assertTrue(payload["final_current"])
-        self.assertIn("## Abstract", payload["final_draft_md"])
+        self.assertNotIn("## Abstract", payload["final_draft_md"])
         self.assertIn("**Authors:** First", payload["final_draft_md"])
-        self.assertEqual("generated", payload["front_matter"]["field_states"]["abstract"])
+        self.assertEqual("missing", payload["front_matter"]["field_states"]["abstract"])
 
     def test_overview_block_is_inserted_immediately_before_introduction(self) -> None:
         source = "# Review title\n\nAbstract text.\n\n## 1. Introduction\n\nOpening."
@@ -526,7 +540,7 @@ class FinalV1Tests(NativeFigureApiTestCase):
         self.block_conclusion_return = True
         with TestClient(self.app) as client:
             self.prepare_approved_draft(client)
-            started = client.post(
+            started = self.start_legacy_conclusion(
                 f"/api/v1/projects/{self.project_id}/final/conclusion-jobs",
                 json={},
                 headers=self.headers("cancel-before-publish"),
@@ -562,7 +576,7 @@ class FinalV1Tests(NativeFigureApiTestCase):
                 # have finished; otherwise their success callbacks can set the
                 # event before the conclusion job reaches publication.
                 repository.mark_job_succeeded = delayed_completion
-                started = client.post(
+                started = self.start_legacy_conclusion(
                     f"/api/v1/projects/{self.project_id}/final/conclusion-jobs",
                     json={},
                     headers=self.headers("cancel-after-publish"),
@@ -587,7 +601,7 @@ class FinalV1Tests(NativeFigureApiTestCase):
     def test_conclusion_overview_edit_and_final_build_are_versioned(self) -> None:
         with TestClient(self.app) as client:
             self.prepare_approved_draft(client)
-            conclusion = client.post(
+            conclusion = self.start_legacy_conclusion(
                 f"/api/v1/projects/{self.project_id}/final/conclusion-jobs",
                 json={},
                 headers=self.headers("final-conclusion"),
@@ -639,7 +653,7 @@ class FinalV1Tests(NativeFigureApiTestCase):
             )
         self.assertEqual(200, built.status_code, built.text)
         self.assertEqual(422, unchanged.status_code, unchanged.text)
-        self.assertIn("Conclusion", payload["final_draft_md"])
+        self.assertNotIn("Copper reactivity supports a bounded outlook.", payload["final_draft_md"])
         self.assertIn("/api/v1/artifacts/", payload["final_draft_md"])
         self.assertEqual("Edited copper overview", payload["overview_text"]["title"])
         self.assertEqual(200, report.status_code, report.text)
@@ -651,7 +665,7 @@ class FinalV1Tests(NativeFigureApiTestCase):
         self.assertIn("citation_callouts", audit.json())
         self.assertNotEqual(audit.json(), release.json())
 
-    def test_front_matter_is_user_authored_and_bound_to_final_version(self) -> None:
+    def test_publication_metadata_does_not_generate_or_edit_prose(self) -> None:
         with TestClient(self.app) as client:
             self.prepare_approved_draft(client)
             initial = client.get(
@@ -663,11 +677,8 @@ class FinalV1Tests(NativeFigureApiTestCase):
                 f"/api/v1/projects/{self.project_id}/final/front-matter",
                 json={
                     "revision": initial["revision"],
-                    "title": "Evidence-bound copper catalysis",
                     "authors": ["A. Researcher", "B. Researcher"],
                     "affiliations": ["Institute of Verified Synthesis"],
-                    "abstract": "This review synthesizes the confirmed corpus.",
-                    "keywords": ["copper", "evidence synthesis"],
                 },
                 headers=self.headers("save-front-matter"),
             )
@@ -684,11 +695,8 @@ class FinalV1Tests(NativeFigureApiTestCase):
                 f"/api/v1/projects/{self.project_id}/final/front-matter",
                 json={
                     "revision": current["revision"],
-                    "title": "Updated evidence-bound copper catalysis",
                     "authors": ["A. Researcher", "B. Researcher"],
-                    "affiliations": ["Institute of Verified Synthesis"],
-                    "abstract": "This review synthesizes the confirmed corpus.",
-                    "keywords": ["copper", "evidence synthesis"],
+                    "affiliations": ["Updated Institute"],
                 },
                 headers=self.headers("edit-front-matter"),
             )
@@ -698,10 +706,10 @@ class FinalV1Tests(NativeFigureApiTestCase):
             ).json()
         self.assertTrue(current["front_matter_current"])
         self.assertTrue(current["final_current"])
-        self.assertIn("# Evidence-bound copper catalysis", current["final_draft_md"])
+        self.assertIn("# Copper chemistry", current["final_draft_md"])
         self.assertIn("**Authors:** A. Researcher, B. Researcher", current["final_draft_md"])
-        self.assertIn("## Abstract", current["final_draft_md"])
-        self.assertIn("**Keywords:** copper, evidence synthesis", current["final_draft_md"])
+        self.assertNotIn("## Abstract", current["final_draft_md"])
+        self.assertNotIn("**Keywords:**", current["final_draft_md"])
         self.assertFalse(stale["final_current"])
         self.assertTrue(stale["freshness"]["stale"])
 
@@ -884,7 +892,7 @@ class FinalV1Tests(NativeFigureApiTestCase):
     def test_final_freshness_tracks_optional_component_versions(self) -> None:
         with TestClient(self.app) as client:
             self.prepare_approved_draft(client)
-            conclusion = client.post(
+            conclusion = self.start_legacy_conclusion(
                 f"/api/v1/projects/{self.project_id}/final/conclusion-jobs",
                 json={},
                 headers=self.headers("fresh-conclusion"),
@@ -923,7 +931,7 @@ class FinalV1Tests(NativeFigureApiTestCase):
     def test_equal_generated_bytes_create_new_versions_for_new_draft_lineage(self) -> None:
         with TestClient(self.app) as client:
             self.prepare_approved_draft(client)
-            first_conclusion_job = client.post(
+            first_conclusion_job = self.start_legacy_conclusion(
                 f"/api/v1/projects/{self.project_id}/final/conclusion-jobs",
                 json={}, headers=self.headers("lineage-conclusion-v1"),
             )
@@ -941,7 +949,7 @@ class FinalV1Tests(NativeFigureApiTestCase):
             )
             first = client.get(f"/api/v1/projects/{self.project_id}/final").json()
             self.revise_and_approve_draft(client, "lineage-draft-v2")
-            second_conclusion_job = client.post(
+            second_conclusion_job = self.start_legacy_conclusion(
                 f"/api/v1/projects/{self.project_id}/final/conclusion-jobs",
                 json={}, headers=self.headers("lineage-conclusion-v2"),
             )
@@ -965,10 +973,10 @@ class FinalV1Tests(NativeFigureApiTestCase):
         self.assertTrue(second["conclusion_current"])
         self.assertTrue(second["overview_figure_current"])
 
-    def test_final_build_does_not_reuse_optional_components_from_an_older_draft(self) -> None:
+    def test_final_retains_selected_overview_but_does_not_append_legacy_conclusion(self) -> None:
         with TestClient(self.app) as client:
             self.prepare_approved_draft(client)
-            conclusion = client.post(
+            conclusion = self.start_legacy_conclusion(
                 f"/api/v1/projects/{self.project_id}/final/conclusion-jobs",
                 json={}, headers=self.headers("stale-build-conclusion"),
             )
@@ -986,9 +994,10 @@ class FinalV1Tests(NativeFigureApiTestCase):
             final = client.get(f"/api/v1/projects/{self.project_id}/final").json()
         self.assertEqual(200, built.status_code, built.text)
         self.assertNotIn("A bounded conclusion.", final["final_draft_md"])
-        self.assertNotIn("## Review Overview", final["final_draft_md"])
+        self.assertIn(final["overview_figure_url"], final["final_draft_md"])
+        self.assertFalse(final["overview_figure_current"])
 
-    def test_stale_final_cannot_be_exported_or_have_overview_text_edited(self) -> None:
+    def test_stale_final_cannot_be_exported_but_selected_overview_caption_is_editable(self) -> None:
         with TestClient(self.app) as client:
             self.prepare_approved_draft(client)
             overview = client.post(
@@ -1019,7 +1028,7 @@ class FinalV1Tests(NativeFigureApiTestCase):
             )
         self.assertFalse(final["final_current"])
         self.assertEqual(409, exported.status_code, exported.text)
-        self.assertEqual(409, edited.status_code, edited.text)
+        self.assertEqual(200, edited.status_code, edited.text)
 
 
 if __name__ == "__main__":

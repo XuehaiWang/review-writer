@@ -118,6 +118,7 @@ class OutlineSaveRequest(BaseModel):
     revision: StrictInt = Field(ge=0)
     outline_style: StrictStr = Field(min_length=1, max_length=160)
     outline_md: StrictStr | None = Field(default=None, max_length=250_000)
+    candidate_outline_md: StrictStr | None = Field(default=None, max_length=250_000)
     scope_contract: dict[str, Any] | None = None
 
 
@@ -289,6 +290,21 @@ class FinalPdfRequest(BaseModel):
     language_profile: Literal["en", "zh-CN"] = "en"
 
 
+class DraftOverviewGenerateRequest(BaseModel):
+    instructions: str = Field(default="", max_length=4000)
+
+
+class DraftOverviewAdoptRequest(BaseModel):
+    image_id: str
+    title: str = Field(min_length=1, max_length=4000)
+    revision: StrictInt = Field(ge=0)
+
+
+class DraftSynthesisAdoptRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=100000)
+    base_text_sha256: str
+
+
 class FinalOverviewTextRequest(BaseModel):
     revision: StrictInt = Field(ge=0)
     title: StrictStr = Field(min_length=1, max_length=500)
@@ -297,14 +313,18 @@ class FinalOverviewTextRequest(BaseModel):
 
 
 class FinalFrontMatterRequest(BaseModel):
+    model_config = {"extra": "forbid"}
     revision: StrictInt = Field(ge=0)
-    title: StrictStr = Field(min_length=1, max_length=1_000)
     authors: list[StrictStr] = Field(default_factory=list, max_length=100)
     affiliations: list[StrictStr] = Field(default_factory=list, max_length=100)
-    abstract: StrictStr = Field(default="", max_length=20_000)
-    keywords: list[StrictStr] = Field(default_factory=list, max_length=100)
     omitted_fields: list[
-        Literal["authors", "affiliations", "abstract", "keywords"]
-    ] = Field(default_factory=list, max_length=4)
+        Literal["authors", "affiliations"]
+    ] = Field(default_factory=list, max_length=2)
+
+
+class DraftManuscriptFieldsRequest(BaseModel):
+    revision: StrictInt = Field(ge=0)
+    title: StrictStr = Field(min_length=1, max_length=1_000)
+    keywords: list[StrictStr] = Field(default_factory=list, max_length=100)
 
 

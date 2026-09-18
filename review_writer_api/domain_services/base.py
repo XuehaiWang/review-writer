@@ -10,12 +10,12 @@ from sqlalchemy import select
 
 from review_writer_api.artifact_service import ArtifactService
 from review_writer_api.database import database_session
-from review_writer_api.errors import WorkflowConflict, WorkflowNotFound
+from review_writer_api.errors import WorkflowConflict, WorkflowNotFound, WorkflowStageNotReady
 from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
 from review_writer_api.workflow_models import LibraryPaper
 from review_writer_core.scientific_facts import is_additive_fact_repair
-from review_writer_core.workflow.artifacts import MATRIX
+from review_writer_core.workflow.artifacts import MATRIX, DISCOVERY_REVIEW, BLUEPRINT, SECTION_DRAFTS
 
 
 class OwnedProjectService:
@@ -129,13 +129,38 @@ class ArtifactBackedService(OwnedProjectService):
         artifact = self._artifact(principal, project_id, logical_name)
         if artifact is None:
             if required:
-                raise WorkflowNotFound("Current workflow artifact not found.")
+                raise self._stage_not_ready(principal, project_id, logical_name)
             return "", None
         resolved = self.artifacts.resolve_owned_artifact(principal.user_id, artifact.id)
         try:
             return resolved.path.read_text(encoding="utf-8"), artifact
         except OSError as exc:
             raise WorkflowConflict("The current workflow artifact is unreadable.") from exc
+
+    def _stage_not_ready(self, principal, project_id, logical_name):
+        # Only called when there is no registered current artifact. Registered
+        # but missing/unreadable files keep their existing operational errors.
+        prefix = logical_name.split("/", 1)[0]
+        stage = {"matrix": "discovery", "blueprint": "planning",
+                 "figure-review": "images", "figures": "images"}.get(prefix, prefix)
+        milestones = [(DISCOVERY_REVIEW, "discovery"), (MATRIX, "discovery"),
+                      (BLUEPRINT, "planning"), (SECTION_DRAFTS, "sections")]
+        end = {"discovery": 0, "matrix": 1, "planning": 2, "blueprint": 2,
+               "sections": 3}.get(prefix, 4)
+        for name, owner in milestones[:end]:
+            if self.repository.get_current_artifact(principal.user_id, project_id, name) is None:
+                stage = owner
+                break
+        job_prefix = {"images": ("figures.", "figure-review."),
+                      "planning": ("planning.",), "discovery": ("discovery.",)}.get(stage, (stage + ".",))
+        active = next((job for job in self.repository.list_project_jobs(principal.user_id, project_id, limit=100)
+                       if job.status in {"queued", "running", "cancel_requested"}
+                       and job.job_type.startswith(job_prefix)), None)
+        return WorkflowStageNotReady("This stage has no output yet.", details={
+            "project_id": project_id, "next_stage": stage,
+            "active_job": {"status": active.status, "current": active.progress_current,
+                           "total": active.progress_total} if active else None,
+        })
 
     def _read_json(
         self,

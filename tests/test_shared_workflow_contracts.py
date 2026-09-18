@@ -11,6 +11,7 @@ from review_writer_api.domain_services.final import FinalService
 from review_writer_api.domain_services.planning import _planning_job_payload
 from review_writer_api.domain_services.sections import _job_payload
 from review_writer_api.errors import WorkflowConflict
+from review_writer_api.security import Principal, Role
 from review_writer_api.job_service import job_payload
 from review_writer_api.routers.jobs import _job_response
 from review_writer_core.stages.discovery import records
@@ -66,8 +67,8 @@ def test_repair_publication_preserves_history_and_binds_new_sources(logical):
     assert repaired_artifact_metadata(previous, logical, {}) == previous
 
 
-@pytest.mark.parametrize("method", ["conclusion_payload", "overview_payload"])
-def test_final_synthesis_preserves_approval_and_manual_text_exclusion(method):
+def test_legacy_final_conclusion_preserves_approval_and_manual_text_exclusion():
+    method = "conclusion_payload"
     service = object.__new__(FinalService)
     principal = SimpleNamespace(user_id="owner")
     draft = SimpleNamespace(id="draft-id")
@@ -88,6 +89,27 @@ def test_final_synthesis_preserves_approval_and_manual_text_exclusion(method):
     service._approved_draft.side_effect = WorkflowConflict("not approved")
     with pytest.raises(WorkflowConflict):
         getattr(service, method)(principal, "project")
+
+
+def test_draft_overview_uses_saved_text_without_final_approval_but_rejects_stale_sources():
+    service = object.__new__(FinalService)
+    principal = Principal("owner", frozenset({Role.USER}))
+    draft = SimpleNamespace(id="draft-id")
+    service._approved_draft = Mock(side_effect=AssertionError("Overview belongs to Draft"))
+    service._revision = Mock(return_value=7)
+    service.drafts = SimpleNamespace(
+        _read_text=Mock(return_value=("Saved text including manual edits", draft)),
+        _freshness=Mock(return_value={"upstream_stale": False}),
+        compatibility_payload=Mock(return_value={"topic": "topic"}),
+    )
+    result = service.overview_payload(principal, "project")
+    assert result["draft_text"] == "Saved text including manual edits"
+    assert result["source_draft_artifact_id"] == "draft-id"
+    assert result["draft_creation"] is True
+    service._approved_draft.assert_not_called()
+    service.drafts._freshness.return_value = {"upstream_stale": True}
+    with pytest.raises(WorkflowConflict):
+        service.overview_payload(principal, "project")
 
 
 @pytest.mark.parametrize("assignment", [

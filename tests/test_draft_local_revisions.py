@@ -81,32 +81,8 @@ def test_acceptance_cannot_split_group_and_preserves_other_namespaces():
     assert "argument_revisions" not in old
 
 
-def test_partial_acceptance_updates_unchanged_dependent_scores_only_once():
-    from review_writer_api.domain_services.drafts import DraftsService
-    service = object.__new__(DraftsService)
-    def evaluation(pid, score):
-        return {'evaluation_scope': 'single_paragraph', 'paragraph_id': pid,
-                'paragraph_score': {'paragraph_id': pid, 'score': score, 'route': 'pass'}}
-    source = {'score': 70, 'paragraph_scores': [
-        {'paragraph_id': 'p1', 'score': 70}, {'paragraph_id': 'p2', 'score': 60},
-        {'paragraph_id': 'p3', 'score': 80}]}
-    change = {'paragraph_id': 'p1', 'candidate_evaluation': evaluation('p1', 80),
-              'dependent_evaluations': {'p2': evaluation('p2', 90)}}
-    quality, count = service._optimization_quality_from_scored_changes({'source_quality': source}, [change])
-    assert count == 1
-    assert {r['paragraph_id']: r['score'] for r in quality['paragraph_scores']} == {'p1': 80, 'p2': 90, 'p3': 80}
-    assert quality['score'] == 83.33
-    assert source['paragraph_scores'][1]['score'] == 60
 
 
-def test_joint_candidate_is_never_auto_accepted():
-    from review_writer_api.domain_services.drafts import DraftsService
-    service = object.__new__(DraftsService)
-    service._read_json = Mock(return_value=({'entries': {'proposal': {'status': 'pending', 'changes': [
-        {'paragraph_id': 'p1', 'requires_manual_confirmation': True, 'argument_revisions': [delta()]}]}}}, None))
-    service._read_text = Mock(return_value=('Draft', SimpleNamespace(metadata={})))
-    result = service.auto_apply_optimization_proposal(SimpleNamespace(), 'project', 'proposal', revision=1)
-    assert result == {'auto_applied': False, 'auto_apply_status': 'manual_review_required'}
 
 
 def test_published_draft_points_to_matching_overlay_for_restore(tmp_path):

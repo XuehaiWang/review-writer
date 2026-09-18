@@ -5409,6 +5409,12 @@ def main():
         print(f"  Source-checked 2D chemistry reference ({skeleton_source}): {skeleton_png}")
     adapted_prompt = build_adapted_prompt(best_template, features,
                                           composite_mode=bool(skeleton_rendered))
+    request_path = project_dir / "03_figure_redraw" / "overview_user_request.json"
+    if request_path.is_file():
+        instructions = str(json.loads(request_path.read_text(encoding="utf-8")).get("instructions") or "")[:4000]
+        if instructions.strip():
+            adapted_prompt += ("\nAuthor's presentation preferences (not scientific evidence; preserve source-checked "
+                               "chemistry and do not invent findings):\n" + instructions)
     print(f"\n  Adapted prompt length: {len(adapted_prompt)} chars")
 
     if args.dry_run:

@@ -8,6 +8,7 @@ from sqlalchemy import select
 from review_writer_api.errors import WorkflowConflict, WorkflowNotFound, WorkflowValidationError
 from review_writer_api.security import Permission
 from review_writer_core.paragraph_revision import exact_hash, paragraph_keys, dialogue_sections
+from review_writer_core.draft_composition import body_source
 from review_writer_core.dialogue_memory import conversation_memory, candidate_response
 from review_writer_core.draft_quality import QUALITY_INPUT_ARTIFACTS
 from review_writer_core.draft_bibliography import citation_entries_from_draft
@@ -228,6 +229,11 @@ class DraftDialogueMixin(SectionVersionsMixin):
             "preferences": preferences,
             "parent_candidate_id": parent["candidate_id"] if parent else "", "base_text_sha256": base_text_sha256,
             "context": related, "context_hashes": {p["paragraph_id"]: exact_hash(p["text"]) for p in neighbours}}
+        section_role = next((s.get("section_role", "body") for s in dialogue_sections(text, artifact.metadata, artifact.id)
+                             if any(p["paragraph_key"] == key for p in s["paragraphs"])), "body")
+        dialogue["section_role"] = section_role
+        if section_role in {"abstract", "conclusion"}:
+            dialogue["manuscript_context"] = body_source(text, include_conclusion=section_role == "abstract")
         if include_memory:
             dialogue["conversation_memory"] = conversation_memory([{"id": (m["candidate"] or {}).get("candidate_id") or m["job_id"],
                 "user": m["message"], "responses": [candidate_response(m["candidate"], base_text_sha256)] if m["candidate"] else [],
@@ -289,8 +295,13 @@ class DraftDialogueMixin(SectionVersionsMixin):
                 if attempt == 2:
                     raise
 
-    def decide_dialogue(self, principal, project_id, candidate_id, *, decision):
+    def decide_dialogue(self, principal, project_id, candidate_id, *, decision, expected_base_text_sha256=None):
         principal.require(Permission.PROJECT_WRITE)
+        store, _ = self._read_json(principal, project_id, DRAFT_REWRITE_CANDIDATES, required=False)
+        if (store.get("entries", {}).get(candidate_id) or {}).get("revision_mode") == "section_synthesis":
+            return self.decide_synthesis(principal, project_id, candidate_id, decision=decision, expected_base_text_sha256=expected_base_text_sha256)
+        if candidate_id not in (store.get("entries") or {}):
+            return self.decide_synthesis(principal, project_id, candidate_id, decision=decision, expected_base_text_sha256=expected_base_text_sha256)
         if decision not in {"accept", "reject"}:
             raise WorkflowValidationError("Unknown candidate decision.")
         for attempt in range(3):

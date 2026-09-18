@@ -22,11 +22,10 @@ from sqlalchemy import select
 
 from review_writer_api.artifact_service import ArtifactService
 from review_writer_api.database import database_session, utc_now
-from review_writer_api.domain_services.base import OwnedProjectService
+from review_writer_api.domain_services.base import ArtifactBackedService
 from review_writer_api.errors import (
     WorkflowConflict,
     WorkflowError,
-    WorkflowNotFound,
     WorkflowValidationError,
 )
 from review_writer_api.figure_rules import image_size
@@ -161,7 +160,7 @@ class SectionProviderUnavailable(WorkflowError):
     retryable = True
 
 
-class SectionsService(OwnedProjectService):
+class SectionsService(ArtifactBackedService):
     def __init__(
         self,
         repository: WorkflowRepository,
@@ -187,7 +186,7 @@ class SectionsService(OwnedProjectService):
         )
         if artifact is None:
             if required:
-                raise WorkflowNotFound("Current workflow artifact not found.")
+                raise self._stage_not_ready(principal, project_id, logical_name)
             return None, None
         resolved = self.artifacts.resolve_owned_artifact(principal.user_id, artifact.id)
         try:
@@ -248,6 +247,10 @@ class SectionsService(OwnedProjectService):
             if not isinstance(section, dict) or not str(section.get("section_id") or ""):
                 continue
             if section.get("organizing_only"):
+                continue
+            # Standalone conclusions belong to Draft composition, including
+            # those still present in previously confirmed Blueprints.
+            if str(section.get("section_role") or "").strip().casefold() == "conclusion":
                 continue
             if policy_mode != "argument_based":
                 section = apply_single_paper_policy(section)
@@ -396,12 +399,7 @@ class SectionsService(OwnedProjectService):
             )
         if not tasks:
             raise WorkflowConflict("Blueprint contains no usable section tasks.")
-        # Conclusions depend on the completed body synthesis.  Keep all other
-        # outline ordering stable, but always schedule reflective sections last.
-        return [
-            *[task for task in tasks if task["section_role"] != "conclusion"],
-            *[task for task in tasks if task["section_role"] == "conclusion"],
-        ]
+        return tasks
 
     @staticmethod
     def _evidence_queries(

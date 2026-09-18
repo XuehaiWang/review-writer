@@ -198,6 +198,27 @@ def test_stale_queued_job_never_enters_scientific_builder():
     service.publish_generation.assert_not_called()
 
 
+def test_retry_defers_standalone_conclusion_without_changing_body_checkpoint():
+    from review_writer_api.job_handlers.stage_execution import register_sections_handler
+
+    handlers = {}
+    jobs = SimpleNamespace(register_handler=lambda name, handler: handlers.update({name: handler}))
+    service, builder = Mock(), Mock(return_value={})
+    comparison = {"section_id": "compare", "section_role": "body", "heading": "Comparison and outlook"}
+    tasks = [comparison, {"section_id": "end", "section_role": "conclusion"}]
+    checkpoint = {"entries": {"compare": {"input_fingerprint": "unchanged", "output": {}}}}
+    previous = SimpleNamespace(result={"section_checkpoint": checkpoint}, retry_of_job_id=None)
+    context = Mock(user_id="user", project_id="project", retry_of_job_id="old")
+    context.repository.get_job.return_value = previous
+    register_sections_handler(service, jobs, {"sections.generate": builder})
+    handlers["sections.generate"](context, {"tasks": tasks})
+    payload = builder.call_args.args[1]
+    assert payload["tasks"] == [comparison]
+    assert payload["resume_checkpoint"]["entries"] == checkpoint["entries"]
+    assert service.publish_generation.call_args.args[2]["tasks"] == [comparison]
+    assert len(tasks) == 2  # Historical input snapshot is not mutated.
+
+
 def test_publication_failure_corrects_completed_progress_and_next_retry_checkpoint():
     from review_writer_api.errors import WorkflowValidationError
     from review_writer_api.job_handlers.stage_execution import register_sections_handler
@@ -219,7 +240,7 @@ def test_publication_failure_corrects_completed_progress_and_next_retry_checkpoi
         handlers["sections.generate"](context, {"tasks": tasks})
     snapshot = context.report_partial_result.call_args.args[0]
     assert list(snapshot["section_checkpoint"]["entries"]) == ["intro"]
-    assert {x["section_id"] for x in snapshot["section_progress"]["failed_sections"]} == {"body", "end"}
+    assert {x["section_id"] for x in snapshot["section_progress"]["failed_sections"]} == {"body"}
     assert [x["section_id"] for x in snapshot["section_progress"]["completed_sections"]] == ["intro"]
     assert snapshot["section_progress"]["phase"] == "publication_failed"
 

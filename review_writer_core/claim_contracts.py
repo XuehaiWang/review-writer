@@ -15,9 +15,7 @@ import re
 from typing import Any, Iterable
 
 from .evidence_integrity import unsupported_realization_anchors
-from .evidence_queries import registered_fact_field_ids
 from .scientific_facts import (
-    claim_assertion_ceiling,
     fact_is_usable,
     normalize_assertion_ceiling,
 )

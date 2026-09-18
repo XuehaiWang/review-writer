@@ -25,6 +25,7 @@ from review_writer_core.pdf_diagnostics import pdf_character_diagnostics
 
 
 class FinalJobHandlers:
+
     def final_conclusion(self, context, payload):
         staging, workspace, project = self._compatibility_workspace(
             context, payload, name="final-conclusion-workspace"
@@ -74,39 +75,6 @@ class FinalJobHandlers:
             "report": report,
         }
 
-    def final_front_matter(self, context, payload):
-        """Generate only missing/stale machine-owned abstract and keywords."""
-
-        staging = self._staging(context.user_id, context.job_id)
-        input_path = staging / "final-front-matter-input.json"
-        output_path = staging / "final-front-matter-output.json"
-        self._write_json(input_path, payload)
-        normal, secrets = self._text_gateway_environment(context)
-        self.runner.run(
-            [
-                sys.executable,
-                str(
-                    self.root
-                    / "skills"
-                    / "review-final-audit-release"
-                    / "scripts"
-                    / "generate_front_matter.py"
-                ),
-                "--input",
-                str(input_path),
-                "--output",
-                str(output_path),
-            ],
-            cwd=self.root,
-            staging_directory=staging,
-            expected_outputs=("final-front-matter-output.json",),
-            env=normal,
-            secret_env=secrets,
-            cancel_requested=context.cancellation_requested,
-            timeout_seconds=10 * 60,
-        )
-        return self._result(staging, "final-front-matter-output.json")
-
     def final_overview(self, context, payload):
         # Capture the previous step cache before compatibility materialization
         # clears the current staging workspace. No shared/global user cache.
@@ -129,6 +97,8 @@ class FinalJobHandlers:
             self._write_json(project / "03_figure_redraw" / "overview_generation_cache.json", cache)
         project_id = str(payload["project_id"])
         output = project / "03_figure_redraw" / "overview_figure.png"
+        self._write_json(project / "03_figure_redraw" / "overview_user_request.json",
+                         {"instructions": str(payload.get("generation_instructions") or "")})
         report_path = project / "03_figure_redraw" / "overview_template_match.json"
         relative_stage = (
             Path("final-overview-workspace")

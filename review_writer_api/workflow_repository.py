@@ -26,6 +26,7 @@ from review_writer_api.workflow_contracts import (
     current_user_stage,
 )
 from review_writer_api.job_queues import queue_for_job_type
+from review_writer_core.workflow.artifacts import PERSISTENT_PUBLICATION_INPUTS
 from review_writer_api.job_lease_context import active_job_lease
 from review_writer_api.job_lifecycle import active_job_project, cancel_project_jobs
 from review_writer_api.workflow_models import (
@@ -1304,6 +1305,7 @@ class WorkflowRepository:
                 derived_artifacts = select(WorkflowArtifact.id).where(
                     WorkflowArtifact.project_id == project_uuid,
                     artifact_owner_stage.in_(invalidate_stages),
+                    WorkflowArtifact.logical_name.not_in(PERSISTENT_PUBLICATION_INPUTS),
                 )
                 session.execute(
                     delete(WorkflowCurrentArtifact).where(

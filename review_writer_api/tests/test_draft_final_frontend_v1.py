@@ -37,16 +37,13 @@ class DraftFinalFrontendV1Tests(unittest.TestCase):
             "base_hashes",
             "useDraftScratch",
         ):
-            self.assertIn(token, source + DRAFT_STATUS.read_text(encoding="utf-8"))
+            self.assertIn(token, source + DRAFT_STATUS.read_text(encoding="utf-8") + (DRAFT.parent / "ChapterVersions.tsx").read_text(encoding="utf-8"))
 
-    def test_final_uses_native_jobs_and_editable_overview_text(self) -> None:
+    def test_final_uses_publication_jobs_and_draft_owns_creation(self) -> None:
         source = FINAL.read_text(encoding="utf-8")
         for token in (
             "/api/v1/projects/",
-            "/final/overview-text",
             "`/api/v1/projects/${encodeURIComponent(project!.project_id)}/final/${action}-jobs`",
-            'startJob("conclusion")',
-            'startJob("overview")',
             'startJob("build")',
             'startJob("export")',
             "/api/v1/jobs/",
@@ -61,6 +58,11 @@ class DraftFinalFrontendV1Tests(unittest.TestCase):
             self.assertIn(token, source)
         self.assertNotIn("/api/project/", source)
         self.assertNotIn("/file?path", source)
+        self.assertNotIn('startJob("conclusion")', source)
+        self.assertNotIn('startJob("overview")', source)
+        composition = (DRAFT.parent / "DraftCompositionPanel.tsx").read_text(encoding="utf-8")
+        for token in ('run.mutate("abstract")', 'run.mutate("conclusion")', 'run.mutate("overview")', '/overview-text'):
+            self.assertIn(token, composition)
 
     def test_native_errors_are_parsed_and_cancel_states_are_shared(self) -> None:
         client = API_CLIENT.read_text(encoding="utf-8")
@@ -74,10 +76,10 @@ class DraftFinalFrontendV1Tests(unittest.TestCase):
             self.assertIn('"cancel_requested"', source)
             self.assertIn('status === "failed"', source)
 
-    def test_final_has_distinct_audit_and_release_views(self) -> None:
+    def test_final_combines_audit_and_release_details_without_losing_reports(self) -> None:
         source = FINAL.read_text(encoding="utf-8")
-        self.assertIn('["audit", text("终稿审计", "Final audit")]', source)
-        self.assertIn('["release", text("发布报告", "Release report")]', source)
+        self.assertIn('["audit", text("检查详情", "Checks")]', source)
+        self.assertNotIn('["release",', source)
         self.assertIn("payload.final_audit_report_md", source)
         self.assertIn("payload.release_report_md", source)
 

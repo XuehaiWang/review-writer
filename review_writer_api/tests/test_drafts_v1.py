@@ -19,6 +19,12 @@ from review_writer_api.workflow_models import WorkflowApproval
 
 
 class DraftsV1Tests(NativeFigureApiTestCase):
+    def test_empty_draft_guides_to_figure_approval_before_auto_assembly(self):
+        with TestClient(self.app) as client:
+            response = client.get(f"/api/v1/projects/{self.project_id}/draft")
+        self.assertEqual(404, response.status_code, response.text)
+        self.assertEqual("WORKFLOW_STAGE_NOT_READY", response.json()["error"]["code"])
+
     def setUp(self) -> None:
         self.noop_rewrite = False
         self.hard_gate_failures: list[str] = []

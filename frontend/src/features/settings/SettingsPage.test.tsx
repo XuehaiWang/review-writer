@@ -6,7 +6,7 @@ import { apiRequest } from "../../api/client";
 import { queryKeys } from "../../api/queries";
 import { SettingsPage } from "./SettingsPage";
 
-vi.mock("../../api/client", () => ({ apiRequest: vi.fn(), jsonBody: (body: unknown) => ({ body: JSON.stringify(body) }) }));
+vi.mock("../../api/client", async (importOriginal) => ({ ...await importOriginal<typeof import("../../api/client")>(), apiRequest: vi.fn(), jsonBody: (body: unknown) => ({ body: JSON.stringify(body) }) }));
 vi.mock("../../i18n/useUiText", () => ({ useUiText: () => ({ language: "zh-CN", text: (zh: string) => zh }) }));
 const model = (id: string, enabled = true) => ({ id, model: `Vendor/${id}`, label_zh: `${id} 模型`, label_en: id, enabled, input_usd_per_million: "1.5", cached_input_usd_per_million: "0.25", output_usd_per_million: "8" });
 let items = [model("custom-a"), model("custom-b"), model("retired", false)];

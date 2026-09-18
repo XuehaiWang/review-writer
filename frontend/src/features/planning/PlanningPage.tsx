@@ -14,6 +14,7 @@ import { MatrixLiveProgress, readMatrixEnrichmentLive } from "./MatrixLiveProgre
 import { MatrixAnalysisStatus, MatrixEvidenceUse, analysisState } from "./MatrixAnalysisStatus";
 import { BibliographyResolutionPanel } from "./BibliographyResolutionPanel";
 import { usePlanningCompletionSync } from "./usePlanningCompletionSync";
+import { TopicRecommendationPending, type TopicRecommendationState } from "./TopicRecommendationPending";
 
 type MatrixPaper = Record<string, unknown> & {
   paper_id: string;
@@ -263,6 +264,7 @@ type BlueprintRestructureRecord = {
 };
 
 type PlanningPayload = {
+  topic_recommendation?: TopicRecommendationState | null;
   topic?: string;
   matrix_revision: number;
   blueprint_revision: number;
@@ -379,6 +381,8 @@ function fileBase64(file: File): Promise<string> {
 
 function MatrixWorkspace({ payload, projectId, refresh }: { payload: PlanningPayload; projectId: string; refresh: () => Promise<unknown> }) {
   const { text } = useUiText();
+  const queryClient = useQueryClient();
+  const [outlineSyncFailed, setOutlineSyncFailed] = useState(false);
   const [mode, setMode] = useState<"reading" | "outline">("reading");
   const [filter, setFilter] = useState("");
   const papers = payload.literature_matrix?.rows || [];
@@ -419,11 +423,21 @@ function MatrixWorkspace({ payload, projectId, refresh }: { payload: PlanningPay
     onSuccess: refresh,
   });
   const chooseOutline = useMutation({
-    mutationFn: (outlineStyle: string) => apiRequest(`/api/v1/projects/${encodeURIComponent(projectId)}/planning/outline`, {
+    mutationFn: (outlineStyle: string) => apiRequest<Partial<PlanningPayload>>(`/api/v1/projects/${encodeURIComponent(projectId)}/planning/outline`, {
       method: "PUT",
-      ...jsonBody({ revision: payload.matrix_revision, outline_style: outlineStyle }),
+      ...jsonBody({ revision: payload.matrix_revision, outline_style: outlineStyle,
+        ...(outlineStyle === "topic-guided" ? { candidate_outline_md: payload.outline_candidates?.find(candidate => candidate.source === "topic")?.outline_md } : {}),
+      }),
     }),
-    onSuccess: refresh,
+    onSuccess: (result, style) => {
+      setOutlineDraft(result.selected_outline_md || "");
+      setOutlineSyncFailed(false);
+      queryClient.setQueryData<PlanningPayload>(["planning", projectId], current => current ? {
+        ...current, ...result, outline_current: true,
+        outline_selection: { ...current.outline_selection, outline_style: style },
+      } : current);
+      void refresh().then(() => setOutlineSyncFailed(false)).catch(() => setOutlineSyncFailed(true));
+    },
     onError: async (error) => {
       if (error instanceof ApiError && error.status === 409) await refresh();
     },
@@ -524,6 +538,7 @@ function MatrixWorkspace({ payload, projectId, refresh }: { payload: PlanningPay
         <section className="outline-workspace-react">
           <div className="outline-hero"><div><span className="step-label">{text("步骤 1 · 综述结构", "Step 1 · Review structure")}</span><h2>{text("选择综述组织逻辑", "Choose the review structure")}</h2><p>{text("只借鉴参考综述的组织方式，不复制其主题标题和具体内容。", "Reuse only the organizational style of a reference review, not its topic headings or content.")}</p></div><span className={selectedStyle ? "badge" : "badge pending"}>{selectedStyle ? text(`当前：${selectedStyle}`, `Current: ${selectedStyle}`) : text("尚未选择", "Not selected")}</span></div>
           <div aria-live="polite">
+            {outlineSyncFailed ? <p className="message message-warning" role="status">{text("大纲已保存，页面信息同步失败，请刷新查看。", "Outline saved, but page synchronization failed. Refresh to view it.")}</p> : null}
             {chooseOutline.isError ? <div className="message message-error" role="alert">
               <strong>{text("大纲未应用：", "Outline was not applied: ")}</strong>{chooseOutline.error.message}
               {chooseOutline.error instanceof ApiError && chooseOutline.error.status === 409 ? <p>{text("项目状态发生变化，已重新获取当前状态。请重新点击需要的大纲。", "The project state changed and has been fetched again. Select the outline again.")}</p> : null}
@@ -531,7 +546,7 @@ function MatrixWorkspace({ payload, projectId, refresh }: { payload: PlanningPay
             {chooseOutline.isSuccess ? <p className="message message-success" role="status">{chooseOutline.variables === "custom" ? text("已启用自定义大纲，请在下方填写章节并保存。", "Custom outline selected. Add sections below and save.") : text("大纲已应用，章节已载入下方编辑器。", "Outline applied. Sections are loaded in the editor below.")}</p> : null}
           </div>
           {topicOutlineCandidate ? <article className={selectedStyle === topicOutlineCandidate.outline_style ? "topic-outline-recommendation current" : "topic-outline-recommendation"}>
-            <div className="topic-outline-recommendation-copy"><span className="step-label">{topicOutlineIntent?.system_recommended ? text("根据 Matrix 证据推荐", "Recommended from Matrix evidence") : text("根据你的 Topic 推荐", "Recommended from your Topic")}</span><h3>{text("主题驱动的组合大纲", "Topic-guided hybrid outline")}</h3><p>{topicOutlineIntent?.system_recommended ? text("Topic 未固定唯一章节轴，系统根据当前入选论文的正式事实推荐组织方式；仍在章节规划步骤统一确认。", "The Topic did not fix one chapter axis, so the system recommends an organization from formal facts in the selected papers. It is confirmed in the chapter planning step.") : text("系统读取了 Topic 中明确写出的组织要求，并结合当前 Matrix 分配论文。选择后仍可在下方逐节修改。", "The system read the explicit organization instructions in your Topic and assigned the current Matrix papers accordingly. Every section remains editable below.")}</p><div className="topic-outline-intent-list">
+            <div className="topic-outline-recommendation-copy"><span className="step-label">{topicOutlineIntent?.system_recommended ? text("根据 Matrix 证据推荐", "Recommended from Matrix evidence") : text("根据你的 Topic 推荐", "Recommended from your Topic")}</span><h3>{text("主题驱动的组合大纲", "Topic-guided hybrid outline")}</h3><p>{topicOutlineIntent?.system_recommended ? text("Topic 未固定唯一章节轴，系统根据当前入选论文的可用信息推荐组织方式；仍在章节规划步骤统一确认。", "The Topic did not fix one chapter axis, so the system recommends an organization from available information in the selected papers. It is confirmed in the chapter planning step.") : text("系统读取了 Topic 中明确写出的组织要求，并结合当前 Matrix 分配论文。选择后仍可在下方逐节修改。", "The system read the explicit organization instructions in your Topic and assigned the current Matrix papers accordingly. Every section remains editable below.")}</p><div className="topic-outline-intent-list">
               {topicOutlineIntent?.primary_axis ? <span><strong>{text("主要组织轴", "Primary axis")}</strong>{topicOutlineIntent.primary_axis_label || outlineAxisLabel(topicOutlineIntent.primary_axis, text)}</span> : null}
               {topicOutlineIntent?.secondary_axes?.length ? <span><strong>{text("次级比较轴", "Secondary axes")}</strong>{topicOutlineIntent.secondary_axes.map((axis) => topicOutlineIntent.secondary_axis_labels?.[axis] || outlineAxisLabel(axis, text)).join(" + ")}</span> : null}
               {topicAxisExamples.length ? <span><strong>{text("组织轴示例", "Axis examples")}</strong>{topicAxisExamples.join(" · ")}</span> : null}
@@ -540,7 +555,7 @@ function MatrixWorkspace({ payload, projectId, refresh }: { payload: PlanningPay
               {(topicOutlineIntent?.focus_dimensions || topicOutlineIntent?.requested_outcomes)?.length ? <span><strong>{text("重点范围", "Focus dimensions")}</strong>{(topicOutlineIntent.focus_dimensions || topicOutlineIntent.requested_outcomes || []).join(" / ")}</span> : null}
             </div></div>
             <button className="button button-primary" type="button" {...outlineChoiceProps(String(topicOutlineCandidate.outline_style || "topic-guided"))}>{outlineChoiceText(String(topicOutlineCandidate.outline_style || "topic-guided"), text("使用推荐大纲", "Use recommended outline"), text("当前推荐大纲", "Current recommended outline"))}</button>
-          </article> : null}
+          </article> : <TopicRecommendationPending projectId={projectId} state={payload.topic_recommendation} refresh={refresh} />}
           <div className="outline-card-grid">{outlineStyles.map((style) => <article key={style.id} className={selectedStyle === style.id ? "outline-card current" : "outline-card"}><span>{style.icon}</span><h3>{text(style.titleZh, style.titleEn)}</h3><p>{text(style.descriptionZh, style.descriptionEn)}</p><button className="button button-secondary" type="button" {...outlineChoiceProps(style.id)}>{outlineChoiceText(style.id, text("使用此结构", "Use this structure"), text("当前选择", "Current selection"))}</button></article>)}</div>
           <details className="advanced-panel planning-reference-advanced">
             <summary>{text("上传参考综述以学习组织方式（可选）", "Upload a reference review for organization only (optional)")}</summary>
@@ -804,10 +819,7 @@ export function PlanningPage() {
     enabled: Boolean(project),
     refetchInterval: (query) => [...(query.state.data?.matrix_enrichment?.jobs || []), ...(query.state.data?.blueprint_jobs || [])].some((job) => jobIsActive(job.status)) ? 1500 : false,
   });
-  const refresh = async () => {
-    await queryClient.invalidateQueries({ queryKey: ["planning", project?.project_id || ""] });
-    return planning.refetch();
-  };
+  const refresh = () => planning.refetch({ throwOnError: true });
   usePlanningCompletionSync(project?.project_id || "", [
     ...(planning.data?.matrix_enrichment?.jobs || []),
     ...(planning.data?.blueprint_jobs || []),

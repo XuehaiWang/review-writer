@@ -107,6 +107,7 @@ TEXT_GATEWAY_JOB_TYPES = frozenset(
         "sections.generate",
         "planning.reference-analyze",
         "planning.blueprint",
+        "planning.topic-outline",
         "draft.evaluate",
         "draft.optimize",
         "draft.rewrite",

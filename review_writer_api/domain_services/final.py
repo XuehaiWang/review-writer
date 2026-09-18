@@ -9,7 +9,6 @@ import threading
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
-from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +26,7 @@ from review_writer_api.errors import (
     WorkflowValidationError,
 )
 from review_writer_api.figure_rules import image_size
+from review_writer_core.overview_composition import compose_overview, insert_before_introduction
 from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
@@ -57,7 +57,6 @@ from review_writer_core.publication_scope import methods_execution_report
 from review_writer_core.review_titles import (
     build_publication_overview_text,
     build_publication_review_title,
-    generated_title_is_acceptable,
     generated_title_needs_rewrite,
     overview_text_needs_rewrite,
 )
@@ -94,7 +93,6 @@ REFERENCES_HEADING = re.compile(
 CITATION_CALLOUT = CALLOUT_RE
 REFERENCE_ITEM = re.compile(r"(?m)^\s*\[(\d+)\]\s*\.?\s+(.+?)\s*$")
 MARKDOWN_HEADING = re.compile(r"(?m)^\s*(#{1,6})\s+(.+?)\s*$")
-INTRODUCTION_TITLES = ("introduction", "background", "引言", "绪论", "研究背景")
 REFERENCE_AFFILIATION_SUP = re.compile(
     r"<sup\b[^>]*>[\s,;:.·•*†‡#∥‖|\[\](){}\-]*</sup>",
     re.IGNORECASE,
@@ -747,6 +745,7 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
         status: str = "review",
         expected_current_artifacts: dict[str, str] | None = None,
         expected_stage_states: dict[str, dict[str, Any]] | None = None,
+        make_current: bool = True,
     ) -> tuple[dict[str, ArtifactRecord], Any]:
         run = self.repository.create_stage_run(
             principal.user_id,
@@ -774,6 +773,8 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
                 make_current=False,
                 metadata=metadata,
             )
+        if not make_current:
+            return published, None
         try:
             state = self.repository.promote_stage_artifacts_atomically(
                 principal.user_id,
@@ -787,7 +788,9 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
                 expected_stage_states=expected_stage_states,
             )
         except WorkflowConflict:
-            if metadata.get("operation") != "final-build" or self._revision(principal, project_id) == expected_revision:
+            if metadata.get("operation") not in {"final-build", "overview"}:
+                raise
+            if metadata.get("operation") == "final-build" and self._revision(principal, project_id) == expected_revision:
                 raise
             # Files remain immutable candidates; never replace a newer saved version.
             return published, None
@@ -809,39 +812,7 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
             raise FinalNotReady("Draft approval is stale.")
         return text, artifact, approval
 
-    @staticmethod
-    def _insert_before_introduction(markdown: str, block: str) -> str:
-        """Place a front-of-article artifact immediately before Introduction."""
-
-        normalized_block = str(block or "").strip()
-        body = str(markdown or "").rstrip()
-        if not normalized_block:
-            return body
-        headings = list(MARKDOWN_HEADING.finditer(body))
-        insertion: int | None = None
-        for match in headings:
-            title = re.sub(
-                r"^\s*\d+(?:\.\d+)*[.)]?\s*", "", match.group(2)
-            ).strip().casefold()
-            if any(
-                title == candidate
-                or any(
-                    title.startswith(f"{candidate}{separator}")
-                    for separator in (" ", ":", "：", "与", "和")
-                )
-                for candidate in INTRODUCTION_TITLES
-            ):
-                insertion = match.start()
-                break
-        if insertion is None and headings and len(headings[0].group(1)) == 1:
-            insertion = headings[0].end()
-        if insertion is None:
-            insertion = 0
-        before = body[:insertion].rstrip()
-        after = body[insertion:].lstrip()
-        return "\n\n".join(
-            value for value in (before, normalized_block, after) if value
-        )
+    _insert_before_introduction = staticmethod(insert_before_introduction)
 
     @staticmethod
     def _remove_review_methods(markdown: str) -> str:
@@ -1010,12 +981,6 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
         cls, markdown: str, front_matter: dict[str, Any]
     ) -> str:
         body = str(markdown or "").rstrip()
-        title = " ".join(str(front_matter.get("title") or "").split()).strip()
-        if title:
-            if re.search(r"(?m)^#\s+.+$", body):
-                body = re.sub(r"(?m)^#\s+.+$", f"# {title}", body, count=1)
-            else:
-                body = f"# {title}\n\n{body}"
         lines: list[str] = []
         authors = [
             " ".join(str(value).split()).strip()
@@ -1027,21 +992,15 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
             for value in front_matter.get("affiliations") or []
             if str(value).strip()
         ]
-        abstract = str(front_matter.get("abstract") or "").strip()
-        keywords = [
-            " ".join(str(value).split()).strip()
-            for value in front_matter.get("keywords") or []
-            if str(value).strip()
-        ]
         if authors:
             lines.append(f"**Authors:** {', '.join(authors)}")
         if affiliations:
             lines.append(f"**Affiliations:** {'; '.join(affiliations)}")
-        if abstract:
-            lines.extend(("## Abstract", abstract))
-        if keywords:
-            lines.append(f"**Keywords:** {', '.join(keywords)}")
-        return cls._insert_before_introduction(body, "\n\n".join(lines))
+        if not lines:
+            return body
+        title = re.search(r"(?m)^#[ \t]+[^\n]+", body)
+        at = title.end() if title else 0
+        return body[:at].rstrip()+"\n\n"+"\n\n".join(lines)+"\n\n"+body[at:].lstrip()
 
     @staticmethod
     def _default_front_matter(
@@ -1096,139 +1055,31 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
             user = session.get(User, user_id)
             return " ".join(str(user.display_name or "").split()).strip() if user else ""
 
-    @staticmethod
-    def _abstract_source(markdown: str) -> str:
-        """Return body evidence only; conclusion-like sections never feed Abstract."""
-
-        source = str(markdown or "")
-        reference_match = REFERENCES_HEADING.search(source)
-        if reference_match:
-            source = source[: reference_match.start()]
-        excluded = re.compile(
-            r"^(?:conclusion|conclusions|challenges?|future directions?|"
-            r"outlook|references|bibliography|publication notes?|结论|挑战|未来展望|参考文献)\b",
-            re.IGNORECASE,
-        )
-        lines: list[str] = []
-        skip_level: int | None = None
-        for line in source.splitlines():
-            heading = re.match(r"^\s*(#{1,6})\s+(.+?)\s*$", line)
-            if heading:
-                level = len(heading.group(1))
-                title = re.sub(r"^\s*\d+(?:\.\d+)*[.)]?\s*", "", heading.group(2)).strip()
-                if excluded.match(title):
-                    skip_level = level
-                    continue
-                if skip_level is not None and level <= skip_level:
-                    skip_level = None
-            if skip_level is not None:
-                continue
-            if line.lstrip().startswith("<!--") or parse_markdown_image(line):
-                continue
-            if re.match(r"^\s*\*(?:Figure|Fig\.|Scheme|Table|图|表)\s*\d+", line, re.I):
-                continue
-            if re.search(r"unresolved placeholder|publication note", line, re.I):
-                continue
-            lines.append(line)
-        return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
     def save_front_matter(
-        self,
-        principal: Principal,
-        project_id: str,
-        *,
-        revision: int,
-        title: str,
-        authors: list[str],
-        affiliations: list[str],
-        abstract: str,
-        keywords: list[str],
+        self, principal: Principal, project_id: str, *, revision: int,
+        authors: list[str], affiliations: list[str],
         omitted_fields: list[str] | None = None,
     ) -> dict[str, Any]:
+        """Publication metadata only; legacy prose is retained for explicit Draft migration."""
+        principal.require(Permission.PROJECT_WRITE)
         _text, draft, _approval = self._approved_draft(principal, project_id)
-        current_value, current = self._read_json(
-            principal, project_id, FINAL_FRONT_MATTER
-        )
-        submitted = {
-            "title": " ".join(str(title).split()).strip(),
-            "authors": [
-                " ".join(str(item).split()).strip()
-                for item in authors
-                if str(item).strip()
-            ],
-            "affiliations": [
-                " ".join(str(item).split()).strip()
-                for item in affiliations
-                if str(item).strip()
-            ],
-            "abstract": str(abstract).strip(),
-            "keywords": [
-                " ".join(str(item).split()).strip()
-                for item in keywords
-                if str(item).strip()
-            ],
-        }
-        omitted = {
-            str(field)
-            for field in omitted_fields or []
-            if str(field) in {"authors", "affiliations", "abstract", "keywords"}
-        }
-        previous_states = dict(current_value.get("field_states") or {})
-        field_states: dict[str, str] = {}
-        for field in ("title", "authors", "affiliations", "abstract", "keywords"):
-            if field in omitted:
-                submitted[field] = [] if field in {"authors", "affiliations", "keywords"} else ""
-                field_states[field] = "user_omitted"
-            elif field != "title" and not submitted.get(field):
-                field_states[field] = "missing"
-            elif current is None or current_value.get(field) != submitted.get(field):
-                field_states[field] = "user_modified"
-            else:
-                field_states[field] = str(previous_states.get(field) or "user_modified")
-        value = {
-            "schema_version": 2,
-            **submitted,
-            "source": "user",
-            "source_draft_artifact_id": draft.id,
-            "field_states": field_states,
-            "field_source_draft_artifact_ids": {
-                field: draft.id
-                for field in ("title", "authors", "affiliations", "abstract", "keywords")
-            },
-            "generation_warnings": list(current_value.get("generation_warnings") or []),
-            "updated_at": utc_now().isoformat(),
-        }
-        if not value["title"]:
-            raise WorkflowValidationError("Final title cannot be blank.")
-        comparable = (
-            "title", "authors", "affiliations", "abstract", "keywords", "field_states"
-        )
-        if current is not None and all(
-            current_value.get(key) == value.get(key) for key in comparable
-        ):
-            raise WorkflowValidationError("Final front matter has no change.")
-        expected = {FINAL_FRONT_MATTER: current.id} if current is not None else None
-        with self._write_lock:
-            published, state = self._publish_files(
-                principal,
-                project_id,
-                {
-                    FINAL_FRONT_MATTER: (
-                        (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode(),
-                        "json",
-                    )
-                },
-                expected_revision=revision,
-                metadata={
-                    "operation": "front-matter-edit",
-                    "source_draft_artifact_id": draft.id,
-                },
-                expected_current_artifacts=expected,
-            )
-        return {
-            "front_matter_artifact_id": published[FINAL_FRONT_MATTER].id,
-            "revision": state.revision,
-        }
+        current_value, current = self._read_json(principal, project_id, FINAL_FRONT_MATTER)
+        value = dict(current_value)
+        states = dict(value.get("field_states") or {})
+        for name, values in (("authors", authors), ("affiliations", affiliations)):
+            omitted = name in (omitted_fields or [])
+            value[name] = [] if omitted else [" ".join(v.split()) for v in values if v.strip()]
+            states[name] = "user_omitted" if omitted else "user_modified"
+        if current and all(value.get(k) == current_value.get(k) for k in ("authors", "affiliations")) and states == current_value.get("field_states"):
+            raise WorkflowValidationError("Publication metadata has no change.")
+        value.update(schema_version=3, field_states=states, updated_at=utc_now().isoformat())
+        published, state = self._publish_files(principal, project_id,
+            {FINAL_FRONT_MATTER: ((json.dumps(value, ensure_ascii=False)+"\n").encode(), "json")},
+            expected_revision=revision,
+            expected_current_artifacts={FINAL_FRONT_MATTER: current.id if current else "", DRAFT_DOCUMENT: draft.id},
+            metadata={"operation": "publication-metadata-edit"})
+        return {"front_matter_artifact_id": published[FINAL_FRONT_MATTER].id, "revision": state.revision}
 
     def _revision(self, principal: Principal, project_id: str) -> int:
         state = self.repository.get_stage_state(principal.user_id, project_id, "final")
@@ -1317,6 +1168,9 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
         }
 
     def validate_task_inputs(self, principal, project_id, payload):
+        if payload.get("draft_creation"):
+            self._owned_project(principal, project_id)
+            return {DRAFT_DOCUMENT: str(payload["source_draft_artifact_id"])}
         self._approved_draft(principal, project_id)
         expected = self.validate_artifact_inputs(principal, project_id, payload, {
             **QUALITY_INPUT_ARTIFACTS,
@@ -1351,212 +1205,11 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
         return self._synthesis_payload(principal, project_id)
 
     def build_payload(self, principal: Principal, project_id: str) -> dict[str, Any]:
-        text, draft, _approval = self._approved_draft(principal, project_id)
-        project = self.repository.get_owned_project(principal.user_id, project_id)
-        front_matter, front_matter_artifact = self._read_json(
-            principal, project_id, FINAL_FRONT_MATTER
-        )
-        if front_matter_artifact is None:
-            front_matter = self._default_front_matter(
-                text,
-                fallback_title=project.topic if project is not None else "",
-                author_candidate=self._author_candidate(principal),
-                source_draft_artifact_id=draft.id,
-            )
-        states = dict(front_matter.get("field_states") or {})
-        field_sources = dict(
-            front_matter.get("field_source_draft_artifact_ids") or {}
-        )
-        raw_topic = str(project.topic if project is not None else "")
-        suggested_title = build_publication_review_title(
-            raw_topic or front_matter.get("title") or "",
-            manuscript_title=front_matter.get("title") or "",
-        )
-        generation_fields: list[str] = []
-        for field in ("title", "abstract", "keywords"):
-            state = str(states.get(field) or "")
-            if state in {"user_modified", "user_omitted"}:
-                continue
-            needs_refresh = (
-                not front_matter.get(field)
-                or str(field_sources.get(field) or "") != draft.id
-            )
-            if field == "title":
-                needs_refresh = bool(
-                    front_matter_artifact is None
-                    or needs_refresh
-                    or generated_title_needs_rewrite(
-                        front_matter.get("title") or "", raw_topic
-                    )
-                )
-            if needs_refresh:
-                generation_fields.append(field)
-        return {
-            "project_id": project_id,
-            "source_draft_artifact_id": draft.id,
-            "source_front_matter_artifact_id": (
-                front_matter_artifact.id if front_matter_artifact else ""
-            ),
-            "expected_revision": self._revision(principal, project_id),
-            "title": (
-                suggested_title
-                if "title" in generation_fields
-                else str(front_matter.get("title") or suggested_title)
-            ),
-            "review_topic": raw_topic,
-            "front_matter": front_matter,
-            "generation_fields": generation_fields,
-            "abstract_source": self._abstract_source(text),
-        }
-
-    def publish_generated_front_matter(
-        self,
-        principal: Principal,
-        project_id: str,
-        job_payload: dict[str, Any],
-        generated: dict[str, Any] | None,
-        *,
-        generation_error: str = "",
-    ) -> dict[str, Any]:
-        """Merge machine-owned fields without overwriting user-owned values."""
-
-        text, draft, _approval = self._approved_draft(principal, project_id)
-        if draft.id != str(job_payload.get("source_draft_artifact_id") or ""):
-            raise WorkflowConflict("Draft changed while front matter was generated.")
-        current, current_artifact = self._read_json(
-            principal, project_id, FINAL_FRONT_MATTER
-        )
-        expected_front_id = str(job_payload.get("source_front_matter_artifact_id") or "")
-        if (current_artifact.id if current_artifact else "") != expected_front_id:
-            raise WorkflowConflict("Front matter changed while the final build was running.")
-        project = self.repository.get_owned_project(principal.user_id, project_id)
-        if current_artifact is None:
-            current = dict(job_payload.get("front_matter") or {})
-            if not current:
-                current = self._default_front_matter(
-                    text,
-                    fallback_title=project.topic if project is not None else "",
-                    author_candidate=self._author_candidate(principal),
-                    source_draft_artifact_id=draft.id,
-                )
-        value = deepcopy(current)
-        value["schema_version"] = 2
-        states = dict(value.get("field_states") or {})
-        field_sources = dict(value.get("field_source_draft_artifact_ids") or {})
-        # Legacy user-authored artifacts predate field_states.  Their populated
-        # values are treated as user-owned and therefore never overwritten.
-        for field in ("title", "authors", "affiliations", "abstract", "keywords"):
-            if field not in states:
-                states[field] = (
-                    "user_modified"
-                    if current_artifact is not None and value.get(field)
-                    else "missing"
-                )
-        if not value.get("authors") and states.get("authors") != "user_omitted":
-            candidate = self._author_candidate(principal)
-            if candidate:
-                value["authors"] = [candidate]
-                states["authors"] = "generated"
-                field_sources["authors"] = draft.id
-        result = dict(generated or {})
-        warnings = [str(item) for item in result.get("warnings") or [] if str(item)]
-        if generation_error:
-            warnings.append("front_matter_generation_unavailable")
-        for field in ("abstract", "keywords"):
-            if (
-                states.get(field) == "user_modified"
-                and str(field_sources.get(field) or current.get("source_draft_artifact_id") or "")
-                != draft.id
-            ):
-                warnings.append(f"{field}_user_modified_on_older_draft")
-        requested = {
-            str(field) for field in job_payload.get("generation_fields") or []
-        }
-        if "title" in requested and states.get("title") != "user_modified":
-            raw_topic = str(
-                job_payload.get("review_topic")
-                or (project.topic if project is not None else "")
-            )
-            generated_title = " ".join(
-                str(result.get("title") or "").split()
-            ).strip("# \t")
-            if (
-                not generated_title_is_acceptable(generated_title)
-                or generated_title_needs_rewrite(generated_title, raw_topic)
-            ):
-                generated_title = build_publication_review_title(
-                    raw_topic or value.get("title") or "",
-                    manuscript_title=value.get("title") or "",
-                )
-                warnings.append("title_deterministic_fallback")
-            value["title"] = generated_title
-            states["title"] = "generated"
-            field_sources["title"] = draft.id
-        if "abstract" in requested and states.get("abstract") not in {
-            "user_modified", "user_omitted"
-        }:
-            abstract = str(result.get("abstract") or "").strip()
-            if abstract:
-                value["abstract"] = abstract
-                states["abstract"] = "generated"
-                field_sources["abstract"] = draft.id
-            else:
-                states["abstract"] = "missing"
-        if "keywords" in requested and states.get("keywords") not in {
-            "user_modified", "user_omitted"
-        }:
-            keywords = [
-                " ".join(str(item).split()).strip()
-                for item in result.get("keywords") or []
-                if str(item).strip()
-            ]
-            if keywords:
-                value["keywords"] = list(dict.fromkeys(keywords))[:8]
-                states["keywords"] = "generated"
-                field_sources["keywords"] = draft.id
-            else:
-                states["keywords"] = "missing"
-        for field in ("authors", "abstract", "keywords"):
-            if not value.get(field) and states.get(field) != "user_omitted":
-                warnings.append(f"{field}_missing")
-        value.update(
-            {
-                "source": "generated+user-merge",
-                "source_draft_artifact_id": draft.id,
-                "field_states": states,
-                "field_source_draft_artifact_ids": field_sources,
-                "generation_warnings": list(dict.fromkeys(warnings)),
-                "updated_at": utc_now().isoformat(),
-            }
-        )
-        expected = (
-            {FINAL_FRONT_MATTER: current_artifact.id}
-            if current_artifact is not None
-            else None
-        )
-        with self._write_lock:
-            published, state = self._publish_files(
-                principal,
-                project_id,
-                {
-                    FINAL_FRONT_MATTER: (
-                        (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode(),
-                        "json",
-                    )
-                },
-                expected_revision=int(job_payload["expected_revision"]),
-                metadata={
-                    "operation": "front-matter-auto-merge",
-                    "source_draft_artifact_id": draft.id,
-                    "generation_error": str(generation_error or "")[:500],
-                },
-                expected_current_artifacts=expected,
-            )
-        return {
-            "front_matter_artifact_id": published[FINAL_FRONT_MATTER].id,
-            "revision": state.revision,
-            "warnings": value["generation_warnings"],
-        }
+        _text, draft, _approval = self._approved_draft(principal, project_id)
+        front = self._artifact(principal, project_id, FINAL_FRONT_MATTER)
+        return {"project_id": project_id, "source_draft_artifact_id": draft.id,
+                "source_front_matter_artifact_id": front.id if front else "",
+                "expected_revision": self._revision(principal, project_id)}
 
     def publish_conclusion(
         self,
@@ -1611,7 +1264,15 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
         }
 
     def overview_payload(self, principal: Principal, project_id: str) -> dict[str, Any]:
-        return self._synthesis_payload(principal, project_id)
+        principal.require(Permission.PROJECT_WRITE)
+        text, draft = self.drafts._read_text(principal, project_id, DRAFT_DOCUMENT)
+        if self.drafts._freshness(principal, project_id, draft)["upstream_stale"]:
+            raise WorkflowConflict("Draft sources changed before overview generation.")
+        return {**self.drafts.compatibility_payload(principal, project_id),
+                "project_id": project_id, "draft_text": text,
+                "source_draft_artifact_id": draft.id,
+                "expected_revision": self._revision(principal, project_id), "draft_creation": True}
+
 
     def publish_overview(
         self,
@@ -1655,7 +1316,8 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
                 expected_revision=int(job_payload["expected_revision"]),
                 metadata={
                     "operation": "overview",
-                    "source_draft_artifact_id": current.id,
+                    "generation_instructions": str(job_payload.get("generation_instructions") or ""),
+                    "source_draft_artifact_id": str(job_payload["source_draft_artifact_id"]),
                     "source_quality_artifact_id": str(
                         job_payload.get("source_quality_artifact_id") or ""
                     ),
@@ -1670,12 +1332,54 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
                     },
                 },
                 expected_current_artifacts=expected_inputs,
+                make_current=not job_payload.get("preview_only", False),
             )
         return {
             "overview_artifact_id": published[FINAL_OVERVIEW_IMAGE].id,
             "overview_text_artifact_id": published[FINAL_OVERVIEW_TEXT].id,
-            "revision": state.revision,
+            "revision": state.revision if state else self._revision(principal, project_id),
+            "candidate_pending": state is None,
         }
+
+    def overview_history(self, principal, project_id):
+        self._owned_project(principal, project_id)
+        current = self._artifact(principal, project_id, FINAL_OVERVIEW_IMAGE)
+        draft = self._artifact(principal, project_id, DRAFT_DOCUMENT)
+        captions = {a.producer_run_id: a for a in self.repository.list_artifacts(
+            principal.user_id, project_id, FINAL_OVERVIEW_TEXT) if a.metadata.get("operation") == "overview"}
+        selected = (current.metadata.get("selected_overview_id") or current.id) if current else ""
+        result = []
+        for image in self.repository.list_artifacts(principal.user_id, project_id, FINAL_OVERVIEW_IMAGE):
+            if image.metadata.get("operation") != "overview":
+                continue
+            caption = captions.get(image.producer_run_id)
+            if not caption:
+                continue
+            resolved = self.artifacts.resolve_owned_artifact(principal.user_id, caption.id)
+            value = json.loads(resolved.path.read_text(encoding="utf-8"))
+            result.append({"id": image.id, "url": f"/api/v1/artifacts/{image.id}/content",
+                "title": value.get("title", ""), "created_at": image.created_at.isoformat() if image.created_at else "",
+                "instructions": image.metadata.get("generation_instructions", ""), "selected": image.id == selected,
+                "source_changed": bool(draft and image.metadata.get("source_draft_artifact_id") != draft.id)})
+        return result
+
+    def adopt_overview(self, principal, project_id, *, image_id, title, revision):
+        principal.require(Permission.PROJECT_WRITE)
+        self._owned_project(principal, project_id)
+        if not title.strip():
+            raise WorkflowValidationError("Overview caption cannot be blank.")
+        image = next((a for a in self.repository.list_artifacts(principal.user_id, project_id, FINAL_OVERVIEW_IMAGE)
+                      if a.id == image_id and a.metadata.get("operation") == "overview"), None)
+        if image is None:
+            raise WorkflowValidationError("Overview version does not belong to this project.")
+        resolved = self.artifacts.resolve_owned_artifact(principal.user_id, image.id)
+        with self._write_lock:
+            _, state = self._publish_files(principal, project_id, {
+                FINAL_OVERVIEW_IMAGE: (resolved.path.read_bytes(), image.artifact_type),
+                FINAL_OVERVIEW_TEXT: ((json.dumps({"title": title.strip(), "subtitle": "", "labels": []}, ensure_ascii=False)+"\n").encode(), "json")},
+                expected_revision=revision,
+                metadata={**image.metadata, "operation": "overview-adopt", "selected_overview_id": image.id})
+        return {"revision": state.revision}
 
     def save_overview_text(
         self,
@@ -1687,21 +1391,16 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
         subtitle: str,
         labels: list[str],
     ) -> dict[str, Any]:
-        _draft_text, draft, _approval = self._approved_draft(principal, project_id)
+        principal.require(Permission.PROJECT_WRITE)
+        self._owned_project(principal, project_id)
         current_value, current = self._read_json(
             principal, project_id, FINAL_OVERVIEW_TEXT
         )
         if current is None:
             raise FinalNotReady("Generate the overview before editing its text.")
         overview = self._artifact(principal, project_id, FINAL_OVERVIEW_IMAGE)
-        if (
-            overview is None
-            or current.metadata.get("source_draft_artifact_id") != draft.id
-            or overview.metadata.get("source_draft_artifact_id") != draft.id
-        ):
-            raise FinalNotReady(
-                "The overview belongs to an older Draft. Generate it again before editing."
-            )
+        if overview is None:
+            raise FinalNotReady("Generate the overview before editing its caption.")
         requested = {
             "title": str(title).strip(),
             "subtitle": str(subtitle).strip(),
@@ -1909,12 +1608,6 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
             or approval_artifact is None
         ):
             raise FinalNotReady("Draft approval changed before Final build.")
-        conclusion, conclusion_artifact = self._read_text(
-            principal, project_id, FINAL_CONCLUSION
-        )
-        conclusion_report, conclusion_report_artifact = self._read_json(
-            principal, project_id, FINAL_CONCLUSION_REPORT
-        )
         overview = self._artifact(principal, project_id, FINAL_OVERVIEW_IMAGE)
         overview_text, overview_text_artifact = self._read_json(
             principal, project_id, FINAL_OVERVIEW_TEXT
@@ -1930,23 +1623,9 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
                 author_candidate=self._author_candidate(principal),
                 source_draft_artifact_id=draft.id,
             )
-        if conclusion_artifact and conclusion_artifact.metadata.get(
-            "source_draft_artifact_id"
-        ) != draft.id:
-            raise FinalNotReady(
-                "The conclusion belongs to an older Draft. Generate it again or remove it."
-            )
-        if bool(conclusion_artifact) != bool(conclusion_report_artifact):
-            raise FinalNotReady("The conclusion and its quality report are incomplete.")
+        # Final does not append legacy synthesis; the approved Draft owns all prose.
         if bool(overview) != bool(overview_text_artifact):
             raise FinalNotReady("The overview image and editable text are incomplete.")
-        if overview and (
-            overview.metadata.get("source_draft_artifact_id") != draft.id
-            or overview_text_artifact.metadata.get("source_draft_artifact_id") != draft.id
-        ):
-            raise FinalNotReady(
-                "The overview belongs to an older Draft. Generate it again or remove it."
-            )
         reference_match = REFERENCES_HEADING.search(draft_text)
         draft_body = (
             draft_text[: reference_match.start()].rstrip()
@@ -2057,35 +1736,8 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
         # are not publication prose.
         draft_body = self._sanitize_internal_section_headings(draft_body)
         draft_body = self._remove_review_methods(draft_body)
-        overview_block = ""
-        if overview is not None:
-            overview_lines = [
-                f"![Overview figure](/api/v1/artifacts/{overview.id}/content)",
-            ]
-            caption = ". ".join(
-                value
-                for value in (
-                    str(overview_text.get("title") or "").strip(),
-                    str(overview_text.get("subtitle") or "").strip(),
-                )
-                if value
-            )
-            labels = [
-                str(value).strip()
-                for value in overview_text.get("labels") or []
-                if str(value).strip()
-            ]
-            if labels:
-                caption = (caption + " — " if caption else "") + ", ".join(labels)
-            if caption:
-                overview_lines.append(f"*{caption.rstrip(' .')}.*")
-            else:
-                overview_lines.append("*Review overview.*")
-            overview_block = "\n".join(overview_lines)
-        assembled_body = self._insert_before_introduction(draft_body, overview_block)
+        assembled_body = compose_overview(draft_body, overview.id if overview else "", overview_text)
         parts = [assembled_body]
-        if conclusion:
-            parts.append(conclusion.strip())
         if draft_references:
             parts.append(draft_references)
         markdown = "\n\n".join(parts).rstrip() + "\n"
@@ -2247,10 +1899,6 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
         }
         source_ids = {
             "source_draft_artifact_id": draft.id,
-            "conclusion_artifact_id": conclusion_artifact.id if conclusion_artifact else "",
-            "conclusion_report_artifact_id": (
-                conclusion_report_artifact.id if conclusion_report_artifact else ""
-            ),
             "overview_artifact_id": overview.id if overview else "",
             "overview_text_artifact_id": (
                 overview_text_artifact.id if overview_text_artifact else ""
@@ -2264,10 +1912,6 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
             DRAFT_APPROVAL: approval_artifact.id,
             DRAFT_QUALITY: quality_artifact.id if quality_artifact else "",
         }
-        if conclusion_artifact:
-            expected_currents[FINAL_CONCLUSION] = conclusion_artifact.id
-        if conclusion_report_artifact:
-            expected_currents[FINAL_CONCLUSION_REPORT] = conclusion_report_artifact.id
         if overview:
             expected_currents[FINAL_OVERVIEW_IMAGE] = overview.id
         if overview_text_artifact:
@@ -2730,16 +2374,13 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
             final_artifact
             and final_artifact.metadata.get("source_draft_artifact_id") == current_draft_id
             and approved
-            and final_artifact.metadata.get("conclusion_artifact_id")
-            == (conclusion_artifact.id if conclusion_artifact else "")
             and final_artifact.metadata.get("overview_artifact_id")
             == (overview.id if overview else "")
             and final_artifact.metadata.get("overview_text_artifact_id")
             == (overview_text_artifact.id if overview_text_artifact else "")
             and final_artifact.metadata.get("front_matter_artifact_id")
             == (front_matter_artifact.id if front_matter_artifact else "")
-            and (not conclusion_artifact or conclusion_current)
-            and (not overview and not overview_text_artifact or overview_current)
+            and (not overview or bool(overview_text_artifact))
             and (not front_matter_artifact or front_matter_current)
         )
         release_current = bool(

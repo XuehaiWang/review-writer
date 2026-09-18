@@ -21,7 +21,7 @@ from PIL import Image as PILImage, UnidentifiedImageError
 
 from review_writer_api.artifact_service import ArtifactService
 from review_writer_api.database import utc_now
-from review_writer_api.domain_services.base import OwnedProjectService
+from review_writer_api.domain_services.base import ArtifactBackedService
 from review_writer_api.errors import (
     WorkflowConflict,
     WorkflowNotFound,
@@ -56,7 +56,6 @@ from review_writer_core.workflow.artifacts import (
     FIGURE_MANIFEST,
     FIGURE_REVIEW_INPUTS as REVIEW_INPUTS,
     FIGURE_REVIEW_SELECTIONS as REVIEW_SELECTIONS,
-    MATRIX as MATRIX_LOGICAL_NAME,
     SECTION_DEFAULT_FIGURE_REVIEWS as DEFAULT_REVIEWS,
     SECTION_DRAFTS as SECTION_INDEX,
     SECTION_PAPER_FIGURE_CANDIDATES as PAPER_CANDIDATES,
@@ -100,10 +99,6 @@ def _edge_check(path: Path, *, safe_margin_px: int = 8) -> dict[str, Any]:
     }
 
 
-class FigureCandidatesMissing(WorkflowConflict):
-    code = "FIGURE_CANDIDATES_MISSING"
-
-
 class FigureParagraphAnchorMissing(WorkflowConflict):
     code = "FIGURE_PARAGRAPH_ANCHOR_MISSING"
 
@@ -128,7 +123,7 @@ class FigureOutputUnavailable(WorkflowConflict):
     code = "FIGURE_OUTPUT_UNAVAILABLE"
 
 
-class FiguresService(OwnedProjectService):
+class FiguresService(ArtifactBackedService):
     def __init__(
         self,
         repository: WorkflowRepository,
@@ -152,10 +147,7 @@ class FiguresService(OwnedProjectService):
         )
         if artifact is None:
             if required:
-                raise FigureCandidatesMissing(
-                    "Current section figure candidates are unavailable. Regenerate Sections first.",
-                    details={"logical_name": logical_name},
-                )
+                raise self._stage_not_ready(principal, project_id, logical_name)
             return None, None
         resolved = self.artifacts.resolve_owned_artifact(principal.user_id, artifact.id)
         try:

@@ -39,11 +39,13 @@ export function CandidateComparison({ candidate, disabled, readOnly, decide }: {
   return <section className="dialogue-candidate">
     <CandidateStatus status={candidate.status} />
     <CandidateReply candidate={candidate} />
-    <CandidateEvidenceReview candidate={candidate} />
-    {candidate.context_paragraph_ids?.length ? <p className="muted">{text("本轮只读上下文：", "Read-only context this turn: ")}{candidate.context_paragraph_ids.join(", ")}</p> : null}
     {candidate.candidate_text ? <div className="optimization-comparison"><div><h4>{text("保存前正文", "Saved original")}</h4><MarkdownView content={candidate.original_text} /></div><div><h4>{text("候选内容", "Candidate")}</h4><MarkdownView content={candidate.candidate_text} /></div></div> : null}
-    {[...(candidate.validation_errors || []), ...(candidate.validation_warnings || [])].map((value, i) => <p role="status" key={i}>{value}</p>)}
-    <EvidenceLinks sources={candidate.sources} legacyRefs={candidate.source_refs} />
+    <details><summary>{text("查看依据与检查详情", "Evidence and check details")}{candidate.evidence_review || candidate.validation_errors?.length || candidate.validation_warnings?.length ? text(" · 有待核对提示", " · review suggested") : ""}</summary>
+      <CandidateEvidenceReview candidate={candidate} />
+      {candidate.context_paragraph_ids?.length ? <p className="muted">{text("本轮只读上下文：", "Read-only context this turn: ")}{candidate.context_paragraph_ids.join(", ")}</p> : null}
+      {[...(candidate.validation_errors || []), ...(candidate.validation_warnings || [])].map((value, i) => <p role="status" key={i}>{value}</p>)}
+      <EvidenceLinks sources={candidate.sources} legacyRefs={candidate.source_refs} />
+    </details>
     {candidate.status === "pending" && !readOnly ? <footer><button className="button button-primary" disabled={disabled} onClick={() => decide(candidate.candidate_id, "accept")}>{text("保存候选", "Save candidate")}</button><button className="button button-secondary" disabled={disabled} onClick={() => decide(candidate.candidate_id, "reject")}>{text("放弃候选", "Discard candidate")}</button></footer> : null}
   </section>;
 }

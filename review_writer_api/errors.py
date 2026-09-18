@@ -35,6 +35,11 @@ class WorkflowNotFound(WorkflowError):
     status_code = 404
 
 
+class WorkflowStageNotReady(WorkflowNotFound):
+    """No current output has been produced; not a missing registered file."""
+    code = "WORKFLOW_STAGE_NOT_READY"
+
+
 class WorkflowValidationError(WorkflowError):
     code = "WORKFLOW_VALIDATION_FAILED"
     status_code = 422

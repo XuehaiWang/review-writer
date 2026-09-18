@@ -37,6 +37,14 @@ FINAL_CONCLUSION_REPORT = "final/conclusion-report.json"
 FINAL_OVERVIEW_IMAGE = "final/overview.png"
 FINAL_OVERVIEW_TEXT = "final/overview-text.json"
 FINAL_FRONT_MATTER = "final/front-matter.json"
+
+# Selected creative assets and publication metadata survive prose revisions.
+# Their source versions may be old; that is a warning, not a forced regeneration.
+# Legacy synthesis stays available for explicit migration into Draft.
+PERSISTENT_PUBLICATION_INPUTS = (
+    FINAL_OVERVIEW_IMAGE, FINAL_OVERVIEW_TEXT,
+    FINAL_FRONT_MATTER, FINAL_CONCLUSION, FINAL_CONCLUSION_REPORT,
+)
 FINAL_MANUSCRIPT = "final/manuscript.md"
 FINAL_VALIDATION = "final/validation.json"
 FINAL_RELEASE = "final/release.json"

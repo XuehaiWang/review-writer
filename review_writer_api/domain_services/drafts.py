@@ -24,14 +24,10 @@ from review_writer_api.artifact_service import ArtifactService
 from review_writer_api.database import utc_now
 from review_writer_api.domain_services.base import ArtifactBackedService
 from review_writer_api.domain_services.actions.draft.errors import (
-    DraftApprovalBlocked,
     DraftNotReady,
 )
 from review_writer_api.domain_services.actions.draft.decisions import (
     DraftDecisionActionsMixin,
-)
-from review_writer_api.domain_services.actions.draft.optimization import (
-    DraftOptimizationActionsMixin,
 )
 from review_writer_api.domain_services.actions.draft.quality import (
     DraftQualityActionsMixin,
@@ -40,7 +36,9 @@ from review_writer_api.domain_services.actions.draft.rewrite import (
     DraftRewriteActionsMixin,
 )
 from review_writer_api.domain_services.actions.draft.dialogue import DraftDialogueMixin
+from review_writer_api.domain_services.actions.draft.composition import DraftCompositionMixin
 from review_writer_core.paragraph_revision import paragraph_keys, dialogue_sections
+from review_writer_core.draft_composition import signature, source_signature, section_text, replace_section, manuscript_fields, replace_manuscript_fields
 from review_writer_api.errors import (
     WorkflowConflict,
     WorkflowNotFound,
@@ -68,7 +66,6 @@ from review_writer_core.draft_quality import quality_score
 from review_writer_core.stages.draft.text import (
     apply_rewrite_overlays,
     normalize_draft_text,
-    optimization_candidate,
     paragraph_spans,
     text_sha256,
 )
@@ -100,9 +97,9 @@ from review_writer_core.workflow.artifacts import (
 
 
 class DraftsService(
+    DraftCompositionMixin,
     DraftDialogueMixin,
     DraftDecisionActionsMixin,
-    DraftOptimizationActionsMixin,
     DraftQualityActionsMixin,
     DraftRewriteActionsMixin,
     ArtifactBackedService,
@@ -111,7 +108,6 @@ class DraftsService(
     _normalized = staticmethod(normalize_draft_text)
     _text_sha256 = staticmethod(text_sha256)
     _apply_rewrite_overlays = staticmethod(apply_rewrite_overlays)
-    _optimization_candidate = staticmethod(optimization_candidate)
 
     def __init__(self, repository: WorkflowRepository, artifacts: ArtifactService):
         self.repository = repository
@@ -244,39 +240,6 @@ class DraftsService(
         )
         return published, state
 
-    @classmethod
-    def _optimization_candidate_from_changes(
-        cls, current_text: str, changes: list[dict[str, Any]]
-    ) -> str:
-        requested = {
-            str(item.get("paragraph_id") or ""): str(
-                item.get("candidate_text") or ""
-            ).strip()
-            for item in changes
-            if str(item.get("paragraph_id") or "").strip()
-            and str(item.get("candidate_text") or "").strip()
-        }
-        replacements: list[tuple[int, int, str]] = []
-        found: set[str] = set()
-        for paragraph in cls._paragraph_spans(current_text):
-            paragraph_id = str(paragraph["paragraph_id"])
-            replacement = requested.get(paragraph_id)
-            if replacement is None:
-                continue
-            replacements.append(
-                (int(paragraph["start"]), int(paragraph["end"]), replacement)
-            )
-            found.add(paragraph_id)
-        missing = sorted(set(requested) - found)
-        if missing:
-            raise WorkflowConflict(
-                "Optimization paragraph markers are no longer current: "
-                + ", ".join(missing)
-            )
-        candidate = current_text
-        for start, end, replacement in reversed(replacements):
-            candidate = candidate[:start] + replacement + candidate[end:]
-        return candidate.rstrip() + "\n"
 
     @staticmethod
     def _assemble_markdown(
@@ -593,13 +556,21 @@ class DraftsService(
             parts.append("\n".join(references))
         return normalize_chemical_typography("\n\n".join(part.strip() for part in parts if part.strip()) + "\n")
 
-    def assemble(self, principal: Principal, project_id: str) -> dict[str, Any]:
-        principal.require(Permission.PROJECT_WRITE)
+    def _require_figure_approval(self, principal: Principal, project_id: str):
         figures_state = self.repository.get_stage_state(
             principal.user_id, project_id, "figures"
         )
         if figures_state is None or figures_state.status != "approved":
-            raise DraftNotReady("Approve the current figure stage before assembling Draft.")
+            error = self._stage_not_ready(principal, project_id, FIGURE_MANIFEST)
+            if error.details["next_stage"] == "images":
+                error.details["reason"] = "figure_approval_required"
+            raise error
+        return figures_state
+
+    def assemble(self, principal: Principal, project_id: str) -> dict[str, Any]:
+        principal.require(Permission.PROJECT_WRITE)
+        self._owned_project(principal, project_id)
+        figures_state = self._require_figure_approval(principal, project_id)
         sections, sections_artifact = self._read_json(
             principal, project_id, SECTION_INDEX
         )
@@ -627,6 +598,17 @@ class DraftsService(
         )
         initial_markdown = markdown
         markdown, overlay_replay = self._apply_rewrite_overlays(markdown, overlays)
+        previous_versions = self.repository.list_artifacts(principal.user_id, project_id, DRAFT_DOCUMENT)
+        if previous_versions:
+            previous = self._artifact(principal, project_id, DRAFT_DOCUMENT) or previous_versions[0]
+            previous_text = self.artifacts.resolve_owned_artifact(principal.user_id, previous.id).path.read_text(encoding="utf-8")
+            for role in ("abstract", "conclusion"):
+                existing = section_text(previous_text, role)
+                if existing:
+                    markdown = replace_section(markdown, role, existing)
+            fields = manuscript_fields(previous_text)
+            if fields["title"]:
+                markdown = replace_manuscript_fields(markdown, fields["title"], fields["keywords"])
         expected_current_artifacts = {
             SECTION_INDEX: sections_artifact.id,
             FIGURE_MANIFEST: manifest_artifact.id,
@@ -657,6 +639,9 @@ class DraftsService(
                         overlay_artifact.id if overlay_artifact else ""
                     ),
                     "overlay_replay": overlay_replay,
+                    "synthesis_sources": dict(previous_versions[0].metadata.get("synthesis_sources") or {}) if previous_versions else {},
+                    "title_user_modified": bool(previous.metadata.get("title_user_modified")) if previous_versions else False,
+                    "keywords_user_omitted": bool(previous.metadata.get("keywords_user_omitted")) if previous_versions else False,
                     "operation": "assemble",
                 },
                 expected_current_artifacts=expected_current_artifacts,
@@ -787,6 +772,8 @@ class DraftsService(
         text, draft_artifact = self._read_text(
             principal, project_id, DRAFT_DOCUMENT, required=False
         )
+        if draft_artifact is None:
+            self._require_figure_approval(principal, project_id)
         quality, quality_artifact = self._read_json(
             principal, project_id, DRAFT_QUALITY, required=False
         )
@@ -892,6 +879,9 @@ class DraftsService(
             if not isinstance(value, dict):
                 continue
             candidate = dict(value)
+            if candidate.get("revision_mode") == "section_synthesis" and candidate.get("status") == "pending":
+                if signature(section_text(text, candidate["section_role"])) != candidate.get("base_text_sha256") or freshness["upstream_stale"]:
+                    candidate["status"] = "stale"
             if candidate.get("revision_mode") == "dialogue" and candidate.get("status") == "pending":
                 current_target = next((p for p in paragraphs if stable_keys.get(p["paragraph_id"]) == candidate.get("paragraph_key")), None)
                 if (not current_target or current_target["text_sha256"] != candidate.get("base_text_sha256")
@@ -899,7 +889,7 @@ class DraftsService(
                     candidate["status"] = "stale"
             if (
                 candidate.get("status") == "pending"
-                and candidate.get("revision_mode") != "dialogue"
+                and candidate.get("revision_mode") not in {"dialogue", "section_synthesis"}
                 and (
                     not draft_artifact
                     or candidate.get("source_draft_artifact_id") != draft_artifact.id
@@ -910,6 +900,8 @@ class DraftsService(
             ):
                 candidate["status"] = "stale"
             rewrite_candidates.append(candidate)
+        if draft_artifact:
+            rewrite_candidates.extend(self.legacy_synthesis_candidates(principal, project_id, text, rewrites.get("entries") or {}))
         optimization_proposals = []
         for value in (optimizations.get("entries") or {}).values():
             if not isinstance(value, dict):
@@ -948,6 +940,7 @@ class DraftsService(
             ]
             optimization_proposals.append(proposal)
         jobs = self.repository.list_project_jobs(principal.user_id, project_id)
+        synthesis_job = next((j for j in jobs if j.payload.get("revision_mode") == "section_synthesis"), None)
         dialogue_batch_job = next((job for job in jobs if job.payload.get("revision_mode") == "dialogue_batch" and not job.payload.get("section_id")), None)
         paragraph_task_states = {}
         for job in jobs:
@@ -1005,6 +998,15 @@ class DraftsService(
                 if str(value).strip()
             ),
             "first_draft_md": normalize_chemical_typography(text),
+            "manuscript_preview_md": normalize_chemical_typography(self.manuscript_preview(principal, project_id, text)),
+            "synthesis_stale": bool(draft_artifact and any(value != source_signature(text, role)
+                for role, value in (draft_artifact.metadata.get("synthesis_sources") or {}).items())),
+            "synthesis_job": ({"id": synthesis_job.id, "status": synthesis_job.status,
+                "error_message": synthesis_job.error_message, "result": synthesis_job.result,
+                "progress_current": synthesis_job.progress_current, "progress_total": synthesis_job.progress_total}
+                if synthesis_job else None),
+            "manuscript_fields": manuscript_fields(text),
+            "legacy_manuscript_fields": self.legacy_manuscript_fields(principal, project_id),
             "publication_voice": {
                 "status": "warning" if voice_issues else "pass",
                 "issues": voice_issues,
@@ -1085,10 +1087,18 @@ class DraftsService(
         if operation == "full-edit" or operation.startswith("paragraph-edit:"):
             canonical, _marker_report = ensure_prose_paragraph_markers(canonical)
             canonical = canonical.rstrip() + "\n"
-        if canonical == current_text:
+        before_keywords = manuscript_fields(current_text)["keywords"]
+        after_keywords = manuscript_fields(canonical)["keywords"]
+        keywords_omitted = bool(current.metadata.get("keywords_user_omitted"))
+        if operation == "manuscript-fields-edit" or before_keywords != after_keywords:
+            keywords_omitted = not bool(after_keywords)
+        if canonical == current_text and keywords_omitted == bool(current.metadata.get("keywords_user_omitted")):
             return {"draft_artifact_id": current.id,
                     "revision": self._revision(principal, project_id), "changed": False}
         metadata = dict(current.metadata)
+        metadata["keywords_user_omitted"] = keywords_omitted
+        if manuscript_fields(canonical)["title"] != manuscript_fields(current_text)["title"]:
+            metadata["title_user_modified"] = True
         metadata["operation"] = operation
         metadata["previous_draft_artifact_id"] = current.id
         if operation == "full-edit" or operation.startswith("paragraph-edit:"):
@@ -2610,82 +2620,6 @@ class DraftsService(
 
 
 
-    def _optimization_quality_from_scored_changes(
-        self,
-        proposal: dict[str, Any],
-        selected_changes: list[dict[str, Any]],
-    ) -> tuple[dict[str, Any], int]:
-        candidate_quality = dict(
-            proposal.get("source_quality")
-            or proposal.get("candidate_quality")
-            or {}
-        )
-        scoring = {str(change.get("paragraph_id") or ""): change for change in selected_changes}
-        for change in selected_changes:
-            for pid, evaluation in (change.get("dependent_evaluations") or {}).items():
-                scoring.setdefault(pid, {"paragraph_id": pid, "candidate_evaluation": evaluation})
-        scored_ids = set()
-        for change in scoring.values():
-            paragraph_id = str(change.get("paragraph_id") or "")
-            candidate_evaluation = dict(change.get("candidate_evaluation") or {})
-            if (
-                candidate_evaluation.get("evaluation_scope")
-                == "single_paragraph"
-                and str(candidate_evaluation.get("paragraph_id") or "")
-                == paragraph_id
-            ):
-                candidate_quality = self._incremental_quality(
-                    candidate_quality,
-                    candidate_evaluation,
-                    paragraph_id=paragraph_id,
-                    source_quality_artifact_id=str(
-                        proposal.get("source_quality_artifact_id") or ""
-                    ),
-                )
-                scored_ids.add(paragraph_id)
-        scored_changes = sum(str(change.get("paragraph_id") or "") in scored_ids for change in selected_changes)
-        if scored_changes == len(selected_changes) and selected_changes:
-            # Avoid accumulating one rounding operation per paragraph.  The
-            # comparison UI sums unrounded overall deltas once, so publish the
-            # same deterministic total here.
-            source_quality = dict(
-                proposal.get("source_quality")
-                or proposal.get("candidate_quality")
-                or {}
-            )
-            source_score = quality_score(source_quality)
-            explicit_deltas: list[float] = []
-            for change in scoring.values():
-                try:
-                    explicit_deltas.append(float(change["overall_score_delta"]))
-                except (KeyError, TypeError, ValueError):
-                    explicit_deltas = []
-                    break
-            if explicit_deltas:
-                exact_score = source_score + sum(explicit_deltas)
-            else:
-                source_scores = {
-                    str(item.get("paragraph_id") or ""): float(
-                        item.get("score") or 0
-                    )
-                    for item in source_quality.get("paragraph_scores") or []
-                    if isinstance(item, dict)
-                    and str(item.get("paragraph_id") or "")
-                }
-                paragraph_count = max(1, len(source_scores))
-                exact_score = source_score
-                for change in scoring.values():
-                    paragraph_id = str(change.get("paragraph_id") or "")
-                    evaluation = dict(change.get("candidate_evaluation") or {})
-                    paragraph_score = dict(evaluation.get("paragraph_score") or {})
-                    exact_score += (
-                        float(paragraph_score.get("score") or 0)
-                        - source_scores.get(paragraph_id, 0.0)
-                    ) / paragraph_count
-            exact_score = round(max(0.0, min(exact_score, 100.0)), 2)
-            candidate_quality["score"] = exact_score
-            candidate_quality["total_score"] = exact_score
-        return candidate_quality, scored_changes
 
 
 

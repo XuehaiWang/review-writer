@@ -559,8 +559,9 @@ class SectionsV1Tests(unittest.TestCase):
                 [
                     section
                     for section in payload["section_blueprint"]["sections"]
-                    if section.get("section_role") != "body"
-                    or section.get("generation_eligible") is not False
+                    if section.get("section_role") != "conclusion"
+                    and (section.get("section_role") != "body"
+                         or section.get("generation_eligible") is not False)
                 ]
             ),
             len(payload["section_tasks"]),
@@ -570,15 +571,9 @@ class SectionsV1Tests(unittest.TestCase):
             for task in payload["section_tasks"]
             if task["section_role"] == "introduction"
         )
-        conclusion = next(
-            task
-            for task in payload["section_tasks"]
-            if task["section_role"] == "conclusion"
-        )
         self.assertEqual([], introduction["primary_papers"])
         self.assertEqual("framing_synthesis", introduction["writing_mode"])
-        self.assertEqual([], conclusion["primary_papers"])
-        self.assertEqual("cross_section_synthesis", conclusion["writing_mode"])
+        self.assertFalse(any(task["section_role"] == "conclusion" for task in payload["section_tasks"]))
         primary_occurrences = [
             paper_id
             for task in payload["section_tasks"]
@@ -644,10 +639,9 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertEqual("Explain scope before comparison", by_id["S02"]["organizing_thread"])
         self.assertEqual(["Explain scope", "Compare compatible experiments"], by_id["S02"]["paragraph_tasks"])
         self.assertEqual("table", by_id["S02"]["paper_roles"][0]["presentation"])
-        self.assertEqual("conclusion", by_id["S03"]["section_role"])
-        self.assertEqual([], by_id["S03"]["primary_papers"])
+        self.assertNotIn("S03", by_id)
 
-    def test_context_papers_are_allowed_and_conclusion_is_scheduled_last(self) -> None:
+    def test_context_papers_are_allowed_and_conclusion_is_deferred_to_draft(self) -> None:
         tasks = self.app.state.sections_service.tasks_from_blueprint(
             {
                 "paper_assignment_policy": {
@@ -681,7 +675,7 @@ class SectionsV1Tests(unittest.TestCase):
         introduction = next(task for task in tasks if task["section_id"] == "S01")
         self.assertEqual(["P009"], introduction["context_papers"])
         self.assertIn("P009", introduction["allowed_papers"])
-        self.assertEqual("S03", tasks[-1]["section_id"])
+        self.assertEqual(["S01", "S02"], [task["section_id"] for task in tasks])
 
     def test_context_papers_are_not_double_counted_as_supporting(self) -> None:
         tasks = self.app.state.sections_service.tasks_from_blueprint(

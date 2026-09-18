@@ -99,6 +99,8 @@ def section_retry_checkpoints(context) -> tuple[dict | None, dict | None]:
 
 
 def register_planning_handlers(planning_service, job_service, handlers: Mapping[str, Callable]) -> None:
+    if (topic_builder := dict(handlers or {}).get("planning.topic-outline")) is not None:
+        job_service.register_handler("planning.topic-outline", topic_builder)
     enrichment_builder = dict(handlers or {}).get("matrix.enrich")
     blueprint_builder = dict(handlers or {}).get("planning.blueprint")
     if blueprint_builder is not None:
@@ -358,6 +360,10 @@ def register_sections_handler(sections_service, job_service, handlers: Mapping[s
             payload = dict(payload)
             principal = Principal(context.user_id, frozenset({Role.USER}))
             sections_service.validate_generation_inputs(principal, str(context.project_id), payload)
+            # Retries carry the original task snapshot. Drop only obsolete
+            # standalone conclusions; keep body inputs/checkpoints unchanged.
+            payload["tasks"] = [task for task in payload.get("tasks") or []
+                                if str(task.get("section_role") or "").strip().casefold() != "conclusion"]
             if context.retry_of_job_id:
                 checkpoint, fact_repair_checkpoint = section_retry_checkpoints(
                     context

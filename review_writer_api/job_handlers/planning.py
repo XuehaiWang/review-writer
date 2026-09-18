@@ -13,6 +13,28 @@ from review_writer_api.security import Principal, Role
 
 
 class PlanningJobHandlers:
+    def topic_outline(self, context, payload):
+        staging = self._staging(context.user_id, context.job_id)
+        # Read local source passages once in the worker, not on page refresh.
+        inputs = {**payload, "papers": [dict(p) for p in payload["papers"]]}
+        index = getattr(getattr(self, "planning_service", None), "library_index", None)
+        if index is not None and index.enabled:
+            principal = Principal(context.user_id, frozenset({Role.USER}))
+            papers = {p["paper_id"]: p for p in inputs["papers"]}
+            budget = max(200, min(2000, 120000 // max(1, len(papers))))
+            for hit in index.primary_coverage_hits(principal, allowed_papers=list(papers), per_paper_limit=2):
+                papers[hit.paper_id].setdefault("source_passages", []).append({
+                    "chunk_id": hit.chunk_id, "page": hit.page_start, "content": hit.content[:budget]})
+        self._write_json(staging / "topic-outline-input.json", inputs)
+        normal, secrets = self._text_gateway_environment(context)
+        context.report_progress(0, 1)
+        self.runner.run([sys.executable, "-m", "review_writer_core.stages.planning.topic_recommendation",
+            "--input", str(staging / "topic-outline-input.json"), "--output", str(staging / "topic-outline-output.json")],
+            cwd=self.root, staging_directory=staging, expected_outputs=("topic-outline-output.json",),
+            env=normal, secret_env=secrets, cancel_requested=context.cancellation_requested, timeout_seconds=900)
+        context.report_progress(1, 1)
+        return self._result(staging, "topic-outline-output.json")
+
     def blueprint_plan(self, context, payload):
         staging = self._staging(context.user_id, context.job_id)
         checkpoint_path, progress_path = staging / "blueprint-checkpoint.json", staging / "blueprint-progress.json"

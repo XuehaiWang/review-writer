@@ -19,12 +19,6 @@ from review_writer_api.job_handlers.figures import FigureJobHandlers
 from review_writer_api.job_handlers.library import LibraryJobHandlers
 from review_writer_api.job_handlers.planning import PlanningJobHandlers
 from review_writer_api.job_handlers.sections import SectionJobHandlers
-from review_writer_api.job_handlers.support import (
-    bibliography_needs_bounded_agent as _bibliography_needs_bounded_agent,
-    bibliography_source_names as _bibliography_source_names,
-    matrix_live_payload as _matrix_live_payload,
-    section_generation_timeout_seconds as _section_generation_timeout_seconds,
-)
 from review_writer_api.scientific_runner import ScientificRunner
 from review_writer_api.security import Principal, Role
 from review_writer_api.workspaces import HostedWorkspaceManager
@@ -91,10 +85,11 @@ class NativeWorkflowHandlers(
             "discovery.search": self.discovery_search,
             "matrix.enrich": self.matrix_enrich,
             "planning.blueprint": self.blueprint_plan,
+            "planning.topic-outline": self.topic_outline,
             "sections.generate": self.sections_generate,
             "figures.redraw": self.figures_redraw,
             "draft.rewrite": self.draft_rewrite,
-            "final.build": self.final_front_matter,
+            "draft.synthesis": self.draft_synthesis,
             "final.conclusion": self.final_conclusion,
             "final.overview": self.final_overview,
             "final.export": self.final_export,

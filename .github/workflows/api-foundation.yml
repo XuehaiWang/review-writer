@@ -62,7 +62,7 @@ jobs:
         run: |
           set -o pipefail
           status=0
-          python -m pytest -q --tb=short --import-mode=importlib tests review_writer_api/tests 2>&1 | tee native-api-tests.log || status=$?
+          python -m pytest -q --tb=short --import-mode=importlib tests review_writer_api/tests review_writer_core/tests 2>&1 | tee native-api-tests.log || status=$?
           if [ "$status" -ne 0 ]; then
             {
               echo "## Scientific and API test failure"

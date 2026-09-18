@@ -24,16 +24,15 @@ from review_writer_api.domain_services.planning import (
     MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION,
     MATRIX_FACT_PROMPT_VERSION,
     ROUTING_REQUIRED_LABEL,
-    TOPIC_PARTITION_BOUNDARY_LABEL,
     _matrix_classification_axes,
     _required_topic_partitions_from_outline,
     _topic_outline_intent,
-    _topic_partition_for_text,
     _topic_partition_for_row,
     _topic_partition_routes,
     _usable_fact_candidate,
 )
 from review_writer_api.domain_services.library_index import EvidenceHit
+from review_writer_core.stages.planning.topic import TOPIC_PARTITION_BOUNDARY_LABEL, _topic_partition_for_text
 from review_writer_api.security import Principal, Role
 from review_writer_api.errors import WorkflowConflict, WorkflowValidationError
 from review_writer_api.workflow_models import LibraryPaper
@@ -45,6 +44,47 @@ TEST_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("="
 
 
 class PlanningV1Tests(unittest.TestCase):
+    def test_missing_topic_recommendation_is_a_persisted_candidate_not_an_outline_write(self):
+        from review_writer_core.stages.planning.topic_recommendation import validate_recommendation
+        calls = []
+        def build(context, payload):
+            calls.append(payload)
+            return validate_recommendation({"organization": "Scientific approaches", "sections": [
+                {"title": "Approaches and evidence", "role": "body", "question": "How do the approaches differ?",
+                 "paper_ids": [p["paper_id"] for p in payload["papers"]], "rationale": "Compare the selected studies."}
+            ]}, payload["papers"])
+        service = self.app.state.planning_service
+        with patch.dict(self.app.state.job_service._handlers, {"planning.topic-outline": build}), \
+             patch("review_writer_api.domain_services.planning._topic_outline_intent", return_value={"available": False}), \
+             TestClient(self.app) as client:
+            base = f"/api/v1/projects/{self.project_id}/planning"
+            before = client.get(base).json()
+            self.assertEqual("not_started", before["topic_recommendation"]["status"])
+            self.assertEqual([], calls)  # GET never initiates paid work.
+            queued = client.post(base + "/outline/topic/jobs", headers=self.headers())
+            self.assertEqual(202, queued.status_code, queued.text)
+            job = queued.json()
+            for _ in range(100):
+                job = client.get(f"/api/v1/jobs/{job['id']}").json()
+                if job["status"] not in {"queued", "running"}: break
+                time.sleep(.03)
+            self.assertEqual("succeeded", job["status"], job)
+            current = client.get(base).json()
+            self.assertEqual(before["outline_selection"], current["outline_selection"])
+            self.assertTrue(any(c["source"] == "topic" for c in current["outline_candidates"]))
+            self.assertEqual(job["id"], client.post(base + "/outline/topic/jobs", headers=self.headers()).json()["id"])
+            self.assertEqual(1, len(calls))
+            snapshot = next(c["outline_md"] for c in current["outline_candidates"] if c["source"] == "topic")
+            rejected = client.put(base + "/outline", headers=self.headers(), json={"revision": current["matrix_revision"], "outline_style": "topic-guided", "candidate_outline_md": snapshot + "changed"})
+            self.assertEqual(409, rejected.status_code)
+            with patch.object(service, "_outline_sources", side_effect=AssertionError("Applying the cached outline must not reread sources")):
+                chosen = client.put(base + "/outline", headers=self.headers(), json={"revision": current["matrix_revision"], "outline_style": "topic-guided", "candidate_outline_md": snapshot})
+            self.assertEqual(200, chosen.status_code, chosen.text)
+            self.assertEqual(snapshot.strip(), chosen.json()["selected_outline_md"].strip())
+            self.assertIn("Approaches and evidence", client.get(base).json()["selected_outline_md"])
+            self.current = self.second
+            self.assertEqual(404, client.post(base + "/outline/topic/jobs", headers=self.headers()).status_code)
+
     def test_candidate_source_failure_is_local_and_retains_valid_previous_fact(self):
         from copy import deepcopy
         from review_writer_core.scientific_facts import fact_is_usable
@@ -1035,8 +1075,8 @@ class PlanningV1Tests(unittest.TestCase):
             selected = self.choose_outline(client, "reaction")
         self.assertIn("##", selected["selected_outline_md"])
         self.assertIn("## Introduction\nSection role: introduction", selected["selected_outline_md"])
-        self.assertIn(
-            "## Cross-category comparison and conclusion\nSection role: conclusion",
+        self.assertNotIn(
+            "Section role: conclusion",
             selected["selected_outline_md"],
         )
         self.assertIn("## 1. Cross-coupling", selected["selected_outline_md"])
@@ -2351,15 +2391,9 @@ class PlanningV1Tests(unittest.TestCase):
             for section in blueprint["sections"]
             if section["section_role"] == "introduction"
         )
-        conclusion = next(
-            section
-            for section in blueprint["sections"]
-            if section["section_role"] == "conclusion"
-        )
+        self.assertFalse(any(section["section_role"] == "conclusion" for section in blueprint["sections"]))
         self.assertEqual([], introduction["major_papers"])
-        self.assertEqual([], conclusion["major_papers"])
         self.assertTrue(introduction["supporting_papers"])
-        self.assertTrue(conclusion["supporting_papers"])
         self.assertTrue(
             all(section["writing_requirements"] for section in blueprint["sections"])
         )
@@ -2385,7 +2419,6 @@ class PlanningV1Tests(unittest.TestCase):
             )
         )
         self.assertEqual([], introduction["scientific_claims"])
-        self.assertEqual([], conclusion["scientific_claims"])
         self.assertTrue(
             all(
                 section["review_claims"][0]["legacy_role"]

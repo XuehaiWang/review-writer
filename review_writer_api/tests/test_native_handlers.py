@@ -9,12 +9,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from review_writer_api.errors import LiteratureSearchFailed, WorkflowValidationError
-from review_writer_api.native_handlers import (
-    NativeWorkflowHandlers,
-    _bibliography_needs_bounded_agent,
-    _bibliography_source_names,
-    _matrix_live_payload,
-    _section_generation_timeout_seconds,
+from review_writer_api.native_handlers import NativeWorkflowHandlers
+from review_writer_api.job_handlers.support import (
+    bibliography_needs_bounded_agent as _bibliography_needs_bounded_agent,
+    bibliography_source_names as _bibliography_source_names,
+    matrix_live_payload as _matrix_live_payload,
+    section_generation_timeout_seconds as _section_generation_timeout_seconds,
 )
 from review_writer_api.scientific_runner import ScientificRunFailed
 from review_writer_api.workspaces import HostedWorkspaceManager

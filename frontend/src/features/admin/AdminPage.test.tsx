@@ -17,6 +17,7 @@ beforeEach(() => {
     if (options?.method === "POST") return {};
     if (url === "/api/v1/me") return { user_id: "admin" };
     if (url.includes("/admin/users")) return { items: users };
+    if (url === "/api/v1/admin/storage") return { available: true };
     if (url.includes("/admin/usage")) return { user_count: 2, active_user_count: 2, project_count: 4, total_tokens: 100, text_request_count: 2, estimated_cost_usd: "2", account_balance_total_usd: "10", reserved_total_usd: "0" };
     if (url.includes("/provider-settings")) return { items: providers };
     if (url.endsWith("/model-catalog")) return catalog;

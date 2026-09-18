@@ -8,6 +8,24 @@ from review_writer_api.errors import WorkflowValidationError
 
 
 class DraftJobHandlers:
+    def draft_synthesis(self, context, payload):
+        staging = self._staging(context.user_id, context.job_id)
+        input_path = staging / "draft-synthesis-input.json"
+        self._write_json(input_path, payload)
+        retry_of = getattr(context, "retry_of_job_id", None)
+        output = staging / "draft-synthesis-output.json"
+        if retry_of and not output.exists():
+            previous = self._staging(context.user_id, retry_of) / output.name
+            if previous.is_file() and not previous.is_symlink():
+                self._write_json(output, json.loads(previous.read_text(encoding="utf-8")))
+        normal, secrets = self._text_gateway_environment(context)
+        self.runner.run([sys.executable, "-m", "review_writer_core.draft_synthesis",
+            "--input", str(input_path), "--output", str(staging / "draft-synthesis-output.json")],
+            cwd=self.root, staging_directory=staging, expected_outputs=("draft-synthesis-output.json",),
+            env=normal, secret_env=secrets, cancel_requested=context.cancellation_requested,
+            timeout_seconds=15 * 60)
+        return self._result(staging, "draft-synthesis-output.json")
+
     @staticmethod
     def _restore_artifact_urls(markdown: str, paths: dict[str, Any]) -> str:
         restored = str(markdown or "")

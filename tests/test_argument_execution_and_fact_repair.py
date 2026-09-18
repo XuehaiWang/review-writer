@@ -8,7 +8,6 @@ from review_writer_core.scientific_facts import (
     FACT_VALIDATION_VERSION, attach_repair_fact_context, is_additive_fact_repair,
 )
 from review_writer_core.section_narrative_contracts import build_argument_execution
-from review_writer_core.claim_contracts import build_fact_grounded_claims
 
 
 def bundle(sentence="The external cohort accuracy was 84%."):
@@ -195,82 +194,6 @@ def test_single_candidate_evidence_publication_reuses_exact_scored_sources():
     assert not summary["promoted_facts"]
 
 
-@pytest.mark.parametrize("selected", [None, ["S1-p1"]])
-def test_acceptance_publishes_agent_evidence_and_matrix_only_for_accepted_paragraphs(selected):
-    import json
-    import threading
-    from types import SimpleNamespace
-    from unittest.mock import Mock
-    from review_writer_api.domain_services.drafts import DraftsService
-    from review_writer_core.workflow.artifacts import (
-        DRAFT_MANUSCRIPT, DRAFT_OPTIMIZATION_PROPOSALS, DRAFT_QUALITY_REPORT,
-        MATRIX, SECTION_EVIDENCE_PACKAGE,
-    )
-
-    package, repair, matrix = repair_bundle()
-    matrix["rows"][0]["scientific_facts"] = []
-    second_source, second_fact, *_ = bundle("The alloy retained strength after cycling.")
-    second_source.update(evidence_key="owned2")
-    second_fact.update(fact_id="F2", evidence_refs=[{"evidence_key": "owned2", "support_excerpt": second_fact["value"]}])
-    repair["papers"][0]["facts"].append(second_fact)
-    repair["fact_repair_sources"][0]["evidence_candidates"].append(second_source)
-    repair["targets"][0]["paragraph_ids"].append("S1-p2")
-    payload = {"section_evidence": package, "matrix": matrix}
-    changes, scores = [], []
-    for i, ref in [(1, "owned"), (2, "owned2")]:
-        pid = f"S1-p{i}"
-        score = {"paragraph_id": pid, "score": 90, "source_evidence_refs": [ref]}
-        scores.append(score)
-        changes.append({"paragraph_id": pid, "original_text": f"Original {i}.",
-                        "candidate_text": f"Improved {i}.", "candidate_evaluation": {
-                            "evaluation_scope": "single_paragraph",
-                            "paragraph_id": pid, "paragraph_score": score,
-                            "source_check_entry": {"paragraph_id": pid, "source_evidence_refs": [ref]},
-                            "local_hard_gate_failures": [], "local_preflight": {"issues": []}}})
-    quality = {"fact_agent_repair": repair, "paragraph_scores": scores}
-    evidence, summary, _ = DraftsService._repair_evidence_package(payload, quality)
-    repaired_matrix, promotions = DraftsService._matrix_with_promoted_facts(matrix, summary)
-    summary["matrix_fact_promotion_count"] = len(promotions)
-    assert summary["added_evidence_count"] == 0
-    assert len(promotions) == 2
-    original = "# Review\n\n" + "\n\n".join(
-        f"Original {i}.\n<!-- paragraph_id: S1-p{i} -->" for i in (1, 2)) + "\n"
-    proposal = {"status": "pending", "source_draft_artifact_id": "draft-v1", "changes": changes,
-                "candidate_quality": quality, "candidate_evidence_package": evidence,
-                "candidate_matrix": repaired_matrix, "evidence_repair": summary,
-                "source_quality": {"paragraph_scores": [{"paragraph_id": f"S1-p{i}", "score": 60} for i in (1, 2)]},
-                "claim_dispositions": {f"C{i}": {"paragraph_id": f"S1-p{i}"} for i in (1, 2)}}
-    service = object.__new__(DraftsService)
-    service.validate_task_inputs = Mock(return_value={})  # Version guards have separate integration coverage.
-    service._write_lock = threading.RLock()
-    service._read_text = Mock(return_value=(original, SimpleNamespace(id="draft-v1", metadata={})))
-    service._read_json = Mock(return_value=({"entries": {"proposal": proposal}}, SimpleNamespace(id="store-v1")))
-    service.compatibility_payload = Mock(return_value=payload)
-    service._validate_repair_lineages = Mock()
-    captured = {}
-
-    def publish(_principal, _project, files, **_kwargs):
-        published = {}
-        for name, (content, _extension) in files.items():
-            captured[name] = content(published) if callable(content) else content
-            published[name] = SimpleNamespace(id=f"new-{name}")
-        return published, SimpleNamespace(revision=2)
-
-    service._publish_files = publish
-    service.decide_optimization_proposal(SimpleNamespace(), "project", "proposal",
-                                        decision="accept", revision=1, selected_paragraph_ids=selected)
-    expected_keys = {"owned"} if selected else {"owned", "owned2"}
-    saved_evidence = json.loads(captured[SECTION_EVIDENCE_PACKAGE])
-    assert {row["evidence_key"] for row in saved_evidence["evidence_registry"]} == expected_keys
-    saved_matrix = json.loads(captured[MATRIX])
-    assert {f["fact_id"] for f in saved_matrix["rows"][0]["scientific_facts"]} == ({"F1"} if selected else {"F1", "F2"})
-    assert saved_evidence["source_matrix_artifact_id"] == f"new-{MATRIX}"
-    assert json.loads(captured[DRAFT_QUALITY_REPORT])["source_draft_artifact_id"] == f"new-{DRAFT_MANUSCRIPT}"
-    assert set(json.loads(captured[DRAFT_QUALITY_REPORT])["claim_dispositions"]) == ({"C1"} if selected else {"C1", "C2"})
-    assert ("Original 2." if selected else "Improved 2.") in captured[DRAFT_MANUSCRIPT].decode()
-    saved_proposal = json.loads(captured[DRAFT_OPTIMIZATION_PROPOSALS])["entries"]["proposal"]
-    assert saved_proposal["evidence_repair"]["promoted_fact_count"] == (1 if selected else 2)
-    assert not package["evidence_registry"] and not matrix["rows"][0]["scientific_facts"]
 
 
 

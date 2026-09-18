@@ -4,13 +4,15 @@ export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly requestId: string;
+  readonly details: Record<string, unknown>;
 
-  constructor(message: string, status: number, code = "", requestId = "") {
+  constructor(message: string, status: number, code = "", requestId = "", details: Record<string, unknown> = {}) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.requestId = requestId;
+    this.details = details;
   }
 }
 
@@ -73,15 +75,17 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
       response.status,
       normalized.code,
       response.headers.get("x-request-id") || "",
+      typeof payload.error === "object" ? payload.error.details : typeof payload.detail === "object" ? payload.detail.details : undefined,
     );
   }
   if (contentType.includes("application/json")) return (await response.json()) as T;
   return (await response.text()) as T;
 }
 
-export function jsonBody(value: unknown): Pick<RequestInit, "body" | "headers"> {
+export function jsonBody(value: unknown): Pick<RequestInit, "body"> {
+  // apiRequest owns Content-Type. Returning headers here would overwrite
+  // caller headers (notably Idempotency-Key) when this object is spread last.
   return {
     body: JSON.stringify(value),
-    headers: { "Content-Type": "application/json" },
   };
 }

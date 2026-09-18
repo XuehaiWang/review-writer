@@ -22,6 +22,7 @@ import type {
 import { ErrorState } from "../../components/ErrorState";
 import { useUiText } from "../../i18n/useUiText";
 import { SystemErrors } from "./SystemErrors";
+import { StorageMaintenance } from "./StorageMaintenance";
 
 type ProviderDraft = {
   base_url: string;
@@ -327,6 +328,7 @@ export function AdminPage() {
       section === "services" && providerKind === "text" ? client.invalidateQueries({ queryKey: queryKeys.textConnections }) : undefined,
       section === "activity" ? audit.refetch() : undefined,
       section === "activity" ? client.invalidateQueries({ queryKey: ["admin-system-errors"] }) : undefined,
+      section === "activity" ? client.invalidateQueries({ queryKey: ["admin-storage"] }) : undefined,
     ]);
   } });
 
@@ -379,6 +381,7 @@ export function AdminPage() {
       </div> : null}
 
       {visited.has("activity") ? <div id="admin-activity" className="admin-content-panel" hidden={section !== "activity"}>
+      <StorageMaintenance active={section === "activity"} />
       <SystemErrors active={section === "activity"} />
       <section className="surface admin-audit-panel">
         {audit.isPending ? <p role="status">{text("正在加载配置记录…", "Loading configuration history…")}</p> : null}

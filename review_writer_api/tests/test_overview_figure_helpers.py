@@ -69,7 +69,7 @@ class OverviewFigureHelperTests(unittest.TestCase):
         self.assertEqual(overview.OVERVIEW_TEMPLATE_CONTRACT_VERSION, report["template_contract_version"])
         self.assertEqual(64, len(report["template_sha256"]))
         self.assertEqual(64, len(report["overview_content_contract_sha256"]))
-    def test_legacy_ata_blueprint_derives_product_locked_allene_structure(self) -> None:
+    def test_legacy_topic_cannot_confirm_product_but_explicit_structure_can(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
             planning = project / "01_matrix_outline"
@@ -114,10 +114,19 @@ class OverviewFigureHelperTests(unittest.TestCase):
 
             features = overview.extract_review_features(project)
 
+            blueprint_path = planning / "section_blueprint.json"
+            blueprint = json.loads(blueprint_path.read_text(encoding="utf-8"))
+            blueprint["overview_structure_contract"] = {
+                "role": "target_product", "status": "resolved", "smiles": "*C=C=C*"}
+            blueprint_path.write_text(json.dumps(blueprint), encoding="utf-8")
+            confirmed = overview.extract_review_features(project)
+
         contract = features["overview_structure_contract"]
         self.assertEqual("target_product", contract["role"])
-        self.assertEqual("allene", contract["motif"])
-        self.assertEqual("*C=C=C*", overview.resolve_skeleton_smiles(features))
+        self.assertEqual("unresolved", contract["status"])
+        self.assertEqual("", overview.resolve_skeleton_smiles(features))
+        self.assertEqual("resolved", confirmed["overview_structure_contract"]["status"])
+        self.assertEqual("*C=C=C*", overview.resolve_skeleton_smiles(confirmed))
 
     def test_blueprint_body_sections_override_legacy_metal_categories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

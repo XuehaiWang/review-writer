@@ -323,7 +323,7 @@ export function DiscoveryPage() {
     setSelectionFeedback(text("已清空当前选择。", "The current selection was cleared."));
   }
 
-  const noArtifact = discovery.error instanceof ApiError && discovery.error.status === 404;
+  const noArtifact = discovery.error instanceof ApiError && discovery.error.code === "WORKFLOW_STAGE_NOT_READY";
   const insufficientCreditStop = Boolean(
     currentJobId
     && job.data?.status === "failed"

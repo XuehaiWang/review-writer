@@ -1,8 +1,10 @@
 import { useDraftScratch } from "./useDraftScratch";
+import { useEffect } from "react";
 import { useUiText } from "../../i18n/useUiText";
 import { CandidateComparison, type DialogueCandidate } from "./ParagraphDialogue";
 
-export function CandidateBrowser({ candidates, disabled, decide, checked, toggle, stateKey }: {
+export function CandidateBrowser({ candidates, disabled, decide, checked, toggle, stateKey, focusId }: {
+  focusId?: string;
   stateKey?: string;
   candidates: DialogueCandidate[]; disabled?: boolean;
   decide: (id: string, action: "accept" | "reject") => void;
@@ -11,6 +13,7 @@ export function CandidateBrowser({ candidates, disabled, decide, checked, toggle
   const { text } = useUiText();
   const [filter, setFilter] = useDraftScratch(stateKey ? stateKey + ":filter" : undefined, candidates.some(c => c.status === "pending") ? "pending" : "all");
   const [selected, setSelected] = useDraftScratch(stateKey ? stateKey + ":selected" : undefined, "");
+  useEffect(() => { if (focusId) { setFilter("all"); setSelected(focusId); } }, [focusId]);
   const filtered = candidates.filter(c => filter === "all" || c.status === filter);
   const items = filter === "pending" ? [...new Map(filtered.map(c => [c.paragraph_key, c])).values()] : filtered;
   const index = Math.max(0, items.findIndex(c => c.candidate_id === selected));

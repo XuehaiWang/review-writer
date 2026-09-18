@@ -31,26 +31,35 @@ function mount(url = "/draft?project=p") {
     <MemoryRouter initialEntries={[url]}><DraftPage /><RouteProbe /></MemoryRouter>
   </QueryClientProvider>);
 }
-it("starts with batch analysis and every workspace column changes its actual content", async () => {
+it("renders the composed overview manuscript instead of raw editable prose", async () => {
+  vi.mocked(apiRequest).mockImplementation(async path => {
+    if (path === "/api/v1/me") return { user_id: "u" };
+    if (path.endsWith("/draft")) return { ...draft, manuscript_preview_md: "# Title\n\n![Overview figure](/api/v1/artifacts/overview/content)\n\n*Saved overview caption.*\n\n## Introduction\n\nFull manuscript text" };
+    if (path.endsWith("/overview")) return { revision: 1, overview_figure_exists: false };
+    throw new Error("Unexpected request: " + path);
+  });
+  mount("/draft?project=p&tab=preview");
+  expect(await screen.findByRole("img", { name: "Overview figure" })).toHaveAttribute("src", "/api/v1/artifacts/overview/content");
+  expect(screen.getByText(/Saved overview caption\./)).toBeTruthy();
+});
+it("starts with the manuscript and opens optional tools without a numbered wizard", async () => {
   mount();
   const nav = await screen.findByRole("navigation", { name: "Draft workspace" });
-  const buttons = within(nav).getAllByRole("button");
-  expect(buttons.map(b => b.textContent)).toEqual(["01 Batch analysis & candidates", "02 Chapter dialogue", "03 Manuscript", "04 Approval", "History"]);
+  expect(screen.getByText("Full manuscript text")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Start batch revision" })).toBeNull();
+  fireEvent.click(within(nav).getByRole("button", { name: "Batch revision" }));
   expect(screen.getByRole("button", { name: "Start batch revision" })).toBeEnabled();
-  fireEvent.click(buttons[1]);
+  fireEvent.click(within(nav).getByRole("button", { name: "Manuscript" }));
+  fireEvent.click(screen.getByRole("button", { name: "Discuss current chapter" }));
   expect(await screen.findByRole("button", { name: "View text" })).toBeTruthy();
-  expect(screen.getByTestId("route")).toHaveTextContent("tab=dialogue");
-  fireEvent.click(buttons[2]);
-  expect(screen.getByText("Full manuscript text")).toBeTruthy();
-  expect(screen.queryByText("Saved paragraph")).toBeNull();
-  fireEvent.click(buttons[3]);
+  expect(screen.getByText("Full manuscript text")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Back to manuscript" }));
+  expect(screen.queryByRole("button", { name: "View text" })).toBeNull();
+  fireEvent.click(within(nav).getByRole("button", { name: "Approve for Final" }));
   expect(screen.getByRole("button", { name: "Approve and allow final stage" })).toBeEnabled();
-  fireEvent.click(buttons[4]);
+  fireEvent.click(within(nav).getByText("More"));
+  fireEvent.click(within(nav).getByRole("button", { name: "History" }));
   expect(screen.getByText("No historical versions yet.")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "Browser back" }));
-  expect(await screen.findByRole("button", { name: "Approve and allow final stage" })).toBeTruthy();
-  fireEvent.click(buttons[0]);
-  expect(screen.getByRole("button", { name: "Start batch revision" })).toBeTruthy();
 });
 it("restores the selected column from the URL and preserves paragraph deep links", async () => {
   const view = mount("/draft?project=p&tab=history");
@@ -61,15 +70,32 @@ it("restores the selected column from the URL and preserves paragraph deep links
   expect(await screen.findByText("Saved paragraph")).toBeVisible();
   expect(screen.queryByLabelText("Revision scope")).not.toBeInTheDocument();
 });
+
+it("expands and restores dialogue without losing the input or remounting the reader", async () => {
+  mount("/draft?project=p&paragraph=S1-p1");
+  const expand = await screen.findByRole("button", { name: "Expand dialogue" });
+  const input = screen.getByRole("textbox", { name: "Tell the AI how to improve this chapter" });
+  fireEvent.change(input, { target: { value: "Compare the key results" } });
+  const manuscript = screen.getByText("Full manuscript text");
+  fireEvent.click(expand);
+  expect(manuscript).not.toBeVisible();
+  expect(input).toHaveValue("Compare the key results");
+  fireEvent.click(screen.getByRole("button", { name: "Restore split view" }));
+  expect(screen.getByText("Full manuscript text")).toBe(manuscript);
+  expect(manuscript).toBeVisible();
+  expect(screen.getByRole("textbox", { name: "Tell the AI how to improve this chapter" })).toBe(input);
+  expect(input).toHaveValue("Compare the key results");
+});
 it("late batch submission does not pull the user away from another column", async () => {
   const original = vi.mocked(apiRequest).getMockImplementation()!;
   let finish!: (value: unknown) => void;
   vi.mocked(apiRequest).mockImplementation((path, init) => path.endsWith("/dialogue-batch")
     ? new Promise(resolve => { finish = resolve; }) : original(path, init));
   mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Batch revision" }));
   fireEvent.click(await screen.findByRole("button", { name: "Start batch revision" }));
   await waitFor(() => expect(finish).toBeDefined());
-  fireEvent.click(screen.getByRole("button", { name: "03 Manuscript" }));
+  fireEvent.click(screen.getByRole("button", { name: "Manuscript" }));
   await act(async () => { finish({ id: "batch" }); });
   expect(screen.getByText("Full manuscript text")).toBeTruthy();
   expect(screen.getByTestId("route")).toHaveTextContent("tab=preview");

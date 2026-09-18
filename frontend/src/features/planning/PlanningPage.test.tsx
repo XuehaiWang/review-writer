@@ -201,6 +201,25 @@ describe("default argument planning and candidate confirmation", () => {
     expect(JSON.parse(String(requests[0].init.body))).toEqual({ revision: 14, outline_style: "substrate" });
   });
 
+  it("shows the saved outline without waiting for the background page refresh", async () => {
+    renderPlanning();
+    fireEvent.click(await screen.findByRole("button", { name: "大纲选择与上传" }));
+    const originalFetch = vi.mocked(globalThis.fetch).getMockImplementation()!;
+    let saved = false;
+    vi.mocked(globalThis.fetch).mockImplementation(async (input, init = {}) => {
+      if (saved && String(input) === planningPath && (!init.method || init.method === "GET")) {
+        return new Promise<Response>(() => {});
+      }
+      const response = await originalFetch(input, init);
+      if (String(input) === `${planningPath}/outline` && init.method === "PUT") saved = true;
+      return response;
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "使用此结构" })[0]);
+    expect(await screen.findByText("大纲已应用，章节已载入下方编辑器。")).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "章节标题" })).toHaveValue("Applied section");
+    expect(screen.queryByRole("button", { name: "正在应用…" })).not.toBeInTheDocument();
+  });
+
   it("shows a conflict, refreshes the revision, and retries only on another click", async () => {
     const apply = applyOutline;
     applyOutline = async (body) => {

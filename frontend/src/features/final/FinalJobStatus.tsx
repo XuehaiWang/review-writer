@@ -18,8 +18,8 @@ type PdfCharacterIssue = {
 
 const activeStatuses = new Set(["queued", "running", "cancel_requested"]);
 
-function actionFromJob(job: Job | undefined, fallback: FinalAction): FinalAction {
-  const value = String(job?.job_type || "").replace(/^final\./, "");
+export function finalActionFromJobType(jobType?: string, fallback: FinalAction = "build"): FinalAction {
+  const value = String(jobType || "").replace(/^final\./, "");
   return value === "conclusion" || value === "overview" || value === "build" || value === "export" || value === "pdf"
     ? value
     : fallback;
@@ -27,7 +27,7 @@ function actionFromJob(job: Job | undefined, fallback: FinalAction): FinalAction
 
 export function FinalJobStatus({ job, startingAction = "build", submissionError = null, onResume, resuming = false }: FinalJobStatusProps) {
   const { text } = useUiText();
-  const action = actionFromJob(job, startingAction);
+  const action = finalActionFromJobType(job?.job_type, startingAction);
   const diagnostics = job?.result?.pdf_diagnostics as { total?: number; issues?: PdfCharacterIssue[]; truncated?: boolean } | undefined;
   const status = submissionError ? "failed" : job?.status || "submitting";
   const active = status === "submitting" || activeStatuses.has(status);

@@ -204,6 +204,9 @@ class ParagraphDialogueTests(fixtures.DraftsV1Tests):
             self.assertEqual(0, self.accept_rewrite_model_calls)
 
     def test_scored_http_writes_are_retired_but_approval_needs_no_report(self):
+        for retired in ("publish_optimization", "auto_apply_optimization_proposal",
+                        "decide_optimization_proposal", "repair_accepted_optimization_quality"):
+            self.assertFalse(hasattr(self.app.state.drafts_service, retired))
         with TestClient(self.app) as client:
             self.prepare_draft(client)
             for endpoint in ("evaluation-jobs", "optimization-jobs", "paragraphs/S1-p1/rewrite-jobs"):

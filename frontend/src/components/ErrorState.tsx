@@ -1,4 +1,6 @@
 import { useUiText } from "../i18n/useUiText";
+import { ApiError } from "../api/client";
+import { StageNotReady } from "./StageNotReady";
 
 type ErrorStateProps = {
   title?: string;
@@ -8,6 +10,9 @@ type ErrorStateProps = {
 
 export function ErrorState({ title, error, onRetry }: ErrorStateProps) {
   const { text } = useUiText();
+  if (error instanceof ApiError && error.code === "WORKFLOW_STAGE_NOT_READY") {
+    return <StageNotReady details={error.details} onRefresh={onRetry} />;
+  }
   const resolvedTitle = title || text("无法加载", "Unable to load");
   const message = error instanceof Error ? error.message : String(error || text("未知错误", "Unknown error"));
   return (

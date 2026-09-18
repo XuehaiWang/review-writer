@@ -421,6 +421,10 @@ def create_app(
     app.state.session_factory = session_factory
     app.state.failure_recorder = failure_recorder
     app.state.hosted_workspace_manager = hosted_workspace_manager
+    from .storage_maintenance import StorageMaintenance
+    storage_maintenance = (StorageMaintenance(session_factory, hosted_workspace_manager.root)
+                           if session_factory is not None and hosted_workspace_manager is not None else None)
+    app.state.storage_maintenance = storage_maintenance
     app.state.workflow_repository = workflow_repository
     app.state.artifact_service = artifact_service
     app.state.job_service = job_service
@@ -637,6 +641,20 @@ def create_app(
         if session_factory is None:
             return {"items": [], "has_more": False}
         return list_failures(session_factory, query=q, source=source, days=days, limit=limit, offset=offset)
+
+    @app.get("/api/v1/admin/storage", tags=["admin"])
+    def admin_storage(principal: Principal = Depends(current_principal)):
+        principal.require(Permission.PROVIDER_MANAGE)
+        if storage_maintenance is None:
+            return {"available": False}
+        return {"available": True, **storage_maintenance.snapshot()}
+
+    @app.post("/api/v1/admin/storage/cleanup", tags=["admin"])
+    def admin_storage_cleanup(principal: Principal = Depends(current_principal)):
+        principal.require(Permission.PROVIDER_MANAGE)
+        if storage_maintenance is None:
+            return {"available": False}
+        return {"available": True, **storage_maintenance.run(manual=True)}
 
     @app.get("/api/v1/health", response_model=HealthResponse, tags=["system"])
     def health() -> HealthResponse:
@@ -1554,6 +1572,7 @@ def create_app(
                 current_principal,
                 drafts_service,
                 job_service,
+                final_service,
             )
         )
     if final_service is not None and job_service is not None:

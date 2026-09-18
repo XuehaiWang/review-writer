@@ -14,7 +14,7 @@ import json
 import re
 from typing import Any, Iterable
 
-from .evidence_queries import COMPARISON_FIELD_IDS, QUESTION_TERMS, registered_fact_field_ids
+from .evidence_queries import QUESTION_TERMS, registered_fact_field_ids
 from .scientific_facts import (FACT_VALIDATION_VERSION, fact_is_classification, fact_is_usable,
                                fact_usage, fact_needs_verification, review_fingerprint)
 

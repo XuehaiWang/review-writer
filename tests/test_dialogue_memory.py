@@ -3,22 +3,49 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from review_writer_core.dialogue_memory import conversation_memory, candidate_response
-from review_writer_core.paragraph_revision import exact_hash
+from review_writer_core.paragraph_revision import exact_hash, revision_prompt
 from review_writer_api.domain_services.actions.draft.dialogue import DraftDialogueMixin
 
 
 class DialogueMemoryTests(unittest.TestCase):
+    def test_compressed_history_reaches_model_prompt(self):
+        records = [{"id": str(i), "user": "Keep chronological structure" if i == 0 else "Edit wording",
+            "responses": []} for i in range(14)]
+        memory = conversation_memory(records)
+        self.assertNotIn("Keep chronological structure", str(memory["recent_turns"]))
+        prompt = revision_prompt({"section_context": {"conversation_memory": memory}}, {}, {})
+        self.assertIn("Keep chronological structure", prompt)
+        self.assertIn("conversation_memory.summary", prompt)
+        self.assertIn("unless superseded by newer requests", prompt)
+
     def test_recent_verbatim_summary_reuse_and_decision_invalidation(self):
         records = [{"id": str(i), "user": "Request " + str(i), "responses": [
-            {"assistant": "Reply", "candidate_text": "Proposal", "decision": "pending"}]} for i in range(10)]
+            {"assistant": "Reply", "candidate_text": "Proposal", "decision": "pending"}]} for i in range(16)]
         first = conversation_memory(records)
-        self.assertEqual(records[-6:], first["recent_turns"])
+        self.assertEqual(records[-12:], first["recent_turns"])
         self.assertEqual(4, first["summary"]["source_count"])
         self.assertIs(first["summary"], conversation_memory(records, first)["summary"])
         records[0]["responses"][0]["decision"] = "rejected"
         updated = conversation_memory(records, first)
         self.assertNotEqual(first["summary"]["source_sha256"], updated["summary"]["source_sha256"])
         self.assertEqual("rejected", updated["summary"]["turns"][0]["responses"][0]["decision"])
+
+    def test_old_requests_survive_without_unadopted_candidate_prose(self):
+        records = [{"id": str(i), "user": "Use chronological order " + str(i),
+            "task_status": "succeeded", "responses": [{"decision": "rejected",
+                "candidate_text": "DO NOT RESTORE", "assistant": "Suggestion"}]} for i in range(18)]
+        result = conversation_memory(records)
+        notes = result["summary"]["request_notes"]
+        self.assertEqual("0", notes[0]["id"])
+        self.assertEqual(["rejected"], notes[0]["decisions"])
+        self.assertNotIn("candidate_excerpt", result["summary"]["turns"][0]["responses"][0])
+        self.assertEqual("DO NOT RESTORE", records[0]["responses"][0]["candidate_text"])
+
+    def test_previous_summary_format_is_rebuilt(self):
+        records = [{"id": str(i), "user": "Request"} for i in range(16)]
+        old = conversation_memory(records)
+        old["summary"].pop("version")
+        self.assertEqual(2, conversation_memory(records, old)["summary"]["version"])
 
     def test_large_turn_is_bounded_and_explicitly_incomplete(self):
         result = conversation_memory([{"id": "large", "user": "x" * 50000,

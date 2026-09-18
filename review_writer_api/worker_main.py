@@ -84,6 +84,13 @@ def maintain_storage(application):
     from review_writer_api.workflow_models import LibraryVectorStore
     from review_writer_api.system_errors import prune_failures
     sessions = application.state.session_factory
+    if application.state.storage_maintenance is not None:
+        try:
+            report = application.state.storage_maintenance.run()
+            if report.get("disk", {}).get("low_space"):
+                logging.getLogger(__name__).warning("workspace_disk_low free_bytes=%s", report["disk"]["free_bytes"])
+        except Exception as exc:
+            logging.getLogger(__name__).warning("storage_maintenance_failed exception=%s", type(exc).__name__)
     prune_failures(sessions)
     with database_session(sessions) as session:
         users = list(session.scalars(select(LibraryVectorStore.user_id)))

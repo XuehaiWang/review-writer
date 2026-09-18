@@ -72,37 +72,3 @@ def apply_rewrite_overlays(
         updated = updated[: paragraph["start"]] + rewritten + updated[paragraph["end"] :]
         applied.append(paragraph_id)
     return updated, {"applied": applied, "conflicts": conflicts}
-
-
-def optimization_candidate(
-    current_text: str, model_text: str
-) -> tuple[str, list[dict[str, str]]]:
-    """Build a reviewable candidate from paragraph bodies only."""
-
-    source_paragraphs = paragraph_spans(current_text)
-    model_paragraphs = {
-        str(row["paragraph_id"]): row for row in paragraph_spans(model_text)
-    }
-    changes: list[dict[str, str]] = []
-    replacements: list[tuple[int, int, str]] = []
-    for source in source_paragraphs:
-        paragraph_id = str(source["paragraph_id"])
-        candidate = model_paragraphs.get(paragraph_id)
-        if candidate is None:
-            continue
-        original_text = str(source["text"])
-        candidate_text = str(candidate["text"]).strip()
-        if normalize_draft_text(candidate_text) == normalize_draft_text(original_text):
-            continue
-        changes.append(
-            {
-                "paragraph_id": paragraph_id,
-                "original_text": original_text,
-                "candidate_text": candidate_text,
-            }
-        )
-        replacements.append((int(source["start"]), int(source["end"]), candidate_text))
-    candidate_draft = current_text
-    for start, end, replacement in reversed(replacements):
-        candidate_draft = candidate_draft[:start] + replacement + candidate_draft[end:]
-    return candidate_draft.rstrip() + "\n", changes

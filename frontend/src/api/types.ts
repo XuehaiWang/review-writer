@@ -387,7 +387,7 @@ export type UploadJobList = {
 };
 
 export type ApiErrorPayload = {
-  detail?: string | { message?: string; code?: string };
-  error?: string | { message?: string; code?: string };
+  detail?: string | { message?: string; code?: string; details?: Record<string, unknown> };
+  error?: string | { message?: string; code?: string; details?: Record<string, unknown> };
   message?: string;
 };

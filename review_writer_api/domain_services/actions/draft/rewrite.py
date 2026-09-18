@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable
-from copy import deepcopy
 from functools import partial
 from typing import Any
 

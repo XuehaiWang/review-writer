@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Header, Query, status
 from review_writer_api.domain_services.planning import PlanningService
 from review_writer_api.job_handlers.stage_execution import queue_fact_revision
 from review_writer_api.planning_jobs import queue_matrix_enrichment
-from review_writer_api.errors import WorkflowConflict
+from review_writer_api.errors import WorkflowConflict, WorkflowValidationError
 from review_writer_api.job_service import JobService
 from review_writer_api.routers.jobs import _job_response
 from review_writer_api.security import Principal
@@ -96,6 +96,7 @@ def build_planning_router(
             revision=payload.revision,
             outline_style=payload.outline_style,
             outline_md=payload.outline_md,
+            candidate_outline_md=payload.candidate_outline_md,
             scope_contract=payload.scope_contract,
             manual="outline_md" in payload.model_fields_set,
         )
@@ -112,6 +113,30 @@ def build_planning_router(
             revision=payload.revision,
             outline_md=payload.outline_md,
         )
+
+    @router.post("/outline/topic/jobs", status_code=status.HTTP_202_ACCEPTED)
+    def recommend_topic_outline(project_id: str, retry: bool = False,
+                                principal: Principal = Depends(principal_dependency)):
+        inputs = planning_service.topic_recommendation_input(principal, project_id)
+        if not inputs["papers"]:
+            raise WorkflowValidationError("Select papers before requesting a topic outline.")
+        state = planning_service.topic_recommendation_status(principal, project_id, inputs)
+        if state["job"] and (not retry or state["status"] in {"queued", "running", "cancel_requested", "succeeded"}):
+            return state["job"]
+        key = "topic-outline:" + inputs["input_fingerprint"]
+        if retry:
+            key += ":" + str(uuid.uuid4())
+        try:
+            job = job_service.submit(principal, scope="project", project_id=project_id,
+                job_type="planning.topic-outline", operation_key="topic-outline", idempotency_key=key, payload=inputs)
+        except WorkflowConflict:
+            # Two tabs may submit the same automatic recommendation together.
+            existing = job_service.repository.get_current_job(principal.user_id, scope="project",
+                project_id=project_id, job_type="planning.topic-outline", operation_key="topic-outline")
+            if not existing or existing.payload.get("input_fingerprint") != inputs["input_fingerprint"]:
+                raise
+            job = existing
+        return _job_response(job)
 
     @router.post("/reference-outlines", status_code=status.HTTP_201_CREATED)
     def register_reference_outline(

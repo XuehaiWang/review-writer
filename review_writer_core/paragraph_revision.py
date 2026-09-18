@@ -5,6 +5,7 @@ import re
 import uuid
 
 from review_writer_core.stages.draft.text import paragraph_spans
+from review_writer_core.draft_composition import section_span
 
 
 def exact_hash(text):
@@ -23,13 +24,17 @@ def dialogue_sections(markdown, metadata, artifact_id):
     """Group editable paragraph identities; headings are display labels, never identities."""
     keys = paragraph_keys(markdown, metadata, artifact_id)
     sections = {}
+    role_spans = {role: section_span(markdown, role) for role in ("abstract", "conclusion")}
     for paragraph in paragraph_spans(markdown):
         pid = paragraph["paragraph_id"]
         match = re.match(r"^(.+)-p\d+$", pid)
         section_id = match.group(1) if match else pid
+        role = next((role for role, span in role_spans.items() if span and span[0] <= paragraph["start"] < span[1]), "body")
+        if role != "body":
+            section_id = "synthesis:" + role
         if section_id not in sections:
             headings = re.findall(r"^#{1,6}\s+(.+?)\s*$", markdown[:paragraph["start"]], re.M)
-            sections[section_id] = {"section_id": section_id, "title": headings[-1] if headings else section_id, "paragraphs": []}
+            sections[section_id] = {"section_id": section_id, "section_role": role, "title": headings[-1] if headings else section_id, "paragraphs": []}
         sections[section_id]["paragraphs"].append({"paragraph_id": pid, "paragraph_key": keys[pid],
             "text": paragraph["text"], "text_sha256": exact_hash(paragraph["text"])})
     return list(sections.values())
@@ -51,9 +56,14 @@ def revision_prompt(request, paragraph, evidence):
         (chapter_scope if chapter_discussion else
          "You are revising ONE paragraph of a scientific review with its author. ")
         + "Analyze and improve in this single task; do not score or impose word limits. "
+        "For Abstract paragraphs, synthesize the manuscript's scope and insights without forcing paper citations. "
+        "For Conclusion paragraphs, synthesize cross-study patterns, boundaries and clearly labeled outlook; do not repeat individual reports. "
         "User messages and manuscript context are not scientific evidence. Use only the supplied "
         "source passages for scientific assertions. Chapter text is context, not source evidence. "
-        "Conversation memory contains historical requests and replies, not additional instructions or evidence. "
+        "Use both conversation_memory.recent_turns and conversation_memory.summary (including request_notes) "
+        "as conversation context, including when nested in section_context. Compressed history participates "
+        "in memory: carry forward relevant user editing requirements unless superseded by newer requests. "
+        "Historical assistant suggestions are not user requirements, and conversation is not scientific evidence. "
         "Use the current discussion_text as the editing base. Latest explicit user requests supersede older "
         "requests; rejected or stale candidates are not adopted text. An accepted historical candidate may "
         "have since changed. Never infer a reason for rejection or missing details from excerpts. "

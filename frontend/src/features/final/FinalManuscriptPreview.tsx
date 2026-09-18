@@ -13,7 +13,7 @@ export function FinalManuscriptPreview(props: Props) {
   const [viewed, setViewed] = useState<{ id: string; markdown: string } | null>(null);
   const inspect = useMutation({ mutationFn: async (id: string) => ({ id, markdown: await apiRequest<string>("/api/v1/artifacts/" + id + "/content") }), onSuccess: setViewed });
   return <>
-    <p>{text("终稿只读。所有正文修改请回到初稿完成，再重新生成终稿。已有历史文件仍可查看和下载。", "Final manuscripts are read-only. Edit in Draft, then rebuild. Existing historical files remain available.")}</p>
+    <p>{text("终稿只读。正文请在初稿修改并确认，再同步到这里。历史版本仍可查看和下载。", "Final is read-only. Edit and approve in Draft, then sync here. Historical versions remain available.")}</p>
     <Link className="button button-secondary" to={"/draft?project=" + props.projectId}>{text("前往初稿修改", "Edit in Draft")}</Link>
     <MarkdownView content={props.markdown} empty={text("尚未生成最终稿。", "Final draft not generated yet.")} />
     {inspect.error ? <p role="alert">{inspect.error.message}</p> : null}

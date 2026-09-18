@@ -1,7 +1,14 @@
 name: review-writer
 
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   postgres:
+    logging: *bounded-logging
     image: postgres:17.11-bookworm
     environment:
       POSTGRES_DB: ${REVIEW_WRITER_POSTGRES_DB:-review_writer}
@@ -19,6 +26,7 @@ services:
     restart: unless-stopped
 
   migrate:
+    logging: *bounded-logging
     image: review-writer-api:${REVIEW_WRITER_IMAGE_TAG:-latest}
     build:
       context: .
@@ -46,6 +54,7 @@ services:
     restart: "no"
 
   pdf-renderer:
+    logging: *bounded-logging
     image: review-writer-pdf-renderer:${REVIEW_WRITER_IMAGE_TAG:-latest}
     build:
       context: .
@@ -76,6 +85,7 @@ services:
     restart: unless-stopped
 
   model-gateway:
+    logging: *bounded-logging
     image: review-writer-api:${REVIEW_WRITER_IMAGE_TAG:-latest}
     build:
       context: .
@@ -134,6 +144,7 @@ services:
   # Keep the original service name for upgrade compatibility, but dedicate it
   # to scientific writing so PDF parsing and image jobs cannot occupy its pool.
   worker: &worker-common
+    logging: *bounded-logging
     image: review-writer-api:${REVIEW_WRITER_IMAGE_TAG:-latest}
     build:
       context: .
@@ -216,6 +227,7 @@ services:
   # Full-text extraction, semantic indexing, and document publication share a
   # separate pool because these jobs are long-running and I/O heavy.
   worker-ingest-document:
+    logging: *bounded-logging
     <<: *worker-common
     command:
       [
@@ -232,6 +244,7 @@ services:
 
   # Bibliography lookups cannot occupy upload/index or writing workers.
   worker-bibliography:
+    logging: *bounded-logging
     <<: *worker-common
     command:
       ["python", "-m", "review_writer_api.worker_main", "--review-root", "/app",
@@ -240,6 +253,7 @@ services:
   # Image generation/editing has an independent low-concurrency pool so it
   # neither blocks writing nor creates an uncontrolled provider burst.
   worker-image:
+    logging: *bounded-logging
     <<: *worker-common
     command:
       [
@@ -255,6 +269,7 @@ services:
       ]
 
   api:
+    logging: *bounded-logging
     image: review-writer-api:${REVIEW_WRITER_IMAGE_TAG:-latest}
     build:
       context: .
