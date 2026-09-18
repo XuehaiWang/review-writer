@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-import httpx
+import httpx2 as httpx
 import threading
 import uuid
 import zipfile
@@ -279,7 +279,9 @@ class FinalV1Tests(NativeFigureApiTestCase):
             )
             self.prepare_approved_draft(client)
             ready = client.get(f"/api/v1/projects/{self.project_id}/final")
-        self.assertEqual(409, blocked.status_code, blocked.text)
+        self.assertEqual(404, blocked.status_code, blocked.text)
+        self.assertEqual("WORKFLOW_STAGE_NOT_READY", blocked.json()["error"]["code"])
+        self.assertEqual("discovery", blocked.json()["error"]["details"]["next_stage"])
         self.assertEqual(200, ready.status_code, ready.text)
         self.assertTrue(ready.json()["draft_approval_current"])
 
