@@ -61,7 +61,10 @@ class DraftFinalFrontendV1Tests(unittest.TestCase):
         self.assertNotIn('startJob("conclusion")', source)
         self.assertNotIn('startJob("overview")', source)
         composition = (DRAFT.parent / "DraftCompositionPanel.tsx").read_text(encoding="utf-8")
-        for token in ('run.mutate("abstract")', 'run.mutate("conclusion")', 'run.mutate("overview")', '/overview-text'):
+        for token in (
+            'open("abstract")', 'open("conclusion")', 'open("overview")',
+            'run.mutate(kind)', '/synthesis/', '/overview/adopt',
+        ):
             self.assertIn(token, composition)
 
     def test_native_errors_are_parsed_and_cancel_states_are_shared(self) -> None:
