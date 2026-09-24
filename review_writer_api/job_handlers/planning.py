@@ -10,6 +10,7 @@ from pathlib import Path
 from review_writer_api.errors import WorkflowError
 from review_writer_api.job_handlers.support import matrix_live_payload as _matrix_live_payload
 from review_writer_api.security import Principal, Role
+from review_writer_api.model_concurrency import text_parallelism
 
 
 class PlanningJobHandlers:
@@ -41,9 +42,8 @@ class PlanningJobHandlers:
         self._write_json(checkpoint_path, payload.get("blueprint_checkpoint") or {})
         settings = getattr(getattr(self, "model_gateway", None), "settings", None)
         limits = dict(payload.get("academic_planning_limits") or {})
-        limits["section_concurrency"] = max(1, min(3, int(limits.get("section_concurrency", 2)),
-            int(getattr(settings, "model_gateway_max_concurrency", os.environ.get("REVIEW_WRITER_MODEL_GATEWAY_CONCURRENCY", 2))),
-            int(getattr(settings, "model_gateway_user_concurrency", os.environ.get("REVIEW_WRITER_MODEL_GATEWAY_USER_CONCURRENCY", 1)))))
+        slots = text_parallelism(settings, getattr(getattr(self, "model_gateway", None), "session_factory", None))
+        limits["section_concurrency"] = max(1, min(slots, int(limits.get("section_concurrency", slots))))
         inputs = {**payload, "academic_planning_limits": limits}
         self._write_json(staging / "blueprint-input.json", inputs)
         previous = None
@@ -191,6 +191,9 @@ class PlanningJobHandlers:
                     answered.add(request_id)
             report_progress()
         normal, secrets = self._text_gateway_environment(context)
+        if (getattr(context, "job_type", "") == "matrix.enrich" and self.model_gateway is not None
+                and os.environ.get("REVIEW_WRITER_DELEGATED_MODEL_ENABLED") == "1"):
+            normal["REVIEW_WRITER_DELEGATE_MODEL_CALLS"] = "1"
         self.runner.run(
             [
                 sys.executable,
@@ -209,6 +212,8 @@ class PlanningJobHandlers:
                 str(progress_path),
                 "--checkpoint",
                 str(checkpoint_path),
+                "--max-new-papers",
+                "1",
                 *(["--evidence-request", str(request_path), "--evidence-response", str(response_path)]
                   if planning is not None else []),
             ],
@@ -219,6 +224,7 @@ class PlanningJobHandlers:
             secret_env=secrets,
             cancel_requested=context.cancellation_requested,
             progress_callback=progress_callback,
+            max_attempts=1,
             timeout_seconds=max(
                 30 * 60,
                 min(

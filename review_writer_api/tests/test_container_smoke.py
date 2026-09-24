@@ -35,6 +35,22 @@ class ContainerConfigurationTests(unittest.TestCase):
         self.assertIn('REVIEW_WRITER_API_EXECUTE_JOBS: "false"', source)
         self.assertIn("review_writer_api.gateway_main", source)
         self.assertIn("review_writer_api.worker_main", source)
+        self.assertIn(
+            "scale: ${REVIEW_WRITER_SCIENTIFIC_WORKER_REPLICAS:-2}", source
+        )
+        self.assertIn('"${REVIEW_WRITER_SCIENTIFIC_WORKERS:-3}"', source)
+        self.assertEqual(5, source.count("    scale: 1"))
+        self.assertIn('"--queues", "scientific,ingest,document,bibliography,model"', source)
+        self.assertIn('"${REVIEW_WRITER_FLEX_WORKERS:-2}"', source)
+        self.assertIn('"${REVIEW_WRITER_IMAGE_WORKERS:-4}"', source)
+        self.assertIn('"--queues", "model"', source)
+        self.assertEqual(
+            3,
+            source.count(
+                "REVIEW_WRITER_MODEL_GATEWAY_CONCURRENCY: "
+                "${REVIEW_WRITER_MODEL_GATEWAY_CONCURRENCY:-8}"
+            ),
+        )
         gateway_block = source.split("  model-gateway:", 1)[1].split(
             "\n  worker:", 1
         )[0]

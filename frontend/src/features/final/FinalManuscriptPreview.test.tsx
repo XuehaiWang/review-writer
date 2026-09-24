@@ -1,9 +1,39 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+import { apiRequest } from "../../api/client";
+vi.mock("../../api/client", () => ({ apiRequest: vi.fn() }));
 import { FinalManuscriptPreview } from "./FinalManuscriptPreview";
 afterEach(cleanup);
+it("supports focused reading and a chapter directory without editing the manuscript", async () => {
+  const client = new QueryClient();
+  const scroll = vi.fn();
+  HTMLElement.prototype.scrollIntoView = scroll;
+  const { container } = render(<MemoryRouter><QueryClientProvider client={client}><FinalManuscriptPreview projectId="p" markdown={"# Title\n\n## Introduction\n\nOriginal text\n\n## Results\n\n![Scheme](/api/v1/artifacts/img/content)"} versions={[]} /></QueryClientProvider></MemoryRouter>);
+  fireEvent.click(screen.getByRole("button", { name: /专注阅读|Focused reading/ }));
+  expect(container.querySelector(".final-reader")).toHaveClass("is-focused");
+  fireEvent.click(screen.getByText(/章节目录|Contents/));
+  fireEvent.click(screen.getByRole("button", { name: "Results" }));
+  expect(scroll).toHaveBeenCalled();
+  expect(screen.getByRole("heading", { name: "Results" })).toHaveFocus();
+  expect(screen.getByAltText("Scheme")).toBeVisible();
+  expect(screen.getByText("Original text")).toBeVisible();
+  expect(screen.queryByRole("textbox")).toBeNull();
+  client.clear();
+});
+it("shows historical content in the same reader and can return to current content", async () => {
+  vi.mocked(apiRequest).mockResolvedValue("# Historical manuscript");
+  const client = new QueryClient();
+  render(<MemoryRouter><QueryClientProvider client={client}><FinalManuscriptPreview projectId="p" markdown="# Current manuscript" versions={[{ artifact_id: "old", current: false, operation: "build", created_at: "yesterday" }]} /></QueryClientProvider></MemoryRouter>);
+  fireEvent.click(screen.getByText(/终稿版本历史|Final version history/));
+  fireEvent.click(screen.getByRole("button", { name: /查看版本|View version/ }));
+  expect(await screen.findByRole("heading", { name: "Historical manuscript" })).toBeVisible();
+  expect(screen.queryByRole("heading", { name: "Current manuscript" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /返回当前终稿|Return to current final/ }));
+  expect(screen.getByRole("heading", { name: "Current manuscript" })).toBeVisible();
+  client.clear();
+});
 it("previews Final read-only with navigation to Draft and historical downloads", () => {
   const client = new QueryClient();
   render(<MemoryRouter><QueryClientProvider client={client}><FinalManuscriptPreview projectId="p" markdown="Saved final" versions={[{ artifact_id: "old", current: false, operation: "final-build", created_at: "yesterday" }]} /></QueryClientProvider></MemoryRouter>);

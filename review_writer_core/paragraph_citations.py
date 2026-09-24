@@ -16,7 +16,14 @@ def render_paragraph_citations(rows):
             pending.clear()
 
     for text, citation, kind in rows:
-        identity = (citation, kind)
+        if not citation:
+            flush()
+            output.append(text)
+            previous, words = None, 0
+            continue
+        # Internal labels for direct reports do not change citation scope.
+        scope = "direct_report" if kind in {"reported_finding", "reported_data", "direct_source_report"} else kind
+        identity = (citation, scope)
         count = len(text.split())
         ambiguous = bool(re.search(r'["“”«»]|\[\d', text)) or not kind or any(
             value in kind for value in ("inference", "interpretation", "comparison", "synthesis"))

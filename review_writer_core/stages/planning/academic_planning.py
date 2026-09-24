@@ -429,7 +429,7 @@ def enhance_blueprint(prepared, *, model_call, checkpoint, report):
     sections, unused = plan_structure(prepared, model_call, checkpoint)
     checkpoint["sections"] = {s["section_id"]: previous[s["section_id"]] for s in sections if s["section_id"] in previous}
     blueprint.update(sections=sections, unused_papers=unused, argument_contract=ARGUMENT_CONTRACT, evidence_mode="source_passages/1")
-    concurrency = max(1, min(3, int((prepared.get("academic_planning_limits") or {}).get("section_concurrency", 2))))
+    concurrency = max(1, min(8, int((prepared.get("academic_planning_limits") or {}).get("section_concurrency", 4))))
     completed = 0
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         pending = {}

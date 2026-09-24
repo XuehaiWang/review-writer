@@ -36,6 +36,29 @@ function mount() {
   return render(<StrictMode><QueryClientProvider client={client}><MemoryRouter><FinalPage /></MemoryRouter></QueryClientProvider></StrictMode>);
 }
 const posts = () => vi.mocked(apiRequest).mock.calls.filter(([, options]) => options?.method === "POST");
+it("omits the redundant overview status from the sidebar", async () => {
+  Object.assign(payload, { final_artifact_id: "f", final_current: true,
+    overview_figure_exists: true, overview_figure_current: false });
+  const { container } = mount();
+  await screen.findByText("Final outputs");
+  const summary = container.querySelector(".final-status-summary");
+  expect(summary).not.toHaveTextContent("Overview figure");
+  expect(summary).toHaveTextContent("Final draft");
+  expect(summary).toHaveTextContent("PDF");
+});
+it("omits overview controls from publication information but retains the manuscript image", async () => {
+  Object.assign(payload, { final_artifact_id: "f", final_current: true,
+    final_draft_md: "# Review\n\n![Review overview](/api/v1/artifacts/overview/content)",
+    overview_figure_exists: true, overview_figure_current: true });
+  mount();
+  expect(await screen.findByAltText("Review overview")).toHaveAttribute("src", "/api/v1/artifacts/overview/content");
+  fireEvent.click(screen.getByText("Publication information and checks"));
+  fireEvent.click(screen.getByRole("button", { name: "Publication information" }));
+  expect(screen.getByText("Authors and affiliations")).toBeVisible();
+  expect(screen.queryByText("Review overview figure")).not.toBeInTheDocument();
+  expect(screen.queryByAltText("Review overview")).not.toBeInTheDocument();
+  expect(posts()).toHaveLength(0);
+});
 it("assembles the first approved draft once with an idempotent request", async () => {
   mount();
   await waitFor(() => expect(posts()).toHaveLength(1));

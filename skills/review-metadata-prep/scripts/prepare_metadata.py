@@ -33,8 +33,9 @@ if str(REVIEW_ROOT) not in sys.path:
 from review_writer_core.metadata_tags import (  # noqa: E402
     STRUCTURED_TAG_KEYS,
     neutral_structured_tag_values,
-    structured_tags_are_verified,
 )
+from review_writer_core.abstract_extraction import extract_abstract  # noqa: E402
+from review_writer_core.metadata_quality import update_quality  # noqa: E402
 from review_writer_core.document_front_matter import (  # noqa: E402
     extract_markdown_title,
     looks_like_placeholder_title,
@@ -319,116 +320,6 @@ def extract_keywords(blocks: list[dict[str, Any]], md: str) -> dict[str, Any]:
     return scored(keywords[:12], "content_list_keywords_region", 0.86 if keywords else 0.0)
 
 
-def extract_abstract(blocks: list[dict[str, Any]], md: str) -> dict[str, Any]:
-    texts = block_texts(blocks, max_page=2)
-    for i, text in enumerate(texts[:80]):
-        compact = re.sub(r"\s+", "", text).lower()
-        if compact in {"abstract", "abstract:"} or compact == "abstract":
-            parts: list[str] = []
-            for nxt in texts[i + 1 : i + 35]:
-                if re.match(r"^\d+\.\s+[A-Z]", nxt) or re.search(r"\bintroduction\b", nxt, re.I):
-                    break
-                if len(nxt) > 30:
-                    parts.append(nxt)
-            abstract = clean_text(" ".join(parts))
-            if len(abstract) > 150:
-                return scored(abstract, "content_list_abstract_region", 0.84)
-        if text.lower().startswith("abstract:"):
-            abstract = clean_text(text.split(":", 1)[1])
-            if len(abstract) > 150:
-                return scored(abstract, "content_list_inline_abstract", 0.84)
-    m = re.search(r"#\s*A\s*B\s*S\s*T\s*R\s*A\s*C\s*T\s*(.+?)(?:\n#\s*\d+\.|\n#\s*1\.|\n#\s*Introduction)", md, re.I | re.S)
-    if m:
-        abstract = clean_text(re.sub(r"\n+", " ", m.group(1)))
-        if len(abstract) > 80:
-            return scored(abstract, "markdown_abstract_heading", 0.82)
-    m = re.search(r"\bAbstract:\s*(.+?)(?:\n\s*#\s*Introduction|\n\s*#|\n\n#)", md, re.I | re.S)
-    if m:
-        abstract = clean_text(re.sub(r"\n+", " ", m.group(1)))
-        if len(abstract) > 80:
-            return scored(abstract, "markdown_inline_abstract", 0.82)
-    intro = extract_intro_work_summary(md)
-    if intro:
-        return scored(intro, "markdown_introduction_ending_summary", 0.72)
-    title_idx = None
-    author_idx = None
-    affiliation_like_re = re.compile(
-        r"\b("
-        r"university|institute|laboratory|lab\b|department|school|academy|"
-        r"state key laboratory|academy of sciences|college|hospital|center|centre|"
-        r"road|street|avenue|lu\b|china|usa|p\.?\s*r\.?\s*china|"
-        r"shanghai|beijing|dalian|guangzhou|nanjing|wuhan|chengdu"
-        r")\b",
-        re.I,
-    )
-    abstract_signal_re = re.compile(
-        r"\b("
-        r"herein|we report|we describe|we disclose|we present|we developed|we have developed|"
-        r"we demonstrate|we herein report|this paper|this work|this study|"
-        r"a method|an efficient method|a practical method|protocol|procedure|"
-        r"approach|strategy|transformation|construction|formation|access to|"
-        r"is described|is reported|is disclosed|has been developed|has been achieved|"
-        r"provides|enable(?:s|d)?|furnish(?:es|ed)?|deliver(?:s|ed)?|using|via|"
-        r"enantioselective|asymmetric|selective|stereoselective|regioselective|chemoselective|"
-        r"cataly[sz]ed|synthesis|prepared|afforded|reaction|under mild conditions|"
-        r"in good yields|with high ee|with excellent"
-        r")\b",
-        re.I,
-    )
-    for i, block in enumerate(blocks[:20]):
-        text = clean_text(str(block.get("text") or ""))
-        if block.get("text_level") == 1 and len(text) > 20 and not looks_like_section_heading(text):
-            title_idx = i
-            continue
-        if title_idx is not None and author_idx is None and 5 <= len(text) <= 260:
-            if re.search(r"\b[A-Z][a-z]+", text) and ("," in text or " and " in text):
-                author_idx = i
-                continue
-        if author_idx is not None and i > author_idx:
-            if block.get("type") == "text" and 100 <= len(text) <= 1600:
-                if not re.search(r"\b(introduction|keywords|received|accepted|cite this)\b", text[:80], re.I):
-                    if affiliation_like_re.search(text):
-                        continue
-                    if not abstract_signal_re.search(text):
-                        continue
-                    return scored(text, "content_list_first_paragraph_after_authors", 0.68)
-    return scored("", "rule_not_found", 0.0)
-
-
-def extract_intro_work_summary(md: str) -> str:
-    intro_match = re.search(
-        r"\n#\s*(?:\d+\.?\s*)?Introduction\s*(.+?)(?:\n#\s*(?:\d+\.?\s*)?[A-Z])",
-        md,
-        re.I | re.S,
-    )
-    if not intro_match:
-        return ""
-    intro = intro_match.group(1)
-    intro = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", intro)
-    intro = re.sub(r"\$([^$]+)\$", r"\1", intro)
-    intro = clean_text(intro)
-    if len(intro) < 200:
-        return ""
-    sentences = re.split(r"(?<=[.!?])\s+", intro)
-    sentences = [clean_text(s) for s in sentences if clean_text(s)]
-    if len(sentences) < 2:
-        return ""
-    tail = sentences[-5:]
-    signal_re = re.compile(
-        r"\b("
-        r"herein|in this work|in this paper|in this study|we report|we describe|we disclose|"
-        r"we present|we developed|we have developed|we demonstrate|to address this|"
-        r"based on this|using this|this work|this paper"
-        r")\b",
-        re.I,
-    )
-    selected = [s for s in tail if signal_re.search(s)]
-    if not selected:
-        return ""
-    summary = clean_text(" ".join(selected[-3:]))
-    return summary if len(summary) > 120 else ""
-
-
 def extract_doi(md: str) -> dict[str, Any]:
     return extract_front_matter_doi(md)
 
@@ -671,23 +562,6 @@ def merge_llm(base: dict[str, Any], llm: dict[str, Any]) -> dict[str, Any]:
     return base
 
 
-def normalize_structured_tags(value: Any) -> dict[str, str]:
-    tags: dict[str, str] = {}
-    if isinstance(value, dict):
-        for key in STRUCTURED_TAG_KEYS:
-            raw = clean_text(str(value.get(key) or "not specified"))
-            tags[key] = raw or "not specified"
-    else:
-        tags = {key: "not specified" for key in STRUCTURED_TAG_KEYS}
-    return tags
-
-
-def structured_tag_values(meta: dict[str, Any]) -> dict[str, str]:
-    field = meta.get("structured_tags")
-    value = field.get("value") if isinstance(field, dict) else None
-    return normalize_structured_tags(value)
-
-
 def apply_structured_tags_to_compat_fields(meta: dict[str, Any]) -> None:
     for key in [
         "keywords",
@@ -711,56 +585,6 @@ def has_value(value: Any) -> bool:
     return True
 
 
-def update_quality(meta: dict[str, Any]) -> None:
-    missing: list[str] = []
-    warnings: list[str] = list(meta.get("quality", {}).get("warnings", []))
-    for key in ["title", "abstract"]:
-        if not has_value(meta.get(key, {}).get("value")):
-            missing.append(key)
-    for key in ["authors"]:
-        if not has_value(meta.get(key, {}).get("value")):
-            warnings.append(f"empty_{key}")
-    for key in ["year"]:
-        if not has_value(meta.get(key, {}).get("value")):
-            missing.append(key)
-    for key in ["journal", "doi"]:
-        if not has_value(meta.get(key, {}).get("value")):
-            warnings.append(f"missing_{key}")
-    # Project-neutral metadata intentionally leaves reusable Tags empty until
-    # a human verifies the complete field.  Treating those neutral placeholders
-    # as quality defects recreated the old "Metadata must be tagged" workflow
-    # through warnings even though retrieval no longer trusts automatic Tags.
-    if structured_tags_are_verified(meta):
-        structured = structured_tag_values(meta)
-        for key, value in structured.items():
-            if not value or value.lower() == "not specified":
-                warnings.append(f"structured_tag_not_specified_{key}")
-    confidences = []
-    confidence_keys = [
-        "title",
-        "authors",
-        "year",
-        "journal",
-        "doi",
-        "abstract",
-    ]
-    if structured_tags_are_verified(meta):
-        confidence_keys.append("structured_tags")
-    for key in confidence_keys:
-        field = meta.get(key)
-        if isinstance(field, dict):
-            confidences.append(float(field.get("confidence") or 0))
-    overall = sum(confidences) / len(confidences) if confidences else 0
-    if float(meta.get("title", {}).get("confidence") or 0) < 0.75:
-        warnings.append("low_confidence_title")
-    if float(meta.get("abstract", {}).get("confidence") or 0) < 0.75:
-        warnings.append("low_confidence_abstract")
-    meta["quality"] = {
-        "missing_fields": dedupe(missing),
-        "warnings": dedupe(warnings),
-        "overall_confidence": round(overall, 3),
-        "needs_human_check": bool(missing or warnings or meta.get("human_review", {}).get("status") != "reviewed"),
-    }
 
 
 def existing_metadata(path: Path) -> dict[str, Any] | None:
@@ -785,15 +609,16 @@ def build_metadata(
     slug = str(job.get("slug") or slugify(job.get("pdf_name") or paper_id))
     blocks = load_blocks(content_path)
     md = markdown_head(md_path)
+    pdf_first_page_text = (
+        read_pdf_first_page_text(pdf_path)
+        if isinstance(pdf_path, Path) and pdf_path.is_file()
+        else ""
+    )
     mineru_bibliography = extract_mineru_bibliography(
         blocks,
         md,
         filename=str(job.get("pdf_name") or slug),
-        pdf_first_page_text=(
-            read_pdf_first_page_text(pdf_path)
-            if isinstance(pdf_path, Path) and pdf_path.is_file()
-            else ""
-        ),
+        pdf_first_page_text=pdf_first_page_text,
     )
     local_fields = dict(mineru_bibliography.get("fields") or {})
     title = local_fields.get("title") or extract_title(blocks, md, slug)
@@ -801,7 +626,7 @@ def build_metadata(
         None, "awaiting_bounded_document_resolution", 0.0
     )
     keywords = extract_keywords(blocks, md)
-    abstract = extract_abstract(blocks, md)
+    abstract = extract_abstract(blocks, markdown_head(md_path, 200_000), pdf_first_page_text)
     publication = extract_publication_metadata(md, job.get("pdf_name") or slug)
     year = local_fields.get("year") or publication["year"]
     doi_candidate = extract_doi(md)

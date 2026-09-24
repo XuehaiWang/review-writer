@@ -205,15 +205,6 @@ def _title_from_text(text: str, filename: str) -> str:
     return re.sub(r"[_-]+", " ", Path(filename).stem).strip()
 
 
-def _abstract_from_text(text: str) -> str:
-    match = re.search(
-        r"(?:^|\n)\s*abstract\s*[:.\-]?\s*(.{80,5000}?)(?=\n\s*(?:keywords?|introduction|1\.?\s+introduction)\b)",
-        text,
-        re.I | re.S,
-    )
-    return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
-
-
 def _markdown_document(title: str, page_texts: list[str]) -> str:
     parts = [f"# {title}", ""]
     for index, text in enumerate(page_texts, start=1):
@@ -641,9 +632,6 @@ def ingest_local_pdf(review_root: Path, original_filename: object, staged_pdf: P
             # only a genuinely missing/uncertain byline.
             if "doi" not in metadata:
                 metadata["doi"] = _field(None, "awaiting_bibliography_verification", 0.0)
-            abstract = _abstract_from_text(extracted_text)
-            if abstract and not (metadata.get("abstract") or {}).get("value"):
-                metadata["abstract"] = _field(abstract, "pdf_text_abstract_region", 0.78)
             metadata["source_file"].update(
                 {
                     "pdf_name": filename,

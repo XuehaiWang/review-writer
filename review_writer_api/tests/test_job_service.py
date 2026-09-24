@@ -20,6 +20,7 @@ from review_writer_api.app import create_app
 from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User
 from review_writer_api.errors import WorkflowConflict
+from review_writer_api.job_service import JobYieldRequested
 from review_writer_api.security import Principal, Role
 from review_writer_api.workflow_repository import WorkflowRepository
 
@@ -37,6 +38,31 @@ def job_service_class():
 
 
 class JobServiceTests(unittest.TestCase):
+    def test_compatibility_executor_wakes_delayed_job_without_busy_loop(self) -> None:
+        calls = 0
+
+        def resumable(_context, _payload):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise JobYieldRequested(delay_seconds=1, queue_reason="provider_rate_limit")
+            return {"resumed": True}
+
+        self.service.register_handler("sections.generate", resumable)
+        job = self.service.submit(self.principal, scope="project", project_id=self.project_id,
+                                  job_type="sections.generate", idempotency_key="delayed", payload={})
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            queued = self.service.status(self.principal, job.id)
+            if queued.next_run_at is not None:
+                break
+            time.sleep(0.01)
+        self.assertIsNotNone(queued.next_run_at)
+        time.sleep(0.2)
+        self.assertEqual(1, calls)
+        self.assertEqual("succeeded", self._wait_for(job.id, timeout=4).status)
+        self.assertEqual(2, calls)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         database_path = Path(self.temporary.name) / "jobs.sqlite3"

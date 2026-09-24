@@ -1,3 +1,4 @@
+import { LocalizedError } from "../../components/LocalizedError";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -15,10 +16,10 @@ import { CandidateBrowser } from "./CandidateBrowser";
 import { type DialogueCandidate, type DialogueParagraph } from "./ParagraphDialogue";
 import { SectionDialogue, type DialogueSection } from "./SectionDialogue";
 import { hasDraftScratch } from "./useDraftScratch";
-import { DraftCompositionPanel, type SynthesisJob } from "./DraftCompositionPanel";
+import { DraftCompositionPanel, DraftSynthesisStatus, type SynthesisJob } from "./DraftCompositionPanel";
 import { DraftManuscriptFields } from "./DraftManuscriptFields";
 
-type Batch = { id: string; status: string; progress_current: number; progress_total: number; error_message?: string; result?: { paragraph_results?: Record<string, { paragraph_id: string; status: string; reason?: string }> } };
+type Batch = { id: string; status: string; progress_current: number; progress_total: number; error_message?: string; result?: { coherence_plan?: { status: string }; paragraph_results?: Record<string, { paragraph_id: string; status: string; reason?: string }> } };
 type DraftPayload = { revision: number; draft_artifact_id: string; first_draft_md: string; manuscript_preview_md?: string; paragraphs: DialogueParagraph[];
   synthesis_job?: SynthesisJob;
   synthesis_stale?: boolean;
@@ -116,12 +117,11 @@ function DraftWorkspace({ projectId, userId }: { projectId: string; userId: stri
   const combined = data.paragraphs.map(p => ({ ...p, text: selectedCandidates.find(c => c.paragraph_key === p.paragraph_key)?.candidate_text || p.text }));
   const duplicateText = combined.some((p, i) => combined.slice(0, i).some(other => other.text.trim() === p.text.trim()));
   return <>
-    {jobIsActive(data.synthesis_job?.status) ? <p role="status">{text("正在补齐摘要或结论；你可以查看正文，当前批量任务不会中途增加段落。", "Synthesis is running; existing batch tasks keep their original paragraph snapshot.")}</p> : null}
-    {data.synthesis_job?.status === "failed" ? <p role="status">{text("摘要/结论生成未完成，已有正文保留。点击“摘要”或“结论”可重新生成。", "Synthesis did not finish. Existing text is safe; open Abstract or Conclusion to retry.")}</p> : null}
+    <DraftSynthesisStatus job={data.synthesis_job} assembling={assemble.isPending} />
 
     {tab === "preview" && data.synthesis_stale ? <p role="status">{text("正文或结论已有更新，可按需更新摘要/结论，不影响确认和导出。", "Source text changed. Update synthesis if needed; approval and export remain available.")}</p> : null}
     {notice ? <p role="status" className="message">{notice}</p> : null}
-    {error ? <p role="alert" className="message message-error">{error.message}</p> : null}
+    {error ? <p role="alert" className="message message-error"><LocalizedError error={error} /></p> : null}
     {data.freshness.upstream_stale ? <section className="message message-warning"><p>{text("上游内容已变化，当前正文仍保留。重新组装前请先保留需要的编辑。", "Upstream content changed. Existing text is retained; preserve edits before reassembling.")}</p><button className="button button-secondary" disabled={assemble.isPending} onClick={() => assemble.mutate()}>{text("根据上游重新组装", "Reassemble from upstream")}</button></section> : null}
     {!data.draft_artifact_id ? <button className="button button-primary" disabled={assemble.isPending} onClick={() => assemble.mutate()}>{text("组装初稿", "Assemble draft")}</button> : <>
       <nav className="draft-main-toolbar button-row" aria-label={text("初稿工作区", "Draft workspace")}>
@@ -152,9 +152,10 @@ function DraftWorkspace({ projectId, userId }: { projectId: string; userId: stri
 
         {tab === "approval" ? <DraftApprovalPanel quality={data.quality?.current ? data.quality : {}} approved={data.draft_approval_current} busy={approve.isPending || data.freshness.upstream_stale} onApprove={() => approve.mutate()} onNext={() => navigate("/final?project=" + projectId)} onReview={choose} /> : null}
         {tab === "batch" ? <>
-          <h2>{text("分析并优化全部段落", "Analyze and revise all paragraphs")}</h2><p>{text("每段只分析优化一次。失败段落单独记录，其余继续；所有候选由你确认保存。", "One revision task per paragraph. Failures do not stop the rest. No candidate is saved without your confirmation.")}</p>
+          <h2>{text("分析并优化全部段落", "Analyze and revise all paragraphs")}</h2><p>{text("先检查全文，再优化需要调整的段落；未通过检查的修改不会替换原文。候选由你确认保存。", "Review the manuscript, then revise where needed. Unverified changes retain the original. Confirm candidates to save them.")}</p>
           <button className="button button-primary" disabled={activeBatch || batch.isPending || data.freshness.upstream_stale} onClick={() => batch.mutate()}>{text("开始批量分析优化", "Start batch revision")}</button>
           {data.dialogue_batch_job ? <section className="draft-batch-status" role="status"><p>{data.dialogue_batch_job.status} · {data.dialogue_batch_job.progress_current}/{data.dialogue_batch_job.progress_total || data.paragraphs.length}</p><progress max={data.dialogue_batch_job.progress_total || data.paragraphs.length} value={data.dialogue_batch_job.progress_current} />
+            {!activeBatch && ["unavailable", "partial"].includes(data.dialogue_batch_job.result?.coherence_plan?.status || "") ? <p>{text("本轮已按局部范围处理，当前正文已保留。", "This run used a limited review scope. Saved text was preserved.")}</p> : null}
             {activeBatch ? <button className="button button-secondary" disabled={cancel.isPending} onClick={() => cancel.mutate()}>{text("取消批量任务", "Cancel batch")}</button> : null}
             {["failed", "cancelled", "interrupted"].includes(data.dialogue_batch_job.status) ? <button className="button button-secondary" disabled={retry.isPending} onClick={() => retry.mutate()}>{text("继续未完成段落", "Resume unfinished paragraphs")}</button> : null}
             {data.dialogue_batch_job.error_message ? <p>{data.dialogue_batch_job.error_message}</p> : null}

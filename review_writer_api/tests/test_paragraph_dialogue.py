@@ -7,6 +7,50 @@ from review_writer_api.errors import WorkflowConflict
 
 
 class ParagraphDialogueTests(fixtures.DraftsV1Tests):
+    def test_global_plan_without_located_issues_keeps_paragraphs_without_rewriting(self):
+        with TestClient(self.app) as client:
+            self.prepare_draft(client)
+            base = f"/api/v1/projects/{self.project_id}/draft"
+            before = client.get(base).json()
+            self.coherence_plan = {"status": "complete", "issues": [],
+                "covered_ids": [p["paragraph_id"] for p in before["paragraphs"]]}
+            response = client.post(base + "/dialogue-batch", headers=self.headers("global-no-changes"))
+            self.assertEqual(202, response.status_code, response.text)
+            for _ in range(150):
+                job = client.get("/api/v1/jobs/" + response.json()["id"]).json()
+                if job["status"] not in {"queued", "running"}:
+                    break
+                time.sleep(.02)
+            self.assertEqual("succeeded", job["status"], job)
+            self.assertEqual("complete", job["result"]["coherence_plan"]["status"])
+            self.assertTrue(all(r.get("outcome") == "kept_original" for r in job["result"]["paragraph_results"].values()))
+            self.assertEqual(before["draft_artifact_id"], client.get(base).json()["draft_artifact_id"])
+
+    def test_automatic_candidate_checks_dependencies_without_staling_independent_candidates(self):
+        from review_writer_core.manuscript_coherence import candidate_fingerprint
+        from review_writer_core.paragraph_revision import exact_hash
+        with TestClient(self.app) as client:
+            self.prepare_draft(client)
+            service = self.app.state.drafts_service
+            paragraphs = service.get(self.first, self.project_id)["paragraphs"]
+            first, second = paragraphs[:2]
+            def make(paragraph, key, dependencies):
+                payload, _ = service.dialogue_payload(self.first, self.project_id, paragraph["paragraph_key"],
+                    message="Clarify wording", base_text_sha256=exact_hash(paragraph["text"]),
+                    use_saved=True, idempotency_key=key, include_memory=False)
+                payload["dialogue"].update(automatic_batch=True, dependency_hashes=dependencies)
+                text = paragraph["text"] + " Clear wording."
+                sources = [{"ref": "P1:1", "paper_id": "P1", "text": "Original evidence"}]
+                built = {"outcome": "candidate", "candidate_text": text, "reply": "Checked", "sources": sources,
+                    "validation_errors": [], "automatic_source_check": {"status": "supported", "fingerprint": candidate_fingerprint(text, sources)}}
+                return service.publish_dialogue(self.first, self.project_id, payload, built)["candidate_id"]
+            dependent = make(first, "dependent", {second["paragraph_id"]: exact_hash(second["text"])})
+            independent = make(second, "independent", {})
+            service.decide_dialogue(self.first, self.project_id, independent, decision="accept")
+            with self.assertRaisesRegex(WorkflowConflict, "Related manuscript"):
+                service.decide_dialogue(self.first, self.project_id, dependent, decision="accept")
+            self.assertEqual(first["text"], service.get(self.first, self.project_id)["paragraphs"][0]["text"])
+
     def test_initial_chapter_is_immutable_and_restart_is_isolated_until_acceptance(self):
         from review_writer_core.workflow.artifacts import DRAFT_INITIAL_MANUSCRIPT
         with TestClient(self.app) as client:
@@ -155,6 +199,8 @@ class ParagraphDialogueTests(fixtures.DraftsV1Tests):
         def rewrite(context, payload):
             if payload.get("revision_mode") != "dialogue":
                 return old(context, payload)
+            if payload["dialogue"].get("coherence_only"):
+                return {"coherence_plan": getattr(self, "coherence_plan", {"status": "unavailable", "issues": []})}
             if payload["dialogue"].get("route_only"):
                 return {"routing": {"mode": "revision", "targets": payload["dialogue"]["route_allowed_ids"], "related": []}}
             self.last_dialogue = payload["dialogue"]
@@ -195,8 +241,8 @@ class ParagraphDialogueTests(fixtures.DraftsV1Tests):
             self.assertEqual(current["draft_artifact_id"], service.get(self.first, self.project_id)["draft_artifact_id"])
             duplicate = self.start_turn(client, paragraph)
             self.assertEqual(job["id"], duplicate["id"])
-            with patch.object(service, "publish_accepted_rewrite", side_effect=AssertionError("No rescoring")):
-                result = client.post(f"/api/v1/projects/{self.project_id}/draft/dialogue-candidates/{candidate['candidate_id']}/accept")
+            self.assertFalse(hasattr(service, "publish_accepted_rewrite"))
+            result = client.post(f"/api/v1/projects/{self.project_id}/draft/dialogue-candidates/{candidate['candidate_id']}/accept")
             self.assertEqual(200, result.status_code, result.text)
             after = service.get(self.first, self.project_id)
             self.assertIn("Clear wording.", after["first_draft_md"])
@@ -205,7 +251,9 @@ class ParagraphDialogueTests(fixtures.DraftsV1Tests):
 
     def test_scored_http_writes_are_retired_but_approval_needs_no_report(self):
         for retired in ("publish_optimization", "auto_apply_optimization_proposal",
-                        "decide_optimization_proposal", "repair_accepted_optimization_quality"):
+                        "decide_optimization_proposal", "repair_accepted_optimization_quality",
+                        "rewrite_payload", "publish_rewrite_candidate", "accept_rewrite_payload",
+                        "publish_accepted_rewrite", "decide_rewrite"):
             self.assertFalse(hasattr(self.app.state.drafts_service, retired))
         with TestClient(self.app) as client:
             self.prepare_draft(client)

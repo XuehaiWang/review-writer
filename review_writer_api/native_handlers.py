@@ -19,6 +19,7 @@ from review_writer_api.job_handlers.figures import FigureJobHandlers
 from review_writer_api.job_handlers.library import LibraryJobHandlers
 from review_writer_api.job_handlers.planning import PlanningJobHandlers
 from review_writer_api.job_handlers.sections import SectionJobHandlers
+from review_writer_api.job_handlers.model_dispatch import ModelDispatchJobHandlers
 from review_writer_api.scientific_runner import ScientificRunner
 from review_writer_api.security import Principal, Role
 from review_writer_api.workspaces import HostedWorkspaceManager
@@ -58,6 +59,7 @@ class NativeWorkflowHandlers(
     LibraryJobHandlers,
     PlanningJobHandlers,
     SectionJobHandlers,
+    ModelDispatchJobHandlers,
     FinalJobHandlers,
 ):
     def __init__(
@@ -79,6 +81,7 @@ class NativeWorkflowHandlers(
 
     def mapping(self) -> dict[str, Any]:
         return {
+            "model.dispatch": self.model_dispatch,
             "library.search": self.library_search,
             "library.download": self.library_download,
             "library.bibliography-audit": self.library_bibliography_audit,

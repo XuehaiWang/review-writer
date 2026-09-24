@@ -5,6 +5,7 @@ from __future__ import annotations
 from review_writer_api.paper_labels import library_paper_labels
 
 from review_writer_core.stages.sections.source_writing import CONTRACT as SOURCE_CONTRACT, valid_source_claim, passage_eligible
+from review_writer_core.stages.sections.authoring import paragraph_is_current
 from review_writer_core.stages.sections.evidence_resolution import has_evidence_resolution, valid_pending_output
 
 import hashlib
@@ -31,7 +32,7 @@ from review_writer_api.errors import (
 from review_writer_api.figure_rules import image_size
 from review_writer_api.job_service import job_payload as _job_payload
 from review_writer_api.mineru_artifacts import mineru_storage_paths
-from review_writer_api.security import Permission, Principal
+from review_writer_api.security import Permission, Principal, Role
 from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
 from review_writer_core.review_structure import (
@@ -46,7 +47,7 @@ from review_writer_core.claim_contracts import (
     argument_projection,
     claim_is_executable,
 )
-from review_writer_core.section_narrative_contracts import apply_single_paper_policy
+from review_writer_core.section_narrative_contracts import apply_single_paper_policy, resolve_section_depth_contract
 from review_writer_core.evidence_integrity import normalize_retrieval_mode
 from review_writer_core.writing_contracts import derive_writing_scope_contract
 from review_writer_core.scientific_facts import (
@@ -316,6 +317,8 @@ class SectionsService(ArtifactBackedService):
             tasks.append(
                 {
                     "section_id": str(section["section_id"]),
+                    "depends_on_sections": [str(sid) for sid in section.get("depends_on_sections", [])]
+                        if isinstance(section.get("depends_on_sections"), list) else [],
                     "heading_level": section.get("heading_level", 2),
                     "parent_headings": section.get("parent_headings") or [],
                     "heading": str(section.get("title") or section["section_id"]),
@@ -338,9 +341,6 @@ class SectionsService(ArtifactBackedService):
                         "framing_synthesis"
                         if str(section.get("section_role") or "body")
                         == "introduction"
-                        else "cross_section_synthesis"
-                        if str(section.get("section_role") or "body")
-                        == "conclusion"
                         else "primary_evidence_synthesis"
                         if primary_papers
                         else "cross_section_synthesis"
@@ -363,11 +363,7 @@ class SectionsService(ArtifactBackedService):
                             else "provisional"
                         )
                     ),
-                    "depth_contract": (
-                        dict(section.get("depth_contract"))
-                        if isinstance(section.get("depth_contract"), dict)
-                        else {}
-                    ),
+                    "depth_contract": resolve_section_depth_contract(section),
                     "evidence_mode": SOURCE_CONTRACT,
                     "writing_objective": section.get("writing_objective") or section.get("section_thesis"),
                     "questions_to_answer": section.get("questions_to_answer") or [],
@@ -399,6 +395,17 @@ class SectionsService(ArtifactBackedService):
             )
         if not tasks:
             raise WorkflowConflict("Blueprint contains no usable section tasks.")
+        # Introduction frames the selected review, rather than a single assigned
+        # background paper. These are contextual sources, not primary obligations.
+        selected = list(dict.fromkeys(pid for task in tasks for pid in task["allowed_papers"]))
+        for task in tasks:
+            if task["section_role"] == "introduction":
+                task["context_papers"] = list(dict.fromkeys([
+                    *task["context_papers"],
+                    *(pid for pid in selected if pid not in task["primary_papers"]
+                      and pid not in task["supporting_papers"]),
+                ]))
+                task["allowed_papers"] = list(dict.fromkeys([*task["allowed_papers"], *selected]))
         return tasks
 
     @staticmethod
@@ -1424,7 +1431,7 @@ class SectionsService(ArtifactBackedService):
                 # One source chunk can be retrieved under several section
                 # questions.  Preserve its canonical identity while merging
                 # every fact identity attached by those scoped retrievals.
-                # Keeping only the first occurrence makes a later conclusion
+                # Keeping only the first occurrence makes another chapter
                 # appear to cite a fact outside the very same evidence key.
                 _merge_evidence_registry_row(registry, hit)
         return {
@@ -1565,7 +1572,7 @@ class SectionsService(ArtifactBackedService):
                         task.get("writing_mode")
                         if writeable
                         or str(task.get("section_role") or "body")
-                        in {"introduction", "conclusion"}
+                        == "introduction"
                         else "bounded_context_synthesis"
                     ),
                 }
@@ -1573,15 +1580,8 @@ class SectionsService(ArtifactBackedService):
             output.append(task)
         return output
 
-    def hydrate_tasks_with_evidence(
-        self,
-        principal: Principal,
-        project_id: str,
-        tasks: list[dict[str, Any]],
-        matrix_rows: list[dict[str, Any]],
-    ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, LibraryPaper]]:
-        """Build the one task/evidence projection used before and during jobs."""
-
+    def _generation_catalog(self, principal, tasks, matrix_rows):
+        """Cheap membership validation, without passage or vector retrieval."""
         matrix_by_id = {
             str(row.get("paper_id") or ""): row
             for row in matrix_rows
@@ -1603,6 +1603,17 @@ class SectionsService(ArtifactBackedService):
                 "Blueprint contains papers that are missing from the current Matrix or active Library.",
                 details={"paper_ids": missing},
             )
+        return matrix_by_id, catalog
+
+    def hydrate_tasks_with_evidence(
+        self,
+        principal: Principal,
+        project_id: str,
+        tasks: list[dict[str, Any]],
+        matrix_rows: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, LibraryPaper]]:
+        """Build the one task/evidence projection used before and during jobs."""
+        matrix_by_id, catalog = self._generation_catalog(principal, tasks, matrix_rows)
         evidence_package = self._evidence_package(
             principal,
             project_id,
@@ -1634,7 +1645,7 @@ class SectionsService(ArtifactBackedService):
         return hydrated, evidence_package, catalog
 
     def generation_payload(
-        self, principal: Principal, project_id: str
+        self, principal: Principal, project_id: str, *, defer_evidence: bool = False
     ) -> dict[str, Any]:
         principal.require(Permission.PROJECT_WRITE)
         project = self._owned_project(principal, project_id)
@@ -1673,6 +1684,18 @@ class SectionsService(ArtifactBackedService):
         matrix_rows = matrix.get("rows") if isinstance(matrix, dict) else None
         if not isinstance(matrix_rows, list):
             raise WorkflowConflict("The current Matrix is invalid.")
+        if defer_evidence:
+            self._generation_catalog(principal, tasks, matrix_rows)
+            state = self.repository.get_stage_state(principal.user_id, project_id, "sections")
+            return {
+                "project_id": project_id,
+                "source_blueprint_artifact_id": blueprint_artifact.id,
+                "source_matrix_artifact_id": matrix_artifact.id,
+                "source_outline_artifact_id": outline_artifact.id,
+                "tasks": tasks,
+                "expected_sections_revision": state.revision if state else 0,
+                "evidence_preparation_pending": True,
+            }
         tasks, evidence_package, catalog = self.hydrate_tasks_with_evidence(
             principal, project_id, tasks, matrix_rows
         )
@@ -1745,6 +1768,31 @@ class SectionsService(ArtifactBackedService):
                 for paper_id in assigned
             },
         }
+
+    def prepare_generation_job(self, context, payload):
+        """Prepare evidence once per job, in its existing disposable staging area."""
+        principal = Principal(context.user_id, frozenset({Role.USER}))
+        project_id = str(context.project_id)
+        self.validate_generation_inputs(principal, project_id, payload)
+        directory = self.artifacts.workspace_manager.trusted_user_directory(
+            context.user_id, ".review-writer", "job-staging", str(uuid.UUID(context.job_id))
+        )
+        cache = directory / "prepared-section-input.json"
+        if cache.is_file():
+            prepared = json.loads(cache.read_text(encoding="utf-8"))
+            self.validate_generation_inputs(principal, project_id, prepared)
+        else:
+            context.report_progress(0, len(payload.get("tasks") or []))
+            context.report_partial_result({"section_progress": {"phase": "preparing_evidence"}})
+            prepared = self.generation_payload(principal, project_id)
+            self.validate_generation_inputs(principal, project_id, payload)
+            context.checkpoint()
+            temporary = directory / f"prepared-section-input-{uuid.uuid4().hex}.tmp"
+            temporary.write_text(json.dumps(prepared, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(cache)
+        return {**payload, **prepared,
+                "expected_sections_revision": payload.get("expected_sections_revision", prepared.get("expected_sections_revision", 0)),
+                "evidence_preparation_pending": False}
 
     @staticmethod
     def _validate_academic_bundle(
@@ -1839,25 +1887,6 @@ class SectionsService(ArtifactBackedService):
             sid: writable_evidence_keys(registry.values(), {str(row.get("paper_id") or "") for row in registry.values()}) | {key for key, row in registry.items() if passage_eligible(row)}
             for sid, registry in scoped_evidence.items()
         }
-        body_claim_evidence_keys = {
-            evidence_key
-            for section_id, registry in scoped_evidence.items()
-            if task_roles.get(section_id, "body") == "body"
-            for evidence_key, item in registry.items()
-            if evidence_key in writable_keys_by_section[section_id]
-        }
-        body_fact_ids_by_evidence_key: dict[str, set[str]] = {}
-        for body_section_id, body_registry in scoped_evidence.items():
-            if task_roles.get(body_section_id, "body") != "body":
-                continue
-            for evidence_key, item in body_registry.items():
-                if evidence_key not in writable_keys_by_section[body_section_id]:
-                    continue
-                body_fact_ids_by_evidence_key.setdefault(evidence_key, set()).update(
-                    str(fact_id)
-                    for fact_id in item.get("fact_ids") or []
-                    if str(fact_id)
-                )
         generated_by_section = {
             str(section.get("section_id") or ""): section
             for section in built.get("sections") or []
@@ -1872,15 +1901,7 @@ class SectionsService(ArtifactBackedService):
             section_id = str(section.get("section_id") or "")
             section_evidence = scoped_evidence.get(section_id, {})
             section_role = task_roles.get(section_id, "body")
-            # The writer can inherit body evidence for conclusion synthesis.
-            # Prefer this section's exact rows, just as the writer does.
             fact_sources = dict(section_evidence)
-            if section_role == "conclusion":
-                for body_section_id, body_registry in scoped_evidence.items():
-                    if task_roles.get(body_section_id, "body") == "body":
-                        for key, item in body_registry.items():
-                            if key in writable_keys_by_section[body_section_id]:
-                                fact_sources.setdefault(key, item)
             fact_registry = registered_fact_bindings(
                 fact_sources.values(), {str(row.get("paper_id") or "") for row in fact_sources.values()},
             )
@@ -1900,6 +1921,12 @@ class SectionsService(ArtifactBackedService):
                 if isinstance(paragraph, dict) and paragraph.get("paragraph_id")
             }
             generated_paragraphs.update(generated_section_paragraphs)
+            if section.get("evidence_mode") == SOURCE_CONTRACT:
+                output_by_id = {p.get("paragraph_id"): p for p in generated_section.get("paragraphs") or []}
+                for plan in section.get("paragraphs") or []:
+                    if not paragraph_is_current(plan, output_by_id.get(plan.get("paragraph_id"), {})):
+                        raise WorkflowValidationError("Paragraph prose/source mapping or checked wording has changed.",
+                            details={"section_id": section_id, "paragraph_id": plan.get("paragraph_id")})
             if section_paragraphs != generated_section_paragraphs:
                 raise WorkflowValidationError(
                     "A Writing Plan section does not match its generated paragraphs.",
@@ -1955,8 +1982,6 @@ class SectionsService(ArtifactBackedService):
                     claim_eligible = bool(
                         key in writable_keys_by_section.get(section_id, set())
                     )
-                    if section_role == "conclusion" and not claim_eligible:
-                        claim_eligible = key in body_claim_evidence_keys
                     if not claim_eligible:
                         raise WorkflowValidationError(
                             "A Claim cannot use neighbor or coverage-only context as direct evidence.",
@@ -1980,15 +2005,6 @@ class SectionsService(ArtifactBackedService):
                         )
                         if str(fact_id)
                     )
-                    if section_role == "conclusion":
-                        # Conclusion Claims may only inherit evidence identities
-                        # already admitted by a body section.  Reuse the fact
-                        # identities bound to that exact evidence key instead
-                        # of requiring the conclusion's broader synthesis query
-                        # to rediscover and retag the same source chunk.
-                        ref_fact_ids.update(
-                            body_fact_ids_by_evidence_key.get(key, set())
-                        )
                     ref_sources.append(scoped_item or fact_sources.get(key) or evidence_registry[key])
                 if lexical and not refs:
                     raise WorkflowValidationError(
@@ -2136,8 +2152,6 @@ class SectionsService(ArtifactBackedService):
                     claim_eligible = bool(
                         str(key) in writable_keys_by_section.get(section_id, set())
                     )
-                    if section_role == "conclusion" and not claim_eligible:
-                        claim_eligible = str(key) in body_claim_evidence_keys
                     if not claim_eligible:
                         raise WorkflowValidationError(
                             "A Synthesis component cannot use neighbor or coverage-only context as direct evidence.",
@@ -2179,18 +2193,7 @@ class SectionsService(ArtifactBackedService):
                 and (passage_eligible(hit) or str(hit.get("evidence_key") or "") in writable)
             }
 
-        valid = eligible_chunks(evidence_sections.get(section_id, {}))
-        if str(task.get("section_role") or "body").casefold() != "conclusion":
-            return valid
-
-        # A conclusion is generated from validated body-section Claims and
-        # therefore inherits their direct evidence identities. Other section
-        # roles remain strictly limited to their own retrieval package.
-        for body_section_id, body_task in expected_tasks.items():
-            if str(body_task.get("section_role") or "body").casefold() != "body":
-                continue
-            valid.update(eligible_chunks(evidence_sections.get(body_section_id, {})))
-        return valid
+        return eligible_chunks(evidence_sections.get(section_id, {}))
 
     def validate_generation_inputs(
         self,
@@ -2265,6 +2268,34 @@ class SectionsService(ArtifactBackedService):
             raise WorkflowValidationError(
                 "Current section generation is missing its evidence-bound Writing Plan."
             )
+        # An incomplete new audit must not replace a still-valid saved section
+        # with a smaller subset. Revalidate against this request's actual sources.
+        previous, _ = self._read_json_artifact(principal, project_id, SECTION_INDEX_LOGICAL_NAME, required=False)
+        if previous and all(previous.get(key) == payload.get(key) for key in (
+                "source_blueprint_artifact_id", "source_matrix_artifact_id", "source_outline_artifact_id")):
+            old_plan, _ = self._read_json_artifact(principal, project_id, WRITING_PLAN_LOGICAL_NAME, required=False)
+            old_synthesis, _ = self._read_json_artifact(principal, project_id, SYNTHESIS_STATE_LOGICAL_NAME, required=False)
+            for sid in expected_tasks:
+                summary = next((s for s in synthesis_state.get("sections", []) if s.get("section_id") == sid), {})
+                review = summary.get("source_review") or {}
+                if not review.get("unresolved") or any(r.get("reason") == "unsupported_by_source" for r in review.get("omitted", [])):
+                    continue
+                old = next((s for s in previous.get("sections", []) if s.get("section_id") == sid and s.get("paragraphs")), None)
+                op = next((s for s in (old_plan or {}).get("sections", []) if s.get("section_id") == sid), None)
+                os = next((s for s in (old_synthesis or {}).get("sections", []) if s.get("section_id") == sid), None)
+                if not old or not op or not os:
+                    continue
+                probe = {**built, "sections": [old if s.get("section_id") == sid else s for s in by_id.values()]}
+                probe_plan = {**writing_plan, "sections": [op if s.get("section_id") == sid else s for s in writing_plan["sections"]]}
+                retained_synthesis = {**os, "pending_source_review": review}
+                probe_synthesis = {**synthesis_state, "sections": [retained_synthesis if s.get("section_id") == sid else s for s in synthesis_state["sections"]]}
+                try:
+                    self._validate_academic_bundle(payload, probe, probe_synthesis, probe_plan, evidence_package)
+                except WorkflowValidationError:
+                    continue
+                by_id[sid] = deepcopy(old)
+                writing_plan, synthesis_state = deepcopy(probe_plan), deepcopy(probe_synthesis)
+                built = probe
         self._validate_academic_bundle(
             payload,
             built,

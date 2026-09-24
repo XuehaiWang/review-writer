@@ -24,6 +24,7 @@ from review_writer_api.schemas import (
     ModelGatewayRequest,
     ModelGatewayResponse,
     ModelGatewayResultResponse,
+    ModelDelegationResponse,
 )
 from review_writer_api.server_providers import ServerProviderSettingsService
 from review_writer_api.security import Principal, Role
@@ -214,6 +215,34 @@ def create_gateway_app(settings: ApiSettings | None = None) -> FastAPI:
         except ModelGatewayError as exc:
             raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "gateway_detail", str(exc))) from exc
         return ModelGatewayResultResponse.model_validate(result)
+
+    @app.post(
+        "/api/internal/v1/model-delegations",
+        response_model=ModelDelegationResponse,
+        include_in_schema=False,
+    )
+    def model_delegation(payload: ModelGatewayRequest, request: Request) -> ModelDelegationResponse:
+        try:
+            result = gateway.delegate_text(
+                _bearer_token(request), request_key=payload.request_key,
+                stage=payload.stage, prompt=payload.prompt,
+                response_format=payload.response_format,
+            )
+        except ModelGatewayError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "gateway_detail", str(exc))) from exc
+        return ModelDelegationResponse.model_validate(result)
+
+    @app.get(
+        "/api/internal/v1/model-delegations/{request_key}",
+        response_model=ModelDelegationResponse,
+        include_in_schema=False,
+    )
+    def model_delegation_status(request_key: str, request: Request) -> ModelDelegationResponse:
+        try:
+            result = gateway.delegated_text_status(_bearer_token(request), request_key=request_key)
+        except ModelGatewayError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "gateway_detail", str(exc))) from exc
+        return ModelDelegationResponse.model_validate(result)
 
     @app.get(
         "/api/internal/v1/embedding-profile",

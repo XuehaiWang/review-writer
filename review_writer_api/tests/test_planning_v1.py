@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import tempfile
 import unittest
 import uuid
@@ -109,6 +110,42 @@ class PlanningV1Tests(unittest.TestCase):
         missing["rows"].pop()
         with self.assertRaises(WorkflowValidationError):
             service._validate_candidate_matrix(self.first, original, missing)
+
+    def test_planning_supplement_retains_omitted_facts_and_syncs_snapshots(self):
+        from copy import deepcopy
+        service = self.app.state.planning_service
+        seed_verified_matrix(service, self.first, self.project_id)
+        with TestClient(self.app) as client:
+            self.choose_outline(client, "reaction")
+            prepared = service.blueprint_job_payload(self.first, self.project_id, revision=0)
+            original = deepcopy(prepared["matrix_snapshot"])
+            prepared["matrix_snapshot"]["rows"][0]["scientific_facts"] = []
+            prepared["planning_matrix_snapshot"] = deepcopy(prepared["matrix_snapshot"])
+            service.reconcile_blueprint_facts(self.first, self.project_id, prepared)
+            for name in ("matrix_snapshot", "planning_matrix_snapshot"):
+                self.assertEqual(original["rows"][0]["scientific_facts"],
+                                 prepared[name]["rows"][0]["scientific_facts"])
+            self.assertEqual([], service._validate_candidate_matrix(
+                self.first, original, prepared["matrix_snapshot"]))
+            built = offline_argument_planner(None, prepared)
+            published = service.publish_blueprint_candidate(self.first, self.project_id, built)
+            self.assertTrue(published["section_blueprint"])
+
+    def test_omitted_fact_without_current_source_is_retained_but_withheld(self):
+        from copy import deepcopy
+        from review_writer_core.scientific_facts import fact_is_usable
+        service = self.app.state.planning_service
+        seed_verified_matrix(service, self.first, self.project_id)
+        original, _ = service._matrix(self.first, self.project_id)
+        candidate = deepcopy(original)
+        candidate["rows"][0]["scientific_facts"] = []
+        with patch.object(service, "fact_source_candidates", return_value={}):
+            issues = service._validate_candidate_matrix(self.first, original, candidate)
+        restored = candidate["rows"][0]["scientific_facts"][0]
+        self.assertEqual(original["rows"][0]["scientific_facts"][0]["fact_id"], restored["fact_id"])
+        self.assertFalse(fact_is_usable(restored))
+        self.assertEqual("withheld", issues[-1]["action"])
+        self.assertEqual("supported", original["rows"][0]["scientific_facts"][0]["verification"]["status"])
 
     def test_withheld_fact_candidate_can_be_planned_published_and_confirmed(self):
         from copy import deepcopy
@@ -425,6 +462,10 @@ class PlanningV1Tests(unittest.TestCase):
 
     def choose_outline(self, client: TestClient, style: str = "substrate") -> dict:
         current = self.planning(client)
+        # Custom editing is a client-side draft state. A custom outline is only
+        # published when its markdown is explicitly submitted.
+        if style == "custom":
+            return current
         response = client.put(
             f"/api/v1/projects/{self.project_id}/planning/outline",
             json={"revision": current["matrix_revision"], "outline_style": style},
@@ -432,6 +473,52 @@ class PlanningV1Tests(unittest.TestCase):
         )
         self.assertEqual(200, response.status_code, response.text)
         return response.json()
+
+    def test_duplicate_custom_outline_ids_are_repaired_on_save_and_legacy_read(self) -> None:
+        from review_writer_api.domain_services.planning import OUTLINE_LOGICAL_NAME
+
+        service = self.app.state.planning_service
+        with TestClient(self.app) as client:
+            chosen = self.choose_outline(client, "reaction")
+            original = chosen["selected_outline_md"]
+            heading_count = 0
+
+            def add_marker(match):
+                nonlocal heading_count
+                heading_count += 1
+                section_id = "S01" if heading_count == 2 else f"S{heading_count:02d}"
+                return f"{match.group(0)}\n<!-- section_id: {section_id} -->"
+
+            duplicated = re.sub(r"(?m)^#{2,6}\s+.+$", add_marker, original)
+            self.assertGreaterEqual(heading_count, 2)
+            current = self.planning(client)
+            saved = client.put(
+                f"/api/v1/projects/{self.project_id}/planning/outline",
+                json={"revision": current["matrix_revision"], "outline_style": "custom", "outline_md": duplicated},
+                headers=self.headers(),
+            )
+            self.assertEqual(200, saved.status_code, saved.text)
+            result = saved.json()
+            self.assertEqual(1, len(result["section_id_repairs"]))
+            self.assertEqual(1, result["selected_outline_md"].count("<!-- section_id: S01 -->"))
+            self.assertEqual(
+                re.findall(r"<!-- section_id: (S[A-Za-z0-9_-]+) -->", result["selected_outline_md"]),
+                re.findall(r"<!-- section_id: (S[A-Za-z0-9_-]+) -->", self.planning(client)["selected_outline_md"]),
+            )
+
+            # Existing artifacts from before the fix must also reach Blueprint.
+            original_read = service._read_json
+
+            def read_with_legacy_outline(principal, project_id, logical_name, **kwargs):
+                document, artifact = original_read(principal, project_id, logical_name, **kwargs)
+                if logical_name == OUTLINE_LOGICAL_NAME:
+                    document = {**document, "outline_md": duplicated}
+                return document, artifact
+
+            with patch.object(service, "_read_json", side_effect=read_with_legacy_outline):
+                prepared = service.prepare_blueprint(self.first, self.project_id, revision=0)
+            section_ids = [section["section_id"] for section in prepared["section_blueprint"]["sections"]]
+            self.assertEqual(len(section_ids), len(set(section_ids)))
 
     def test_real_matrix_publication_handoff_reuses_extraction_cache(self):
         service, repo = self.app.state.planning_service, self.app.state.workflow_repository
@@ -502,6 +589,87 @@ class PlanningV1Tests(unittest.TestCase):
             source["paper_count"], changed_model["pending_paper_count"]
         )
         self.assertEqual("gpt-5.6-luna", changed_model["actual_model_id"])
+
+    def test_selected_outline_categories_change_routes_not_base_fact_identity(self) -> None:
+        service = self.app.state.planning_service
+        def contract(label):
+            return {"primary_axis_id": "study_method", "axes": [{
+                "axis_id": "study_method", "label": "Study method",
+                "axis_role": "primary_organization", "source_type": "explicit_topic",
+                "partitions": [{"partition_id": label.casefold().replace(" ", "_"), "label": label}],
+            }]}
+
+        first = service.matrix_enrichment_payload(
+            self.first, self.project_id, classification_contract_override=contract("Method A"))
+        second = service.matrix_enrichment_payload(
+            self.first, self.project_id, classification_contract_override=contract("Method B"))
+        self.assertEqual(first["paper_count"], second["paper_count"])
+        self.assertNotEqual(first["papers"][0]["source_fingerprint"],
+                            second["papers"][0]["source_fingerprint"])
+        self.assertEqual(first["papers"][0]["fact_fingerprint"],
+                         second["papers"][0]["fact_fingerprint"])
+        self.assertEqual(["Method B"], [item["label"] for item in second["routing_categories"]])
+
+        empty = service.matrix_enrichment_payload(
+            self.first, self.project_id, classification_contract_override={
+                "primary_axis_id": "study_method", "axes": [{
+                    "axis_id": "study_method", "label": "Study method",
+                    "axis_role": "primary_organization", "partitions": [],
+                }],
+            })
+        self.assertEqual([], empty["routing_categories"])
+        self.assertFalse(any(item["deterministic_routing_label"] for item in empty["papers"]))
+
+        provisional = service.matrix_enrichment_payload(
+            self.first, self.project_id, classification_contract_override={
+                **contract("Method A"),
+                "axes": [{**contract("Method A")["axes"][0], "source_type": "agent_recommended"}],
+            })
+        self.assertEqual("", provisional["routing_axis_id"])
+        self.assertEqual([], provisional["routing_categories"])
+
+    def test_outline_reclassification_payload_reuses_current_verified_facts(self) -> None:
+        from copy import deepcopy
+        service = self.app.state.planning_service
+        seed_verified_matrix(service, self.first, self.project_id)
+        matrix, _ = service._matrix(self.first, self.project_id)
+        first_contract = {"primary_axis_id": "method", "axes": [{
+            "axis_id": "method", "label": "Method", "axis_role": "primary_organization",
+            "source_type": "explicit_topic",
+            "partitions": [{"partition_id": "first", "label": "Method A"}],
+        }]}
+        first = service.matrix_enrichment_payload(
+            self.first, self.project_id, classification_contract_override=first_contract)
+        fingerprints = {paper["paper_id"]: paper for paper in first["papers"]}
+        candidate = deepcopy(matrix)
+        for row in candidate["rows"]:
+            paper = fingerprints[row["paper_id"]]
+            row["fact_enrichment"].update(
+                source_fingerprint=paper["source_fingerprint"],
+                fact_fingerprint=paper["fact_fingerprint"],
+                status="complete",
+                fact_extraction_profile={"stop_reason": "checks_completed"},
+            )
+        second_contract = deepcopy(first_contract)
+        second_contract["axes"][0]["partitions"] = [
+            {"partition_id": "second", "label": "Method B"}]
+        second = service.matrix_enrichment_payload(
+            self.first, self.project_id, matrix_snapshot=candidate,
+            classification_contract_override=second_contract)
+        self.assertTrue(second["papers"])
+        self.assertTrue(all(paper["reusable_fact_result"] is not None for paper in second["papers"]))
+        self.assertTrue(all(paper["existing_fact_result"] is None for paper in second["papers"]))
+        for row in candidate["rows"]:
+            paper = fingerprints[row["paper_id"]]
+            row["fact_enrichment"].pop("fact_fingerprint")
+            row["fact_enrichment"]["fact_cache_key"] = paper["fact_cache_key"]
+            row["fact_enrichment"]["fact_extraction_profile"]["requested_fact_roles"] = (
+                paper["required_fact_roles"]
+            )
+        legacy = service.matrix_enrichment_payload(
+            self.first, self.project_id, matrix_snapshot=candidate,
+            classification_contract_override=second_contract)
+        self.assertTrue(all(paper["reusable_fact_result"] is not None for paper in legacy["papers"]))
 
     def test_matrix_extraction_axes_ignore_runtime_coverage_fields(self) -> None:
         matrix = {
@@ -2082,11 +2250,26 @@ class PlanningV1Tests(unittest.TestCase):
 
         self.assertEqual({}, tags["P001"])
 
-    def test_custom_outline_starts_blank(self) -> None:
+    def test_selecting_custom_without_content_preserves_the_saved_outline(self) -> None:
         with TestClient(self.app) as client:
-            selected = self.choose_outline(client, "custom")
-        self.assertEqual("", selected["selected_outline_md"])
-        self.assertFalse(selected["outline_complete"])
+            selected = self.choose_outline(client, "reaction")
+            response = client.put(
+                f"/api/v1/projects/{self.project_id}/planning/outline",
+                json={
+                    "revision": selected["matrix_revision"],
+                    "outline_style": "custom",
+                },
+                headers=self.headers(),
+            )
+            reloaded = self.planning(client)
+        self.assertEqual(422, response.status_code, response.text)
+        self.assertEqual(
+            selected["outline_artifact_id"],
+            reloaded["outline_selection"]["artifact_id"],
+        )
+        self.assertEqual("reaction", reloaded["outline_selection"]["outline_style"])
+        self.assertTrue(reloaded["selected_outline_md"].strip())
+        self.assertTrue(reloaded["outline_selection"]["outline_complete"])
 
     def test_whole_outline_recommendation_uses_evidence_and_never_falls_back_to_first_papers(self) -> None:
         service = self.app.state.planning_service

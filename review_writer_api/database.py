@@ -273,6 +273,9 @@ class ServerProviderCredential(Base, TimestampMixin):
     secret_hint: Mapped[str] = mapped_column(String(32), default="", nullable=False)
     encryption_key_version: Mapped[str] = mapped_column(String(64), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    input_usd_per_million: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 8), nullable=True
+    )
 
 
 class ServerProviderAuditEvent(Base):
@@ -316,11 +319,13 @@ class AIModelRequest(Base, TimestampMixin):
     job_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("workflow_jobs.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    budget_root_job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, index=True)
     request_key: Mapped[str] = mapped_column(String(128), nullable=False)
     stage: Mapped[str] = mapped_column(String(96), nullable=False)
     model_tier: Mapped[str] = mapped_column(String(32), nullable=False)
     model_name: Mapped[str] = mapped_column(String(255), nullable=False)
     request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    route_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="running", nullable=False)
     attempt_count: Mapped[int] = mapped_column(default=1, nullable=False)
     provider_request_id: Mapped[str] = mapped_column(String(255), default="", nullable=False)

@@ -24,6 +24,87 @@ from review_writer_core.manuscript_state import build_manuscript_state
 
 
 class FinalV1Tests(NativeFigureApiTestCase):
+    def test_final_figure_review_is_versioned_and_preserves_draft(self):
+        from review_writer_api.domain_services.final_figures import figure_blocks
+        with TestClient(self.app) as client:
+            self.prepare_approved_draft(client)
+            base = f"/api/v1/projects/{self.project_id}/final"
+            self.assertEqual(200, client.post(base + "/build").status_code)
+            before = self.app.state.drafts_service.get(self.first, self.project_id)
+            markdown = before["first_draft_md"]
+            figure_id = next(figure_blocks(markdown))[2]["figure_id"]
+            url = base + f"/figures/{figure_id}/review"
+            opened = client.get(url)
+            self.assertEqual(200, opened.status_code, opened.text)
+            row = opened.json()
+            self.assertEqual([], row["blockers"], row)
+            from unittest.mock import patch
+            with patch.object(self.app.state.final_service, "_catalog", return_value={}):
+                missing_source = client.get(url).json()
+                self.assertTrue(missing_source["blockers"])
+                rejected = client.put(url, json={"fingerprint": row["fingerprint"], "caption": "Caption",
+                                               "source_location": "Page 1", "confirmed": True})
+                self.assertEqual(422, rejected.status_code, rejected.text)
+            payload = {"fingerprint": row["fingerprint"], "caption": "Reviewed caption showing [3+2] cycloaddition.",
+                       "confirmed": True}
+            self.assertEqual(422, client.put(url, json={**payload, "confirmed": False}).status_code)
+            self.assertEqual(409, client.put(url, json={**payload, "fingerprint": "stale"}).status_code)
+            with patch.object(self.app.state.final_service, "figure_review", return_value={**row, "source_caption": ""}):
+                saved = client.put(url, json=payload)
+            self.assertEqual(200, saved.status_code, saved.text)
+            self.assertFalse(client.get(base).json()["final_current"])
+            rebuilt = client.post(base + "/build")
+            self.assertEqual(200, rebuilt.status_code, rebuilt.text)
+            current = client.get(base).json()
+            self.assertTrue(current["final_current"])
+            self.assertIn(payload["caption"], current["final_draft_md"])
+            from review_writer_api.domain_services.final import _figure_argument_findings
+            findings = _figure_argument_findings(current["final_draft_md"])
+            for finding in findings:
+                if finding["figure_id"] == figure_id:
+                    self.assertNotIn("paper_level_interpretation_missing", finding["issues"])
+                    self.assertNotIn("figure_caption_pending", finding["issues"])
+            self.assertEqual(markdown, self.app.state.drafts_service.get(self.first, self.project_id)["first_draft_md"])
+            self.assertEqual(409, client.put(url, json=payload).status_code)
+            self.current = self.second
+            self.assertEqual(404, client.get(url).status_code)
+
+    def test_inline_bibliography_correction_preserves_prose_and_requires_sync(self):
+        from review_writer_api.domain_services.final import _same_metadata_content
+        self.assertTrue(_same_metadata_content({"title": "T", "authors": ["Old"]}, {"title": "T", "authors": ["New"]}))
+        for field in ("title", "doi", "year", "abstract", "source_paths"):
+            self.assertFalse(_same_metadata_content({field: "before"}, {field: "after"}), field)
+        with TestClient(self.app) as client:
+            self.prepare_approved_draft(client)
+            library = self.app.state.library_service
+            original = library.get(self.first, "P001")
+            library.update_metadata(self.first, "P001", original.metadata)
+            base = f"/api/v1/projects/{self.project_id}/final"
+            built = client.post(base + "/build")
+            self.assertEqual(200, built.status_code, built.text)
+            before = self.app.state.drafts_service.get(self.first, self.project_id)
+            url = base + "/references/P001/bibliography"
+            opened = client.get(url)
+            self.assertEqual(200, opened.status_code, opened.text)
+            payload = {"metadata_artifact_id": opened.json()["metadata_artifact_id"],
+                       "fields": {"authors": ["Corrected Author"], "journal": "Corrected Journal"}}
+            self.assertEqual(422, client.put(url, json={**payload, "fields": {"doi": "10/new"}}).status_code)
+            saved = client.put(url, json=payload)
+            self.assertEqual(200, saved.status_code, saved.text)
+            self.assertEqual(409, client.put(url, json=payload).status_code)
+            self.assertFalse(client.get(base).json()["final_current"])
+            rebuilt = client.post(base + "/build")
+            self.assertEqual(200, rebuilt.status_code, rebuilt.text)
+            current = client.get(base).json()
+            self.assertTrue(current["final_current"])
+            self.assertIn("Corrected Author", current["final_draft_md"])
+            self.assertIn("Corrected Journal", current["final_draft_md"])
+            self.assertEqual(before["revision"], self.app.state.drafts_service.get(self.first, self.project_id)["revision"])
+            self.assertEqual(before["manuscript_preview_md"], self.app.state.drafts_service.get(self.first, self.project_id)["manuscript_preview_md"])
+            self.assertEqual(404, client.get(base + "/references/not-cited/bibliography").status_code)
+            self.current = self.second
+            self.assertEqual(404, client.get(url).status_code)
+
     def start_legacy_conclusion(self, _url, *, json, headers):
         """Simulate a job already queued before creation moved to Draft."""
         job = self.app.state.job_service.submit(self.first, scope="project",

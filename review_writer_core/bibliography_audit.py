@@ -410,8 +410,16 @@ def resolve_bibliography(
             parent_paper_id=parent_paper_id,
         )
 
+    # Provider candidates are commonly incremental: for example, Crossref may
+    # contribute a DOI while the trusted local PDF already supplied title,
+    # authors, venue and year.  Validate the resulting canonical record rather
+    # than requiring every candidate to repeat fields we already have.
+    validation_fields = dict(updated_metadata)
+    validation_fields.update(fields)
     missing = _missing_resolution_fields(
-        fields, document_type=document_type, parent_paper_id=parent_paper_id
+        validation_fields,
+        document_type=document_type,
+        parent_paper_id=parent_paper_id,
     )
     if action in {"save_manual", "accept_candidate"} and missing:
         raise BibliographyResolutionError(

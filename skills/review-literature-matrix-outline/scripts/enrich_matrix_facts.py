@@ -30,7 +30,7 @@ if _BOOTSTRAP_ROOT is None:
 if str(_BOOTSTRAP_ROOT) not in sys.path:
     sys.path.insert(0, str(_BOOTSTRAP_ROOT))
 
-from review_writer_core.model_gateway_client import call_json_model  # noqa: E402
+from review_writer_core.model_gateway_client import DeferredModelCall, call_json_model  # noqa: E402
 from review_writer_core.classification_axes import (  # noqa: E402
     axis_requires_formal_route,
     normalize_classification_axes_semantics,
@@ -1324,13 +1324,18 @@ def merge_targeted_recheck(
         if isinstance(item, dict)
     }
     outcomes: list[dict[str, Any]] = []
+    seen_outcomes: set[str] = set()
     for item in base.get("classification_outcomes") or []:
         if not isinstance(item, dict):
             continue
         axis_id = str(item.get("axis_id") or "")
         if axis_id in resolved_axis_ids:
             continue
+        seen_outcomes.add(axis_id)
         outcomes.append(dict(retry_outcomes.get(axis_id) or item))
+    for axis_id, item in retry_outcomes.items():
+        if axis_id in axis_ids and axis_id not in seen_outcomes and axis_id not in resolved_axis_ids:
+            outcomes.append(dict(item))
 
     facts_by_id = {
         str(fact.get("fact_id") or ""): dict(fact)
@@ -1872,9 +1877,13 @@ def run_fact_agent(paper, result, *, model_call, retrieve, state, report):
 
 
 def resolve_paper_classification(source, paper, result, axes, partitions, routing_axis_id,
-                                 routing_categories, *, model_call, report):
+                                 routing_categories, *, model_call, report,
+                                 allow_existing_evidence=False):
     """Use at most one follow-up for formal axes and primary routing together."""
-    unresolved = unresolved_axes_for_targeted_recheck(result, axes) if paper.get("partition_evidence_candidates") else []
+    can_recheck = bool(paper.get("partition_evidence_candidates") or
+                       (allow_existing_evidence and paper.get("evidence_candidates")))
+    unresolved = unresolved_axes_for_targeted_recheck(result, axes) if can_recheck else []
+    topic_requested = bool(allow_existing_evidence and can_recheck and partitions)
     def needs_routing():
         return bool(routing_axis_id and routing_categories
                     and not compact(paper.get("deterministic_routing_label"), 160)
@@ -1882,8 +1891,8 @@ def resolve_paper_classification(source, paper, result, axes, partitions, routin
                     and routing_axis_id not in (result.get("evidence_backed_tags") or {}))
 
     routing_requested = needs_routing()
-    if unresolved or routing_requested:
-        report("targeted_recheck" if unresolved else "routing_adjudication",
+    if unresolved or routing_requested or topic_requested:
+        report("targeted_recheck" if unresolved or topic_requested else "routing_adjudication",
                target_axis_ids=[compact(axis.get("axis_id"), 80) for axis in unresolved])
         error = ""
         try:
@@ -1892,11 +1901,15 @@ def resolve_paper_classification(source, paper, result, axes, partitions, routin
                 topic, paper, unresolved, partitions,
                 routing_axis_id=routing_axis_id if routing_requested else "",
                 routing_categories=routing_categories,
-            ) if unresolved else targeted_routing_prompt(topic, paper, routing_axis_id, routing_categories, result))
+            ) if unresolved or topic_requested else targeted_routing_prompt(topic, paper, routing_axis_id, routing_categories, result))
             generated = model_call(prompt, label=f"matrix-route-recheck-{paper['paper_id']}"[:80],
                                    timeout_seconds=240, required_list="facts")
             if unresolved:
                 result = merge_targeted_recheck(result, normalize_result(paper, generated, partitions, unresolved), unresolved)
+            elif topic_requested:
+                result["topic_partition_classification"] = normalize_result(
+                    paper, generated, partitions, []
+                )["topic_partition_classification"]
             if needs_routing():
                 result["routing_recommendation"] = normalize_routing_recommendation(
                     paper, generated, routing_axis_id, routing_categories)
@@ -1915,6 +1928,9 @@ def resolve_paper_classification(source, paper, result, axes, partitions, routin
                           "user_action_required": False})
         if unresolved:
             automatic.update({"targeted_recheck_attempted": True, "targeted_recheck_completed": not bool(error)})
+        if topic_requested:
+            automatic.update({"topic_partition_recheck_attempted": True,
+                              "topic_partition_recheck_completed": not bool(error)})
         if routing_requested:
             automatic.update({"routing_adjudication_attempted": True, "routing_axis_id": routing_axis_id,
                               "routing_status": str((result.get("routing_recommendation") or {}).get("status") or "formal_axis_route_available")})
@@ -1946,6 +1962,11 @@ def extract_paper(source, paper, previous, *, publish, retrieve):
         for item in source.get("classification_axes") or []
         if isinstance(item, dict) and compact(item.get("axis_id"), 80)
     ])
+    # An axis without alternatives can organize the outline, but there is no
+    # bounded paper-level decision for the fact Agent to make yet.
+    classification_axes = [axis for axis in classification_axes
+                           if axis.get("partitions")
+                           and str(axis.get("source_type") or "") != "agent_recommended"]
     routing_axis_id = compact(source.get("routing_axis_id"), 80)
     routing_categories = [
         {
@@ -2003,7 +2024,16 @@ def extract_paper(source, paper, previous, *, publish, retrieve):
         state["model_calls"] = int(state.get("model_calls", 0)) + 1
         state["attempt_model_calls"] = int(state.get("attempt_model_calls", 0)) + 1
         report("model_request")
-        return call_json_model(*args, **kwargs)
+        try:
+            return call_json_model(*args, **kwargs)
+        except DeferredModelCall:
+            # Submitting a durable child is not a completed paper-level model
+            # call. Restore both counters before the checkpoint is resumed;
+            # the cached result will count exactly once when it is consumed.
+            state["model_calls"] -= 1
+            state["attempt_model_calls"] -= 1
+            report("model_request")
+            raise
 
     report("restoring" if previous_is_current else "extracting")
     if source.get("operation") == "fact_revision":
@@ -2023,6 +2053,33 @@ def extract_paper(source, paper, previous, *, publish, retrieve):
         result = deepcopy(previous["result"])
     elif existing_result.get("facts"):
         result = deepcopy(existing_result)
+    elif (paper.get("reusable_fact_result") or {}).get("facts"):
+        # The source facts remain current while the classification contract
+        # changed. Keep verified facts, discard old route decisions, and run at
+        # most one focused classification call against the new alternatives.
+        reusable = paper["reusable_fact_result"]
+        result = {
+            "paper_id": paper_id,
+            "status": "partial",
+            "facts": [deepcopy(fact) for fact in reusable["facts"]
+                      if isinstance(fact, dict) and fact.get("field_id") != "topic_partition"],
+            "failed_fields": list(reusable.get("failed_fields") or []),
+            "paper_analysis": deepcopy(reusable.get("paper_analysis") or {}),
+            "topic_partition_classification": {"status": "not_requested"},
+            "evidence_backed_tags": {},
+            "classification_outcomes": [],
+            "automatic_resolution": {"status": "not_needed", "user_action_required": False},
+            "fact_extraction_profile": {"schema_version": FACT_SCHEMA_VERSION,
+                                        "prompt_version": FACT_PROMPT_VERSION,
+                                        "mode": "classification_refresh"},
+        }
+        checkpoint_result = deepcopy(result)
+        report("classification_refresh")
+        result = resolve_paper_classification(
+            source, paper, result, classification_axes, topic_partitions,
+            routing_axis_id, routing_categories, model_call=model_call, report=report,
+            allow_existing_evidence=True,
+        )
     elif (
         cache_covers_current_fields(paper)
         and not topic_partitions
@@ -2228,7 +2285,8 @@ def extract_paper(source, paper, previous, *, publish, retrieve):
     return result
 
 
-def enrich_papers(source, checkpoint, *, save_checkpoint, save_progress, retrieve):
+def enrich_papers(source, checkpoint, *, save_checkpoint, save_progress, retrieve,
+                  max_new_papers=None):
     """Overlap independent papers while serializing checkpoint/progress writes."""
     papers = deepcopy([item for item in source.get("papers") or [] if isinstance(item, dict)])
     paper_ids = [str(paper.get("paper_id") or "") for paper in papers]
@@ -2237,6 +2295,13 @@ def enrich_papers(source, checkpoint, *, save_checkpoint, save_progress, retriev
     previous = checkpoint.get("entries") or {}
     entries = {paper_id: deepcopy(previous[paper_id]) for paper_id in paper_ids if paper_id in previous}
     completed = []
+    if max_new_papers is not None and checkpoint.get("source_matrix_artifact_id") == source.get("source_matrix_artifact_id"):
+        recorded = set(checkpoint.get("completed_papers") or [])
+        fingerprints = {str(paper["paper_id"]): paper.get("source_fingerprint") for paper in papers}
+        completed = [paper_id for paper_id in paper_ids
+                     if paper_id in recorded
+                     and isinstance(entries.get(paper_id, {}).get("result"), dict)
+                     and entries[paper_id].get("source_fingerprint") == fingerprints[paper_id]]
     active = {}
     lock = Lock()
 
@@ -2245,14 +2310,16 @@ def enrich_papers(source, checkpoint, *, save_checkpoint, save_progress, retriev
         with lock:
             entries[paper_id] = snapshot
             if phase == "completed":
-                completed.append(paper_id)
+                if paper_id not in completed:
+                    completed.append(paper_id)
                 active.pop(paper_id, None)
             else:
                 active[paper_id] = {"phase": phase, **details}
             current_id = next(iter(active), paper_id) if phase == "completed" else paper_id
             current = active.get(current_id, {"phase": "finalizing" if len(completed) == len(papers) else "extracting"})
             save_checkpoint({"schema_version": 1,
-                             "source_matrix_artifact_id": source.get("source_matrix_artifact_id"), "entries": entries})
+                             "source_matrix_artifact_id": source.get("source_matrix_artifact_id"),
+                             "completed_papers": list(completed), "entries": entries})
             save_progress({**current, "current": len(completed), "total": len(papers),
                            "current_paper_id": current_id, "active_paper_ids": list(active),
                            "paper_phases": {key: value["phase"] for key, value in active.items()},
@@ -2265,10 +2332,16 @@ def enrich_papers(source, checkpoint, *, save_checkpoint, save_progress, retriev
         paper.setdefault("actual_model_id", source.get("actual_model_id"))
         return extract_paper(source, paper, previous.get(str(paper["paper_id"])), publish=publish, retrieve=retrieve)
 
+    selected = papers if max_new_papers is None else [
+        paper for paper in papers if str(paper["paper_id"]) not in completed
+    ][:max(1, int(max_new_papers))]
     workers = max(1, min(3, int((source.get("fact_agent_limits") or {}).get("paper_concurrency", 1))))
-    with ThreadPoolExecutor(max_workers=min(workers, len(papers) or 1)) as executor:
+    with ThreadPoolExecutor(max_workers=min(workers, len(selected) or 1)) as executor:
         # map preserves Matrix order even when later papers finish first.
-        return list(executor.map(execute, papers))
+        results = list(executor.map(execute, selected))
+    if max_new_papers is None:
+        return results
+    return [entries[paper_id]["result"] for paper_id in paper_ids if paper_id in completed]
 
 
 def evidence_mailbox(request_path, response_path):
@@ -2304,6 +2377,7 @@ def main() -> int:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--evidence-request")
     parser.add_argument("--evidence-response")
+    parser.add_argument("--max-new-papers", type=int, default=0)
     args = parser.parse_args()
     source = read_json(Path(args.input))
     checkpoint_path = Path(args.checkpoint)
@@ -2313,6 +2387,7 @@ def main() -> int:
         save_checkpoint=lambda value: write_json(checkpoint_path, value),
         save_progress=lambda value: write_json(Path(args.progress), value),
         retrieve=evidence_mailbox(args.evidence_request, args.evidence_response),
+        max_new_papers=args.max_new_papers or None,
     )
     write_json(Path(args.output), {"schema_version": 1, "project_id": source.get("project_id"),
                                   "source_matrix_artifact_id": source.get("source_matrix_artifact_id"), "papers": results})

@@ -50,7 +50,7 @@ def final_issue_details(validation: dict[str, Any]) -> list[dict[str, Any]]:
     def add(target_type: str, target_id: object, issues: object) -> None:
         normalized = list(
             dict.fromkeys(
-                str(issue).strip()
+                str(issue.get("field") or issue.get("reason") or "bibliography_identity_unresolved").strip() if isinstance(issue, dict) else str(issue).strip()
                 for issue in (issues if isinstance(issues, list) else [issues])
                 if str(issue or "").strip()
             )
@@ -67,6 +67,8 @@ def final_issue_details(validation: dict[str, Any]) -> list[dict[str, Any]]:
     for finding in validation.get("figure_argument_findings") or []:
         if isinstance(finding, dict):
             add("figure", finding.get("figure_id"), finding.get("issues") or [])
+            if finding.get("issues"):
+                rows[-1]["title"] = str(finding.get("published_label") or finding.get("figure_id") or "")
     for finding in (validation.get("claim_citation_mapping") or {}).get("issues") or []:
         if isinstance(finding, dict):
             add("claim", finding.get("claim_id"), finding.get("issues") or [])

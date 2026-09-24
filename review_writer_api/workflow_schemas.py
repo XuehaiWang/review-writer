@@ -290,8 +290,25 @@ class FinalPdfRequest(BaseModel):
     language_profile: Literal["en", "zh-CN"] = "en"
 
 
+class OverviewStructureReference(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    kind: Literal["molecule", "reaction"] = "molecule"
+    label: str = Field(default="", max_length=100)
+    name: str = Field(default="", max_length=200)
+    smiles: str = Field(default="", max_length=3000)
+    role: Literal["substrate", "product", "catalyst", "ligand", "reference"] = "reference"
+    conditions: str = Field(default="", max_length=500)
+
+    @model_validator(mode="after")
+    def valid_structure(self):
+        from review_writer_core.overview_references import validate_reference
+        validate_reference(self.model_dump())
+        return self
+
+
 class DraftOverviewGenerateRequest(BaseModel):
     instructions: str = Field(default="", max_length=4000)
+    structure_references: list[OverviewStructureReference] = Field(default_factory=list, max_length=4)
 
 
 class DraftOverviewAdoptRequest(BaseModel):
@@ -310,6 +327,35 @@ class FinalOverviewTextRequest(BaseModel):
     title: StrictStr = Field(min_length=1, max_length=500)
     subtitle: StrictStr = Field(default="", max_length=1_000)
     labels: list[StrictStr] = Field(default_factory=list, max_length=100)
+
+
+class FinalFigureReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    fingerprint: str = Field(min_length=1)
+    caption: str = Field(min_length=1, max_length=3000)
+    source_location: str = Field(default="", max_length=500)
+    confirmed: Literal[True]
+
+
+class FinalBibliographyCorrectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    metadata_artifact_id: str = Field(min_length=1)
+    fields: dict[str, Any]
+    source_location: str = Field(default="", max_length=500)
+
+    @field_validator("fields")
+    @classmethod
+    def safe_fields(cls, values):
+        allowed = {"authors", "journal", "volume", "issue", "pages", "article_number", "publisher"}
+        if not values or set(values) - allowed:
+            raise ValueError("这里只能更正作者、期刊、卷期页码等书目信息；论文身份请到文献库核对。")
+        for key, value in values.items():
+            if key == "authors":
+                if not isinstance(value, list) or len(value) > 200 or any(not isinstance(v, str) or len(v) > 300 for v in value):
+                    raise ValueError("作者请按每行一位填写。")
+            elif not isinstance(value, str) or len(value) > 1000:
+                raise ValueError("书目字段内容过长或格式错误。")
+        return values
 
 
 class FinalFrontMatterRequest(BaseModel):

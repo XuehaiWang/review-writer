@@ -40,12 +40,13 @@ from .container import ApplicationContainer
 from .credentials import ProviderSettingsError
 from .database import create_session_factory, utc_now
 from .errors import ProjectArchiveFailed, WorkflowError
-from .system_errors import FailureRecorder, list_failures, record_failure
+from .system_errors import FailureRecorder, list_failures, record_failure, safe_summary
 from .job_service import JobService
 from .gateway_client import test_provider_through_gateway
 from .model_catalog import read_catalog, save_catalog, public_catalog
 from .text_connections import list_connections, save_connection
 from .model_gateway import ModelGatewayError, ModelGatewayService
+from .model_concurrency import load as load_model_concurrency, save as save_model_concurrency
 from .native_handlers import NativeWorkflowHandlers
 from .domain_services.library import LibraryService
 from .domain_services.library_index import LibraryIndexService
@@ -65,6 +66,8 @@ from .schemas import (
     AdminProviderAuditListResponse,
     AdminProviderAuditResponse,
     AdminProviderSettingsUpdateRequest,
+    AdminConcurrencyUpdateRequest,
+    AdminQueuePauseRequest,
     AdminProviderTestResponse,
     AdminCreditAdjustmentRequest,
     AdminUsageSummaryResponse,
@@ -84,6 +87,7 @@ from .schemas import (
     ModelGatewayRequest,
     ModelGatewayResponse,
     ModelGatewayResultResponse,
+    ModelDelegationResponse,
     EmbeddingGatewayRequest,
     EmbeddingGatewayResponse,
     ImageGatewayRequest,
@@ -105,7 +109,7 @@ from .schemas import (
     UsageTimelineResponse,
 )
 from review_writer_core.taxonomy import (
-    DEFAULT_TAXONOMY_PROFILE,
+    NEW_PROJECT_TAXONOMY_PROFILE,
     taxonomy_profile_catalog,
 )
 from .server_providers import ServerProviderSettingsService
@@ -201,7 +205,11 @@ def create_app(
         window_seconds=resolved.auth_rate_limit_window_seconds,
     )
     workflow_repository = (
-        workflow_repository_override or WorkflowRepository(session_factory, default_text_wire_api=resolved.text_provider_wire_api)
+        workflow_repository_override or WorkflowRepository(
+            session_factory,
+            default_text_wire_api=resolved.text_provider_wire_api,
+            mineru_max_concurrency=resolved.mineru_max_concurrency,
+        )
         if resolved.deployment_mode == "hosted"
         else None
     )
@@ -620,6 +628,13 @@ def create_app(
     @app.exception_handler(WorkflowError)
     async def workflow_error(_request: Request, exc: WorkflowError):
         _request.state.failure_code = exc.code
+        fields = exc.details.get("fields") if isinstance(exc.details, dict) else None
+        field_suffix = (
+            " Fields: " + ", ".join(str(field) for field in fields if str(field).strip())
+            if isinstance(fields, list) and fields
+            else ""
+        )
+        _request.state.failure_summary = safe_summary(f"{exc}{field_suffix}")
         return workflow_error_response(exc)
 
     @app.exception_handler(ProjectOperationError)
@@ -1055,7 +1070,7 @@ def create_app(
     ) -> TaxonomyProfileCatalogResponse:
         return TaxonomyProfileCatalogResponse(
             items=taxonomy_profile_catalog(),
-            default_profile=DEFAULT_TAXONOMY_PROFILE,
+            default_profile=NEW_PROJECT_TAXONOMY_PROFILE,
         )
 
     @app.post(
@@ -1148,6 +1163,35 @@ def create_app(
 
     if provider_settings_service is not None:
 
+        @app.get("/api/v1/admin/workers", tags=["admin"])
+        def admin_workers(principal: Principal = Depends(current_principal)):
+            principal.require(Permission.PROVIDER_MANAGE)
+            return workflow_repository.worker_status()
+
+        @app.put("/api/v1/admin/workers/queues/{queue_name}", tags=["admin"])
+        def admin_worker_queue_pause(
+            queue_name: str, payload: AdminQueuePauseRequest,
+            principal: Principal = Depends(current_principal),
+        ):
+            principal.require(Permission.PROVIDER_MANAGE)
+            return {"paused_queues": workflow_repository.set_worker_queue_paused(queue_name, payload.paused)}
+
+        @app.get("/api/v1/admin/model-concurrency", tags=["admin"])
+        def admin_model_concurrency(principal: Principal = Depends(current_principal)):
+            principal.require(Permission.PROVIDER_MANAGE)
+            return load_model_concurrency(session_factory, resolved)
+
+        @app.put("/api/v1/admin/model-concurrency", tags=["admin"])
+        def update_admin_model_concurrency(
+            payload: AdminConcurrencyUpdateRequest,
+            principal: Principal = Depends(current_principal),
+        ):
+            principal.require(Permission.PROVIDER_MANAGE)
+            try:
+                return save_model_concurrency(session_factory, payload.limits, principal.user_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+
         @app.get("/api/v1/admin/text-connections", tags=["admin"])
         def admin_text_connections(principal: Principal = Depends(current_principal)):
             return list_connections(provider_settings_service, principal)
@@ -1208,6 +1252,7 @@ def create_app(
                 wire_api=payload.wire_api,
                 api_key=payload.api_key,
                 enabled=payload.enabled,
+                input_usd_per_million=payload.input_usd_per_million,
             )
             return ProviderSettingsResponse.model_validate(record, from_attributes=True)
 
@@ -1315,6 +1360,41 @@ def create_app(
             except ModelGatewayError as exc:
                 raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "gateway_detail", str(exc))) from exc
             return ModelGatewayResultResponse.model_validate(result)
+
+        @app.post(
+            "/api/internal/v1/model-delegations",
+            response_model=ModelDelegationResponse,
+            include_in_schema=False,
+        )
+        def internal_model_delegation(payload: ModelGatewayRequest, request: Request) -> ModelDelegationResponse:
+            if not resolved.embedded_gateway_routes_enabled:
+                raise HTTPException(status_code=404, detail="Not Found")
+            authorization = str(request.headers.get("Authorization") or "")
+            token = authorization[7:].strip() if authorization.casefold().startswith("bearer ") else ""
+            try:
+                result = model_gateway.delegate_text(
+                    token, request_key=payload.request_key, stage=payload.stage,
+                    prompt=payload.prompt, response_format=payload.response_format,
+                )
+            except ModelGatewayError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "gateway_detail", str(exc))) from exc
+            return ModelDelegationResponse.model_validate(result)
+
+        @app.get(
+            "/api/internal/v1/model-delegations/{request_key}",
+            response_model=ModelDelegationResponse,
+            include_in_schema=False,
+        )
+        def internal_model_delegation_status(request_key: str, request: Request) -> ModelDelegationResponse:
+            if not resolved.embedded_gateway_routes_enabled:
+                raise HTTPException(status_code=404, detail="Not Found")
+            authorization = str(request.headers.get("Authorization") or "")
+            token = authorization[7:].strip() if authorization.casefold().startswith("bearer ") else ""
+            try:
+                result = model_gateway.delegated_text_status(token, request_key=request_key)
+            except ModelGatewayError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "gateway_detail", str(exc))) from exc
+            return ModelDelegationResponse.model_validate(result)
 
         @app.post(
             "/api/internal/v1/embeddings",
@@ -1514,6 +1594,8 @@ def create_app(
         app.include_router(build_file_router(current_principal, artifact_service))
     if job_service is not None:
         app.include_router(build_job_router(current_principal, job_service))
+        if "model.dispatch" in native_handlers:
+            job_service.register_handler("model.dispatch", native_handlers["model.dispatch"])
     if (
         library_service is not None
         and library_index_service is not None
@@ -1582,6 +1664,7 @@ def create_app(
                 current_principal,
                 final_service,
                 job_service,
+                library_service=library_service,
             )
         )
     return app

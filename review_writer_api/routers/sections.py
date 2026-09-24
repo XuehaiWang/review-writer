@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Header, status
 
 from review_writer_api.domain_services.sections import SectionsService
 from review_writer_api.job_service import JobService
+from review_writer_api.errors import WorkflowConflict
 from review_writer_api.routers.jobs import _job_response
 from review_writer_api.security import Principal
 from review_writer_api.workflow_schemas import (
@@ -41,15 +42,30 @@ def build_sections_router(
         idempotency_key: str = Header(default="", alias="Idempotency-Key"),
         principal: Principal = Depends(principal_dependency),
     ):
-        payload = sections_service.generation_payload(principal, project_id)
-        job = job_service.submit(
-            principal,
-            scope="project",
-            project_id=project_id,
-            job_type="sections.generate",
-            idempotency_key=idempotency_key.strip() or str(uuid.uuid4()),
-            payload=payload,
-        )
+        payload = sections_service.generation_payload(principal, project_id, defer_evidence=True)
+
+        def active_job():
+            current = job_service.repository.get_current_job(
+                principal.user_id, scope="project", project_id=project_id, job_type="sections.generate"
+            )
+            return current if current and current.status in {"queued", "running", "cancel_requested"} else None
+
+        job = active_job()
+        if job is None:
+            try:
+                job = job_service.submit(
+                    principal, scope="project", project_id=project_id,
+                    job_type="sections.generate",
+                    idempotency_key=idempotency_key.strip() or str(uuid.uuid4()), payload=payload,
+                )
+            except WorkflowConflict as exc:
+                # Another submit may win after our read. Rejoin only the same
+                # scoped active task; unrelated validation errors still surface.
+                if not exc.details.get("current_job_id"):
+                    raise
+                job = active_job()
+                if job is None:
+                    raise
         return _job_response(job)
 
     @router.post("/confirm")

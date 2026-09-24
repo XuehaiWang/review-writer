@@ -4,7 +4,9 @@ from typing import Any
 from review_writer_api.security import Principal, Role
 from review_writer_api.domain_services.figures import FigureSafetyBlocked, SAFETY_ERROR
 from review_writer_api.errors import WorkflowError
-from review_writer_api.job_service import JobCancellationRequested, JobShutdownRequested
+from review_writer_api.job_service import (
+    JobCancellationRequested, JobShutdownRequested, JobYieldRequested,
+)
 from review_writer_api.job_handlers.lifecycle import report_committed_progress
 
 
@@ -15,11 +17,26 @@ def register_figure_handlers(figures_service, job_service, handlers):
         def redraw_handler(context, payload):
             figure_ids = list(payload.get("figure_ids") or [])
             execution_payload = {**payload, "producer_job_id": context.job_id}
-            context.report_progress(0, len(figure_ids))
+            previous = context.repository.get_job(context.user_id, context.job_id)
+            checkpoint = dict(previous.result or {}) if previous else {}
+            requested = set(figure_ids)
+            results: list[dict[str, Any]] = [
+                dict(row) for row in checkpoint.get("outputs") or []
+                if isinstance(row, dict) and str(row.get("figure_id") or "") in requested
+            ]
+            errors: list[dict[str, Any]] = [
+                dict(row) for row in checkpoint.get("errors") or []
+                if isinstance(row, dict) and str(row.get("figure_id") or "") in requested
+            ]
+            completed = {
+                str(row["figure_id"]) for row in [*results, *errors]
+                if row.get("figure_id")
+            }
+            context.report_progress(len(completed), len(figure_ids))
             principal = Principal(context.user_id, frozenset({Role.USER}))
-            results: list[dict[str, Any]] = []
-            errors: list[dict[str, Any]] = []
             for index, figure_id in enumerate(figure_ids, start=1):
+                if figure_id in completed:
+                    continue
                 context.checkpoint()
                 item = figures_service.resolve_redraw_item(
                     principal,
@@ -79,6 +96,12 @@ def register_figure_handlers(figures_service, job_service, handlers):
                         }
                     )
                 report_committed_progress(context, index, len(figure_ids))
+                # The old batch loop held its image worker through every
+                # figure. Yield only when a different queued image task can
+                # run; completed images remain checkpointed and are skipped
+                # when this batch is claimed again.
+                if index < len(figure_ids) and context.repository.has_queued_job("image"):
+                    raise JobYieldRequested(queue_reason="image_batch_yield")
             return {
                 "figure_count": len(results),
                 "figure_ids": figure_ids,

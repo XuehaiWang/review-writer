@@ -124,6 +124,9 @@ export function DiscoveryJobProgress({ job, submitting = false }: DiscoveryJobPr
         "余额不足，本次检索已停止，且没有生成新的候选结果。请在“API 设置”中查看余额，或联系管理员添加额度后重新检索。",
         "Your balance is insufficient. This search was stopped and did not create new candidates. Review your balance in API Settings or contact an administrator for credit, then run the search again.",
       );
+    } else if (job?.error_message?.includes("QUERY_TRANSLATION_FAILED")) {
+      title = text("检索未执行", "Search not run");
+      detail = text("未能生成英文检索词，请重试，或使用英文主题和关键词。上次的检索结果未被覆盖。", "English search terms could not be prepared. Retry or use an English topic and keywords. Previous results were not replaced.");
     } else {
       title = text("检索失败", "Search failed");
       detail = job?.error_message || text("检索任务执行失败，请检查错误信息后重试。", "The search failed. Review the error and try again.");

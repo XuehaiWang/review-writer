@@ -168,10 +168,14 @@ def normalize_classification_axes_semantics(
 
 
 def axis_requires_formal_route(axis: dict[str, Any]) -> bool:
-    return str(axis.get("axis_role") or "") in {
+    # An organizing axis without named alternatives can guide an outline, but
+    # cannot be answered as a paper-level classification question yet.
+    return (bool(axis.get("partitions"))
+            and str(axis.get("source_type") or "") != "agent_recommended"
+            and str(axis.get("axis_role") or "") in {
         "primary_organization",
         "required_independent_discussion",
-    }
+    })
 
 
 def _contract_axis(axis: dict[str, Any]) -> dict[str, Any]:

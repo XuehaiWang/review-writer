@@ -1,6 +1,7 @@
 import { useUiText } from "../i18n/useUiText";
 import { ApiError } from "../api/client";
 import { StageNotReady } from "./StageNotReady";
+import { diagnosticText } from "../i18n/diagnostics";
 
 type ErrorStateProps = {
   title?: string;
@@ -9,7 +10,7 @@ type ErrorStateProps = {
 };
 
 export function ErrorState({ title, error, onRetry }: ErrorStateProps) {
-  const { text } = useUiText();
+  const { text, language } = useUiText();
   if (error instanceof ApiError && error.code === "WORKFLOW_STAGE_NOT_READY") {
     return <StageNotReady details={error.details} onRefresh={onRetry} />;
   }
@@ -18,7 +19,8 @@ export function ErrorState({ title, error, onRetry }: ErrorStateProps) {
   return (
     <section className="error-state" role="alert">
       <strong>{resolvedTitle}</strong>
-      <p>{message}</p>
+      <p>{diagnosticText(error, language)}</p>
+      <details><summary>{text("技术详情（保留原文）", "Technical details (original text)")}</summary><pre>{message}</pre></details>
       {onRetry ? (
         <button className="button button-secondary" type="button" onClick={onRetry}>
           {text("重试", "Retry")}

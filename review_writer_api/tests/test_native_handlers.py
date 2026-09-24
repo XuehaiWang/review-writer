@@ -726,6 +726,22 @@ class NativeWorkflowHandlerTests(unittest.TestCase):
                 context.partial_results[0]["section_progress"]["completed_sections"][0]["heading"],
             )
 
+    def test_section_progress_persists_repair_budget_without_progress_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            status_file = Path(temporary) / "progress.json"
+            checkpoint_file = Path(temporary) / "checkpoint.json"
+            status_file.write_text(json.dumps({"phase": "reviewing", "current": 0, "total": 1}), encoding="utf-8")
+            checkpoint_file.write_text(json.dumps({"entries": {}}), encoding="utf-8")
+            context = _Context(str(uuid.uuid4()))
+            callback = NativeWorkflowHandlers._section_progress_callback(context, status_file, checkpoint_file)
+            callback()
+            checkpoint_file.write_text(json.dumps({"entries": {}, "authoring_states": {
+                "S01": {"state": {"repair_attempted": True}}}}), encoding="utf-8")
+            callback()
+            callback()
+            self.assertEqual(2, len(context.partial_results))
+            self.assertTrue(context.partial_results[-1]["section_checkpoint"]["authoring_states"]["S01"]["state"]["repair_attempted"])
+
     def test_matrix_progress_callback_publishes_live_fact_previews(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             status_file = Path(temporary) / "matrix-progress.json"
@@ -837,6 +853,29 @@ class NativeWorkflowHandlerTests(unittest.TestCase):
                     saved = json.loads((root / "matrix-enrichment-input.json").read_text(encoding="utf-8"))
                     self.assertEqual({"paper_concurrency": expected, "max_model_calls": 5, "max_supplement_rounds": 1},
                                      saved["fact_agent_limits"])
+
+    def test_model_delegation_is_scoped_to_standalone_matrix_not_embedded_blueprint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            handler = NativeWorkflowHandlers.__new__(NativeWorkflowHandlers)
+            handler.root = root
+            handler.model_gateway = object()
+            handler.planning_service = None
+            handler._staging = lambda *_: root
+            handler._text_gateway_environment = lambda _: ({"REVIEW_WRITER_MODEL_GATEWAY_URL": "internal"}, {})
+            observed = []
+            def run(*_args, **kwargs):
+                observed.append(dict(kwargs["env"]))
+                (root / "matrix-enrichment-output.json").write_text('{"papers": []}', encoding="utf-8")
+            handler.runner = SimpleNamespace(run=run)
+            context = SimpleNamespace(user_id=str(uuid.uuid4()), project_id="project", job_id=str(uuid.uuid4()),
+                job_type="matrix.enrich", checkpoint=lambda: None, cancellation_requested=lambda: False)
+            with patch.dict("os.environ", {"REVIEW_WRITER_DELEGATED_MODEL_ENABLED": "1"}):
+                handler.matrix_enrich(context, {"papers": []})
+                context.job_type = "planning.blueprint"
+                handler.matrix_enrich(context, {"papers": []})
+            self.assertEqual("1", observed[0]["REVIEW_WRITER_DELEGATE_MODEL_CALLS"])
+            self.assertNotIn("REVIEW_WRITER_DELEGATE_MODEL_CALLS", observed[1])
 
     def test_matrix_live_payload_bounds_long_fact_preview(self) -> None:
         live = _matrix_live_payload(

@@ -29,6 +29,13 @@ function job(overrides: Partial<Job> = {}): Job {
 }
 
 describe("DiscoveryJobProgress", () => {
+  it("explains failed query translation without showing raw errors", () => {
+    usePreferences.getState().setLanguage("zh-CN");
+    render(<DiscoveryJobProgress job={job({ status: "failed", error_message: "QUERY_TRANSLATION_FAILED: provider timeout" })} />);
+    expect(screen.getByText("检索未执行")).toBeInTheDocument();
+    expect(screen.getByText(/未能生成英文检索词/)).toBeInTheDocument();
+    expect(screen.queryByText(/provider timeout/)).not.toBeInTheDocument();
+  });
   afterEach(() => {
     cleanup();
     usePreferences.getState().setLanguage("zh-CN");

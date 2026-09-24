@@ -21,6 +21,8 @@ from review_writer_api.security import Principal, Role
 ROOT = Path(__file__).resolve().parents[2]
 TEST_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("=")
 REMOVED_RUNTIME = (
+    ROOT / "review_writer_api" / "domain_services" / "actions" / "draft" / "rewrite.py",
+    ROOT / "review_writer_api" / "domain_services" / "actions" / "draft" / "publication.py",
     ROOT / "review_writer_api" / "workflow_compat.py",
     ROOT / "review_writer_api" / "dashboard_executor.py",
     ROOT / "view" / "serve_review_dashboard.py",

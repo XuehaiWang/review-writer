@@ -1,3 +1,4 @@
+import { LocalizedError } from "../../../components/LocalizedError";
 import { useUiText } from "../../../i18n/useUiText";
 import {
   isMetadataObject,
@@ -35,19 +36,25 @@ export function MetadataVisualEditor({
   dirty,
   saving,
   reviewing,
+  reextracting,
+  reextractResult,
   error,
   onChange,
   onSave,
   onReview,
+  onReextract,
 }: {
   draft: MetadataRecord;
   dirty: boolean;
   saving: boolean;
   reviewing: boolean;
+  reextracting: boolean;
+  reextractResult: string;
   error: Error | null;
   onChange: (next: MetadataRecord) => void;
   onSave: () => void;
   onReview: () => void;
+  onReextract: () => void;
 }) {
   const { language, text } = useUiText();
   const validationError = metadataValidationError(draft);
@@ -145,6 +152,20 @@ export function MetadataVisualEditor({
           <div><span>02</span><h3 id="metadata-abstract-title">{text("摘要", "Abstract")}</h3></div>
           <p>{text("用于后续检索、筛选和写作规划。", "Used for later retrieval, screening, and writing plans.")}</p>
         </header>
+        {!metadataFieldIsHumanChecked(draft, "abstract") ? (
+          <div>
+            <button className="button button-secondary" type="button" disabled={dirty || saving || reviewing || reextracting} onClick={onReextract}>
+              {reextracting ? text("正在重新识别…", "Rechecking abstract…") : text("从已有解析重新识别", "Recheck parsed abstract")}
+            </button>
+            {dirty ? <small>{text("请先保存当前修改", "Save current edits first")}</small> : null}
+          </div>
+        ) : null}
+        {reextractResult ? <p className="message" role="status">{{
+          updated: text("已重新识别摘要，请核对内容。", "Abstract rechecked. Please review it."),
+          not_found: text("已有解析中仍未找到明确的原文摘要，可手动补充。", "No explicit abstract was found in the existing parse. You can add it manually."),
+          unchanged: text("摘要内容没有变化。", "The abstract is unchanged."),
+          human_checked: text("人工已核对的摘要未被覆盖。", "The manually checked abstract was preserved."),
+        }[reextractResult] || reextractResult}</p> : null}
         <label className="metadata-form-field metadata-field-wide">
           <span><strong>{text("论文摘要", "Paper abstract")}</strong><MetadataFieldStatus metadata={draft} field="abstract" /></span>
           <textarea rows={10} value={metadataTextForEditing(metadataFieldValue(draft, "abstract"))} onChange={(event) => setField("abstract", event.target.value)} placeholder={text("未识别到摘要时可在此补充", "Add the abstract here if it was not detected")} />
@@ -154,10 +175,13 @@ export function MetadataVisualEditor({
       <details className="metadata-form-section metadata-optional-section">
         <summary>
           <div><span>03</span><strong>{text("内容标签（可选）", "Content tags (optional)")}</strong></div>
-          <small>{text("用于更准确地检索和归类论文", "Helps retrieve and organize the paper")}</small>
+          <small>{text("经核对后，仅作为章节归类的辅助线索", "After verification, used only as a supporting hint for chapter organization")}</small>
         </summary>
         <div className="metadata-optional-body">
-          <p>{text("仅填写论文中明确出现的内容。不确定的项目可以留空。", "Only enter information stated in the paper. Leave uncertain items blank.")}</p>
+          <p>{text(
+            "仅填写论文中明确出现的内容；不确定的项目请留空，系统会按“未指定”保存。这些标签不决定检索相关性，也不会作为正文科学证据。",
+            "Enter only information explicitly stated in the paper. Leave uncertain fields blank; the system stores them as not specified. These tags do not determine retrieval relevance or serve as scientific evidence.",
+          )}</p>
           <div className="metadata-tag-grid">
             {STRUCTURED_TAG_KEYS.map((key) => (
               <label className="metadata-form-field" key={key}>
@@ -168,7 +192,7 @@ export function MetadataVisualEditor({
           </div>
           <label className="metadata-tag-verification">
             <input type="checkbox" checked={tagsVerified} onChange={(event) => onChange(setStructuredTagsVerified(draft, event.target.checked))} />
-            <span><strong>{text("我已根据论文内容核对以上标签", "I checked these tags against the paper")}</strong><small>{text("勾选后，这些标签才会用于正式检索与写作。", "These tags are used for retrieval and writing only after confirmation.")}</small></span>
+            <span><strong>{text("我已根据论文内容核对以上标签", "I checked these tags against the paper")}</strong><small>{text("勾选后，已填写的标签才会辅助后续章节归类；再次修改会自动取消核对状态。", "After confirmation, completed tags may assist chapter organization. Editing a tag automatically clears this confirmation.")}</small></span>
           </label>
         </div>
       </details>
@@ -189,7 +213,7 @@ export function MetadataVisualEditor({
         </div>
       </details>
 
-      {error ? <p className="message message-error" role="alert">{error.message}</p> : null}
+      {error ? <p className="message message-error" role="alert"><LocalizedError error={error} /></p> : null}
     </form>
   );
 }

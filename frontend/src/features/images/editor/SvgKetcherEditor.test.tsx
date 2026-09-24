@@ -95,7 +95,7 @@ describe("SvgKetcherEditor", () => {
     expect(screen.queryByRole("link", { name: /在线编辑/ })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Ketcher 添加结构" }));
-    expect(screen.getByTitle("Ketcher chemical structure editor")).toHaveAttribute("src", "/assets/ketcher/standalone/index.html");
+    expect(screen.getByTitle("Ketcher 化学结构编辑器")).toHaveAttribute("src", "/assets/ketcher/standalone/index.html");
   });
 
   it("updates selection glow and source-object deletion in the live SVG preview", async () => {

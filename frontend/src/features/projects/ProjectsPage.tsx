@@ -1,3 +1,4 @@
+import { LocalizedError } from "../../components/LocalizedError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
@@ -80,7 +81,7 @@ export function ProjectsPage() {
   const modelCatalog = useQuery(modelCatalogQuery);
   const taxonomyProfiles = useQuery(taxonomyProfilesQuery);
   const { register, handleSubmit, reset, formState } = useForm<ProjectFields>({
-    defaultValues: { slug: "", topic: "", taxonomy_profile: "general_academic", model_tier: "" },
+    defaultValues: { slug: "", topic: "", taxonomy_profile: "chemistry_general", model_tier: "" },
   });
   const createProject = useMutation({
     mutationFn: (values: ProjectFields) =>
@@ -170,8 +171,8 @@ export function ProjectsPage() {
           <div className="project-list">
             {projects.data?.items.map((project) => <ProjectCard key={project.project_id} project={project} deleting={deleteProject.isPending && deleteProject.variables?.project_id === project.project_id} modelUpdating={updateModelTier.isPending && updateModelTier.variables?.project.project_id === project.project_id} taxonomyUpdating={updateTaxonomyProfile.isPending && updateTaxonomyProfile.variables?.project.project_id === project.project_id} taxonomyProfiles={taxonomyProfiles.data?.items || [{ id: "general_academic", label_zh: "通用学术", label_en: "General Academic", description_zh: "不启用化学领域规则。", description_en: "No chemistry domain rules.", domain_rules_enabled: false }, { id: "chemistry_general", label_zh: "通用化学", label_en: "General Chemistry", description_zh: "启用化学扩展和标签加权。", description_en: "Enables chemistry expansion and tag weighting.", domain_rules_enabled: true }]} pendingTaxonomyProfile={pendingTaxonomyChange?.projectId === project.project_id ? pendingTaxonomyChange.profile : ""} onModelChange={(item, modelTier) => updateModelTier.mutate({ project: item, modelTier })} onTaxonomyChange={requestTaxonomyChange} onConfirmTaxonomyChange={(item, profile) => updateTaxonomyProfile.mutate({ project: item, profile, confirm: true })} onCancelTaxonomyChange={() => setPendingTaxonomyChange(null)} onDelete={confirmDelete} />)}
           </div>
-          {deleteProject.error ? <p className="message message-error" role="alert">{deleteProject.error.message}</p> : null}
-          {updateTaxonomyProfile.error ? <p className="message message-error" role="alert">{updateTaxonomyProfile.error.message}</p> : null}
+          {deleteProject.error ? <p className="message message-error" role="alert"><LocalizedError error={deleteProject.error} /></p> : null}
+          {updateTaxonomyProfile.error ? <p className="message message-error" role="alert"><LocalizedError error={updateTaxonomyProfile.error} /></p> : null}
         </section>
 
         <aside id="create-project" className="surface sticky-card">
@@ -209,7 +210,7 @@ export function ProjectsPage() {
             <button className="button button-primary button-block" type="submit" disabled={createProject.isPending || formState.isSubmitting}>
               {createProject.isPending ? text("正在创建…", "Creating…") : text("创建项目", "Create project")}
             </button>
-            {createProject.error ? <p className="message message-error" role="alert">{createProject.error.message}</p> : null}
+            {createProject.error ? <p className="message message-error" role="alert"><LocalizedError error={createProject.error} /></p> : null}
             {createProject.isSuccess ? <p className="message" role="status">{text("项目已创建。", "Project created.")}</p> : null}
           </form>
         </aside>
@@ -217,7 +218,7 @@ export function ProjectsPage() {
       <DeleteProjectDialog
         project={deleteTarget}
         deleting={deleteProject.isPending}
-        error={deleteProject.error?.message}
+        error={deleteProject.error ? <LocalizedError error={deleteProject.error} /> : undefined}
         onCancel={() => {
           if (!deleteProject.isPending) setDeleteTarget(null);
         }}

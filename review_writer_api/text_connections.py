@@ -39,7 +39,7 @@ def _version(service, runtime, name, revision):
                 wire_api=runtime.wire_api, enabled=runtime.enabled,
                 encrypted_secret=base64.b64encode(service.cipher.encrypt("server-global", "text", runtime.api_key)).decode() if runtime.api_key else "",
                 api_key_hint=_secret_hint(runtime.api_key) if runtime.api_key else "",
-                source=runtime.source, updated_at=utc_now().isoformat())
+                source=runtime.source, max_concurrency=4, updated_at=utc_now().isoformat())
 
 
 def ensure_default(service):
@@ -82,7 +82,8 @@ def mirror_legacy_default(service, session, runtime):
     data = deepcopy(old)
     item = next(item for item in data["items"] if item["id"] == "default")
     current = item["versions"][-1]
-    item["versions"].append(_version(service, runtime, current["name"], current["revision"] + 1))
+    item["versions"].append({**_version(service, runtime, current["name"], current["revision"] + 1),
+                             "max_concurrency": current.get("max_concurrency", 4)})
     _commit_state(session, old, data)
 
 
@@ -101,7 +102,7 @@ def list_connections(service, principal):
     principal.require(Permission.PROVIDER_MANAGE)
     with database_session(service.session_factory) as session:
         state = session.get(WorkflowSystemState, CONNECTIONS_KEY)
-        return {"items": [dict(id=item["id"], **{k: v for k, v in item["versions"][-1].items() if k != "encrypted_secret"},
+        return {"items": [dict(id=item["id"], **{"max_concurrency": 4, **{k: v for k, v in item["versions"][-1].items() if k != "encrypted_secret"}},
                                api_key_configured=bool(item["versions"][-1]["encrypted_secret"]))
                           for item in state.value_json["items"]]}
 
@@ -110,6 +111,9 @@ def save_connection(service, principal, connection_id, data):
     principal.require(Permission.PROVIDER_MANAGE)
     name = str(data.get("name") or "").strip()
     wire = str(data.get("wire_api") or "")
+    capacity = data.get("max_concurrency")
+    if capacity is not None and (type(capacity) is not int or not 1 <= capacity <= 32):
+        raise ProviderSettingsError("Connection concurrency must be between 1 and 32.")
     if not name or len(name) > 100:
         raise ProviderSettingsError("Provide a connection name (1–100 characters).")
     if wire not in {"responses", "chat-completions"}:
@@ -134,6 +138,8 @@ def save_connection(service, principal, connection_id, data):
             previous = item["versions"][-1]
         if int(data.get("revision", 0)) != previous.get("revision", 0):
             raise ProviderSettingsError("This connection changed. Refresh before saving.")
+        if capacity is None:
+            capacity = previous.get("max_concurrency", 4)
         if any(i["id"] != connection_id and i["versions"][-1]["name"].casefold() == name.casefold() for i in updated["items"]):
             raise ProviderSettingsError("Connection names must be unique.")
         key = str(data.get("api_key") or "").strip()
@@ -144,7 +150,7 @@ def save_connection(service, principal, connection_id, data):
         item["versions"].append(dict(revision=previous.get("revision", 0) + 1, name=name,
             base_url=url, wire_api=wire, enabled=enabled, encrypted_secret=encrypted,
             api_key_hint=_secret_hint(key) if key else previous.get("api_key_hint", ""),
-            source="database", updated_at=utc_now().isoformat()))
+            source="database", max_concurrency=capacity, updated_at=utc_now().isoformat()))
         _commit_state(session, old, updated)
         session.add(ServerProviderAuditEvent(actor_user_id=uuid.UUID(principal.user_id), provider_kind="text",
             action="connection_update", summary=f"Text connection {connection_id}; revision={item['versions'][-1]['revision']}; enabled={enabled}"))

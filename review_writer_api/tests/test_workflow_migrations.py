@@ -21,6 +21,31 @@ from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper, Wor
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def insert_legacy_job(session, *, user_id, project_id=None, job_type, queue_name,
+                      scope, scope_key, request_key):
+    """Seed an old revision without inserting columns its schema does not have."""
+    job_id = uuid.uuid4()
+    session.execute(text("""
+        INSERT INTO workflow_jobs (
+            id, user_id, project_id, scope, job_type, queue_name, status,
+            idempotency_scope_key, idempotency_key, payload_json, result_json,
+            progress_current, progress_total, cancellation_requested,
+            error_code, error_message, lease_owner, lease_generation, attempt_count,
+            created_at, updated_at
+        ) VALUES (
+            :id, :user_id, :project_id, :scope, :job_type, :queue_name, 'queued',
+            :scope_key, :request_key, '{}', '{}', 0, 0, 0, '', '', '', 0, 0,
+            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        )
+    """), {"id": job_id.hex, "user_id": user_id.hex,
+           "project_id": project_id.hex if project_id else None,
+           "scope": scope, "job_type": job_type, "queue_name": queue_name,
+           "scope_key": scope_key, "request_key": request_key})
+    return job_id
+
+
 FOUNDATION_TABLES = {"users", "user_sessions", "projects", "provider_credentials"}
 WORKFLOW_TABLES = {
     "workflow_system_state",
@@ -59,7 +84,14 @@ class WorkflowMigrationTests(unittest.TestCase):
     def test_workflow_schema_has_separate_workflow_and_job_scope_revisions(self) -> None:
         script = ScriptDirectory.from_config(self.alembic_config())
 
-        self.assertEqual(["20260914_0024"], script.get_heads())
+        self.assertEqual(["20260924_0028"], script.get_heads())
+        self.assertEqual("20260923_0027", script.get_revision("20260924_0028").down_revision)
+        delegation_revision = script.get_revision("20260923_0027")
+        self.assertEqual("20260923_0026", delegation_revision.down_revision)
+        retry_revision = script.get_revision("20260923_0026")
+        self.assertEqual("20260920_0025", retry_revision.down_revision)
+        embedding_pricing_revision = script.get_revision("20260920_0025")
+        self.assertEqual("20260914_0024", embedding_pricing_revision.down_revision)
         workflow_revision = script.get_revision("20260813_0002")
         self.assertEqual("20260811_0001", workflow_revision.down_revision)
         job_scope_revision = script.get_revision("20260813_0003")
@@ -145,8 +177,9 @@ class WorkflowMigrationTests(unittest.TestCase):
                 with sessions.begin() as session:
                     user = User(email="queue@test.invalid", password_hash="x")
                     session.add(user); session.flush()
-                    job = WorkflowJob(user_id=user.id, scope="library", job_type="library.bibliography-audit", queue_name="ingest", status="queued", idempotency_key="old-audit")
-                    session.add(job); session.flush(); job_id = job.id
+                    job_id = insert_legacy_job(session, user_id=user.id,
+                        scope="library", scope_key="_library_", request_key="old-audit",
+                        job_type="library.bibliography-audit", queue_name="ingest")
                 command.upgrade(config, "head")
                 with sessions() as session:
                     job = session.get(WorkflowJob, job_id)
@@ -352,26 +385,11 @@ class WorkflowMigrationTests(unittest.TestCase):
                     second = Project(user_id=user.id, slug="second", topic="Second")
                     session.add_all([first, second])
                     session.flush()
-                    session.add_all(
-                        [
-                            WorkflowJob(
-                                user_id=user.id,
-                                project_id=first.id,
-                                scope="project",
-                                job_type="discovery",
-                                idempotency_scope_key=str(first.id),
-                                idempotency_key="same-request",
-                            ),
-                            WorkflowJob(
-                                user_id=user.id,
-                                project_id=second.id,
-                                scope="project",
-                                job_type="discovery",
-                                idempotency_scope_key=str(second.id),
-                                idempotency_key="same-request",
-                            ),
-                        ]
-                    )
+                    for project in (first, second):
+                        insert_legacy_job(session, user_id=user.id, project_id=project.id,
+                            scope="project", scope_key=str(project.id),
+                            request_key="same-request", job_type="discovery",
+                            queue_name="scientific")
 
                 command.downgrade(config, "20260813_0002")
                 with engine.connect() as connection:

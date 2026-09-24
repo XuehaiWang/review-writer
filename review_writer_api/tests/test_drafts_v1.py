@@ -397,6 +397,23 @@ class DraftsV1Tests(NativeFigureApiTestCase):
         self.assertIn("[1] Study two", markdown)
         self.assertIn("[2] Study one", markdown)
 
+    def test_assembly_preserves_grouped_citations_and_bound_transitions(self) -> None:
+        paragraph = {
+            "paragraph_id": "S01-p1", "paper_id": "P002",
+            "text": "We next compare the methods. First result. Second result. [16] Other study. [7]",
+            "claim_realizations": [
+                {"claim_id": "a", "text": "First result.", "citation_group": ["P002"], "claim_kind": "reported_finding"},
+                {"claim_id": "b", "text": "Second result.", "citation_group": ["P002"], "claim_kind": "reported_finding"},
+                {"claim_id": "c", "text": "Other study.", "citation_group": ["P001"], "claim_kind": "reported_finding"},
+            ],
+        }
+        markdown = self.app.state.drafts_service._assemble_markdown(
+            "Review", {"sections": [{"section_id": "S01", "heading": "Methods", "paragraphs": [paragraph]}]},
+            {"figures": []}, {"rows": [{"paper_id": "P002", "title": "Two"}, {"paper_id": "P001", "title": "One"}]},
+        )
+        self.assertIn("We next compare the methods. First result. Second result. [1] Other study. [2]", markdown)
+        self.assertNotIn("[16]", markdown)
+
     def test_current_insertion_plan_skips_unplaced_pool_assets(self) -> None:
         markdown = self.app.state.drafts_service._assemble_markdown(
             "Review",
@@ -487,39 +504,6 @@ class DraftsV1Tests(NativeFigureApiTestCase):
         )
         self.assertNotIn("$", figure_block)
 
-    def test_rewrite_payload_carries_the_complete_evaluated_draft(self) -> None:
-        service = object.__new__(DraftsService)
-        complete_draft = (
-            "# Review\n\nEvidence paragraph.\n\n"
-            "<!-- paragraph_id: S01-p1 -->\n"
-        )
-        service.get = lambda _principal, _project_id: {  # type: ignore[method-assign]
-            "first_draft_md": complete_draft,
-            "draft_artifact_id": "draft-artifact",
-            "quality_artifact_id": "quality-artifact",
-            "revision": 4,
-            "paragraphs": [
-                {"paragraph_id": "S01-p1", "text": "Evidence paragraph."}
-            ],
-            "quality": {
-                "current": True,
-                "issues": [
-                    {
-                        "issue_id": "issue-1",
-                        "paragraph_id": "S01-p1",
-                        "message": "Strengthen the evidence comparison.",
-                    }
-                ],
-            },
-        }
-        service.compatibility_payload = (  # type: ignore[method-assign]
-            lambda _principal, _project_id: {"matrix": {"rows": []}}
-        )
-
-        payload = service.rewrite_payload(None, "project-1", "S01-p1")
-
-        self.assertEqual(complete_draft, payload["draft_text"])
-        self.assertIn(payload["paragraph_text"], payload["draft_text"])
 
     def test_legacy_quality_issue_gets_consistent_response_only_repair_route(self) -> None:
         legacy = {

@@ -1,8 +1,11 @@
+import { uiLocale } from "../../i18n/locale";
+import { LocalizedError } from "../../components/LocalizedError";
 import { useState } from "react";
 import { ModelCatalogEditor } from "./ModelCatalogEditor";
 import { TextConnectionsEditor } from "./TextConnectionsEditor";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { useLocalizedMessage } from "../../i18n/useLocalizedMessage";
 import { apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
 import {
   adminUsageQuery,
@@ -23,6 +26,8 @@ import { ErrorState } from "../../components/ErrorState";
 import { useUiText } from "../../i18n/useUiText";
 import { SystemErrors } from "./SystemErrors";
 import { StorageMaintenance } from "./StorageMaintenance";
+import { ModelConcurrencyPanel } from "./ModelConcurrencyPanel";
+import { WorkerStatusPanel } from "./WorkerStatusPanel";
 
 type ProviderDraft = {
   base_url: string;
@@ -30,6 +35,7 @@ type ProviderDraft = {
   wire_api: string;
   api_key: string;
   enabled: boolean;
+  input_usd_per_million: string;
 };
 
 const providerSections: { id: ProviderKind; zh: string; en: string; description: string; descriptionEn: string }[] = [
@@ -46,6 +52,7 @@ function draftFrom(record: ProviderSettings): ProviderDraft {
     wire_api: record.wire_api,
     api_key: "",
     enabled: record.enabled,
+    input_usd_per_million: record.input_usd_per_million || "0",
   };
 }
 
@@ -54,7 +61,7 @@ function ProviderEditor({ record }: { record: ProviderSettings }) {
   const queryClient = useQueryClient();
   const [changes, setDraft] = useState<ProviderDraft | null>(null);
   const draft = changes ?? draftFrom(record);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useLocalizedMessage();
 
   const refresh = async () => {
     await Promise.all([
@@ -71,13 +78,16 @@ function ProviderEditor({ record }: { record: ProviderSettings }) {
         ...jsonBody({
           ...draft,
           api_key: draft.api_key.trim() || null,
+          input_usd_per_million: record.provider_kind === "embedding"
+            ? (draft.input_usd_per_million.trim() || "0")
+            : null,
         }),
       },
     ),
     onSuccess: async (saved) => {
       queryClient.setQueryData(queryKeys.adminProviderSettings, (current: { items: ProviderSettings[] } | undefined) => current ? { ...current, items: current.items.map(item => item.provider_kind === saved.provider_kind ? saved : item) } : current);
       setDraft(null);
-      setMessage(text("配置已保存，之后启动的任务会立即使用新配置。", "Saved. New tasks will use this configuration immediately."));
+      setMessage(["配置已保存，之后启动的任务会立即使用新配置。", "Saved. New tasks will use this configuration immediately."]);
       await refresh();
     },
   });
@@ -88,7 +98,7 @@ function ProviderEditor({ record }: { record: ProviderSettings }) {
     ),
     onSuccess: async () => {
       setDraft(null);
-      setMessage(text("已恢复服务器环境变量配置。", "Restored the server environment fallback."));
+      setMessage(["已恢复服务器环境变量配置。", "Restored the server environment fallback."]);
       await refresh();
     },
   });
@@ -99,12 +109,15 @@ function ProviderEditor({ record }: { record: ProviderSettings }) {
     ),
     onSuccess: async (result) => {
       setMessage(result.ok
-        ? text(`连接成功，耗时 ${result.latency_ms} ms。`, `Connected in ${result.latency_ms} ms.`)
-        : text(`连接失败：${result.message}`, `Connection failed: ${result.message}`));
+        ? [`连接成功，耗时 ${result.latency_ms} ms。`, `Connected in ${result.latency_ms} ms.`]
+         : result.message);
       await queryClient.invalidateQueries({ queryKey: queryKeys.adminProviderAudit });
     },
   });
   const busy = save.isPending || reset.isPending || testConnection.isPending;
+  const embeddingPrice = Number(draft.input_usd_per_million || "0");
+  const embeddingPriceInvalid = record.provider_kind === "embedding"
+    && (!Number.isFinite(embeddingPrice) || embeddingPrice < 0 || embeddingPrice > 1_000_000);
   const title = record.provider_kind === "text"
     ? text("文本生成服务", "Text generation")
     : record.provider_kind === "image"
@@ -162,6 +175,21 @@ function ProviderEditor({ record }: { record: ProviderSettings }) {
             />
           </label>
         ) : null}
+        {record.provider_kind === "embedding" ? (
+          <label>
+            <span>{text("输入价格（USD / 百万 Token）", "Input price (USD / million tokens)")}</span>
+            <input
+              type="number"
+              min="0"
+              max="1000000"
+              step="0.00000001"
+              value={draft.input_usd_per_million}
+              disabled={busy}
+              onChange={(event) => setDraft({ ...draft, input_usd_per_million: event.target.value })}
+            />
+            <small>{text("向量调用按实际输入 Token 结算；填 0 表示仅记录用量、不扣余额。", "Embedding calls settle on actual input tokens; 0 records usage without debiting balance.")}</small>
+          </label>
+        ) : null}
         <label className={record.provider_kind === "text" ? undefined : "admin-wide-field"}>
           <span>API Key</span>
           <input
@@ -191,21 +219,21 @@ function ProviderEditor({ record }: { record: ProviderSettings }) {
           <small>{changes ? text("有未保存修改；保存后再测试连接。", "Unsaved changes; save before testing.") : text("启用不代表连接正常，可测试已保存的配置。", "Enabled does not confirm connectivity. Test the saved configuration.")}</small>
           {message ? <p className="admin-provider-message" role="status">{message}</p> : null}
           {save.error || reset.error || testConnection.error ? (
-            <p className="message message-error" role="alert">{(save.error || reset.error || testConnection.error)?.message}</p>
+            <p className="message message-error" role="alert"><LocalizedError error={(save.error || reset.error || testConnection.error)} /></p>
           ) : null}
         </div>
         <div className="admin-provider-actions">
           <button className="button button-quiet" type="button" disabled={busy || !record.enabled || !!changes} onClick={() => testConnection.mutate()}>
             {testConnection.isPending ? text("测试中…", "Testing…") : text("测试连接", "Test connection")}
           </button>
-          <button className="button button-primary" type="button" disabled={busy || !changes} onClick={() => save.mutate()}>
+          <button className="button button-primary" type="button" disabled={busy || !changes || embeddingPriceInvalid} onClick={() => save.mutate()}>
             {save.isPending ? text("保存中…", "Saving…") : text("保存服务配置", "Save provider")}
           </button>
         </div>
         <details className="admin-advanced">
           <summary>{text("高级维护", "Advanced maintenance")}</summary>
           <p className="muted">{text("恢复后将移除该服务的后台覆盖设置，后续任务改用服务器环境配置。", "Restoring removes this provider's admin override. New tasks use server environment settings.")}</p>
-          <small>{record.updated_at ? text(`最近更新：${new Date(record.updated_at).toLocaleString()}`, `Updated: ${new Date(record.updated_at).toLocaleString()}`) : text("当前使用服务器默认配置", "Using server defaults")}</small>
+          <small>{record.updated_at ? text(`最近更新：${new Date(record.updated_at).toLocaleString(uiLocale())}`, `Updated: ${new Date(record.updated_at).toLocaleString(uiLocale())}`) : text("当前使用服务器默认配置", "Using server defaults")}</small>
           <div className="button-row"><button className="button button-quiet" type="button" disabled={busy || !!changes || record.source !== "database"} onClick={() => reset.mutate()}>{text("恢复服务器默认配置", "Restore server defaults")}</button>
           {changes ? <button className="button button-quiet" type="button" disabled={busy} onClick={() => { setDraft(null); setMessage(""); save.reset(); }}>{text("放弃未保存修改", "Discard changes")}</button> : null}</div>
         </details>
@@ -221,7 +249,7 @@ function UserAndCreditManagement({ users, currentUserId }: { users: AdminUser[];
   const [targetUserId, setTargetUserId] = useState("");
   const [amount, setAmount] = useState("");
   const [reason, setReason] = useState("");
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useLocalizedMessage();
   const [adjustmentKey, setAdjustmentKey] = useState(() => newIdempotencyKey());
 
   const targetUser = users.find(user => user.user_id === targetUserId);
@@ -241,7 +269,7 @@ function UserAndCreditManagement({ users, currentUserId }: { users: AdminUser[];
       headers: { "Content-Type": "application/json", "Idempotency-Key": adjustmentKey },
     }),
     onSuccess: async () => {
-      setMessage(text("额度调整已写入不可变资金流水。", "Adjustment was written to the append-only ledger."));
+      setMessage(["额度调整已写入不可变资金流水。", "Adjustment was written to the append-only ledger."]);
       setAmount("");
       setReason("");
       setTargetUserId("");
@@ -277,7 +305,7 @@ function UserAndCreditManagement({ users, currentUserId }: { users: AdminUser[];
         </fieldset>
       </section> : null}
       {message ? <p className="message" role="status">{message}</p> : null}
-      {adjustment.error || updateUser.error ? <p className="message message-error" role="alert">{(adjustment.error || updateUser.error)?.message}</p> : null}
+      {adjustment.error || updateUser.error ? <p className="message message-error" role="alert"><LocalizedError error={(adjustment.error || updateUser.error)} /></p> : null}
 
       <div className="admin-user-table-wrap">
         <table className="admin-user-table">
@@ -288,8 +316,8 @@ function UserAndCreditManagement({ users, currentUserId }: { users: AdminUser[];
               <td><strong>{user.display_name || text("未命名用户", "Unnamed user")}{isSelf ? text("（当前账户）", " (you)") : ""}</strong><small>{user.email}</small></td>
               <td><strong>${Number(user.available_usd).toFixed(4)}</strong><small>{Number(user.reserved_usd) > 0 ? text(`冻结 $${Number(user.reserved_usd).toFixed(4)}`, `$${Number(user.reserved_usd).toFixed(4)} reserved`) : text("无冻结", "No hold")}</small></td>
               <td><strong>${Number(user.estimated_cost_usd).toFixed(4)}</strong><small>USD</small></td>
-              <td>{user.project_count.toLocaleString()}</td>
-              <td><select aria-label={text(`${user.email} 的角色`, `Role for ${user.email}`)} value={user.role} disabled={updateUser.isPending || isSelf} onChange={(event) => updateUser.mutate({ userId: user.user_id, patch: { role: event.target.value } })}><option value="user">User</option><option value="admin">Admin</option></select></td>
+              <td>{user.project_count.toLocaleString(uiLocale())}</td>
+              <td><select aria-label={text(`${user.email} 的角色`, `Role for ${user.email}`)} value={user.role} disabled={updateUser.isPending || isSelf} onChange={(event) => updateUser.mutate({ userId: user.user_id, patch: { role: event.target.value } })}><option value="user">{text("用户", "User")}</option><option value="admin">{text("管理员", "Admin")}</option></select></td>
               <td><select aria-label={text(`${user.email} 的状态`, `Status for ${user.email}`)} value={user.status} disabled={updateUser.isPending || isSelf} onChange={(event) => updateUser.mutate({ userId: user.user_id, patch: { status: event.target.value } })}><option value="active">{text("正常", "Active")}</option><option value="disabled">{text("停用", "Disabled")}</option></select></td>
               <td><button className="button button-quiet" type="button" aria-label={text(`调整 ${user.email} 的余额`, `Adjust balance for ${user.email}`)} disabled={adjustment.isPending} onClick={() => { setTargetUserId(user.user_id); setAmount(""); setReason(""); setMessage(""); adjustment.reset(); setAdjustmentKey(newIdempotencyKey()); }}>{text("调整余额", "Adjust balance")}</button></td>
             </tr>;
@@ -347,10 +375,10 @@ export function AdminPage() {
 
       {usage.error ? <ErrorState error={usage.error} onRetry={() => usage.refetch()} /> : null}
       <section className="admin-overview-grid">
-        <article><span>{text("注册用户", "Registered users")}</span><strong>{usage.data?.user_count.toLocaleString() ?? "—"}</strong><small>{usage.data ? text(`${usage.data.active_user_count} 个正常账户`, `${usage.data.active_user_count} active`) : "—"}</small></article>
-        <article><span>{text("有效项目", "Active projects")}</span><strong>{usage.data?.project_count.toLocaleString() ?? "—"}</strong><small>{text("未删除项目", "not deleted")}</small></article>
-        <article><span>{text("累计 Tokens", "Lifetime tokens")}</span><strong>{usage.data?.total_tokens.toLocaleString() ?? "—"}</strong><small>{usage.data ? text(`${usage.data.text_request_count} 次文本请求`, `${usage.data.text_request_count} text requests`) : "—"}</small></article>
-        <article><span>{text("外部服务成本", "Provider cost")}</span><strong>{usage.data ? `$${Number(usage.data.estimated_cost_usd).toFixed(4)}` : "—"}</strong><small>{text("文本 + 图像 + MinerU", "text + image + MinerU")}</small></article>
+        <article><span>{text("注册用户", "Registered users")}</span><strong>{usage.data?.user_count.toLocaleString(uiLocale()) ?? "—"}</strong><small>{usage.data ? text(`${usage.data.active_user_count} 个正常账户`, `${usage.data.active_user_count} active`) : "—"}</small></article>
+        <article><span>{text("有效项目", "Active projects")}</span><strong>{usage.data?.project_count.toLocaleString(uiLocale()) ?? "—"}</strong><small>{text("未删除项目", "not deleted")}</small></article>
+        <article><span>{text("累计 Tokens", "Lifetime tokens")}</span><strong>{usage.data?.total_tokens.toLocaleString(uiLocale()) ?? "—"}</strong><small>{usage.data ? text(`${usage.data.text_request_count} 次文本请求`, `${usage.data.text_request_count} text requests`) : "—"}</small></article>
+        <article><span>{text("外部服务成本", "Provider cost")}</span><strong>{usage.data ? `$${Number(usage.data.estimated_cost_usd).toFixed(4)}` : "—"}</strong><small>{text("文本/向量 + 图像 + MinerU", "text/embedding + image + MinerU")}</small></article>
         <article><span>{text("用户余额总额", "Account balances")}</span><strong>{usage.data ? `$${Number(usage.data.account_balance_total_usd).toFixed(4)}` : "—"}</strong><small>{usage.data ? text(`冻结 $${Number(usage.data.reserved_total_usd).toFixed(4)}`, `$${Number(usage.data.reserved_total_usd).toFixed(4)} reserved`) : "—"}</small></article>
       </section>
 
@@ -381,6 +409,8 @@ export function AdminPage() {
       </div> : null}
 
       {visited.has("activity") ? <div id="admin-activity" className="admin-content-panel" hidden={section !== "activity"}>
+      <WorkerStatusPanel active={section === "activity"} />
+      <ModelConcurrencyPanel active={section === "activity"} />
       <StorageMaintenance active={section === "activity"} />
       <SystemErrors active={section === "activity"} />
       <section className="surface admin-audit-panel">
@@ -389,7 +419,7 @@ export function AdminPage() {
         <details className="admin-audit-disclosure">
           <summary className="admin-audit-summary">
             <div>
-              <span className="step-label">AUDIT</span>
+              <span className="step-label">{text("审计", "Audit")}</span>
               <h2>{text("服务与模型配置记录", "Service & model configuration history")}</h2>
               <small>{audit.data?.items.length ? text(`${audit.data.items.length} 条记录，展开后可滚动查看`, `${audit.data.items.length} records · scroll after expanding`) : text("还没有管理记录", "No administrative activity yet")}</small>
             </div>
@@ -400,7 +430,7 @@ export function AdminPage() {
               <article key={item.id}>
                 <strong>{item.provider_kind.toUpperCase()} · {item.action}</strong>
                 <span>{item.summary}</span>
-                <small>{item.actor_email} · {new Date(item.created_at).toLocaleString()}</small>
+                <small>{item.actor_email} · {new Date(item.created_at).toLocaleString(uiLocale())}</small>
               </article>
             )) : <div className="empty-state compact-empty">{text("服务器配置发生变更后会显示在这里。", "Provider configuration changes will appear here.")}</div>}
           </div>

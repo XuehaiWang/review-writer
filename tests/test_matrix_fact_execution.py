@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Event, Lock
 
 import pytest
+from review_writer_core.model_gateway_client import DeferredModelCall
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "skills/review-literature-matrix-outline/scripts/enrich_matrix_facts.py"
@@ -43,6 +44,70 @@ def execute(source, checkpoint=None):
         save_checkpoint=lambda value: checkpoints.append(deepcopy(value)),
         save_progress=lambda value: progress.append(deepcopy(value)), retrieve=lambda _: [])
     return results, checkpoints, progress
+
+
+def test_limited_paper_execution_yields_without_repeating_completed_papers(monkeypatch):
+    calls = []
+    source = {"source_matrix_artifact_id": "matrix-1", "papers": [paper("P1"), paper("P2")]}
+
+    def fake_extract(_source, item, _previous, *, publish, retrieve):
+        paper_id = item["paper_id"]
+        calls.append(paper_id)
+        result = {"paper_id": paper_id, "status": "complete", "facts": []}
+        publish(paper_id, {"source_fingerprint": item["source_fingerprint"],
+                           "result": result, "agent_state": {}}, "completed", {})
+        return result
+
+    monkeypatch.setattr(PIPELINE, "extract_paper", fake_extract)
+    saved = []
+    run = lambda checkpoint: PIPELINE.enrich_papers(
+        source, checkpoint, save_checkpoint=lambda value: saved.append(deepcopy(value)),
+        save_progress=lambda _: None, retrieve=lambda _: [], max_new_papers=1,
+    )
+    first = run({})
+    assert calls == ["P1"] and [row["paper_id"] for row in first] == ["P1"]
+    assert saved[-1]["completed_papers"] == ["P1"]
+    second = run(saved[-1])
+    assert calls == ["P1", "P2"] and [row["paper_id"] for row in second] == ["P1", "P2"]
+    source["papers"][0]["source_fingerprint"] = "changed"
+    run(saved[-1])
+    assert calls[-1] == "P1"
+
+
+def test_deferred_paper_model_call_resumes_without_spending_paper_budget_twice(monkeypatch):
+    item = paper("P1")
+    source = {"source_matrix_artifact_id": "matrix-1", "attempt_id": "job-1", "papers": [item]}
+    snapshots = []
+    waiting = True
+    calls = []
+
+    def model(prompt, **kwargs):
+        nonlocal waiting
+        calls.append(kwargs["label"])
+        if waiting:
+            raise DeferredModelCall("child-1")
+        if kwargs["required_list"] == "verdicts":
+            return verify_response(prompt)
+        return fact_response("P1")
+
+    monkeypatch.setattr(PIPELINE, "call_json_model", model)
+    def run(checkpoint):
+        return PIPELINE.enrich_papers(source, checkpoint,
+            save_checkpoint=lambda value: snapshots.append(deepcopy(value)),
+            save_progress=lambda _: None, retrieve=lambda _: [], max_new_papers=1)
+
+    with pytest.raises(DeferredModelCall):
+        run({})
+    checkpoint = snapshots[-1]
+    assert checkpoint["entries"]["P1"]["agent_state"]["model_calls"] == 0
+    assert checkpoint["entries"]["P1"]["agent_state"]["attempt_model_calls"] == 0
+    assert checkpoint["completed_papers"] == []
+
+    waiting = False
+    result = run(checkpoint)
+    assert calls == ["matrix-facts-P1", "matrix-facts-P1", "fact-verify-P1"]
+    assert result[0]["fact_extraction_profile"]["model_calls"] == 2
+    assert snapshots[-1]["completed_papers"] == ["P1"]
 
 
 def test_new_facts_check_ownership_once_and_reuse_audit_across_jobs(monkeypatch):
@@ -261,6 +326,104 @@ def test_one_combined_classification_request_preserves_route_verification(monkey
     route = results[0]["routing_recommendation"]
     assert route["status"] == "classified" and route["verification"]["status"] == "supported"
     assert results[0]["automatic_resolution"]["targeted_recheck_attempted"]
+
+
+def test_axis_without_partitions_does_not_trigger_per_paper_recheck(monkeypatch):
+    item = paper("P1")
+    item["partition_evidence_candidates"] = deepcopy(item["evidence_candidates"])
+    calls = []
+
+    def model(prompt, **kwargs):
+        calls.append(kwargs["label"])
+        return verify_response(prompt) if kwargs["required_list"] == "verdicts" else fact_response("P1")
+
+    monkeypatch.setattr(PIPELINE, "call_json_model", model)
+    result = execute({"papers": [item], "classification_axes": [{
+        "axis_id": "substrate", "axis_role": "primary_organization",
+        "label": "Substrate class", "partitions": [],
+    }]})[0][0]
+    assert calls == ["matrix-facts-P1", "fact-verify-P1"]
+    assert result["classification_outcomes"] == []
+    assert not result["automatic_resolution"]["targeted_recheck_attempted"]
+
+
+def test_provisional_agent_outline_is_not_a_formal_fact_classification(monkeypatch):
+    item = paper("P1")
+    item["partition_evidence_candidates"] = deepcopy(item["evidence_candidates"])
+    calls = []
+
+    def model(prompt, **kwargs):
+        calls.append(kwargs["label"])
+        return verify_response(prompt) if kwargs["required_list"] == "verdicts" else fact_response("P1")
+
+    monkeypatch.setattr(PIPELINE, "call_json_model", model)
+    result = execute({"papers": [item], "classification_axes": [{
+        "axis_id": "topic_organization", "axis_role": "primary_organization",
+        "source_type": "agent_recommended",
+        "partitions": [{"partition_id": "section_1", "label": "Methods and evidence"}],
+    }]})[0][0]
+    assert calls == ["matrix-facts-P1", "fact-verify-P1"]
+    assert result["evidence_backed_tags"] == {}
+
+
+def test_changed_outline_routes_reused_facts_without_reextracting_them(monkeypatch):
+    item = paper("P1")
+    calls = []
+
+    def model(prompt, **kwargs):
+        calls.append(kwargs["label"])
+        if kwargs["required_list"] == "verdicts":
+            return verify_response(prompt)
+        if kwargs["label"] == "matrix-facts-P1":
+            return fact_response("P1")
+        assert kwargs["label"] == "matrix-route-recheck-P1"
+        return {"facts": [], "topic_classification_assignments": [{
+            "axis_id": "approach", "partition_id": "optimized",
+            "relation_to_paper": "primary_contribution", "confidence": 0.99,
+            "evidence_key": "key-P1",
+            "support_excerpt": item["evidence_candidates"][0]["content"],
+        }]}
+
+    monkeypatch.setattr(PIPELINE, "call_json_model", model)
+    first = execute({"papers": [item]})[0][0]
+    assert first["facts"] and first["facts"][0]["verification"]["status"] == "supported"
+    calls.clear()
+    changed = {**item, "source_fingerprint": "new-classification-contract",
+               "reusable_fact_result": first,
+               "partition_evidence_candidates": deepcopy(item["evidence_candidates"])}
+    axes = [{"axis_id": "approach", "axis_role": "primary_organization",
+             "partitions": [{"partition_id": "optimized", "label": "Optimized protocol"}]}]
+    refreshed = execute({"papers": [changed], "classification_axes": axes})[0][0]
+    assert calls == ["matrix-route-recheck-P1", "fact-verify-P1"]
+    assert any(fact["field_id"] == "quantitative_results" for fact in refreshed["facts"])
+    assert refreshed["evidence_backed_tags"]["approach"]
+
+
+def test_explicit_topic_partition_can_be_refreshed_from_reused_facts(monkeypatch):
+    item = paper("P1")
+    calls = []
+
+    def model(prompt, **kwargs):
+        calls.append(kwargs["label"])
+        if kwargs["required_list"] == "verdicts":
+            return verify_response(prompt)
+        if kwargs["label"] == "matrix-facts-P1":
+            return fact_response("P1")
+        return {"facts": [], "topic_partition_classification": {
+            "partition": "Optimized protocol", "confidence": 0.99,
+            "evidence_key": "key-P1",
+            "support_excerpt": item["evidence_candidates"][0]["content"],
+        }}
+
+    monkeypatch.setattr(PIPELINE, "call_json_model", model)
+    first = execute({"papers": [item]})[0][0]
+    calls.clear()
+    refreshed_item = {**item, "source_fingerprint": "topic-partition-update",
+                      "reusable_fact_result": first}
+    result = execute({"papers": [refreshed_item],
+                      "topic_partitions": ["Optimized protocol"]})[0][0]
+    assert calls == ["matrix-route-recheck-P1"]
+    assert result["topic_partition_classification"]["status"] == "classified"
 
 
 def test_first_pass_formal_route_needs_only_extraction_and_verification(monkeypatch):

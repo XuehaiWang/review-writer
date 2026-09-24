@@ -220,6 +220,38 @@ describe("default argument planning and candidate confirmation", () => {
     expect(screen.queryByRole("button", { name: "正在应用…" })).not.toBeInTheDocument();
   });
 
+  it("keeps the saved outline active until a custom draft is explicitly saved", async () => {
+    renderPlanning();
+    fireEvent.click(await screen.findByRole("button", { name: "大纲选择与上传" }));
+    const custom = screen.getAllByRole("button", { name: "使用此结构" }).at(-1)!;
+
+    fireEvent.click(custom);
+
+    expect(requests).toEqual([]);
+    expect(screen.getByText(/当前已保存大纲会继续保留/)).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "章节标题" })).toHaveValue("Evidence theme");
+    expect(screen.getByRole("button", { name: "正在编辑" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存大纲" }));
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(JSON.parse(String(requests[0].init.body))).toMatchObject({
+      revision: 14,
+      outline_style: "custom",
+    });
+  });
+
+  it("immediately reports duplicate section IDs repaired while saving", async () => {
+    applyOutline = async (body) => {
+      payload = { ...payload, matrix_revision: body.revision + 1, selected_outline_md: "## Evidence theme\n<!-- section_id: S01 -->\n## Comparison\n<!-- section_id: S02 -->\n" };
+      return Response.json({ ...payload, section_id_repairs: [{ section_index: 2, title: "Comparison", old_id: "S01", new_id: "S02" }] });
+    };
+    renderPlanning();
+    fireEvent.click(await screen.findByRole("button", { name: "大纲选择与上传" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "使用此结构" }).at(-1)!);
+    fireEvent.click(screen.getByRole("button", { name: "保存大纲" }));
+    expect(await screen.findByText(/已自动修复 1 处重复的章节标识（第 2 节）/)).toBeVisible();
+  });
+
   it("shows a conflict, refreshes the revision, and retries only on another click", async () => {
     const apply = applyOutline;
     applyOutline = async (body) => {
@@ -230,7 +262,9 @@ describe("default argument planning and candidate confirmation", () => {
     renderPlanning();
     fireEvent.click(await screen.findByRole("button", { name: "大纲选择与上传" }));
     fireEvent.click(screen.getAllByRole("button", { name: "使用此结构" })[0]);
-    expect(await screen.findByRole("alert")).toHaveTextContent("Workflow stage changed since it was loaded.");
+    expect(await screen.findByRole("alert")).toHaveTextContent("内容或版本已更新，请刷新后重试。");
+    fireEvent.click(screen.getByRole("button", { name: "技术详情" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Workflow stage changed since it was loaded.");
     expect(screen.getByRole("alert")).toHaveTextContent("请重新点击需要的大纲");
     expect(requests).toHaveLength(1);
     expect(screen.getByRole("textbox", { name: "章节标题" })).toHaveValue("Evidence theme");
@@ -245,7 +279,9 @@ describe("default argument planning and candidate confirmation", () => {
     renderPlanning();
     fireEvent.click(await screen.findByRole("button", { name: "大纲选择与上传" }));
     fireEvent.click(screen.getAllByRole("button", { name: "使用此结构" })[0]);
-    expect(await screen.findByRole("alert")).toHaveTextContent("The outline could not be loaded.");
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法载入该大纲，请检查内容后重试。");
+    fireEvent.click(screen.getByRole("button", { name: "技术详情" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("The outline could not be loaded.");
     expect(screen.getByRole("textbox", { name: "章节标题" })).toHaveValue("Evidence theme");
     expect(screen.getAllByRole("button", { name: "使用此结构" })[0]).toBeEnabled();
   });
@@ -296,6 +332,10 @@ describe("default argument planning and candidate confirmation", () => {
 
   it.each([
     { name: "outdated outline", patch: { outline_current: false } },
+    { name: "blank incomplete outline", patch: {
+      selected_outline_md: "",
+      outline_selection: { outline_style: "custom", outline_complete: false },
+    } },
   ])("preserves the generation gate for $name", async ({ patch }) => {
     payload = { ...payload, ...patch };
     renderPlanning();

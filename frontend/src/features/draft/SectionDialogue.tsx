@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { useLocalizedMessage } from "../../i18n/useLocalizedMessage";
+import { LocalizedError } from "../../components/LocalizedError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
 import { MarkdownView } from "../../components/MarkdownView";
@@ -36,7 +38,7 @@ export function SectionDialogue({ section, projectId, userId, revision, blocked,
   const olderScroll = useRef<{ height: number; top: number } | null>(null);
   const [newReply, setNewReply] = useState(false);
   const [historyLimit, setHistoryLimit] = useState(5);
-  const [localError, setLocalError] = useState("");
+  const [localError, setLocalError] = useLocalizedMessage();
   const messageRef = useRef(message); messageRef.current = message;
   const endpoint = `/api/v1/projects/${encodeURIComponent(projectId)}/draft/section-dialogues/${encodeURIComponent(section.section_id)}`;
   const history = useQuery({ queryKey: ["draft-dialogue", projectId, "section", section.section_id],
@@ -94,7 +96,7 @@ export function SectionDialogue({ section, projectId, userId, revision, blocked,
   const error = history.error || send.error || cancel.error;
   const revise = (action: "discuss" | "revise" = "discuss") => {
     if (section.paragraphs.some(p => hasDraftScratch(`${userId}:${projectId}:${p.paragraph_key}:manual`))) {
-      setLocalError(text("本章还有未保存的手动编辑，请先保存或取消。", "Save or cancel this chapter's manual edits first.")); return;
+      setLocalError(["本章还有未保存的手动编辑，请先保存或取消。", "Save or cancel this chapter's manual edits first."]); return;
     }
     setLocalError(""); send.mutate({ action, originalInput: message, submitted: message.trim() || text("根据本章此前讨论生成完整章节修改候选。修改讨论涉及的内容，其余保留。", "Generate a complete chapter candidate from our discussion. Revise relevant content and retain the rest.") });
   };
@@ -113,7 +115,7 @@ export function SectionDialogue({ section, projectId, userId, revision, blocked,
       disabled={blocked || decisionPending || !!active || send.isPending} candidates={candidates} turns={allTurns} refresh={sync}
       close={() => setShowVersions(false)} restart={artifactId => {
         if (section.paragraphs.some(p => hasDraftScratch(`${userId}:${projectId}:${p.paragraph_key}:manual`))) {
-          setLocalError(text("本章还有未保存的手动编辑，请先保存或取消。", "Save or cancel this chapter's manual edits first.")); return;
+          setLocalError(["本章还有未保存的手动编辑，请先保存或取消。", "Save or cancel this chapter's manual edits first."]); return;
         }
         setBranch({ id: newIdempotencyKey(), initialArtifactId: artifactId }); setBaseHashes(hashes);
         setRequestKey(newIdempotencyKey()); setMessage(""); setShowVersions(false); setLocalError("");
@@ -155,7 +157,7 @@ export function SectionDialogue({ section, projectId, userId, revision, blocked,
       <p className="muted">{text("生成修改面向当前整章，讨论未涉及的内容保留；保存后才更新正文。", "Generate revision covers this entire chapter, retaining unrelated content. Save to update the draft.")}</p>
       {message && changed ? <p className="message message-warning">{text("本章正文发生变化，请核对最新内容。", "This chapter changed. Review the latest text.")} <button className="button button-secondary" onClick={() => { setBaseHashes(hashes); setRequestKey(newIdempotencyKey()); }}>{text("已核对", "Reviewed")}</button></p> : null}
       {blocked ? <p className="message message-warning">{text("上游内容已变化，请先核对初稿。", "Upstream content changed. Review the draft first.")}</p> : null}
-      {error || localError ? <p role="alert" className="message message-error">{error?.message || localError}</p> : null}
+      {error || localError ? <p role="alert" className="message message-error">{error ? <LocalizedError error={error} /> : localError}</p> : null}
       {storageFailed ? <p role="alert">{text("浏览器暂存不可用，请保留输入。", "Browser storage unavailable; preserve your input.")}</p> : null}
     </div>
   </section>;

@@ -9,6 +9,7 @@ from typing import Any
 from review_writer_core.claim_contracts import ARGUMENT_CONTRACT
 from review_writer_core.academic_contracts import blueprint_taxonomy_diagnostics
 from review_writer_core.scientific_facts import fact_is_usable, fact_support_spans, fact_needs_verification
+from review_writer_core.classification_axes import classification_contract_from_document
 from review_writer_api.database import utc_now
 from review_writer_api.errors import (
     WorkflowConflict,
@@ -33,14 +34,42 @@ class PlanningBlueprintActionsMixin:
         rows = candidate.get("rows") or []
         if len(rows) != len(original_rows) or {row["paper_id"] for row in rows} != set(original_rows):
             raise WorkflowValidationError("Argument planning must retain the selected Matrix papers.")
+        classification_changed = (
+            classification_contract_from_document(original).get("fingerprint")
+            != classification_contract_from_document(candidate).get("fingerprint")
+        )
         issues = []
         for row in rows:
             before = {f["fact_id"]: f for f in original_rows[row["paper_id"]].get("scientific_facts") or []}
             facts = row.get("scientific_facts") or []
-            if not set(before) <= {f["fact_id"] for f in facts}:
-                raise WorkflowValidationError("Planning supplements cannot silently remove existing facts.")
-            changed = [fact for fact in facts if fact_is_usable(fact) and before.get(fact["fact_id"]) != fact]
+            # Extraction returns a fresh subset, not a deletion instruction.
+            # Reconcile here so both planning and publication use the same rule.
+            missing = set(before) - {f["fact_id"] for f in facts}
+            candidate_enrichment = row.get("fact_enrichment") or {}
+            previous_enrichment = original_rows[row["paper_id"]].get("fact_enrichment") or {}
+            refreshed_this_candidate = bool(
+                candidate_enrichment.get("classification_refreshed_from_facts")
+                and candidate_enrichment.get("source_fingerprint")
+                != previous_enrichment.get("source_fingerprint")
+            )
+            if classification_changed or refreshed_this_candidate:
+                # A source fact omitted by an incremental supplement is kept,
+                # but an old route fact cannot survive a new outline contract.
+                missing = {fid for fid in missing
+                           if str(before[fid].get("field_id") or "") != "topic_partition"}
+            facts.extend(deepcopy(fact) for fid, fact in before.items() if fid in missing)
+            row["scientific_facts"] = facts
+            for fid in before:
+                if fid in missing:
+                    issues.append({"paper_id": row["paper_id"], "fact_id": fid,
+                                   "reasons": ["omitted_by_supplement"],
+                                   "action": "retained_previous",
+                                   "value": str(before[fid].get("value") or "")})
+            changed = [fact for fact in facts if fact_is_usable(fact)
+                       and (fact["fact_id"] in missing or before.get(fact["fact_id"]) != fact)]
             if not changed:
+                if missing:
+                    refresh_row_facts(row)
                 continue
             lineages = self.fact_source_lineages(row)
             registry = self.fact_source_candidates(principal, row, [*changed, *before.values()], lineages)

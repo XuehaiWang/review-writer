@@ -57,6 +57,8 @@ export function updateBibliographicField(
       ...field,
       value,
       source: "human_review",
+      source_page: undefined,
+      source_block_index: undefined,
       confidence: 1,
       human_checked: true,
     },
@@ -73,8 +75,7 @@ function structuredTagField(metadata: MetadataRecord): MetadataRecord {
 export function structuredTagValue(metadata: MetadataRecord, key: StructuredTagKey): string {
   const value = structuredTagField(metadata).value;
   if (!isMetadataObject(value)) return "";
-  const raw = String(value[key] || "");
-  return raw.trim().toLocaleLowerCase() === "not specified" ? "" : raw;
+  return String(value[key] || "");
 }
 
 export function updateStructuredTag(
@@ -84,13 +85,19 @@ export function updateStructuredTag(
 ): MetadataRecord {
   const field = structuredTagField(metadata);
   const currentValues = isMetadataObject(field.value) ? field.value : {};
+  const changed = String(currentValues[key] || "") !== value;
   return {
     ...metadata,
     structured_tags: {
       ...field,
+      ...(changed ? {
+        source: "human_edit_unverified",
+        confidence: 0,
+        human_checked: false,
+      } : {}),
       value: {
         ...currentValues,
-        [key]: value || "not specified",
+        [key]: value,
       },
     },
   };
@@ -140,6 +147,19 @@ export function metadataTextForEditing(value: unknown): string {
     .replace(/&gt;/gi, ">")
     .replace(/&quot;/gi, "\"")
     .replace(/&#39;/gi, "'");
+}
+
+export function metadataForEditing(metadata: MetadataRecord): MetadataRecord {
+  const editable = cloneMetadata(metadata);
+  const field = structuredTagField(editable);
+  if (!isMetadataObject(field.value)) return editable;
+  const values = { ...field.value };
+  for (const key of STRUCTURED_TAG_KEYS) {
+    if (String(values[key] || "").trim().toLocaleLowerCase() === "not specified") {
+      values[key] = "";
+    }
+  }
+  return { ...editable, structured_tags: { ...field, value: values } };
 }
 
 export function metadataForSave(metadata: MetadataRecord): MetadataRecord {

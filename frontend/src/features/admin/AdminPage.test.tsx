@@ -8,11 +8,13 @@ vi.mock("../../api/client", () => ({ apiRequest: vi.fn(), jsonBody: (body: unkno
 vi.mock("../../i18n/useUiText", () => ({ useUiText: () => ({ text: (zh: string) => zh }) }));
 
 const users = ["admin", "reader"].map(id => ({ user_id: id, email: `${id}@test.invalid`, display_name: id, role: id === "admin" ? "admin" : "user", status: "active", available_usd: "5", reserved_usd: "0", estimated_cost_usd: "1", project_count: 2 }));
-const providers = ["text", "image", "embedding", "mineru"].map(provider_kind => ({ provider_kind, base_url: "https://provider.test/v1", model_name: "model", wire_api: "responses", enabled: true, source: "database", api_key_configured: true, api_key_hint: "***", updated_at: null }));
+const providers = ["text", "image", "embedding", "mineru"].map(provider_kind => ({ provider_kind, base_url: "https://provider.test/v1", model_name: "model", wire_api: provider_kind === "embedding" ? "embeddings" : "responses", enabled: true, input_usd_per_million: provider_kind === "embedding" ? "0.25" : "0", source: "database", api_key_configured: true, api_key_hint: "***", updated_at: null }));
 const catalog = { revision: 1, default_tier: "m1", items: [{ id: "m1", model: "model-one", label_zh: "测试模型", label_en: "Test", enabled: true, wire_api: "", input_usd_per_million: "1", output_usd_per_million: "2", cached_input_usd_per_million: "0" }] };
 let client: QueryClient;
 beforeEach(() => {
   vi.mocked(apiRequest).mockImplementation(async (url, options) => {
+    if (url === "/api/v1/admin/workers") return { paused_queues: { scientific: false, image: false, ingest: false, document: false, bibliography: false }, workers: [], queue_counts: {} };
+    if (url === "/api/v1/admin/model-concurrency") return { limits: { text: { global: 8, user: 1 }, image: { global: 1, user: 1 }, embedding: { global: 2, user: 1 } }, version: 0, updated_at: null };
     if (options?.method === "PUT") return { ...providers[0], ...JSON.parse(String(options.body)) };
     if (options?.method === "POST") return {};
     if (url === "/api/v1/me") return { user_id: "admin" };
@@ -63,6 +65,21 @@ it("preserves provider drafts across navigation and refresh, then saves the sele
   fireEvent.click(within(textPanel).getByRole("button", { name: "保存连接" }));
   await waitFor(() => expect(vi.mocked(apiRequest).mock.calls.some(([url, opts]) => url === "/api/v1/admin/text-connections/default" && opts?.method === "PUT" && JSON.parse(String(opts.body)).api_key === "test-only-key")).toBe(true));
   await waitFor(() => expect(key).toHaveValue(""));
+});
+
+it("edits and saves embedding input pricing with the provider", async () => {
+  openServices();
+  await screen.findByText("默认连接", { selector: "strong" });
+  fireEvent.click(screen.getByRole("button", { name: /^向量检索/ }));
+  const price = await screen.findByLabelText(/输入价格（USD \/ 百万 Token）/);
+  expect(price).toHaveValue(0.25);
+  fireEvent.change(price, { target: { value: "0.4" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存服务配置" }));
+  await waitFor(() => expect(vi.mocked(apiRequest).mock.calls.some(([url, opts]) =>
+    url === "/api/v1/admin/provider-settings/embedding"
+      && opts?.method === "PUT"
+      && JSON.parse(String(opts.body)).input_usd_per_million === "0.4"
+  )).toBe(true));
 });
 
 it("opens balance adjustment for an explicit user and preserves self-account protections", async () => {

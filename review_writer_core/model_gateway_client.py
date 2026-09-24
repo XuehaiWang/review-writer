@@ -9,10 +9,13 @@ import os
 import re
 import ssl
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
+from contextlib import contextmanager
+from pathlib import Path
 
 from .provider_errors import normalize_provider_error, provider_error_message
 
@@ -20,6 +23,31 @@ from .provider_errors import normalize_provider_error, provider_error_message
 # Recovery only reads the original request. Allow the gateway's three provider
 # attempts (up to 300 seconds each) to finish without starting another paid call.
 MODEL_RESULT_RECOVERY_SECONDS = 900
+
+
+class ModelResultUnknown(RuntimeError):
+    """The original request may have been sent; automatic replay is unsafe."""
+
+
+@contextmanager
+def _model_wait_marker():
+    directory = str(os.environ.get("REVIEW_WRITER_MODEL_WAIT_DIR") or "").strip()
+    if not directory or not Path(directory).is_dir():
+        yield
+        return
+    marker = Path(directory) / f"{uuid.uuid4().hex}.waiting"
+    try:
+        marker.touch(exist_ok=False)
+    except OSError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            marker.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _recover_model_result(url: str, token: str, request_key: str, *, label: str) -> dict[str, Any]:
@@ -54,7 +82,7 @@ def _recover_model_result(url: str, token: str, request_key: str, *, label: str)
             if status != "running":
                 raise RuntimeError(f"{label} gateway returned an invalid recovery status.")
         time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
-    raise RuntimeError(
+    raise ModelResultUnknown(
         f"{label} gateway result recovery timed out after {MODEL_RESULT_RECOVERY_SECONDS} seconds; "
         "the original request was not resubmitted."
     )
@@ -75,6 +103,79 @@ class GatewayRequestError(RuntimeError):
         self.status_code = int(status_code)
         self.code = str(code or "")
         self.details = dict(details or {})
+
+
+class DeferredModelCall(BaseException):
+    """The durable model job owns this request; the scientific job may yield."""
+
+    def __init__(self, model_job_id: str, *, model_job_ids=None):
+        super().__init__(model_job_id)
+        self.model_job_id = model_job_id
+        self.model_job_ids = list(dict.fromkeys([model_job_id, *(model_job_ids or [])]))
+
+
+def _delegated_text_result(
+    url: str, token: str, *, request_key: str, stage: str,
+    prompt: str, response_format: str,
+) -> str:
+    base = url.rsplit("/", 1)[0] + "/model-delegations"
+    body = json.dumps({
+        "request_key": request_key, "stage": stage,
+        "prompt": prompt, "response_format": response_format,
+    }, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(base, data=body, method="POST", headers={
+        "Authorization": f"Bearer {token}", "Content-Type": "application/json",
+        "Accept": "application/json",
+    })
+    with _model_wait_marker():
+        try:
+            with urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=30) as response:
+                snapshot = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {408, 500, 502, 503, 504, 524}:
+                raise _gateway_http_error(exc) from exc
+            exc.close()
+            snapshot = _recover_delegated_submission(base, token, request_key)
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            # A lost submission response is not permission to create another
+            # paid request. Query the original key; never repeat the POST.
+            snapshot = _recover_delegated_submission(base, token, request_key)
+    if not isinstance(snapshot, dict):
+        raise RuntimeError("The model delegation returned an invalid response.")
+    status = str(snapshot.get("status") or "")
+    if status == "succeeded":
+        output = str(snapshot.get("output_text") or "")
+        if not output:
+            raise RuntimeError("The delegated model returned an empty response.")
+        return output
+    if status in {"queued", "running"}:
+        model_job_id = str(snapshot.get("model_job_id") or "")
+        if not model_job_id:
+            raise RuntimeError("The model delegation did not identify its durable job.")
+        raise DeferredModelCall(model_job_id)
+    raise RuntimeError(str(snapshot.get("error") or "The delegated model request failed."))
+
+
+def _recover_delegated_submission(base: str, token: str, request_key: str) -> dict[str, Any]:
+    lookup = urllib.request.Request(
+        base.rstrip("/") + "/" + urllib.parse.quote(request_key, safe=""),
+        method="GET", headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+    )
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(lookup, context=ssl.create_default_context(), timeout=5) as response:
+                value = json.loads(response.read().decode("utf-8"))
+            if isinstance(value, dict):
+                return value
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {404, 408, 429, 500, 502, 503, 504, 524}:
+                raise _gateway_http_error(exc) from exc
+            exc.close()
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            pass
+        if attempt < 2:
+            time.sleep(0.25 * (attempt + 1))
+    raise ModelResultUnknown("Model delegation outcome is uncertain; no paid request was submitted again.")
 
 
 _FENCED_JSON_RE = re.compile(
@@ -277,9 +378,11 @@ def call_model(
     response_format: str = "text",
     timeout_seconds: int = 330,
     recover_on_timeout: bool = True,
+    gateway_url: str = "",
+    task_token: str = "",
 ) -> str:
-    url = str(os.environ.get("REVIEW_WRITER_MODEL_GATEWAY_URL") or "").strip()
-    token = str(os.environ.get("REVIEW_WRITER_TASK_TOKEN") or "").strip()
+    url = str(gateway_url or os.environ.get("REVIEW_WRITER_MODEL_GATEWAY_URL") or "").strip()
+    token = str(task_token or os.environ.get("REVIEW_WRITER_TASK_TOKEN") or "").strip()
     if not url or not token:
         raise RuntimeError("The internal model gateway configuration is incomplete.")
     normalized_format = str(response_format).strip().casefold()
@@ -287,6 +390,11 @@ def call_model(
         f"{normalized_format}\0{prompt}".encode("utf-8")
     ).hexdigest()
     request_key = f"{str(label)[:32]}-{digest[:48]}"
+    if os.environ.get("REVIEW_WRITER_DELEGATE_MODEL_CALLS") == "1" and not gateway_url:
+        return _delegated_text_result(
+            url, token, request_key=request_key, stage=str(label)[:96],
+            prompt=prompt, response_format=normalized_format,
+        )
     request = urllib.request.Request(
         url,
         data=json.dumps(
@@ -307,35 +415,36 @@ def call_model(
     )
     # Provider retries belong to the gateway. An uncertain connection failure
     # only triggers read-only recovery, never another generation POST.
-    try:
-        with urllib.request.urlopen(
-            request,
-            context=ssl.create_default_context(),
-            timeout=max(1, int(timeout_seconds)),
-        ) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        error = _gateway_http_error(exc)
-        if not recover_on_timeout:
-            exc.close()
-            raise error from exc
-        if exc.code not in {408, 500, 502, 503, 504, 524}:
-            raise error from exc
-        # A proxy error does not say whether generation finished. Inspect the
-        # original request once; a terminal failed status stops polling immediately.
-        exc.close()
+    with _model_wait_marker():
         try:
-            payload = _recover_model_result(url, token, request_key, label=label)
-        except GatewayRequestError as recovery_error:
-            if recovery_error.code == "MODEL_REQUEST_FAILED" and recovery_error.details:
-                raise
-            if recovery_error.code == "MODEL_REQUEST_FAILED" or recovery_error.status_code == 404:
+            with urllib.request.urlopen(
+                request,
+                context=ssl.create_default_context(),
+                timeout=max(1, int(timeout_seconds)),
+            ) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            error = _gateway_http_error(exc)
+            if not recover_on_timeout:
+                exc.close()
                 raise error from exc
-            raise
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        if not recover_on_timeout:
-            raise
-        payload = _recover_model_result(url, token, request_key, label=label)
+            if exc.code not in {408, 500, 502, 503, 504, 524}:
+                raise error from exc
+            # A proxy error does not say whether generation finished. Inspect the
+            # original request once; a terminal failed status stops polling immediately.
+            exc.close()
+            try:
+                payload = _recover_model_result(url, token, request_key, label=label)
+            except GatewayRequestError as recovery_error:
+                if recovery_error.code == "MODEL_REQUEST_FAILED" and recovery_error.details:
+                    raise
+                if recovery_error.code == "MODEL_REQUEST_FAILED" or recovery_error.status_code == 404:
+                    raise error from exc
+                raise
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            if not recover_on_timeout:
+                raise
+            payload = _recover_model_result(url, token, request_key, label=label)
     text = str(payload.get("output_text") or "")
     if not text:
         raise RuntimeError("The internal model gateway returned an empty response.")

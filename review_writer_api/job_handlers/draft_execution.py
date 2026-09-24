@@ -5,6 +5,7 @@ from review_writer_api.job_service import JobYieldRequested, JobCancellationRequ
 from review_writer_api.security import Principal, Role
 import uuid
 from review_writer_core.workflow.artifacts import DRAFT_REWRITE_CANDIDATES
+from review_writer_core.paragraph_revision import exact_hash
 
 
 def register_draft_handlers(drafts_service, job_service, handlers):
@@ -15,11 +16,35 @@ def register_draft_handlers(drafts_service, job_service, handlers):
         current = context.repository.get_job(context.user_id, context.job_id)
         results = dict((current.result or {}).get("paragraph_results") or {})
         routing = (current.result or {}).get("routing")
+        coherence = (current.result or {}).get("coherence_plan")
         if current.retry_of_job_id and not results:
             previous = context.repository.get_job(context.user_id, current.retry_of_job_id)
             results = {key: value for key, value in (previous.result or {}).get("paragraph_results", {}).items()
                        if value.get("status") not in {"failed", "skipped"}} if previous else {}
             routing = routing or ((previous.result or {}).get("routing") if previous else None)
+            coherence = coherence or ((previous.result or {}).get("coherence_plan") if previous else None)
+        def report(values):
+            context.report_partial_result({**values, "coherence_plan": coherence})
+        if payload.get("manuscript_snapshot") and not coherence:
+            # Reserve the attempt before dispatch; an interrupted unknown response must
+            # not silently restart a paid global review on every paragraph yield.
+            coherence = {"status": "unavailable", "issues": [], "covered_ids": []}
+            report({"paragraph_results": results, "routing": routing})
+            try:
+                first = payload["paragraphs"][0]
+                request, _ = drafts_service.dialogue_payload(principal, context.project_id, first["paragraph_key"],
+                    message=payload["message"], base_text_sha256=first["text_sha256"], use_saved=True,
+                    idempotency_key=f"coherence:{context.job_id}", include_memory=False)
+                request["dialogue"].update(coherence_only=True, manuscript_snapshot=payload["manuscript_snapshot"])
+                built = available["draft.rewrite"](context, request).get("coherence_plan")
+                if isinstance(built, dict) and built.get("status") in {"complete", "partial"}:
+                    coherence = built
+            except (JobCancellationRequested, JobShutdownRequested, JobLeaseLost):
+                raise
+            except Exception:
+                pass  # Optional global planning degrades to the same local executor.
+            report({"paragraph_results": results, "routing": routing})
+            raise JobYieldRequested()
         if payload.get("section_context") and not routing:
             first = payload["paragraphs"][0]
             if payload.get("action") == "revise":
@@ -40,13 +65,19 @@ def register_draft_handlers(drafts_service, job_service, handlers):
                 raise ValueError("Unable to interpret the chapter request. Please retry.")
             routing["mode"] = "question"
             routing["targets"] = routing["targets"][:1]
-            context.report_partial_result({"paragraph_results": results, "routing": routing})
+            report({"paragraph_results": results, "routing": routing})
             context.report_progress(0, len(routing["targets"]))
             raise JobYieldRequested()
         targets = [p for p in payload["paragraphs"] if not routing or p["paragraph_id"] in routing["targets"]]
+        if coherence and coherence.get("status") in {"complete", "partial"}:
+            affected = {i["paragraph_id"] for i in coherence["issues"]}
+            for paragraph in targets:
+                if paragraph["paragraph_id"] in coherence["covered_ids"] and paragraph["paragraph_id"] not in affected:
+                    results.setdefault(paragraph["paragraph_key"], {"paragraph_id": paragraph["paragraph_id"],
+                        "status": "completed", "outcome": "kept_original"})
         pending = [p for p in targets if p["paragraph_key"] not in results]
         if not pending:
-            return {"paragraph_results": results, "routing": routing}
+            return {"paragraph_results": results, "routing": routing, "coherence_plan": coherence}
         target = pending[0]
         key = target["paragraph_key"]
         claimed = context.repository.paragraph_task_slot(context.user_id, context.project_id, key, context.job_id)
@@ -54,7 +85,7 @@ def register_draft_handlers(drafts_service, job_service, handlers):
             results[key] = {"paragraph_id": target["paragraph_id"], "status": "skipped", "reason": "paragraph_busy"}
         else:
             try:
-                context.report_partial_result({"paragraph_results": results, "routing": routing, "active_paragraph_key": key})
+                report({"paragraph_results": results, "routing": routing, "active_paragraph_key": key})
                 turn_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{context.job_id}:{key}"))
                 cached, _artifact = drafts_service._read_json(principal, context.project_id, DRAFT_REWRITE_CANDIDATES, required=False)
                 entry = (cached.get("entries") or {}).get(turn_id)
@@ -63,10 +94,23 @@ def register_draft_handlers(drafts_service, job_service, handlers):
                 else:
                     one, _ = drafts_service.dialogue_payload(principal, context.project_id, key,
                         message=payload["message"], base_text_sha256=target["text_sha256"], use_saved=not bool(payload.get("section_id")), branch_id=payload.get("branch_id", ""),
-                        idempotency_key=f"batch:{context.job_id}:{key}", include_memory=not bool(payload.get("section_context")))
+                        idempotency_key=f"batch:{context.job_id}:{key}", include_memory=False)
                     one["dialogue"]["turn_id"] = turn_id
                     one["dialogue"]["batch_job_id"] = context.job_id
                     one["dialogue"]["routing"] = routing
+                    if not payload.get("section_context"):
+                        instructions = [i for i in (coherence or {}).get("issues", [])
+                                        if i["paragraph_id"] == target["paragraph_id"]]
+                        indexed = {p["paragraph_id"]: p for p in payload.get("manuscript_snapshot", {}).get("paragraphs", [])}
+                        dependencies = {pid for i in instructions for pid in i["dependencies"]
+                                        if pid != target["paragraph_id"]}
+                        one["dialogue"].update(automatic_batch=True, coherence_instructions=instructions,
+                            coherence_context=[indexed[pid] for pid in sorted(dependencies)],
+                            dependency_hashes={pid: exact_hash(indexed[pid]["text"]) for pid in dependencies})
+                        # Automatic scope is explicit. Do not implicitly depend on
+                        # unrelated neighbours/history and stale the entire batch.
+                        one["dialogue"]["context"] = []
+                        one["dialogue"]["context_hashes"] = {}
                     if payload.get("section_context"):
                         section_context = dict(payload["section_context"])
                         # Read decisions afresh at execution time; HTTP submission may have waited in the queue.
@@ -113,11 +157,11 @@ def register_draft_handlers(drafts_service, job_service, handlers):
                 results[key] = {"paragraph_id": target["paragraph_id"], "status": "failed", "reason": str(exc)[:1000]}
             finally:
                 context.repository.paragraph_task_slot(context.user_id, context.project_id, key, context.job_id, release=True)
-        context.report_partial_result({"paragraph_results": results, "routing": routing, "active_paragraph_key": ""})
+        report({"paragraph_results": results, "routing": routing, "active_paragraph_key": ""})
         context.report_progress(len(results), len(targets))
         if len(results) < len(targets):
             raise JobYieldRequested()
-        return {"paragraph_results": results, "routing": routing}
+        return {"paragraph_results": results, "routing": routing, "coherence_plan": coherence}
 
     def dispatch_revision(existing):
         def handler(context, payload):

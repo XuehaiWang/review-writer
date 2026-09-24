@@ -99,19 +99,21 @@ class TaxonomyProfileApiTests(unittest.TestCase):
             project.stage_states = stored
             project.current_stage = next(iter(states), "discovery")
 
-    def test_catalog_and_new_project_default_to_general_academic(self) -> None:
+    def test_catalog_and_new_project_default_to_general_chemistry(self) -> None:
         with TestClient(self.app) as client:
             catalog = client.get("/api/v1/taxonomy-profiles")
             self.assertEqual(200, catalog.status_code)
             payload = catalog.json()
-            self.assertEqual("general_academic", payload["default_profile"])
+            self.assertEqual("chemistry_general", payload["default_profile"])
             profiles = {item["id"]: item for item in payload["items"]}
             self.assertEqual({"general_academic", "chemistry_general"}, set(profiles))
             self.assertFalse(profiles["general_academic"]["domain_rules_enabled"])
             self.assertTrue(profiles["chemistry_general"]["domain_rules_enabled"])
 
             project = self._create_project(client, "general-default")
-            self.assertEqual("general_academic", project["taxonomy_profile"])
+            self.assertEqual("chemistry_general", project["taxonomy_profile"])
+            academic = self._create_project(client, "academic-explicit", taxonomy_profile="general_academic")
+            self.assertEqual("general_academic", academic["taxonomy_profile"])
 
             internal_profile = client.post(
                 "/api/v1/projects",
@@ -125,7 +127,7 @@ class TaxonomyProfileApiTests(unittest.TestCase):
 
     def test_profile_change_before_matrix_leaves_downstream_state_unchanged(self) -> None:
         with TestClient(self.app) as client:
-            project = self._create_project(client, "before-matrix")
+            project = self._create_project(client, "before-matrix", taxonomy_profile="general_academic")
             self._seed_states(
                 project["project_id"],
                 {"discovery": "review", "sections": "approved"},

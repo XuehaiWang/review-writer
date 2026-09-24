@@ -43,3 +43,24 @@ it("shows a maintenance lock rather than claiming a cleanup occurred", async () 
   fireEvent.click(screen.getByRole("button", { name: "Clean safe cache" }));
   expect(await screen.findByText(/Maintenance is already running/)).toBeVisible();
 });
+it("separates filesystem capacity, workspace usage and cleanup policy", async () => {
+  mount();
+  const meter = await screen.findByRole("meter", { name: "Filesystem utilization" });
+  expect(meter).toHaveAttribute("aria-valuenow", "98");
+  expect(screen.getByRole("region", { name: "Workspace breakdown" })).toHaveTextContent("Staging files (not all removable)");
+  expect(screen.getByRole("region", { name: "Cleanup history and policy" })).toHaveTextContent("Staging usage is not the amount that can be freed.");
+});
+it("keeps cleanup disabled when storage maintenance is unavailable", async () => {
+  vi.mocked(apiRequest).mockResolvedValue({ available: false });
+  mount();
+  expect(await screen.findByText("Storage maintenance is unavailable in this mode.")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Clean safe cache" })).toBeDisabled();
+  expect(screen.queryByRole("meter")).not.toBeInTheDocument();
+});
+it("handles zero capacity and missing first scan without invalid percentages", async () => {
+  vi.mocked(apiRequest).mockResolvedValue({ available: true, disk: { total_bytes: 0, used_bytes: 0, free_bytes: 0, low_space: false } });
+  mount();
+  expect(await screen.findByRole("meter")).toHaveAttribute("aria-valuenow", "0");
+  expect(screen.getByText(/Waiting for the first maintenance scan/)).toBeVisible();
+  expect(screen.getByText("No cleanup history yet")).toBeVisible();
+});

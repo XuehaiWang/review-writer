@@ -418,6 +418,7 @@ class WorkflowJob(Base):
             name="uq_workflow_job_scoped_idempotency",
         ),
         Index("ix_workflow_jobs_user_status_created", "user_id", "status", "created_at"),
+        Index("ix_workflow_jobs_due", "status", "next_run_at"),
         Index("ix_workflow_jobs_project_type", "project_id", "job_type"),
         Index(
             "ix_workflow_jobs_claim",
@@ -449,6 +450,8 @@ class WorkflowJob(Base):
         String(32), default="scientific", nullable=False
     )
     status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    queue_reason: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     idempotency_scope_key: Mapped[str] = mapped_column(
         String(255), default="_library_", nullable=False
     )

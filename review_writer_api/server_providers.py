@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 
 import httpx2 as httpx
 from sqlalchemy import delete, select
@@ -38,6 +39,20 @@ from .text_connections import ensure_default
 SERVER_CREDENTIAL_SUBJECT = "server-global"
 
 
+def _embedding_input_price(value: Decimal | str | int | float) -> Decimal:
+    try:
+        price = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ProviderSettingsError(
+            "Embedding input price must be a valid non-negative amount."
+        ) from exc
+    if not price.is_finite() or price < 0 or price > Decimal("1000000"):
+        raise ProviderSettingsError(
+            "Embedding input price must be between 0 and 1000000 USD per million tokens."
+        )
+    return price.quantize(Decimal("0.00000001"))
+
+
 @dataclass(frozen=True)
 class ServerProviderRuntime:
     provider_kind: str
@@ -49,6 +64,7 @@ class ServerProviderRuntime:
     source: str
     api_key_hint: str
     updated_at: datetime | None = None
+    input_usd_per_million: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -62,6 +78,7 @@ class ServerProviderStatus:
     enabled: bool
     source: str = "server"
     updated_at: datetime | None = None
+    input_usd_per_million: str = "0"
 
 
 @dataclass(frozen=True)
@@ -132,6 +149,11 @@ class ServerProviderSettingsService:
                 bool(secret and model),
                 "environment",
                 _secret_hint(secret) if secret else "",
+                input_usd_per_million=(
+                    _embedding_input_price(
+                        self.settings.embedding_provider_price_usd_per_million
+                    )
+                ),
             )
         secret = self.settings.mineru_api_token
         return ServerProviderRuntime(
@@ -175,6 +197,12 @@ class ServerProviderSettingsService:
                 source="database",
                 api_key_hint=row.secret_hint or fallback.api_key_hint,
                 updated_at=row.updated_at,
+                input_usd_per_million=(
+                    _embedding_input_price(row.input_usd_per_million)
+                    if kind is ProviderKind.EMBEDDING
+                    and row.input_usd_per_million is not None
+                    else fallback.input_usd_per_million
+                ),
             )
 
     def list_settings(self, principal: Principal | None = None) -> list[ServerProviderStatus]:
@@ -201,12 +229,16 @@ class ServerProviderSettingsService:
                 enabled=runtime.enabled if text_available is None else text_available,
                 source=runtime.source if is_admin else "server",
                 updated_at=runtime.updated_at if is_admin else None,
+                input_usd_per_million=format(
+                    runtime.input_usd_per_million, "f"
+                ),
             ))
         return records
 
     def save_settings(
         self, principal: Principal, provider_kind: str, *, base_url: str,
         model_name: str, wire_api: str, api_key: str | None, enabled: bool,
+        input_usd_per_million: Decimal | str | int | float | None = None,
     ) -> ServerProviderStatus:
         principal.require(Permission.PROVIDER_MANAGE)
         kind = self._kind(provider_kind)
@@ -262,6 +294,16 @@ class ServerProviderSettingsService:
             row.model_name = normalized_model
             row.wire_api = normalized_wire
             row.enabled = bool(enabled)
+            if kind is ProviderKind.EMBEDDING:
+                row.input_usd_per_million = (
+                    _embedding_input_price(input_usd_per_million)
+                    if input_usd_per_million is not None
+                    else (
+                        row.input_usd_per_million
+                        if row.input_usd_per_million is not None
+                        else fallback.input_usd_per_million
+                    )
+                )
             session.flush()
             if kind is ProviderKind.TEXT:
                 from .text_connections import mirror_legacy_default
@@ -270,7 +312,16 @@ class ServerProviderSettingsService:
                     normalized_model, normalized_wire, secret, bool(enabled and secret), "database", _secret_hint(secret) if secret else ""))
             session.add(ServerProviderAuditEvent(
                 actor_user_id=actor_id, provider_kind=kind.value, action="update",
-                summary=f"Updated {kind.value} provider; enabled={bool(enabled)}.",
+                summary=(
+                    f"Updated {kind.value} provider; enabled={bool(enabled)}"
+                    + (
+                        "; input_usd_per_million="
+                        f"{format(row.input_usd_per_million or Decimal('0'), 'f')}"
+                        if kind is ProviderKind.EMBEDDING
+                        else ""
+                    )
+                    + "."
+                ),
             ))
         return next(item for item in self.list_settings(principal)
                     if item.provider_kind == kind.value)
@@ -315,7 +366,8 @@ class ServerProviderSettingsService:
             ))
 
     async def test_connection(
-        self, principal: Principal, provider_kind: str, *, model_id: str | None = None
+        self, principal: Principal, provider_kind: str, *, model_id: str | None = None,
+        _channel: dict | None = None,
     ) -> ServerProviderTestResult:
         principal.require(Permission.PROVIDER_MANAGE)
         kind = self._kind(provider_kind)
@@ -328,6 +380,23 @@ class ServerProviderSettingsService:
                 model = resolve_model_tier(model_id, self.session_factory)
             except ValueError as exc:
                 raise ProviderSettingsError(str(exc)) from exc
+            from .model_catalog import model_channels, routed_model
+            channels = model_channels(model)
+            if _channel is None and len(channels) > 1:
+                results = []
+                for channel in channels:
+                    try:
+                        result = await self.test_connection(principal, provider_kind,
+                            model_id=model_id, _channel=channel)
+                    except ProviderSettingsError as exc:
+                        result = ServerProviderTestResult(kind.value, False, 0, 0, str(exc))
+                    results.append(result)
+                ok = all(result.ok for result in results)
+                return ServerProviderTestResult(kind.value, ok, 200 if ok else 0,
+                    sum(result.latency_ms for result in results),
+                    "All model channels passed." if ok else "; ".join(
+                        f"Channel {i + 1}: {result.message}" for i, result in enumerate(results) if not result.ok))
+            model = routed_model(model, _channel or channels[0])
             from .text_connections import runtime_for_connection
             runtime = runtime_for_connection(self, model.connection_id)
         if not runtime.enabled:

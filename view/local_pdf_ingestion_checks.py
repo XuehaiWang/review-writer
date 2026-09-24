@@ -142,6 +142,8 @@ def check_ingestion_and_downstream_reuse() -> None:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         assert metadata["paper_id"] == "P001"
         assert metadata["title"]["value"]
+        assert len(metadata["abstract"]["value"]) > 1_000
+        assert "allene" in metadata["abstract"]["value"].casefold()
         assert metadata["source_file"]["original_upload_name"] == sample.name
         assert metadata["extraction"]["mode"] == "local_pdf_upload+mineru_precise"
         assert Path(metadata["source_paths"]["pdf"]).is_file()
@@ -161,13 +163,17 @@ def check_ingestion_and_downstream_reuse() -> None:
         papers = discover.load_metadata(review_root)
         assert "P001" in papers
         assert len(discover.markdown_signal(papers["P001"])) > 1000
-        grouped, _ = discover.local_search_by_keyword(
-            papers,
-            [{"keyword": "allenes", "category": "product"}],
-            "allene synthesis",
+        # This source is itself a review, so the product-formation admission
+        # rule correctly excludes it from a primary-paper result group.
+        scored = discover.score_local_paper(
+            papers["P001"],
+            "allenes",
+            "product",
+            discover.tokenize("allene synthesis"),
             discover.load_classification_rules(review_root),
+            require_product_formation=False,
         )
-        assert any(row["paper_id"] == "P001" for row in grouped[0]["local_results"])
+        assert scored["primary_raw_score"] > 0
 
         section_writer = load_module(
             "local_pdf_section_checks_target",

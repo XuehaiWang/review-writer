@@ -595,6 +595,24 @@ class PostgreSQLWorkflowRepositoryTests(unittest.TestCase):
 
         self.assertEqual(1, sum(item is not None for item in claims))
 
+    def test_concurrent_workers_cannot_claim_two_jobs_for_same_user(self) -> None:
+        for index in range(2):
+            self.repository.create_or_get_job(
+                self.user_id, self.project_id, "project", "sections.generate",
+                f"same-user-{index}-{uuid.uuid4().hex}", {},
+            )
+        barrier = threading.Barrier(2)
+
+        def claim(index):
+            barrier.wait(timeout=10)
+            return self.repository.claim_next_job(
+                owner=f"concurrent-worker-{index}", job_types={"sections.generate"},
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            claimed = list(executor.map(claim, range(2)))
+        self.assertEqual(1, sum(job is not None for job in claimed))
+
     def test_concurrent_artifact_publications_keep_both_versions_and_one_current_pointer(self) -> None:
         barrier = threading.Barrier(2)
 

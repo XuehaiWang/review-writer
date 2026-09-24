@@ -9,9 +9,10 @@ from review_writer_core.publication_tables import paper_presentation_outcomes
 from review_writer_api.tests.test_feedback_loop_batching import feedback_loop as feedback
 
 
-def test_section_input_change_keeps_other_sections_but_refreshes_conclusion():
+def test_section_input_change_keeps_independent_sections_but_refreshes_dependents():
     tasks = [{"section_id": sid, "section_role": role, "allowed_papers": [paper]}
-             for sid, role, paper in [("S1", "body", "P1"), ("S2", "body", "P2"), ("S3", "conclusion", "P1")]]
+             for sid, role, paper in [("S1", "body", "P1"), ("S2", "body", "P2"), ("S3", "body", "P1")]]
+    tasks[2]["depends_on_sections"] = ["S1"]
     matrix = {"rows": [{"paper_id": "P1"}, {"paper_id": "P2"}]}
     blueprint = {"sections": deepcopy(tasks), "review_topic": "A general research topic"}
     shared = {"model": "test", "rules": "v1"}
@@ -111,3 +112,12 @@ def test_planned_table_does_not_count_as_table_coverage_without_exportable_rows(
     assert result[0]["table_fallback"]
     assert result[1]["actual"] == "unrepresented"
     assert task == before
+
+
+def test_shared_chapter_responsibility_change_invalidates_all_peer_prompts():
+    tasks = [{"section_id": "A", "writing_objective": "Compare methods"},
+             {"section_id": "B", "writing_objective": "Discuss scope"}]
+    before = section_input_fingerprints(tasks, {}, {"rows": []}, {}, {})
+    tasks[0]["avoid_points"] = ["Leave applicability limits to B"]
+    after = section_input_fingerprints(tasks, {}, {"rows": []}, {}, {})
+    assert all(before[sid] != after[sid] for sid in before)

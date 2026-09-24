@@ -75,8 +75,9 @@ class ClassificationAxisTests(unittest.TestCase):
 
         self.assertEqual(CLASSIFICATION_CONTRACT_VERSION, contract["contract_version"])
         self.assertEqual("reaction_type", contract["primary_axis_id"])
+        self.assertEqual([], contract["axes"][0]["partitions"])
         self.assertEqual(
-            ["reaction_type", "stereochemical_regime"],
+            ["stereochemical_regime"],
             contract["required_route_axis_ids"],
         )
         self.assertEqual(

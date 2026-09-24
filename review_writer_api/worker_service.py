@@ -24,6 +24,7 @@ from review_writer_api.job_service import (
 )
 from review_writer_api.job_lease_context import bind_job_lease
 from review_writer_api.job_queues import JOB_QUEUES, queue_for_job_type
+from review_writer_api.worker_wait_state import bind_model_wait_callback
 from review_writer_api.workflow_repository import JobRecord, WorkflowRepository
 
 
@@ -65,6 +66,13 @@ class WorkerService:
             if queue_for_job_type(job_type) in self.queues
         }
         self.max_workers = max(1, min(int(max_workers), 16))
+        # Image jobs retain their full local subprocess while waiting for the
+        # provider. Do not turn four configured image slots into eight resident
+        # redraw processes through the scientific model-wait allowance.
+        self.max_total_workers = (
+            self.max_workers if self.queues == {"image"}
+            else self.max_workers + min(4, self.max_workers)
+        )
         self.poll_seconds = max(0.25, min(float(poll_seconds), 30.0))
         self.lease_seconds = max(30, int(lease_seconds))
         self.heartbeat_seconds = max(
@@ -75,9 +83,10 @@ class WorkerService:
         )
         self._shutdown = threading.Event()
         self._executor = DaemonWorkerPool(
-            self.max_workers, thread_name_prefix="review-writer-worker"
+            self.max_total_workers, thread_name_prefix="review-writer-worker"
         )
         self._futures: dict[str, Future] = {}
+        self._waiting_model_jobs: set[str] = set()
         self._lock = threading.RLock()
 
     def stop(self) -> None:
@@ -101,27 +110,35 @@ class WorkerService:
             self.poll_seconds,
             self.lease_seconds,
         )
+        next_health_write = 0.0
+        last_activity = (-1, -1)
         try:
             while not self._shutdown.is_set():
-                try:
-                    self.repository.set_system_state(
-                        f"worker_heartbeat:{self.worker_id}",
-                        {
-                            "status": "running",
-                            "worker_id": self.worker_id,
-                            "active_jobs": self._active_count(),
-                            "queue_counts": self.repository.job_queue_counts(),
-                        },
-                    )
-                except Exception as exc:
-                    # An observability write must not stop task execution.
-                    LOGGER.warning(
-                        "worker_health_write_failed worker_id=%s exception=%s",
-                        self.worker_id,
-                        type(exc).__name__,
-                    )
+                active_count, waiting_count = self._activity_counts()
+                if time.monotonic() >= next_health_write or (active_count, waiting_count) != last_activity:
+                    try:
+                        self.repository.set_system_state(
+                            f"worker_heartbeat:{self.worker_id}",
+                            {
+                                "status": "running",
+                                "worker_id": self.worker_id,
+                                "queues": sorted(self.queues),
+                                "capacity": self.max_workers,
+                                "active_jobs": active_count,
+                                "waiting_model_jobs": waiting_count,
+                            },
+                        )
+                        last_activity = (active_count, waiting_count)
+                        next_health_write = time.monotonic() + 15.0
+                    except Exception as exc:
+                        # An observability write must not stop task execution.
+                        LOGGER.warning(
+                            "worker_health_write_failed worker_id=%s exception=%s",
+                            self.worker_id,
+                            type(exc).__name__,
+                        )
                 claimed_any = False
-                while not self._shutdown.is_set() and self._active_count() < self.max_workers:
+                while not self._shutdown.is_set() and self._can_claim():
                     try:
                         claimed = self.repository.claim_next_job(
                             owner=self.worker_id,
@@ -168,12 +185,28 @@ class WorkerService:
             LOGGER.info("worker_stopped worker_id=%s", self.worker_id)
 
     def _active_count(self) -> int:
+        return self._activity_counts()[0]
+
+    def _activity_counts(self) -> tuple[int, int]:
         with self._lock:
-            return sum(1 for future in self._futures.values() if not future.done())
+            running = {job_id for job_id, future in self._futures.items() if not future.done()}
+            return len(running), len(running & self._waiting_model_jobs)
+
+    def _can_claim(self) -> bool:
+        running, waiting = self._activity_counts()
+        return running < self.max_total_workers and running - waiting < self.max_workers
+
+    def _set_model_waiting(self, job_id: str, waiting: bool) -> None:
+        with self._lock:
+            if waiting:
+                self._waiting_model_jobs.add(job_id)
+            else:
+                self._waiting_model_jobs.discard(job_id)
 
     def _forget(self, job_id: str) -> None:
         with self._lock:
             self._futures.pop(job_id, None)
+            self._waiting_model_jobs.discard(job_id)
 
     def _heartbeat(self, context: JobContext, stop: threading.Event) -> None:
         consecutive_failures = 0
@@ -241,6 +274,8 @@ class WorkerService:
             context.checkpoint()
             with bind_job_lease(
                 context.job_id, context.lease_token, context.lease_generation
+            ), bind_model_wait_callback(
+                lambda waiting: self._set_model_waiting(context.job_id, waiting)
             ):
                 result = handler(context, dict(claimed.payload or {}))
             completed = self.repository.mark_job_succeeded(
@@ -257,8 +292,8 @@ class WorkerService:
                     lease_token=context.lease_token,
                     lease_generation=context.lease_generation,
                 )
-        except JobYieldRequested:
-            release_yielded_job(context)
+        except JobYieldRequested as exc:
+            release_yielded_job(context, exc)
         except JobShutdownRequested:
             self.repository.release_job_lease(
                 claimed.id,

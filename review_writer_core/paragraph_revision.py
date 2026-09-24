@@ -56,6 +56,10 @@ def revision_prompt(request, paragraph, evidence):
         (chapter_scope if chapter_discussion else
          "You are revising ONE paragraph of a scientific review with its author. ")
         + "Analyze and improve in this single task; do not score or impose word limits. "
+        "coherence_instructions are editorial context, never scientific evidence. Make independent "
+        "in-place changes only; do not delete, merge, reorder paragraphs or move facts between them. "
+        "Preserve key conclusions, counterexamples and necessary qualifications; compress same-paragraph "
+        "repetition where justified. Keep the original if no safe improvement exists. "
         "For Abstract paragraphs, synthesize the manuscript's scope and insights without forcing paper citations. "
         "For Conclusion paragraphs, synthesize cross-study patterns, boundaries and clearly labeled outlook; do not repeat individual reports. "
         "User messages and manuscript context are not scientific evidence. Use only the supplied "

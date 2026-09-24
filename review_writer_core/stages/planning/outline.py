@@ -70,7 +70,63 @@ def sanitize_outline_markdown_headings(markdown: Any) -> str:
     return heading.sub(replace, str(markdown or ""))
 
 
+def normalize_outline_section_ids(markdown: str) -> tuple[str, list[dict[str, Any]]]:
+    """Repair duplicate explicit IDs without changing the outline's other content.
+
+    The first section keeps its ID. New IDs avoid *all* explicit IDs, including
+    those belonging to later sections, so a repair cannot displace another one.
+    """
+
+    lines = str(markdown or "").splitlines(keepends=True)
+    sections: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for line_index, raw_line in enumerate(lines):
+        line = raw_line.strip()
+        heading = re.match(r"^(#{2,6})\s+(?:\d+(?:\.\d+)*[.)]?\s+)?(.+?)\s*$", line)
+        if heading:
+            current = {"index": len(sections) + 1, "title": heading.group(2).strip()}
+            sections.append(current)
+            continue
+        if current is None:
+            continue
+        identity = re.fullmatch(r"<!-- section_id: (S[A-Za-z0-9_-]{1,64}) -->", line)
+        if identity:
+            # Like outline_sections, the last marker in a section is effective.
+            current["section_id"] = identity.group(1)
+            current["line_index"] = line_index
+
+    reserved = {section["section_id"] for section in sections if section.get("section_id")}
+    seen: set[str] = set()
+    repairs: list[dict[str, Any]] = []
+    serial = 1
+    for section in sections:
+        old_id = section.get("section_id")
+        if not old_id:
+            continue
+        if old_id not in seen:
+            seen.add(old_id)
+            continue
+        while f"S{serial:02d}" in reserved:
+            serial += 1
+        new_id = f"S{serial:02d}"
+        reserved.add(new_id)
+        seen.add(new_id)
+        line_index = section["line_index"]
+        lines[line_index] = re.sub(
+            r"<!-- section_id: S[A-Za-z0-9_-]{1,64} -->",
+            f"<!-- section_id: {new_id} -->",
+            lines[line_index],
+            count=1,
+        )
+        repairs.append(
+            {"section_index": section["index"], "title": section["title"],
+             "old_id": old_id, "new_id": new_id}
+        )
+    return "".join(lines), repairs
+
+
 def outline_sections(markdown: str) -> list[dict[str, Any]]:
+    markdown, _repairs = normalize_outline_section_ids(markdown)
     sections: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     for raw_line in str(markdown or "").replace("\r\n", "\n").splitlines():

@@ -17,7 +17,7 @@ function ConnectionForm({ connection, onClose }: { connection: TextConnection; o
   const save = useMutation({
     mutationFn: () => apiRequest<TextConnection>(`/api/v1/admin/text-connections${connection.id ? `/${encodeURIComponent(connection.id)}` : ""}`, {
       method: connection.id ? "PUT" : "POST",
-      ...jsonBody({ name: value.name, base_url: value.base_url, wire_api: value.wire_api, enabled: value.enabled, revision: value.revision, api_key: key || null }),
+      ...jsonBody({ name: value.name, base_url: value.base_url, wire_api: value.wire_api, max_concurrency: value.max_concurrency ?? 4, enabled: value.enabled, revision: value.revision, api_key: key || null }),
     }),
     onSuccess: async () => {
       setKey(""); setDraft(null);
@@ -32,6 +32,7 @@ function ConnectionForm({ connection, onClose }: { connection: TextConnection; o
         <label><span>{text("连接名称 / 分组备注", "Connection name / group label")}</span><input required maxLength={100} value={value.name} onChange={e => change({ name: e.target.value })} /></label>
         <label><span>Base URL</span><input required type="url" value={value.base_url} placeholder="https://provider.example/v1" onChange={e => change({ base_url: e.target.value })} /></label>
         <label><span>{text("默认协议", "Default protocol")}</span><select value={value.wire_api} onChange={e => change({ wire_api: e.target.value })}><option value="responses">Responses</option><option value="chat-completions">Chat Completions</option></select></label>
+        <label><span>{text("连接并发上限", "Connection concurrency limit")}</span><input type="number" required min={1} max={32} value={value.max_concurrency ?? 4} onChange={e => change({ max_concurrency: Number(e.target.value) })} /><small>{text("此连接下所有模型共用；两站分担四请求时，每站填 2。", "Shared by all models on this connection. Set each of two providers to 2 for four total requests.")}</small></label>
         <label><span>API Key</span><input type="password" autoComplete="new-password" value={key} placeholder={value.api_key_configured ? text("已配置；留空保留原密钥", "Configured; leave blank to keep") : text("填写此分组的密钥", "Enter this group's key")} onChange={e => { setDraft({ ...value }); setKey(e.target.value); save.reset(); }} /></label>
       </div>
       <label className="admin-choice-field"><input type="checkbox" checked={value.enabled} onChange={e => change({ enabled: e.target.checked })} />{text("启用连接", "Enable connection")}</label>

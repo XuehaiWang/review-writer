@@ -1,3 +1,4 @@
+import { uiLocale } from "../../i18n/locale";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -39,7 +40,7 @@ export function ChapterVersions({ section, projectId, userId, revision, disabled
       <option value="current">{text("当前正文", "Current text")}</option>
       <option value="initial">{text("初始版本", "Initial version")}</option>
       <option value="history">{text("对话与候选记录", "Conversation and candidate history")}</option>
-      {(versions.data?.versions || []).filter(v => v.artifact_id !== versions.data?.current.artifact_id).map(v => <option key={v.artifact_id} value={v.artifact_id}>{text("历史版本", "Saved version")} · {new Date(v.created_at).toLocaleString()}</option>)}
+      {(versions.data?.versions || []).filter(v => v.artifact_id !== versions.data?.current.artifact_id).map(v => <option key={v.artifact_id} value={v.artifact_id}>{text("历史版本", "Saved version")} · {new Date(v.created_at).toLocaleString(uiLocale())}</option>)}
     </select></label>
     <div className="chapter-version-content">
       {version === "current" ? section.paragraphs.map(p => <article key={p.paragraph_key}><MarkdownView content={p.text} />

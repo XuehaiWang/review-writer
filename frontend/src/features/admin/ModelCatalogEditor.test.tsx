@@ -82,3 +82,31 @@ it("binds a model to the explicitly selected connection without exposing groups 
   await waitFor(() => expect(vi.mocked(apiRequest).mock.calls.some(([url, opts]) => url === "/api/v1/admin/model-catalog" && opts?.method === "PUT" && JSON.parse(String(opts.body)).items[0].connection_id === "group-b")).toBe(true));
   client.clear();
 });
+
+it("adds two channels under one user-visible model and preserves their exact model names", async () => {
+  vi.mocked(apiRequest).mockImplementation(async (url, options) => {
+    if (url.endsWith("/text-connections")) return { items: [
+      { id: "default", name: "站点 A", enabled: true, api_key_configured: true, max_concurrency: 2 },
+      { id: "station-b", name: "站点 B", enabled: true, api_key_configured: true, max_concurrency: 2 },
+    ] };
+    return options?.method === "PUT" ? { ...JSON.parse(String(options.body)), revision: 4 } : catalog;
+  });
+  const client = mount(<ModelCatalogEditor />);
+  const field = await screen.findByLabelText("平台模型名称（精确匹配）");
+  fireEvent.click(field.closest("details")!.querySelector("summary")!);
+  fireEvent.click(screen.getByRole("button", { name: "添加分担渠道" }));
+  const models = screen.getAllByLabelText("平台模型名称（精确匹配）");
+  expect(models).toHaveLength(2);
+  fireEvent.change(models[1], { target: { value: "Vendor-B/Exact-X" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存模型目录" }));
+  await waitFor(() => expect(vi.mocked(apiRequest).mock.calls.some(([url, options]) => {
+    if (!url.endsWith("/model-catalog") || options?.method !== "PUT") return false;
+    const saved = JSON.parse(String(options.body));
+    return saved.items.length === 1 && saved.items[0].id === model.id &&
+      saved.items[0].channels[0].connection_id === "default" &&
+      saved.items[0].channels[1].connection_id === "station-b" &&
+      saved.items[0].channels[1].model === "Vendor-B/Exact-X" &&
+      saved.items[0].input_usd_per_million === "1";
+  })).toBe(true));
+  client.clear();
+});

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx2 as httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from .billing import BillingService
@@ -34,8 +34,11 @@ from .database import (
     database_session,
     utc_now,
 )
-from .model_catalog import ModelTier, resolve_model_tier, SNAPSHOT_KEY, model_dict, model_from_dict
+from .model_catalog import ModelTier, resolve_model_tier, SNAPSHOT_KEY, model_dict, model_from_dict, model_channels, routed_model
+from .text_routing import TextChannelPool
+from .model_concurrency import AdjustableLimiter, defaults as concurrency_defaults, load as load_concurrency
 from .job_lifecycle import active_job_project
+from .job_queues import DELEGATED_TEXT_PARENT_JOB_TYPES
 from .server_providers import ServerProviderRuntime, ServerProviderSettingsService
 from .workflow_models import WorkflowJob
 
@@ -101,6 +104,7 @@ class TaskClaims:
 
 TEXT_GATEWAY_JOB_TYPES = frozenset(
     {
+        "model.dispatch",
         "discovery.search",
         "library.bibliography-audit",
         "matrix.enrich",
@@ -190,17 +194,18 @@ class ModelGatewayService:
         self._signing_key = hmac.new(
             decoded, b"review-writer/internal-model-gateway/v1", hashlib.sha256
         ).digest()
-        self._global_slots = asyncio.Semaphore(settings.model_gateway_max_concurrency)
-        self._user_slots: dict[str, asyncio.Semaphore] = {}
-        self._user_slots_lock = asyncio.Lock()
-        self._image_global_slots = asyncio.Semaphore(settings.image_gateway_max_concurrency)
-        self._image_user_slots: dict[str, asyncio.Semaphore] = {}
+        self._text_channels = TextChannelPool(settings.model_gateway_max_concurrency,
+                                              settings.model_gateway_user_concurrency)
+        self._image_global_slots = AdjustableLimiter(settings.image_gateway_max_concurrency)
+        self._image_user_slots: dict[str, AdjustableLimiter] = {}
         self._image_user_slots_lock = asyncio.Lock()
-        self._embedding_global_slots = asyncio.Semaphore(
+        self._embedding_global_slots = AdjustableLimiter(
             settings.embedding_gateway_max_concurrency
         )
-        self._embedding_user_slots: dict[str, asyncio.Semaphore] = {}
+        self._embedding_user_slots: dict[str, AdjustableLimiter] = {}
         self._embedding_user_slots_lock = asyncio.Lock()
+        self._concurrency_snapshot = concurrency_defaults(settings)
+        self._concurrency_checked_at = 0.0
         hosted_root = settings.hosted_workspace_root or (
             settings.review_root / ".review-writer" / "hosted-workspaces"
         )
@@ -253,6 +258,9 @@ class ModelGatewayService:
             bool(secret and model),
             "environment",
             "",
+            input_usd_per_million=(
+                self.settings.embedding_provider_price_usd_per_million
+            ),
         )
 
     def embedding_profile(self) -> dict[str, Any]:
@@ -498,23 +506,33 @@ class ModelGatewayService:
                 lifetime_seconds=lifetime_seconds,
             )
 
-    async def _user_semaphore(self, user_id: str) -> asyncio.Semaphore:
-        async with self._user_slots_lock:
-            return self._user_slots.setdefault(
-                user_id, asyncio.Semaphore(self.settings.model_gateway_user_concurrency)
-            )
+    async def _refresh_concurrency(self) -> None:
+        now = time.monotonic()
+        if now - self._concurrency_checked_at < 1.0:
+            return
+        limits = load_concurrency(self.session_factory, self.settings)["limits"]
+        self._concurrency_checked_at = now
+        if limits == self._concurrency_snapshot:
+            return
+        self._concurrency_snapshot = limits
+        await self._text_channels.configure(limits["text"]["global"], limits["text"]["user"])
+        for kind, global_slot, users in (
+            ("image", self._image_global_slots, self._image_user_slots),
+            ("embedding", self._embedding_global_slots, self._embedding_user_slots),
+        ):
+            await global_slot.set_limit(limits[kind]["global"])
+            for slot in users.values():
+                await slot.set_limit(limits[kind]["user"])
 
-    async def _image_user_semaphore(self, user_id: str) -> asyncio.Semaphore:
-        async with self._image_user_slots_lock:
-            return self._image_user_slots.setdefault(
-                user_id, asyncio.Semaphore(self.settings.image_gateway_user_concurrency)
-            )
-
-    async def _embedding_user_semaphore(self, user_id: str) -> asyncio.Semaphore:
-        async with self._embedding_user_slots_lock:
-            return self._embedding_user_slots.setdefault(
-                user_id,
-                asyncio.Semaphore(self.settings.embedding_gateway_user_concurrency),
+    async def _user_limiter(self, kind: str, user_id: str) -> AdjustableLimiter:
+        await self._refresh_concurrency()
+        slots, lock = {
+            "image": (self._image_user_slots, self._image_user_slots_lock),
+            "embedding": (self._embedding_user_slots, self._embedding_user_slots_lock),
+        }[kind]
+        async with lock:
+            return slots.setdefault(
+                user_id, AdjustableLimiter(self._concurrency_snapshot[kind]["user"])
             )
 
     @staticmethod
@@ -622,6 +640,79 @@ class ModelGatewayService:
                 if row.status == "succeeded" else None,
             }
 
+    def delegate_text(
+        self, token: str, *, request_key: str, stage: str,
+        prompt: str, response_format: str,
+    ) -> dict[str, Any]:
+        """Persist one text call under a separate leased model job.
+
+        Chapter generation and standalone Matrix extraction use this protocol.
+        The signed parent
+        token pins user, project and model snapshot before its lease is yielded.
+        Repeated submissions with the same key return the same child job.
+        """
+        claims = self.verify_task_token(token)
+        self._require_capability(claims, "text")
+        self._validate_live_job(claims)
+        if claims.job_type not in DELEGATED_TEXT_PARENT_JOB_TYPES or not claims.project_id:
+            raise GatewayRequestConflict("This task does not support delegated text calls.")
+        key = str(request_key or "").strip()
+        normalized_stage = str(stage or "").strip()[:96]
+        normalized_format = str(response_format or "").strip().casefold()
+        if not key or len(key) > 128 or not prompt or len(prompt) > 4_000_000:
+            raise GatewayRequestConflict("The delegated model request is incomplete or too large.")
+        if normalized_format not in {"json", "text"}:
+            raise GatewayRequestConflict("The response format must be json or text.")
+        from review_writer_api.workflow_repository import WorkflowRepository
+        repository = WorkflowRepository(
+            self.session_factory, default_text_wire_api=self.settings.text_provider_wire_api,
+        )
+        child = repository.create_or_get_job(
+            claims.user_id, claims.project_id, "project", "model.dispatch",
+            f"{claims.job_id}:{key}",
+            {"parent_job_id": claims.job_id, "request_key": key,
+             "stage": normalized_stage, "prompt": prompt,
+             "response_format": normalized_format},
+            operation_key=f"model:{claims.job_id}:{key}",
+            model_snapshot_override=claims.model_snapshot,
+        )
+        return self._delegated_text_snapshot(child)
+
+    @staticmethod
+    def _delegated_text_snapshot(child) -> dict[str, Any]:
+        stored = getattr(child, "result", None)
+        if stored is None:
+            stored = getattr(child, "result_json", None)
+        result = stored if isinstance(stored, dict) else {}
+        return {
+            "model_job_id": str(child.id),
+            "status": child.status,
+            "output_text": str(result.get("output_text") or "") if child.status == "succeeded" else "",
+            "error": "模型执行失败，请在任务详情中查看。" if child.status in {"failed", "interrupted", "cancelled"} else "",
+        }
+
+    def delegated_text_status(self, token: str, *, request_key: str) -> dict[str, Any]:
+        """Read-only recovery for an uncertain delegation submission."""
+        claims = self.verify_task_token(token)
+        self._require_capability(claims, "text")
+        self._validate_live_job(claims)
+        if claims.job_type not in DELEGATED_TEXT_PARENT_JOB_TYPES or not claims.project_id:
+            raise GatewayRequestConflict("This task does not support delegated text calls.")
+        key = str(request_key or "").strip()
+        if not key or len(key) > 128:
+            raise GatewayRequestConflict("A valid model request key is required.")
+        with database_session(self.session_factory) as session:
+            child = session.scalar(select(WorkflowJob).where(
+                WorkflowJob.user_id == uuid.UUID(claims.user_id),
+                WorkflowJob.project_id == uuid.UUID(claims.project_id),
+                WorkflowJob.job_type == "model.dispatch",
+                WorkflowJob.idempotency_scope_key == f"{claims.project_id}:model:{claims.job_id}:{key}",
+                WorkflowJob.idempotency_key == f"{claims.job_id}:{key}",
+            ))
+            if child is None:
+                raise GatewayRequestNotFound("The delegated model request was not found.")
+            return self._delegated_text_snapshot(child)
+
     async def _join_running_request(
         self,
         request_id: str,
@@ -687,8 +778,8 @@ class ModelGatewayService:
     def _reserve_text_attempt(self, request_id: str, input_chars: int) -> dict[str, int]:
         """Count actual provider attempts across all phases and Job retries.
 
-        The Job row is the existing serialization lock; counters stay in the
-        existing request records. No new queue, ledger table or client retry.
+        The retry root Job is the serialization lock; counters stay in the
+        existing request records even when a model.dispatch child owns the call.
         """
         with database_session(self.session_factory) as session:
             request = session.get(AIModelRequest, uuid.UUID(request_id))
@@ -697,23 +788,40 @@ class ModelGatewayService:
             job = session.get(WorkflowJob, request.job_id)
             if job is None or job.status != "running" or job.cancellation_requested:
                 raise GatewayRequestConflict("The task is no longer active; no further model calls were made.")
-            root, seen = job, {job.id}
+            budget_job = job
+            if job.job_type == "model.dispatch":
+                try:
+                    parent_id = uuid.UUID(str((job.payload_json or {}).get("parent_job_id") or ""))
+                except ValueError as exc:
+                    raise GatewayRequestConflict("The delegated model budget owner is invalid.") from exc
+                budget_job = session.get(WorkflowJob, parent_id)
+                if (budget_job is None or budget_job.user_id != job.user_id
+                        or budget_job.project_id != job.project_id
+                        or budget_job.job_type not in DELEGATED_TEXT_PARENT_JOB_TYPES
+                        or budget_job.status not in {"queued", "running"}
+                        or budget_job.cancellation_requested):
+                    raise GatewayRequestConflict("The parent writing task is no longer eligible for model calls.")
+            root, seen = budget_job, {budget_job.id}
             while root.retry_of_job_id is not None:
                 parent = session.get(WorkflowJob, root.retry_of_job_id)
-                if (parent is None or parent.id in seen or parent.user_id != job.user_id
-                        or parent.project_id != job.project_id or parent.job_type != job.job_type):
+                if (parent is None or parent.id in seen or parent.user_id != budget_job.user_id
+                        or parent.project_id != budget_job.project_id or parent.job_type != budget_job.job_type):
                     raise GatewayRequestConflict("The task retry lineage is invalid.")
                 seen.add(parent.id)
                 root = parent
             # All retries share the original Job's lock and budget, including
             # concurrent siblings. No new task identity can reset spent work.
             session.scalar(select(WorkflowJob).where(WorkflowJob.id == root.id).with_for_update())
+            if job.job_type == "model.dispatch":
+                request.budget_root_job_id = root.id
+                session.flush()
             retry_jobs = select(WorkflowJob.id).where(WorkflowJob.id == root.id).cte(recursive=True)
             retry_jobs = retry_jobs.union_all(select(WorkflowJob.id).join(
                 retry_jobs, WorkflowJob.retry_of_job_id == retry_jobs.c.id
-            ).where(WorkflowJob.user_id == job.user_id, WorkflowJob.job_type == job.job_type))
+            ).where(WorkflowJob.user_id == budget_job.user_id, WorkflowJob.job_type == budget_job.job_type))
             records = session.scalars(select(AIModelRequest).where(
-                AIModelRequest.job_id.in_(select(retry_jobs.c.id))
+                or_(AIModelRequest.job_id.in_(select(retry_jobs.c.id)),
+                    AIModelRequest.budget_root_job_id == root.id)
             )).all()
             total_attempts = sum(int((row.response_json or {}).get("provider_attempts") or 0) for row in records)
             total_chars = sum(int((row.response_json or {}).get("provider_input_chars") or 0) for row in records)
@@ -1049,45 +1157,61 @@ class ModelGatewayService:
                     details={"reconciled_from_cached_result": True},
                 )
             return {**cached, "cached": True}
-        user_slot = await self._user_semaphore(claims.user_id)
+        await self._refresh_concurrency()
         reservation_id: str | None = None
         provider_completed = False
         try:
-            if self.billing_service is not None:
-                estimated_input_tokens = max(
-                    1, (len(prompt.encode("utf-8")) + 3) // 4
-                )
-                estimated_output_tokens = min(
-                    32_768, max(2_048, estimated_input_tokens // 2)
-                )
-                estimated_cost = calculate_provider_cost(
-                    tier,
-                    input_tokens=estimated_input_tokens,
-                    cached_input_tokens=0,
-                    output_tokens=estimated_output_tokens,
-                )
-                reserve_amount = (
-                    estimated_cost * Decimal("1.20")
-                ).quantize(Decimal("0.00000001"))
-                if estimated_cost > 0:
-                    reserve_amount = max(Decimal("0.00100000"), reserve_amount)
-                reservation = self.billing_service.reserve(
-                    user_id=claims.user_id,
-                    amount_usd=reserve_amount,
-                    reference_type="text_model",
-                    reference_id=request_id,
-                    attempt_number=attempt_number,
-                    job_id=claims.job_id,
-                    reason=f"文本模型调用冻结：{normalized_stage}",
-                    details={
-                        "model_tier": tier.id,
-                        "model": tier.model,
-                        "estimated_input_tokens": estimated_input_tokens,
-                        "estimated_output_tokens": estimated_output_tokens,
-                    },
-                )
-                reservation_id = str(reservation.id)
-            async with self._global_slots, user_slot:
+            from .text_connections import connection_in_session
+            with database_session(self.session_factory) as session:
+                request = session.get(AIModelRequest, uuid.UUID(request_id))
+                pinned = dict(request.route_json or {})
+                channels = [pinned] if pinned else model_channels(tier)
+                for channel in channels:
+                    current = connection_in_session(session, channel["connection_id"])
+                    channel["max_concurrency"] = int((current or {}).get("max_concurrency", 4))
+                    channel["capacity_revision"] = int((current or {}).get("revision", 0))
+            async with self._text_channels.admit(claims.user_id, channels) as channel:
+                tier = routed_model(tier, channel)
+                with database_session(self.session_factory) as session:
+                    request = session.get(AIModelRequest, uuid.UUID(request_id))
+                    request.route_json = {k: channel[k] for k in (
+                        "connection_id", "connection_revision", "model", "wire_api")}
+                    request.model_name = tier.model
+                if self.billing_service is not None:
+                    estimated_input_tokens = max(
+                        1, (len(prompt.encode("utf-8")) + 3) // 4
+                    )
+                    estimated_output_tokens = min(
+                        32_768, max(2_048, estimated_input_tokens // 2)
+                    )
+                    estimated_cost = calculate_provider_cost(
+                        tier,
+                        input_tokens=estimated_input_tokens,
+                        cached_input_tokens=0,
+                        output_tokens=estimated_output_tokens,
+                    )
+                    reserve_amount = (
+                        estimated_cost * Decimal("1.20")
+                    ).quantize(Decimal("0.00000001"))
+                    if estimated_cost > 0:
+                        reserve_amount = max(Decimal("0.00100000"), reserve_amount)
+                    reservation = self.billing_service.reserve(
+                        user_id=claims.user_id,
+                        amount_usd=reserve_amount,
+                        reference_type="text_model",
+                        reference_id=request_id,
+                        attempt_number=attempt_number,
+                        job_id=claims.job_id,
+                        reason=f"文本模型调用冻结：{normalized_stage}",
+                        details={
+                            "model_tier": tier.id,
+                            "connection_id": tier.connection_id,
+                            "model": tier.model,
+                            "estimated_input_tokens": estimated_input_tokens,
+                            "estimated_output_tokens": estimated_output_tokens,
+                        },
+                    )
+                    reservation_id = str(reservation.id)
                 provider_data = await self._provider_call(
                     tier=tier,
                     prompt=prompt,
@@ -1106,6 +1230,8 @@ class ModelGatewayService:
             response = {
                 "request_id": request_id,
                 "provider_request_id": str(provider_data.get("id") or ""),
+                "connection_id": tier.connection_id,
+                "connection_revision": tier.connection_revision,
                 "model_tier": tier.id,
                 "model": tier.model,
                 "output_text": self._output_text(
@@ -1126,6 +1252,7 @@ class ModelGatewayService:
                     actual_usd=cost,
                     details={
                         "model_tier": tier.id,
+                        "connection_id": tier.connection_id,
                         "model": tier.model,
                         "input_tokens": usage["input_tokens"],
                         "cached_input_tokens": usage["cached_input_tokens"],
@@ -1201,7 +1328,7 @@ class ModelGatewayService:
             label_en="Retrieval embedding",
             description_zh="服务器固定的检索向量模型。",
             description_en="Server-fixed retrieval embedding model.",
-            input_usd_per_million=self.settings.embedding_provider_price_usd_per_million,
+            input_usd_per_million=runtime.input_usd_per_million,
             cached_input_usd_per_million=Decimal("0"),
             output_usd_per_million=Decimal("0"),
         )
@@ -1230,7 +1357,7 @@ class ModelGatewayService:
         if cached is not None:
             return {**cached, "cached": True}
 
-        user_slot = await self._embedding_user_semaphore(claims.user_id)
+        user_slot = await self._user_limiter("embedding", claims.user_id)
         reservation_id: str | None = None
         provider_completed = False
         try:
@@ -1245,29 +1372,29 @@ class ModelGatewayService:
                 cached_input_tokens=0,
                 output_tokens=0,
             )
-            if self.billing_service is not None and estimated_cost > 0:
-                reserve_amount = max(
-                    Decimal("0.00010000"),
-                    (estimated_cost * Decimal("1.20")).quantize(
-                        Decimal("0.00000001")
-                    ),
-                )
-                reservation = self.billing_service.reserve(
-                    user_id=claims.user_id,
-                    amount_usd=reserve_amount,
-                    reference_type="embedding_model",
-                    reference_id=request_id,
-                    attempt_number=attempt_number,
-                    job_id=claims.job_id,
-                    reason=f"语义检索向量调用冻结：{normalized_stage}",
-                    details={
-                        "profile": "retrieval_embedding",
-                        "model": runtime.model_name,
-                        "estimated_input_tokens": estimated_input_tokens,
-                    },
-                )
-                reservation_id = str(reservation.id)
-            async with self._embedding_global_slots, user_slot:
+            async with user_slot, self._embedding_global_slots:
+                if self.billing_service is not None and estimated_cost > 0:
+                    reserve_amount = max(
+                        Decimal("0.00010000"),
+                        (estimated_cost * Decimal("1.20")).quantize(
+                            Decimal("0.00000001")
+                        ),
+                    )
+                    reservation = self.billing_service.reserve(
+                        user_id=claims.user_id,
+                        amount_usd=reserve_amount,
+                        reference_type="embedding_model",
+                        reference_id=request_id,
+                        attempt_number=attempt_number,
+                        job_id=claims.job_id,
+                        reason=f"语义检索向量调用冻结：{normalized_stage}",
+                        details={
+                            "profile": "retrieval_embedding",
+                            "model": runtime.model_name,
+                            "estimated_input_tokens": estimated_input_tokens,
+                        },
+                    )
+                    reservation_id = str(reservation.id)
                 provider_data = await self._provider_embedding_call(
                     inputs=normalized_inputs,
                     idempotency_key=f"{claims.job_id}:{key}",
@@ -1797,27 +1924,27 @@ class ModelGatewayService:
                 "image_base64": base64.b64encode(image_bytes).decode("ascii"),
                 "cached": True,
             }
-        user_slot = await self._image_user_semaphore(claims.user_id)
+        user_slot = await self._user_limiter("image", claims.user_id)
         reservation_id: str | None = None
         provider_completed = False
         try:
-            if self.billing_service is not None:
-                reservation = self.billing_service.reserve(
-                    user_id=claims.user_id,
-                    amount_usd=self.settings.image_provider_price_usd_per_image,
-                    reference_type="image_model",
-                    reference_id=request_id,
-                    attempt_number=attempt_number,
-                    job_id=claims.job_id,
-                    reason=f"图像模型调用冻结：{normalized_stage}",
-                    details={
-                        "model": model,
-                        "operation": normalized_operation,
-                        "image_count": 1,
-                    },
-                )
-                reservation_id = str(reservation.id)
-            async with self._image_global_slots, user_slot:
+            async with user_slot, self._image_global_slots:
+                if self.billing_service is not None:
+                    reservation = self.billing_service.reserve(
+                        user_id=claims.user_id,
+                        amount_usd=self.settings.image_provider_price_usd_per_image,
+                        reference_type="image_model",
+                        reference_id=request_id,
+                        attempt_number=attempt_number,
+                        job_id=claims.job_id,
+                        reason=f"图像模型调用冻结：{normalized_stage}",
+                        details={
+                            "model": model,
+                            "operation": normalized_operation,
+                            "image_count": 1,
+                        },
+                    )
+                    reservation_id = str(reservation.id)
                 image_bytes, mime_type, provider_id, provider_attempts = (
                     await self._provider_image_call(
                         operation=normalized_operation,

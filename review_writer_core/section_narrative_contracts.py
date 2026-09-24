@@ -26,7 +26,7 @@ def build_argument_execution(blueprint, writing_plan, section_index, matrix, *, 
     The result belongs inside existing synthesis/quality artifacts.
     """
     from review_writer_core.claim_contracts import argument_projection, claim_is_executable
-    from review_writer_core.stages.sections.source_writing import CONTRACT as SOURCE_CONTRACT, support_fingerprint
+    from review_writer_core.stages.sections.source_writing import CONTRACT as SOURCE_CONTRACT, source_check_current
 
     def rows(value, key):
         return [row for row in (value or {}).get(key) or [] if isinstance(row, dict)]
@@ -75,10 +75,7 @@ def build_argument_execution(blueprint, writing_plan, section_index, matrix, *, 
                     continue
                 source_bound = plan.get("evidence_mode") == SOURCE_CONTRACT
                 if source_bound:
-                    verdict = claim.get("source_verification") or {}
-                    if (verdict.get("status") != "supported" or verdict.get("contract") != SOURCE_CONTRACT
-                            or verdict.get("input_fingerprint") != support_fingerprint(sentence, refs,
-                                claim.get("claim_kind"), claim.get("result_context") or [])):
+                    if not source_check_current(claim, text=sentence):
                         findings.append({"code": "source_claim_check_not_current", "section_id": sid,
                                          "paragraph_id": pid, "claim_id": cid})
                         continue
@@ -446,6 +443,22 @@ def _target_range(value: Any) -> tuple[int, int]:
     return 0, 0
 
 
+def resolve_section_depth_contract(section: Mapping[str, Any]) -> dict[str, Any]:
+    """Repair stale automatic budgets after paper ownership changes.
+
+    Explicit/custom contracts are preserved. A derived contract that asks for
+    more than 350 words per planned paragraph is recalculated from current roles.
+    """
+    saved = dict(section.get("depth_contract") or {})
+    paragraphs = int(saved.get("target_paragraph_count") or 0)
+    if (saved.get("diagnostic_policy") == "derived_not_hard_word_quota" and paragraphs
+            and int(saved.get("target_word_min") or 0) > paragraphs * 350):
+        current = dict(section)
+        current.pop("target_words", None)
+        return derive_section_depth_contract(current)
+    return saved or derive_section_depth_contract(section)
+
+
 def derive_section_depth_contract(section: Mapping[str, Any]) -> dict[str, Any]:
     """Return a measurable, non-prescriptive depth target for one section."""
 
@@ -549,10 +562,13 @@ def derive_narrative_diagnostics(
     semantic_review = writing_section.get("section_review")
     if isinstance(semantic_review, dict):
         complete = semantic_review.get("status") == "coherent"
-        return {"status": "complete" if complete else "shallow",
+        issues = list(semantic_review.get("issues") or [])
+        # Processing notes and partial audits do not establish a structural flaw.
+        incomplete = semantic_review.get("status") == "needs_revision"
+        return {"status": "complete" if complete else "shallow" if incomplete else "not_reviewed",
                 "paragraph_count": len(writing_section.get("paragraphs") or []),
-                "missing_requirements": [] if complete else ["section_thread_review"],
-                "issues": list(semantic_review.get("issues") or []),
+                "missing_requirements": ["section_thread_review"] if incomplete else [],
+                "issues": issues,
                 "review_status": semantic_review.get("status"),
                 "diagnostic_policy": "semantic_thread_not_role_quota"}
     paragraphs = [

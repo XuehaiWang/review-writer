@@ -86,6 +86,66 @@ class QualityOptimizationUnitTests(unittest.TestCase):
         self.assertEqual("10.1000/example", metadata["doi"]["value"])
         self.assertIn("title", outcome["changed_fields"])
 
+    def test_candidate_resolution_combines_candidate_with_existing_metadata(self) -> None:
+        metadata, audit, outcome = resolve_bibliography(
+            {
+                "paper_id": "P001",
+                "title": {"value": "Canonical title"},
+                "authors": {"value": ["A. Author"]},
+                "journal": {"value": "Journal"},
+                "year": {"value": 2024},
+                "document_type": {"value": "journal_article"},
+            },
+            {
+                "status": "conflict",
+                "sources": {
+                    "crossref": {
+                        "candidates": [
+                            {
+                                "candidate_id": "crossref:partial",
+                                "candidate": {"doi": "10.1000/example"},
+                                "match": {"title_similarity": 0.99},
+                            }
+                        ]
+                    }
+                },
+            },
+            {
+                "action": "accept_candidate",
+                "candidate_id": "crossref:partial",
+                "document_type": "journal_article",
+            },
+        )
+
+        self.assertEqual("resolved", audit["manual_review_status"])
+        self.assertEqual("10.1000/example", metadata["doi"]["value"])
+        self.assertEqual(["doi"], outcome["changed_fields"])
+
+    def test_candidate_resolution_still_rejects_collectively_missing_identity(self) -> None:
+        with self.assertRaises(BibliographyResolutionError) as raised:
+            resolve_bibliography(
+                {"paper_id": "P001", "title": {"value": "Partial title"}},
+                {
+                    "sources": {
+                        "crossref": {
+                            "candidates": [
+                                {
+                                    "candidate_id": "crossref:partial",
+                                    "candidate": {"doi": "10.1000/example"},
+                                }
+                            ]
+                        }
+                    }
+                },
+                {
+                    "action": "accept_candidate",
+                    "candidate_id": "crossref:partial",
+                    "document_type": "journal_article",
+                },
+            )
+
+        self.assertEqual(["authors", "journal", "year"], raised.exception.fields)
+
     def test_uncitable_supporting_source_is_context_only(self) -> None:
         _metadata, audit, _outcome = resolve_bibliography(
             {"paper_id": "P001", "title": {"value": "Procedure"}},

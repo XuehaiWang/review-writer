@@ -10,7 +10,7 @@ from typing import Any
 
 from .draft_bibliography import CALLOUT_RE, format_citation_group, _embedded_citation_map
 from .scientific_facts import build_fact_comparison
-from .stages.sections.source_writing import CONTRACT as SOURCE_CONTRACT, support_fingerprint
+from .stages.sections.source_writing import CONTRACT as SOURCE_CONTRACT, source_check_current
 
 # Related fields share a column; values and experiment identities remain separate.
 _COLUMNS = (
@@ -535,23 +535,21 @@ def _standalone_conditions(value):
 
 
 def _source_comparison_cells(section, papers):
-    """Project audited Claim records, without reconstructing facts or experiments.
+    """Project checked Claim records, without reconstructing facts or experiments.
 
     The section publisher owns source-version validation. Here the same audit
-    fingerprint prevents changed text/records from reusing an old audit.
+    fingerprint prevents changed text/records from reusing an old check.
     """
     structured = []
     for pi, paragraph in enumerate(section.get("paragraphs") or []):
         for ci, claim in enumerate(paragraph.get("claim_realizations") or []):
-            audit = claim.get("source_verification") or {}
             refs = claim.get("evidence_refs") or []
             text = str(claim.get("text") or "").strip()
             records = claim.get("result_context") or []
-            if (audit.get("contract") != SOURCE_CONTRACT or audit.get("status") != "supported"
+            if (not source_check_current(claim, text=text)
                     or not text or not refs
                     or any(not isinstance(ref, dict) or not ref.get("quote") or not ref.get("evidence_key") for ref in refs)
-                    or audit.get("input_fingerprint") != support_fingerprint(
-                        text, refs, claim.get("claim_kind"), records, claim.get("fact_ids") or [])):
+                    ):
                 continue
             by_key = {ref["evidence_key"]: ref for ref in refs}
             bound_papers = {str(ref.get("paper_id") or "") for ref in refs}

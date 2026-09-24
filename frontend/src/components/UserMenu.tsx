@@ -1,3 +1,4 @@
+import { LocalizedError } from "./LocalizedError";
 import { useEffect, useId, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import type { AuthConfig, Principal } from "../api/types";
@@ -51,7 +52,7 @@ export function UserMenu({ identity, authConfig }: { identity: Principal; authCo
       {authConfig.enabled ? <button className="user-menu-action user-menu-logout" type="button" disabled={logout.isPending} onClick={() => logout.mutate()}>
         {logout.isPending ? (language === "en" ? "Signing out…" : "正在退出…") : translate(language, "logout")}
       </button> : null}
-      {logout.error ? <p className="user-menu-error" role="alert">{logout.error.message}</p> : null}
+      {logout.error ? <p className="user-menu-error" role="alert"><LocalizedError error={logout.error} /></p> : null}
     </div> : null}
   </div>;
 }

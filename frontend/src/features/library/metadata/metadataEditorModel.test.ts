@@ -4,6 +4,7 @@ import {
   authorsFromInput,
   markMetadataReviewed,
   metadataFieldValue,
+  metadataForEditing,
   metadataForSave,
   metadataTextForEditing,
   metadataValidationError,
@@ -43,6 +44,31 @@ describe("metadata editor model", () => {
 
     const verified = setStructuredTagsVerified(edited, true);
     expect(verified.structured_tags).toMatchObject({ source: "human_review", confidence: 1, human_checked: true });
+  });
+
+  it("uses blank inputs for internal not-specified values and permits natural typing", () => {
+    const editing = metadataForEditing(source);
+    expect(structuredTagValue(editing, "product")).toBe("");
+
+    const typed = updateStructuredTag(editing, "product", "not specified");
+    expect(structuredTagValue(typed, "product")).toBe("not specified");
+
+    const cleared = updateStructuredTag(typed, "product", "");
+    const saved = metadataForSave(cleared);
+    expect((saved.structured_tags as { value: Record<string, string> }).value.product).toBe("not specified");
+  });
+
+  it("requires tag confirmation again after any verified value changes", () => {
+    const verified = setStructuredTagsVerified(
+      updateStructuredTag(source, "product", "chiral allenoate"),
+      true,
+    );
+    const edited = updateStructuredTag(verified, "product", "substituted allene");
+    expect(edited.structured_tags).toMatchObject({
+      source: "human_edit_unverified",
+      confidence: 0,
+      human_checked: false,
+    });
   });
 
   it("marks the overall record reviewed while preserving review notes", () => {

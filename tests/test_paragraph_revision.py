@@ -13,6 +13,33 @@ def test_unknown_source_reference_is_not_accepted():
             {"evidence": [{"original_passages": [{"ref": "P1:b2"}]}]})
 
 
+@pytest.mark.parametrize("supported", [False, True])
+def test_automatic_batch_semantic_check_controls_candidate_not_original(tmp_path, monkeypatch, supported):
+    scripts = Path(__file__).resolve().parents[1] / "skills/review-first-draft-feedback-loop/scripts"
+    monkeypatch.syspath_prepend(str(scripts))
+    spec = importlib.util.spec_from_file_location("automatic_revision_test", scripts / "revise_paragraph.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    original, candidate = "The reaction sometimes works. [1]", "The reaction always works. [1]"
+    first = tmp_path / "04_first_draft"
+    first.mkdir()
+    manuscript = first / "first_draft.md"
+    manuscript.write_text(original, encoding="utf-8")
+    evidence = {"evidence": [{"paper_id": "P1", "original_passages": [{"ref": "P1:b2", "text": "Sometimes works."}]}]}
+    responses = [{"reply": "Proposed change", "candidate_text": candidate, "source_refs": ["P1:b2"]},
+                 {"status": "supported" if supported else "unsupported", "preserves_information": supported, "source_refs": ["P1:b2"]}]
+    with patch.object(module.loop, "parse_marked_paragraphs", return_value=[{"paragraph_id": "S1-p1", "text": original}]), \
+         patch.object(module.loop, "matrix_rows", return_value={}), \
+         patch.object(module.loop, "paragraph_metadata", return_value={}), \
+         patch.object(module.loop, "claim_evidence_contract", return_value={}), \
+         patch.object(module.loop, "source_evidence", return_value=evidence), \
+         patch.object(module.loop, "call_json_model", side_effect=responses):
+        result = module.revise(tmp_path, {"paragraph_id": "S1-p1", "discussion_text": original, "automatic_batch": True})
+    assert result["candidate_text"] == (candidate if supported else "")
+    assert manuscript.read_text(encoding="utf-8") == original
+    assert result["automatic_source_check"]["status"] == ("supported" if supported else "unresolved")
+
+
 def test_stable_keys_follow_saved_identity_not_position():
     first = "One.\n<!-- paragraph_id: S1-p1 -->\n\nTwo.\n<!-- paragraph_id: S1-p2 -->\n"
     keys = paragraph_keys(first, {}, "draft1")

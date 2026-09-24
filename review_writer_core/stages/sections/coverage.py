@@ -1,6 +1,8 @@
 """Shared primary-paper coverage contract for generation, resume and publication."""
 from __future__ import annotations
 
+from review_writer_core.stages.sections.execution import chapter_responsibilities
+from review_writer_core.stages.sections.authoring import paragraph_is_current
 from review_writer_core.evidence_integrity import normalize_retrieval_mode
 from review_writer_core.claim_contracts import (
     claim_is_executable,
@@ -12,7 +14,7 @@ from review_writer_core.stages.sections.evidence_resolution import has_evidence_
 
 
 def section_input_fingerprints(tasks, evidence_sections, matrix, blueprint, shared):
-    """Section-local authoring inputs; conclusions also depend on all body inputs.
+    """Section-local authoring inputs and shared chapter responsibilities.
 
     Citation numbering is global: changing paper order invalidates every section.
     Shared scope, rules and outline remain global by design, not best-effort guesses.
@@ -22,6 +24,7 @@ def section_input_fingerprints(tasks, evidence_sections, matrix, blueprint, shar
     specs = {str(s.get("section_id")): s for s in blueprint.get("sections") or []}
     common = fingerprint({"contract": "section-input/1", "shared": shared,
         "blueprint": {k: v for k, v in blueprint.items() if k != "sections"},
+        "responsibilities": chapter_responsibilities(tasks),
         "paper_order": list(by_paper)})
     signatures = {}
     for task in tasks:
@@ -30,12 +33,20 @@ def section_input_fingerprints(tasks, evidence_sections, matrix, blueprint, shar
         signatures[sid] = fingerprint({"common": common, "task": task,
             "section": specs.get(sid), "evidence": evidence_sections.get(sid),
             "papers": {pid: by_paper.get(pid) for pid in papers}})
-    body = {str(t.get("section_id")): signatures[str(t.get("section_id"))]
-            for t in tasks if t.get("section_role", "body") == "body"}
+    local = dict(signatures)
+    by_id = {t["section_id"]: t for t in tasks}
+    def ancestors(sid, visited):
+        for dependency in by_id[sid].get("depends_on_sections") or []:
+            if dependency in by_id and dependency not in visited:
+                visited.add(dependency)
+                ancestors(dependency, visited)
+        return visited
     for task in tasks:
-        if task.get("section_role") == "conclusion":
-            sid = str(task.get("section_id"))
-            signatures[sid] = fingerprint({"section": signatures[sid], "body": body})
+        sid = task["section_id"]
+        dependencies = ancestors(sid, set())
+        if dependencies:
+            signatures[sid] = fingerprint({"section": local[sid],
+                "dependencies": {key: local[key] for key in sorted(dependencies)}})
     return signatures
 
 
@@ -155,6 +166,9 @@ def reusable_section_entries(entries, tasks, evidence_sections):
         output = entry["output"]
         from review_writer_core.stages.sections.source_writing import BINDING_CONTRACT
         source_review = entry["synthesis"].get("source_review") or {}
+        if source_review.get("unresolved"):
+            rejected[section_id] = "source_check_incomplete"
+            continue
         if (source_review.get("binding_contract") != BINDING_CONTRACT
                 and any(item.get("reason") == "missing_or_invalid_source_span"
                         for item in source_review.get("omitted") or [] if isinstance(item, dict))):
@@ -198,14 +212,12 @@ def reusable_section_entries(entries, tasks, evidence_sections):
                 )
             )
         elif entry["writing"].get("evidence_mode") == SOURCE_CONTRACT:
-            if task.get("section_role") == "conclusion":
-                for body_task in tasks:
-                    if body_task.get("section_role", "body") == "body":
-                        for row in (evidence_sections.get(body_task["section_id"]) or {}).get("hits") or []:
-                            if row.get("evidence_key"):
-                                source_by_key.setdefault(str(row["evidence_key"]), row)
+            output_by_id = {p.get("paragraph_id"): p for p in output.get("paragraphs") or []}
             realizations = {c.get("claim_id"): c for p in output.get("paragraphs") or [] for c in p.get("claim_realizations") or []}
-            if any(not valid_source_claim(c, source_by_key, text=(realizations.get(c.get("claim_id")) or {}).get("text", ""))
+            if any(not paragraph_is_current(p, output_by_id.get(p.get("paragraph_id"), {}))
+                   for p in entry["writing"].get("paragraphs") or []):
+                rejected[section_id] = "Paragraph prose/source mapping changed."
+            elif any(not valid_source_claim(c, source_by_key, text=(realizations.get(c.get("claim_id")) or {}).get("text", ""))
                    for c in entry["writing"].get("claims") or []):
                 rejected[section_id] = "Source passage or checked claim changed."
             else:
@@ -232,11 +244,13 @@ def reusable_section_entries(entries, tasks, evidence_sections):
             retained[section_id] = entry
         else:
             retained[section_id] = entry
-    if any(str(task.get("section_role") or "body").casefold() == "body"
-           and str(task.get("section_id")) not in retained for task in tasks):
+    changed = True
+    while changed:
+        changed = False
         for task in tasks:
-            section_id = str(task.get("section_id") or "")
-            if str(task.get("section_role") or "").casefold() == "conclusion" and section_id in retained:
-                retained.pop(section_id)
-                rejected[section_id] = "Refresh conclusion after the incomplete body sections are repaired."
+            sid = task["section_id"]
+            if sid in retained and not set(task.get("depends_on_sections") or []).issubset(retained):
+                retained.pop(sid)
+                rejected[sid] = "A required chapter must be regenerated first."
+                changed = True
     return retained, rejected

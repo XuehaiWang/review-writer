@@ -103,6 +103,7 @@ from review_writer_core.review_structure import (
 )
 from review_writer_core.classification_axes import (
     CLASSIFICATION_CONTRACT_VERSION,
+    axis_requires_formal_route,
     canonical_classification_contract,
     classification_contract_from_document,
 )
@@ -125,6 +126,7 @@ from review_writer_core.stages.planning.outline import (
     capitalize_outline_heading as _capitalize_outline_heading,
     outline_markdown_from_sections as _outline_markdown_from_sections,
     outline_sections as _outline_sections,
+    normalize_outline_section_ids as _normalize_outline_section_ids,
     sanitize_outline_markdown_headings as _sanitize_outline_markdown_headings,
 )
 from review_writer_core.stages.planning.topic import (
@@ -574,6 +576,7 @@ class PlanningService(
         force: bool = False,
         selected_paper_ids: list[str] | None = None,
         matrix_snapshot: dict[str, Any] | None = None,
+        classification_contract_override: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Prepare source-addressable fact candidates for an asynchronous job."""
 
@@ -615,11 +618,16 @@ class PlanningService(
         )
         topic = str(matrix.get("review_topic") or "")
         topic_partitions = _topic_partitions(topic)
-        classification_axes = _matrix_classification_axes(matrix, topic_partitions)
+        classification_axes = (
+            list(classification_contract_override.get("axes") or [])
+            if isinstance(classification_contract_override, dict)
+            else _matrix_classification_axes(matrix, topic_partitions)
+        )
         classification_contract = canonical_classification_contract(
             classification_axes,
             primary_axis_hint=str(
-                (matrix.get("classification_recommendation") or {}).get(
+                (classification_contract_override or {}).get("primary_axis_id")
+                or (matrix.get("classification_recommendation") or {}).get(
                     "primary_axis_id"
                 )
                 or (matrix.get("classification_contract") or {}).get(
@@ -630,6 +638,12 @@ class PlanningService(
             source="matrix_fact_extraction",
         )
         classification_axes = list(classification_contract["axes"])
+        nonformal_route_needs_cleanup = any(
+            str(axis.get("axis_role") or "") in {
+                "primary_organization", "required_independent_discussion"
+            } and not axis_requires_formal_route(axis)
+            for axis in classification_axes
+        )
         topic_required_roles = _matrix_required_fact_roles(
             topic,
             classification_axes,
@@ -675,7 +689,12 @@ class PlanningService(
             ),
             {},
         )
-        for partition in primary_axis.get("partitions") or []:
+        if not axis_requires_formal_route(primary_axis):
+            # Provisional outline headings and axes without alternatives are
+            # writing structure, not a per-paper formal classification task.
+            routing_axis_id = ""
+        routing_partitions = (primary_axis.get("partitions") or []) if routing_axis_id else []
+        for partition in routing_partitions:
             if not isinstance(partition, dict):
                 continue
             add_routing_category(
@@ -692,7 +711,8 @@ class PlanningService(
                     profile=project.taxonomy_profile,
                     topic_text=topic,
                 ):
-                    if str(category or "") == routing_axis_id:
+                    if (classification_contract_override is None
+                            and str(category or "") == routing_axis_id):
                         add_routing_category(label, aliases)
             except TaxonomyConfigurationError:
                 # Formal contract partitions above remain usable.  A missing
@@ -734,7 +754,7 @@ class PlanningService(
                         ),
                         "",
                     )
-                if label:
+                if label and label.casefold() in routing_category_labels:
                     deterministic_routing_by_paper[paper_id] = label
         classification_partition_queries: list[dict[str, str]] = []
         seen_partition_queries: set[tuple[str, str]] = set()
@@ -812,6 +832,10 @@ class PlanningService(
                 ),
                 "actual_model_id": resolve_model_tier(project.model_tier, self.repository.session_factory).model,
             }
+            if nonformal_route_needs_cleanup:
+                # Only affected legacy rows need a one-time metadata refresh.
+                # Verified source facts remain reusable below.
+                fingerprint_input["nonformal_route_policy_version"] = 1
             if topic_partitions or classification_axes:
                 fingerprint_input.update(
                     {
@@ -825,6 +849,27 @@ class PlanningService(
             source_fingerprint = hashlib.sha256(
                 json.dumps(
                     fingerprint_input,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            # Keep the verified source facts independent of a later outline's
+            # classification choices. The full fingerprint above still guards
+            # the paper-level routing result.
+            fact_fingerprint = hashlib.sha256(
+                json.dumps(
+                    {
+                        key: value
+                        for key, value in fingerprint_input.items()
+                        if key not in {
+                            "routing_adjudicator_version", "routing_axis_id",
+                            "routing_categories_fingerprint", "deterministic_routing_label",
+                            "topic_partition_classifier_version", "topic_partitions",
+                            "classification_contract_fingerprint",
+                            "nonformal_route_policy_version",
+                        }
+                    } | {"required_fact_roles": topic_required_roles},
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
@@ -1061,6 +1106,13 @@ class PlanningService(
                     },
                 )
             current_facts = row.get("scientific_facts") or []
+            existing_roles = (existing.get("fact_extraction_profile") or {}).get("requested_fact_roles")
+            legacy_fact_identity_matches = (
+                not existing.get("fact_fingerprint")
+                and existing.get("fact_cache_key") == fact_cache_key
+                and isinstance(existing_roles, list)
+                and set(existing_roles) == set(topic_required_roles)
+            )
             candidates.update(self.fact_source_candidates(principal, row, current_facts, source_lineages))
             reusable_candidates = set(candidates) | set(partition_candidates)
             cross_project_cache = dict(user_fact_cache.get(fact_cache_key) or {})
@@ -1102,6 +1154,7 @@ class PlanningService(
                     "index_summary": summary,
                     "source_lineages": source_lineages,
                     "source_fingerprint": source_fingerprint,
+                    "fact_fingerprint": fact_fingerprint,
                     "fact_cache_key": fact_cache_key,
                     "taxonomy_profile": project.taxonomy_profile,
                     "required_fact_roles": topic_required_roles,
@@ -1111,6 +1164,15 @@ class PlanningService(
                         **{key: deepcopy(row.get(key)) for key in ("topic_partition_classification",
                             "evidence_backed_tags", "classification_outcomes", "routing_recommendation")},
                     } if existing.get("source_fingerprint") == source_fingerprint and current_facts else None),
+                    "reusable_fact_result": ({
+                        **deepcopy(existing), "paper_id": paper_id, "facts": deepcopy(current_facts),
+                        "paper_analysis": deepcopy(row.get("paper_analysis") or {}),
+                    } if not force and existing.get("source_fingerprint") != source_fingerprint
+                        and (existing.get("fact_fingerprint") == fact_fingerprint
+                             or legacy_fact_identity_matches)
+                        and current_facts and fact_processing_complete(current_facts, existing)
+                        and any(fact_is_usable(fact) and fact.get("field_id") != "topic_partition"
+                                for fact in current_facts) else None),
                     "deterministic_routing_label": deterministic_routing_by_paper.get(
                         paper_id, ""
                     ),
@@ -1846,6 +1908,8 @@ class PlanningService(
                 **readiness,
                 "review_status": review_status,
                 "source_fingerprint": str(source.get("source_fingerprint") or ""),
+                "fact_fingerprint": str(source.get("fact_fingerprint") or ""),
+                "classification_refreshed_from_facts": bool(source.get("reusable_fact_result")),
                 "fact_cache_key": str(source.get("fact_cache_key") or ""),
                 "source_lineage_hash": str(
                     (source.get("index_summary") or {}).get("source_lineage_hash") or ""
@@ -3427,6 +3491,7 @@ class PlanningService(
             raise WorkflowValidationError("Outline Markdown must not be empty.")
         if len(text) > 250_000:
             raise WorkflowValidationError("Outline Markdown exceeds 250,000 characters.")
+        text, _repairs = _normalize_outline_section_ids(text)
         sections = _outline_sections(text)
         if not sections:
             raise WorkflowValidationError(
@@ -3844,8 +3909,9 @@ class PlanningService(
         if candidate_outline_md is not None and (manual or style != TOPIC_GUIDED_STYLE):
             raise WorkflowValidationError("A recommendation snapshot is only valid when applying a topic outline.")
         if style == "custom" and not manual:
-            markdown = ""
-            complete = False
+            raise WorkflowValidationError(
+                "Custom outline editing does not replace the saved outline until a complete outline is explicitly saved."
+            )
         elif style.startswith("reference:") and not manual:
             references, _artifact = self._read_json(
                 principal, project_id, REFERENCE_INDEX_LOGICAL_NAME, required=False
@@ -3909,6 +3975,9 @@ class PlanningService(
                 taxonomy_profile=planning_taxonomy_profile,
             )
             complete = True
+        _normalized_input, section_id_repairs = _normalize_outline_section_ids(
+            str(outline_md or "") if manual else markdown
+        )
         current_outline, current_outline_artifact = self._read_json(
             principal,
             project_id,
@@ -4144,6 +4213,7 @@ class PlanningService(
                 "project_id": project_id,
                 "outline_style": style,
                 "selected_outline_md": markdown,
+                "section_id_repairs": section_id_repairs,
                 "outline_complete": complete,
                 "blueprint_pending": complete,
                 "scope_contract": scope,
@@ -4185,6 +4255,7 @@ class PlanningService(
             "project_id": project_id,
             "outline_style": style,
             "selected_outline_md": markdown,
+            "section_id_repairs": section_id_repairs,
             "outline_complete": complete,
             "blueprint_pending": complete,
             "scope_contract": scope,
@@ -4488,6 +4559,8 @@ class PlanningService(
             raise WorkflowConflict(
                 "The selected outline is blank or incomplete. Edit and save it before Blueprint generation."
             )
+        normalized_outline_md, _repairs = _normalize_outline_section_ids(str(outline["outline_md"]))
+        outline = {**outline, "outline_md": normalized_outline_md}
         matrix_ids = set(_paper_ids(matrix["rows"]))
         parsed = _outline_sections(str(outline["outline_md"]))
         matrix_order = _paper_ids(matrix["rows"])
@@ -4812,7 +4885,8 @@ class PlanningService(
                         "without repeating full study descriptions."
                     )
                 figure_need = f"Support the comparison in {section['title']} where source evidence permits."
-                target_words = max(700, 350 * max(1, len(primary)))
+                # Comparison length grows sublinearly; a paper is not a paragraph.
+                target_words = min(1800, 700 + 100 * max(0, len(primary) - 1))
             thesis_contract = {"text": thesis, "status": "provisional" if role == "body" else "structural_synthesis"}
             depth_contract = derive_section_depth_contract(
                 {

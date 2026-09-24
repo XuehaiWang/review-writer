@@ -8,6 +8,8 @@ import unittest
 import uuid
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch, Mock
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -369,6 +371,9 @@ class SectionsV1Tests(unittest.TestCase):
             public_origin="http://testserver",
             credential_encryption_key=TEST_KEY,
             hosted_workspace_root=root / "users",
+            # Offline handlers still require an enabled catalog connection at
+            # job admission; this dummy credential is never sent to a provider.
+            text_provider_api_key="offline-sections-test-key",
         )
         self.app = create_app(
             settings,
@@ -540,6 +545,24 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertEqual(202, response.status_code, response.text)
         return self.wait_job(client, response.json()["id"])
 
+    def test_submission_defers_evidence_and_worker_reuses_preparation(self) -> None:
+        service = self.app.state.sections_service
+        with patch.object(service, "hydrate_tasks_with_evidence", side_effect=AssertionError("HTTP must not retrieve evidence")):
+            payload = service.generation_payload(self.first, self.project_id, defer_evidence=True)
+        self.assertTrue(payload["evidence_preparation_pending"])
+        context = SimpleNamespace(user_id=self.first.user_id, project_id=self.project_id,
+            job_id=str(uuid.uuid4()), report_progress=Mock(), report_partial_result=Mock(), checkpoint=Mock())
+        with patch.object(service, "generation_payload", wraps=service.generation_payload) as prepare:
+            first = service.prepare_generation_job(context, payload)
+            second = service.prepare_generation_job(context, payload)
+        self.assertEqual(1, prepare.call_count)
+        self.assertEqual(first, second)
+        self.assertFalse(first["evidence_preparation_pending"])
+        self.assertTrue(first["evidence_package"]["sections"])
+        stale = {**payload, "source_blueprint_artifact_id": "superseded"}
+        with self.assertRaises(WorkflowConflict):
+            service.prepare_generation_job(context, stale)
+
     def test_payload_resolves_blueprint_papers(self) -> None:
         with TestClient(self.app) as client:
             response = client.get(f"/api/v1/projects/{self.project_id}/sections")
@@ -673,8 +696,12 @@ class SectionsV1Tests(unittest.TestCase):
         )
 
         introduction = next(task for task in tasks if task["section_id"] == "S01")
-        self.assertEqual(["P009"], introduction["context_papers"])
+        self.assertEqual(["P009", "P001"], introduction["context_papers"])
         self.assertIn("P009", introduction["allowed_papers"])
+        body = next(task for task in tasks if task["section_id"] == "S02")
+        self.assertEqual(["P001"], body["allowed_papers"])
+        hydrated = self.app.state.sections_service._apply_primary_evidence_roles([introduction], {})[0]
+        self.assertIn("P001", hydrated["allowed_papers"])
         self.assertEqual(["S01", "S02"], [task["section_id"] for task in tasks])
 
     def test_context_papers_are_not_double_counted_as_supporting(self) -> None:
@@ -787,6 +814,29 @@ class SectionsV1Tests(unittest.TestCase):
                 {},
                 attempts=1,
             )
+
+    def test_incomplete_new_audit_preserves_valid_saved_section(self):
+        from review_writer_api.domain_services.sections import (
+            SECTION_INDEX_LOGICAL_NAME, WRITING_PLAN_LOGICAL_NAME, SYNTHESIS_STATE_LOGICAL_NAME,
+        )
+        with TestClient(self.app) as client:
+            self.assertEqual("succeeded", self.start(client, "baseline-protection")["status"])
+            service = self.app.state.sections_service
+            old, _ = service._read_json_artifact(self.first, self.project_id, SECTION_INDEX_LOGICAL_NAME)
+            plan, _ = service._read_json_artifact(self.first, self.project_id, WRITING_PLAN_LOGICAL_NAME)
+            synthesis, _ = service._read_json_artifact(self.first, self.project_id, SYNTHESIS_STATE_LOGICAL_NAME)
+            built = {"sections": deepcopy(old["sections"]), "writing_plan": deepcopy(plan), "synthesis_state": deepcopy(synthesis)}
+            sid = built["sections"][0]["section_id"]
+            built["sections"][0]["paragraphs"] = built["sections"][0]["paragraphs"][:1]
+            built["sections"][0]["draft_md"] = built["sections"][0]["paragraphs"][0]["text"]
+            summary = next(s for s in built["synthesis_state"]["sections"] if s["section_id"] == sid)
+            summary["source_review"] = {"unresolved": [{"reason": "invalid_audit_response"}], "omitted": []}
+            payload = service.generation_payload(self.first, self.project_id)
+            service.publish_generation(self.first, self.project_id, payload, built, attempts=1)
+            saved, _ = service._read_json_artifact(self.first, self.project_id, SECTION_INDEX_LOGICAL_NAME)
+            self.assertEqual(old["sections"][0]["paragraphs"], saved["sections"][0]["paragraphs"])
+            saved_synthesis, _ = service._read_json_artifact(self.first, self.project_id, SYNTHESIS_STATE_LOGICAL_NAME)
+            self.assertTrue(saved_synthesis["sections"][0]["pending_source_review"]["unresolved"])
 
     def test_missing_blueprint_paper_blocks_generation(self) -> None:
         service = self.app.state.planning_service
@@ -1293,14 +1343,14 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertEqual("direct", merged["support_level"])
         self.assertTrue(merged["claim_eligible"])
 
-    def test_conclusion_claim_inherits_body_fact_identity_for_same_evidence_key(
+    def test_section_claim_cannot_inherit_another_sections_fact_identity(
         self,
     ) -> None:
         evidence_key = "sha256:" + "c" * 64
         payload = {
             "tasks": [
                 {"section_id": "S02", "section_role": "body"},
-                {"section_id": "S03", "section_role": "conclusion"},
+                {"section_id": "S03", "section_role": "body"},
             ]
         }
         built = {
@@ -1385,9 +1435,10 @@ class SectionsV1Tests(unittest.TestCase):
             ],
         }
 
-        self.app.state.sections_service._validate_academic_bundle(
-            payload, built, synthesis_state, writing_plan, evidence_package
-        )
+        with self.assertRaisesRegex(WorkflowValidationError, "fact identities outside its evidence keys"):
+            self.app.state.sections_service._validate_academic_bundle(
+                payload, built, synthesis_state, writing_plan, evidence_package
+            )
 
         writing_plan["sections"][1]["claims"][0]["fact_ids"] = ["MF-OTHER"]
         with self.assertRaisesRegex(
@@ -1398,7 +1449,7 @@ class SectionsV1Tests(unittest.TestCase):
                 payload, built, synthesis_state, writing_plan, evidence_package
             )
 
-    def test_conclusion_inherits_only_claim_eligible_body_chunks(self) -> None:
+    def test_section_retrieval_stays_within_its_own_package(self) -> None:
         tasks = {
             "S01": {"section_id": "S01", "section_role": "introduction"},
             "S02": {"section_id": "S02", "section_role": "body"},
@@ -1434,7 +1485,7 @@ class SectionsV1Tests(unittest.TestCase):
         conclusion_chunks = self.app.state.sections_service._valid_retrieval_chunks(
             "S03", tasks["S03"], evidence_sections, tasks
         )
-        self.assertIn(("P001", "body-direct"), conclusion_chunks)
+        self.assertNotIn(("P001", "body-direct"), conclusion_chunks)
         self.assertNotIn(("P001", "body-neighbor"), conclusion_chunks)
         self.assertNotIn(("P000", "intro-direct"), conclusion_chunks)
 

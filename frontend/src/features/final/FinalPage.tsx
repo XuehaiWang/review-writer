@@ -1,3 +1,4 @@
+import { LocalizedError } from "../../components/LocalizedError";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -13,6 +14,7 @@ import { FinalJobStatus, finalActionFromJobType, type FinalAction } from "./Fina
 import { readFinalJobId, writeFinalJobId } from "./finalJobPersistence";
 
 import { FinalManuscriptPreview, type FinalVersion } from "./FinalManuscriptPreview";
+import { FinalIssuesPanel, type FinalIssue } from "./FinalIssuesPanel";
 
 type FinalPayload = {
   versions?: FinalVersion[];
@@ -24,10 +26,6 @@ type FinalPayload = {
   final_draft_md: string;
   final_artifact_id: string;
   final_current: boolean;
-  overview_figure_url: string;
-  overview_figure_exists: boolean;
-  overview_figure_current: boolean;
-  overview_text: { title?: string; subtitle?: string; labels?: string[] };
   front_matter: { title?: string; authors?: string[]; affiliations?: string[]; abstract?: string; keywords?: string[]; field_states?: Record<string, "generated" | "user_modified" | "user_omitted" | "missing">; generation_warnings?: string[] };
   front_matter_artifact_id: string;
   front_matter_current: boolean;
@@ -36,7 +34,7 @@ type FinalPayload = {
   release_ready: boolean;
   pending_issue_count: number;
   pending_issues: string[];
-  pending_issue_details: Array<{ target_type: string; target_id: string; issues: string[] }>;
+  pending_issue_details: FinalIssue[];
   evidence_boundary: {
     review_type?: string;
     coverage_claim?: string;
@@ -236,9 +234,9 @@ export function FinalPage() {
     {payload ? <><div className="final-grid-react">
       <aside className="pane final-list-react"><div className="pane-head"><div><span className="step-label">{text("终稿产物", "Final outputs")}</span><h2>{project?.slug || project?.project_id}</h2></div></div><div className="draft-flow-list">{mainTabs.map(([value, label]) => <button key={value} className={tab === value ? "active" : ""} type="button" onClick={() => { setTab(value); setShowAdvanced(false); }}><strong>{label}</strong></button>)}<details className="workflow-advanced-nav" open={showAdvanced} onToggle={(event) => setShowAdvanced(event.currentTarget.open)}><summary>{text("出版信息与检查详情", "Publication information and checks")}</summary><div>{advancedTabs.map(([value, label]) => <button key={value} className={tab === value ? "active" : ""} type="button" onClick={() => { setTab(value); setShowAdvanced(true); }}><strong>{label}</strong></button>)}</div></details></div></aside>
       <section className="pane final-main-react"><div className="pane-head"><div><span className="step-label">{payload.freshness.stale ? text("已过期", "Out of date") : text("当前", "Current")}</span><h2>{tabs.find(([value]) => value === tab)?.[1]}</h2></div></div><div className="final-document-react">
-        {payload.final_current && payload.release_current ? <div className={payload.pending_issue_count ? "message message-warning" : "message message-success"}>{payload.pending_issue_count ? <>{text(`终稿已生成 · 还有 ${payload.pending_issue_count} 项待处理。`, `Final draft generated · ${payload.pending_issue_count} item(s) still need attention.`)} <button className="button button-quiet" type="button" onClick={() => { setTab("audit"); setShowAdvanced(true); }}>{text("查看问题明细", "View issue details")}</button></> : text("终稿已生成。", "Final draft generated.")}</div> : null}
+        {payload.final_current && payload.release_current ? <div className={payload.pending_issue_count ? "message message-warning" : "message message-success"}>{payload.pending_issue_count ? <>{text(`终稿已生成，可下载 · ${payload.pending_issue_count} 项内容建议核对。`, `Final available for download · ${payload.pending_issue_count} finding(s) to review.`)} <button className="button button-quiet" type="button" onClick={() => { setTab("audit"); setShowAdvanced(true); }}>{text("查看处理建议", "View suggested actions")}</button></> : text("终稿已生成。", "Final draft generated.")}</div> : null}
         {tab === "preparation" ? <>
-          <div className="final-preparation-cards"><article className={payload.draft_approval_current ? "good" : "bad"}><h3>{payload.draft_approval_current ? text("初稿已确认", "Draft approved") : text("需要先确认初稿", "Draft approval required")}</h3>{approval.score !== undefined ? <p>{text("分数", "Score")}: {String(approval.score)} / {String(approval.goal || "")}</p> : null}</article><article><strong>{text("综述总览图", "Review overview figure")}</strong><StatusPill exists={payload.overview_figure_exists} current={payload.overview_figure_current} /></article><article><strong>{text("最终稿", "Final draft")}</strong><StatusPill exists={Boolean(payload.final_artifact_id)} current={payload.final_current} optional={false} /></article></div>
+          <div className="final-preparation-cards"><article className={payload.draft_approval_current ? "good" : "bad"}><h3>{payload.draft_approval_current ? text("初稿已确认", "Draft approved") : text("需要先确认初稿", "Draft approval required")}</h3>{approval.score !== undefined ? <p>{text("分数", "Score")}: {String(approval.score)} / {String(approval.goal || "")}</p> : null}</article><article><strong>{text("最终稿", "Final draft")}</strong><StatusPill exists={Boolean(payload.final_artifact_id)} current={payload.final_current} optional={false} /></article></div>
           <section className="front-matter-editor"><h3>{text("作者与单位", "Authors and affiliations")}</h3><p>{text("文章文字请在初稿修改；终稿只装配已确认内容，不自动生成摘要或结论。", "Edit prose in Draft. Final assembles approved content without generating summaries.")}</p>
             <label>{text("作者（每行一位）", "Authors (one per line)")}<textarea rows={4} value={articleAuthors} onChange={e => setArticleAuthors(e.target.value)} /></label>
             <label>{text("单位（每行一个）", "Affiliations (one per line)")}<textarea rows={4} value={articleAffiliations} onChange={e => setArticleAffiliations(e.target.value)} /></label>
@@ -247,7 +245,7 @@ export function FinalPage() {
           <section className="evidence-boundary-card"><header><span className="step-label">{text("范围与证据边界", "Scope and evidence boundary")}</span><h3>{text("基于当前确认语料的叙述性专题综述", "Narrative review of the confirmed corpus")}</h3></header><p>{text("本稿只声明覆盖用户确认的论文集合，不声称穷尽全领域文献。", payload.evidence_boundary.statement || "This review is limited to the user-confirmed corpus and does not claim exhaustive global coverage.")}</p><dl><div><dt>{text("确认论文", "Selected papers")}</dt><dd>{payload.evidence_boundary.selected_paper_count || 0}</dd></div><div><dt>{text("可写主论文", "Writeable primary papers")}</dt><dd>{payload.evidence_boundary.writeable_primary_paper_count || 0}</dd></div><div><dt>{text("未解决主论文", "Unresolved primary papers")}</dt><dd>{payload.evidence_boundary.unresolved_primary_paper_ids?.length || 0}</dd></div><div><dt>{text("问题级缺口", "Question-level gaps")}</dt><dd>{payload.evidence_boundary.corpus_gap_questions?.length || 0}</dd></div></dl>{payload.evidence_boundary.warnings?.length ? <details><summary>{text(`查看 ${payload.evidence_boundary.warnings.length} 项边界警告`, `View ${payload.evidence_boundary.warnings.length} boundary warnings`)}</summary><ul>{payload.evidence_boundary.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></details> : <p className="message message-success">{text("当前未记录额外证据边界警告。", "No additional evidence-boundary warnings are recorded.")}</p>}</section>
         </> : null}
         {tab === "final" ? <FinalManuscriptPreview key={project!.project_id} projectId={project!.project_id} markdown={payload.final_draft_md} versions={payload.versions || []} /> : null}
-        {tab === "audit" ? <><MarkdownView content={payload.final_audit_report_md} empty={text("尚未执行终稿检查。", "No final checks yet.")} /><MarkdownView content={payload.release_report_md} /></> : null}
+        {tab === "audit" ? <><FinalIssuesPanel projectId={project!.project_id} issues={payload.pending_issue_details || []} busy={active || !payload.draft_approval_current} onSync={async () => { setStartingAction("build"); await runJob.mutateAsync({ action: "build" }); }} /><details className="advanced-panel"><summary>{text("完整技术报告（供排查）", "Full technical report")}</summary><MarkdownView content={payload.final_audit_report_md} empty={text("尚未执行终稿检查。", "No final checks yet.")} /><MarkdownView content={payload.release_report_md} /></details></> : null}
         {tab === "pdf" ? <div className="pdf-qa-summary"><h3>{text("期刊型 PDF 渲染状态", "Journal-style PDF render status")}</h3>{payload.final_pdf_exists ? <><p><strong>{text("语言", "Language")}:</strong> {payload.pdf_language_profile}</p><p><strong>{text("编译器", "Compiler")}:</strong> {String(payload.render_manifest?.compiler || "LuaLaTeX")}</p><p><strong>{text("自动 QA", "Automatic QA")}:</strong> {String(payload.pdf_qa?.status || "")}</p><p><strong>{text("页数", "Pages")}:</strong> {String(payload.pdf_qa?.page_count || "")}</p><p><strong>{text("字体全部嵌入", "All fonts embedded")}:</strong> {payload.pdf_qa?.all_fonts_embedded ? text("是", "Yes") : text("否", "No")}</p><div className="final-download-row"><a className="button button-secondary" href={payload.tex_url} download="manuscript.tex">{text("下载 LaTeX 源文件", "Download LaTeX source")}</a></div></> : <div className="empty-state">{text("尚未生成 PDF。选择语言后一次点击即可后台编译和自动 QA。", "No PDF generated yet. Choose a language and compile with automatic QA in one click.")}</div>}</div> : null}
       </div></section>
       <aside className="pane final-actions-react"><div className="pane-head"><div><span className="step-label">{text("同步与导出", "Sync and export")}</span><h2>{text("同步与导出", "Sync and export")}</h2></div></div><div className="gate-body">
@@ -262,10 +260,10 @@ export function FinalPage() {
         {currentJob && jobIsActive(currentJob.status) ? <button className="button button-quiet danger" type="button" disabled={cancel.isPending} onClick={() => cancel.mutate()}>{text("取消当前任务", "Cancel current task")}</button> : null}
         {runJob.isPending ? <FinalJobStatus startingAction={startingAction} /> : runJob.error ? <FinalJobStatus startingAction={startingAction} submissionError={runJob.error} /> : currentJob ? <FinalJobStatus job={currentJob} startingAction={currentAction} onResume={() => resume.mutate()} resuming={resume.isPending} /> : null}
         {currentJob?.status === "succeeded" && currentJob.result?.candidate_pending === true ? <p role="status">{text("生成期间终稿已有更新。本次结果已保留在版本历史，可查看后采用。", "The manuscript changed during generation. This result is available in version history for review and adoption.")}</p> : null}
-        <div className="final-status-summary"><div><strong>{text("初稿", "Draft")}</strong><StatusPill exists current={payload.draft_approval_current} optional={false} /></div><div><strong>{text("总览图", "Overview figure")}</strong><StatusPill exists={payload.overview_figure_exists} current={payload.overview_figure_current} /></div><div><strong>{text("最终稿", "Final draft")}</strong><StatusPill exists={Boolean(payload.final_artifact_id)} current={payload.final_current} optional={false} /></div><div><strong>{text("发布", "Release")}</strong><StatusPill exists={Boolean(payload.release?.status)} current={payload.release_current} optional={false} /></div><div><strong>PDF</strong><StatusPill exists={Boolean(payload.pdf_url)} current={payload.final_pdf_exists && !payload.final_pdf_stale} /></div></div>
+        <div className="final-status-summary"><div><strong>{text("初稿", "Draft")}</strong><StatusPill exists current={payload.draft_approval_current} optional={false} /></div><div><strong>{text("最终稿", "Final draft")}</strong><StatusPill exists={Boolean(payload.final_artifact_id)} current={payload.final_current} optional={false} /></div><div><strong>{text("发布", "Release")}</strong><StatusPill exists={Boolean(payload.release?.status)} current={payload.release_current} optional={false} /></div><div><strong>PDF</strong><StatusPill exists={Boolean(payload.pdf_url)} current={payload.final_pdf_exists && !payload.final_pdf_stale} /></div></div>
         {payload.final_draft_docx_stale ? <p className="message message-warning">{text("现有Word已过期，请重新生成并下载。", "The existing Word file is stale. Regenerate and download it.")}</p> : null}
         {payload.final_pdf_stale ? <p className="message message-warning">{text("现有 PDF 已过期，请重新生成。", "The existing PDF is stale. Regenerate it.")}</p> : null}
       </div></aside>
-    </div>{error ? <p className="message message-error">{error.message}</p> : null}</> : null}
+    </div>{error ? <p className="message message-error"><LocalizedError error={error} /></p> : null}</> : null}
   </main>;
 }

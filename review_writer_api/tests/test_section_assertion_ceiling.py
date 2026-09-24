@@ -7,13 +7,13 @@ from review_writer_api.errors import WorkflowValidationError
 from review_writer_core.scientific_facts import attach_fact_to_evidence
 
 
-def bundle(*, conclusion=False):
+def bundle(*, synthesis=False):
     source = {"evidence_key": "source-a", "paper_id": "paper-a", "claim_eligible": True,
               "content": "The authors proposed an explanation.", "assertion_ceiling": "direct_source_report"}
     attach_fact_to_evidence(source, {"fact_id": "fact-a", "paper_id": "paper-a", "value": source["content"],
         "support_level": "direct", "assertion_ceiling": "attributed_author_interpretation",
         "support_excerpt": source["content"], "evidence_refs": [{"evidence_key": "source-a"}]})
-    ids = ["body", "end"] if conclusion else ["body"]
+    ids = ["body", "end"] if synthesis else ["body"]
     writing = {"planning_mode": "evidence_first", "sections": [{"section_id": sid,
         "paragraphs": [{"paragraph_id": f"{sid}-p1"}], "claims": [{
             "claim_id": f"{sid}-p1-C01", "paragraph_id": f"{sid}-p1", "citation_group": ["paper-a"],
@@ -21,17 +21,17 @@ def bundle(*, conclusion=False):
             "fact_binding_status": "explicit_fact_selection", "assertion_ceiling": "attributed_author_interpretation",
         }]} for sid in ids]}
     return [
-        {"tasks": [{"section_id": sid, "section_role": "conclusion" if sid == "end" else "body"} for sid in ids]},
+        {"tasks": [{"section_id": sid, "section_role": "synthesis" if sid == "end" else "body"} for sid in ids]},
         {"sections": [{"section_id": sid, "paragraphs": [{"paragraph_id": f"{sid}-p1",
             "claim_realizations": [{"claim_id": f"{sid}-p1-C01"}]}]} for sid in ids]},
         {"sections": [{"section_id": sid, "components": []} for sid in ids]}, writing,
         {"evidence_registry": [deepcopy(source)], "sections": [{"section_id": sid, "retrieval_mode": "lexical",
-            "hits": [source] if sid == "body" else []} for sid in ids]},
+            "hits": [source]} for sid in ids]},
     ]
 
 
-def test_conclusion_inherits_fact_ceiling_from_current_body_evidence():
-    args = bundle(conclusion=True)
+def test_synthesis_uses_fact_ceiling_from_explicit_current_evidence():
+    args = bundle(synthesis=True)
     before = deepcopy(args)
     SectionsService._validate_academic_bundle(*args)
     assert args == before
@@ -52,8 +52,9 @@ def test_explicit_fact_without_valid_source_binding_cannot_gain_direct_ceiling()
 
 
 def test_body_claim_cannot_borrow_another_sections_fact_ceiling():
-    args = bundle(conclusion=True)
+    args = bundle(synthesis=True)
     args[0]["tasks"][1]["section_role"] = "body"
+    args[4]["sections"][1]["hits"] = []
     with pytest.raises(WorkflowValidationError, match="neighbor or coverage-only"):
         SectionsService._validate_academic_bundle(*args)
 
@@ -74,9 +75,9 @@ def test_unknown_retrieval_mode_is_rejected_explicitly():
         SectionsService._validate_academic_bundle(*args)
 
 
-@pytest.mark.parametrize("conclusion", [False, True])
-def test_verified_background_can_be_published_without_becoming_direct_evidence(conclusion):
-    args = bundle(conclusion=conclusion)
+@pytest.mark.parametrize("synthesis", [False, True])
+def test_verified_background_can_be_published_without_becoming_direct_evidence(synthesis):
+    args = bundle(synthesis=synthesis)
     source = args[4]["sections"][0]["hits"][0]
     source.update(claim_eligible=False, support_level="abstract_limited", chunk_id="abstract")
     fact = source["fact_bindings"][0]

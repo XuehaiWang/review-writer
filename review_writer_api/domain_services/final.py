@@ -20,6 +20,10 @@ from review_writer_api.database import User, database_session, utc_now
 from review_writer_api.domain_services.base import ArtifactBackedService
 from review_writer_api.domain_services.drafts import DraftsService
 from review_writer_api.domain_services.final_history import FinalHistoryMixin
+from review_writer_api.domain_services.final_figures import (
+    FinalFigureReviewMixin, FINAL_FIGURE_REVIEWS, INSERTED_FIGURE_METADATA, apply_figure_reviews,
+)
+from review_writer_core.workflow.artifacts import FIGURE_MANIFEST
 from review_writer_api.errors import (
     WorkflowConflict,
     WorkflowNotFound,
@@ -113,9 +117,6 @@ HTML_ANY_TAG = re.compile(r"</?[A-Za-z][^>]*>")
 HTML_STRONG = re.compile(r"<(?:strong|b)\b[^>]*>(.*?)</(?:strong|b)\s*>", re.IGNORECASE | re.DOTALL)
 HTML_EMPHASIS = re.compile(r"<(?:em|i)\b[^>]*>(.*?)</(?:em|i)\s*>", re.IGNORECASE | re.DOTALL)
 HTML_CODE = re.compile(r"<code\b[^>]*>(.*?)</code\s*>", re.IGNORECASE | re.DOTALL)
-INSERTED_FIGURE_METADATA = re.compile(
-    r"<!--\s*inserted_figure:\s*(\{.*?\})\s*-->", re.DOTALL
-)
 REFERENCE_WEB_RESIDUE = re.compile(
     r"\b(?:Cite\s+This|Read\s+Online|Article\s+Recommendations|Supporting\s+Information)\b",
     re.IGNORECASE,
@@ -177,12 +178,22 @@ def _normalize_conclusion_heading(markdown: str) -> str:
 
 
 def _same_metadata_content(before: dict[str, Any], after: dict[str, Any]) -> bool:
-    """Ignore only the metadata file's own version, not source-file changes."""
+    """Bibliographic display corrections do not change the selected source.
+
+    Title, identifiers, dates, abstract, classification and source paths remain
+    scope-sensitive. Source/verification wrappers alone are not scientific edits.
+    """
     def content(value):
         result = json.loads(json.dumps(value))
+        for key in ("authors", "journal", "volume", "issue", "number", "pages", "page",
+                    "article_number", "publisher", "human_review"):
+            result.pop(key, None)
         for field in ("_artifact_ids", "_artifact_paths"):
             if isinstance(result.get(field), dict):
                 result[field].pop("metadata", None)
+        for key, field in list(result.items()):
+            if isinstance(field, dict) and "value" in field:
+                result[key] = field["value"]
         return result
     return content(before) == content(after)
 
@@ -289,7 +300,7 @@ def _figure_argument_findings(markdown: str) -> list[dict[str, Any]]:
         ):
             issues.append("source_figure_identity_unresolved")
         if str(metadata.get("interpretation_basis") or "") not in {
-            "source_caption", "source_caption_summary", "source_figure_context"
+            "source_caption", "source_caption_summary", "source_figure_context", "human_source_review"
         }:
             issues.append("paper_level_interpretation_missing")
         if (metadata.get("caption_quality") or {}).get("status") == "pending":
@@ -310,7 +321,7 @@ class FinalNotReady(WorkflowConflict):
     code = "FINAL_NOT_READY"
 
 
-class FinalService(FinalHistoryMixin, ArtifactBackedService):
+class FinalService(FinalFigureReviewMixin, FinalHistoryMixin, ArtifactBackedService):
     def __init__(
         self,
         repository: WorkflowRepository,
@@ -877,8 +888,7 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
         issues: list[str] = []
         if overview_present and not title:
             issues.append("overview_title_missing")
-        if overview_present and not labels:
-            issues.append("overview_labels_missing")
+        warnings = ["overview_labels_missing"] if overview_present and not labels else []
         if title and generated_title_needs_rewrite(title, topic):
             issues.append("overview_title_is_prompt_or_not_publication_ready")
         subtitle = " ".join(
@@ -965,8 +975,9 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
         if overview_present and labels and supported_tokens and not traceable_labels:
             issues.append("overview_labels_not_traceable_to_current_axis")
         return {
-            "status": "invalid" if issues else "aligned",
+            "status": "invalid" if issues else "warning" if warnings else "aligned",
             "issues": issues,
+            "warnings": warnings,
             "unsupported_labels": unsupported_labels,
             "traceable_labels": traceable_labels,
             "supported_axis_phrases": [
@@ -1317,6 +1328,7 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
                 metadata={
                     "operation": "overview",
                     "generation_instructions": str(job_payload.get("generation_instructions") or ""),
+                    "structure_references": list(job_payload.get("structure_references") or []),
                     "source_draft_artifact_id": str(job_payload["source_draft_artifact_id"]),
                     "source_quality_artifact_id": str(
                         job_payload.get("source_quality_artifact_id") or ""
@@ -1360,6 +1372,7 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
             result.append({"id": image.id, "url": f"/api/v1/artifacts/{image.id}/content",
                 "title": value.get("title", ""), "created_at": image.created_at.isoformat() if image.created_at else "",
                 "instructions": image.metadata.get("generation_instructions", ""), "selected": image.id == selected,
+                "structure_references": image.metadata.get("structure_references", []),
                 "source_changed": bool(draft and image.metadata.get("source_draft_artifact_id") != draft.id)})
         return result
 
@@ -1373,10 +1386,17 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
         if image is None:
             raise WorkflowValidationError("Overview version does not belong to this project.")
         resolved = self.artifacts.resolve_owned_artifact(principal.user_id, image.id)
+        caption = next((a for a in self.repository.list_artifacts(principal.user_id, project_id, FINAL_OVERVIEW_TEXT)
+                        if a.producer_run_id == image.producer_run_id and a.metadata.get("operation") == "overview"), None)
+        editable = {}
+        if caption:
+            caption_file = self.artifacts.resolve_owned_artifact(principal.user_id, caption.id)
+            editable = json.loads(caption_file.path.read_text(encoding="utf-8"))
+        editable = {**editable, "title": title.strip()}
         with self._write_lock:
             _, state = self._publish_files(principal, project_id, {
                 FINAL_OVERVIEW_IMAGE: (resolved.path.read_bytes(), image.artifact_type),
-                FINAL_OVERVIEW_TEXT: ((json.dumps({"title": title.strip(), "subtitle": "", "labels": []}, ensure_ascii=False)+"\n").encode(), "json")},
+                FINAL_OVERVIEW_TEXT: ((json.dumps(editable, ensure_ascii=False)+"\n").encode(), "json")},
                 expected_revision=revision,
                 metadata={**image.metadata, "operation": "overview-adopt", "selected_overview_id": image.id})
         return {"revision": state.revision}
@@ -1597,6 +1617,9 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
         build_revision = self._revision(principal, project_id) if expected_revision is None else expected_revision
         principal.require(Permission.PROJECT_WRITE)
         draft_text, draft, approval = self._approved_draft(principal, project_id)
+        figure_reviews, figure_reviews_artifact = self._read_json(principal, project_id, FINAL_FIGURE_REVIEWS)
+        figure_manifest = self._artifact(principal, project_id, FIGURE_MANIFEST)
+        draft_text = apply_figure_reviews(draft_text, figure_reviews, draft.id, figure_manifest.id if figure_manifest else "")
         draft_state = self.repository.get_stage_state(
             principal.user_id, project_id, "draft"
         )
@@ -1898,6 +1921,8 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
             "released_at": utc_now().isoformat(),
         }
         source_ids = {
+            "figure_reviews_artifact_id": figure_reviews_artifact.id if figure_reviews_artifact else "",
+            "figure_review_manifest_id": figure_manifest.id if figure_manifest else "",
             "source_draft_artifact_id": draft.id,
             "overview_artifact_id": overview.id if overview else "",
             "overview_text_artifact_id": (
@@ -1908,6 +1933,8 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
             ),
         }
         expected_currents = {
+            FINAL_FIGURE_REVIEWS: figure_reviews_artifact.id if figure_reviews_artifact else "",
+            FIGURE_MANIFEST: figure_manifest.id if figure_manifest else "",
             DRAFT_DOCUMENT: draft.id,
             DRAFT_APPROVAL: approval_artifact.id,
             DRAFT_QUALITY: quality_artifact.id if quality_artifact else "",
@@ -2370,8 +2397,25 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
             front_matter_artifact
             and approved
         )
+        reference_versions = release.get("reference_metadata_artifact_ids") or {}
+        reference_ids = list(dict.fromkeys([*reference_versions, *(release.get("source_paper_ids") or [])]))
+        with database_session(self.repository.session_factory) as session:
+            reference_rows = session.scalars(select(LibraryPaper).where(
+                LibraryPaper.user_id == uuid.UUID(principal.user_id),
+                LibraryPaper.paper_id.in_(reference_ids), LibraryPaper.deleted_at.is_(None),
+            )).all() if reference_ids else []
+            reference_info = {row.paper_id: {"title": row.title,
+                "metadata_id": str(((row.metadata_json or {}).get("_artifact_ids") or {}).get("metadata") or "")}
+                for row in reference_rows}
+        bibliography_current = all(pid not in reference_info or reference_info[pid].get("metadata_id") == artifact_id
+                                   for pid, artifact_id in reference_versions.items())
+        figure_reviews_artifact = self._artifact(principal, project_id, FINAL_FIGURE_REVIEWS)
+        figure_review_manifest = self._artifact(principal, project_id, FIGURE_MANIFEST) if figure_reviews_artifact else None
         final_current = bool(
             final_artifact
+            and (final_artifact.metadata.get("figure_reviews_artifact_id") or "") == (figure_reviews_artifact.id if figure_reviews_artifact else "")
+            and (not figure_reviews_artifact or (final_artifact.metadata.get("figure_review_manifest_id") or "") == (figure_review_manifest.id if figure_review_manifest else ""))
+            and bibliography_current
             and final_artifact.metadata.get("source_draft_artifact_id") == current_draft_id
             and approved
             and final_artifact.metadata.get("overview_artifact_id")
@@ -2537,7 +2581,17 @@ class FinalService(FinalHistoryMixin, ArtifactBackedService):
                     "",
                 )
             )
-        pending_issue_details = effective_issue_details
+        reference_numbers = {str(row.get("paper_id")): row.get("callout")
+                             for row in (release.get("reference_ledger") or {}).get("entries") or [] if isinstance(row, dict)}
+        figure_labels = {str(row.get("figure_id")): str(row.get("published_label") or "")
+                         for row in validation.get("figure_argument_findings") or [] if isinstance(row, dict)}
+        pending_issue_details = [
+            {**row, "title": reference_info.get(str(row.get("target_id")), {}).get("title", ""),
+             "reference_number": reference_numbers.get(str(row.get("target_id")))}
+            if row.get("target_type") == "reference" else
+            {**row, "title": figure_labels.get(str(row.get("target_id"))) or row.get("title", "")}
+            if row.get("target_type") == "figure" else row for row in effective_issue_details
+        ]
         pending_issues = list(
             dict.fromkeys(
                 str(issue).strip()

@@ -1,3 +1,4 @@
+import json
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -9,6 +10,106 @@ from review_writer_core.stages.sections.coverage import (
 )
 from review_writer_core.scientific_facts import attach_fact_to_evidence
 from review_writer_core.stages.sections.evidence_resolution import pending_markdown, resolution_record
+from review_writer_api.job_service import JobYieldRequested
+from review_writer_api.scientific_runner import ScientificRunFailed, ScientificModelDeferred
+
+
+def test_section_releases_worker_until_durable_model_job_finishes():
+    from review_writer_api.job_handlers.stage_execution import register_sections_handler
+
+    handlers = {}
+    jobs = SimpleNamespace(register_handler=lambda name, handler: handlers.update({name: handler}))
+    service, builder = Mock(), Mock(side_effect=ScientificModelDeferred("model-child"))
+    parent = SimpleNamespace(result={})
+    child = SimpleNamespace(project_id="project", job_type="model.dispatch", status="queued")
+    context = SimpleNamespace(
+        user_id="user", project_id="project", job_id="parent", retry_of_job_id=None,
+        lease_token="lease", lease_generation=1,
+        repository=SimpleNamespace(get_job=lambda _user, job_id: parent if job_id == "parent" else child,
+                                   update_job_progress=Mock()),
+        report_progress=Mock(), report_partial_result=Mock(), checkpoint=Mock(),
+    )
+    register_sections_handler(service, jobs, {"sections.generate": builder})
+    with pytest.raises(JobYieldRequested) as first:
+        handlers["sections.generate"](context, {"tasks": [{"section_id": "S1"}]})
+    assert first.value.queue_reason == "model_waiting"
+    context.report_partial_result.assert_called_with({"waiting_model_job_ids": ["model-child"]})
+    parent.result = {"waiting_model_job_id": "model-child"}
+    with pytest.raises(JobYieldRequested):
+        handlers["sections.generate"](context, {"tasks": [{"section_id": "S1"}]})
+    assert builder.call_count == 1
+    child.status = "succeeded"
+    builder.side_effect = None
+    builder.return_value = {}
+    handlers["sections.generate"](context, {"tasks": [{"section_id": "S1"}]})
+    assert builder.call_count == 2
+
+
+def test_delegated_model_wait_retains_latest_section_checkpoint(tmp_path):
+    from review_writer_api.job_handlers.stage_execution import yield_to_delegated_model
+    from review_writer_api.job_handlers.sections import SectionJobHandlers
+
+    checkpoint = {"entries": {"S1": checkpoint_entry()}, "active_section": {"section_id": "S2"}}
+    status = {"current": 1, "total": 2}
+    status_file = tmp_path / "generation_progress.json"
+    checkpoint_file = tmp_path / "section_checkpoints.json"
+    status_file.write_text(json.dumps(status), encoding="utf-8")
+    checkpoint_file.write_text(json.dumps(checkpoint), encoding="utf-8")
+    parent = SimpleNamespace(result={})
+    child = SimpleNamespace(status="queued")
+    repository = SimpleNamespace(get_job=lambda _user, job_id: parent if job_id == "parent" else child)
+
+    def replace_result(result):
+        parent.result = dict(result)
+
+    context = SimpleNamespace(
+        user_id="user", job_id="parent", repository=repository,
+        report_progress=Mock(), report_partial_result=Mock(side_effect=replace_result),
+    )
+    SectionJobHandlers._section_progress_callback(context, status_file, checkpoint_file)()
+    assert parent.result["section_checkpoint"] == checkpoint
+    with pytest.raises(JobYieldRequested) as raised:
+        yield_to_delegated_model(context, ScientificModelDeferred("model-child"))
+    assert raised.value.queue_reason == "model_waiting"
+    assert parent.result["waiting_model_job_ids"] == ["model-child"]
+    assert parent.result["section_checkpoint"] == checkpoint
+    assert parent.result["section_progress"] == {**status, "drafted_section_ids": []}
+
+
+@pytest.mark.parametrize("ready_status", ["succeeded", "failed", "cancelled"])
+def test_parallel_model_wait_resumes_when_any_child_is_terminal(ready_status):
+    from review_writer_api.job_handlers.stage_execution import wait_for_delegated_model
+
+    children = {
+        "slow": SimpleNamespace(project_id="project", job_type="model.dispatch", status="running"),
+        "ready": SimpleNamespace(project_id="project", job_type="model.dispatch", status="queued"),
+    }
+    context = SimpleNamespace(user_id="user", project_id="project",
+        repository=SimpleNamespace(get_job=lambda _user, job_id: children.get(job_id)))
+    result = {"waiting_model_job_ids": ["slow", "ready"]}
+    with pytest.raises(JobYieldRequested):
+        wait_for_delegated_model(context, result)
+    children["ready"].status = ready_status
+    wait_for_delegated_model(context, result)
+    children["ready"].project_id = "another-project"
+    from review_writer_api.errors import WorkflowConflict
+    with pytest.raises(WorkflowConflict):
+        wait_for_delegated_model(context, result)
+
+
+def test_child_finishing_before_parent_yields_does_not_add_wait():
+    from review_writer_api.job_handlers.stage_execution import yield_to_delegated_model
+
+    jobs = {"parent": SimpleNamespace(result={"section_checkpoint": {"entries": {"S1": {}}}}),
+            "slow": SimpleNamespace(status="running"), "ready": SimpleNamespace(status="succeeded")}
+    context = SimpleNamespace(user_id="user", job_id="parent",
+        repository=SimpleNamespace(get_job=lambda _user, job_id: jobs[job_id]), report_partial_result=Mock())
+    with pytest.raises(JobYieldRequested) as raised:
+        yield_to_delegated_model(context, ScientificModelDeferred("slow", model_job_ids=["slow", "ready"]))
+    assert raised.value.delay_seconds == 0
+    saved = context.report_partial_result.call_args.args[0]
+    assert saved["waiting_model_job_ids"] == ["slow", "ready"]
+    assert saved["section_checkpoint"] == jobs["parent"].result["section_checkpoint"]
 
 
 def test_pending_checkpoint_reuses_only_canonical_notice_with_unchanged_evidence():
@@ -33,6 +134,37 @@ def checkpoint_entry(paper="paper-a"):
     }]}, "synthesis": {}, "writing": {}}
 
 
+def test_section_rate_limit_waits_once_without_replaying_completed_chapters():
+    from review_writer_api.job_handlers.stage_execution import register_sections_handler
+
+    handlers = {}
+    jobs = SimpleNamespace(register_handler=lambda name, handler: handlers.update({name: handler}))
+    service = Mock()
+    failure = {"section_id": "S2", "error": "Provider rate-limited", "retryable_rate_limit": True}
+    checkpoint = {"entries": {"S1": checkpoint_entry()}, "failed_sections": [failure]}
+    stored = SimpleNamespace(result={"section_checkpoint": checkpoint})
+    repository = SimpleNamespace(get_job=lambda *_: stored)
+    context = SimpleNamespace(user_id="user", project_id="project", job_id="job",
+                              retry_of_job_id=None, repository=repository,
+                              report_progress=Mock(), report_partial_result=Mock())
+
+    def unavailable(*_):
+        raise ScientificRunFailed("Provider unavailable", attempts=1, retryable=False)
+
+    register_sections_handler(service, jobs, {"sections.generate": unavailable})
+    with pytest.raises(JobYieldRequested) as raised:
+        handlers["sections.generate"](context, {"tasks": [{"section_id": "S1"}, {"section_id": "S2"}]})
+    assert raised.value.delay_seconds == 30
+    assert raised.value.queue_reason == "provider_rate_limit"
+    saved = context.report_partial_result.call_args.args[0]
+    assert saved["section_checkpoint"]["entries"] == checkpoint["entries"]
+    assert saved["section_checkpoint"]["failed_sections"] == []
+    assert saved["section_auto_retry_count"] == 1
+    stored.result = {"section_checkpoint": checkpoint, "section_auto_retry_count": 2}
+    with pytest.raises(ScientificRunFailed):
+        handlers["sections.generate"](context, {"tasks": [{"section_id": "S1"}, {"section_id": "S2"}]})
+
+
 def test_explicit_empty_writeable_set_is_not_replaced_by_assigned_papers():
     assert required_primary_papers({"primary_papers": ["unresolved"]}, {"writeable_primary_papers": []}) == []
 
@@ -45,11 +177,11 @@ def test_declared_citations_and_empty_prose_do_not_count_as_validated_coverage()
     assert missing_primary_papers(["a"], [{**paragraph, "text": ""}], require_evidence=True) == ["a"]
 
 
-def test_retry_preserves_good_sections_but_invalidates_incomplete_body_and_dependent_conclusion():
+def test_retry_preserves_good_sections_but_invalidates_incomplete_body_and_explicit_dependents():
     tasks = [{"section_id": "intro", "section_role": "introduction"},
              {"section_id": "body", "primary_papers": ["paper-a", "paper-b"]},
              {"section_id": "other", "primary_papers": ["paper-a"]},
-             {"section_id": "end", "section_role": "conclusion"}]
+             {"section_id": "end", "section_role": "body", "depends_on_sections": ["body"]}]
     entries = {t["section_id"]: checkpoint_entry() for t in tasks}
     before = deepcopy(entries)
     kept, rejected = reusable_section_entries(entries, tasks, {"body": {"retrieval_mode": "lexical"}})
@@ -59,11 +191,23 @@ def test_retry_preserves_good_sections_but_invalidates_incomplete_body_and_depen
     assert entries == before
 
 
-def test_complete_checkpoint_is_reused_without_discarding_conclusion():
+def test_complete_checkpoint_reuses_explicit_dependent_chapter():
     tasks = [{"section_id": "body", "primary_papers": ["paper-a"]},
-             {"section_id": "end", "section_role": "conclusion"}]
+             {"section_id": "end", "section_role": "body", "depends_on_sections": ["body"]}]
     entries = {t["section_id"]: checkpoint_entry() for t in tasks}
     assert reusable_section_entries(entries, tasks, {}) == (entries, {})
+
+
+def test_incomplete_source_check_is_never_reused_as_completed_prose():
+    entry = checkpoint_entry()
+    entry["synthesis"]["source_review"] = {
+        "unresolved": [{"claim_id": "S1-p1-C01", "reason": "source_check_incomplete"}]
+    }
+    kept, rejected = reusable_section_entries(
+        {"S1": entry}, [{"section_id": "S1"}], {}
+    )
+    assert kept == {}
+    assert rejected == {"S1": "source_check_incomplete"}
 
 
 def test_checkpoint_is_invalidated_when_supported_blueprint_claim_set_changes():
@@ -256,6 +400,7 @@ def test_retry_merges_completed_sections_across_job_ancestry():
             result={
                 "section_checkpoint": {
                     "project_id": "project",
+                    "failed_sections": [{"section_id": "S04", "error": "provider unavailable"}],
                     "entries": {
                         "S01": {"output": {"draft_md": "latest"}},
                         "S02": {"output": {"draft_md": "repaired"}},
@@ -289,6 +434,7 @@ def test_retry_merges_completed_sections_across_job_ancestry():
 
     assert list(sections["entries"]) == ["S01", "S02", "S03"]
     assert sections["entries"]["S01"]["output"]["draft_md"] == "latest"
+    assert sections["failed_sections"] == []
     assert facts == {"entries": {"P1": {}}}
 
 

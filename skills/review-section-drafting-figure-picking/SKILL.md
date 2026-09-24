@@ -23,24 +23,59 @@ local output files alone do not advance a Web stage.
    retrieval and claim focus, then generate prose directly from the registered
    passages with atomic claims and exact supporting quotes. There is no
    separate predeclared-claim plan or mandatory fact-card quota.
-4. Check only the proposed claims with valid source spans, in one semantic
+4. Repair malformed source/prose mappings or missing planned comparison records
+   in at most one checkpointed batch of affected paragraphs, using the same
+   supplied passages. Revalidate repaired mappings before use; clean paragraphs
+   are not replayed. Failed optional repairs preserve usable original material.
+   Invalid table cells are recorded separately and do not discard valid prose.
+   Check only the proposed claims with valid source spans, in one semantic
    checking call. Keep supported wording, accept checked narrower wording, and
-   omit unsupported assertions. The normal nonempty path uses one writing call
-   and one used-claim check; provider retries may add requests.
+   exclude only concretely unsupported assertions. Unresolved or malformed audit
+   responses retain the candidate in the authoring checkpoint, never silently
+   becoming unsupported. One separate content-repair batch may recover the
+   original or narrow it; a mapping repair does not spend that budget.
+   The normal nonempty path uses one writing call
+   and one used-claim check; local repair and provider retries may add requests. Supported
+   verdicts return the claim ID and status with empty text/reason; the program
+   retains the exact current wording. Revisions return replacement text. Missing,
+   duplicate and foreign verdict IDs never imply support. Source quotes and
+   conditions remain available; downstream ledgers keep their complete format.
+   A supported verdict retains original wording even if the provider redundantly
+   returns a paraphrase. A checked replacement is not rejected because the style
+   request budget was already spent. Processing notes alone do not establish a
+   narrative defect. Automatic word targets are guidance, with tolerance for
+   small differences; stale derived budgets are reconciled with paragraph roles.
 5. Render citations and paragraph markers, preserve source identities and
    fingerprints, and checkpoint completed sections. Retry jobs reuse compatible
    completed sections rather than regenerate the entire manuscript.
 
+Independent chapters run with at most two workers. Both receive the same
+chapter responsibilities (questions, boundaries, paper roles and assignments),
+which are also checked in the existing audit. Optional `depends_on_sections`
+orders chapters that require completed chapter results; cycles, missing or
+failed prerequisites leave the dependent chapter unfinished. Only the
+coordinator publishes progress and checkpoints, and final outputs follow
+outline order. Changing shared responsibilities invalidates affected cached
+inputs. The model gateway's global and per-user limits still apply; both must
+permit at least two requests for model calls to overlap.
+
+Progress reports each active chapter as preparing, writing prose or checking
+sources, at the actual call boundary rather than after the audit has finished.
+
 Quantitative comparisons carry source-specific `result_context` records;
 ordinary narrative does not require them. Abstracts support broadly attributed
 framing only. Retrieval context that is not claim-eligible cannot independently
-support prose. A conclusion chapter synthesizes completed body claims and
-their actual sources rather than inventing additional results.
+support prose. Standalone conclusions are generated in Draft composition, not
+in this stage. Old outline conclusion entries are filtered for compatibility;
+there is no chapter-stage conclusion generation or inherited body-evidence path.
 
 When only some assertions survive checking, retain the supported prose and
-record `limited_evidence`. If no usable prose can be produced, use the existing
-canonical pending-section notice and evidence-resolution record. This permits
-review and continuation without fabricating a fallback scientific paragraph.
+record `limited_evidence`. If no usable prose can be produced, retain the
+authoring checkpoint and leave the section unfinished for recovery; do not
+report an empty/pending placeholder as a successfully generated section.
+When rechecking existing content, incomplete new checks must not replace a
+still-valid saved chapter with a smaller subset. Revalidate any retained
+baseline against current source inputs. Historical pending artifacts remain readable.
 Do not restore a missing-fact-card gate or a second automatic fact-repair loop.
 When a model selects a fact, retain that binding only when it belongs to the
 cited paper and its registered evidence keys are also included in the claim's
@@ -83,7 +118,9 @@ differences and boundaries instead of repeating lists of experimental results.
 A paragraph may compare several papers and must list all of them in
 `cited_paper_ids`.
 Each paper receives detailed treatment only in its primary body section.
-Introduction and conclusion use representative sources briefly and must not
+Introductions can retrieve contextual sources from all papers assigned to the
+selected review; body ownership and primary coverage obligations are unchanged.
+Introductions use representative sources briefly and must not
 repeat full methods, conditions, results, or limitations from the body.
 Introduction develops supported scientific background, the research problem,
 and the scientific scope of the review. Never insert corpus assembly,

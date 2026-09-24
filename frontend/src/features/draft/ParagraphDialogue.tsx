@@ -1,3 +1,4 @@
+import { LocalizedError } from "../../components/LocalizedError";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "../../api/client";
 import { MarkdownView } from "../../components/MarkdownView";
@@ -56,7 +57,7 @@ export function ParagraphDialogue({ projectId, paragraph }: { projectId: string;
     queryFn: () => apiRequest<{ messages: Turn[] }>(`/api/v1/projects/${encodeURIComponent(projectId)}/draft/dialogues/${paragraph.paragraph_key}`) });
   return <section>
     <p className="muted">{text("旧记录仅供查看。请在上方章节对话中继续修改。", "Previous records are read-only. Continue revisions in the chapter dialogue above.")}</p>
-    {history.error ? <p role="alert">{history.error.message}</p> : null}
+    {history.error ? <p role="alert"><LocalizedError error={history.error} /></p> : null}
     {history.data?.messages.map((turn, i) => <article className="dialogue-turn" key={turn.job_id + i}>
       <p>{turn.message}</p>
       {turn.candidate ? <CandidateComparison candidate={turn.candidate} readOnly decide={() => {}} /> : <p>{turn.error || turn.status}</p>}

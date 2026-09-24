@@ -1,3 +1,4 @@
+import { LocalizedError } from "../../components/LocalizedError";
 import { useMutation } from "@tanstack/react-query";
 import { apiRequest, newIdempotencyKey } from "../../api/client";
 import { useUiText } from "../../i18n/useUiText";
@@ -91,6 +92,6 @@ export function MatrixAnalysisStatus({ paper, papers, projectId, busy, refresh, 
     {blocked.length && !recoveryJobId ? <p className="muted">{text(`另有 ${blocked.length} 篇需先恢复原文或服务配置，已有结果仍可使用。`, `${blocked.length} papers need source or service recovery first. Existing results remain usable.`)}</p> : null}
     {blocked.length ? <details><summary>{text("查看原因", "Details")}</summary>{blocked.map(p => <p key={p.paper_id}>{p.paper_id}: {p.fact_enrichment?.last_attempt?.error || p.fact_enrichment?.error}</p>)}<a href={`/library?project=${encodeURIComponent(projectId)}`}>{text("查看文献库原文", "Check Library sources")}</a></details> : null}
     {retry.isSuccess ? <p role="status">{text("已提交，系统将优先复用已有结果。", "Submitted. Existing results will be reused first.")}</p> : null}
-    {retry.error ? <p role="alert">{text("未能继续分析：", "Could not resume analysis: ")}{retry.error.message}</p> : null}
+    {retry.error ? <p role="alert">{text("未能继续分析：", "Could not resume analysis: ")}<LocalizedError error={retry.error} /></p> : null}
   </section>;
 }

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import unittest
 import urllib.error
 from unittest import mock
+from pathlib import Path
 
 from review_writer_core import model_gateway_client
 
@@ -59,6 +61,44 @@ class ModelGatewayClientTests(unittest.TestCase):
         self.assertEqual("text", first_body["response_format"])
         self.assertEqual(first_body["request_key"], second_body["request_key"])
         self.assertEqual("Bearer task-token", requests[0].get_header("Authorization"))
+
+    def test_delegated_text_yields_without_calling_generation_endpoint(self) -> None:
+        requests = []
+        def submit(request, **_kwargs):
+            requests.append(request)
+            return _Response({"status": "queued", "model_job_id": "child-job"})
+        with mock.patch.dict(os.environ, {"REVIEW_WRITER_DELEGATE_MODEL_CALLS": "1"}), \
+                mock.patch.object(model_gateway_client.urllib.request, "urlopen", submit):
+            with self.assertRaises(model_gateway_client.DeferredModelCall) as deferred:
+                model_gateway_client.call_model("write", label="section", response_format="json")
+        self.assertEqual("child-job", deferred.exception.model_job_id)
+        self.assertEqual(1, len(requests))
+        self.assertTrue(requests[0].full_url.endswith("/model-delegations"))
+
+    def test_uncertain_delegation_uses_read_only_recovery(self) -> None:
+        requests = []
+        def request_once(request, **_kwargs):
+            requests.append(request)
+            if request.get_method() == "POST":
+                raise TimeoutError("response lost")
+            return _Response({"status": "succeeded", "output_text": "recovered"})
+        with mock.patch.dict(os.environ, {"REVIEW_WRITER_DELEGATE_MODEL_CALLS": "1"}), \
+                mock.patch.object(model_gateway_client.urllib.request, "urlopen", request_once):
+            self.assertEqual("recovered", model_gateway_client.call_model("write", label="section"))
+        self.assertEqual(["POST", "GET"], [item.get_method() for item in requests])
+
+    def test_model_wait_marker_exists_only_during_gateway_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+
+            def open_request(_request, **_kwargs):
+                self.assertEqual(1, len(list(directory.glob("*.waiting"))))
+                return _Response({"output_text": "ready"})
+
+            with mock.patch.dict(os.environ, {"REVIEW_WRITER_MODEL_WAIT_DIR": temporary}), \
+                    mock.patch.object(model_gateway_client.urllib.request, "urlopen", open_request):
+                self.assertEqual("ready", model_gateway_client.call_model("prompt", label="section"))
+            self.assertEqual([], list(directory.iterdir()))
 
     def test_json_request_removes_fence_and_returns_object(self) -> None:
         with mock.patch.object(

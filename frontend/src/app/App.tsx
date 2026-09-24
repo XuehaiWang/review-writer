@@ -9,42 +9,43 @@ import { ErrorState } from "../components/ErrorState";
 import { LoadingView } from "../components/LoadingView";
 import { safeReturnPath } from "../features/auth/paths";
 import { useUiText } from "../i18n/useUiText";
+import { isDynamicImportFailure, loadLazyModule } from "../utils/dynamicImportRecovery";
 
 const AdminPage = lazy(async () => ({
-  default: (await import("../features/admin/AdminPage")).AdminPage,
+  default: (await loadLazyModule(() => import("../features/admin/AdminPage"))).AdminPage,
 }));
 const AuthPage = lazy(async () => ({
-  default: (await import("../features/auth/AuthPage")).AuthPage,
+  default: (await loadLazyModule(() => import("../features/auth/AuthPage"))).AuthPage,
 }));
 const DiscoveryPage = lazy(async () => ({
-  default: (await import("../features/discovery/DiscoveryPage")).DiscoveryPage,
+  default: (await loadLazyModule(() => import("../features/discovery/DiscoveryPage"))).DiscoveryPage,
 }));
 const DraftPage = lazy(async () => ({
-  default: (await import("../features/draft/DraftPage")).DraftPage,
+  default: (await loadLazyModule(() => import("../features/draft/DraftPage"))).DraftPage,
 }));
 const FinalPage = lazy(async () => ({
-  default: (await import("../features/final/FinalPage")).FinalPage,
+  default: (await loadLazyModule(() => import("../features/final/FinalPage"))).FinalPage,
 }));
 const ImagesPage = lazy(async () => ({
-  default: (await import("../features/images/ImagesPage")).ImagesPage,
+  default: (await loadLazyModule(() => import("../features/images/ImagesPage"))).ImagesPage,
 }));
 const LandingPage = lazy(async () => ({
-  default: (await import("../features/landing/LandingPage")).LandingPage,
+  default: (await loadLazyModule(() => import("../features/landing/LandingPage"))).LandingPage,
 }));
 const LibraryPage = lazy(async () => ({
-  default: (await import("../features/library/LibraryPage")).LibraryPage,
+  default: (await loadLazyModule(() => import("../features/library/LibraryPage"))).LibraryPage,
 }));
 const PlanningPage = lazy(async () => ({
-  default: (await import("../features/planning/PlanningPage")).PlanningPage,
+  default: (await loadLazyModule(() => import("../features/planning/PlanningPage"))).PlanningPage,
 }));
 const ProjectsPage = lazy(async () => ({
-  default: (await import("../features/projects/ProjectsPage")).ProjectsPage,
+  default: (await loadLazyModule(() => import("../features/projects/ProjectsPage"))).ProjectsPage,
 }));
 const SectionsPage = lazy(async () => ({
-  default: (await import("../features/sections/SectionsPage")).SectionsPage,
+  default: (await loadLazyModule(() => import("../features/sections/SectionsPage"))).SectionsPage,
 }));
 const SettingsPage = lazy(async () => ({
-  default: (await import("../features/settings/SettingsPage")).SettingsPage,
+  default: (await loadLazyModule(() => import("../features/settings/SettingsPage"))).SettingsPage,
 }));
 
 class ApplicationErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -64,7 +65,10 @@ class ApplicationErrorBoundary extends Component<{ children: ReactNode }, { erro
         <main className="page-container workspace">
           <ErrorState
             error={this.state.error}
-            onRetry={() => this.setState({ error: null })}
+            onRetry={() => {
+              if (isDynamicImportFailure(this.state.error)) window.location.reload();
+              else this.setState({ error: null });
+            }}
           />
         </main>
       );

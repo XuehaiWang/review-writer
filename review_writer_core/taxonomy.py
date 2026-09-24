@@ -14,6 +14,8 @@ from typing import Any, Iterable
 
 
 DEFAULT_TAXONOMY_PROFILE = "general_academic"
+# Creation preference only; keep legacy/missing-profile inference domain-neutral.
+NEW_PROJECT_TAXONOMY_PROFILE = "chemistry_general"
 PROFILE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 
 

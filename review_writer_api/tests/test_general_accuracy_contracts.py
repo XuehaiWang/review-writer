@@ -196,14 +196,16 @@ Body two.
         self.assertEqual("invalid", report["status"])
         self.assertIn("overview_unsupported_labels", report["issues"])
 
-    def test_overview_requires_labels_when_an_image_exists(self) -> None:
+    def test_legacy_overview_missing_labels_is_nonblocking(self) -> None:
         report = FinalService._overview_semantic_report(
             {"title": "Catalytic allene synthesis", "labels": []},
             {"topic": "Catalytic allene synthesis"},
             {"sections": []},
             overview_present=True,
         )
-        self.assertIn("overview_labels_missing", report["issues"])
+        self.assertIn("overview_labels_missing", report["warnings"])
+        self.assertEqual([], report["issues"])
+        self.assertEqual("warning", report["status"])
 
     def test_overview_labels_trace_to_current_body_axis(self) -> None:
         report = FinalService._overview_semantic_report(

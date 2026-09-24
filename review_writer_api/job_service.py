@@ -7,6 +7,7 @@ from review_writer_core.provider_errors import public_model_error
 import threading
 import uuid
 import logging
+from datetime import datetime, timezone
 from concurrent.futures import Future, wait as wait_for_futures
 from typing import Any, Protocol
 
@@ -37,6 +38,10 @@ def job_payload(job: JobRecord) -> dict[str, Any]:
         "project_id": job.project_id,
         "scope": job.scope,
         "status": job.status,
+        "next_run_at": (job.next_run_at if job.next_run_at.tzinfo else
+                        job.next_run_at.replace(tzinfo=timezone.utc)).isoformat()
+        if job.status == "queued" and job.next_run_at else None,
+        "queue_reason": job.queue_reason if job.status == "queued" else "",
         "job_type": job.job_type,
         "result": job.result,
         "progress_current": job.progress_current,
@@ -66,12 +71,19 @@ class JobLeaseLost(Exception):
 
 
 class JobYieldRequested(Exception):
-    """A checkpointed batch gives its worker slot back after one paragraph."""
+    """A checkpointed unit yields, optionally until a delayed retry is due."""
+
+    def __init__(self, *, delay_seconds: int = 0, queue_reason: str = ""):
+        super().__init__(queue_reason)
+        self.delay_seconds = max(0, int(delay_seconds))
+        self.queue_reason = str(queue_reason or "")[:64]
 
 
-def release_yielded_job(context):
+def release_yielded_job(context, request: JobYieldRequested | None = None):
     released = context.repository.release_job_lease(context.job_id,
-        lease_token=str(context.lease_token or ""), lease_generation=context.lease_generation)
+        lease_token=str(context.lease_token or ""), lease_generation=context.lease_generation,
+        delay_seconds=request.delay_seconds if request else 0,
+        queue_reason=request.queue_reason if request else "")
     if released is None and context.repository.job_cancellation_requested(context.job_id):
         context.repository.mark_job_cancelled(context.job_id,
             lease_token=context.lease_token, lease_generation=context.lease_generation)
@@ -162,6 +174,7 @@ class JobService:
         self._handlers: dict[str, JobHandler] = {}
         self._executor: DaemonWorkerPool | None = None
         self._futures: dict[str, Future] = {}
+        self._delayed_timers: dict[str, threading.Timer] = {}
         self._lock = threading.RLock()
         self._started = False
         self._shutdown_event = threading.Event()
@@ -216,7 +229,11 @@ class JobService:
             self._executor = None
             self._started = False
             futures = tuple(self._futures.values())
+            timers = tuple(self._delayed_timers.values())
+            self._delayed_timers.clear()
             self._shutdown_event.set()
+        for timer in timers:
+            timer.cancel()
         for future in futures:
             future.cancel()
         if wait and futures:
@@ -287,6 +304,8 @@ class JobService:
     def retry_interrupted(self, principal: Principal, job_id: str) -> JobRecord:
         principal.require(Permission.PROJECT_WRITE)
         source = self.status(principal, job_id)
+        if source.job_type == "model.dispatch":
+            raise WorkflowValidationError("Retry the parent writing task, not its internal model call.")
         if (source.job_type in {"draft.evaluate", "draft.optimize", "draft.rewrite", "draft.accept-rewrite"}
                 and source.payload.get("revision_mode") not in {"dialogue", "dialogue_batch"}):
             raise WorkflowValidationError("Scored Draft jobs were retired. Open Draft to start paragraph dialogue or batch analysis.")
@@ -324,11 +343,29 @@ class JobService:
         with self._lock:
             if not self._started or self._executor is None or job.status != "queued":
                 return
-            if job.id in self._futures:
+            if job.id in self._futures or job.id in self._delayed_timers:
                 return
+            if job.next_run_at is not None:
+                due = job.next_run_at if job.next_run_at.tzinfo else job.next_run_at.replace(tzinfo=timezone.utc)
+                delay = (due - datetime.now(timezone.utc)).total_seconds()
+                if delay > 0:
+                    timer = threading.Timer(delay, self._wake_delayed, args=(job.user_id, job.id))
+                    timer.daemon = True
+                    self._delayed_timers[job.id] = timer
+                    timer.start()
+                    return
             future = self._executor.submit(self._execute, job.id)
             self._futures[job.id] = future
             future.add_done_callback(lambda _future: self._forget(job))
+
+    def _wake_delayed(self, user_id: str, job_id: str) -> None:
+        with self._lock:
+            self._delayed_timers.pop(job_id, None)
+            if self._shutdown_event.is_set():
+                return
+        latest = self.repository.get_job(user_id, job_id)
+        if latest is not None:
+            self._schedule(latest)
 
     def _forget(self, job: JobRecord) -> None:
         with self._lock:
@@ -404,8 +441,8 @@ class JobService:
                         lease_token=context.lease_token,
                         lease_generation=context.lease_generation,
                     )
-        except JobYieldRequested:
-            release_yielded_job(context)
+        except JobYieldRequested as exc:
+            release_yielded_job(context, exc)
         except JobShutdownRequested:
             self.repository.mark_job_interrupted(
                 claimed.id,

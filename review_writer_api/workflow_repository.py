@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, delete, exists, func, or_, select, update
+from sqlalchemy import and_, case, delete, exists, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -25,7 +25,7 @@ from review_writer_api.workflow_contracts import (
     INTERNAL_STAGES,
     current_user_stage,
 )
-from review_writer_api.job_queues import queue_for_job_type
+from review_writer_api.job_queues import INTERACTIVE_JOB_TYPES, queue_for_job_type
 from review_writer_core.workflow.artifacts import PERSISTENT_PUBLICATION_INPUTS
 from review_writer_api.job_lease_context import active_job_lease
 from review_writer_api.job_lifecycle import active_job_project, cancel_project_jobs
@@ -69,6 +69,8 @@ class JobRecord:
     job_type: str
     queue_name: str
     status: str
+    next_run_at: datetime | None
+    queue_reason: str
     idempotency_scope_key: str
     idempotency_key: str
     payload: dict[str, Any]
@@ -183,9 +185,13 @@ class WorkflowRepository:
         }
     )
 
-    def __init__(self, session_factory, *, default_text_wire_api: str = "responses"):
+    def __init__(
+        self, session_factory, *, default_text_wire_api: str = "responses",
+        mineru_max_concurrency: int = 2,
+    ):
         self.session_factory = session_factory
         self.default_text_wire_api = default_text_wire_api
+        self.mineru_max_concurrency = max(1, int(mineru_max_concurrency))
 
     @staticmethod
     def _uuid(value: str, *, not_found_message: str) -> uuid.UUID:
@@ -221,6 +227,8 @@ class WorkflowRepository:
             job_type=job.job_type,
             queue_name=job.queue_name,
             status=job.status,
+            next_run_at=job.next_run_at,
+            queue_reason=job.queue_reason,
             idempotency_scope_key=job.idempotency_scope_key,
             idempotency_key=job.idempotency_key,
             payload=dict(job.payload_json or {}),
@@ -1355,6 +1363,7 @@ class WorkflowRepository:
         payload: dict[str, Any],
         retry_of_job_id: str | None = None,
         operation_key: str = "",
+        model_snapshot_override: dict[str, Any] | None = None,
     ) -> JobRecord:
         user_uuid = self._uuid(user_id, not_found_message="User not found.")
         normalized_scope = str(scope or "").strip().lower()
@@ -1389,7 +1398,7 @@ class WorkflowRepository:
         )
         if len(scope_key) > 255:
             raise WorkflowValidationError("The job operation key is too long.")
-        from .model_catalog import SNAPSHOT_KEY, snapshot_for_job
+        from .model_catalog import SNAPSHOT_KEY, snapshot_for_job, snapshot_for_retry
         from .model_gateway import TEXT_GATEWAY_JOB_TYPES
         requested_payload = {k: v for k, v in dict(payload or {}).items() if k != SNAPSHOT_KEY}
 
@@ -1476,9 +1485,19 @@ class WorkflowRepository:
                 if normalized_job_type in TEXT_GATEWAY_JOB_TYPES:
                     try:
                         previous_snapshot = (retry_source.payload_json or {}).get(SNAPSHOT_KEY) if retry_uuid else None
-                        stored_payload[SNAPSHOT_KEY] = dict(previous_snapshot) if previous_snapshot else snapshot_for_job(
-                            session, project.model_tier if project_uuid else None,
-                            default_wire=self.default_text_wire_api)
+                        if normalized_job_type == "model.dispatch" and model_snapshot_override:
+                            snapshot = dict(model_snapshot_override)
+                        elif previous_snapshot:
+                            snapshot = snapshot_for_retry(
+                                session, previous_snapshot,
+                                default_wire=self.default_text_wire_api,
+                            )
+                        else:
+                            snapshot = snapshot_for_job(
+                                session, project.model_tier if project_uuid else None,
+                                default_wire=self.default_text_wire_api,
+                            )
+                        stored_payload[SNAPSHOT_KEY] = snapshot
                     except ValueError as exc:
                         raise WorkflowValidationError(str(exc)) from exc
                 job = WorkflowJob(
@@ -2272,6 +2291,8 @@ class WorkflowRepository:
         lease_seconds: int,
     ) -> None:
         job.status = "running"
+        job.next_run_at = None
+        job.queue_reason = ""
         job.cancellation_requested = False
         job.lease_owner = str(owner)[:128]
         job.lease_token = uuid.uuid4()
@@ -2321,6 +2342,7 @@ class WorkflowRepository:
             query = select(WorkflowJob).where(
                 WorkflowJob.id == job_uuid,
                 WorkflowJob.status == "queued",
+                or_(WorkflowJob.next_run_at.is_(None), WorkflowJob.next_run_at <= now),
                 active_job_project(),
                 ~self._earlier_planning_job(),
             )
@@ -2342,7 +2364,9 @@ class WorkflowRepository:
     ) -> JobRecord | None:
         """Atomically claim the next fair, runnable job with ``SKIP LOCKED``.
 
-        At most one live lease per user and queue is admitted. An expired
+        Business queues admit one live lease per user. Model dispatch admits
+        up to the configured text parallelism; the gateway still owns actual
+        global/user/channel request admission. An expired
         running job may be reclaimed with a higher fencing generation; the old
         worker can no longer mutate it.
         """
@@ -2352,6 +2376,12 @@ class WorkflowRepository:
             raise WorkflowValidationError("A worker lease owner is required.")
         with database_session(self.session_factory) as session:
             now = self._database_now(session)
+            if job_types is None or "library.upload" in job_types:
+                if session.get_bind().dialect.name == "postgresql":
+                    # Use a distinct key from the provider's session slots
+                    # (0..N-1), so admission never waits for a full parse.
+                    session.execute(text("SELECT pg_advisory_xact_lock(:namespace, -1)"),
+                                    {"namespace": 0x52574D55})
             # Repair jobs left behind by older deletion code before evaluating
             # per-user queue fairness, including unexpired running leases.
             cancel_project_jobs(session, now, ~active_job_project())
@@ -2371,9 +2401,17 @@ class WorkflowRepository:
                     lease_expires_at=None,
                 )
             )
+            active_uploads = 0
+            if job_types is None or "library.upload" in job_types:
+                active_uploads = session.scalar(select(func.count(WorkflowJob.id)).where(
+                    WorkflowJob.job_type == "library.upload",
+                    WorkflowJob.status.in_(("running", "cancel_requested")),
+                    WorkflowJob.lease_expires_at > now,
+                )) or 0
             active = aliased(WorkflowJob)
             eligible = or_(
-                WorkflowJob.status == "queued",
+                and_(WorkflowJob.status == "queued",
+                     or_(WorkflowJob.next_run_at.is_(None), WorkflowJob.next_run_at <= now)),
                 and_(
                     WorkflowJob.status == "running",
                     WorkflowJob.cancellation_requested.is_(False),
@@ -2381,40 +2419,91 @@ class WorkflowRepository:
                     WorkflowJob.lease_expires_at <= now,
                 ),
             )
-            another_live_lease = exists(
-                select(active.id).where(
+            live_leases = (
+                select(func.count(active.id)).where(
                     active.id != WorkflowJob.id,
                     active.user_id == WorkflowJob.user_id,
                     active.queue_name == WorkflowJob.queue_name,
                     active.status.in_(("running", "cancel_requested")),
                     active.lease_expires_at.is_not(None),
                     active.lease_expires_at > now,
-                )
+                ).correlate(WorkflowJob).scalar_subquery()
+            )
+            from .model_concurrency import text_parallelism_in_session
+            lease_limit = case(
+                (WorkflowJob.job_type == "model.dispatch", text_parallelism_in_session(session)),
+                else_=1,
             )
             query = select(WorkflowJob).where(
-                eligible, active_job_project(), ~another_live_lease, ~self._earlier_planning_job()
+                eligible, active_job_project(), live_leases < lease_limit, ~self._earlier_planning_job()
             )
+            if active_uploads >= self.mineru_max_concurrency:
+                query = query.where(WorkflowJob.job_type != "library.upload")
             if job_types is not None:
                 if not job_types:
                     return None
                 query = query.where(WorkflowJob.job_type.in_(sorted(job_types)))
-            query = query.order_by(
-                case((WorkflowJob.payload_json["revision_mode"].as_string() == "dialogue_batch", WorkflowJob.updated_at),
-                     else_=WorkflowJob.created_at).asc(), WorkflowJob.id.asc()
-            ).limit(1)
-            if session.get_bind().dialect.name == "postgresql":
-                query = query.with_for_update(skip_locked=True)
-            job = session.scalar(query)
-            if job is None:
-                return None
-            self._apply_claim(
-                job,
-                owner=normalized_owner,
-                now=now,
-                lease_seconds=lease_seconds,
+            paused = session.get(WorkflowSystemState, "worker_queue_pauses")
+            paused_queues = [name for name, value in (paused.value_json or {}).items() if value] if paused else []
+            if paused_queues:
+                query = query.where(WorkflowJob.queue_name.not_in(paused_queues))
+            # Lock the user's row before choosing a job. Locking only the job
+            # row permits two workers to claim different jobs for the same
+            # user from the same pre-claim snapshot.
+            fairness_time = case(
+                (WorkflowJob.attempt_count > 0, WorkflowJob.updated_at),
+                else_=WorkflowJob.created_at,
             )
-            session.flush()
-            return self._job_record(job)
+            candidates = session.execute(
+                query.with_only_columns(WorkflowJob.user_id, func.min(fairness_time))
+                .group_by(WorkflowJob.user_id)
+                .order_by(func.min(fairness_time), WorkflowJob.user_id)
+                .limit(128)
+            ).all()
+            for user_id, _ in candidates:
+                if session.get_bind().dialect.name == "postgresql":
+                    locked_user = session.scalar(
+                        select(User.id).where(User.id == user_id).with_for_update(skip_locked=True)
+                    )
+                    if locked_user is None:
+                        continue
+                # A short user-initiated edit may go before the next batch
+                # unit, but any unit waiting two minutes regains FIFO priority.
+                # This bounds interactive preference without starving batches.
+                priority = case(
+                    (fairness_time <= now - timedelta(minutes=2), 0),
+                    (WorkflowJob.job_type.in_(INTERACTIVE_JOB_TYPES), 1),
+                    else_=2,
+                )
+                job_query = query.where(WorkflowJob.user_id == user_id).order_by(
+                    priority.asc(), fairness_time.asc(), WorkflowJob.id.asc()
+                ).limit(1)
+                if session.get_bind().dialect.name == "postgresql":
+                    job_query = job_query.with_for_update(skip_locked=True)
+                job = session.scalar(job_query)
+                if job is None:
+                    continue
+                self._apply_claim(
+                    job,
+                    owner=normalized_owner,
+                    now=now,
+                    lease_seconds=lease_seconds,
+                )
+                session.flush()
+                return self._job_record(job)
+            return None
+
+    def has_queued_job(self, queue_name: str) -> bool:
+        """Whether another runnable job could use a released worker slot."""
+
+        with database_session(self.session_factory) as session:
+            now = self._database_now(session)
+            return session.scalar(select(WorkflowJob.id).where(
+                WorkflowJob.queue_name == str(queue_name),
+                WorkflowJob.status == "queued",
+                or_(WorkflowJob.next_run_at.is_(None), WorkflowJob.next_run_at <= now),
+                active_job_project(),
+            ).limit(1)) is not None
 
     def renew_job_lease(
         self,
@@ -2452,6 +2541,8 @@ class WorkflowRepository:
         *,
         lease_token: str,
         lease_generation: int,
+        delay_seconds: int = 0,
+        queue_reason: str = "",
     ) -> JobRecord | None:
         """Return a gracefully interrupted worker job to the queue."""
 
@@ -2469,6 +2560,9 @@ class WorkflowRepository:
                 )
                 .values(
                     status="queued",
+                    next_run_at=(now + timedelta(seconds=max(1, int(delay_seconds))))
+                    if delay_seconds else None,
+                    queue_reason=str(queue_reason or "")[:64] if delay_seconds else "",
                     lease_owner="",
                     lease_token=None,
                     lease_expires_at=None,
@@ -2489,22 +2583,6 @@ class WorkflowRepository:
                 query = query.where(WorkflowJob.job_type.in_(sorted(job_types)))
             jobs = session.scalars(query.order_by(WorkflowJob.created_at.asc())).all()
             return [self._job_record(job) for job in jobs]
-
-    def job_queue_counts(self) -> dict[str, dict[str, int]]:
-        """Small operational snapshot for worker heartbeats and structured logs."""
-
-        with database_session(self.session_factory) as session:
-            rows = session.execute(
-                select(
-                    WorkflowJob.queue_name,
-                    WorkflowJob.status,
-                    func.count(WorkflowJob.id),
-                ).group_by(WorkflowJob.queue_name, WorkflowJob.status)
-            ).all()
-        result: dict[str, dict[str, int]] = {}
-        for queue_name, status, count in rows:
-            result.setdefault(str(queue_name), {})[str(status)] = int(count or 0)
-        return result
 
     def request_job_cancellation(self, user_id: str, job_id: str) -> JobRecord | None:
         user_uuid = self._uuid(user_id, not_found_message="Job not found.")
@@ -2722,6 +2800,18 @@ class WorkflowRepository:
                 )
                 .returning(WorkflowJob)
             )
+            if job is not None and job.job_type == "model.dispatch":
+                try:
+                    parent_uuid = uuid.UUID(str((job.payload_json or {}).get("parent_job_id") or ""))
+                except ValueError:
+                    parent_uuid = None
+                if parent_uuid is not None:
+                    session.execute(update(WorkflowJob).where(
+                        WorkflowJob.id == parent_uuid,
+                        WorkflowJob.user_id == job.user_id,
+                        WorkflowJob.status == "queued",
+                        WorkflowJob.queue_reason == "model_waiting",
+                    ).values(next_run_at=now, updated_at=now))
             return self._job_record(job) if job else None
 
     def mark_job_cancelled(
@@ -2830,6 +2920,50 @@ class WorkflowRepository:
         with database_session(self.session_factory) as session:
             state = session.get(WorkflowSystemState, key)
             return dict(state.value_json or {}) if state else None
+
+    def set_worker_queue_paused(self, queue_name: str, paused: bool) -> dict[str, bool]:
+        from review_writer_api.job_queues import JOB_QUEUES
+
+        if queue_name not in JOB_QUEUES:
+            raise WorkflowValidationError("Unknown worker queue.")
+        with database_session(self.session_factory) as session:
+            state = session.get(WorkflowSystemState, "worker_queue_pauses", with_for_update=True)
+            if state is None:
+                state = WorkflowSystemState(key="worker_queue_pauses", value_json={})
+                session.add(state)
+            values = {name: bool(value) for name, value in (state.value_json or {}).items()
+                      if name in JOB_QUEUES}
+            values[queue_name] = bool(paused)
+            state.value_json = values
+            return values
+
+    def worker_status(self) -> dict[str, Any]:
+        from review_writer_api.job_queues import JOB_QUEUES
+
+        with database_session(self.session_factory) as session:
+            paused = session.get(WorkflowSystemState, "worker_queue_pauses")
+            heartbeats = session.scalars(select(WorkflowSystemState).where(
+                WorkflowSystemState.key.like("worker_heartbeat:%")
+            )).all()
+            now = self._database_now(session)
+            rows = session.execute(select(
+                WorkflowJob.queue_name, WorkflowJob.status, func.count(WorkflowJob.id),
+                func.sum(case((and_(WorkflowJob.status == "queued",
+                                    WorkflowJob.next_run_at > now), 1), else_=0)),
+            ).group_by(WorkflowJob.queue_name, WorkflowJob.status)).all()
+            counts: dict[str, dict[str, int]] = {}
+            for queue_name, status, count, retry_waiting in rows:
+                item = counts.setdefault(str(queue_name), {})
+                item[str(status)] = int(count or 0)
+                if retry_waiting:
+                    item["retry_waiting"] = int(retry_waiting)
+            return {
+                "paused_queues": {name: bool((paused.value_json or {}).get(name)) if paused else False
+                                  for name in sorted(JOB_QUEUES)},
+                "workers": [{**dict(row.value_json or {}), "updated_at": row.updated_at.isoformat()}
+                            for row in heartbeats],
+                "queue_counts": counts,
+            }
 
     def workflow_is_ready(self) -> bool:
         with database_session(self.session_factory) as session:

@@ -13,10 +13,12 @@ from collections.abc import Callable, Mapping
 
 from review_writer_api.domain_services.sections import SectionProviderUnavailable
 from review_writer_api.errors import WorkflowConflict, WorkflowValidationError
-from review_writer_api.scientific_runner import ScientificRunError
+from review_writer_api.job_service import JobYieldRequested
+from review_writer_api.scientific_runner import ScientificRunError, ScientificModelDeferred, ScientificInsufficientCredit
 from review_writer_api.job_handlers.lifecycle import report_committed_progress
 from review_writer_api.security import Principal, Role
 from review_writer_core.stages.sections.coverage import reusable_section_entries
+from review_writer_core.classification_axes import axis_requires_formal_route
 from review_writer_core.stages.planning.matrix import has_fact_sources
 
 
@@ -25,6 +27,55 @@ TRANSIENT_PROVIDER_ERROR = re.compile(
     re.IGNORECASE,
 )
 logger = logging.getLogger(__name__)
+
+
+def selected_formal_classification_contract(outline: dict | None) -> dict | None:
+    contract = (outline or {}).get("classification_contract")
+    if not isinstance(contract, dict):
+        return None
+    return contract if any(
+        axis_requires_formal_route(axis)
+        for axis in contract.get("axes") or []
+        if isinstance(axis, dict)
+    ) else None
+
+
+def wait_for_delegated_model(context, result: dict | None) -> None:
+    """Resume when any child is ready, not only the first/slowest child."""
+    result = result if isinstance(result, dict) else {}
+    model_job_ids = result.get("waiting_model_job_ids") or (
+        [result["waiting_model_job_id"]] if result.get("waiting_model_job_id") else [])
+    if not model_job_ids:
+        return
+    jobs = [context.repository.get_job(context.user_id, str(job_id)) for job_id in model_job_ids]
+    if any(job is None or job.project_id != context.project_id or job.job_type != "model.dispatch" for job in jobs):
+        raise WorkflowConflict("The delegated model task is unavailable.")
+    if all(job.status in {"queued", "running"} for job in jobs):
+        raise JobYieldRequested(delay_seconds=10, queue_reason="model_waiting")
+    # Parallel sections must consume each ready result independently. A failed
+    # child is surfaced by its own chapter; don't discard successful siblings.
+    if len(jobs) > 1:
+        return
+    model_job = jobs[0]
+    if model_job.status != "succeeded":
+        if model_job.error_code == "INSUFFICIENT_CREDIT":
+            raise ScientificInsufficientCredit(attempts=1)
+        raise WorkflowConflict("The delegated model task did not finish. No model call was replayed automatically.")
+
+
+def yield_to_delegated_model(context, exc: ScientificModelDeferred) -> None:
+    # The progress callback may just have published a resumable checkpoint.
+    # Partial-result writes replace result_json, so retain that snapshot when
+    # recording the child job that this task is waiting for.
+    current_job = context.repository.get_job(context.user_id, context.job_id)
+    current_result = current_job.result if current_job is not None else None
+    snapshot = dict(current_result) if isinstance(current_result, dict) else {}
+    snapshot.pop("waiting_model_job_id", None)
+    snapshot["waiting_model_job_ids"] = exc.model_job_ids
+    context.report_partial_result(snapshot)
+    delegated = [context.repository.get_job(context.user_id, job_id) for job_id in exc.model_job_ids]
+    delay = 10 if all(job is None or job.status in {"queued", "running"} for job in delegated) else 0
+    raise JobYieldRequested(delay_seconds=delay, queue_reason="model_waiting")
 
 
 def section_retry_checkpoints(context) -> tuple[dict | None, dict | None]:
@@ -95,6 +146,9 @@ def section_retry_checkpoints(context) -> tuple[dict | None, dict | None]:
         source_job_id = str(source_job.retry_of_job_id or "")
     if checkpoint is not None:
         checkpoint["entries"] = merged_entries
+        # A user-triggered retry is a new attempt; old failures must not keep
+        # their sections in the deferred set. Completed chapters remain reusable.
+        checkpoint["failed_sections"] = []
     return checkpoint, fact_repair_checkpoint
 
 
@@ -118,7 +172,10 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
             }
             if integration.get("enabled") and enrichment_builder is not None:
                 fact_payload = planning_service.matrix_enrichment_payload(
-                    principal, str(context.project_id)
+                    principal, str(context.project_id),
+                    classification_contract_override=selected_formal_classification_contract(
+                        payload.get("outline_snapshot")
+                    ),
                 )
                 expected_matrix = str(
                     integration.get("source_matrix_artifact_id")
@@ -280,10 +337,16 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
             payload = dict(payload)
             resume_from_job_id = context.retry_of_job_id or payload.get("resume_from_job_id")
             principal = Principal(context.user_id, frozenset({Role.USER}))
+            current_job = context.repository.get_job(context.user_id, context.job_id)
+            current_result = current_job.result if current_job is not None else None
+            wait_for_delegated_model(context, current_result)
+            current_checkpoint = (current_result.get("matrix_enrichment_checkpoint")
+                                  if isinstance(current_result, dict) else None)
             if payload.get("prepare_on_start"):
                 request = payload
                 expected_artifact_id = str(
-                    payload.get("source_matrix_artifact_id") or ""
+                    payload.get("source_matrix_artifact_id") or
+                    (current_checkpoint or {}).get("source_matrix_artifact_id") or ""
                 )
                 planning_service.validate_matrix_enrichment_inputs(principal, str(context.project_id), payload)
                 payload = (planning_service.fact_revision_payload(principal, str(context.project_id),
@@ -299,7 +362,9 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
                         "Matrix changed before scientific fact extraction started."
                     )
             planning_service.validate_matrix_enrichment_inputs(principal, str(context.project_id), payload)
-            if resume_from_job_id:
+            if isinstance(current_checkpoint, dict):
+                payload["resume_checkpoint"] = current_checkpoint
+            elif resume_from_job_id:
                 source_job = context.repository.get_job(
                     context.user_id, resume_from_job_id
                 )
@@ -314,7 +379,8 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
                 if isinstance(checkpoint, dict):
                     payload["resume_checkpoint"] = checkpoint
             total = int(payload.get("pending_paper_count") or 0)
-            context.report_progress(0, total)
+            resumed = len((payload.get("resume_checkpoint") or {}).get("completed_papers") or [])
+            context.report_progress(min(resumed, total), total)
             if not total:
                 return {
                     "project_id": str(context.project_id),
@@ -324,8 +390,19 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
                 }
             if not has_fact_sources(payload):
                 raise WorkflowConflict("Build full-text indexes before extracting Matrix scientific facts.")
-            built = enrichment_builder(context, payload)
+            try:
+                built = enrichment_builder(context, payload)
+            except ScientificModelDeferred as exc:
+                yield_to_delegated_model(context, exc)
             context.checkpoint()
+            checkpoint = built.get("matrix_enrichment_checkpoint") if isinstance(built, dict) else None
+            if isinstance(checkpoint, dict) and "completed_papers" in checkpoint:
+                expected_papers = {str(row.get("paper_id") or "") for row in payload.get("papers") or []}
+                completed_papers = set(checkpoint.get("completed_papers") or [])
+                if expected_papers - completed_papers:
+                    context.report_partial_result({"matrix_enrichment_checkpoint": checkpoint})
+                    context.report_progress(len(expected_papers & completed_papers), total)
+                    raise JobYieldRequested()
             result = planning_service.publish_matrix_enrichment(
                 principal, str(context.project_id), payload, built
             )
@@ -360,6 +437,8 @@ def register_sections_handler(sections_service, job_service, handlers: Mapping[s
             payload = dict(payload)
             principal = Principal(context.user_id, frozenset({Role.USER}))
             sections_service.validate_generation_inputs(principal, str(context.project_id), payload)
+            if payload.get("evidence_preparation_pending") is True:
+                payload = sections_service.prepare_generation_job(context, payload)
             # Retries carry the original task snapshot. Drop only obsolete
             # standalone conclusions; keep body inputs/checkpoints unchanged.
             payload["tasks"] = [task for task in payload.get("tasks") or []
@@ -373,10 +452,38 @@ def register_sections_handler(sections_service, job_service, handlers: Mapping[s
                 if isinstance(fact_repair_checkpoint, dict):
                     payload["fact_repair_checkpoint"] = fact_repair_checkpoint
             total = len(payload.get("tasks") or [])
-            context.report_progress(0, total)
+            current_job = context.repository.get_job(context.user_id, context.job_id)
+            current_result = current_job.result if current_job is not None else None
+            wait_for_delegated_model(context, current_result)
+            checkpoint = current_result.get("section_checkpoint") if isinstance(current_result, dict) else None
+            entries = checkpoint.get("entries") if isinstance(checkpoint, dict) else None
+            completed = len(entries) if isinstance(entries, dict) else 0
+            context.report_progress(min(completed, total), total)
             try:
                 built = builder(context, payload)
+            except ScientificModelDeferred as exc:
+                yield_to_delegated_model(context, exc)
             except ScientificRunError:
+                # Only an explicit provider rate limit is safe to retry
+                # automatically. A timeout may have produced a paid response
+                # whose outcome is still unknown, so it remains user-visible.
+                latest = context.repository.get_job(context.user_id, context.job_id)
+                snapshot = latest.result if latest is not None and isinstance(latest.result, dict) else {}
+                saved_checkpoint = snapshot.get("section_checkpoint")
+                failures = ((saved_checkpoint or {}).get("failed_sections") or []) if isinstance(saved_checkpoint, dict) else []
+                retry_count = int(snapshot.get("section_auto_retry_count") or 0)
+                if failures and all(isinstance(row, dict) and row.get("retryable_rate_limit") is True
+                                    for row in failures) and retry_count < 2:
+                    progress = dict(snapshot.get("section_progress") or {})
+                    progress["phase"] = "waiting_retry"
+                    progress["failed_sections"] = failures
+                    context.report_partial_result({
+                        "section_checkpoint": {**saved_checkpoint, "failed_sections": []},
+                        "section_progress": progress,
+                        "section_auto_retry_count": retry_count + 1,
+                    })
+                    raise JobYieldRequested(delay_seconds=30 * (retry_count + 1),
+                                            queue_reason="provider_rate_limit")
                 raise
             except Exception as exc:
                 if TRANSIENT_PROVIDER_ERROR.search(str(exc)):

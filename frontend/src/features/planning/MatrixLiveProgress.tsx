@@ -148,10 +148,13 @@ export function MatrixLiveProgress({ job, papers }: { job: Job; papers: MatrixPa
   const total = live?.total || job.progress_total || papers.length;
   const current = live?.current ?? job.progress_current;
   const percent = total ? Math.min(100, Math.round((current / total) * 100)) : 0;
-  const phaseLabel = activeIds.length > 1
+  const phaseLabel = job.status === "queued" && job.queue_reason === "model_waiting"
+    ? text("正在等待模型返回事实结果，已释放提取资源", "Waiting for the model result; extraction capacity is free")
+    : activeIds.length > 1
     ? text(`正在并行提取与核验 ${activeIds.length} 篇论文`, `Extracting and verifying ${activeIds.length} papers in parallel`)
     : ({
     extracting: text("提取与核对原文事实", "Extracting and checking source facts"),
+    classification_refresh: text("复用已有事实，更新论文分类", "Reusing verified facts to update paper routes"),
     targeted_recheck: text("正在自动补证分类边界", "Automatically rechecking classification evidence"),
     routing_adjudication: text("正在核对论文分类", "Checking paper classification"),
     verifying: text("正在核验事实与原文的对应关系", "Verifying facts against their sources"),
@@ -172,6 +175,8 @@ export function MatrixLiveProgress({ job, papers }: { job: Job; papers: MatrixPa
             ? activeIds.map((paperId) => paperLabels.get(paperId) || paperId).join(" · ")
             : currentPaper
             ? `${paperLabels.get(currentPaper.paper_id) || currentPaper.paper_id} · ${titleText(currentPaper.title)}`
+            : job.status === "queued" && job.queue_reason === "model_waiting"
+            ? text("模型返回后自动继续，已完成的事实会保留", "Resumes automatically after the model returns; completed facts are retained")
             : text("等待 Worker 开始处理第一篇论文", "Waiting for the worker to start the first paper")}</span>
         </div>
         <b>{current}/{total || "—"}</b>

@@ -55,7 +55,8 @@ def build_drafts_router(
         return _job_response(job_service.submit(principal, scope="project", project_id=project_id,
             job_type="final.overview", idempotency_key=idempotency_key.strip() or str(uuid.uuid4()),
             payload={**final_service.overview_payload(principal, project_id),
-                     "preview_only": True, "generation_instructions": payload.instructions}))
+                     "preview_only": True, "generation_instructions": payload.instructions,
+                     "structure_references": [ref.model_dump() for ref in payload.structure_references]}))
 
     @router.post("/overview/adopt")
     def adopt_overview(project_id: str, payload: DraftOverviewAdoptRequest,
@@ -156,9 +157,11 @@ def build_drafts_router(
         from review_writer_api.errors import WorkflowValidationError
         if not current["paragraphs"] or current["freshness"]["upstream_stale"]:
             raise WorkflowValidationError("A current saved Draft is required.")
+        from review_writer_core.manuscript_coherence import manuscript_snapshot
         return _job_response(job_service.submit(principal, scope="project", project_id=project_id,
             job_type="draft.optimize", idempotency_key=key, payload={"project_id": project_id,
                 "revision_mode": "dialogue_batch", "paragraphs": current["paragraphs"],
+                "manuscript_snapshot": manuscript_snapshot(current["paragraphs"], current.get("sections", [])),
                 "message": "Analyze and improve this paragraph using the available original-source evidence. Keep the original when no defensible improvement is needed."}))
     @router.get("")
     def get_draft(

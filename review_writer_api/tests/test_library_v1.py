@@ -131,7 +131,15 @@ class LibraryV1Tests(unittest.TestCase):
             pdf_path = uploads / f"{paper_id}.pdf"
             pdf_path.write_bytes(staged_pdf.read_bytes())
             md_path = markdown / f"{paper_id}.md"
-            md_path.write_text(f"# Copper catalysis {paper_id}\n\nallene keyword", encoding="utf-8")
+            md_path.write_text(
+                (
+                    "# Copper catalysis\n\n## Abstract\n"
+                    "We report a useful synthetic route to substituted allenes using "
+                    "accessible reagents and a broad set of reaction conditions.\n"
+                    "## Introduction\nBackground follows.\n"
+                ) if filename == "abstract.pdf" else f"# Copper catalysis {paper_id}\n\nallene keyword",
+                encoding="utf-8",
+            )
             extracted_dir = user_root / ".upload-staging" / f"{paper_id}-extracted"
             extracted_dir.mkdir(parents=True, exist_ok=True)
             source_image = extracted_dir / "images" / "scheme.png"
@@ -857,6 +865,47 @@ class LibraryV1Tests(unittest.TestCase):
         self.assertEqual(before["index_id"], after["index_id"])
         self.assertEqual(before["source_lineage_hash"], after["source_lineage_hash"])
         self.assertEqual("ready", after["fulltext"])
+
+    def test_abstract_reextract_uses_existing_parse_and_preserves_manual_edit(self) -> None:
+        with TestClient(self.app) as client:
+            admitted = self.upload(client, "abstract.pdf", fake_pdf(b"A"))
+            paper_id = admitted.json()["paper_id"]
+            parse_calls = self.parse_calls
+            recovered = client.post(f"/api/v1/library/papers/{paper_id}/abstract-reextract")
+            self.assertEqual(200, recovered.status_code, recovered.text)
+            self.assertEqual("updated", recovered.json()["result"])
+            self.assertIn("synthetic route", recovered.json()["metadata"]["abstract"]["value"])
+            self.assertEqual(parse_calls, self.parse_calls)
+
+            metadata = recovered.json()["metadata"]
+            metadata["abstract"] = {
+                "value": "Human verified abstract", "source": "human_edit",
+                "confidence": 1.0, "human_checked": True,
+            }
+            saved = client.put(f"/api/v1/library/papers/{paper_id}/metadata", json=metadata)
+            self.assertEqual(200, saved.status_code, saved.text)
+            self.assertNotIn("abstract", saved.json()["quality"]["missing_fields"])
+            preserved = client.post(f"/api/v1/library/papers/{paper_id}/abstract-reextract")
+            self.assertEqual("human_checked", preserved.json()["result"])
+            self.assertEqual("Human verified abstract", preserved.json()["metadata"]["abstract"]["value"])
+
+    def test_abstract_reextract_clears_legacy_introduction_summary(self) -> None:
+        with TestClient(self.app) as client:
+            paper_id = self.upload(client, "no-abstract.pdf", fake_pdf(b"N")).json()["paper_id"]
+            metadata = client.get(f"/api/v1/library/papers/{paper_id}/metadata").json()
+            metadata["abstract"] = {
+                "value": "A summary taken from an introduction, not the paper abstract.",
+                "source": "markdown_introduction_ending_summary",
+                "confidence": 0.72,
+                "human_checked": False,
+            }
+            saved = client.put(f"/api/v1/library/papers/{paper_id}/metadata", json=metadata)
+            self.assertEqual(200, saved.status_code, saved.text)
+            repaired = client.post(f"/api/v1/library/papers/{paper_id}/abstract-reextract")
+            self.assertEqual(200, repaired.status_code, repaired.text)
+            self.assertEqual("not_found", repaired.json()["result"])
+            self.assertEqual("", repaired.json()["metadata"]["abstract"]["value"])
+            self.assertIn("abstract", repaired.json()["metadata"]["quality"]["missing_fields"])
 
     def test_index_status_detects_chunker_upgrade_and_retrieval_rejects_other_user_scope(self) -> None:
         with TestClient(self.app) as client:

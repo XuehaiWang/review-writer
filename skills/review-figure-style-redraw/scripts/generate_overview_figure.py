@@ -5411,7 +5411,13 @@ def main():
                                           composite_mode=bool(skeleton_rendered))
     request_path = project_dir / "03_figure_redraw" / "overview_user_request.json"
     if request_path.is_file():
-        instructions = str(json.loads(request_path.read_text(encoding="utf-8")).get("instructions") or "")[:4000]
+        user_request = json.loads(request_path.read_text(encoding="utf-8"))
+        from review_writer_core.overview_references import prepare_reference_images
+        reference_paths, reference_prompt = prepare_reference_images(
+            user_request.get("structure_references") or [], request_path.parent / "author_references")
+        extra_images.extend(reference_paths)
+        adapted_prompt += reference_prompt
+        instructions = str(user_request.get("instructions") or "")[:4000]
         if instructions.strip():
             adapted_prompt += ("\nAuthor's presentation preferences (not scientific evidence; preserve source-checked "
                                "chemistry and do not invent findings):\n" + instructions)

@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from .auth import PASSWORD_MIN_LENGTH
+from review_writer_core.taxonomy import NEW_PROJECT_TAXONOMY_PROFILE
 
 class HealthResponse(BaseModel):
     status: str
     api_version: str
     deployment_mode: str
     components: dict[str, str] = Field(default_factory=dict)
+
+
+class AdminConcurrencyUpdateRequest(BaseModel):
+    limits: dict[str, dict[str, int]]
+
+
+class AdminQueuePauseRequest(BaseModel):
+    paused: bool
 
 
 class BrowserAuthConfigResponse(BaseModel):
@@ -79,7 +89,7 @@ class ProjectListResponse(BaseModel):
 class ProjectCreateRequest(BaseModel):
     slug: str = Field(min_length=1, max_length=96)
     topic: str = Field(default="", max_length=10_000)
-    taxonomy_profile: str = Field(default="general_academic", min_length=1, max_length=96)
+    taxonomy_profile: str = Field(default=NEW_PROJECT_TAXONOMY_PROFILE, min_length=1, max_length=96)
     model_tier: str | None = Field(default=None, min_length=1, max_length=32)
 
 
@@ -133,8 +143,15 @@ class ModelCatalogResponse(BaseModel):
     revision: int = 0
 
 
+class ModelChannelResponse(BaseModel):
+    connection_id: str = Field(min_length=1, max_length=64)
+    model: str = Field(min_length=1, max_length=255)
+    wire_api: str = Field(default="", pattern="^(|responses|chat-completions)$")
+
+
 class AdminModelTierResponse(ModelTierResponse):
     connection_id: str = Field(default="default", min_length=1, max_length=64)
+    channels: list[ModelChannelResponse] = Field(default_factory=list, max_length=16)
 
 
 class AdminModelCatalogResponse(ModelCatalogResponse):
@@ -142,6 +159,7 @@ class AdminModelCatalogResponse(ModelCatalogResponse):
 
 
 class TextConnectionUpdateRequest(BaseModel):
+    max_concurrency: int | None = Field(default=None, ge=1, le=32)
     name: str = Field(min_length=1, max_length=100)
     base_url: str = Field(min_length=1, max_length=2048)
     wire_api: str = Field(pattern="^(responses|chat-completions)$")
@@ -172,6 +190,13 @@ class ModelGatewayResultResponse(BaseModel):
     error: dict[str, Any] | None = None
     status: str = Field(pattern="^(running|succeeded|failed)$")
     result: ModelGatewayResponse | None = None
+
+
+class ModelDelegationResponse(BaseModel):
+    model_job_id: str
+    status: str
+    output_text: str = ""
+    error: str = ""
 
 
 class EmbeddingGatewayRequest(BaseModel):
@@ -348,6 +373,7 @@ class ProviderSettingsResponse(BaseModel):
     api_key_configured: bool
     api_key_hint: str
     enabled: bool
+    input_usd_per_million: str = "0"
     source: str = "server"
     updated_at: datetime | None = None
 
@@ -362,6 +388,12 @@ class AdminProviderSettingsUpdateRequest(BaseModel):
     wire_api: str = Field(default="", max_length=64)
     api_key: str | None = Field(default=None, max_length=10_000)
     enabled: bool = True
+    input_usd_per_million: Decimal | None = Field(
+        default=None,
+        ge=Decimal("0"),
+        le=Decimal("1000000"),
+        decimal_places=8,
+    )
 
 
 class AdminProviderTestResponse(BaseModel):
@@ -391,6 +423,8 @@ class JobResponse(BaseModel):
     scope: str
     job_type: str
     status: str
+    next_run_at: str | None = None
+    queue_reason: str = ""
     result: dict
     progress_current: int
     progress_total: int

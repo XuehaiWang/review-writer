@@ -205,4 +205,15 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except BaseException as exc:
+        from review_writer_core.model_gateway_client import DeferredModelCall
+        if not isinstance(exc, DeferredModelCall):
+            raise
+        sys.stderr.write("REVIEW_WRITER_DEFERRED_MODEL:" + json.dumps({
+            "model_job_id": exc.model_job_id,
+            "model_job_ids": exc.model_job_ids,
+        }, separators=(",", ":")) + "\n")
+        sys.stderr.flush()
+        raise SystemExit(75) from None

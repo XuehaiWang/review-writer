@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
 
 import type { Job } from "../../api/types";
 import { MatrixLiveProgress, readMatrixEnrichmentLive } from "./MatrixLiveProgress";
@@ -27,6 +27,12 @@ function job(result: Record<string, unknown>): Job {
 }
 
 describe("readMatrixEnrichmentLive", () => {
+  afterEach(cleanup);
+  it("explains a delegated model wait without implying fact extraction failed", () => {
+    render(<MatrixLiveProgress job={{ ...job({}), status: "queued", queue_reason: "model_waiting" }} papers={[]} />);
+    expect(screen.getByText("正在等待模型返回事实结果，已释放提取资源")).toBeInTheDocument();
+    expect(screen.getByText("模型返回后自动继续，已完成的事实会保留")).toBeInTheDocument();
+  });
   it("shows parallel papers while keeping unfinished checkpoints out of completed results", () => {
     const running = job({
       matrix_enrichment_progress: {
@@ -68,6 +74,14 @@ describe("readMatrixEnrichmentLive", () => {
     expect(live?.current_paper_id).toBe("P002");
     expect(live?.active_paper_ids).toEqual(["P002"]);
     expect(live?.items[0].facts_preview[0].value).toBe("Cycloaddition");
+  });
+
+  it("identifies classification refresh as reuse rather than another fact extraction", () => {
+    render(<MatrixLiveProgress job={job({ matrix_enrichment_live: {
+      phase: "classification_refresh", current: 0, total: 1,
+      current_paper_id: "P001", active_paper_ids: ["P001"], items: [],
+    } })} papers={[{ paper_id: "P001" }]} />);
+    expect(screen.getByText("复用已有事实，更新论文分类")).toBeInTheDocument();
   });
 
   it("derives live facts from legacy section checkpoints", () => {

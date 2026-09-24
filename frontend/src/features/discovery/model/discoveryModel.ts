@@ -49,6 +49,8 @@ export type DiscoveryPayload = {
   query_plan?: {
     planner?: string;
     planner_notice?: string;
+    search_topic?: string;
+    search_keywords?: string[];
     planner_notice_code?: string;
     group_by?: string[];
     semantic_queries?: Array<{

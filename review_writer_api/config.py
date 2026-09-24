@@ -90,8 +90,8 @@ class ApiSettings:
     internal_gateway_url: str = ""
     internal_worker_token: str = ""
     embedded_gateway_routes_enabled: bool = True
-    model_gateway_max_concurrency: int = 2
-    model_gateway_user_concurrency: int = 1
+    model_gateway_max_concurrency: int = 4
+    model_gateway_user_concurrency: int = 4
     text_job_max_provider_attempts: int = 1000
     text_job_max_input_chars: int = 40_000_000
     image_gateway_max_concurrency: int = 1
@@ -267,13 +267,13 @@ class ApiSettings:
             "REVIEW_WRITER_EMBEDDED_GATEWAY_ROUTES", False
         )
         model_gateway_max_concurrency = _environment_integer(
-            "REVIEW_WRITER_MODEL_GATEWAY_CONCURRENCY", 2, minimum=1, maximum=32
+            "REVIEW_WRITER_MODEL_GATEWAY_CONCURRENCY", 4, minimum=1, maximum=32
         )
         model_gateway_user_concurrency = _environment_integer(
-            "REVIEW_WRITER_MODEL_GATEWAY_USER_CONCURRENCY", 1, minimum=1, maximum=8
+            "REVIEW_WRITER_MODEL_GATEWAY_USER_CONCURRENCY", 4, minimum=1, maximum=8
         )
         image_gateway_max_concurrency = _environment_integer(
-            "REVIEW_WRITER_IMAGE_GATEWAY_CONCURRENCY", 1, minimum=1, maximum=8
+            "REVIEW_WRITER_IMAGE_GATEWAY_CONCURRENCY", 4, minimum=1, maximum=8
         )
         image_gateway_user_concurrency = _environment_integer(
             "REVIEW_WRITER_IMAGE_GATEWAY_USER_CONCURRENCY", 1, minimum=1, maximum=4

@@ -32,9 +32,6 @@ from review_writer_api.domain_services.actions.draft.decisions import (
 from review_writer_api.domain_services.actions.draft.quality import (
     DraftQualityActionsMixin,
 )
-from review_writer_api.domain_services.actions.draft.rewrite import (
-    DraftRewriteActionsMixin,
-)
 from review_writer_api.domain_services.actions.draft.dialogue import DraftDialogueMixin
 from review_writer_api.domain_services.actions.draft.composition import DraftCompositionMixin
 from review_writer_core.paragraph_revision import paragraph_keys, dialogue_sections
@@ -53,6 +50,8 @@ from review_writer_core.draft_bibliography import (
     strip_numeric_callouts,
 )
 from review_writer_core.chemical_typography import normalize_chemical_typography
+from review_writer_core.paragraph_citations import render_paragraph_citations
+from review_writer_core.stages.sections.authoring import paragraph_parts, prose_layout
 from review_writer_core.publication_tables import render_section_comparison
 from review_writer_core.draft_issue_routing import (
     quality_issue_paper_ids,
@@ -101,7 +100,6 @@ class DraftsService(
     DraftDialogueMixin,
     DraftDecisionActionsMixin,
     DraftQualityActionsMixin,
-    DraftRewriteActionsMixin,
     ArtifactBackedService,
 ):
     _paragraph_spans = staticmethod(paragraph_spans)
@@ -326,7 +324,7 @@ class DraftsService(
                 if not paragraph_id or not text:
                     continue
                 cited_papers: list[str] = []
-                claim_bound_parts: list[str] = []
+                claim_bound_parts = {}
                 for realization in paragraph.get("claim_realizations") or []:
                     if not isinstance(realization, dict):
                         continue
@@ -350,19 +348,23 @@ class DraftsService(
                         cited_paper_ids.add(paper_id)
                         if paper_id not in cited_papers:
                             cited_papers.append(paper_id)
-                    if callouts:
-                        claim_bound_parts.append(
-                            f"{sentence} {format_citation_group(callouts)}"
-                        )
-                    else:
-                        claim_bound_parts.append(sentence)
+                    claim_bound_parts[str(realization.get("claim_id") or len(claim_bound_parts))] = (
+                        sentence, format_citation_group(callouts) if callouts else "",
+                        str(realization.get("claim_kind") or ""),
+                    )
 
                 if claim_bound_parts:
                     # Section prose already contains Matrix-order numbers.  The
                     # Claim realization and its Paper IDs are the source of
                     # truth; rebuilding here prevents two numbering systems
                     # from surviving into the manuscript.
-                    text = " ".join(claim_bound_parts)
+                    # Recover validated connective text from older section artifacts too.
+                    layout, _ = prose_layout(strip_numeric_callouts(text), [
+                        {"claim_id": cid, "claim": part[0]}
+                        for cid, part in claim_bound_parts.items()
+                    ])
+                    text = render_paragraph_citations(paragraph_parts(
+                        {"prose_layout": layout}, claim_bound_parts))
                 else:
                     cited_papers = list(
                         dict.fromkeys(

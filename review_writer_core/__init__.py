@@ -1,1 +1,1 @@
-"""Shared runtime configuration helpers for Review Writer."""
+"""Shared domain logic for Review Writer."""

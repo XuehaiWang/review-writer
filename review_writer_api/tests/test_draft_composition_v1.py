@@ -38,16 +38,21 @@ class DraftCompositionTests(NativeFigureApiTestCase):
             path = self.app.state.artifact_service.workspace_manager.user_root(self.first.user_id) / 'overview-preview.png'
             Image.new('RGB', (64, 32), 'green').save(path)
             payload = {**final.overview_payload(self.first, self.project_id), 'preview_only': True,
-                       'generation_instructions': 'Emphasize strategies'}
-            built = {'output_path': str(path), 'editable_text': {'title': 'Strategies'}, 'report': {}}
+                       'generation_instructions': 'Emphasize strategies',
+                       'structure_references': [{'kind': 'molecule', 'smiles': 'CCO', 'role': 'substrate'}]}
+            built = {'output_path': str(path), 'editable_text': {'title': 'Strategies', 'labels': ['Synthesis']}, 'report': {}}
             result = final.publish_overview(self.first, self.project_id, payload, built)
             self.assertTrue(result['candidate_pending'])
             self.assertIsNone(final._artifact(self.first, self.project_id, FINAL_OVERVIEW_IMAGE))
             history = final.overview_history(self.first, self.project_id)
             self.assertEqual('Emphasize strategies', history[0]['instructions'])
+            self.assertEqual(payload['structure_references'], history[0]['structure_references'])
             response = client.post(f'/api/v1/projects/{self.project_id}/draft/overview/adopt', json={
                 'image_id': result['overview_artifact_id'], 'title': 'Edited caption', 'revision': final._revision(self.first, self.project_id)})
             self.assertEqual(200, response.status_code, response.text)
+            from review_writer_core.workflow.artifacts import FINAL_OVERVIEW_TEXT
+            saved, _ = final._read_json(self.first, self.project_id, FINAL_OVERVIEW_TEXT)
+            self.assertEqual(['Synthesis'], saved['labels'])
             self.assertIn('Edited caption', draft.get(self.first, self.project_id)['manuscript_preview_md'])
             self.assertTrue(final.overview_history(self.first, self.project_id)[0]['selected'])
             self.assertEqual(1, len(final.overview_history(self.first, self.project_id)))

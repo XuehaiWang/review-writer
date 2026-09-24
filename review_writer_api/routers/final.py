@@ -16,6 +16,8 @@ from review_writer_api.workflow_schemas import (
     FinalFrontMatterRequest,
     FinalOverviewTextRequest,
     FinalPdfRequest,
+    FinalBibliographyCorrectionRequest,
+    FinalFigureReviewRequest,
 )
 
 
@@ -23,6 +25,7 @@ def build_final_router(
     principal_dependency: Callable[..., Principal],
     final_service: FinalService,
     job_service: JobService,
+    library_service=None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/projects/{project_id}/final", tags=["final"])
     @router.get("")
@@ -31,6 +34,59 @@ def build_final_router(
         principal: Principal = Depends(principal_dependency),
     ) -> dict:
         return final_service.get(principal, project_id)
+
+    @router.get("/figures/{figure_id}/review")
+    def get_figure_review(project_id: str, figure_id: str, principal: Principal = Depends(principal_dependency)):
+        return final_service.figure_review(principal, project_id, figure_id)
+
+    @router.put("/figures/{figure_id}/review")
+    def save_figure_review(project_id: str, figure_id: str, payload: FinalFigureReviewRequest,
+                          principal: Principal = Depends(principal_dependency)):
+        return final_service.save_figure_review(principal, project_id, figure_id, payload)
+
+    def reference_record(principal, project_id, paper_id):
+        from review_writer_api.errors import WorkflowNotFound
+        current = final_service.get(principal, project_id)
+        paper_ids = (current.get("release") or {}).get("source_paper_ids") or []
+        if library_service is None or paper_id not in paper_ids:
+            raise WorkflowNotFound("该论文不在当前终稿的引用文献中。")
+        return library_service.get(principal, paper_id)
+
+    @router.get("/references/{paper_id}/bibliography")
+    def get_reference(project_id: str, paper_id: str, principal: Principal = Depends(principal_dependency)):
+        record = reference_record(principal, project_id, paper_id)
+        return {"metadata": record.metadata, "metadata_artifact_id": record.artifact_ids.get("metadata", "")}
+
+    @router.put("/references/{paper_id}/bibliography")
+    def correct_reference(project_id: str, paper_id: str, payload: FinalBibliographyCorrectionRequest,
+                          principal: Principal = Depends(principal_dependency)):
+        from review_writer_core.bibliography_audit import refresh_edited_bibliography, bibliography_field_readiness
+        from review_writer_api.security import Permission
+        principal.require(Permission.PROJECT_WRITE)
+        record = reference_record(principal, project_id, paper_id)
+        metadata = dict(record.metadata)
+        for field, value in payload.fields.items():
+            metadata[field] = {"value": value, "human_checked": True, "confidence": 1,
+                               "source": "human_review", "evidence": {"location": payload.source_location}}
+        audit = refresh_edited_bibliography(record.metadata, metadata, record.bibliography_audit)
+        # Resolve only fields explicitly checked here, never unrelated conflicts.
+        audit["conflicts"] = [
+            {**row, "status": "resolved", "resolved_value": payload.fields[row["field"]]} if isinstance(row, dict) and row.get("field") in payload.fields else row
+            for row in audit.get("conflicts") or []
+        ]
+        audit["unresolved_conflicts"] = [row for row in audit.get("unresolved_conflicts") or []
+                                          if not isinstance(row, dict) or row.get("field") not in payload.fields]
+        audit["field_readiness"] = bibliography_field_readiness(metadata, audit)
+        audit["automatic_resolution_missing_fields"] = list(dict.fromkeys(
+            audit["field_readiness"]["missing_fields"] + audit["field_readiness"]["polluted_fields"]))
+        audit["manual_evidence"] = {"evidence_type": "user_confirmation", "location": payload.source_location}
+        if audit["field_readiness"]["ready"]:
+            audit.update(manual_review_status="resolved", resolved_by="human",
+                         resolved_fields=list(payload.fields))
+        saved = library_service._persist_metadata_and_audit(principal, paper_id, metadata,
+            bibliography_audit=audit, expected_metadata_artifact_id=payload.metadata_artifact_id)
+        return {"saved": True, "metadata_artifact_id": saved.artifact_ids.get("metadata", ""),
+                "requires_final_sync": True, "authors_changed": "authors" in payload.fields}
 
     def submit(
         principal: Principal,

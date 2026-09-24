@@ -34,7 +34,7 @@ export function SectionStageActions({
   const detail = active
     ? text(`生成中 ${progress}/${total}`, `Generating ${progress}/${total}`)
     : current && resumable
-      ? text(`已保留 ${progress}/${total} 个章节；继续时只处理失败章节及依赖它们的总结。`, `${progress}/${total} sections are retained; continuation processes only failed sections and their dependent conclusion.`)
+      ? text(`已保留 ${progress}/${total} 个章节；继续时只处理未完成章节。`, `${progress}/${total} sections are retained; continuation processes only unfinished sections.`)
       : current
       ? text("可以确认当前版本进入图像处理，也可以使用当前 Blueprint 重新生成全部章节。", "Confirm the current version for figure processing, or regenerate every section from the current blueprint.")
       : resumable

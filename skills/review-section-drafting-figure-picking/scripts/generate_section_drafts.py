@@ -13,6 +13,8 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from threading import RLock
+from copy import deepcopy
 from typing import Any
 
 
@@ -57,6 +59,7 @@ from review_writer_core.writing_contracts import (  # noqa: E402
     section_constraint_prompt_block,
 )
 from review_writer_core.model_gateway_client import (  # noqa: E402
+    GatewayRequestError,
     call_json_model as call_gateway_json,
     gateway_configured,
     parse_json_object_text as _parse_json_object_text,
@@ -74,10 +77,12 @@ from review_writer_core.claim_contracts import (  # noqa: E402
 )
 from review_writer_core.draft_bibliography import format_citation_group  # noqa: E402
 from review_writer_core.paragraph_citations import render_paragraph_citations  # noqa: E402
+from review_writer_core.stages.sections.authoring import paragraph_parts
 from review_writer_core.section_narrative_contracts import (  # noqa: E402
     CANONICAL_PARAGRAPH_ROLES,
     canonical_argument_role,
     derive_narrative_diagnostics,
+    resolve_section_depth_contract,
 )
 from review_writer_core.stages.sections.rule_packs import (  # noqa: E402
     RULE_PACK_PROMPT_VERSION, load_rule_pack_text,
@@ -88,6 +93,7 @@ from review_writer_core.stages.sections.plan_repair import (  # noqa: E402
     repair_schema,
 )
 from review_writer_core.stages.sections.evidence_resolution import pending_markdown, resolution_record
+from review_writer_core.stages.sections.execution import run_sections, chapter_responsibilities
 from review_writer_core.stages.sections.source_writing import CONTRACT as SOURCE_CONTRACT, AUTHORING_VERSION, write_from_sources, valid_source_claim, passage_eligible
 from review_writer_core.source_attribution import contribution_context
 from review_writer_core.publication_tables import paper_presentation_outcomes
@@ -121,6 +127,7 @@ def write_generation_progress(
     current_heading: str = "",
     completed_sections: list[dict[str, Any]] | None = None,
     failed_sections: list[dict[str, Any]] | None = None,
+    active_sections: list[dict[str, Any]] | None = None,
     evidence_hit_count: int = 0,
     evidence_paper_count: int = 0,
 ) -> None:
@@ -133,6 +140,7 @@ def write_generation_progress(
         "phase": str(phase),
         "current": max(0, int(current)),
         "total": max(0, int(total)),
+        "active_sections": list(active_sections or []),
         "current_section_id": str(current_section_id or ""),
         "current_heading": str(current_heading or ""),
         "completed_sections": list(completed_sections or []),
@@ -1245,7 +1253,7 @@ def normalize_section_plan(
     if not paragraph_plans and strict:
         raise RuntimeError(f"The academic planner produced no supported paragraph for {section_id}.")
     # Filtering unsupported paragraphs must not turn a surviving experiment
-    # into an introduction/conclusion. Missing responsibilities are repaired
+    # into an introduction. Missing responsibilities are repaired
     # explicitly; position alone is not proof of a paragraph's function.
     # Repairs append new paragraphs to preserve all existing claim IDs. Order
     # their presentation only after assigning IDs, without rewriting content.
@@ -1299,84 +1307,6 @@ def normalize_section_plan(
         depth_contract,
     )
     return synthesis_section, writing_section
-
-
-def prior_body_synthesis_context(
-    section_specs: dict[str, dict[str, Any]],
-    synthesis_sections: list[dict[str, Any]],
-    writing_sections: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], set[str]]:
-    """Build the evidence-bound body conclusions consumed by a conclusion.
-
-    This deliberately transfers validated plans and evidence identities rather
-    than draft prose, preventing the conclusion from inventing a second,
-    disconnected interpretation of the corpus.
-    """
-
-    synthesis_by_id = {
-        str(item.get("section_id") or ""): item
-        for item in synthesis_sections
-        if isinstance(item, dict) and str(item.get("section_id") or "")
-    }
-    context: list[dict[str, Any]] = []
-    evidence_keys: set[str] = set()
-    for writing in writing_sections:
-        if not isinstance(writing, dict):
-            continue
-        section_id = str(writing.get("section_id") or "")
-        spec = section_specs.get(section_id) or {}
-        if str(spec.get("section_role") or "body").casefold() != "body":
-            continue
-        synthesis = synthesis_by_id.get(section_id) or {}
-        claims: list[dict[str, Any]] = []
-        for claim in writing.get("claims") or []:
-            if not isinstance(claim, dict):
-                continue
-            refs = [
-                {
-                    "evidence_key": str(ref.get("evidence_key") or ""),
-                    "relationship": str(ref.get("relationship") or "supports"),
-                }
-                for ref in claim.get("evidence_refs") or []
-                if isinstance(ref, dict) and str(ref.get("evidence_key") or "")
-            ]
-            evidence_keys.update(ref["evidence_key"] for ref in refs)
-            claims.append(
-                {
-                    "claim": compact_text(claim.get("claim")),
-                    **argument_projection(claim),
-                    "claim_kind": str(claim.get("claim_kind") or ""),
-                    "epistemic_status": str(claim.get("epistemic_status") or ""),
-                    "support_status": str(claim.get("support_status") or ""),
-                    "citation_group": list(claim.get("citation_group") or []),
-                    "evidence_refs": refs,
-                    "fact_ids": list(claim.get("fact_ids") or []),
-                    "allowed_assertion": compact_text(
-                        claim.get("allowed_assertion")
-                    ),
-                    "assertion_ceiling": str(
-                        claim.get("assertion_ceiling") or "context_only"
-                    ),
-                    "ceiling_explanation": compact_text(
-                        claim.get("ceiling_explanation")
-                    ),
-                    "evidence_ceiling": compact_text(claim.get("evidence_ceiling")),
-                    "coverage": dict(claim.get("coverage") or {}),
-                    "failed_coverage_fields": list(
-                        claim.get("failed_coverage_fields") or []
-                    ),
-                }
-            )
-        context.append(
-            {
-                "section_id": section_id,
-                "title": str(spec.get("title") or section_id),
-                "section_thesis": compact_text(spec.get("section_thesis")),
-                "validated_synthesis_summary": compact_text(synthesis.get("summary")),
-                "validated_claims": claims,
-            }
-        )
-    return context, evidence_keys
 
 
 def validate_and_realize_section(
@@ -1443,7 +1373,9 @@ def validate_and_realize_section(
             claim_plan = claims.get(claim_id)
             if claim_plan is None or claim_plan.get("support_status") == "blocked":
                 raise RuntimeError(f"The section writer referenced an unavailable Claim: {claim_id}.")
-            sentence = compact_text(realization.get("text"), limit=2500)
+            sentence = (" ".join(str(realization.get("text") or "").split())
+                        if writing_section.get("evidence_mode") == SOURCE_CONTRACT
+                        else compact_text(realization.get("text"), limit=2500))
             if not sentence:
                 raise RuntimeError(f"The section writer returned an empty Claim realization: {claim_id}.")
             cited = [
@@ -1596,7 +1528,8 @@ def validate_and_realize_section(
                 }
             )
             all_realized_claims.add(claim_id)
-        paragraph_text = render_paragraph_citations(realized_parts)
+        paragraph_text = render_paragraph_citations(paragraph_parts(paragraph_plan,
+            dict(zip(expected_claims, realized_parts))))
         paragraphs.append(
             {
                 "paragraph_id": paragraph_id,
@@ -1719,9 +1652,15 @@ def main() -> int:
     parser.add_argument("--base-url", default="")
     parser.add_argument("--model", default="")
     parser.add_argument("--wire-api", default="")
+    parser.add_argument("--audit-mode", choices=("full", "selective"), default=None)
+    parser.add_argument("--section-concurrency", "--max-new-sections", dest="section_concurrency", type=int, default=0)
     args = parser.parse_args()
     root = Path(args.review_root).resolve()
     dotenv = load_dotenv(root)
+    # Full review remains the deployment baseline until isolated quality acceptance.
+    audit_mode = args.audit_mode or os.environ.get("REVIEW_SECTION_AUDIT_MODE") or dotenv.get("REVIEW_SECTION_AUDIT_MODE") or "full"
+    if audit_mode not in {"full", "selective"}:
+        raise SystemExit("REVIEW_SECTION_AUDIT_MODE must be full or selective.")
     base_url = (
         args.base_url
         or os.environ.get("REVIEW_WRITING_BASE_URL")
@@ -1749,7 +1688,9 @@ def main() -> int:
     stage = project / "02_section_drafting"
     matrix = read_json(project / "01_matrix_outline" / "literature_matrix.json")
     blueprint = read_json(project / "01_matrix_outline" / "section_blueprint.json")
-    tasks = read_json(stage / "section_tasks.json")
+    # Compatibility only: standalone conclusions are composed in Draft.
+    tasks = [t for t in read_json(stage / "section_tasks.json")
+             if str(t.get("section_role") or "").casefold() != "conclusion"]
     evidence_package_path = stage / "section_evidence.json"
     evidence_package = (
         read_json(evidence_package_path)
@@ -1774,13 +1715,13 @@ def main() -> int:
     synthesis_rules = load_cross_study_synthesis_skill()
     section_signatures = section_input_fingerprints(tasks, evidence_sections, matrix, blueprint, {
         "model": model, "base_url": base_url, "wire_api": wire_api,
-        "authoring_version": AUTHORING_VERSION, "fact_routing_contract": FACT_ROUTING_CONTRACT,
+        "authoring_version": AUTHORING_VERSION, "audit_mode": audit_mode, "fact_routing_contract": FACT_ROUTING_CONTRACT,
         "rules": rules, "synthesis_rules": synthesis_rules, "outline": selected_outline})
     generation_fingerprint = hashlib.sha256(json.dumps({
         "contract": "section-authoring/3", "fact_routing_contract": FACT_ROUTING_CONTRACT,
         "rule_pack_prompt_version": RULE_PACK_PROMPT_VERSION,
         "source_writing_contract": SOURCE_CONTRACT,
-        "authoring_version": AUTHORING_VERSION,
+        "authoring_version": AUTHORING_VERSION, "audit_mode": audit_mode,
         "tasks": tasks, "evidence": evidence_package,
         "matrix": matrix, "blueprint": blueprint, "model": model,
     }, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -1801,10 +1742,32 @@ def main() -> int:
     rejected_checkpoints = {**input_rejections, **rejected_checkpoints}
     for sid, entry in checkpoint_entries.items():
         entry["input_fingerprint"] = section_signatures[sid]
-    # Replace the resume snapshot immediately, including when the next call fails.
-    write_section_checkpoint(stage, {"schema_version": 1, "project_id": args.project_id,
-        "task_ids": task_ids, "generation_fingerprint": generation_fingerprint,
-        "entries": checkpoint_entries, "rejected_entries": rejected_checkpoints})
+    authoring_states = {sid: value for sid, value in (checkpoint.get("authoring_states") or {}).items()
+        if checkpoint.get("project_id") == args.project_id and isinstance(value, dict)
+        and value.get("section_input") == section_signatures.get(sid)}
+    failed_progress: list[dict[str, Any]] = [
+        dict(row) for row in checkpoint.get("failed_sections") or []
+        if isinstance(row, dict) and str(row.get("section_id") or "") in task_ids
+    ]
+    # An unbounded CLI invocation is a new explicit attempt. Bounded Worker
+    # leases retain failures until the coordinator decides whether to retry.
+    if not args.section_concurrency:
+        failed_progress = []
+    checkpoint_lock = RLock()
+    def persist_checkpoint():
+        with checkpoint_lock:
+            write_section_checkpoint(stage, {"schema_version": 1, "project_id": args.project_id,
+                "task_ids": task_ids, "generation_fingerprint": generation_fingerprint,
+                "entries": checkpoint_entries, "rejected_entries": rejected_checkpoints,
+                "authoring_states": authoring_states,
+                "failed_sections": failed_progress,
+            })
+    def persist_authoring(sid, value):
+        with checkpoint_lock:
+            authoring_states[sid] = {"section_input": section_signatures[sid], "state": value}
+            persist_checkpoint()
+    # Persist partial drafting/review state in the same checkpoint, not another store.
+    persist_checkpoint()
     completed_progress: list[dict[str, Any]] = [
         {
             "section_id": section_id,
@@ -1888,71 +1851,22 @@ def main() -> int:
         if isinstance(checkpoint_entries.get(section_id), dict)
         and isinstance(checkpoint_entries[section_id].get("writing"), dict)
     ]
-    failed_progress: list[dict[str, Any]] = []
 
-    def record_section_failure(section_id: str, heading: str, error: str, *, evidence_failure=False) -> None:
-        if evidence_failure:
-            entry = recover_evidence_section(task, section_evidence, evidence, citation_map, error,
-                [])
-            entry["input_fingerprint"] = section_signatures[section_id]
-            output_sections.append(entry["output"]); synthesis_sections.append(entry["synthesis"]); writing_sections.append(entry["writing"])
-            checkpoint_entries[section_id] = entry
-            (sections_dir / f"{section_id}.md").write_text(entry["output"]["draft_md"], encoding="utf-8")
-            write_section_checkpoint(stage, {"schema_version": 1, "project_id": args.project_id,
-                "task_ids": task_ids, "generation_fingerprint": generation_fingerprint, "entries": checkpoint_entries})
-            completed_progress.append({"section_id": section_id, "heading": heading,
-                "generation_mode": entry["output"]["generation_mode"], "section_readiness": entry["output"]["section_readiness"]})
-            write_generation_progress(stage, current=len(completed_progress), total=progress_total,
-                phase="continuing_with_evidence_notice", completed_sections=completed_progress, failed_sections=failed_progress)
-            return
-        failed_progress.append(
-            {
-                "section_id": section_id,
-                "heading": heading,
-                "error": str(error)[:2000],
-            }
-        )
-        write_generation_progress(
-            stage,
-            current=len(completed_progress) + len(failed_progress),
-            total=progress_total,
-            phase="continuing_after_failure",
-            current_section_id=section_id,
-            current_heading=heading,
-            completed_sections=completed_progress,
-            failed_sections=failed_progress,
-        )
-    for task in tasks:
-        section_id = str(task.get("section_id"))
-        if section_id in checkpoint_entries:
-            continue
-        write_generation_progress(
-            stage,
-            current=len(completed_progress),
-            total=progress_total,
-            phase="planning_claims",
-            current_section_id=section_id,
-            current_heading=str(task.get("heading") or section_id),
-            completed_sections=completed_progress,
-        )
-        role = str(task.get("section_role") or "body").strip().casefold()
-        if role == "conclusion" and any(
-            str(item.get("section_role") or "body").casefold() == "body"
-            and item.get("section_id") in {row["section_id"] for row in failed_progress}
-            for item in tasks
-        ):
-            record_section_failure(section_id, str(task.get("heading") or section_id),
-                                   "Conclusion deferred until incomplete body sections are repaired.")
-            continue
-        body_synthesis_context: list[dict[str, Any]] = []
-        body_synthesis_evidence_keys: set[str] = set()
-        if role == "conclusion":
-            body_synthesis_context, body_synthesis_evidence_keys = (
-                prior_body_synthesis_context(
-                    section_specs, synthesis_sections,
-                    sorted(writing_sections, key=lambda row: task_order[row["section_id"]]),
-                )
+    responsibilities = chapter_responsibilities(tasks)
+
+    def generate(task, emit):
+        def failure(section_id, heading, error, *, evidence_failure=False):
+            if evidence_failure:
+                entry = recover_evidence_section(task, section_evidence, evidence, citation_map, error, [])
+                entry["input_fingerprint"] = section_signatures[section_id]
+                return entry
+            gateway_details = error.details if isinstance(error, GatewayRequestError) else {}
+            rate_limited = isinstance(error, GatewayRequestError) and (
+                error.status_code == 429 or gateway_details.get("provider_status") == 429
             )
+            return {"error": str(error)[:2000], "retryable_rate_limit": rate_limited}
+        section_id = str(task.get("section_id"))
+        role = str(task.get("section_role") or "body").strip().casefold()
         assigned_primary = list(
             dict.fromkeys(
                 str(pid)
@@ -1965,15 +1879,6 @@ def main() -> int:
                 str(pid)
                 for pid in task.get("supporting_papers", [])
                 if str(pid) in rows and str(pid) not in assigned_primary
-            )
-        )
-        contextual = list(
-            dict.fromkeys(
-                str(pid)
-                for pid in task.get("context_papers", [])
-                if str(pid) in rows
-                and str(pid) not in assigned_primary
-                and str(pid) not in supporting
             )
         )
         allowed = list(
@@ -1989,29 +1894,6 @@ def main() -> int:
             for item in section_evidence.get("scientific_claim_states") or []
             if isinstance(item, dict)
         ]
-        declared_scientific_claims = [
-            dict(item)
-            for item in task.get("scientific_claims") or []
-            if isinstance(item, dict)
-        ]
-        has_blueprint_claim_contract = (
-            role == "body"
-            and int(blueprint.get("schema_version") or 0)
-            >= FACT_GROUNDED_BLUEPRINT_SCHEMA_VERSION
-        )
-        supported_claim_ids = supported_scientific_claim_ids(
-            task, section_evidence
-        )
-        supported_scientific_claims = [
-            claim
-            for claim in declared_scientific_claims
-            if str(claim.get("claim_id") or "") in supported_claim_ids
-        ]
-        writing_requirements = [
-            dict(item)
-            for item in task.get("writing_requirements") or []
-            if isinstance(item, dict)
-        ]
         primary = list(
             dict.fromkeys(
                 str(pid)
@@ -2019,11 +1901,6 @@ def main() -> int:
                 if str(pid) in assigned_primary
             )
         )
-        context_only_primary = [
-            str(pid)
-            for pid in section_evidence.get("context_only_primary_papers") or []
-            if str(pid) in assigned_primary
-        ]
         unresolved_primary = [
             str(pid)
             for pid in section_evidence.get("unresolved_primary_papers") or []
@@ -2038,35 +1915,6 @@ def main() -> int:
                 and str(item.get("paper_id") or "") in allowed
                 and str(item.get("chunk_id") or "")
             ]
-            if role == "conclusion" and body_synthesis_evidence_keys:
-                evidence_by_key = {
-                    str(item.get("evidence_key") or ""): item
-                    for item in evidence
-                    if isinstance(item, dict)
-                    and str(item.get("evidence_key") or "")
-                }
-                for body_section_id, body_evidence in evidence_sections.items():
-                    if (
-                        str(
-                            (section_specs.get(str(body_section_id)) or {}).get(
-                                "section_role"
-                            )
-                            or "body"
-                        ).casefold()
-                        != "body"
-                    ):
-                        continue
-                    for item in body_evidence.get("hits") or []:
-                        if not isinstance(item, dict):
-                            continue
-                        key = str(item.get("evidence_key") or "")
-                        if (
-                            key in body_synthesis_evidence_keys
-                            and key not in evidence_by_key
-                            and str(item.get("paper_id") or "") in allowed
-                        ):
-                            evidence.append(item)
-                            evidence_by_key[key] = item
         elif retrieval_mode == "abstract_only":
             evidence = [
                 item
@@ -2079,14 +1927,6 @@ def main() -> int:
             evidence = [paper_evidence(root, rows, paper_id) for paper_id in allowed]
         else:
             evidence = []
-        if role == "conclusion" and body_synthesis_evidence_keys:
-            # Inherit only passages used by completed body claims, even if the
-            # conclusion's own broad retrieval query has no matches.
-            inherited = {str(row.get("evidence_key")): row
-                for package in evidence_sections.values() for row in package.get("hits") or []
-                if row.get("evidence_key") in body_synthesis_evidence_keys and row.get("paper_id") in allowed}
-            evidence = list(inherited.values())
-            retrieval_mode = "lexical" if evidence else retrieval_mode
         has_evidence_text = any(
             str(
                 item.get("content")
@@ -2105,32 +1945,13 @@ def main() -> int:
                 if retrieval_mode in {"lexical", "insufficient_evidence"}
                 else f"No usable MinerU Markdown or matrix evidence for {section_id}."
             )
-            record_section_failure(
+            return failure(
                 section_id, str(task.get("heading") or section_id), message,
                 evidence_failure=(retrieval_mode != "unsupported_retrieval_mode"
                                   and section_evidence.get("source_lookup_complete", False))
             )
-            continue
-        evidence_paper_count = len(
-            {
-                str(item.get("paper_id") or "")
-                for item in evidence
-                if str(item.get("paper_id") or "")
-            }
-        )
-        write_generation_progress(
-            stage,
-            current=len(completed_progress),
-            total=progress_total,
-            phase="generating",
-            current_section_id=section_id,
-            current_heading=str(task.get("heading") or section_id),
-            completed_sections=completed_progress,
-            evidence_hit_count=len(evidence),
-            evidence_paper_count=evidence_paper_count,
-        )
         spec = section_specs.get(section_id, {})
-        depth_contract = dict(spec.get("depth_contract") or task.get("depth_contract") or {})
+        depth_contract = resolve_section_depth_contract({**spec, "depth_contract": task.get("depth_contract") or spec.get("depth_contract") or {}})
         # Keep the compact, source-bound fact bindings beside their original
         # passages. ``write_from_sources`` exposes only the safe fact fields;
         # the full Evidence Package remains the authoritative registry.
@@ -2142,10 +1963,13 @@ def main() -> int:
         generation_mode = "standard"
         try:
             def source_call(prompt, schema, label):
+                emit("drafting" if label == "section-source-writing" else "reviewing")
                 return call_structured_llm(prompt, schema, api_key, base_url, model, wire_api,
                                            label=label, schema_name=label.replace("-", "_"))
             writing_section, generated_draft, source_review = write_from_sources(
-                section_id=section_id, task=task, evidence=evidence, prompt_evidence=plan_evidence, domain_terms=domain_terms,
+                section_id=section_id, task=task, evidence=evidence, prompt_evidence=plan_evidence, domain_terms=domain_terms, responsibilities=responsibilities,
+                audit_mode=audit_mode, resume_state=deepcopy(authoring_states.get(section_id, {}).get("state")),
+                save_state=lambda value: persist_authoring(section_id, value),
                 context=("Topic: " + str(blueprint.get("review_topic") or project.name) + "\n"
                     + writing_scope_prompt_block(writing_scope_contract, stage="drafting") + "\n"
                     + section_constraint_prompt_block(task) + "\nConfirmed outline:\n" + selected_outline
@@ -2153,16 +1977,17 @@ def main() -> int:
                     + "\nPaper contribution guides (navigation, not verified conclusions):\n"
                     + json.dumps({pid: contribution_context(rows.get(pid, {}).get("paper_analysis"), limit=300)
                                   for pid in task.get("allowed_papers") or []}, ensure_ascii=False)
-                    + ("\nCompleted body claims (synthesize only these):\n" + json.dumps(body_synthesis_context, ensure_ascii=False)
-                       if role == "conclusion" else "")), call=source_call)
+                    + "\nCompleted dependencies (context, not additional source evidence):\n" + json.dumps(task.get("dependency_context", []), ensure_ascii=False)), call=source_call)
+            if source_review.get("unresolved"):
+                return failure(section_id, str(task.get("heading") or section_id),
+                    "Source checking is incomplete. Draft and check state were preserved; retry this section after reviewing its evidence.")
             if not writing_section["paragraphs"]:
                 malformed = any(row.get("reason") in {
                     "invalid_paragraph", "invalid_claim", "missing_or_invalid_source_span", "invalid_result_context"
                 } for row in source_review.get("omitted") or [])
-                record_section_failure(section_id, str(task.get("heading") or section_id),
+                return failure(section_id, str(task.get("heading") or section_id),
                     "Source response needs repair." if malformed else
                     "No source-supported prose remained after checking the actual claims.", evidence_failure=not malformed)
-                continue
             overview, paragraphs, validations, reviews = validate_and_realize_section(
                 section_id=section_id, generated=generated_draft, writing_section=writing_section,
                 evidence=evidence, citation_map=citation_map, domain_terms=domain_terms)
@@ -2173,7 +1998,7 @@ def main() -> int:
                 "comparison_table": {"cells": [record for c in writing_section["claims"] for record in c.get("result_context") or []]},
                 "prompt_evidence_budget": plan_evidence_budget}
             missing = missing_primary_papers(primary, paragraphs, require_evidence=retrieval_mode == "lexical", source_evidence=evidence)
-            if source_review["omitted"] or missing or unresolved_primary:
+            if source_review["omitted"] or source_review.get("unresolved") or missing or unresolved_primary:
                 generation_mode = "limited_evidence"
                 fallback_reason = "Unsupported statements were omitted; unanswered questions remain pending."
             elif source_review["narrowed"]:
@@ -2181,20 +2006,8 @@ def main() -> int:
             validations.append({"rule_id": "section.used_claim_source_check", "status": "pass_with_warning"
                 if generation_mode != "standard" else "pass", **source_review})
         except (RuntimeError, urllib.error.HTTPError, urllib.error.URLError) as exc:
-            record_section_failure(section_id, str(task.get("heading") or section_id),
-                str(exc))
-            continue
-        write_generation_progress(
-            stage,
-            current=len(completed_progress),
-            total=progress_total,
-            phase="reviewing",
-            current_section_id=section_id,
-            current_heading=str(task.get("heading") or section_id),
-            completed_sections=completed_progress,
-            evidence_hit_count=len(evidence),
-            evidence_paper_count=evidence_paper_count,
-        )
+            return failure(section_id, str(task.get("heading") or section_id),
+                exc)
         markdown = [f"## {task.get('heading')}", "", overview, ""]
         for item in paragraphs:
             paragraph_id = str(item["paragraph_id"])
@@ -2206,7 +2019,6 @@ def main() -> int:
                 "",
             ])
         section_text = make_xml_compatible("\n".join(markdown).strip() + "\n")[0]
-        (sections_dir / f"{section_id}.md").write_text(section_text, encoding="utf-8")
         actual_word_count = manuscript_word_count(
             " ".join(
                 [overview, *(str(item.get("text") or "") for item in paragraphs)]
@@ -2218,7 +2030,7 @@ def main() -> int:
             or 0
         )
         depth_sufficient = bool(
-            not minimum_word_count or actual_word_count >= minimum_word_count
+            not minimum_word_count or actual_word_count >= minimum_word_count * 0.9
         )
         planning_repair = (
             dict(synthesis_section.get("planning_contract_repair") or {})
@@ -2251,12 +2063,9 @@ def main() -> int:
                 depth_contract.get("target_paragraph_count") or 0
             ),
         }
-        synthesis_sections.append(synthesis_section)
-        writing_sections.append(writing_section)
         presentation = paper_presentation_outcomes(task, {"section_id": section_id,
             "section_role": role, "primary_papers": primary, "paragraphs": paragraphs}, rows, citation_map)
-        output_sections.append(
-            {
+        output = {
                 "section_id": section_id,
                 "heading": task.get("heading"),
                 "section_role": role,
@@ -2279,47 +2088,53 @@ def main() -> int:
                 "repair_candidates": [],
                 "planning_proposals": [],
             }
-        )
         if generation_mode == "limited_evidence":
             record = resolution_record(section_evidence, pending=False, reason=fallback_reason)
-            output_sections[-1]["evidence_resolution"] = record
-            output_sections[-1]["section_readiness"] = {"status": "limited_evidence"}
+            output["evidence_resolution"] = record
+            output["section_readiness"] = {"status": "limited_evidence"}
             synthesis_section["evidence_resolution"] = record
-        checkpoint_entries[section_id] = {
-            "input_fingerprint": section_signatures[section_id],
-            "heading": str(task.get("heading") or section_id),
-            "output": output_sections[-1],
-            "synthesis": synthesis_section,
-            "writing": writing_section,
-        }
-        write_section_checkpoint(
-            stage,
-            {
-                "schema_version": 1,
-                "project_id": args.project_id,
-                "task_ids": task_ids,
-                "generation_fingerprint": generation_fingerprint,
-                "entries": checkpoint_entries,
-            },
-        )
-        completed_progress.append(
-            {
-                "section_id": section_id,
-                "heading": str(task.get("heading") or section_id),
-                "generation_mode": generation_mode,
-                "section_readiness": section_readiness,
-            }
-        )
-        write_generation_progress(
-            stage,
-            current=len(completed_progress) + len(failed_progress),
-            total=progress_total,
-            phase="planning_claims"
-            if len(completed_progress) + len(failed_progress) < progress_total
-            else "finalizing",
-            completed_sections=completed_progress,
-            failed_sections=failed_progress,
-        )
+        return {"input_fingerprint": section_signatures[section_id],
+                "heading": str(task.get("heading") or section_id), "output": output,
+                "synthesis": synthesis_section, "writing": writing_section}
+
+    active = {}
+    def observe(task, phase):
+        sid = task["section_id"]
+        active[sid] = {"section_id": sid, "heading": task.get("heading", sid), "phase": phase}
+        progress()
+
+    def progress():
+        write_generation_progress(stage, current=len(completed_progress), total=progress_total,
+            phase="generating" if active else "finalizing", active_sections=list(active.values()),
+            completed_sections=completed_progress, failed_sections=failed_progress)
+
+    def save(task, entry):
+        sid = task["section_id"]
+        active.pop(sid, None)
+        if "error" in entry:
+            failed_progress.append({"section_id": sid, "heading": task.get("heading", sid),
+                                    "error": entry["error"],
+                                    "retryable_rate_limit": bool(entry.get("retryable_rate_limit"))})
+            persist_checkpoint()
+        else:
+            with checkpoint_lock:
+                checkpoint_entries[sid] = entry
+                authoring_states.pop(sid, None)
+                persist_checkpoint()
+            output_sections.append(entry["output"])
+            synthesis_sections.append(entry["synthesis"])
+            writing_sections.append(entry["writing"])
+            (sections_dir / f"{sid}.md").write_text(entry["output"]["draft_md"], encoding="utf-8")
+            completed_progress.append({"section_id": sid, "heading": entry["heading"],
+                "generation_mode": entry["output"].get("generation_mode"),
+                "section_readiness": entry["output"].get("section_readiness")})
+        progress()
+
+    run_sections(
+        tasks, generate, observe, save, completed=checkpoint_entries,
+        deferred={row["section_id"] for row in failed_progress},
+        concurrency=args.section_concurrency or 2,
+    )
     if failed_progress:
         write_generation_progress(
             stage,

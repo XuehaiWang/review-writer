@@ -1,3 +1,4 @@
+import { LocalizedError } from "./LocalizedError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -60,11 +61,11 @@ export function ProjectSelector({ label }: { label?: string }) {
       <button className="button button-danger project-delete" title={text("永久删除当前项目", "Permanently delete the current project")} type="button" disabled={!selected || deleteProject.isPending} onClick={confirmDelete}>
         {deleteProject.isPending ? text("删除中…", "Deleting…") : text("删除项目", "Delete project")}
       </button>
-      {deleteProject.error ? <span className="message message-error">{deleteProject.error.message}</span> : null}
+      {deleteProject.error ? <span className="message message-error"><LocalizedError error={deleteProject.error} /></span> : null}
       <DeleteProjectDialog
         project={deleteTarget}
         deleting={deleteProject.isPending}
-        error={deleteProject.error?.message}
+        error={deleteProject.error ? <LocalizedError error={deleteProject.error} /> : undefined}
         onCancel={() => {
           if (!deleteProject.isPending) setDeleteTarget(null);
         }}

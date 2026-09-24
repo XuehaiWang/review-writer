@@ -221,6 +221,45 @@ class PublicationMetadataTests(unittest.TestCase):
             self.assertFalse(result["model_attempted"])
             self.assertFalse(result["model_needed"])
 
+    def test_ambiguous_date_model_timeout_falls_back_before_task_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            markdown = root / "paper.md"
+            pdf = root / "paper.pdf"
+            output = root / "result.json"
+            markdown.write_text("# Paper", encoding="utf-8")
+            pdf.write_bytes(b"%PDF-test")
+            args = SimpleNamespace(
+                markdown=markdown,
+                pdf=pdf,
+                filename="paper.pdf",
+                output=output,
+            )
+            deterministic = {"status": "insufficient", "publication_year": None}
+            with (
+                patch.object(scientific_tasks, "gateway_configured", return_value=True),
+                patch.object(scientific_tasks, "read_pdf_first_page_text", return_value=""),
+                patch.object(
+                    scientific_tasks,
+                    "resolve_local_publication_extraction",
+                    return_value=deterministic,
+                ),
+                patch.object(
+                    scientific_tasks,
+                    "call_json_model",
+                    side_effect=TimeoutError("slow provider"),
+                ) as model_call,
+            ):
+                scientific_tasks.publication_date_extract(args)
+
+            self.assertEqual(
+                scientific_tasks.BIBLIOGRAPHY_MODEL_TIMEOUT_SECONDS,
+                model_call.call_args.kwargs["timeout_seconds"],
+            )
+            self.assertFalse(model_call.call_args.kwargs["recover_on_timeout"])
+            result = json.loads(output.read_text(encoding="utf-8"))
+            self.assertTrue(result["model_attempted"])
+
 
 if __name__ == "__main__":
     unittest.main()

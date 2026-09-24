@@ -1,3 +1,4 @@
+import { LocalizedError } from "../../components/LocalizedError";
 import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
@@ -185,7 +186,7 @@ export function AuthPage({ config }: { config: AuthConfig }) {
 
           {mode === "forgot" || mode === "reset" ? <button type="button" className="button button-quiet button-block auth-back" onClick={() => switchMode("login")}>{text("返回登录", "Back to sign in")}</button> : null}
           {notice ? <p className="message message-success" role="status">{notice}</p> : null}
-          {authentication.error || requestRegistrationCode.error || requestReset.error || completeReset.error ? <p className="message message-error" role="alert">{(authentication.error || requestRegistrationCode.error || requestReset.error || completeReset.error)?.message}</p> : null}
+          {authentication.error || requestRegistrationCode.error || requestReset.error || completeReset.error ? <p className="message message-error" role="alert"><LocalizedError error={(authentication.error || requestRegistrationCode.error || requestReset.error || completeReset.error)} /></p> : null}
           <p className="fine-print">{text("登录与重置令牌使用安全Cookie或单向哈希；服务器不会保存可读取的原密码。", "Sign-in and reset tokens use secure cookies or one-way hashes; the server never stores readable passwords.")}</p>
         </section>
       </main>

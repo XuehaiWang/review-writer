@@ -15,9 +15,11 @@ type CompletedSection = {
 type FailedSection = CompletedSection & { error?: string };
 
 type SectionProgressResult = {
+  drafted_section_ids?: string[];
   phase?: string;
   current_section_id?: string;
   current_heading?: string;
+  active_sections?: Array<{ section_id: string; heading: string; phase: string }>;
   completed_sections?: CompletedSection[];
   failed_sections?: FailedSection[];
   evidence_hit_count?: number;
@@ -38,6 +40,7 @@ export function SectionJobProgress({ job }: { job: Job }) {
   const current = Math.max(0, Math.min(Number(job.progress_current || 0), total || Number.MAX_SAFE_INTEGER));
   const percentage = total > 0 ? Math.round((current / total) * 100) : undefined;
   const live = progressResult(job);
+  const draftedCount = Math.min(total, new Set(live.drafted_section_ids || []).size);
   const completed = Array.isArray(live.completed_sections) ? live.completed_sections : [];
   const failed = Array.isArray(live.failed_sections) ? live.failed_sections : [];
   const checkpoint = job.result?.section_checkpoint as { entries?: Record<string, { output?: { draft_md?: unknown } }> } | undefined;
@@ -53,6 +56,8 @@ export function SectionJobProgress({ job }: { job: Job }) {
   const fallbackCount = completed.filter((section) => section.generation_mode === "safe_evidence_fallback").length;
   const evidenceNoticeCount = completed.filter((section) => section.generation_mode === "pending_evidence" || section.generation_mode === "limited_evidence").length;
   const active = ["queued", "running", "cancel_requested"].includes(job.status);
+  const elapsedSeconds = job.started_at && job.updated_at
+    ? Math.max(0, Math.floor((Date.parse(job.updated_at) - Date.parse(job.started_at)) / 1000)) : 0;
   const readinessLabel = (section: CompletedSection) => {
     const readiness = typeof section.section_readiness === "string"
       ? section.section_readiness
@@ -66,15 +71,28 @@ export function SectionJobProgress({ job }: { job: Job }) {
 
   let title = text("章节任务正在排队", "Section job queued");
   let detail = text("正在等待可用的写作工作线程。", "Waiting for an available writing worker.");
-  if (job.status === "running") {
+  if (job.status === "queued" && job.queue_reason === "model_waiting") {
+    title = text("正在等待模型结果", "Waiting for the model result");
+    detail = text("模型请求已独立处理，章节写作资源已释放；收到结果后会自动继续，已完成内容会保留。",
+      "The model request is running separately. Writing capacity is free; this job resumes automatically when the result arrives, and completed work is retained.");
+  } else if (job.status === "queued" && job.queue_reason === "provider_rate_limit" && job.next_run_at) {
+    title = text("模型限流，稍后自动继续", "Model rate-limited; resuming automatically");
+    detail = text(`已完成的章节会保留，预计 ${new Date(job.next_run_at).toLocaleTimeString()} 后重试受影响章节。`,
+      `Completed sections remain saved. The affected section becomes eligible again at ${new Date(job.next_run_at).toLocaleTimeString()}.`);
+  } else if (job.status === "running") {
     if (failed.length && total > 0 && current >= total) {
       title = text("本轮处理结束，部分章节待修复", "Pass finished; some sections need repair");
-      detail = text(`已保留 ${completed.length}/${total} 章；下次继续未完成章节及依赖它们的总结。`, `${completed.length}/${total} sections retained; resume unfinished sections and their dependent conclusion.`);
+      detail = text(`已保留 ${completed.length}/${total} 章；下次继续未完成章节。`, `${completed.length}/${total} sections retained; resume unfinished sections.`);
     } else if (total > 0 && current >= total) {
       title = completed.some(section => section.generation_mode === "pending_evidence")
         ? text("章节处理完成，部分章节暂不生成", "Sections processed; some have no prose")
         : text("章节正文已全部生成", "All section prose generated");
       detail = text("正在整理章节报告和图像候选。", "Finalizing the report and figure candidates.");
+    } else if (live.active_sections?.length) {
+      title = text(`正在处理 ${live.active_sections.length} 个章节`, `Processing ${live.active_sections.length} sections`);
+      detail = live.active_sections.map(section => `${section.heading} · ${section.phase === "reviewing"
+        ? text("正在核对来源", "Checking sources") : section.phase === "drafting"
+          ? text("正在生成正文", "Writing prose") : text("准备中", "Preparing")}`).join("；");
     } else if (live.current_heading) {
       const phaseTitle: Record<string, string> = {
         planning_claims: text(`正在规划论证：${live.current_heading}`, `Planning claims: ${live.current_heading}`),
@@ -127,6 +145,18 @@ export function SectionJobProgress({ job }: { job: Job }) {
         aria-valuetext={counter}
       ><span style={percentage === undefined ? undefined : { width: `${percentage}%` }} /></div>
       <p>{detail}</p>
+      {active && Number.isFinite(elapsedSeconds) && elapsedSeconds > 0 ? <p>{text(
+        `本次任务已进行 ${Math.floor(elapsedSeconds / 60)} 分 ${elapsedSeconds % 60} 秒；包含模型等待与后处理。`,
+        `Task elapsed ${Math.floor(elapsedSeconds / 60)}m ${elapsedSeconds % 60}s, including model waits and post-processing.`
+      )}</p> : null}
+      {total > 0 && live.drafted_section_ids ? <p>{text(
+        `正文已生成 ${draftedCount}/${total} · 全流程已处理 ${current}/${total}（不代表质量全部达标）`,
+        `Prose generated ${draftedCount}/${total} · processing finished ${current}/${total} (not a quality approval)`
+      )}</p> : null}
+      {job.status === "queued" && job.queue_reason === "model_waiting" && live.active_sections?.length ? <ul>{live.active_sections.map(section => <li key={section.section_id}>
+        {section.heading} · {section.phase === "reviewing" ? text("正文后处理：核验或局部修复中", "Post-writing: checking or local repair")
+          : section.phase === "drafting" ? text("正文生成中", "Generating prose") : text("准备中", "Preparing")}
+      </li>)}</ul> : null}
       {job.status !== "succeeded" && completed.length ? <p>{text(`已保留 ${completed.length} 章的检查点；整批发布前不会替换当前正式版本。`, `${completed.length} section checkpoints retained; the current version is unchanged until the batch is published.`)}</p> : null}
       {completed.length ? <p className="section-progress-summary">{text(`标准生成 ${standardCount} · 自动修复 ${repairedCount} · 安全保底 ${fallbackCount}`, `Standard ${standardCount} · repaired ${repairedCount} · safe fallback ${fallbackCount}`)}{evidenceNoticeCount ? text(` · 证据有限/待补充 ${evidenceNoticeCount}（可继续）`, ` · limited/pending evidence ${evidenceNoticeCount} (can continue)`) : ""}</p> : null}
       {completed.length ? <ol className="section-progress-completed">{completed.map((section, index) => <li key={`${section.section_id || "section"}-${index}`}><span>{section.heading || section.section_id || text(`章节 ${index + 1}`, `Section ${index + 1}`)}</span><small>{[generationLabel(section), readinessLabel(section)].filter(Boolean).join(" · ")}</small></li>)}</ol> : null}

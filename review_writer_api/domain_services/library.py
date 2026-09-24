@@ -9,14 +9,16 @@ import uuid
 import re
 import sys
 import tempfile
+import time
 from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from threading import BoundedSemaphore
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from review_writer_api.billing import BillingService
@@ -41,6 +43,9 @@ from review_writer_api.scientific_runner import (
     ScientificRunner,
 )
 from review_writer_core.metadata_fields import unwrap_metadata_value
+from review_writer_core.abstract_extraction import extract_abstract
+from review_writer_core.metadata_quality import update_quality
+from review_writer_core.publication_metadata import read_pdf_first_page_text
 from review_writer_core.metadata_tags import verified_structured_tags
 from review_writer_core.bibliography_audit import (
     BibliographyResolutionError,
@@ -115,6 +120,67 @@ class LibraryService:
         )
         self.billing_service = billing_service
         self._parse_slots = BoundedSemaphore(max(1, int(mineru_max_concurrency)))
+        self._mineru_max_concurrency = max(1, int(mineru_max_concurrency))
+
+    @contextmanager
+    def _mineru_slot(self, cancel_requested: Callable[[], bool] | None):
+        """Limit MinerU across hosted workers and the direct upload endpoint."""
+
+        if cancel_requested is not None and cancel_requested():
+            raise MinerUPreciseParseFailed("MinerU precise parsing was cancelled.")
+        engine = self.session_factory.kw["bind"]
+        if engine.dialect.name != "postgresql":
+            while not self._parse_slots.acquire(timeout=0.25):
+                if cancel_requested is not None and cancel_requested():
+                    raise MinerUPreciseParseFailed("MinerU precise parsing was cancelled.")
+            try:
+                yield
+            finally:
+                self._parse_slots.release()
+            return
+
+        # Session-level advisory locks are released if a worker crashes. Keep
+        # the connection checked out only while its provider call is active.
+        namespace = 0x52574D55  # Review Writer / MinerU
+        while True:
+            if cancel_requested is not None and cancel_requested():
+                raise MinerUPreciseParseFailed("MinerU precise parsing was cancelled.")
+            for slot in range(self._mineru_max_concurrency):
+                connection = engine.connect()
+                acquired = False
+                try:
+                    try:
+                        acquired = bool(connection.scalar(
+                            text("SELECT pg_try_advisory_lock(:namespace, :slot)"),
+                            {"namespace": namespace, "slot": slot},
+                        ))
+                        connection.commit()
+                    except Exception:
+                        if acquired:
+                            connection.invalidate()
+                        raise
+                    if not acquired:
+                        continue
+                    try:
+                        if cancel_requested is not None and cancel_requested():
+                            raise MinerUPreciseParseFailed("MinerU precise parsing was cancelled.")
+                        yield
+                    finally:
+                        try:
+                            connection.execute(
+                                text("SELECT pg_advisory_unlock(:namespace, :slot)"),
+                                {"namespace": namespace, "slot": slot},
+                            )
+                            connection.commit()
+                        except Exception:
+                            # Never return a connection holding a session lock
+                            # to the pool if the unlock could not be confirmed.
+                            connection.invalidate()
+                            raise
+                    return
+                finally:
+                    connection.close()
+            time.sleep(0.25)
 
     @staticmethod
     def _pdf_page_count(path: Path) -> int:
@@ -793,29 +859,25 @@ class LibraryService:
                 )
 
         try:
-            if self.billing_service is not None:
-                reservation = self.billing_service.reserve(
-                    user_id=principal.user_id,
-                    amount_usd=(
-                        Decimal(max(0, page_count)) * self.mineru_price_usd_per_page
-                    ).quantize(Decimal("0.00000001")),
-                    reference_type="mineru",
-                    reference_id=usage_event_id,
-                    attempt_number=usage_attempt,
-                    job_id=job_id,
-                    reason="MinerU PDF 精确解析冻结",
-                    details={"filename": filename, "estimated_pages": page_count},
-                )
-                reservation_id = str(reservation.id)
-            if self.precise_ingest:
-                result = self.precise_ingest(root, filename, staged_pdf)
-            else:
-                while not self._parse_slots.acquire(timeout=0.25):
-                    if cancel_requested is not None and cancel_requested():
-                        raise MinerUPreciseParseFailed(
-                            "MinerU precise parsing was cancelled."
-                        )
-                try:
+            slot = nullcontext() if self.precise_ingest else self._mineru_slot(cancel_requested)
+            with slot:
+                if self.billing_service is not None:
+                    reservation = self.billing_service.reserve(
+                        user_id=principal.user_id,
+                        amount_usd=(
+                            Decimal(max(0, page_count)) * self.mineru_price_usd_per_page
+                        ).quantize(Decimal("0.00000001")),
+                        reference_type="mineru",
+                        reference_id=usage_event_id,
+                        attempt_number=usage_attempt,
+                        job_id=job_id,
+                        reason="MinerU PDF 精确解析冻结",
+                        details={"filename": filename, "estimated_pages": page_count},
+                    )
+                    reservation_id = str(reservation.id)
+                if self.precise_ingest:
+                    result = self.precise_ingest(root, filename, staged_pdf)
+                else:
                     result = self._native_precise_ingest(
                         principal,
                         root,
@@ -823,8 +885,6 @@ class LibraryService:
                         staged_pdf,
                         cancel_requested=cancel_requested,
                     )
-                finally:
-                    self._parse_slots.release()
         except MinerUPreciseParseFailed as exc:
             provider_completed = bool(
                 (getattr(exc, "details", None) or {}).get("provider_call_completed")
@@ -1440,7 +1500,86 @@ class LibraryService:
     def update_metadata(
         self, principal: Principal, paper_id: str, metadata: dict[str, Any]
     ) -> LibraryPaperRecord:
-        return self._persist_metadata_and_audit(principal, paper_id, metadata)
+        updated = dict(metadata)
+        update_quality(updated)
+        return self._persist_metadata_and_audit(principal, paper_id, updated)
+
+    def reextract_abstract(
+        self, principal: Principal, paper_id: str
+    ) -> tuple[LibraryPaperRecord, str]:
+        """Recheck existing MinerU artifacts without rerunning the paid PDF parse."""
+
+        principal.require(Permission.PROJECT_WRITE)
+        current = self.get(principal, paper_id)
+        old_field = current.metadata.get("abstract") or {}
+        if isinstance(old_field, dict) and old_field.get("human_checked") is True:
+            return current, "human_checked"
+
+        root = self.workspace_manager.user_root(principal.user_id)
+        markdown = self._safe_stored_path(root, current.markdown_relative_path)
+        blocks: list[dict[str, Any]] = []
+        mineru_id = current.artifact_ids.get("mineru")
+        try:
+            mineru_uuid = uuid.UUID(str(mineru_id)) if mineru_id else None
+        except ValueError:
+            mineru_uuid = None
+        if mineru_uuid is not None:
+            with database_session(self.session_factory) as session:
+                artifact = session.scalar(
+                    select(LibraryArtifact).where(
+                        LibraryArtifact.id == mineru_uuid,
+                        LibraryArtifact.user_id == uuid.UUID(principal.user_id),
+                        LibraryArtifact.paper_id == current.paper_id,
+                        LibraryArtifact.kind == "mineru",
+                        LibraryArtifact.availability == "available",
+                    )
+                )
+            if artifact is not None:
+                try:
+                    content_path = self._safe_stored_path(root, artifact.relative_path)
+                    _version, extracted = self._mineru_storage_roots(
+                        root, current.paper_id, artifact.relative_path
+                    )
+                    content_path.relative_to(extracted.resolve())
+                    loaded = json.loads(content_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, list):
+                        blocks = loaded
+                except (WorkflowNotFound, ValueError, OSError, json.JSONDecodeError):
+                    pass  # The current immutable Markdown can still identify the abstract.
+
+        candidate = extract_abstract(
+            blocks,
+            markdown.read_text(encoding="utf-8", errors="replace")[:200_000],
+            read_pdf_first_page_text(
+                self._safe_stored_path(root, current.pdf_relative_path)
+            ),
+        )
+        old_source = str(old_field.get("source") or "") if isinstance(old_field, dict) else ""
+        legacy_guess = old_source in {
+            "markdown_introduction_ending_summary",
+            "content_list_first_paragraph_after_authors",
+        }
+        replacement = candidate if candidate["value"] or legacy_guess else None
+        if replacement is None:
+            return current, "not_found"
+        if replacement == old_field:
+            return current, "unchanged"
+
+        updated = dict(current.metadata)
+        updated["abstract"] = replacement
+        review = dict(updated.get("human_review") or {})
+        if review.get("status") == "reviewed":
+            review["status"] = "not_reviewed"
+            review["reviewed_at"] = None
+            updated["human_review"] = review
+        update_quality(updated)
+        saved = self._persist_metadata_and_audit(
+            principal,
+            current.paper_id,
+            updated,
+            expected_metadata_artifact_id=str(current.artifact_ids.get("metadata") or ""),
+        )
+        return saved, "updated" if candidate["value"] else "not_found"
 
     def resolve_bibliography(
         self,

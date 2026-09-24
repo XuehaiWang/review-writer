@@ -8,6 +8,7 @@ from sqlalchemy import select
 from review_writer_api.errors import WorkflowConflict, WorkflowNotFound, WorkflowValidationError
 from review_writer_api.security import Permission
 from review_writer_core.paragraph_revision import exact_hash, paragraph_keys, dialogue_sections
+from review_writer_core.manuscript_coherence import candidate_check_current
 from review_writer_core.draft_composition import body_source
 from review_writer_core.dialogue_memory import conversation_memory, candidate_response
 from review_writer_core.draft_quality import QUALITY_INPUT_ARTIFACTS
@@ -285,6 +286,8 @@ class DraftDialogueMixin(SectionVersionsMixin):
                 "source_inputs": {field: payload[field] for field in QUALITY_INPUT_ARTIFACTS
                                   if field in payload and field != "source_rewrite_overlay_artifact_id"},
                 "context_hashes": request["context_hashes"], "status": status, "created_at": utc_now().isoformat()}
+            entries[turn_id]["automatic_batch"] = bool(request.get("automatic_batch"))
+            entries[turn_id]["dependency_hashes"] = request.get("dependency_hashes") or {}
             try:
                 _, state = self._publish_files(principal, project_id,
                     {DRAFT_REWRITE_CANDIDATES: ((json.dumps({"entries": entries}, ensure_ascii=False)+"\n").encode(), "json")},
@@ -323,6 +326,11 @@ class DraftDialogueMixin(SectionVersionsMixin):
                 text, artifact, paragraph = self.dialogue_paragraph(principal, project_id, candidate["paragraph_key"])
                 if exact_hash(paragraph["text"]) != candidate["base_text_sha256"]:
                     raise WorkflowConflict("This paragraph changed. Your candidate has been retained for comparison.")
+                current_hashes = {p["paragraph_id"]: exact_hash(p["text"]) for p in self._paragraph_spans(text)}
+                if any(current_hashes.get(pid) != value for pid, value in (candidate.get("dependency_hashes") or {}).items()):
+                    raise WorkflowConflict("Related manuscript content changed. The candidate has been retained for comparison.")
+                if candidate.get("automatic_batch") and not candidate_check_current(candidate):
+                    raise WorkflowValidationError("This automatic candidate has not completed its source check. The saved text was retained.")
                 if self._freshness(principal, project_id, artifact)["upstream_stale"]:
                     raise WorkflowConflict("Draft sources changed before candidate acceptance.")
                 expected.update(self.validate_artifact_inputs(principal, project_id,
@@ -335,7 +343,17 @@ class DraftDialogueMixin(SectionVersionsMixin):
                 expected[DRAFT_MANUSCRIPT] = artifact.id
                 metadata = {**artifact.metadata, **metadata, "previous_draft_artifact_id": artifact.id}
                 # No score or unearned scientific verification is inherited.
-                metadata["unverified_manual_paragraph_ids"] = sorted(set(metadata.get("unverified_manual_paragraph_ids") or []) | {paragraph["paragraph_id"]})
+                unverified = set(metadata.get("unverified_manual_paragraph_ids") or [])
+                if candidate.get("automatic_batch") and candidate_check_current(candidate):
+                    unverified.discard(paragraph["paragraph_id"])
+                    metadata["automatic_source_checks"] = {**metadata.get("automatic_source_checks", {}),
+                        paragraph["paragraph_id"]: {"candidate_id": candidate_id, **candidate["automatic_source_check"]}}
+                else:
+                    unverified.add(paragraph["paragraph_id"])
+                    checks = dict(metadata.get("automatic_source_checks") or {})
+                    checks.pop(paragraph["paragraph_id"], None)
+                    metadata["automatic_source_checks"] = checks
+                metadata["unverified_manual_paragraph_ids"] = sorted(unverified)
                 for value in entries.values():
                     if value.get("paragraph_key") == candidate["paragraph_key"] and value.get("status") == "pending":
                         value["status"] = "superseded"

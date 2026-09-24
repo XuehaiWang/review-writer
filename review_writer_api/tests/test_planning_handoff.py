@@ -2,12 +2,15 @@
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest import TestCase
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from review_writer_api.domain_services.actions.planning.blueprint import PlanningBlueprintActionsMixin
 from review_writer_api.errors import WorkflowConflict
 from review_writer_api.planning_jobs import queue_matrix_enrichment
-from review_writer_api.job_handlers.stage_execution import register_planning_handlers
+from review_writer_api.job_handlers.stage_execution import (
+    register_planning_handlers,
+    selected_formal_classification_contract,
+)
 
 
 class PlanningHandoffTests(TestCase):
@@ -38,6 +41,57 @@ class PlanningHandoffTests(TestCase):
         self.assertIsNone(checked["base_blueprint_artifact_id"])
         self.assertEqual("outline", checked["section_blueprint"]["source_outline_artifact_id"])
         self.assertEqual(before, self.prepared)
+
+    def test_changed_outline_drops_old_route_fact_but_retains_source_fact(self):
+        def contract(partition):
+            return {"primary_axis_id": "method", "axes": [{
+                "axis_id": "method", "axis_role": "primary_organization",
+                "partitions": [{"partition_id": partition, "label": partition}],
+            }]}
+        original = {"classification_contract": contract("old"), "rows": [{
+            "paper_id": "P1", "scientific_facts": [
+                {"fact_id": "fact-1", "field_id": "quantitative_results", "value": "91% yield"},
+                {"fact_id": "route-1", "field_id": "topic_partition", "value": "Old route"},
+            ],
+        }]}
+        candidate = {"classification_contract": contract("new"), "rows": [{
+            "paper_id": "P1", "scientific_facts": [],
+        }]}
+        with patch("review_writer_api.domain_services.actions.planning.blueprint.refresh_row_facts"):
+            issues = PlanningBlueprintActionsMixin._validate_candidate_matrix(
+                self.service, self.principal, original, candidate)
+        self.assertEqual(["fact-1"], [f["fact_id"] for f in candidate["rows"][0]["scientific_facts"]])
+        self.assertEqual(["fact-1"], [item["fact_id"] for item in issues])
+
+        candidate["classification_contract"] = contract("old")
+        candidate["rows"][0]["scientific_facts"] = []
+        candidate["rows"][0]["fact_enrichment"] = {
+            "classification_refreshed_from_facts": True,
+            "source_fingerprint": "new-route-policy",
+        }
+        with patch("review_writer_api.domain_services.actions.planning.blueprint.refresh_row_facts"):
+            PlanningBlueprintActionsMixin._validate_candidate_matrix(
+                self.service, self.principal, original, candidate)
+        self.assertEqual(["fact-1"], [f["fact_id"] for f in candidate["rows"][0]["scientific_facts"]])
+
+        original["rows"][0]["fact_enrichment"] = {"source_fingerprint": "current"}
+        candidate["rows"][0]["scientific_facts"] = []
+        candidate["rows"][0]["fact_enrichment"]["source_fingerprint"] = "current"
+        with patch("review_writer_api.domain_services.actions.planning.blueprint.refresh_row_facts"):
+            PlanningBlueprintActionsMixin._validate_candidate_matrix(
+                self.service, self.principal, original, candidate)
+        self.assertEqual({"fact-1", "route-1"},
+                         {f["fact_id"] for f in candidate["rows"][0]["scientific_facts"]})
+
+    def test_provisional_outline_does_not_trigger_formal_paper_reclassification(self):
+        axis = {"axis_id": "study_method", "axis_role": "primary_organization",
+                "source_type": "agent_recommended",
+                "partitions": [{"partition_id": "one", "label": "Chapter one"}]}
+        outline = {"classification_contract": {"axes": [axis]}}
+        self.assertIsNone(selected_formal_classification_contract(outline))
+        axis["source_type"] = "explicit_topic"
+        self.assertIs(outline["classification_contract"],
+                      selected_formal_classification_contract(outline))
 
     def test_failure_cancellation_or_foreign_dependency_cannot_start_planner(self):
         for status in ("failed", "cancelled", "running", "queued"):
@@ -127,7 +181,7 @@ class PlanningHandoffTests(TestCase):
         register_planning_handlers(self.service, jobs, {"matrix.enrich": builder})
         handler = jobs.register_handler.call_args.args[1]
         checkpoint = {"papers": {"P1": {"status": "partial"}}}
-        context = Mock(user_id="owner", project_id="project", retry_of_job_id=None)
+        context = Mock(user_id="owner", project_id="project", job_id="current", retry_of_job_id=None)
         context.repository.get_job.return_value = SimpleNamespace(result={"section_checkpoint": checkpoint})
         self.service.matrix_enrichment_payload.return_value = {
             "source_matrix_artifact_id": "before", "pending_paper_count": 1,
@@ -135,7 +189,8 @@ class PlanningHandoffTests(TestCase):
             "papers": [{"paper_id": "P1", "evidence_candidates": [{"text": "Evidence"}]}]}
         handler(context, {"prepare_on_start": True, "source_matrix_artifact_id": "before",
             "resume_from_job_id": "previous", "selected_paper_ids": ["P1"]})
-        context.repository.get_job.assert_called_once_with("owner", "previous")
+        context.repository.get_job.assert_any_call("owner", "current")
+        context.repository.get_job.assert_any_call("owner", "previous")
         self.assertEqual(checkpoint, builder.call_args.args[1]["resume_checkpoint"])
 
     def test_worker_missing_sources_is_not_reported_as_success(self):

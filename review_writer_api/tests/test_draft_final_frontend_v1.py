@@ -47,7 +47,6 @@ class DraftFinalFrontendV1Tests(unittest.TestCase):
             'startJob("build")',
             'startJob("export")',
             "/api/v1/jobs/",
-            "overview_text",
             "release_report_md",
             "release_current",
             "currentJobId",
@@ -60,6 +59,7 @@ class DraftFinalFrontendV1Tests(unittest.TestCase):
         self.assertNotIn("/file?path", source)
         self.assertNotIn('startJob("conclusion")', source)
         self.assertNotIn('startJob("overview")', source)
+        self.assertNotIn("overview_text", source)
         composition = (DRAFT.parent / "DraftCompositionPanel.tsx").read_text(encoding="utf-8")
         for token in (
             'open("abstract")', 'open("conclusion")', 'open("overview")',

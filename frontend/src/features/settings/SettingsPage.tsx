@@ -1,3 +1,5 @@
+import { uiLocale } from "../../i18n/locale";
+import { LocalizedError } from "../../components/LocalizedError";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -43,8 +45,8 @@ function UsageChart({ items }: { items: UsageTimelineItem[] }) {
             const date = new Date(`${item.date}T00:00:00Z`);
             const dateLabel = date.toLocaleDateString(language === "en" ? "en-US" : "zh-CN", { month: "numeric", day: "numeric", timeZone: "UTC" });
             return (
-              <div className="usage-bar-column" key={item.date} title={`${item.date} · ${activeLabel}: ${value.toLocaleString()}`}>
-                <span className="usage-bar-value">{value > 0 ? value.toLocaleString() : ""}</span>
+              <div className="usage-bar-column" key={item.date} title={`${item.date} · ${activeLabel}: ${value.toLocaleString(uiLocale())}`}>
+                <span className="usage-bar-value">{value > 0 ? value.toLocaleString(uiLocale()) : ""}</span>
                 <div className="usage-bar-track"><span style={{ height: value > 0 ? `${Math.max(7, (value / maximum) * 100)}%` : "2px" }} /></div>
                 <time dateTime={item.date}>{showDate ? dateLabel : ""}</time>
               </div>
@@ -58,6 +60,10 @@ function UsageChart({ items }: { items: UsageTimelineItem[] }) {
 }
 
 function transactionLabel(item: CreditTransaction, text: (zh: string, en: string) => string) {
+  const embedding = item.details?.profile === "retrieval_embedding";
+  if (embedding && item.transaction_type === "reservation") return text("向量检索费用冻结", "Embedding cost reserved");
+  if (embedding && item.transaction_type === "settlement") return text("向量检索实际结算", "Embedding cost settled");
+  if (embedding && item.transaction_type === "release") return text("向量检索冻结释放", "Embedding reservation released");
   if (item.transaction_type === "admin_adjustment") return text("管理员额度调整", "Administrative adjustment");
   if (item.transaction_type === "reservation") return text("任务费用冻结", "Job cost reserved");
   if (item.transaction_type === "settlement") return text("任务实际结算", "Job cost settled");
@@ -175,14 +181,14 @@ export function SettingsPage() {
             <button className="button button-primary" type="button" disabled={!project || saveModel.isPending || catalog.isPending || !!catalog.error || pendingTier === project.model_tier || !pendingModel || pendingModel.enabled === false} onClick={() => project && saveModel.mutate({ projectId: project.project_id, modelId: pendingTier })}>{saveModel.isPending ? text("保存中…", "Saving…") : text("确认并保存", "Confirm and save")}</button>
           </div>
           {saveModel.isSuccess && saveModel.variables.projectId === project?.project_id ? <p className="message" role="status">{text("文本模型已保存。", "Text model saved.")}</p> : null}
-          {saveModel.error && saveModel.variables?.projectId === project?.project_id ? <p className="message message-error" role="alert">{saveModel.error.message}</p> : null}
+          {saveModel.error && saveModel.variables?.projectId === project?.project_id ? <p className="message message-error" role="alert"><LocalizedError error={saveModel.error} /></p> : null}
         </section>
       </div>
 
       <section className="surface balance-dashboard">
         <div className="section-heading">
           <div>
-            <span className="step-label">BILLING</span>
+            <span className="step-label">{text("余额与计费", "Billing")}</span>
             <h2>{text("我的余额与消费明细", "My balance and transactions")}</h2>
             <p>{text("外部模型和 PDF 解析调用前会临时冻结预计费用；成功后按实际用量扣除，失败会自动释放。", "Estimated cost is reserved before external model and PDF parsing calls, then settled to actual usage or released on failure.")}</p>
           </div>
@@ -221,7 +227,7 @@ export function SettingsPage() {
                   </div>
                   <div className="balance-ledger-amount">
                     <strong className={displayDelta < 0 ? "negative" : displayDelta > 0 ? "positive" : ""}>{displayDelta > 0 ? "+" : ""}${displayDelta.toFixed(4)}</strong>
-                    <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time>
+                    <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString(uiLocale())}</time>
                   </div>
                 </article>
               );
@@ -237,10 +243,10 @@ export function SettingsPage() {
         </div>
         {usage.error ? <ErrorState error={usage.error} onRetry={() => usage.refetch()} /> : null}
         <div className="usage-summary-grid">
-          <article><span>{text("文本请求", "Text requests")}</span><strong>{usage.data?.request_count.toLocaleString() ?? "—"}</strong><small>{text("累计完成次数", "completed")}</small></article>
-          <article><span>Tokens</span><strong>{usage.data?.total_tokens.toLocaleString() ?? "—"}</strong><small>{usage.data ? `${usage.data.cached_input_tokens.toLocaleString()} cached` : "—"}</small></article>
-          <article><span>{text("生成图像", "Generated images")}</span><strong>{usage.data?.image_count.toLocaleString() ?? "—"}</strong><small>{usage.data ? `${usage.data.image_request_count.toLocaleString()} requests` : "—"}</small></article>
-          <article><span>{text("PDF 解析", "PDF parsing")}</span><strong>{usage.data?.mineru_billable_pages.toLocaleString() ?? "—"}</strong><small>{text("累计页数", "pages")}</small></article>
+          <article><span>{text("文本请求", "Text requests")}</span><strong>{usage.data?.request_count.toLocaleString(uiLocale()) ?? "—"}</strong><small>{text("累计完成次数", "completed")}</small></article>
+          <article><span>Tokens</span><strong>{usage.data?.total_tokens.toLocaleString(uiLocale()) ?? "—"}</strong><small>{usage.data ? text(`${usage.data.cached_input_tokens.toLocaleString(uiLocale())} 缓存输入`, `${usage.data.cached_input_tokens.toLocaleString(uiLocale())} cached`) : "—"}</small></article>
+          <article><span>{text("生成图像", "Generated images")}</span><strong>{usage.data?.image_count.toLocaleString(uiLocale()) ?? "—"}</strong><small>{usage.data ? text(`${usage.data.image_request_count.toLocaleString(uiLocale())} 次请求`, `${usage.data.image_request_count.toLocaleString(uiLocale())} requests`) : "—"}</small></article>
+          <article><span>{text("PDF 解析", "PDF parsing")}</span><strong>{usage.data?.mineru_billable_pages.toLocaleString(uiLocale()) ?? "—"}</strong><small>{text("累计页数", "pages")}</small></article>
           <article className="usage-cost-card"><span>{text("估算成本", "Estimated cost")}</span><strong>{usage.data ? `$${Number(usage.data.estimated_cost_usd).toFixed(4)}` : "—"}</strong><small>USD</small></article>
         </div>
         {timeline.error ? <ErrorState error={timeline.error} onRetry={() => timeline.refetch()} /> : null}

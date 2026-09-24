@@ -98,7 +98,8 @@ class FinalJobHandlers:
         project_id = str(payload["project_id"])
         output = project / "03_figure_redraw" / "overview_figure.png"
         self._write_json(project / "03_figure_redraw" / "overview_user_request.json",
-                         {"instructions": str(payload.get("generation_instructions") or "")})
+                         {"instructions": str(payload.get("generation_instructions") or ""),
+                          "structure_references": list(payload.get("structure_references") or [])})
         report_path = project / "03_figure_redraw" / "overview_template_match.json"
         relative_stage = (
             Path("final-overview-workspace")

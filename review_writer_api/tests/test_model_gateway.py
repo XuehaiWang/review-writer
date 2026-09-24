@@ -22,7 +22,7 @@ from sqlalchemy.pool import StaticPool
 
 from review_writer_api.billing import BillingService
 from review_writer_api.config import ApiSettings
-from review_writer_api.database import Base, Project, User, database_session, utc_now
+from review_writer_api.database import AIModelRequest, Base, Project, User, database_session, utc_now
 from review_writer_api.model_catalog import resolve_model_tier
 from review_writer_api.model_gateway import (
     GatewayBudgetExceeded,
@@ -56,6 +56,151 @@ def mock_stream_reply(client, reply_mock):
 
 
 class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
+    def test_standalone_matrix_can_delegate_without_changing_the_parent_model(self) -> None:
+        with database_session(self.sessions) as session:
+            session.get(WorkflowJob, self.job_id).job_type = "matrix.enrich"
+        token = self.service.issue_task_token(
+            job_id=str(self.job_id), user_id=str(self.user_id),
+            project_id=str(self.project_id), job_type="matrix.enrich",
+        )
+        child = self.service.delegate_text(
+            token, request_key="matrix-facts-p1", stage="matrix-facts-P1",
+            prompt="Extract from indexed evidence", response_format="json",
+        )
+        self.assertEqual("queued", child["status"])
+        with database_session(self.sessions) as session:
+            job = session.get(WorkflowJob, uuid.UUID(child["model_job_id"]))
+            self.assertEqual("matrix.enrich", session.get(WorkflowJob, self.job_id).job_type)
+            self.assertEqual("terra", job.payload_json["_text_model_snapshot"]["id"])
+
+    async def test_matrix_child_provider_attempt_uses_parent_budget_root(self) -> None:
+        with database_session(self.sessions) as session:
+            session.get(WorkflowJob, self.job_id).job_type = "matrix.enrich"
+        parent_token = self.service.issue_task_token(
+            job_id=str(self.job_id), user_id=str(self.user_id),
+            project_id=str(self.project_id), job_type="matrix.enrich",
+        )
+        child_id = self.service.delegate_text(
+            parent_token, request_key="facts", stage="matrix-facts-P1",
+            prompt="Evidence", response_format="json",
+        )["model_job_id"]
+        with database_session(self.sessions) as session:
+            session.get(WorkflowJob, self.job_id).status = "queued"
+            session.get(WorkflowJob, uuid.UUID(child_id)).status = "running"
+        child_token = self.service.issue_task_token(
+            job_id=child_id, user_id=str(self.user_id),
+            project_id=str(self.project_id), job_type="model.dispatch",
+        )
+        async def provider(*, request_id, prompt, **_kwargs):
+            self.service._reserve_text_attempt(request_id, len(prompt))
+            return {"id": "provider-1", "output_text": '{"facts":[]}',
+                    "usage": {"input_tokens": 1, "output_tokens": 1}}
+        with mock.patch.object(self.service, "_provider_call", new=mock.AsyncMock(side_effect=provider)):
+            await self.service.complete(child_token, request_key="facts", stage="matrix-facts-P1",
+                                        prompt="Evidence")
+        with database_session(self.sessions) as session:
+            request = session.scalar(select(AIModelRequest).where(
+                AIModelRequest.job_id == uuid.UUID(child_id)))
+            self.assertEqual(self.job_id, request.budget_root_job_id)
+
+    def test_delegated_chapter_call_is_one_durable_model_job(self) -> None:
+        with database_session(self.sessions) as session:
+            session.get(WorkflowJob, self.job_id).job_type = "sections.generate"
+        token = self.service.issue_task_token(
+            job_id=str(self.job_id), user_id=str(self.user_id),
+            project_id=str(self.project_id), job_type="sections.generate",
+        )
+        first = self.service.delegate_text(
+            token, request_key="section-source-abc", stage="section-source-writing",
+            prompt="Write from evidence", response_format="json",
+        )
+        second = self.service.delegate_text(
+            token, request_key="section-source-abc", stage="section-source-writing",
+            prompt="Write from evidence", response_format="json",
+        )
+        self.assertEqual(first["model_job_id"], second["model_job_id"])
+        self.assertEqual(first, self.service.delegated_text_status(token, request_key="section-source-abc"))
+        self.assertEqual("queued", first["status"])
+        with database_session(self.sessions) as session:
+            child = session.get(WorkflowJob, uuid.UUID(first["model_job_id"]))
+            self.assertEqual("model", child.queue_name)
+            self.assertEqual(str(self.job_id), child.payload_json["parent_job_id"])
+            self.assertEqual("terra", child.payload_json["_text_model_snapshot"]["id"])
+            child.status = "succeeded"
+            child.result_json = {"output_text": "Verified prose"}
+        finished = self.service.delegate_text(
+            token, request_key="section-source-abc", stage="section-source-writing",
+            prompt="Write from evidence", response_format="json",
+        )
+        self.assertEqual("Verified prose", finished["output_text"])
+
+    def test_completed_model_job_wakes_waiting_parent(self) -> None:
+        from review_writer_api.workflow_repository import WorkflowRepository
+        with database_session(self.sessions) as session:
+            session.get(WorkflowJob, self.job_id).job_type = "sections.generate"
+        token = self.service.issue_task_token(
+            job_id=str(self.job_id), user_id=str(self.user_id),
+            project_id=str(self.project_id), job_type="sections.generate",
+        )
+        child_id = self.service.delegate_text(
+            token, request_key="wake", stage="source-writing",
+            prompt="Evidence", response_format="json",
+        )["model_job_id"]
+        lease = uuid.uuid4()
+        with database_session(self.sessions) as session:
+            parent = session.get(WorkflowJob, self.job_id)
+            parent.status = "queued"
+            parent.queue_reason = "model_waiting"
+            parent.next_run_at = utc_now() + timedelta(minutes=5)
+            child = session.get(WorkflowJob, uuid.UUID(child_id))
+            child.status = "running"
+            child.lease_token = lease
+            child.lease_generation = 1
+            child.lease_expires_at = utc_now() + timedelta(minutes=5)
+        repository = WorkflowRepository(self.sessions)
+        repository.mark_job_succeeded(child_id, {"output_text": "Done"},
+                                      lease_token=str(lease), lease_generation=1)
+        with database_session(self.sessions) as session:
+            parent = session.get(WorkflowJob, self.job_id)
+            self.assertLessEqual(parent.next_run_at.replace(tzinfo=None), utc_now().replace(tzinfo=None))
+
+    async def test_delegated_calls_share_parent_attempt_budget(self) -> None:
+        with database_session(self.sessions) as session:
+            session.get(WorkflowJob, self.job_id).job_type = "sections.generate"
+        parent_token = self.service.issue_task_token(
+            job_id=str(self.job_id), user_id=str(self.user_id),
+            project_id=str(self.project_id), job_type="sections.generate",
+        )
+        children = [self.service.delegate_text(
+            parent_token, request_key=f"source-{number}", stage="section-source-writing",
+            prompt=f"evidence {number}", response_format="json",
+        )["model_job_id"] for number in (1, 2)]
+        with database_session(self.sessions) as session:
+            session.get(WorkflowJob, self.job_id).status = "queued"
+            for child_id in children:
+                session.get(WorkflowJob, uuid.UUID(child_id)).status = "running"
+        self.service.settings = replace(self.settings, text_job_max_provider_attempts=1)
+        answer = {"output_text": "{}", "usage": {"input_tokens": 1, "output_tokens": 1}}
+        external_calls = []
+        async def provider_attempt(*, request_id, prompt, **_kwargs):
+            counters = self.service._reserve_text_attempt(request_id, len(prompt))
+            external_calls.append(prompt)
+            return {**answer, "_gateway_metering": counters}
+        with mock.patch.object(self.service, "_provider_call", new=mock.AsyncMock(side_effect=provider_attempt)) as provider:
+            for index, child_id in enumerate(children):
+                token = self.service.issue_task_token(
+                    job_id=child_id, user_id=str(self.user_id),
+                    project_id=str(self.project_id), job_type="model.dispatch",
+                )
+                if index == 0:
+                    await self.service.complete(token, request_key="child-call", stage="section-source-writing",
+                                                prompt="evidence 1")
+                else:
+                    with self.assertRaises(GatewayBudgetExceeded):
+                        await self.service.complete(token, request_key="child-call", stage="section-source-writing",
+                                                    prompt="evidence 2")
+        self.assertEqual(["evidence 1"], external_calls)
+
     async def test_524_retries_streaming_and_buffered_calls_with_same_key(self):
         from review_writer_api.model_gateway import GatewayProviderError
         for streaming in (True, False):
@@ -566,6 +711,47 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
         summary = self.service.usage_summary(str(self.user_id), str(self.project_id))
         self.assertEqual(1, summary["request_count"])
         self.assertEqual(8, summary["total_tokens"])
+
+    async def test_embedding_runtime_price_is_settled_to_user_balance(self) -> None:
+        billing = BillingService(self.sessions)
+        billing.adjust(
+            actor_user_id=self.user_id,
+            target_user_id=self.user_id,
+            amount_usd="1",
+            reason="Embedding billing test credit",
+            idempotency_key="embedding-billing-credit",
+        )
+        self.service.billing_service = billing
+        runtime = replace(
+            self.service._embedding_runtime(),
+            input_usd_per_million=Decimal("0.50"),
+        )
+        provider_result = {
+            "id": "emb_billed",
+            "model": "embedding-test-model",
+            "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}],
+            "usage": {"prompt_tokens": 1000, "total_tokens": 1000},
+        }
+        with mock.patch.object(
+            self.service, "_embedding_runtime", return_value=runtime
+        ), mock.patch.object(
+            self.service,
+            "_provider_embedding_call",
+            new=mock.AsyncMock(return_value=provider_result),
+        ):
+            result = await self.service.complete_embeddings(
+                self.embedding_token(),
+                request_key="billed-embedding-runtime-price",
+                stage="matrix.enrich.embedding",
+                inputs=["semantic retrieval"],
+            )
+
+        self.assertEqual("0.00050000", result["cost_usd"])
+        self.assertEqual(
+            "0.99950000", billing.account_summary(self.user_id)["balance_usd"]
+        )
+        transactions = billing.transactions(self.user_id)
+        self.assertEqual("retrieval_embedding", transactions[0]["details"]["profile"])
 
     async def test_embedding_provider_requests_configured_dimension(self) -> None:
         captured: dict[str, object] = {}

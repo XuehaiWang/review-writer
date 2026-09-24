@@ -21,7 +21,7 @@ def test_permission_removal_preserves_real_figure_failures():
         "warning_issues": ["figure_argument_closure_incomplete"],
         "release_integrity_issues": ["figure_rights_unresolved", "figure_evidence_binding_incomplete"],
     }
-    assert final_issue_details(report) == [{"target_type": "figure", "target_id": "F1", "issues": ["image_missing"]}]
+    assert final_issue_details(report) == [{"target_type": "figure", "target_id": "F1", "issues": ["image_missing"], "title": "F1"}]
     assert without_permission_checks(report)["warning_issues"] == ["figure_argument_closure_incomplete"]
 
 

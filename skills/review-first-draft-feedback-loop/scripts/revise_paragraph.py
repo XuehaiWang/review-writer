@@ -6,9 +6,12 @@ from pathlib import Path
 
 import feedback_loop as loop
 from review_writer_core.paragraph_revision import revision_prompt, validate_revision_response, revision_sources, author_revision_findings
+from review_writer_core.manuscript_coherence import plan_manuscript, audit_candidate
 
 
 def revise(project, request):
+    if request.get("coherence_only"):
+        return {"coherence_plan": plan_manuscript(request["manuscript_snapshot"], loop.call_json_model)}
     if request.get("route_only"):
         allowed = request["route_allowed_ids"]
         result = loop.call_json_model(
@@ -75,6 +78,18 @@ def revise(project, request):
             errors, warnings, changes = author_revision_findings(errors, warnings,
                 loop.protected_signature(paragraph["text"], exclude_citation_numbers=True),
                 loop.protected_signature(candidate, exclude_citation_numbers=True))
+    sources = revision_sources(response.get("source_refs") or [], evidence)
+    automatic_check = {}
+    scientific_errors = {"protected_numbers_changed", "protected_stereo_changed", "protected_chemical_identities_changed", "protected_required_labels_changed"}
+    if request.get("automatic_batch") and candidate and candidate != paragraph["text"] and not (set(errors) - scientific_errors):
+        try:
+            automatic_check = audit_candidate(paragraph["text"], candidate, sources, loop.call_json_model)
+        except (RuntimeError, ValueError, OSError):
+            automatic_check = {"status": "unresolved", "reason": "candidate_check_unavailable"}
+        if automatic_check.get("status") != "supported":
+            errors.append("automatic_candidate_unverified")
+        else:
+            errors = [error for error in errors if error not in scientific_errors]
     # Structural failures remain non-accepting, but must not look like a successful unchanged paragraph.
     rejected_candidate = candidate if errors else ""
     if errors:
@@ -82,7 +97,7 @@ def revise(project, request):
     return {"reply": response["reply"], "candidate_text": candidate,
             "rejected_candidate_text": rejected_candidate,
             "source_refs": response.get("source_refs") or [], "validation_errors": errors,
-            "sources": revision_sources(response.get("source_refs") or [], evidence),
+            "sources": sources, "automatic_source_check": automatic_check,
             "scientific_changes": changes,
             "evidence_review": "author_review_required" if human_revision and candidate else "",
             "validation_warnings": warnings,

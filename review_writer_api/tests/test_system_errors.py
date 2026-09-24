@@ -15,6 +15,7 @@ from sqlalchemy.pool import StaticPool
 from review_writer_api.app import create_app
 from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, User, database_session, utc_now
+from review_writer_api.errors import WorkflowValidationError
 from review_writer_api.security import Principal, Role
 from review_writer_api.system_errors import list_failures, safe_summary, prune_failures
 from review_writer_api.workflow_models import SystemErrorEvent, WorkflowJob
@@ -36,6 +37,12 @@ class SystemErrorTests(unittest.TestCase):
         @self.app.get('/api/v1/admin/test-failure')
         def fail(principal=Depends(dep)):
             raise RuntimeError('password=secret-value sk-do-not-record manuscript-private-content')
+        @self.app.get('/api/v1/admin/test-validation')
+        def validation_fail(principal=Depends(dep)):
+            raise WorkflowValidationError(
+                'The bibliography record is missing required fields: journal, year',
+                details={'fields': ['journal', 'year']},
+            )
         self.client = TestClient(self.app)
 
     def tearDown(self):
@@ -69,6 +76,19 @@ class SystemErrorTests(unittest.TestCase):
         self.assertNotIn('hidden',first['items'][0]['message'])
         self.assertEqual([],list_failures(self.sessions,query='nonexistent')['items'])
         self.assertEqual(422,self.client.get('/api/v1/admin/errors?limit=100000').status_code)
+
+    def test_workflow_validation_failure_keeps_safe_actionable_summary(self):
+        response = self.client.get('/api/v1/admin/test-validation')
+        self.assertEqual(422, response.status_code)
+        request_id = response.headers['x-request-id']
+        listing = self.client.get(
+            f'/api/v1/admin/errors?q={request_id}'
+        ).json()['items']
+
+        self.assertEqual(1, len(listing))
+        self.assertEqual('WORKFLOW_VALIDATION_FAILED', listing[0]['error_code'])
+        self.assertIn('missing required fields: journal, year', listing[0]['message'])
+        self.assertIn('Fields: journal, year', listing[0]['message'])
 
     def test_retention_and_logging_failure_does_not_break_response(self):
         with database_session(self.sessions) as s:

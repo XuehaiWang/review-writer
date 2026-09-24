@@ -16,7 +16,7 @@ it("does not equate a table preference with a generated comparison", () => {
 it("shows semantic organization issues without labelling them evidence failures", () => {
   render(<SectionContentNotice section={{ narrative_diagnostics: {
     review_status: "needs_revision", issues: ["Explain why the next example follows."] } }} />);
-  expect(screen.getByText(/待优化草稿/)).toBeInTheDocument();
+  expect(screen.getByText(/建议优化表达与论证组织/)).toBeInTheDocument();
   expect(screen.getByText("Explain why the next example follows.")).toBeInTheDocument();
   expect(screen.queryByText(/来源绑定失败/)).not.toBeInTheDocument();
 });
@@ -45,6 +45,33 @@ it("does not invent a warning for complete content", () => {
 
 it("shows coverage guidance without calling it a binding failure", () => {
   render(<SectionContentNotice section={{ generation_mode: "limited_evidence" }} />);
-  expect(screen.getByText(/文献覆盖仍待补充/)).toBeInTheDocument();
+  expect(screen.getByText(/历史记录未区分自动处理与证据缺口/)).toBeInTheDocument();
   expect(screen.queryByText(/来源绑定失败/)).not.toBeInTheDocument();
+});
+
+it("shows handled omissions as a neutral record instead of a section-wide warning", () => {
+  render(<SectionContentNotice section={{ generation_mode: "limited_evidence",
+    primary_papers: ["P1"], paragraphs: [{ cited_paper_ids: ["P1"] }],
+    validations: [{ omitted: [{ reason: "missing_or_invalid_source_span" }] }],
+  }} />);
+  expect(screen.getByText(/已自动排除 1 条/)).toBeInTheDocument();
+  expect(screen.getByRole("status")).not.toHaveClass("message-warning");
+  expect(screen.queryByText(/部分内容存在限制/)).not.toBeInTheDocument();
+});
+
+it("does not hide missing primary papers behind handled omissions", () => {
+  render(<SectionContentNotice section={{ generation_mode: "limited_evidence",
+    primary_papers: ["P1", "P2"], paragraphs: [{ cited_paper_ids: ["P1"] }],
+    validations: [{ omitted: [{ reason: "missing_or_invalid_source_span" }] }],
+  }} />);
+  expect(screen.getByText(/1 篇主要论文尚未/)).toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveClass("message-warning");
+});
+
+it("retains warnings for unresolved support and evidence-pending sections", () => {
+  render(<SectionContentNotice section={{ generation_mode: "pending_evidence",
+    validations: [{ unresolved: [{}] }] }} />);
+  expect(screen.getByText(/尚缺可用于成文的证据/)).toBeInTheDocument();
+  expect(screen.getByText(/1 项来源支持仍未确认/)).toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveClass("message-warning");
 });

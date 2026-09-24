@@ -6,7 +6,7 @@ import { useUiText } from "../i18n/useUiText";
 type DeleteProjectDialogProps = {
   project: Project | null;
   deleting?: boolean;
-  error?: string;
+  error?: React.ReactNode;
   onCancel: () => void;
   onConfirm: (project: Project) => void;
 };

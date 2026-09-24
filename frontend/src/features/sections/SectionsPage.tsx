@@ -1,9 +1,10 @@
 import { sectionErrorMessage } from "./sectionErrorMessage";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
-import { apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
+import { ApiError, apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
+import { queryKeys } from "../../api/queries";
 import type { Job } from "../../api/types";
 import { ErrorState } from "../../components/ErrorState";
 import { MarkdownView } from "../../components/MarkdownView";
@@ -411,33 +412,44 @@ export function SectionsPage() {
   const displayedActiveContent = replacePaperIdsForDisplay(activeFile?.content, paperLabels);
   const displayedMergedContent = replacePaperIdsForDisplay(payload?.section_drafts_md, paperLabels);
 
+  const submission = useRef<{ projectId: string; promise: Promise<Job> } | null>(null);
+  const submitSections = (resume: boolean) => {
+    const projectId = project!.project_id;
+    if (submission.current?.projectId === projectId) return submission.current.promise;
+    const promise = (async () => {
+      try {
+        return await apiRequest<Job>(resume
+          ? `/api/v1/jobs/${encodeURIComponent(currentJob!.id)}/retry`
+          : `/api/v1/projects/${encodeURIComponent(projectId)}/sections/jobs`, {
+          method: "POST", headers: { "Idempotency-Key": newIdempotencyKey() }, ...jsonBody({}),
+        });
+      } catch (error) {
+        // A lost response does not imply the server failed to create the job.
+        if (!(error instanceof ApiError) || error.status === 409) {
+          const latest = await apiRequest<SectionsPayload>(`/api/v1/projects/${encodeURIComponent(projectId)}/sections`).catch(() => null);
+          const active = latest?.report.jobs.find(job => jobIsActive(job.status));
+          if (active) return active;
+        }
+        throw error;
+      }
+    })();
+    submission.current = { projectId, promise };
+    return promise.finally(() => {
+      if (submission.current?.promise === promise) submission.current = null;
+    });
+  };
+  const showSubmittedJob = (job: Job) => {
+    if (job.project_id !== project?.project_id) return;
+    queryClient.setQueryData(queryKeys.job(job.id), job);
+    setJobId(job.id);
+    setTab("report");
+    setShowAdvanced(true);
+  };
   const generate = useMutation({
-    mutationFn: () => canResumeCurrentJob
-      ? apiRequest<Job>(`/api/v1/jobs/${encodeURIComponent(currentJob!.id)}/retry`, {
-        method: "POST",
-      })
-      : apiRequest<Job>(`/api/v1/projects/${encodeURIComponent(project!.project_id)}/sections/jobs`, {
-        method: "POST",
-        headers: { "Idempotency-Key": newIdempotencyKey() },
-        ...jsonBody({}),
-      }),
-    onSuccess: (job) => {
-      setJobId(job.id);
-      setTab("report");
-      setShowAdvanced(true);
-    },
+    mutationFn: () => submitSections(canResumeCurrentJob), onSuccess: showSubmittedJob,
   });
   const regenerate = useMutation({
-    mutationFn: () => apiRequest<Job>(`/api/v1/projects/${encodeURIComponent(project!.project_id)}/sections/jobs`, {
-      method: "POST",
-      headers: { "Idempotency-Key": newIdempotencyKey() },
-      ...jsonBody({}),
-    }),
-    onSuccess: (job) => {
-      setJobId(job.id);
-      setTab("report");
-      setShowAdvanced(true);
-    },
+    mutationFn: () => submitSections(false), onSuccess: showSubmittedJob,
   });
   const confirm = useMutation({
     mutationFn: () => apiRequest(`/api/v1/projects/${encodeURIComponent(project!.project_id)}/sections/confirm`, {
@@ -453,7 +465,7 @@ export function SectionsPage() {
   const advancedTabs: Array<[WorkspaceTab, string]> = taskOnly
     ? [["report", text("生成报告", "Generation report")]]
     : [["synthesis", text("综合", "Synthesis")], ["writing", text("写作计划", "Writing Plan")], ["evidence", text("证据", "Evidence")], ["review", text("审校", "Review")], ["tasks", text("写作要求", "Writing requirements")], ["report", text("生成报告", "Generation report")]];
-  const error = generate.error || regenerate.error || confirm.error || (currentJob?.status === "failed" ? new Error(currentJob.error_message || text("章节生成失败。", "Section generation failed.")) : null);
+  const error = currentJobActive ? null : generate.error || regenerate.error || confirm.error || (currentJob?.status === "failed" ? new Error(currentJob.error_message || text("章节生成失败。", "Section generation failed.")) : null);
 
   return (
     <main className="workspace page-container workspace-page sections-page">

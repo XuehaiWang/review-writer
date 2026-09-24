@@ -1,3 +1,4 @@
+import { uiLocale } from "../../i18n/locale";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "../../api/client";
@@ -35,7 +36,7 @@ export function SystemErrors({ active = true }: { active?: boolean }) {
       <div className="button-row"><button type="submit" className="button button-primary">{text("查询", "Search")}</button>
         {filtered ? <button type="button" className="button button-quiet" onClick={() => { setInput(""); setQuery(""); setSource(""); setDays("30"); setOffset(0); }}>{text("重置筛选", "Reset filters")}</button> : null}</div>
     </form>
-    <div className="system-errors-meta"><span>{errors.data ? text(`本页 ${errors.data.items.length} 条记录`, `${errors.data.items.length} records on this page`) : text("每页最多 25 条记录", "Up to 25 records per page")}</span><span>{text("查看时每 15 秒自动刷新", "Auto-refreshes every 15 seconds while viewing")}{errors.dataUpdatedAt ? ` · ${text("更新于", "Updated")} ${new Date(errors.dataUpdatedAt).toLocaleTimeString()}` : ""}</span></div>
+    <div className="system-errors-meta"><span>{errors.data ? text(`本页 ${errors.data.items.length} 条记录`, `${errors.data.items.length} records on this page`) : text("每页最多 25 条记录", "Up to 25 records per page")}</span><span>{text("查看时每 15 秒自动刷新", "Auto-refreshes every 15 seconds while viewing")}{errors.dataUpdatedAt ? ` · ${text("更新于", "Updated")} ${new Date(errors.dataUpdatedAt).toLocaleTimeString(uiLocale())}` : ""}</span></div>
     {errors.error ? <ErrorState error={errors.error} onRetry={() => errors.refetch()} /> : null}
     {errors.isPending ? <p role="status">{text("正在加载…", "Loading…")}</p> : null}
     {!errors.error && errors.data?.items.length === 0 ? <div className="system-errors-empty"><strong>{text("此范围内没有故障记录。", "No failures in this range.")}</strong><p>{text("可以调整关键词、来源或时间范围后重新查询。", "Try a different keyword, source or time range.")}</p></div> : null}
@@ -43,7 +44,7 @@ export function SystemErrors({ active = true }: { active?: boolean }) {
       <summary className="system-error-summary">
         <span className={`system-error-source ${item.source}`}>{item.source === "job" ? text("后台任务", "Background job") : text("接口请求", "API request")}</span>
         <span className="system-error-identity"><strong>{item.operation || (item.source === "job" ? text("任务执行失败", "Job execution failed") : text("接口请求失败", "API request failed"))}</strong><small>{item.email || text("未登录用户", "Anonymous user")}</small></span>
-        <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time>
+        <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString(uiLocale())}</time>
         <span className="system-error-chevron" aria-hidden="true">⌄</span>
       </summary>
       <div className="system-error-body">

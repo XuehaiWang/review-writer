@@ -1,3 +1,4 @@
+import { LocalizedError } from "../../components/LocalizedError";
 import { useEffect } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { apiRequest, jsonBody } from "../../api/client";
@@ -29,7 +30,7 @@ export function ParagraphManualEditor({ projectId, revision, paragraph, disabled
     <textarea rows={9} aria-label={text("段落内容", "Paragraph text")} value={edit.text}
       disabled={save.isPending} onChange={event => setEdit({ ...edit, text: event.target.value })} />
     {edit.hash && edit.hash !== paragraph.text_sha256 ? <div role="alert"><p>{text("此段已有新版本，未保存文字已保留。请对照最新正文后再编辑。", "This paragraph changed. Your input is preserved; compare the latest text before editing again.")}</p><button className="button button-secondary" disabled={save.isPending} onClick={() => setEdit({ ...edit, hash: paragraph.text_sha256 || "", revision })}>{text("已核对，保留我的文字继续编辑", "Compared: keep my text and continue editing")}</button></div> : null}
-    {save.error ? <p role="alert" className="message message-error">{save.error.message}</p> : null}
+    {save.error ? <p role="alert" className="message message-error"><LocalizedError error={save.error} /></p> : null}
     <button className="button button-primary" disabled={disabled || save.isPending || !edit.text.trim()} onClick={() => save.mutate()}>{text("保存此段", "Save paragraph")}</button>
     <button className="button button-secondary" disabled={save.isPending} onClick={() => setEdit(null)}>{text("取消", "Cancel")}</button>
   </section>;

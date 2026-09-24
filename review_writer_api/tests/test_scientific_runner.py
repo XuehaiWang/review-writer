@@ -58,6 +58,106 @@ class ScientificRunnerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_model_wait_marker_reports_wait_without_losing_job_lease(self):
+        from review_writer_api.worker_wait_state import bind_model_wait_callback
+
+        events = []
+        script = (
+            "import os, time; from pathlib import Path; "
+            "marker = Path(os.environ['REVIEW_WRITER_MODEL_WAIT_DIR']) / 'request.waiting'; "
+            "marker.touch(); time.sleep(0.2); marker.unlink(); "
+            "Path('done.txt').write_text('complete')"
+        )
+        with bind_model_wait_callback(events.append):
+            self.runner.run([sys.executable, "-c", script], cwd=self.root,
+                staging_directory=self.root, expected_outputs=("done.txt",), max_attempts=1)
+        self.assertIn(True, events)
+        self.assertFalse(events[-1])
+
+    def test_deferred_model_result_releases_scientific_runner_without_retry(self):
+        import uuid
+        from review_writer_api.scientific_runner import ScientificModelDeferred
+
+        child_id = str(uuid.uuid4())
+        script = (
+            "from review_writer_core.model_gateway_client import DeferredModelCall; "
+            f"raise DeferredModelCall('{child_id}')"
+        )
+        with self.assertRaises(ScientificModelDeferred) as deferred:
+            self.runner.run(
+                [sys.executable, "-c", script], cwd=self.root,
+                staging_directory=self.root, expected_outputs=("unused.txt",),
+                env={"REVIEW_WRITER_DELEGATE_MODEL_CALLS": "1"}, max_attempts=3,
+            )
+        self.assertEqual(child_id, deferred.exception.model_job_id)
+        self.assertEqual([child_id], deferred.exception.model_job_ids)
+
+    def test_parallel_deferred_children_survive_subprocess_boundary(self):
+        import uuid
+        from review_writer_api.scientific_runner import ScientificModelDeferred
+
+        ids = [str(uuid.uuid4()) for _ in range(4)]
+        script = ("from review_writer_core.model_gateway_client import DeferredModelCall; "
+                  f"raise DeferredModelCall({ids[0]!r}, model_job_ids={ids!r})")
+        with self.assertRaises(ScientificModelDeferred) as caught:
+            self.runner.run([sys.executable, "-c", script], cwd=self.root,
+                staging_directory=self.root, expected_outputs=("unused.txt",),
+                env={"REVIEW_WRITER_DELEGATE_MODEL_CALLS": "1"}, max_attempts=3)
+        self.assertEqual(ids, caught.exception.model_job_ids)
+
+    def test_delegated_model_call_resumes_after_child_result(self):
+        import uuid
+        from review_writer_api.scientific_runner import ScientificModelDeferred
+
+        child_id = str(uuid.uuid4())
+        state = {"ready": False, "keys": []}
+
+        class Gateway(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                size = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(size).decode("utf-8"))
+                state["keys"].append(body["request_key"])
+                payload = ({"status": "succeeded", "model_job_id": child_id, "output_text": "verified"}
+                           if state["ready"] else {"status": "queued", "model_job_id": child_id})
+                raw = json.dumps(payload).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *_args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Gateway)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            command = [sys.executable, "-c", (
+                "from pathlib import Path; "
+                "from review_writer_core.model_gateway_client import call_model; "
+                "Path('done.txt').write_text(call_model('evidence', label='section', response_format='text'))"
+            )]
+            environment = {"REVIEW_WRITER_DELEGATE_MODEL_CALLS": "1",
+                           "REVIEW_WRITER_MODEL_GATEWAY_URL":
+                               f"http://127.0.0.1:{server.server_port}/api/internal/v1/model-responses"}
+            with self.assertRaises(ScientificModelDeferred):
+                self.runner.run(command, cwd=self.root, staging_directory=self.root,
+                                expected_outputs=("done.txt",), env=environment,
+                                secret_env={"REVIEW_WRITER_TASK_TOKEN": "test-token"}, max_attempts=1)
+            self.assertFalse((self.root / "done.txt").exists())
+            state["ready"] = True
+            self.runner.run(command, cwd=self.root, staging_directory=self.root,
+                            expected_outputs=("done.txt",), env=environment,
+                            secret_env={"REVIEW_WRITER_TASK_TOKEN": "test-token"}, max_attempts=1)
+            self.assertEqual("verified", (self.root / "done.txt").read_text())
+            self.assertEqual(2, len(state["keys"]))
+            self.assertEqual(state["keys"][0], state["keys"][1])
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
     def test_call_can_disable_replay_after_timeout(self):
         from review_writer_api.scientific_runner import ScientificRunner, ScientificRunFailed
         runner = ScientificRunner(max_attempts=3, retry_delay_seconds=0)

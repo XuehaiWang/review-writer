@@ -23,6 +23,13 @@ from review_writer_core.publication_metadata import (
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Bibliography models only resolve ambiguity left by local extraction.  Keep
+# their wait shorter than the 120-second scientific subprocess deadline so a
+# slow provider can fall back to the deterministic result instead of killing
+# the whole bibliography job.  Recovery polling is intentionally disabled for
+# these calls because its general 15-minute window would outlive that deadline.
+BIBLIOGRAPHY_MODEL_TIMEOUT_SECONDS = 60
+
 
 def _module(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -169,7 +176,8 @@ UNTRUSTED_SOURCES_BEGIN
             model_payload = call_json_model(
                 prompt,
                 label="library-publication-date",
-                timeout_seconds=180,
+                timeout_seconds=BIBLIOGRAPHY_MODEL_TIMEOUT_SECONDS,
+                recover_on_timeout=False,
             )
         except Exception as exc:
             # Bibliographic enrichment is non-blocking. Deterministic extraction
@@ -214,7 +222,8 @@ def bibliography_role_extract(args: argparse.Namespace) -> int:
             model_payload = call_json_model(
                 bibliography_agent_prompt(metadata, regions),
                 label="library-bibliography-role",
-                timeout_seconds=180,
+                timeout_seconds=BIBLIOGRAPHY_MODEL_TIMEOUT_SECONDS,
+                recover_on_timeout=False,
             )
         except Exception as exc:
             # Bibliographic role recovery is a non-blocking fallback. Preserve

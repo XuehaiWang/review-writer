@@ -42,7 +42,7 @@ class SectionAcademicPipelineTests(unittest.TestCase):
             stage.mkdir(parents=True); matrix.mkdir()
             tasks = [{"section_id": sid, "heading": sid, "section_role": role,
                       "allowed_papers": ["P001"], "primary_papers": ["P001"], "supporting_papers": []}
-                     for sid, role in [("S01", "body"), ("S02", "conclusion")]]
+                     for sid, role in [("S01", "body"), ("S02", "body")]]
             packages = [{"section_id": t["section_id"], "retrieval_mode": "insufficient_evidence",
                          "source_lookup_complete": lookup_complete, "hits": []} for t in tasks]
             for path, value in {stage / "section_tasks.json": tasks,
@@ -82,6 +82,67 @@ class SectionAcademicPipelineTests(unittest.TestCase):
         self.assertEqual("pending_evidence", result["output"]["generation_mode"])
         self.assertNotIn("91%", result["output"]["draft_md"])
         self.assertEqual([], result["output"]["paragraphs"])
+
+    def test_incomplete_source_check_fails_once_and_next_chapter_continues(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "review-projects" / "test"
+            stage = project / "02_section_drafting"
+            matrix = project / "01_matrix_outline"
+            stage.mkdir(parents=True)
+            matrix.mkdir()
+            tasks = [
+                {"section_id": sid, "heading": sid, "section_role": "body",
+                 "allowed_papers": ["P001"], "primary_papers": ["P001"],
+                 "supporting_papers": []}
+                for sid in ("S01", "S02")
+            ]
+            source = {"evidence_key": "sha256:source", "paper_id": "P001",
+                      "chunk_id": "C001", "content": "A directly reported result.",
+                      "claim_eligible": True}
+            packages = [
+                {"section_id": "S01", "retrieval_mode": "lexical",
+                 "source_lookup_complete": True, "hits": [source]},
+                {"section_id": "S02", "retrieval_mode": "insufficient_evidence",
+                 "source_lookup_complete": True, "hits": []},
+            ]
+            for path, value in {
+                stage / "section_tasks.json": tasks,
+                stage / "section_evidence.json": {"sections": packages},
+                matrix / "literature_matrix.json": {"rows": [{"paper_id": "P001", "title": "A paper"}]},
+                matrix / "section_blueprint.json": {"review_topic": "Topic", "sections": tasks},
+            }.items():
+                path.write_text(json.dumps(value), encoding="utf-8")
+
+            calls = []
+            def incomplete_write(**kwargs):
+                calls.append(kwargs["section_id"])
+                kwargs["save_state"]({"proposed": {"paragraphs": [{"text": "Draft"}]}})
+                return (
+                    {"paragraphs": [{"paragraph_id": "S01-p1"}], "claims": []},
+                    {"paragraphs": [{"paragraph_id": "S01-p1", "claim_realizations": []}]},
+                    {"unresolved": [{"claim_id": "S01-p1-C01", "reason": "source_check_incomplete"}],
+                     "omitted": [], "narrowed": []},
+                )
+
+            with patch.object(PIPELINE.sys, "argv", [str(SCRIPT), "--review-root", str(root),
+                    "--project-id", "test", "--api-key", "test", "--model", "test",
+                    "--section-concurrency", "1"]), \
+                 patch.object(PIPELINE, "load_dotenv", return_value={}), \
+                 patch.object(PIPELINE, "load_blueprint_rule_pack", return_value="Use evidence"), \
+                 patch.object(PIPELINE, "load_cross_study_synthesis_skill", return_value="Use evidence"), \
+                 patch.object(PIPELINE, "write_from_sources", side_effect=incomplete_write):
+                with self.assertRaisesRegex(SystemExit, "1 section\\(s\\) failed: S01"):
+                    PIPELINE.main()
+                checkpoint = json.loads((stage / "section_checkpoints.json").read_text(encoding="utf-8"))
+                self.assertEqual({"S02"}, set(checkpoint["entries"]))
+                self.assertEqual("S01", checkpoint["failed_sections"][0]["section_id"])
+                self.assertIn("S01", checkpoint["authoring_states"])
+                with self.assertRaisesRegex(SystemExit, "1 section\\(s\\) failed: S01"):
+                    PIPELINE.main()
+                checkpoint = json.loads((stage / "section_checkpoints.json").read_text(encoding="utf-8"))
+                self.assertEqual({"S02"}, set(checkpoint["entries"]))
+                self.assertEqual(["S01"], calls)
 
 
 
@@ -883,43 +944,6 @@ class SectionAcademicPipelineTests(unittest.TestCase):
         self.assertEqual("insufficient_evidence", PIPELINE.effective_retrieval_mode({
             "retrieval_mode": "fixed_prefix_fallback"}))
 
-    def test_conclusion_receives_validated_body_synthesis_and_evidence_keys(self) -> None:
-        context, keys = PIPELINE.prior_body_synthesis_context(
-            {
-                "S02": {
-                    "section_id": "S02",
-                    "title": "Defined precursor class",
-                    "section_role": "body",
-                    "section_thesis": "Compare the bounded body evidence.",
-                },
-                "S03": {"section_id": "S03", "section_role": "conclusion"},
-            },
-            [{"section_id": "S02", "summary": "A bounded body conclusion."}],
-            [
-                {
-                    "section_id": "S02",
-                    "section_role": "body",
-                    "claims": [
-                        {
-                            "claim": "The studies support a bounded difference.",
-                            "claim_kind": "cross_study_comparison",
-                            "support_status": "supported",
-                            "citation_group": ["P001", "P002"],
-                            "evidence_refs": [
-                                {"evidence_key": "sha256:a", "relationship": "supports"},
-                                {"evidence_key": "sha256:b", "relationship": "supports"},
-                            ],
-                        }
-                    ],
-                }
-            ],
-        )
-
-        self.assertEqual(["S02"], [item["section_id"] for item in context])
-        self.assertEqual({"sha256:a", "sha256:b"}, keys)
-        self.assertEqual(
-            "A bounded body conclusion.", context[0]["validated_synthesis_summary"]
-        )
 
 
 if __name__ == "__main__":

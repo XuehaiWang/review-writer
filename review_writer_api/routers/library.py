@@ -797,6 +797,14 @@ def build_library_router(
     ) -> dict[str, Any]:
         return library_service.update_metadata(principal, paper_id, payload).metadata
 
+    @router.post("/papers/{paper_id}/abstract-reextract")
+    def reextract_abstract(
+        paper_id: str,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        record, result = library_service.reextract_abstract(principal, paper_id)
+        return {"metadata": record.metadata, "result": result}
+
     @router.get("/papers/{paper_id}/bibliography-audit")
     def bibliography_audit(
         paper_id: str,

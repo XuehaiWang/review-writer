@@ -187,6 +187,7 @@ describe("public and authenticated routing", () => {
       if (path === "/api/v1/auth/config") return jsonResponse({ enabled: true, registration_enabled: true, password_min_length: 10 });
       if (path === "/api/v1/me") return jsonResponse(principal);
       if (path === "/api/v1/projects" && init?.method === "POST") {
+        expect(JSON.parse(init.body as string).taxonomy_profile).toBe("chemistry_general");
         created = true;
         return jsonResponse(createdProject, 201);
       }

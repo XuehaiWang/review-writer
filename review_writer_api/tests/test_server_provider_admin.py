@@ -4,6 +4,7 @@ import base64
 import socket
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -65,6 +66,7 @@ class ServerProviderAdminTests(unittest.TestCase):
             text_provider_api_key="environment-secret",
             text_provider_base_url="https://api.openai.com/v1",
             text_provider_wire_api="responses",
+            embedding_provider_price_usd_per_million=Decimal("0.05"),
             allowed_provider_hosts=("api.openai.com",),
         )
         self.service = ServerProviderSettingsService(self.settings, self.sessions)
@@ -129,6 +131,38 @@ class ServerProviderAdminTests(unittest.TestCase):
         restored = self.service.reset_settings(self.admin, "text")
         self.assertEqual("environment", restored.source)
         self.assertEqual("environment-secret", self.service.runtime_config("text").api_key)
+
+    def test_embedding_price_is_persisted_and_restores_environment_fallback(self) -> None:
+        with patch(
+            "review_writer_api.credentials.socket.getaddrinfo",
+            side_effect=self.public_resolver,
+        ):
+            saved = self.service.save_settings(
+                self.admin,
+                "embedding",
+                base_url="https://api.openai.com/v1",
+                model_name="embedding-model",
+                wire_api="embeddings",
+                api_key="embedding-secret",
+                enabled=True,
+                input_usd_per_million="0.125",
+            )
+
+        self.assertEqual("0.12500000", saved.input_usd_per_million)
+        self.assertEqual(
+            Decimal("0.12500000"),
+            self.service.runtime_config("embedding").input_usd_per_million,
+        )
+        with database_session(self.sessions) as session:
+            row = session.scalar(
+                select(ServerProviderCredential).where(
+                    ServerProviderCredential.provider_kind == "embedding"
+                )
+            )
+            self.assertEqual(Decimal("0.12500000"), row.input_usd_per_million)
+
+        restored = self.service.reset_settings(self.admin, "embedding")
+        self.assertEqual("0.05000000", restored.input_usd_per_million)
 
     def test_admin_email_bootstraps_role_on_registration(self) -> None:
         auth = AuthService(

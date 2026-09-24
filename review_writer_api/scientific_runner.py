@@ -6,16 +6,20 @@ import ctypes
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
 import time
+import tempfile
+import uuid
 from urllib.parse import urlparse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from review_writer_api.errors import WorkflowError, WorkflowValidationError
+from review_writer_api.worker_wait_state import report_model_waiting
 
 
 SAFE_ENVIRONMENT_KEYS = frozenset(
@@ -72,6 +76,15 @@ class ScientificRunError(WorkflowError):
         super().__init__(message, details=details)
         self.attempts = attempts
         self.retryable = retryable
+
+
+class ScientificModelDeferred(Exception):
+    """A separate durable model job is running; release this business lease."""
+
+    def __init__(self, model_job_id: str, *, model_job_ids=None):
+        super().__init__(model_job_id)
+        self.model_job_id = model_job_id
+        self.model_job_ids = list(dict.fromkeys([model_job_id, *(model_job_ids or [])]))
 
 
 class ScientificRunFailed(ScientificRunError):
@@ -221,10 +234,16 @@ class ScientificRunner:
             self._remove_previous_outputs(outputs)
             completion_marker = runner_directory / f"provider-attempt-{attempt}.completed"
             completion_marker.unlink(missing_ok=True)
+            try:
+                wait_directory = Path(tempfile.mkdtemp(prefix="model-wait-", dir=runner_directory))
+            except OSError:
+                wait_directory = None  # Observability must not stop generation.
             attempt_environment = dict(child_environment)
             attempt_environment["REVIEW_WRITER_PROVIDER_CALL_COMPLETED_FILE"] = str(
                 completion_marker
             )
+            if wait_directory is not None:
+                attempt_environment["REVIEW_WRITER_MODEL_WAIT_DIR"] = str(wait_directory)
             process_options: dict = {}
             if os.name == "nt":
                 process_options["creationflags"] = getattr(
@@ -253,6 +272,8 @@ class ScientificRunner:
                     **process_options,
                 )
             except (FileNotFoundError, PermissionError, OSError) as exc:
+                if wait_directory is not None:
+                    shutil.rmtree(wait_directory, ignore_errors=True)
                 raise WorkflowValidationError(
                     "Scientific command could not be started.",
                     details={"reason": exc.__class__.__name__},
@@ -275,14 +296,22 @@ class ScientificRunner:
                         )
                         break
                     except subprocess.TimeoutExpired:
+                        try:
+                            waiting = bool(wait_directory and any(wait_directory.glob("*.waiting")))
+                        except OSError:
+                            waiting = False
+                        report_model_waiting(waiting)
                         if progress_callback is not None:
                             progress_callback()
                         continue
             finally:
+                report_model_waiting(False)
                 # A callback can observe deletion, cancellation, or a lost lease
                 # before the next poll. Never leave its child running on exit.
                 if process.poll() is None:
                     self._terminate(process)
+                if wait_directory is not None:
+                    shutil.rmtree(wait_directory, ignore_errors=True)
 
             last_stdout = self._redact(last_stdout, secret_values)
             last_stderr = self._redact(last_stderr, secret_values)
@@ -292,6 +321,20 @@ class ScientificRunner:
             # though the resumable checkpoint is safely present on disk.
             if progress_callback is not None:
                 progress_callback()
+            if (
+                not timed_out and process.returncode == 75
+                and normal_environment.get("REVIEW_WRITER_DELEGATE_MODEL_CALLS") == "1"
+            ):
+                marker = re.search(r"^REVIEW_WRITER_DEFERRED_MODEL:(\{[^\r\n]*\})$", last_stderr, re.MULTILINE)
+                if marker is not None:
+                    try:
+                        deferred_data = json.loads(marker.group(1))
+                        model_job_id = str(uuid.UUID(str(deferred_data["model_job_id"])))
+                        model_job_ids = [str(uuid.UUID(str(value))) for value in deferred_data.get("model_job_ids", [model_job_id])]
+                    except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+                        model_job_id = ""
+                    if model_job_id:
+                        raise ScientificModelDeferred(model_job_id, model_job_ids=model_job_ids)
             if not timed_out and process.returncode == 0:
                 missing = [
                     path.relative_to(staging).as_posix()

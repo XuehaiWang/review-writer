@@ -73,8 +73,8 @@ def record_failure(sessions, request, status_code, exc=None):
     code = getattr(request.state, "failure_code", "") or (
         type(exc).__name__ if exc else f"HTTP_{status_code}")
     route = getattr(request.scope.get("route"), "path", "<unmatched>")
-    location = ""
-    if exc and exc.__traceback__:
+    location = safe_summary(getattr(request.state, "failure_summary", ""))[:240]
+    if not location and exc and exc.__traceback__:
         tb = exc.__traceback__
         while tb.tb_next:
             tb = tb.tb_next
@@ -100,8 +100,14 @@ def record_failure(sessions, request, status_code, exc=None):
     except Exception:
         # Logging must not change the user's response or recursively log itself.
         logger.error("system_error_persistence_failed request_id=%s", request.state.request_id)
-    logger.warning("request_failed request_id=%s status=%s code=%s route=%s",
-                   request.state.request_id, status_code, str(code)[:96], route)
+    logger.warning(
+        "request_failed request_id=%s status=%s code=%s route=%s summary=%s",
+        request.state.request_id,
+        status_code,
+        str(code)[:96],
+        route,
+        location or "-",
+    )
 
 
 def list_failures(sessions, *, query="", source="", days=30, limit=50, offset=0):

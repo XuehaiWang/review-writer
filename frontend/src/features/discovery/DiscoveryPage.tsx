@@ -1,7 +1,9 @@
+import { LocalizedError } from "../../components/LocalizedError";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 
+import { useLocalizedMessage } from "../../i18n/useLocalizedMessage";
 import { ApiError, apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
 import { ACTIVE_JOB_POLL_INTERVAL_MS } from "../../api/polling";
 import { queryKeys } from "../../api/queries";
@@ -90,7 +92,7 @@ export function DiscoveryPage() {
   const [selectedJob, setSelectedJob] = useState({ projectId: "", jobId: "" });
   const [candidateFilter, setCandidateFilter] = useState<CandidateFilter>("all");
   const [selectedPaper, setSelectedPaper] = useState<{ row: DiscoveryRow; kind: "local" | "web" } | null>(null);
-  const [selectionFeedback, setSelectionFeedback] = useState("");
+  const [selectionFeedback, setSelectionFeedback] = useLocalizedMessage();
   const [externalDownloadJobId, setExternalDownloadJobId] = useState("");
   const [refreshWatch, setRefreshWatch] = useState<{ revision: number; startedAt: number } | null>(null);
   const [coverageNoticeDismissed, setCoverageNoticeDismissed] = useState(false);
@@ -188,30 +190,30 @@ export function DiscoveryPage() {
     onSuccess: (submitted) => {
       setExternalDownloadJobId(submitted.id);
       setRefreshWatch({ revision: discovery.data!.revision, startedAt: Date.now() });
-      setSelectionFeedback(text("已提交下载与解析；全文和语义索引完成后，本页会自动载入新的待确认版本。", "Download and parsing were queued. This page will load a new reviewable revision after full-text and semantic indexing."));
+      setSelectionFeedback(["已提交下载与解析；全文和语义索引完成后，本页会自动载入新的待确认版本。", "Download and parsing were queued. This page will load a new reviewable revision after full-text and semantic indexing."]);
     },
   });
   useEffect(() => {
     if (!refreshWatch || !externalDownloadJobId) return;
     const status = externalDownloadJob.data?.status;
     if (status === "failed" || status === "cancelled" || status === "interrupted") {
-      setSelectionFeedback(externalDownloadJob.data?.error_message || text("外部论文下载或解析失败。", "External paper download or parsing failed."));
+      setSelectionFeedback(externalDownloadJob.data?.error_message || ["外部论文下载或解析失败。", "External paper download or parsing failed."]);
       setRefreshWatch(null);
       return;
     }
     if (status === "succeeded" && Number(externalDownloadJob.data?.result?.failed_count || 0) > 0) {
-      setSelectionFeedback(text("没有找到可合法自动下载的开放获取 PDF；可打开来源页面使用机构权限下载后，再到文献库导入 PDF。", "No lawfully downloadable open-access PDF was found. Open the source with institutional access, then import the downloaded PDF in Library."));
+      setSelectionFeedback(["没有找到可合法自动下载的开放获取 PDF；可打开来源页面使用机构权限下载后，再到文献库导入 PDF。", "No lawfully downloadable open-access PDF was found. Open the source with institutional access, then import the downloaded PDF in Library."]);
       setRefreshWatch(null);
       return;
     }
     if (Number(discovery.data?.revision || 0) > refreshWatch.revision) {
-      setSelectionFeedback(text("论文已完成解析与索引，并转换为可加入 Matrix 的本地候选。", "The paper was parsed and indexed and is now a local candidate eligible for the matrix."));
+      setSelectionFeedback(["论文已完成解析与索引，并转换为可加入 Matrix 的本地候选。", "The paper was parsed and indexed and is now a local candidate eligible for the matrix."]);
       setRefreshWatch(null);
       void queryClient.invalidateQueries({ queryKey: queryKeys.library("") });
       return;
     }
     if (Date.now() - refreshWatch.startedAt > 3 * 60 * 1000) {
-      setSelectionFeedback(text("下载任务已结束，但索引刷新仍在后台排队；稍后刷新页面即可查看。", "The download finished, but indexing is still queued. Refresh the page shortly to view the update."));
+      setSelectionFeedback(["下载任务已结束，但索引刷新仍在后台排队；稍后刷新页面即可查看。", "The download finished, but indexing is still queued. Refresh the page shortly to view the update."]);
       setRefreshWatch(null);
       return;
     }
@@ -298,10 +300,7 @@ export function DiscoveryPage() {
 
   function applyRecommendation() {
     setSelectedPaperIds(recommendation.recommendedIds, "replace");
-    setSelectionFeedback(text(
-      `已采用系统推荐：预选 ${recommendation.recommendedIds.size} 篇，另有 ${recommendation.reviewIds.size} 篇建议人工复核。`,
-      `Recommendation applied: ${recommendation.recommendedIds.size} preselected and ${recommendation.reviewIds.size} left for review.`,
-    ));
+    setSelectionFeedback([`已采用系统推荐：预选 ${recommendation.recommendedIds.size} 篇，另有 ${recommendation.reviewIds.size} 篇建议人工复核。`, `Recommendation applied: ${recommendation.recommendedIds.size} preselected and ${recommendation.reviewIds.size} left for review.`]);
   }
 
   function selectVisibleCandidates() {
@@ -312,15 +311,12 @@ export function DiscoveryPage() {
         .filter(Boolean),
     );
     setSelectedPaperIds(selectedIds, "add");
-    setSelectionFeedback(text(
-      `已加入当前筛选结果中的 ${selectedIds.size} 篇非排除论文。`,
-      `Added ${selectedIds.size} non-excluded papers from the current filtered results.`,
-    ));
+    setSelectionFeedback([`已加入当前筛选结果中的 ${selectedIds.size} 篇非排除论文。`, `Added ${selectedIds.size} non-excluded papers from the current filtered results.`]);
   }
 
   function clearSelection() {
     setSelectedPaperIds(new Set(), "replace");
-    setSelectionFeedback(text("已清空当前选择。", "The current selection was cleared."));
+    setSelectionFeedback(["已清空当前选择。", "The current selection was cleared."]);
   }
 
   const noArtifact = discovery.error instanceof ApiError && discovery.error.code === "WORKFLOW_STAGE_NOT_READY";
@@ -353,8 +349,9 @@ export function DiscoveryPage() {
           {(run.isPending || currentJobId) ? <DiscoveryJobProgress job={job.data || discoveryJobState.data?.active_job || undefined} submitting={run.isPending && !currentJobId} /> : null}
           {insufficientCreditStop && discovery.data ? <p className="message message-info">{text("下方保留的是上一次成功检索的结果；本次余额不足的检索未执行，也没有覆盖这些结果。", "The results below are from the last successful search. The current search was not run because of insufficient credit and did not overwrite them.")}</p> : null}
           {!insufficientCreditStop && discovery.data?.query_plan?.planner_notice ? <p className="message message-warning">{publicPlannerNotice(discovery.data.query_plan, text)}</p> : null}
+          {discovery.data?.query_plan?.search_topic ? <details className="advanced-panel"><summary>{text("查看自动转换的英文检索内容", "View translated English search input")}</summary><div className="advanced-panel-body"><p>{discovery.data.query_plan.search_topic}</p><p>{discovery.data.query_plan.search_keywords?.join(" · ")}</p><p className="muted">{text("原始研究需求保持不变。需要调整时，可修改上方主题或补充关键词后重新检索。", "Your original research request is unchanged. To adjust the search, edit the topic or additional keywords above and search again.")}</p></div></details> : null}
           {!insufficientCreditStop && discovery.data?.query_plan_source === "dashboard_llm" && !discovery.data?.query_plan?.planner_notice ? <p className="message message-info">{text("已使用当前所选文本模型完成查询规划。", "The current selected text model produced the query plan.")}</p> : null}
-          {run.error ? <p className="message message-error">{run.error.message}</p> : null}
+          {run.error ? <p className="message message-error"><LocalizedError error={run.error} /></p> : null}
         </section>
       ) : null}
       {discovery.isPending && !noArtifact ? <div className="empty-state">{text("正在加载检索结果…", "Loading discovery results…")}</div> : null}
@@ -413,7 +410,7 @@ export function DiscoveryPage() {
               <button className="button button-quiet" type="button" disabled={!hasAnySelection} onClick={clearSelection}>{text("清空选择", "Clear selection")}</button>
             </div>
             {selectionFeedback ? <p className="matrix-selection-feedback" role="status">{selectionFeedback}</p> : null}
-            {downloadExternal.error ? <p className="message message-error">{downloadExternal.error.message}</p> : null}
+            {downloadExternal.error ? <p className="message message-error"><LocalizedError error={downloadExternal.error} /></p> : null}
           </section>
           <div className="discovery-grid unified-discovery-grid">
             <section className="pane result-pane">
@@ -475,7 +472,7 @@ export function DiscoveryPage() {
             </section>
             <section className="pane discovery-detail-pane"><PaperDetail row={selectedPaper?.row || null} kind={selectedPaper?.kind || "local"} displayLabel={selectedPaper?.kind === "local" ? paperLabels.get(String(selectedPaper.row.paper_id || "")) : undefined} /></section>
           </div>
-          <div className="stage-action-bar"><div><strong>{text("论文选择", "Paper selection")}</strong><p>{text("选择需要进入 Matrix 的论文；确认采用时会自动保存当前选择，并只在输入确实变化时让后续阶段过期。", "Choose papers for the matrix. Adoption automatically saves the current selection and marks later stages stale only when the inputs actually changed.")}</p></div><button className="button button-primary" type="button" disabled={!selectedCount || confirm.isPending} onClick={() => confirm.mutate()}>{confirm.isPending ? text("同步中…", "Syncing…") : text(`确认采用并进入 Matrix（${selectedCount}篇）`, `Adopt and enter matrix (${selectedCount})`)}</button>{confirm.error ? <span className="message message-error">{confirm.error.message}</span> : null}</div>
+          <div className="stage-action-bar"><div><strong>{text("论文选择", "Paper selection")}</strong><p>{text("选择需要进入 Matrix 的论文；确认采用时会自动保存当前选择，并只在输入确实变化时让后续阶段过期。", "Choose papers for the matrix. Adoption automatically saves the current selection and marks later stages stale only when the inputs actually changed.")}</p></div><button className="button button-primary" type="button" disabled={!selectedCount || confirm.isPending} onClick={() => confirm.mutate()}>{confirm.isPending ? text("同步中…", "Syncing…") : text(`确认采用并进入 Matrix（${selectedCount}篇）`, `Adopt and enter matrix (${selectedCount})`)}</button>{confirm.error ? <span className="message message-error"><LocalizedError error={confirm.error} /></span> : null}</div>
         </>
       ) : null}
     </main>

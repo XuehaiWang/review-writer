@@ -35,6 +35,37 @@ function job(overrides: Partial<Job> = {}): Job {
 }
 
 describe("SectionJobProgress", () => {
+  it("shows drafted chapters while none has finished processing", () => {
+    render(<SectionJobProgress job={job({ status: "queued", queue_reason: "model_waiting",
+      progress_current: 0, progress_total: 7, result: { section_progress: {
+        drafted_section_ids: ["S01", "S02", "S03", "S04"], active_sections: [
+          { section_id: "S01", heading: "Introduction", phase: "reviewing" },
+        ],
+      } } })} />);
+    expect(screen.getByText(/正文已生成 4\/7 · 全流程已处理 0\/7/)).toBeInTheDocument();
+    expect(screen.getByText(/Introduction · 正文后处理/)).toBeInTheDocument();
+  });
+  it("explains that a delegated model call frees the writing worker", () => {
+    render(<SectionJobProgress job={job({ status: "queued", queue_reason: "model_waiting" })} />);
+    expect(screen.getByText("正在等待模型结果")).toBeInTheDocument();
+    expect(screen.getByText(/章节写作资源已释放/)).toBeInTheDocument();
+  });
+  it("explains a delayed provider retry without saying the section failed", () => {
+    render(<SectionJobProgress job={job({
+      status: "queued", queue_reason: "provider_rate_limit",
+      next_run_at: "2026-09-23T12:00:00Z",
+    })} />);
+    expect(screen.getByText("模型限流，稍后自动继续")).toBeInTheDocument();
+    expect(screen.getByText(/已完成的章节会保留/)).toBeInTheDocument();
+  });
+  it("shows each concurrent chapter's actual model phase", () => {
+    render(<SectionJobProgress job={job({ result: { section_progress: { active_sections: [
+      { section_id: "S01", heading: "Introduction", phase: "drafting" },
+      { section_id: "S02", heading: "Methods", phase: "reviewing" },
+    ] } } })} />);
+    expect(screen.getByText("正在处理 2 个章节")).toBeInTheDocument();
+    expect(screen.getByText(/Introduction · 正在生成正文；Methods · 正在核对来源/)).toBeInTheDocument();
+  });
   it("previews retained prose after a sibling failed without treating it as published", () => {
     const failed = job({ status: "failed", result: {
       section_progress: { completed_sections: [{ section_id: "S01", heading: "Introduction" }],
@@ -116,5 +147,15 @@ describe("SectionJobProgress", () => {
     expect(screen.queryByText("S02: missing validated evidence for paper-b")).not.toBeInTheDocument();
     expect(screen.getByText("本次操作未完成，请重试；若仍失败，请联系管理员。")).toBeInTheDocument();
     expect(screen.getByText("已保留 1 章的检查点；整批发布前不会替换当前正式版本。")).toBeInTheDocument();
+  });
+
+  it("explains an incomplete source check without presenting the section as completed", () => {
+    render(<SectionJobProgress job={job({ status: "failed", result: { section_progress: {
+      completed_sections: [{ section_id: "S01", heading: "Introduction" }],
+      failed_sections: [{ section_id: "S02", heading: "Methods", error: "Source checking is incomplete. Draft and check state were preserved." }],
+    } } })} />);
+    expect(screen.getByText("该章部分论断尚未通过原文核对；已保存中间结果，可检查证据后继续生成。")).toBeInTheDocument();
+    expect(screen.getByText("Methods")).toBeInTheDocument();
+    expect(screen.queryByText("章节正文已全部生成")).not.toBeInTheDocument();
   });
 });
