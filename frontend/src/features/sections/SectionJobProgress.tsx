@@ -109,7 +109,7 @@ export function SectionJobProgress({ job }: { job: Job }) {
       detail = `${evidenceDetail}${evidenceDetail ? " " : ""}${text(`已保留 ${completed.length}/${total} 章，待修复 ${failed.length} 章，完成一章后会立即更新。`, `${completed.length}/${total} sections retained, ${failed.length} need repair; each completion appears immediately.`)}`;
     } else {
       title = text("正在准备章节证据", "Preparing section evidence");
-      detail = text("正在读取 Blueprint、MinerU 证据和章节写作规则。", "Reading the Blueprint, MinerU evidence, and writing rules.");
+      detail = text("正在读取章节规划、原文证据和写作要求。", "Reading the chapter plan, source evidence, and writing requirements.");
     }
   } else if (job.status === "cancel_requested") {
     title = text("正在安全停止章节生成", "Stopping section generation safely");

@@ -63,6 +63,26 @@ class StorageTests(unittest.TestCase):
         self.assertTrue(self.service.run(manual=True)["cooldown"])
         self.assertEqual(report["last_cleanup"], self.service.snapshot()["last_cleanup"])
 
+    def test_orphan_zip_cleanup_protects_active_archives_and_library_pdfs(self):
+        staging = self.root / str(self.user) / "review-library" / ".upload-staging"
+        staging.mkdir(parents=True)
+        orphan = staging / f"{uuid.uuid4()}.zip.part"
+        orphan.write_bytes(b"orphan")
+        token = str(uuid.uuid4())
+        active = staging / f"{token}.zip.part"
+        active.write_bytes(b"active")
+        pdf = staging / f"{uuid.uuid4()}.pdf.part"
+        pdf.write_bytes(b"pdf")
+        self.age(staging)
+        with self.sessions.begin() as session:
+            session.add(WorkflowJob(user_id=self.user, scope="library", job_type="library.archive",
+                status="running", idempotency_key=token, payload_json={"archive_id": token}))
+        report = self.service.run()["last_cleanup"]
+        self.assertFalse(orphan.exists())
+        self.assertTrue(active.exists())
+        self.assertTrue(pdf.exists())
+        self.assertEqual(1, report["removed_files"])
+
     def test_references_recent_writes_and_leases_prevent_deletion(self):
         source, referenced = self.job()
         self.job("failed", retry_of_job_id=source)

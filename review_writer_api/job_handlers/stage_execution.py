@@ -152,6 +152,38 @@ def section_retry_checkpoints(context) -> tuple[dict | None, dict | None]:
     return checkpoint, fact_repair_checkpoint
 
 
+def _yield_incomplete_matrix_batch(context, payload, built):
+    """A bounded batch is a checkpoint, never an incomplete publication."""
+    checkpoint = built.get("matrix_enrichment_checkpoint") if isinstance(built, dict) else None
+    if not isinstance(checkpoint, dict) or "completed_papers" not in checkpoint:
+        return  # Legacy builders still go through the publication validator.
+    expected = {str(row.get("paper_id") or "") for row in payload.get("papers") or []}
+    returned = {str(row.get("paper_id") or "") for row in built.get("papers") or []}
+    completed = set(checkpoint.get("completed_papers") or [])
+    if (returned - expected or completed - expected
+            or completed != returned
+            or checkpoint.get("source_matrix_artifact_id") != payload.get("source_matrix_artifact_id")):
+        raise WorkflowValidationError("Matrix batch checkpoint does not match its source papers.")
+    if expected - completed:
+        context.report_partial_result({"matrix_enrichment_checkpoint": checkpoint})
+        context.report_progress(len(completed), len(expected))
+        raise JobYieldRequested()
+
+
+def _planning_fact_checkpoint(context, payload):
+    """Same-job progress wins over the retry source and initial input."""
+    for job_id in (context.job_id, context.retry_of_job_id):
+        if not job_id:
+            continue
+        job = context.repository.get_job(context.user_id, job_id)
+        result = getattr(job, "result", None)
+        if isinstance(result, dict):
+            checkpoint = result.get("matrix_enrichment_checkpoint")
+            if isinstance(checkpoint, dict):
+                return deepcopy(checkpoint)
+    return deepcopy(payload.get("matrix_enrichment_checkpoint"))
+
+
 def register_planning_handlers(planning_service, job_service, handlers: Mapping[str, Callable]) -> None:
     if (topic_builder := dict(handlers or {}).get("planning.topic-outline")) is not None:
         job_service.register_handler("planning.topic-outline", topic_builder)
@@ -190,23 +222,9 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
                     fact_payload.get("pending_paper_count") or 0
                 )
                 if pending_fact_count and has_fact_sources(fact_payload):
-                    saved_facts = payload.get("matrix_enrichment_checkpoint")
+                    saved_facts = _planning_fact_checkpoint(context, payload)
                     if isinstance(saved_facts, dict):
                         fact_payload["resume_checkpoint"] = saved_facts
-                    if context.retry_of_job_id:
-                        previous_job = context.repository.get_job(
-                            context.user_id, context.retry_of_job_id
-                        )
-                        previous_result = (
-                            dict(previous_job.result or {})
-                            if previous_job is not None
-                            else {}
-                        )
-                        saved_checkpoint = previous_result.get(
-                            "matrix_enrichment_checkpoint"
-                        )
-                        if isinstance(saved_checkpoint, dict):
-                            fact_payload["resume_checkpoint"] = saved_checkpoint
                     context.report_partial_result(
                         {
                             "planning_pipeline": {
@@ -218,6 +236,8 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
                     )
                     try:
                         built_facts = enrichment_builder(context, fact_payload)
+                        context.checkpoint()
+                        _yield_incomplete_matrix_batch(context, fact_payload, built_facts)
                         candidate = planning_service.publish_matrix_enrichment(
                             principal,
                             str(context.project_id),
@@ -395,14 +415,7 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
             except ScientificModelDeferred as exc:
                 yield_to_delegated_model(context, exc)
             context.checkpoint()
-            checkpoint = built.get("matrix_enrichment_checkpoint") if isinstance(built, dict) else None
-            if isinstance(checkpoint, dict) and "completed_papers" in checkpoint:
-                expected_papers = {str(row.get("paper_id") or "") for row in payload.get("papers") or []}
-                completed_papers = set(checkpoint.get("completed_papers") or [])
-                if expected_papers - completed_papers:
-                    context.report_partial_result({"matrix_enrichment_checkpoint": checkpoint})
-                    context.report_progress(len(expected_papers & completed_papers), total)
-                    raise JobYieldRequested()
+            _yield_incomplete_matrix_batch(context, payload, built)
             result = planning_service.publish_matrix_enrichment(
                 principal, str(context.project_id), payload, built
             )
@@ -437,12 +450,6 @@ def register_sections_handler(sections_service, job_service, handlers: Mapping[s
             payload = dict(payload)
             principal = Principal(context.user_id, frozenset({Role.USER}))
             sections_service.validate_generation_inputs(principal, str(context.project_id), payload)
-            if payload.get("evidence_preparation_pending") is True:
-                payload = sections_service.prepare_generation_job(context, payload)
-            # Retries carry the original task snapshot. Drop only obsolete
-            # standalone conclusions; keep body inputs/checkpoints unchanged.
-            payload["tasks"] = [task for task in payload.get("tasks") or []
-                                if str(task.get("section_role") or "").strip().casefold() != "conclusion"]
             if context.retry_of_job_id:
                 checkpoint, fact_repair_checkpoint = section_retry_checkpoints(
                     context
@@ -451,6 +458,12 @@ def register_sections_handler(sections_service, job_service, handlers: Mapping[s
                     payload["resume_checkpoint"] = checkpoint
                 if isinstance(fact_repair_checkpoint, dict):
                     payload["fact_repair_checkpoint"] = fact_repair_checkpoint
+            if payload.get("evidence_preparation_pending") is True:
+                payload = sections_service.prepare_generation_job(context, payload)
+            # Retries carry the original task snapshot. Drop only obsolete
+            # standalone conclusions; keep body inputs/checkpoints unchanged.
+            payload["tasks"] = [task for task in payload.get("tasks") or []
+                                if str(task.get("section_role") or "").strip().casefold() != "conclusion"]
             total = len(payload.get("tasks") or [])
             current_job = context.repository.get_job(context.user_id, context.job_id)
             current_result = current_job.result if current_job is not None else None

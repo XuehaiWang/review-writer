@@ -2,6 +2,8 @@
 
 Only succeeded job-staging directories are eligible. Failed/cancelled jobs may
 be retried indefinitely; unknown, referenced, and linked paths are left alone.
+Old orphaned ZIP transfers are removed separately; active/retryable archives
+remain protected and permanent library PDFs are never candidates.
 """
 from datetime import timedelta
 import os
@@ -165,6 +167,7 @@ class StorageMaintenance:
             except ValueError:
                 continue
             base = user / ".review-writer" / "job-staging"
+            self._clean_orphan_archives(session, user, cutoff, result)
             if linked(user / ".review-writer") or linked(base) or not base.is_dir():
                 continue
             for path in base.iterdir():
@@ -204,6 +207,32 @@ class StorageMaintenance:
                     if reason not in result["error_reasons"]:
                         result["error_reasons"].append(reason)
         return result
+
+    def _clean_orphan_archives(self, session, user, cutoff, result):
+        library = user / "review-library"
+        staging = library / ".upload-staging"
+        if linked(library) or linked(staging) or not staging.is_dir():
+            return
+        protected = {str((row.payload_json or {}).get("archive_id") or "") for row in session.scalars(
+            select(WorkflowJob).where(WorkflowJob.user_id == uuid.UUID(user.name),
+                WorkflowJob.job_type == "library.archive",
+                WorkflowJob.status.not_in(("succeeded", "cancelled"))))}
+        for index, path in enumerate(staging.glob("*.zip.part")):
+            if index >= 100:
+                result["partial"] = True
+                break
+            try:
+                token = path.name.removesuffix(".zip.part")
+                if str(uuid.UUID(token)) != token or token in protected or linked(path):
+                    continue
+                info = path.stat()
+                if not stat.S_ISREG(info.st_mode) or info.st_mtime > cutoff.timestamp():
+                    continue
+                path.unlink()
+                result["removed_files"] = result.get("removed_files", 0) + 1
+                result["freed_bytes"] += info.st_size
+            except (OSError, ValueError):
+                result["skipped"] += 1
 
     @staticmethod
     def _referenced(session, job_id):

@@ -26,6 +26,7 @@ CROSSREF_API = "https://api.crossref.org/works"
 EUROPE_PMC_API = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper"
 UNPAYWALL_API = "https://api.unpaywall.org/v2"
+OPENALEX_WORK_API = "https://api.openalex.org/works"
 CLOUDFLARE_DOH_API = "https://cloudflare-dns.com/dns-query"
 DEFAULT_TIMEOUT = 25
 DEFAULT_MAX_BYTES = 80 * 1024 * 1024
@@ -74,6 +75,22 @@ def _tokens(value: object) -> set[str]:
     return {token.casefold() for token in _TOKEN_RE.findall(_plain_text(value)) if token.casefold() not in stop}
 
 
+def _title_tokens(value: object) -> set[str]:
+    """Keep compound names intact while matching their distinctive prefix.
+
+    A search for ``DEFSR`` should match ``DEFSR-Net``, but a search for the
+    generic suffix ``Net`` should not match every named network.
+    """
+    tokens = _tokens(value)
+    return tokens | {
+        prefix
+        for token in tokens
+        if "-" in token
+        for prefix in (token.split("-", 1)[0],)
+        if len(prefix) >= 3
+    }
+
+
 def _first_year(item: dict[str, Any]) -> int | None:
     for key in ("published-print", "published-online", "published", "issued", "created"):
         parts = ((item.get(key) or {}).get("date-parts") or [])
@@ -107,7 +124,7 @@ def _direct_pdf_link(item: dict[str, Any]) -> str:
 
 def _candidate_score(topic: str, title: str, abstract: str, year: int | None, cited: int) -> float:
     wanted = _tokens(topic)
-    title_tokens = _tokens(title)
+    title_tokens = _title_tokens(title)
     abstract_tokens = _tokens(abstract)
     if not wanted:
         return 0.0
@@ -213,11 +230,23 @@ def search_crossref(
         current = deduped.get(key)
         if current is None or row["score"] > current["score"]:
             deduped[key] = row
-    return sorted(
+    ranked = sorted(
         deduped.values(),
         key=lambda row: (row["score"], row.get("citation_count") or 0, row.get("year") or 0),
         reverse=True,
     )
+    # For a single distinctive term, Crossref often appends unrelated papers
+    # to a precise hit. Keep abstract-only matches, but omit pure noise once
+    # there is at least one real textual match.
+    wanted = _tokens(topic)
+    if len(wanted) == 1 and len(next(iter(wanted))) >= 4:
+        matching = [
+            row for row in ranked
+            if wanted & (_title_tokens(row["title"]) | _tokens(row["abstract"]))
+        ]
+        if matching:
+            return matching
+    return ranked
 
 
 def resolve_unpaywall(
@@ -418,6 +447,45 @@ def resolve_semantic_scholar(
     }
 
 
+def resolve_openalex(
+    doi: str,
+    *,
+    timeout: int = DEFAULT_TIMEOUT,
+    request_json: Callable[..., dict[str, Any]] = _json_request,
+) -> dict[str, Any]:
+    doi = normalize_doi(doi)
+    if not doi:
+        return {"status": "no_doi", "provider": "openalex"}
+    data = request_json(
+        OPENALEX_WORK_API + "/" + urllib.parse.quote("https://doi.org/" + doi, safe=""),
+        headers={"Accept": "application/json", "User-Agent": "review-writer-literature-acquisition/1.0"},
+        timeout=timeout,
+    )
+    locations = [data.get("best_oa_location") or {}, *(data.get("locations") or [])]
+    location = next(
+        (
+            row for row in locations
+            if isinstance(row, dict) and row.get("is_oa") and str(row.get("pdf_url") or "").strip()
+        ),
+        None,
+    )
+    if location is None:
+        return {
+            "status": "no_open_access_pdf",
+            "provider": "openalex",
+            "oa_status": str((data.get("open_access") or {}).get("oa_status") or ""),
+        }
+    return {
+        "status": "open_access_pdf",
+        "provider": "openalex",
+        "pdf_url": str(location["pdf_url"]),
+        "landing_url": str(location.get("landing_page_url") or ""),
+        "license": str(location.get("license") or ""),
+        "host_type": "publisher_or_repository",
+        "version": str(location.get("version") or ""),
+    }
+
+
 def resolve_pdf_sources(
     candidate: dict[str, Any],
     *,
@@ -486,6 +554,20 @@ def resolve_pdf_sources(
                 "error": "No optional Unpaywall email was supplied.",
             }
         )
+    if not sources:
+        try:
+            openalex = resolve_openalex(doi, timeout=timeout)
+        except Exception as exc:
+            attempts.append({"provider": "openalex", "status": "provider_error", "error": f"{type(exc).__name__}: {exc}"})
+        else:
+            attempts.append({
+                "provider": "openalex",
+                "status": str(openalex.get("status") or ""),
+                "error": str(openalex.get("error") or ""),
+                "oa_status": str(openalex.get("oa_status") or ""),
+            })
+            if openalex.get("status") == "open_access_pdf":
+                sources.append(openalex)
     deduped: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
     for source in sources:

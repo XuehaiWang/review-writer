@@ -204,6 +204,7 @@ class ParagraphDialogueTests(fixtures.DraftsV1Tests):
             if payload["dialogue"].get("route_only"):
                 return {"routing": {"mode": "revision", "targets": payload["dialogue"]["route_allowed_ids"], "related": []}}
             self.last_dialogue = payload["dialogue"]
+            self.rewrite_paragraph_ids = getattr(self, "rewrite_paragraph_ids", []) + [payload["paragraph_id"]]
             if getattr(self, "fail_paragraph", "") == payload["paragraph_id"]:
                 raise RuntimeError("Isolated provider failure")
             return {"reply": "Clarified using the source", "candidate_text": payload["dialogue"]["discussion_text"] + " Clear wording.",
@@ -281,7 +282,10 @@ class ParagraphDialogueTests(fixtures.DraftsV1Tests):
                 service.decide_dialogue(self.first, self.project_id, b["candidate_id"], decision="accept")
 
     def test_batch_records_failure_and_continues(self):
-        with TestClient(self.app) as client:
+        # The fixture's default text connection is intentionally disabled; the
+        # native rewrite handler is mocked, so expose a route for job snapshots.
+        channel = {"connection_id": "default", "model": "gpt-5.6-terra", "wire_api": "chat-completions"}
+        with patch("review_writer_api.model_catalog.available_channels", return_value=[channel]), TestClient(self.app) as client:
             self.prepare_draft(client)
             service = self.app.state.drafts_service
             current = service.get(self.first, self.project_id)
@@ -301,6 +305,35 @@ class ParagraphDialogueTests(fixtures.DraftsV1Tests):
             self.assertEqual("failed", results[current["paragraphs"][0]["paragraph_key"]]["status"])
             self.assertTrue(any(r["status"] == "completed" for r in results.values()))
             self.assertEqual(current["draft_artifact_id"], service.get(self.first, self.project_id)["draft_artifact_id"])
+
+            failed_key = current["paragraphs"][0]["paragraph_key"]
+            called_before_resume = len(self.rewrite_paragraph_ids)
+            self.fail_paragraph = ""
+            resumed = client.post(f"/api/v1/projects/{self.project_id}/draft/dialogue-batch/{job['id']}/resume",
+                                  headers=self.headers("resume-partial"))
+            self.assertEqual(202, resumed.status_code, resumed.text)
+            resumed_job = resumed.json()
+            for _ in range(300):
+                resumed_job = client.get(f"/api/v1/jobs/{resumed_job['id']}").json()
+                if resumed_job["status"] not in {"queued", "running", "cancel_requested"}:
+                    break
+                time.sleep(.03)
+            self.assertEqual("succeeded", resumed_job["status"], resumed_job)
+            self.assertEqual(job["id"], resumed_job["retry_of_job_id"])
+            self.assertTrue(all(r["status"] == "completed" for r in resumed_job["result"]["paragraph_results"].values()))
+            self.assertIn(failed_key, resumed_job["result"]["paragraph_results"])
+            self.assertEqual([current["paragraphs"][0]["paragraph_id"]], self.rewrite_paragraph_ids[called_before_resume:])
+            self.assertEqual(409, client.post(
+                f"/api/v1/projects/{self.project_id}/draft/dialogue-batch/{resumed_job['id']}/resume",
+                headers=self.headers("nothing-to-resume")).status_code)
+            fresh = service.get(self.first, self.project_id)
+            changed = fresh["paragraphs"][-1]
+            service.save_paragraph(self.first, self.project_id, changed["paragraph_id"],
+                text=changed["text"] + " Author correction.", revision=fresh["revision"],
+                base_text_sha256=changed["text_sha256"])
+            self.assertEqual(409, client.post(
+                f"/api/v1/projects/{self.project_id}/draft/dialogue-batch/{job['id']}/resume",
+                headers=self.headers("stale-partial")).status_code)
 
     def test_accept_merges_other_paragraph_save_but_rejects_same_paragraph_conflict(self):
         with TestClient(self.app) as client:

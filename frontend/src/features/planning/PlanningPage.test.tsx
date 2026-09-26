@@ -1,11 +1,13 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Job } from "../../api/types";
 import { usePreferences } from "../../state/preferences";
-import { PlanningPage } from "./PlanningPage";
+import { PlanningPage, type PlanningPayload } from "./PlanningPage";
+import { ChapterPlanningWorkspace } from "./ChapterPlanningWorkspace";
+import { apiRequest } from "../../api/client";
 
 vi.mock("../../components/ProjectSelector", () => ({
   ProjectSelector: () => null,
@@ -59,14 +61,24 @@ function enhancementJob(status: Job["status"]): Job {
   };
 }
 
+function StageFourPlanning() {
+  const planning = useQuery({
+    queryKey: ["planning", "project-1"],
+    queryFn: () => apiRequest<PlanningPayload>(planningPath),
+  });
+  if (!planning.data) return null;
+  if (planning.data.blueprint_approved) return <h1>Section writing</h1>;
+  return <ChapterPlanningWorkspace payload={planning.data} projectId="project-1" refresh={() => planning.refetch({ throwOnError: true })} />;
+}
+
 function renderPlanning(tab = "matrix") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   clients.push(client);
   render(<QueryClientProvider client={client}>
-    <MemoryRouter initialEntries={[`/planning?project=project-1&tab=${tab}`]}>
+    <MemoryRouter initialEntries={[tab === "blueprint" ? "/sections?project=project-1" : `/planning?project=project-1&tab=${tab}`]}>
       <Routes>
         <Route path="/planning" element={<PlanningPage />} />
-        <Route path="/sections" element={<h1>Section writing</h1>} />
+        <Route path="/sections" element={<StageFourPlanning />} />
       </Routes>
     </MemoryRouter>
   </QueryClientProvider>);
@@ -99,6 +111,9 @@ describe("default argument planning and candidate confirmation", () => {
         payload = { ...payload, blueprint_jobs: [enhancementJob("cancelled")] };
         return Response.json(enhancementJob("cancelled"));
       }
+      if (path === `${planningPath}/blueprint/confirm`) {
+        payload = { ...payload, blueprint_approved: true, blueprint_candidate_pending: false };
+      }
       if ([planningPath, `${planningPath}/blueprint`, `${planningPath}/blueprint/confirm`].includes(path)) {
         return Response.json(payload);
       }
@@ -112,8 +127,23 @@ describe("default argument planning and candidate confirmation", () => {
     vi.restoreAllMocks();
   });
 
+  it("redirects the old chapter-planning link to stage four", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    clients.push(client);
+    render(<QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/planning?tab=blueprint&project=project-1"]}>
+        <Routes>
+          <Route path="/planning" element={<PlanningPage />} />
+          <Route path="/sections" element={<h1>Stage four</h1>} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>);
+    expect(await screen.findByRole("heading", { name: "Stage four" })).toBeInTheDocument();
+    expect(requests).toEqual([]);
+  });
+
   it("queues default planning and confirms the completed candidate artifact", async () => {
-    renderPlanning();
+    renderPlanning("blueprint");
     fireEvent.click(await screen.findByRole("button", { name: "生成章节规划" }));
     await screen.findByRole("button", { name: "停止生成" });
     expect(requests.map(({ path }) => path)).toEqual([`${planningPath}/blueprint/jobs`]);
@@ -122,7 +152,7 @@ describe("default argument planning and candidate confirmation", () => {
     expect(screen.queryByRole("button", { name: "增强章节论证（可选）" })).not.toBeInTheDocument();
     payload = { ...payload, ...basicBlueprint(), blueprint_candidate_pending: true, blueprint_jobs: [enhancementJob("succeeded")] };
     await act(async () => { await clients[0].invalidateQueries(); });
-    const confirm = await screen.findByRole("button", { name: "确认并进入章节" });
+    const confirm = await screen.findByRole("button", { name: "确认章节规划" });
     await waitFor(() => expect(confirm).toBeEnabled());
     fireEvent.click(confirm);
     expect(await screen.findByRole("heading", { name: "Section writing" })).toBeInTheDocument();
@@ -151,7 +181,7 @@ describe("default argument planning and candidate confirmation", () => {
     renderPlanning("blueprint");
     expect(await screen.findByText("章节规划已完成 · 1 个章节")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "重新生成" })).toHaveLength(1);
-    expect(screen.getByRole("button", { name: "确认并进入章节" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "确认章节规划" })).toBeEnabled();
     const disclosure = screen.getByText("1 篇论文未纳入本次综述 · 查看原因").closest("details")!;
     expect(disclosure).not.toHaveAttribute("open");
     fireEvent.click(disclosure.querySelector("summary")!);
@@ -161,11 +191,10 @@ describe("default argument planning and candidate confirmation", () => {
     expect(screen.getByText(/已分配 1 篇论文/)).toBeInTheDocument();
   });
 
-  it("opens an existing plan from Matrix without generating another job", async () => {
+  it("opens an existing plan in stage 04 without generating another job", async () => {
     payload = { ...payload, ...basicBlueprint() };
-    renderPlanning();
-    fireEvent.click(await screen.findByRole("button", { name: "查看章节规划" }));
-    expect(await screen.findByRole("button", { name: "确认并进入章节" })).toBeEnabled();
+    renderPlanning("blueprint");
+    expect(await screen.findByRole("button", { name: "确认章节规划" })).toBeEnabled();
     expect(requests).toEqual([]);
   });
 
@@ -190,7 +219,7 @@ describe("default argument planning and candidate confirmation", () => {
     const pending = new Promise<void>((resolve) => { release = resolve; });
     applyOutline = async (body) => { await pending; return apply(body); };
     renderPlanning();
-    fireEvent.click(await screen.findByRole("button", { name: "大纲选择与上传" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择大纲" }));
     fireEvent.click(screen.getAllByRole("button", { name: "使用此结构" })[0]);
     expect(await screen.findByRole("button", { name: "正在应用…" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "保存大纲" })).toBeDisabled();
@@ -203,7 +232,7 @@ describe("default argument planning and candidate confirmation", () => {
 
   it("shows the saved outline without waiting for the background page refresh", async () => {
     renderPlanning();
-    fireEvent.click(await screen.findByRole("button", { name: "大纲选择与上传" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择大纲" }));
     const originalFetch = vi.mocked(globalThis.fetch).getMockImplementation()!;
     let saved = false;
     vi.mocked(globalThis.fetch).mockImplementation(async (input, init = {}) => {
@@ -222,7 +251,7 @@ describe("default argument planning and candidate confirmation", () => {
 
   it("keeps the saved outline active until a custom draft is explicitly saved", async () => {
     renderPlanning();
-    fireEvent.click(await screen.findByRole("button", { name: "大纲选择与上传" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择大纲" }));
     const custom = screen.getAllByRole("button", { name: "使用此结构" }).at(-1)!;
 
     fireEvent.click(custom);
@@ -240,13 +269,29 @@ describe("default argument planning and candidate confirmation", () => {
     });
   });
 
+  it("keeps unsaved outline edits when a source switch is cancelled", async () => {
+    renderPlanning();
+    fireEvent.click(await screen.findByRole("button", { name: "选择大纲" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "章节标题" }), { target: { value: "Edited evidence theme" } });
+    expect(screen.getByText("修改未保存")).toBeVisible();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    fireEvent.click(screen.getAllByRole("button", { name: "使用此结构" })[0]);
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(requests).toEqual([]);
+    expect(screen.getByRole("textbox", { name: "章节标题" })).toHaveValue("Edited evidence theme");
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getAllByRole("button", { name: "使用此结构" })[0]);
+    await screen.findByText("大纲已应用，章节已载入下方编辑器。");
+    expect(requests).toHaveLength(1);
+  });
+
   it("immediately reports duplicate section IDs repaired while saving", async () => {
     applyOutline = async (body) => {
       payload = { ...payload, matrix_revision: body.revision + 1, selected_outline_md: "## Evidence theme\n<!-- section_id: S01 -->\n## Comparison\n<!-- section_id: S02 -->\n" };
       return Response.json({ ...payload, section_id_repairs: [{ section_index: 2, title: "Comparison", old_id: "S01", new_id: "S02" }] });
     };
     renderPlanning();
-    fireEvent.click(await screen.findByRole("button", { name: "大纲选择与上传" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择大纲" }));
     fireEvent.click(screen.getAllByRole("button", { name: "使用此结构" }).at(-1)!);
     fireEvent.click(screen.getByRole("button", { name: "保存大纲" }));
     expect(await screen.findByText(/已自动修复 1 处重复的章节标识（第 2 节）/)).toBeVisible();
@@ -260,7 +305,7 @@ describe("default argument planning and candidate confirmation", () => {
       return Response.json({ error: { code: "STATE_CONFLICT", message: "Workflow stage changed since it was loaded." } }, { status: 409 });
     };
     renderPlanning();
-    fireEvent.click(await screen.findByRole("button", { name: "大纲选择与上传" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择大纲" }));
     fireEvent.click(screen.getAllByRole("button", { name: "使用此结构" })[0]);
     expect(await screen.findByRole("alert")).toHaveTextContent("内容或版本已更新，请刷新后重试。");
     fireEvent.click(screen.getByRole("button", { name: "技术详情" }));
@@ -277,7 +322,7 @@ describe("default argument planning and candidate confirmation", () => {
   it("shows non-conflict failures instead of silently leaving the outline unchanged", async () => {
     applyOutline = async () => Response.json({ detail: "The outline could not be loaded." }, { status: 422 });
     renderPlanning();
-    fireEvent.click(await screen.findByRole("button", { name: "大纲选择与上传" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择大纲" }));
     fireEvent.click(screen.getAllByRole("button", { name: "使用此结构" })[0]);
     expect(await screen.findByRole("alert")).toHaveTextContent("无法载入该大纲，请检查内容后重试。");
     fireEvent.click(screen.getByRole("button", { name: "技术详情" }));
@@ -290,7 +335,7 @@ describe("default argument planning and candidate confirmation", () => {
     payload = { ...payload, outline_current: false, outline_selection: { outline_style: "topic-guided" },
       outline_candidates: [{ source: "topic", outline_style: "topic-guided", title: "Recommended" }] };
     renderPlanning();
-    fireEvent.click(await screen.findByRole("button", { name: "大纲选择与上传" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择大纲" }));
     const choose = screen.getByRole("button", { name: "使用推荐大纲" });
     expect(choose).toBeEnabled();
     fireEvent.click(choose);
@@ -300,7 +345,7 @@ describe("default argument planning and candidate confirmation", () => {
 
   it("prevents duplicate generation while the default planner is running", async () => {
     payload.blueprint_jobs = [enhancementJob("running")];
-    renderPlanning();
+    renderPlanning("blueprint");
     expect(await screen.findByRole("button", { name: "停止生成" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "生成章节规划" })).not.toBeInTheDocument();
     expect(screen.getByRole("progressbar", { name: "章节规划进度" })).toBeInTheDocument();
@@ -311,11 +356,13 @@ describe("default argument planning and candidate confirmation", () => {
     payload = { ...payload, ...basicBlueprint() };
     renderPlanning("blueprint");
     fireEvent.click(await screen.findByRole("button", { name: "重新生成" }));
+    expect(requests).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "确认重新规划" }));
     const cancel = await screen.findByRole("button", { name: "停止生成" });
-    expect(screen.getByRole("button", { name: "确认并进入章节" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认章节规划" })).toBeDisabled();
     fireEvent.click(cancel);
     await waitFor(() => expect(screen.getByRole("button", { name: "重新生成" })).toBeEnabled());
-    expect(screen.getByRole("button", { name: "确认并进入章节" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "确认章节规划" })).toBeEnabled();
     expect(requests[1].path).toBe("/api/v1/jobs/enhancement-1/cancel");
   });
 
@@ -325,7 +372,7 @@ describe("default argument planning and candidate confirmation", () => {
       ...basic.section_blueprint, academic_planning: { status: "incomplete", incomplete_sections: ["S01"] },
     } };
     renderPlanning("blueprint");
-    expect(await screen.findByRole("button", { name: "确认并进入章节" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "确认章节规划" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "继续生成" })).toBeEnabled();
     expect(requests).toEqual([]);
   });
@@ -338,7 +385,7 @@ describe("default argument planning and candidate confirmation", () => {
     } },
   ])("preserves the generation gate for $name", async ({ patch }) => {
     payload = { ...payload, ...patch };
-    renderPlanning();
+    renderPlanning("blueprint");
     const generate = await screen.findByRole("button", { name: "生成章节规划" });
     expect(generate).toBeDisabled();
     fireEvent.click(generate);
@@ -352,16 +399,16 @@ describe("default argument planning and candidate confirmation", () => {
       section_blueprint: { ...basic.section_blueprint, sections: [{ section_id: "S01", title: "Provisional theme",
         planning_status: "planned", thesis_status: "provisional", scientific_thesis: { text: "Explore the theme" }, scientific_claims: [] }] } };
     renderPlanning("blueprint");
-    expect(await screen.findByRole("button", { name: "确认并进入章节" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "确认章节规划" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "重新生成" })).toBeEnabled();
     expect(screen.getByText("写作目标")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "确认并进入章节" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认章节规划" }));
     await screen.findByRole("heading", { name: "Section writing" });
   });
 
   it("can plan while a recoverable historical fact job runs", async () => {
     payload = { ...payload, matrix_enrichment: { jobs: [{ ...enhancementJob("running"), job_type: "matrix.enrich" }] } };
-    renderPlanning();
+    renderPlanning("blueprint");
     expect(await screen.findByRole("button", { name: "生成章节规划" })).toBeEnabled();
     expect(requests).toEqual([]);
   });

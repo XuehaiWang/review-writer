@@ -110,6 +110,10 @@ class LibraryV1Tests(unittest.TestCase):
             public_origin="http://testserver",
             credential_encryption_key=TEST_KEY,
             hosted_workspace_root=root / "users",
+            # The audit handler is stubbed, but enqueuing it still requires a
+            # valid text-model route in the test catalog.
+            text_provider_api_key="test-only-library-audit-key",
+            text_provider_base_url="https://api.openai.com/v1",
         )
         self.parse_calls = 0
 
@@ -205,6 +209,7 @@ class LibraryV1Tests(unittest.TestCase):
                         "candidate_id": "crossref:1",
                         "title": payload["topic"],
                         "source": "crossref",
+                        "availability": {"state": "not_found" if payload["topic"] == "no open pdf" else "available", "source_found": payload["topic"] != "no open pdf"},
                     }
                 ]
             }
@@ -423,6 +428,98 @@ class LibraryV1Tests(unittest.TestCase):
         staging = self.settings.hosted_workspace_root / self.first.user_id / "review-library" / ".upload-staging"
         self.assertEqual(2, len(list(staging.glob("*.pdf.part"))))
         self.assertEqual(0, self.parse_calls)
+
+    def test_archive_collection_queues_pdfs_and_preserves_names(self) -> None:
+        import io
+        import zipfile
+        from review_writer_api.job_service import JobContext
+        self.app.state.job_service.execution_enabled = False
+        data = io.BytesIO()
+        with zipfile.ZipFile(data, "w") as archive:
+            archive.writestr("a/paper.pdf", fake_pdf(b"A"))
+            archive.writestr("b/paper.pdf", fake_pdf(b"B"))
+            archive.writestr("bad.pdf", b"not pdf")
+            archive.writestr("metadata.json", b"{}")
+        batch_id = str(uuid.uuid4())
+        jobs = self.app.state.job_service
+        with TestClient(self.app) as client:
+            response = client.post("/api/v1/library/archive-jobs", params={"filename": "papers.zip", "batch_id": batch_id},
+                content=data.getvalue(), headers={"Content-Type": "application/zip", "Origin": "http://testserver"})
+            self.assertEqual(202, response.status_code, response.text)
+            job = jobs.repository.claim_job(response.json()["id"])
+            result = jobs._handlers["library.archive"](JobContext(jobs.repository, job, Event()), job.payload)
+            self.assertEqual(2, result["submitted_count"])
+            self.assertEqual(1, result["ignored_count"])
+            self.assertEqual(1, result["failed_count"])
+            recent = client.get("/api/v1/library/upload-jobs/recent").json()
+            self.assertEqual({"a/paper.pdf", "b/paper.pdf"}, {row["filename"] for row in recent["items"]})
+            self.assertEqual(1, len(recent["archives"]))
+            self.assertTrue(all(row["status"] == "queued" for row in recent["items"]))
+            self.current = self.second
+            foreign = client.get("/api/v1/library/upload-jobs/recent").json()
+            self.assertFalse(foreign["items"] or foreign["archives"])
+        staging = self.settings.hosted_workspace_root / self.first.user_id / "review-library" / ".upload-staging"
+        self.assertEqual(2, len(list(staging.glob("*.pdf.part"))))
+        self.assertFalse(list(staging.glob("*.zip.part")))
+
+    def test_archive_cancel_before_worker_and_reject_late_submission(self) -> None:
+        self.app.state.job_service.execution_enabled = False
+        batch_id = str(uuid.uuid4())
+        with TestClient(self.app) as client:
+            def submit():
+                return client.post("/api/v1/library/archive-jobs", params={"filename": "papers.zip", "batch_id": batch_id},
+                    content=b"zip", headers={"Content-Type": "application/zip", "Origin": "http://testserver"})
+            response = submit()
+            self.assertEqual(202, response.status_code)
+            cancelled = client.post(f"/api/v1/library/upload-batches/{batch_id}/cancel-remaining", headers={"Origin": "http://testserver"})
+            self.assertEqual(1, cancelled.json()["cancelled_count"])
+            self.assertEqual("cancelled", self.app.state.workflow_repository.get_job(self.first.user_id, response.json()["id"]).status)
+            self.assertEqual(409, submit().status_code)
+        staging = self.settings.hosted_workspace_root / self.first.user_id / "review-library" / ".upload-staging"
+        self.assertFalse(list(staging.iterdir()))
+
+    def test_archive_resume_skips_submitted_children_and_cancel_stops_collection(self) -> None:
+        import io
+        import zipfile
+        from review_writer_api.job_service import JobContext, JobShutdownRequested, JobCancellationRequested
+        jobs = self.app.state.job_service
+        jobs.execution_enabled = False
+        data = io.BytesIO()
+        with zipfile.ZipFile(data, "w") as archive:
+            for index in range(3):
+                archive.writestr(f"{index}.pdf", fake_pdf(str(index).encode()))
+        batch_id = str(uuid.uuid4())
+        with TestClient(self.app) as client:
+            response = client.post("/api/v1/library/archive-jobs", params={"filename": "papers.zip", "batch_id": batch_id},
+                content=data.getvalue(), headers={"Content-Type": "application/zip", "Origin": "http://testserver"})
+            job = jobs.repository.claim_job(response.json()["id"])
+            context = JobContext(jobs.repository, job, Event())
+            original_progress = context.report_progress
+            def stop_after_first(current, total):
+                original_progress(current, total)
+                if current == 1:
+                    raise JobShutdownRequested()
+            context.report_progress = stop_after_first
+            with self.assertRaises(JobShutdownRequested):
+                jobs._handlers["library.archive"](context, job.payload)
+            before = jobs.repository.archive_upload_keys(self.first.user_id, job.payload["archive_id"])
+            self.assertEqual(1, len(before))
+            self.assertFalse(jobs.repository.archive_upload_keys(self.second.user_id, job.payload["archive_id"]))
+            context.report_progress = original_progress
+            original_submit = jobs.submit
+            def cancel_after_next(*args, **kwargs):
+                child = original_submit(*args, **kwargs)
+                client.post(f"/api/v1/library/upload-batches/{batch_id}/cancel-remaining", headers={"Origin": "http://testserver"})
+                return child
+            with patch.object(jobs, "submit", side_effect=cancel_after_next) as submitted:
+                with self.assertRaises(JobCancellationRequested):
+                    jobs._handlers["library.archive"](context, job.payload)
+                self.assertEqual(1, submitted.call_count)
+            children = jobs.repository.list_library_jobs(self.first.user_id, job_type="library.upload")
+            self.assertEqual(2, len(children))
+            self.assertTrue(all(child.status == "cancelled" for child in children))
+        staging = self.settings.hosted_workspace_root / self.first.user_id / "review-library" / ".upload-staging"
+        self.assertFalse(list(staging.iterdir()))
 
     def test_batch_cancellation_races_upload_admission_without_leaving_queued_work(self) -> None:
         repository = self.app.state.workflow_repository
@@ -1289,6 +1386,7 @@ class LibraryV1Tests(unittest.TestCase):
                 headers={"Origin": "http://testserver", "Idempotency-Key": "download-1"},
             )
             download_job = self.wait_job(client, download.json()["id"])
+            self.assertEqual("succeeded", download_job["status"], download_job)
             self.assertEqual(1, download_job["result"]["added_count"])
             final_paper_id = download_job["result"]["results"][0]["paper_id"]
             self.assertNotEqual("P900", final_paper_id)
@@ -1331,6 +1429,73 @@ class LibraryV1Tests(unittest.TestCase):
 
             self.current = self.second
             self.assertEqual(404, client.get(f"/api/v1/jobs/{search_job['id']}").status_code)
+
+    def test_library_download_uses_owned_search_candidate_and_rejects_unavailable_pdf(self) -> None:
+        with TestClient(self.app) as client:
+            search = client.post(
+                "/api/v1/library/search-jobs",
+                json={"topic": "allenation"},
+                headers={"Origin": "http://testserver"},
+            )
+            self.assertEqual("succeeded", self.wait_job(client, search.json()["id"])["status"])
+            forged = client.post(
+                "/api/v1/library/download-jobs",
+                json={"candidates": [{"candidate_id": "crossref:1", "title": "Forged", "crossref_pdf_url": "https://attacker.example/paper.pdf"}]},
+                headers={"Origin": "http://testserver"},
+            )
+            self.assertEqual(202, forged.status_code, forged.text)
+            saved = self.app.state.job_service.repository.get_job(self.first.user_id, forged.json()["id"])
+            self.assertEqual("allenation", saved.payload["candidates"][0]["title"])
+            self.assertNotIn("crossref_pdf_url", saved.payload["candidates"][0])
+            completed = self.wait_job(client, forged.json()["id"])
+            self.assertEqual("succeeded", completed["status"], completed)
+            paper_id = completed["result"]["results"][0]["paper_id"]
+            for job_type, key in (("library.index", f"index:{paper_id}"),
+                                  ("library.bibliography-audit", f"bibliography-audit:{paper_id}")):
+                follow_up = self.app.state.job_service.repository.get_current_job(
+                    self.first.user_id, scope="library", job_type=job_type, operation_key=key
+                )
+                if follow_up is not None:
+                    self.wait_job(client, follow_up.id)
+
+            blocked_search = client.post(
+                "/api/v1/library/search-jobs",
+                json={"topic": "no open pdf"},
+                headers={"Origin": "http://testserver"},
+            )
+            self.assertEqual("succeeded", self.wait_job(client, blocked_search.json()["id"])["status"])
+            blocked = client.post(
+                "/api/v1/library/download-jobs",
+                json={"candidates": [{"candidate_id": "crossref:1"}]},
+                headers={"Origin": "http://testserver"},
+            )
+            self.assertEqual(422, blocked.status_code, blocked.text)
+
+    def test_downloaded_pdf_is_not_failed_by_unavailable_follow_up_audit(self) -> None:
+        with TestClient(self.app) as client:
+            search = client.post(
+                "/api/v1/library/search-jobs",
+                json={"topic": "allenation"},
+                headers={"Origin": "http://testserver"},
+            )
+            self.assertEqual("succeeded", self.wait_job(client, search.json()["id"])["status"])
+            with patch("review_writer_api.model_catalog.snapshot_for_job", side_effect=ValueError("The selected model's service connection is disabled.")):
+                submitted = client.post(
+                    "/api/v1/library/download-jobs",
+                    json={"candidates": [{"candidate_id": "crossref:1"}]},
+                    headers={"Origin": "http://testserver"},
+                )
+                self.assertEqual(202, submitted.status_code, submitted.text)
+                completed = self.wait_job(client, submitted.json()["id"])
+            self.assertEqual("succeeded", completed["status"], completed)
+            self.assertEqual(1, completed["result"]["added_count"])
+            paper_id = completed["result"]["results"][0]["paper_id"]
+            index_job = self.app.state.job_service.repository.get_current_job(
+                self.first.user_id, scope="library", job_type="library.index", operation_key=f"index:{paper_id}"
+            )
+            if index_job is not None:
+                self.wait_job(client, index_job.id)
+            self.assertEqual(1, client.get("/api/v1/library/papers").json()["count"])
 
     def test_literature_acquisition_candidates_are_scoped_per_project(self) -> None:
         with self.sessions.begin() as session:

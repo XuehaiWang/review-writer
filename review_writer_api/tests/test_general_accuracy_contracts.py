@@ -27,6 +27,37 @@ from review_writer_core.draft_bibliography import CITATION_MAP_RE
 
 
 class GeneralAccuracyContractTests(unittest.TestCase):
+    def test_final_heading_cleanup_preserves_adjacent_levels_and_line_endings(self):
+        for newline in ("\n", "\r\n"):
+            for gap in (newline, newline * 2):
+                with self.subTest(newline=repr(newline), gap=repr(gap)):
+                    source = gap.join([
+                        "## Introduction",
+                        "### Structural Features and Synthetic Significance of Allenes",
+                        "#### Fluoroalkyl-Substituted Allenes",
+                        "Body with an inline ### token.",
+                    ]) + newline
+                    self.assertEqual(FinalService._sanitize_internal_section_headings(source), source)
+
+    def test_final_heading_cleanup_keeps_pdf_parent_sections(self):
+        from review_writer_core.manuscript_state import build_manuscript_state
+        from review_writer_core.latex_renderer import render_body
+
+        source = "# Review\n\n" + "\n\n".join(
+            f"## Chapter {index}\n\n### Carbon-Substituted Allenes\n\n"
+            "#### Fluoroalkyl-Substituted Allenes\n\nBody."
+            for index in range(1, 5)
+        )
+        cleaned = FinalService._sanitize_internal_section_headings(source)
+        rendered = render_body(build_manuscript_state(cleaned))
+        self.assertEqual(rendered.count(r"\subsection{Carbon-Substituted Allenes}"), 4)
+        self.assertEqual(rendered.count(r"\subsubsection{Fluoroalkyl-Substituted Allenes}"), 4)
+        self.assertIn(
+            "\\section{Chapter 4}\n\n\\subsection{Carbon-Substituted Allenes}\n\n"
+            "\\subsubsection{Fluoroalkyl-Substituted Allenes}", rendered,
+        )
+        self.assertNotIn(r"\#\#\#", rendered)
+
     def test_postgres_term_groups_preserve_or_within_and_between_contract(self) -> None:
         expression = postgres_term_group_constraint(
             func.to_tsvector("simple", column("content", String)),

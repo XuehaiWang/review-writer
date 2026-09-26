@@ -19,6 +19,8 @@ import {
 import { MetadataVisualEditor } from "./metadata/MetadataVisualEditor";
 import { buildUploadBatchCounts } from "./uploadBatchProgress";
 import { uploadJobsNeedingLibraryRefresh } from "./uploadRefresh";
+import { LibraryImportPicker } from "./LibraryImportPicker";
+import { PreparationNotice } from "../../components/PreparationNotice";
 
 type DetailTab = "metadata" | "markdown" | "pdf";
 type UploadStatus = {
@@ -32,12 +34,15 @@ type UploadStatus = {
   duplicate?: boolean;
   paperId?: string;
 };
-type Candidate = Record<string, unknown> & { candidate_id?: string; title?: string; year?: number; journal?: string; doi?: string; score?: number; landing_url?: string };
+type Candidate = Record<string, unknown> & {
+  candidate_id?: string; title?: string; year?: number; journal?: string; doi?: string; score?: number; landing_url?: string;
+  availability?: { state?: "available" | "unknown" | "restricted" | "not_found"; source_found?: boolean; provider?: string; checked_at?: number };
+};
 type DownloadResult = {
   added_count?: number;
   already_present_count?: number;
   failed_count?: number;
-  results?: Array<{ status?: string; error?: string }>;
+  results?: Array<{ candidate_id?: string; status?: string; error?: string }>;
 };
 
 export function UploadBatchProgress({
@@ -50,6 +55,7 @@ export function UploadBatchProgress({
   cancelNotice,
   cancelError,
   onViewPaper,
+  collecting = false,
 }: {
   uploads: UploadStatus[];
   localUploads: UploadStatus[];
@@ -60,6 +66,7 @@ export function UploadBatchProgress({
   cancelNotice?: string;
   cancelError?: string;
   onViewPaper?: (paperId: string) => void;
+  collecting?: boolean;
 }) {
   const { language, text } = useUiText();
   const { total, done, failed, cancelled, uploading, queued } = buildUploadBatchCounts(
@@ -76,8 +83,8 @@ export function UploadBatchProgress({
   const added = done - duplicates;
 
   const finished = done + failed + cancelled;
-  const active = uploading > 0 || queued > 0;
-  const progress = Math.round((finished / total) * 100);
+  const active = collecting || uploading > 0 || queued > 0;
+  const progress = Math.min(collecting ? 99 : 100, Math.round((finished / total) * 100));
   const current = uploads.find((row) => row.status === "uploading");
   const firstFailure = uploads.find((row) => row.status === "failed");
   const stateClass = active ? "running" : failed > 0 ? "failed" : "done";
@@ -196,7 +203,7 @@ function useCurrentLibraryJob(kind: "search" | "download", projectId: string, en
 function LibraryJobStatus({ kind, job }: { kind: "search" | "download"; job: Job | null | undefined }) {
   const { language, text } = useUiText();
   if (!job) return null;
-  const label = kind === "search" ? text("检索", "Search") : text("下载", "Download");
+  const label = kind === "search" ? text("检索与开放 PDF 核验", "Search and open PDF check") : text("下载", "Download");
   const statusLabels: Record<Job["status"], string> = {
     queued: text("等待中", "Queued"),
     running: text("进行中", "Running"),
@@ -239,20 +246,26 @@ function LibraryJobStatus({ kind, job }: { kind: "search" | "download"; job: Job
   );
 }
 
-function PaperListItem({ paper, displayLabel, selected, onSelect }: { paper: LibraryPaper; displayLabel: string; selected: boolean; onSelect: () => void }) {
-  const { text } = useUiText();
-  const status = paper.human_review_status === "reviewed"
-    ? { className: "status-dot reviewed", label: text("已人工审核", "Manually reviewed") }
-    : paper.needs_human_check
-      ? { className: "status-dot warning", label: text("需要人工检查", "Manual review required") }
-      : { className: "status-dot ok", label: text("Metadata已就绪", "Metadata ready") };
+export function PaperListItem({ paper, displayLabel, selected, onSelect }: { paper: LibraryPaper; displayLabel: string; selected: boolean; onSelect: () => void }) {
+  const { text, language } = useUiText();
+  const fieldLabels: Record<string, string> = {
+    title: text("标题", "title"), authors: text("作者", "authors"), year: text("年份", "year"),
+    journal: text("期刊", "journal"), abstract: text("摘要", "abstract"), fulltext: text("解析正文", "parsed full text"),
+  };
+  const complete = paper.content_complete ?? (paper.human_review_status === "reviewed" || paper.needs_human_check === false);
+  const missing = (paper.content_missing_fields || []).map((field) => fieldLabels[field] || field).join(language === "en" ? ", " : "、");
+  const status = complete
+    ? { className: "status-dot ok", label: text("论文内容齐全", "Paper content complete") }
+    : { className: "status-dot warning", label: missing
+      ? text(`内容待补全：${missing}`, `Content incomplete: ${missing}`)
+      : text("论文内容待补全", "Paper content incomplete") };
   return (
     <button type="button" className={selected ? "paper-row active" : "paper-row"} onClick={onSelect}>
       <span className="paper-row-main">
         <strong><span className="paper-display-id" title={paper.paper_id}>{displayLabel}</span> · {paper.title || displayLabel}</strong>
         <small>{paper.search_match ? `${text("正文页", "Full text p.")} ${paper.search_match.page_start || "?"} · ${paper.search_match.content.slice(0, 90)}` : [paper.year, paper.journal, paper.doi].filter(Boolean).join(" · ") || paper.original_filename}</small>
       </span>
-      <span className={status.className} title={status.label} />
+      <span className={status.className} title={status.label} role="img" aria-label={status.label} />
     </button>
   );
 }
@@ -306,7 +319,14 @@ function AcquisitionPanel({ projectId, onLibraryChanged }: { projectId: string; 
   const searchJob = useCurrentLibraryJob("search", projectId, Boolean(projectId));
   const downloadJob = useCurrentLibraryJob("download", projectId, Boolean(projectId));
   const candidates = jobResult<Candidate[]>(searchJob.data?.job, "candidates", []);
-  const downloadResult = downloadJob.data?.job?.result as DownloadResult | undefined;
+  const currentDownloadJob = downloadJob.data?.job && (!searchJob.data?.job || downloadJob.data.job.created_at >= searchJob.data.job.created_at)
+    ? downloadJob.data.job : null;
+  const downloadResult = currentDownloadJob?.result as DownloadResult | undefined;
+  const downloadOutcomes = new Map(downloadResult?.results?.map((row) => [String(row.candidate_id || ""), row]) || []);
+  const canDownload = (candidate: Candidate) => candidate.availability?.state === "available"
+    || (candidate.availability?.state === "unknown" && candidate.availability.source_found === true);
+  const downloadableSelected = candidates.filter((row) => selected.has(String(row.candidate_id || "")) && canDownload(row)
+    && !["downloaded", "already_in_library", "duplicate_file"].includes(downloadOutcomes.get(String(row.candidate_id || ""))?.status || ""));
   const search = useMutation({
     mutationFn: () => apiRequest<Job>(acquisitionEndpoint("/api/v1/library/search-jobs", projectId), {
       method: "POST",
@@ -322,13 +342,23 @@ function AcquisitionPanel({ projectId, onLibraryChanged }: { projectId: string; 
     mutationFn: () => apiRequest<Job>(acquisitionEndpoint("/api/v1/library/download-jobs", projectId), {
       method: "POST",
       headers: { "Idempotency-Key": newIdempotencyKey() },
-      ...jsonBody({ candidates: candidates.filter((row) => selected.has(String(row.candidate_id || ""))), email: email.trim() }),
+      ...jsonBody({ candidates: downloadableSelected, email: email.trim() }),
     }),
     onSuccess: async () => downloadJob.refetch(),
   });
   useEffect(() => {
     if (downloadJob.data?.job?.status === "succeeded") void onLibraryChanged();
   }, [downloadJob.data?.job?.status, onLibraryChanged]);
+  useEffect(() => {
+    if (currentDownloadJob?.status !== "succeeded") return;
+    const completedIds = new Set((downloadResult?.results || [])
+      .filter((row) => ["downloaded", "already_in_library", "duplicate_file"].includes(row.status || ""))
+      .map((row) => String(row.candidate_id || "")));
+    if (completedIds.size) setSelected((current) => {
+      if (![...current].some((id) => completedIds.has(id))) return current;
+      return new Set([...current].filter((id) => !completedIds.has(id)));
+    });
+  }, [currentDownloadJob?.id, currentDownloadJob?.status]);
   useEffect(() => {
     setSelected(new Set());
   }, [projectId]);
@@ -337,7 +367,7 @@ function AcquisitionPanel({ projectId, onLibraryChanged }: { projectId: string; 
   return (
     <section className="surface acquisition-panel">
       <div className="section-heading compact">
-        <div><h2>{text("联网检索开放获取文献", "Find open-access literature online")}</h2><p>{text("搜索候选后选择论文下载；下载成功后自动进入当前用户文献库。", "Search for candidates, select papers to download, and add successful downloads to your library.")}</p></div>
+        <div><h2>{text("联网检索开放获取文献", "Find open-access literature online")}</h2><p>{text("检索后自动核验开放 PDF 来源；选择可尝试下载的论文，成功后进入文献库。", "Open PDF sources are checked after search; select candidates to try downloading into your library.")}</p></div>
       </div>
       <div className="acquisition-form">
         <label>{text("英文主题", "Topic in English")}<input value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="graph neural networks for drug discovery" /></label>
@@ -353,21 +383,47 @@ function AcquisitionPanel({ projectId, onLibraryChanged }: { projectId: string; 
           const id = String(candidate.candidate_id || "");
           const checkboxId = `candidate-${index}`;
           const website = candidateWebsite(candidate);
+          const access = candidate.availability;
+          const selectable = Boolean(id) && canDownload(candidate);
+          const outcome = downloadOutcomes.get(id);
+          const accessLabel = !access
+            ? text("旧检索结果未核验，请重新检索", "This older result was not checked; search again")
+            : access.state === "available"
+              ? text("开放 PDF 文件头已验证 · 可尝试下载", "Open PDF header verified · ready to try")
+              : access.state === "unknown" && access.source_found
+                ? text("发现开放 PDF 来源 · 下载待验证", "Open PDF source found · download unverified")
+                : access.state === "restricted"
+                  ? text("来源限制自动访问 · 可自行获取后上传", "Source restricts automated access · obtain and upload manually")
+                  : access.state === "not_found"
+                    ? text("暂未找到开放 PDF · 可能需要机构权限", "No open PDF found · institutional access may be needed")
+                    : text("暂时无法核验是否可下载", "Download availability could not be checked");
+          const outcomeLabel = outcome?.status === "downloaded"
+            ? text("已下载入库", "Downloaded to library")
+            : ["already_in_library", "duplicate_file"].includes(outcome?.status || "")
+              ? text("已在文献库", "Already in library")
+              : outcome?.status === "no_open_access_pdf"
+                ? text("下载时未找到开放 PDF", "No open PDF found during download")
+                : outcome?.status === "all_sources_failed"
+                  ? text("开放来源未返回有效 PDF，可打开原文或手动上传", "Open sources did not return a valid PDF; open the article or upload manually")
+                  : outcome?.status
+                    ? text("下载未完成，请稍后重试", "Download did not complete; retry later")
+                    : "";
           return (
             <div className="candidate-row" key={id || String(candidate.title)}>
               <input
                 id={checkboxId}
                 type="checkbox"
                 checked={selected.has(id)}
+                disabled={!selectable || Boolean(outcome && ["downloaded", "already_in_library", "duplicate_file"].includes(outcome.status || ""))}
                 onChange={(event) => setSelected((current) => {
                   const next = new Set(current);
                   if (event.target.checked) next.add(id); else next.delete(id);
                   return next;
                 })}
               />
-              <label htmlFor={checkboxId} className="candidate-copy"><strong>{String(candidate.title || text("无标题", "Untitled"))}</strong><small>{[candidate.year, candidate.journal, candidate.doi].filter(Boolean).join(" · ")}</small></label>
+              <label htmlFor={checkboxId} className="candidate-copy"><strong>{String(candidate.title || text("无标题", "Untitled"))}</strong><small>{[candidate.year, candidate.journal, candidate.doi].filter(Boolean).join(" · ")}</small><span className={`candidate-access ${access?.state || "unknown"}${access?.source_found ? " source-found" : ""}`}>{accessLabel}</span>{outcomeLabel ? <span className={`candidate-download-outcome ${outcome?.status || ""}`}>{outcomeLabel}</span> : null}</label>
               <div className="candidate-actions">
-                <em>{Math.round(Number(candidate.score || 0) * 100)}%</em>
+                <em>{text("相关度", "Relevance")} {Math.round(Number(candidate.score || 0) * 100)}%</em>
                 {website ? <a href={website} target="_blank" rel="noopener noreferrer">{text("访问期刊页面", "Open article website")}</a> : null}
               </div>
             </div>
@@ -375,12 +431,12 @@ function AcquisitionPanel({ projectId, onLibraryChanged }: { projectId: string; 
         })}
       </div>
       {candidates.length ? (
-        <button className="button button-primary" type="button" disabled={!selected.size || download.isPending || active} onClick={() => download.mutate()}>
-          {text(`下载所选 ${selected.size} 篇`, `Download ${selected.size} selected papers`)}
+        <button className="button button-primary" type="button" disabled={!downloadableSelected.length || download.isPending || active} onClick={() => download.mutate()}>
+          {text(`下载所选 ${downloadableSelected.length} 篇`, `Download ${downloadableSelected.length} selected papers`)}
         </button>
       ) : null}
-      <LibraryJobStatus kind="download" job={downloadJob.data?.job} />
-      {downloadJob.data?.job?.status === "succeeded" && downloadResult ? (
+      <LibraryJobStatus kind="download" job={currentDownloadJob} />
+      {currentDownloadJob?.status === "succeeded" && downloadResult ? (
         <p className={`message ${Number(downloadResult.failed_count || 0) > 0 ? "message-warning" : ""}`} role="status">
           {text(
             `下载处理完成：新增 ${Number(downloadResult.added_count || 0)} 篇，已存在 ${Number(downloadResult.already_present_count || 0)} 篇，未下载 ${Number(downloadResult.failed_count || 0)} 篇。`,
@@ -408,6 +464,7 @@ export function LibraryPage() {
   const [localUploads, setLocalUploads] = useState<UploadStatus[]>([]);
   const [uploadBatchExpectation, setUploadBatchExpectation] = useState<{ batchId: string; total: number } | null>(null);
   const [uploadSubmitting, setUploadSubmitting] = useState(false);
+  const [archiveTransfer, setArchiveTransfer] = useState<{ batchId: string; name: string; error?: string } | null>(null);
   const stoppedUploadBatches = useRef(new Set<string>());
   const cancelBatch = useMutation({
     mutationFn: (batchId: string) => apiRequest<{ cancelled_count: number }>(`/api/v1/library/upload-batches/${encodeURIComponent(batchId)}/cancel-remaining`, { method: "POST" }),
@@ -419,7 +476,7 @@ export function LibraryPage() {
   const uploadJobs = useQuery({
     queryKey: queryKeys.libraryUploadJobs,
     queryFn: () => apiRequest<UploadJobList>("/api/v1/library/upload-jobs/recent?limit=100&include_active=true"),
-    refetchInterval: (query) => query.state.data?.items.some((job) => ["queued", "running", "cancel_requested"].includes(job.status)) ? ACTIVE_JOB_POLL_INTERVAL_MS : 15_000,
+    refetchInterval: (query) => [...(query.state.data?.items || []), ...(query.state.data?.archives || [])].some((job) => ["queued", "running", "cancel_requested"].includes(job.status)) ? ACTIVE_JOB_POLL_INTERVAL_MS : 15_000,
   });
   const persistedUploads = useMemo<UploadStatus[]>(() => (uploadJobs.data?.items || []).map((job) => {
     if (job.status === "queued") return { id: job.id, batchId: job.batch_id, name: job.filename, status: "queued", message: "等待服务器处理", messageEn: "Waiting for server processing", updatedAt: job.updated_at };
@@ -433,15 +490,22 @@ export function LibraryPage() {
   }), [uploadJobs.data?.items]);
   const visibleLocalUploads = localUploads;
   const batchSummaries = uploadJobs.data?.batch_summaries || [];
+  const archives = uploadJobs.data?.archives || [];
+  const activeArchive = archives.find(job => ["queued", "running", "cancel_requested"].includes(job.status));
   const expectedBatchHasVisibleRows = Boolean(uploadBatchExpectation) && (
     visibleLocalUploads.some((row) => row.batchId === uploadBatchExpectation?.batchId)
     || persistedUploads.some((row) => row.batchId === uploadBatchExpectation?.batchId)
+    || archives.some((row) => row.batch_id === uploadBatchExpectation?.batchId)
   );
   const activeBatchSummary = batchSummaries.find((summary) => summary.queued + summary.running + summary.cancel_requested > 0);
   const recentBatchSummary = batchSummaries[0];
-  const currentUploadBatchId = expectedBatchHasVisibleRows
+  const latestBatchId = archives[0] && (!recentBatchSummary || archives[0].created_at > recentBatchSummary.created_at)
+    ? archives[0].batch_id : recentBatchSummary?.batch_id;
+  const currentUploadBatchId = archiveTransfer?.batchId || (expectedBatchHasVisibleRows
     ? uploadBatchExpectation?.batchId || ""
-    : activeBatchSummary?.batch_id || recentBatchSummary?.batch_id || "";
+    : activeArchive?.batch_id || activeBatchSummary?.batch_id || latestBatchId || "");
+  const currentArchive = archives.find(job => job.batch_id === currentUploadBatchId);
+  const collectingArchive = Boolean(currentArchive && ["queued", "running", "cancel_requested"].includes(currentArchive.status));
   const currentBatchSummary = batchSummaries.find((summary) => summary.batch_id === currentUploadBatchId);
   const currentLocalUploads = visibleLocalUploads.filter((row) => row.batchId === currentUploadBatchId);
   const uploads = useMemo(
@@ -580,8 +644,27 @@ export function LibraryPage() {
   const metadataDirty = Boolean(metadataDraft && metadata.data
     && JSON.stringify(metadataForSave(metadataDraft)) !== JSON.stringify(metadataForSave(metadata.data)));
 
-  async function uploadFiles(files: FileList | null) {
+  async function uploadArchive(file: File) {
+    const batchId = newIdempotencyKey();
+    setUploadBatchExpectation({ batchId, total: 0 });
+    setArchiveTransfer({ batchId, name: file.name });
+    setUploadSubmitting(true);
+    try {
+      await apiRequest<UploadJob>(`/api/v1/library/archive-jobs?filename=${encodeURIComponent(file.name)}&batch_id=${encodeURIComponent(batchId)}`, {
+        method: "POST", headers: { "Content-Type": "application/zip" }, body: file,
+      });
+      await uploadJobs.refetch();
+      setArchiveTransfer(null);
+    } catch (error) {
+      setArchiveTransfer({ batchId, name: file.name, error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setUploadSubmitting(false);
+    }
+  }
+
+  async function uploadFiles(files: File[] | null) {
     if (!files?.length) return;
+    setArchiveTransfer(null);
     const queue = Array.from(files);
     const invalid = queue.find((file) => !file.name.toLocaleLowerCase().endsWith(".pdf"));
     if (invalid) {
@@ -591,7 +674,7 @@ export function LibraryPage() {
       return;
     }
     const batchId = newIdempotencyKey();
-    const localRows = queue.map((file, index) => ({ id: `${batchId}:${index}`, batchId, name: file.name, status: "queued" as const, message: "等待上传", messageEn: "Waiting to upload" }));
+    const localRows = queue.map((file, index) => ({ id: `${batchId}:${index}`, batchId, name: file.webkitRelativePath || file.name, status: "queued" as const, message: "等待上传", messageEn: "Waiting to upload" }));
     setUploadBatchExpectation({ batchId, total: queue.length });
     setLocalUploads(localRows);
     setUploadSubmitting(true);
@@ -601,7 +684,7 @@ export function LibraryPage() {
         const localId = `${batchId}:${index}`;
         setLocalUploads((rows) => rows.map((row) => row.id === localId ? { ...row, status: "uploading", message: "正在上传到服务器", messageEn: "Uploading to server" } : row));
         try {
-          const submitted = await apiRequest<UploadJob>(`/api/v1/library/upload-jobs?filename=${encodeURIComponent(file.name)}&batch_id=${encodeURIComponent(batchId)}`, {
+          const submitted = await apiRequest<UploadJob>(`/api/v1/library/upload-jobs?filename=${encodeURIComponent(file.name)}&batch_id=${encodeURIComponent(batchId)}&display_name=${encodeURIComponent(file.webkitRelativePath || file.name)}`, {
             method: "POST",
             headers: { "Content-Type": file.type || "application/pdf", "Idempotency-Key": newIdempotencyKey() },
             body: file,
@@ -634,12 +717,27 @@ export function LibraryPage() {
 
   return (
     <main className="workspace page-container workspace-page">
+      <PreparationNotice kind="mineru" />
       <div className="workspace-heading">
         <div><p className="eyebrow">{text("阶段 1 · 共享文献集合", "Stage 1 · Shared source collection")}</p><h1>{text("文献库", "Literature library")}</h1><p className="muted">{text("上传PDF后必须完成MinerU解析，Metadata和正文才会供后续检索与写作使用。", "Uploaded PDFs must complete MinerU parsing before metadata and full text are available to later discovery and writing stages.")}</p></div>
-        <div className="library-heading-actions"><ProjectSelector /><details className="compact-advanced-menu"><summary className="button button-secondary">{text("高级维护", "Advanced maintenance")}</summary><div><button className="button button-secondary" type="button" disabled={reindexMissing.isPending} onClick={() => reindexMissing.mutate()}>{reindexMissing.isPending ? text("提交中…", "Submitting…") : text("补建缺失索引", "Build missing indexes")}</button></div></details><label className={`button button-primary file-button${uploadSubmitting ? " disabled" : ""}`}>{uploadSubmitting ? text("正在提交PDF…", "Submitting PDFs…") : text("批量上传PDF", "Upload PDFs in batch")}<input type="file" accept="application/pdf,.pdf" multiple disabled={uploadSubmitting} onChange={(event) => { const files = event.target.files; void uploadFiles(files); event.currentTarget.value = ""; }} /></label></div>
+        <div className="library-heading-actions"><ProjectSelector /><details className="compact-advanced-menu"><summary className="button button-secondary">{text("高级维护", "Advanced maintenance")}</summary><div><button className="button button-secondary" type="button" disabled={reindexMissing.isPending} onClick={() => reindexMissing.mutate()}>{reindexMissing.isPending ? text("提交中…", "Submitting…") : text("补建缺失索引", "Build missing indexes")}</button></div></details><LibraryImportPicker busy={uploadSubmitting} onFiles={files => void uploadFiles(files)} onArchive={file => void uploadArchive(file)} /></div>
       </div>
       {reindexMissing.error ? <p className="message message-error"><LocalizedError error={reindexMissing.error} /></p> : null}
+      {archiveTransfer || currentArchive ? <section className="upload-progress-panel" aria-live="polite">
+        <div className="upload-progress-heading"><strong>{archiveTransfer?.name || currentArchive?.filename}</strong>
+          {(uploadSubmitting || collectingArchive) && !uploads.length ? <button type="button" className="button button-secondary" disabled={cancelBatch.isPending || (cancelBatch.isSuccess && cancelBatch.variables === currentUploadBatchId)} onClick={cancelRemainingUploads}>{text("取消剩余", "Cancel remaining")}</button> : null}
+        </div>
+        {archiveTransfer ? <p>{archiveTransfer.error ? <LocalizedError error={archiveTransfer.error} /> : text("正在上传 ZIP，上传完成后开始后台收集 PDF…", "Uploading ZIP; PDF collection starts afterwards…")}</p>
+          : currentArchive?.status === "succeeded" ? <p>{text(`文件收集完成：${Number(currentArchive.result?.submitted_count || 0)} 个 PDF 已提交解析，忽略 ${Number(currentArchive.result?.ignored_count || 0)} 个其他文件，${Number(currentArchive.result?.failed_count || 0)} 个文件未能提交。解析结果见下方。`, `Collection finished: ${Number(currentArchive.result?.submitted_count || 0)} PDFs queued, ${Number(currentArchive.result?.ignored_count || 0)} other files ignored, ${Number(currentArchive.result?.failed_count || 0)} files could not be queued. Parsing results appear below.`)}</p>
+          : collectingArchive ? <p>{text("正在后台收集 PDF", "Collecting PDFs in the background")} · {currentArchive?.progress_current || 0}/{currentArchive?.progress_total || "—"}</p>
+          : currentArchive?.status === "cancelled" ? <p>{text("已取消剩余收集，正在解析的论文会继续完成。", "Remaining collection cancelled; parsing already in progress will finish.")}</p>
+          : <p className="message message-error"><LocalizedError error={currentArchive?.error_message || text("收集被中断，请重新上传 ZIP；已入库论文会自动去重。", "Collection interrupted. Upload the ZIP again; existing papers will be deduplicated.")} /></p>}
+        {Array.isArray(currentArchive?.result?.failures) && currentArchive.result.failures.length ? <details><summary>{text("查看未提交文件", "Files not queued")}</summary><ul>{(currentArchive.result.failures as Array<{ filename: string; message: string }>).map((failure, index) => <li key={index}>{failure.filename}: <LocalizedError error={failure.message} /></li>)}</ul></details> : null}
+        {cancelBatch.isError && cancelBatch.variables === currentUploadBatchId && !uploads.length ? <button type="button" className="button button-secondary" onClick={cancelRemainingUploads}>{text("取消未成功，点击重试", "Cancellation failed; retry")}</button> : null}
+        {cancelBatch.isSuccess && cancelBatch.variables === currentUploadBatchId ? <p>{text("已请求取消剩余文件，正在解析的论文会继续完成。", "Remaining files cancelled; parsing already in progress will finish.")}</p> : null}
+      </section> : null}
       <UploadBatchProgress
+        collecting={collectingArchive}
         uploads={uploads}
         localUploads={currentLocalUploads}
         summary={currentBatchSummary}

@@ -128,14 +128,14 @@ export function SettingsPage() {
         <section className="surface settings-service-panel">
           <div className="section-heading compact"><div><span className="step-label">{text("服务状态", "Service status")}</span><h2>{text("服务器连接", "Server connections")}</h2></div></div>
           <div className="settings-service-list">
-            {(["text", "image"] as const).map((kind) => {
+            {(["text", "image", "mineru"] as const).map((kind) => {
               const record = records.get(kind);
-              const title = kind === "text" ? text("文本生成服务", "Text generation") : text("图像生成服务", "Image generation");
+              const title = kind === "text" ? text("文本生成服务", "Text generation") : kind === "mineru" ? text("PDF 解析服务", "PDF parsing") : text("图像生成服务", "Image generation");
               return (
                 <article key={kind}>
-                  <span className={`service-status-dot ${record?.enabled ? "online" : ""}`} />
+                  <span className={`service-status-dot ${record?.enabled && record.api_key_configured ? "online" : ""}`} />
                   <div><strong>{title}</strong><small>{kind === "text" ? selectedProjectModel || text("按当前项目选择", "Selected per project") : record?.model_name || text("由服务器管理员维护", "Managed by server administrator")}</small></div>
-                  <em>{providers.isPending ? text("加载中", "Loading") : providers.error ? text("状态未知", "Unknown") : record?.enabled ? text("已启用", "Enabled") : text("未启用", "Disabled")}</em>
+                  <em>{providers.isPending ? text("加载中", "Loading") : providers.error ? text("状态未知", "Unknown") : record?.enabled && record.api_key_configured ? text("已启用", "Enabled") : text("未启用", "Disabled")}</em>
                 </article>
               );
             })}

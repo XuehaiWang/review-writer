@@ -563,6 +563,133 @@ class SectionsV1Tests(unittest.TestCase):
         with self.assertRaises(WorkflowConflict):
             service.prepare_generation_job(context, stale)
 
+    def test_retry_reuses_verified_preparation_without_retrieval(self) -> None:
+        service = self.app.state.sections_service
+        payload = service.generation_payload(self.first, self.project_id, defer_evidence=True)
+        def context(source=None):
+            return SimpleNamespace(user_id=self.first.user_id, project_id=self.project_id,
+                job_id=str(uuid.uuid4()), retry_of_job_id=source,
+                report_progress=Mock(), report_partial_result=Mock(), checkpoint=Mock())
+        original = context()
+        first = service.prepare_generation_job(original, payload)
+        self.assertTrue(first.get("preparation_fingerprint"))
+        source = SimpleNamespace(project_id=self.project_id, job_type="sections.generate", retry_of_job_id=None)
+        retry = context(original.job_id)
+        with patch.object(service.repository, "get_job", return_value=source) as lookup, \
+             patch.object(service, "generation_payload", side_effect=AssertionError("must reuse evidence")):
+            restored = service.prepare_generation_job(retry, {**payload, "expected_sections_revision": 12})
+        lookup.assert_called_with(self.first.user_id, original.job_id)
+        self.assertEqual(first["evidence_package"], restored["evidence_package"])
+        self.assertEqual(12, restored["expected_sections_revision"])
+        # A missing intermediate cache must not hide a valid older ancestor.
+        intermediate = context(original.job_id)
+        records = {original.job_id: source, intermediate.job_id: SimpleNamespace(
+            project_id=self.project_id, job_type="sections.generate", retry_of_job_id=original.job_id)}
+        with patch.object(service.repository, "get_job", side_effect=lambda user, job: records[job]), \
+             patch.object(service, "generation_payload", side_effect=AssertionError("must reuse ancestor")):
+            restored = service.prepare_generation_job(context(intermediate.job_id), payload)
+        self.assertEqual(first["evidence_package"], restored["evidence_package"])
+
+    def test_retry_rejects_unverified_or_foreign_preparation(self) -> None:
+        service = self.app.state.sections_service
+        payload = service.generation_payload(self.first, self.project_id, defer_evidence=True)
+        source_id = str(uuid.uuid4())
+        directory = service.artifacts.workspace_manager.trusted_user_directory(
+            self.first.user_id, ".review-writer", "job-staging", source_id)
+        cache = directory / "prepared-section-input.json"
+        prepared = service.generation_payload(self.first, self.project_id)
+        prepared["preparation_fingerprint"] = service._preparation_fingerprint(self.first, self.project_id, payload)
+        for case in ("foreign", "wrong_type", "missing", "corrupt", "legacy", "changed_sources", "cycle"):
+            with self.subTest(case=case):
+                stored = deepcopy(prepared)
+                if case == "legacy":
+                    stored.pop("preparation_fingerprint")
+                if case == "changed_sources":
+                    stored["preparation_fingerprint"] = "outdated"
+                cache.write_text("{" if case in {"corrupt", "cycle"} else json.dumps(stored), encoding="utf-8")
+                if case == "missing":
+                    cache.unlink()
+                source = SimpleNamespace(project_id="other" if case == "foreign" else self.project_id,
+                    job_type="model.dispatch" if case == "wrong_type" else "sections.generate",
+                    retry_of_job_id=source_id if case == "cycle" else None)
+                ctx = SimpleNamespace(user_id=self.first.user_id, project_id=self.project_id,
+                    job_id=str(uuid.uuid4()), retry_of_job_id=source_id,
+                    report_progress=Mock(), report_partial_result=Mock(), checkpoint=Mock())
+                with patch.object(service.repository, "get_job", return_value=source), \
+                     patch.object(service, "generation_payload", wraps=service.generation_payload) as generate:
+                    result = service.prepare_generation_job(ctx, payload)
+                self.assertEqual(1, generate.call_count)
+                self.assertTrue(result["evidence_package"]["sections"])
+
+    def test_preparation_fingerprint_includes_metadata_and_no_hit_sources(self) -> None:
+        service = self.app.state.sections_service
+        payload = {"tasks": [{"allowed_papers": ["P001"]}]}
+        paper = SimpleNamespace(content_sha256="pdf", metadata_json={"abstract": "old"}, updated_at="fixed")
+        si = SimpleNamespace(content_sha256="si", metadata_json={"parent_paper_id": "P001"}, updated_at="fixed")
+        catalog = {"P001": paper}
+        with patch.object(service, "_catalog", return_value=catalog), patch.object(service, "library_index", None):
+            original = service._preparation_fingerprint(self.first, self.project_id, payload)
+            paper.metadata_json["abstract"] = "corrected"
+            self.assertNotEqual(original, service._preparation_fingerprint(self.first, self.project_id, payload))
+            paper.metadata_json["abstract"] = "old"
+            catalog["SI"] = si
+            self.assertNotEqual(original, service._preparation_fingerprint(self.first, self.project_id, payload))
+        summaries = {"P001": {"fulltext": "ready", "chunk_count": 10, "source_lineage_hash": "v1"}}
+        index = SimpleNamespace(enabled=True, summaries=Mock(return_value=summaries))
+        with patch.object(service, "_catalog", return_value=catalog), patch.object(service, "library_index", index):
+            original = service._preparation_fingerprint(self.first, self.project_id, payload)
+            summaries["P001"]["source_lineage_hash"] = "v2"
+            self.assertNotEqual(original, service._preparation_fingerprint(self.first, self.project_id, payload))
+            summaries["P001"]["source_lineage_hash"] = "v1"
+            summaries["P001"]["fulltext"] = "building"
+            self.assertNotEqual(original, service._preparation_fingerprint(self.first, self.project_id, payload))
+
+    def test_legacy_preparation_requires_unchanged_owned_sources(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        service = self.app.state.sections_service
+        now = datetime.now(timezone.utc)
+        source = SimpleNamespace(project_id=self.project_id, created_at=now)
+        paper = SimpleNamespace(metadata_json={"abstract": "original"}, updated_at=now-timedelta(days=1))
+        project = SimpleNamespace(topic="topic", taxonomy_profile="general_chemistry")
+        prepared = {"library_metadata": {"P1": {"abstract": "original"}},
+            "blueprint": {"review_topic": "topic"}, "taxonomy_profile": "general_chemistry",
+            "evidence_package": {"sections": [{"hits": [{"paper_id": "P1", "chunk_id": "c1", "source_lineage_hash": "v1"}]}]}}
+        summaries = {"P1": {"fulltext": "ready", "source_lineage_hash": "v1"}}
+        index = SimpleNamespace(enabled=True, summaries=Mock(return_value=summaries))
+        catalog = {"P1": paper}
+        with patch.object(service, "_catalog", return_value=catalog), \
+             patch.object(service, "_owned_project", return_value=project), patch.object(service, "library_index", index):
+            self.assertTrue(service._legacy_preparation_matches(self.first, source, prepared))
+            prepared["evidence_package"]["sections"][0]["hits"] = []
+            self.assertFalse(service._legacy_preparation_matches(self.first, source, prepared))
+            summaries["P1"]["updated_at"] = (now-timedelta(days=1)).isoformat()
+            self.assertTrue(service._legacy_preparation_matches(self.first, source, prepared))
+            summaries["P1"]["updated_at"] = (now+timedelta(seconds=1)).isoformat()
+            self.assertFalse(service._legacy_preparation_matches(self.first, source, prepared))
+            prepared["evidence_package"]["sections"][0]["hits"] = [{"paper_id": "P1", "chunk_id": "c1", "source_lineage_hash": "v1"}]
+            summaries["P1"]["source_lineage_hash"] = "v2"
+            self.assertFalse(service._legacy_preparation_matches(self.first, source, prepared))
+            summaries["P1"]["source_lineage_hash"] = "v1"
+            paper.updated_at = now+timedelta(seconds=1)
+            self.assertFalse(service._legacy_preparation_matches(self.first, source, prepared))
+            paper.updated_at = now-timedelta(days=1)
+            paper.metadata_json = {"abstract": "changed"}
+            self.assertFalse(service._legacy_preparation_matches(self.first, source, prepared))
+            paper.metadata_json = {"abstract": "original"}
+            catalog["new-SI"] = paper
+            self.assertFalse(service._legacy_preparation_matches(self.first, source, prepared))
+
+    def test_preparing_evidence_keeps_checkpoint_preview(self) -> None:
+        service = self.app.state.sections_service
+        payload = service.generation_payload(self.first, self.project_id, defer_evidence=True)
+        payload["resume_checkpoint"] = {"entries": {"S01": {"output": {"draft_md": "original text"}}}}
+        context = SimpleNamespace(user_id=self.first.user_id, project_id=self.project_id,
+            job_id=str(uuid.uuid4()), report_progress=Mock(), report_partial_result=Mock(), checkpoint=Mock())
+        service.prepare_generation_job(context, payload)
+        preview = context.report_partial_result.call_args.args[0]
+        self.assertEqual("original text", preview["section_checkpoint"]["entries"]["S01"]["output"]["draft_md"])
+        self.assertEqual("S01", preview["section_progress"]["completed_sections"][0]["section_id"])
+
     def test_payload_resolves_blueprint_papers(self) -> None:
         with TestClient(self.app) as client:
             response = client.get(f"/api/v1/projects/{self.project_id}/sections")
@@ -643,7 +770,7 @@ class SectionsV1Tests(unittest.TestCase):
                         "major_papers": ["P001", "P002"],
                         "organizing_thread": "Explain scope before comparison",
                         "paragraph_tasks": ["Explain scope", "Compare compatible experiments"],
-                        "paper_roles": [{"paper_id": "P002", "presentation": "table"}],
+                        "paper_roles": [{"paper_id": "P002", "presentation": "table"}, "invalid role"],
                     },
                     {
                         "section_id": "S03",
@@ -662,6 +789,7 @@ class SectionsV1Tests(unittest.TestCase):
         self.assertEqual("Explain scope before comparison", by_id["S02"]["organizing_thread"])
         self.assertEqual(["Explain scope", "Compare compatible experiments"], by_id["S02"]["paragraph_tasks"])
         self.assertEqual("table", by_id["S02"]["paper_roles"][0]["presentation"])
+        self.assertEqual(1, len(by_id["S02"]["paper_roles"]))
         self.assertNotIn("S03", by_id)
 
     def test_context_papers_are_allowed_and_conclusion_is_deferred_to_draft(self) -> None:

@@ -5,10 +5,9 @@ type ApprovalFinding = { issue_id?: string; paragraph_id?: string; section_id?: 
 export type ApprovalQuality = Record<string, unknown> & {
   current?: boolean; score?: number; approval_findings?: ApprovalFinding[];
 };
-type Props = { quality: ApprovalQuality; approved: boolean; busy: boolean;
-  onApprove: () => void; onNext: () => void; onReview: (paragraphId: string) => void };
+type Props = { quality: ApprovalQuality; approved: boolean; onReview: (paragraphId: string) => void };
 
-export function DraftApprovalPanel({ quality, approved, busy, onApprove, onNext, onReview }: Props) {
+export function DraftApprovalPanel({ quality, approved, onReview }: Props) {
   const { text } = useUiText();
   const details = hardGateDetails(quality);
   const gateLabel = (gateId: string) => gateId === "paragraph_readability_or_source_failures"
@@ -91,15 +90,9 @@ export function DraftApprovalPanel({ quality, approved, busy, onApprove, onNext,
         </div>
       ) : null}
       <p className="muted">{text(
-        "点击确认允许继续，不代表系统已核实所有科学事实。正文和已有问题记录不会因此改变。",
-        "Approval allows progression; it does not verify every scientific claim or change the saved text or findings.",
+        "底部确认操作允许继续，但不代表系统已核实所有科学事实；正文和问题记录不会因此改变。",
+        "The confirmation action below allows progression but does not verify every scientific claim or alter saved text and findings.",
       )}</p>
-      <button className="button button-primary" type="button" disabled={busy || approved} onClick={onApprove}>
-        {approved ? text("已确认", "Approved") : text("确认并允许进入终稿", "Approve and allow final stage")}
-      </button>
-      {approved ? <button className="button button-secondary" type="button" onClick={onNext}>
-        {text("进入终稿", "Enter final stage")}
-      </button> : null}
     </section>
   );
 }

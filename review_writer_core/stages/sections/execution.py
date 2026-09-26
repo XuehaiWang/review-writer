@@ -5,6 +5,8 @@ from queue import Queue
 
 from review_writer_core.model_gateway_client import DeferredModelCall
 
+DEFAULT_SECTION_CONCURRENCY = 2
+
 
 def chapter_responsibilities(tasks):
     """One shared snapshot for writing, audit, and checkpoint invalidation."""
@@ -14,7 +16,9 @@ def chapter_responsibilities(tasks):
         for task in tasks]
 
 
-def run_sections(tasks, generate, observe, save, *, completed=None, deferred=None, concurrency=2):
+def run_sections(tasks, generate, observe, save, *, completed=None, deferred=None,
+                 concurrency=DEFAULT_SECTION_CONCURRENCY):
+    """Bound local work, not durable model waits; gateway admission limits requests."""
     completed = completed or {}
     retained = dict(completed) if isinstance(completed, dict) else {}
     deferred = set(deferred or ())
@@ -39,7 +43,7 @@ def run_sections(tasks, generate, observe, save, *, completed=None, deferred=Non
     with ThreadPoolExecutor(max_workers=capacity) as pool:
         while pending or running:
             for sid, task in list(pending.items()):
-                if len(running) + len(model_waits) >= capacity:
+                if len(running) >= capacity:
                     break
                 dependencies = task.get("depends_on_sections") or []
                 if not set(dependencies).issubset(done):
@@ -75,8 +79,8 @@ def run_sections(tasks, generate, observe, save, *, completed=None, deferred=Non
             if kind == "phase":
                 observe(task, value)
             elif kind == "deferred":
-                # Drain the other in-flight chapters and persist their results
-                # before yielding the lease to delegated model jobs.
+                # A durable model wait consumes no local worker. Prepare other
+                # ready chapters before yielding; dependencies still require done.
                 running.remove(sid)
                 deferred.add(sid)
                 model_waits.extend(value.model_job_ids)

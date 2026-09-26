@@ -9,8 +9,8 @@ from unittest.mock import patch
 from pathlib import Path
 
 from review_writer_core.writing_contracts import derive_writing_scope_contract
-from review_writer_core.scientific_facts import attach_fact_to_evidence
-from review_writer_core.stages.sections.plan_repair import complete_primary_claim_coverage
+from review_writer_core.scientific_facts import attach_fact_to_evidence, build_fact_comparison
+from review_writer_core.stages.sections.plan_repair import complete_primary_claim_coverage, merge_plan_repair
 
 
 SCRIPT = (
@@ -335,7 +335,7 @@ class SectionAcademicPipelineTests(unittest.TestCase):
             {"claim_id": "S02-p1-C02", "replacement": valid},
             {"claim_id": "S99-p1-C01", "replacement": invalid},
         ], "additional_paragraphs": []}
-        merged = PIPELINE.merge_plan_repair("S02", self.proposed, synthesis["normalization_diagnostics"], patch)
+        merged = merge_plan_repair("S02", self.proposed, synthesis["normalization_diagnostics"], patch)
         self.assertEqual(original, self.proposed)
         self.assertEqual(valid, merged["paragraphs"][0]["claims"][0])
         synthesis, writing = self.normalize(merged)
@@ -343,7 +343,7 @@ class SectionAcademicPipelineTests(unittest.TestCase):
         self.assertFalse(synthesis["normalization_diagnostics"]["rejected_claims"])
 
         diagnostics = {"rejected_claims": [], "unsupported_components": ["mechanism"]}
-        patched = PIPELINE.merge_plan_repair("S02", original, diagnostics, {
+        patched = merge_plan_repair("S02", original, diagnostics, {
             "claim_repairs": [], "additional_paragraphs": [], "component_repairs": [
                 {"component_type": "comparison", "summary": "Overwrite supported component"},
                 {"component_type": "mechanism", "summary": "Source-attributed proposal", "evidence_keys": ["sha256:a"]},
@@ -735,7 +735,7 @@ class SectionAcademicPipelineTests(unittest.TestCase):
             "P002": {"scientific_facts": None},
         }
 
-        table = PIPELINE.build_matrix_comparison_table(
+        table = build_fact_comparison(
             "S02", ["P001", "P002"], rows
         )
 
@@ -764,7 +764,7 @@ class SectionAcademicPipelineTests(unittest.TestCase):
             )
         }
 
-        table = PIPELINE.build_matrix_comparison_table(
+        table = build_fact_comparison(
             "S02", ["P001", "P002"], rows
         )
 
@@ -917,6 +917,24 @@ class SectionAcademicPipelineTests(unittest.TestCase):
 
         self.assertEqual("complete", parsed["overview"])
         self.assertNotIn("relay_diagnostic", parsed)
+
+    def test_primary_results_survive_background_and_repeated_fact_quotes(self) -> None:
+        from copy import deepcopy
+        evidence = [{"paper_id": f"B{i}", "evidence_key": f"b{i}", "chunk_id": str(i),
+                     "content": "background " * 700, "claim_eligible": True} for i in range(20)]
+        for i in range(4):
+            evidence.append({"paper_id": "PRIMARY", "evidence_key": f"p{i}", "chunk_id": f"p{i}",
+                "content": "primary passage " * 80 + f"RESULT_TAIL_{i}", "claim_eligible": True,
+                "fact_bindings": [{"fact_id": f"F{i}", "usage": "direct", "value": "bounded result",
+                    "evidence_refs": [{"support_excerpt": "repeated source quote " * 5000}]}]})
+        original = deepcopy(evidence)
+        projected, report = PIPELINE.bounded_evidence_payload(evidence, char_budget=14000, primary_papers=["PRIMARY"])
+        primary = [row for row in projected if row["paper_id"] == "PRIMARY"]
+        self.assertEqual(4, len(primary))
+        self.assertTrue(all("RESULT_TAIL_" in row["content"] for row in primary))
+        self.assertLessEqual(len(json.dumps(projected, ensure_ascii=False)), 14000)
+        self.assertTrue(all("evidence_refs" not in row["fact_bindings"][0] for row in primary))
+        self.assertEqual(original, evidence)
 
     def test_evidence_that_fits_keeps_long_tail_and_input_unchanged(self) -> None:
         from copy import deepcopy

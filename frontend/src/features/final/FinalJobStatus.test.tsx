@@ -35,7 +35,7 @@ describe("FinalJobStatus", () => {
     const failed = job({ status: "failed", available_actions: ["retry"],
       error_message: "模型服务响应超时，已完成内容已保留。" });
     const view = render(<FinalJobStatus job={failed} onResume={resume} />);
-    expect(screen.getByText(failed.error_message)).toBeInTheDocument();
+    expect(screen.getByText("请求超时，请稍后重试。")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "继续未完成任务" }));
     expect(resume).toHaveBeenCalledTimes(1);
     view.rerender(<FinalJobStatus job={failed} onResume={resume} resuming />);
@@ -88,7 +88,8 @@ describe("FinalJobStatus", () => {
   it("shows a submission failure inside the progress window", () => {
     render(<FinalJobStatus startingAction="build" submissionError={new Error("HTTP 404: Not Found")} />);
 
-    expect(screen.getByText("任务执行失败")).toBeInTheDocument();
-    expect(screen.getByText("HTTP 404: Not Found")).toBeInTheDocument();
+    expect(screen.getByText("未能开始任务")).toBeInTheDocument();
+    expect(screen.queryByText("HTTP 404: Not Found")).not.toBeInTheDocument();
+    expect(screen.getByText(/本次操作未完成/)).toBeInTheDocument();
   });
 });

@@ -24,6 +24,7 @@ from review_writer_api.domain_services.library import (
     MinerUPreciseParseFailed,
 )
 from review_writer_api.domain_services.library_index import LibraryIndexService
+from review_writer_api.domain_services.library_archive import MAX_ARCHIVE_BYTES, archive_path, collect_archive
 from review_writer_api.errors import (
     ArtifactRangeNotSatisfiable,
     WorkflowConflict,
@@ -40,6 +41,7 @@ from review_writer_api.workflow_schemas import (
     LiteratureSearchRequest,
 )
 from review_writer_core.metadata_tags import structured_tags_are_verified
+from review_writer_core.metadata_quality import missing_library_content_fields
 from review_writer_core.bibliography_audit import bibliography_candidates
 
 
@@ -49,6 +51,10 @@ def _paper_payload(
     search_match: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     metadata = record.metadata
+    content_missing_fields = missing_library_content_fields(
+        metadata,
+        has_parsed_content=bool(record.artifact_ids.get("mineru") and record.artifact_ids.get("markdown")),
+    )
     resolved_index_status = index_status or {
         "mineru": "ready" if record.artifact_ids.get("mineru") else "unavailable",
         "fulltext": "not_indexed",
@@ -78,6 +84,8 @@ def _paper_payload(
         "structured_tags_verified": structured_tags_are_verified(metadata),
         "human_review_status": (metadata.get("human_review") or {}).get("status"),
         "needs_human_check": (metadata.get("quality") or {}).get("needs_human_check"),
+        "content_complete": not content_missing_fields,
+        "content_missing_fields": content_missing_fields,
         "mineru_parse_status": resolved_index_status["mineru"],
         "document_index_status": resolved_index_status["fulltext"],
         "embedding_status": resolved_index_status["semantic"],
@@ -376,8 +384,10 @@ def build_library_router(
                 },
                 operation_key=f"bibliography-audit:{record.paper_id}",
             )
-        except WorkflowConflict:
+        except (WorkflowConflict, WorkflowValidationError):
             if suppress_active_conflict:
+                # Automatic follow-up is optional; an unavailable text model
+                # must not turn an already admitted PDF into a failed upload.
                 return None
             raise
 
@@ -461,9 +471,15 @@ def build_library_router(
 
     job_service.register_handler("library.upload", upload_handler)
 
+    def archive_handler(context, payload):
+        principal = Principal(context.user_id, frozenset({Role.USER}))
+        return collect_archive(library_service, job_service, context, payload, principal)
+
+    job_service.register_handler("library.archive", archive_handler)
+
     def upload_job_payload(job) -> dict[str, Any]:
         payload = _job_response(job).model_dump()
-        payload["filename"] = str((job.payload or {}).get("filename") or "")
+        payload["filename"] = str((job.payload or {}).get("display_name") or (job.payload or {}).get("filename") or "")
         payload["batch_id"] = str((job.payload or {}).get("batch_id") or "")
         return payload
 
@@ -626,11 +642,45 @@ def build_library_router(
                     await disconnect_watcher
             staged.unlink(missing_ok=True)
 
+    @router.post("/archive-jobs", status_code=status.HTTP_202_ACCEPTED)
+    async def create_archive_job(
+        request: Request,
+        filename: str,
+        batch_id: uuid.UUID,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        if not filename.lower().endswith(".zip"):
+            raise WorkflowValidationError("Only ZIP archives are supported.")
+        archive_id = str(uuid.uuid4())
+        staged = archive_path(library_service, principal, archive_id)
+        submitted, size = False, 0
+        try:
+            with staged.open("xb") as handle:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > MAX_ARCHIVE_BYTES:
+                        raise WorkflowValidationError("ZIP files must be 256 MB or smaller.")
+                    handle.write(chunk)
+            if not size:
+                raise WorkflowValidationError("The uploaded ZIP is empty.")
+            job = job_service.submit(principal, scope="library", project_id=None,
+                job_type="library.archive", idempotency_key=archive_id,
+                operation_key=f"archive:{archive_id}", payload={
+                    "filename": filename.replace("\\", "/").split("/")[-1][:200],
+                    "archive_id": archive_id, "batch_id": str(batch_id),
+                })
+            submitted = True
+            return upload_job_payload(job)
+        finally:
+            if not submitted:
+                staged.unlink(missing_ok=True)
+
     @router.post("/upload-jobs", status_code=status.HTTP_202_ACCEPTED)
     async def create_upload_job(
         request: Request,
         filename: str,
         batch_id: str = "",
+        display_name: str = "",
         idempotency_key: str = Header(default="", alias="Idempotency-Key"),
         principal: Principal = Depends(principal_dependency),
     ) -> dict[str, Any]:
@@ -661,6 +711,7 @@ def build_library_router(
                 idempotency_key=idempotency_key.strip() or str(uuid.uuid4()),
                 payload={
                     "filename": safe_name,
+                    **({"display_name": display_name[:500]} if display_name else {}),
                     "staging_id": staging_id,
                     "batch_id": normalized_batch_id,
                 },
@@ -683,7 +734,10 @@ def build_library_router(
             # Only committed cancelled jobs are cleaned; running jobs retain
             # their inputs. Repeated cancellation also retries this cleanup.
             with suppress(WorkflowNotFound):
-                library_service.staged_upload_path(principal, str(job.payload.get("staging_id") or "")).unlink(missing_ok=True)
+                if job.job_type == "library.archive":
+                    archive_path(library_service, principal, str(job.payload["archive_id"])).unlink(missing_ok=True)
+                else:
+                    library_service.staged_upload_path(principal, str(job.payload.get("staging_id") or "")).unlink(missing_ok=True)
         return {"batch_id": str(batch_id), "cancelled_count": len(cancelled)}
 
     @router.get("/upload-jobs/recent")
@@ -704,6 +758,8 @@ def build_library_router(
         )
         return {
             "items": [upload_job_payload(row) for row in rows],
+            "archives": [upload_job_payload(row) for row in job_service.repository.list_library_jobs(
+                principal.user_id, job_type="library.archive", limit=20, include_all_active=include_active)],
             "count": len(rows),
             "batch_summaries": [
                 {
@@ -982,8 +1038,38 @@ def build_library_router(
         principal: Principal = Depends(principal_dependency),
     ):
         operation_key = acquisition_operation_key(principal, project_id)
+        search = job_service.repository.get_current_job(
+            principal.user_id,
+            scope="library",
+            job_type="library.search",
+            operation_key=operation_key,
+        )
+        if search is None or search.status != "succeeded":
+            raise WorkflowValidationError("Search for literature before downloading selected papers.")
+        indexed_candidates = {
+            str(row.get("candidate_id") or ""): row
+            for row in search.result.get("candidates") or []
+            if isinstance(row, dict) and str(row.get("candidate_id") or "").strip()
+        }
+        selected_ids = [str(row.get("candidate_id") or "").strip() for row in payload.candidates]
+        if not all(selected_ids) or len(set(selected_ids)) != len(selected_ids):
+            raise WorkflowValidationError("Select distinct papers from the current search results.")
+        selected_candidates = []
+        for candidate_id in selected_ids:
+            candidate = indexed_candidates.get(candidate_id)
+            if candidate is None:
+                raise WorkflowValidationError("A selected paper is no longer in the current search results. Search again.")
+            access = candidate.get("availability")
+            if not isinstance(access, dict):
+                access = {}
+            if access.get("state") != "available" and not (
+                access.get("state") == "unknown" and access.get("source_found") is True
+            ):
+                raise WorkflowValidationError("A selected paper has no verified open PDF source. Search again or upload a PDF you obtained lawfully.")
+            selected_candidates.append(candidate)
         payload_data = {
             **payload.model_dump(),
+            "candidates": selected_candidates,
             **({"acquisition_project_id": project_id} if operation_key else {}),
         }
         job = job_service.submit(

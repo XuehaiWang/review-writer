@@ -5,10 +5,10 @@ import { PublicHeader } from "../../components/PublicHeader";
 import { useUiText } from "../../i18n/useUiText";
 
 const workflowStages = [
-  ["01–02", "文献准备与检索", "Literature preparation & discovery", "批量上传PDF，经MinerU精确解析和全文索引后，与联网结果、metadata及项目领域规则共同完成召回和Matrix确认。", "Upload PDFs in batches, parse them precisely with MinerU, build full-text indexes, and combine local evidence, web results, metadata, and project-specific rules before Matrix confirmation."],
-  ["03–04", "证据规划与章节写作", "Evidence planning & section writing", "从已确认Matrix生成综述大纲、章节Blueprint与写作任务，使论点、段落和主要论文保持明确绑定。", "Turn the confirmed Matrix into an outline, section blueprints, and writing tasks that keep claims, paragraphs, and primary papers explicitly linked."],
-  ["05–06", "图像与初稿优化", "Figures & draft optimization", "人工选择源图后进行AI重绘和可编辑SVG修订，并通过段落评估、安全重写与人工对比持续优化初稿。", "Select source figures before AI redraw and editable SVG refinement, then improve the draft through paragraph evaluation, safe rewrites, and human comparison."],
-  ["07", "审计与交付", "Audit & delivery", "生成综述总览图和结论，完成引用、格式与版本审计，并交付排版后的Word和PDF。", "Generate the review overview and conclusion, audit references, formatting, and versions, then deliver formatted Word and PDF files."],
+  ["01–02", "文献准备与检索", "Literature preparation & discovery", "批量上传PDF，经MinerU精确解析和全文索引后，与联网结果、书目信息及项目领域规则共同完成召回和文献分析确认。", "Upload PDFs in batches, parse them precisely with MinerU, build full-text indexes, and combine local evidence, web results, bibliographic data, and project-specific rules before paper selection."],
+  ["03–04", "证据规划与章节写作", "Evidence planning & section writing", "从已确认文献分析生成综述大纲、章节规划与写作任务，使论点、段落和主要论文保持明确绑定。", "Turn the confirmed papers into an outline, section blueprints, and writing tasks that keep claims, paragraphs, and primary papers explicitly linked."],
+  ["05–06", "图像与初稿优化", "Figures & draft optimization", "人工选择源图后进行AI重绘和可编辑SVG修订，在初稿中完善摘要、结论和可选总览图，并按需修改正文。", "Select source figures for AI redraw and editable SVG refinement; complete the abstract, conclusion and optional overview in Draft, and revise the text as needed."],
+  ["07", "审计与交付", "Audit & delivery", "组装已确认的初稿，检查引用、格式与版本，并交付排版后的 Word 和 PDF。", "Assemble the approved draft, check references, formatting and versions, and export Word and PDF."],
 ] as const;
 
 export function LandingPage({ authConfig, identity }: { authConfig: AuthConfig; identity: Principal | null }) {
@@ -57,9 +57,9 @@ export function LandingPage({ authConfig, identity }: { authConfig: AuthConfig; 
             <h2>{text("不只是生成文本，而是管理一套科研生产流程。", "More than text generation: a managed research production system.")}</h2>
           </header>
           <div className="capability-grid">
-            <article><span>01</span><h3>{text("解析与混合检索", "Parsing and hybrid retrieval")}</h3><p>{text("MinerU结构化内容、本地全文索引、metadata与联网结果进入统一候选池；领域规则只在项目分类匹配时参与扩展。", "MinerU structure, local full-text indexes, metadata, and web results enter one candidate pool, while domain rules expand queries only for matching project profiles.")}</p></article>
-            <article><span>02</span><h3>{text("确认后生效的阶段依赖", "Confirmation-aware dependencies")}</h3><p>{text("重新检索只产生待确认候选；确认采用Matrix后，系统才根据主题和论文集合的实际变化判断后续产物是否过期。", "A rerun creates pending candidates only; downstream artifacts are evaluated for staleness after you confirm the Matrix and its topic or paper set has actually changed.")}</p></article>
-            <article><span>03</span><h3>{text("证据绑定的写作与图像", "Evidence-bound writing and figures")}</h3><p>{text("Blueprint、章节论点和段落绑定主要论文；源图经人工选择后再重绘，并保留完整性审核、SVG与Ketcher编辑。", "Blueprints, section claims, and paragraphs stay linked to primary papers; source figures are selected by people before redraw, integrity review, SVG editing, and Ketcher refinement.")}</p></article>
+            <article><span>01</span><h3>{text("解析与混合检索", "Parsing and hybrid retrieval")}</h3><p>{text("MinerU结构化内容、本地全文索引、书目信息与联网结果进入统一候选池；领域规则只在项目分类匹配时参与扩展。", "MinerU structure, local full-text indexes, bibliographic data, and web results enter one candidate pool, while domain rules expand queries only for matching project profiles.")}</p></article>
+            <article><span>02</span><h3>{text("确认后生效的阶段依赖", "Confirmation-aware dependencies")}</h3><p>{text("重新检索只产生待确认候选；确认采用文献分析后，系统才根据主题和论文集合的实际变化判断后续产物是否过期。", "A rerun creates pending candidates only; downstream artifacts are evaluated for staleness after you confirm the selected papers and its topic or paper set has actually changed.")}</p></article>
+            <article><span>03</span><h3>{text("证据绑定的写作与图像", "Evidence-bound writing and figures")}</h3><p>{text("章节规划、章节论点和段落绑定主要论文；源图经人工选择后再重绘，并保留完整性审核、SVG与Ketcher编辑。", "Section plans, section claims, and paragraphs stay linked to primary papers; source figures are selected by people before redraw, integrity review, SVG editing, and Ketcher refinement.")}</p></article>
             <article><span>04</span><h3>{text("质量闭环与双格式交付", "Quality loop and dual-format delivery")}</h3><p>{text("段落评分、安全优化、人工版本确认、引用与格式审计共同约束终稿，并输出排版后的Word和PDF。", "Paragraph scoring, safe optimization, human version approval, and reference and format audits govern the final formatted Word and PDF outputs.")}</p></article>
           </div>
         </section>

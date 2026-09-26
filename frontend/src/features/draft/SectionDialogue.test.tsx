@@ -148,16 +148,13 @@ it("shows server-confirmed saved state without offering to save again", async ()
 it("keeps unsaved manual text and prevents submitting against it", async () => {
   vi.mocked(apiRequest).mockResolvedValue({ turns: [] });
   mount();
-  fireEvent.click(screen.getByRole("button", { name: "View text" }));
-  fireEvent.click(screen.getAllByRole("button", { name: "Edit this paragraph" })[0]);
-  fireEvent.change(screen.getByLabelText("Paragraph text"), { target: { value: "Local unsaved edit" } });
-  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  localStorage.setItem("rw-draft-scratch:user:project:k1:manual", JSON.stringify({ text: "Local unsaved edit" }));
   fireEvent.change(screen.getByLabelText("Tell the AI how to improve this chapter"), { target: { value: "Improve" } });
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
   await screen.findByText("Save or cancel this chapter's manual edits first.");
   expect(vi.mocked(apiRequest).mock.calls.filter(c => c[1]?.method === "POST")).toHaveLength(0);
-  fireEvent.click(screen.getByRole("button", { name: "View text" }));
-  expect(screen.getByLabelText("Paragraph text")).toHaveValue("Local unsaved edit");
+  fireEvent.click(screen.getByRole("button", { name: "Chapter versions" }));
+  expect(screen.queryByRole("button", { name: "Edit this paragraph" })).toBeNull();
 });
 
 it("allows saving author-reviewed citation changes with a visible warning", async () => {
@@ -263,7 +260,7 @@ it("opens versions outside the chat and restarts without saving or generating un
     : { turns: [{ id: "old", status: "succeeded", message: "Abandoned instructions", progress_current: 1, progress_total: 1 }], rewrite_candidates: [] }));
   mount();
   await screen.findByText("Abandoned instructions");
-  fireEvent.click(screen.getByRole("button", { name: "View text" }));
+  fireEvent.click(screen.getByRole("button", { name: "Chapter versions" }));
   const modal = screen.getByRole("dialog", { name: "Chapter text and versions" });
   expect(modal.closest(".chapter-chat")).toBeNull();
   fireEvent.change(screen.getByLabelText("View version"), { target: { value: "initial" } });

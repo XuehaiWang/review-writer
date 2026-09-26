@@ -1,7 +1,8 @@
 import { LocalizedError } from "../../components/LocalizedError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { useForm } from "react-hook-form";
+import { useFormDraft } from "../../hooks/useFormDraft";
+import { PreparationNotice } from "../../components/PreparationNotice";
 import { Link, useNavigate } from "react-router-dom";
 
 import { ApiError, apiRequest, jsonBody } from "../../api/client";
@@ -18,6 +19,12 @@ type ProjectFields = {
   taxonomy_profile: string;
   model_tier: string;
 };
+
+function continuationPath(project: Project) {
+  const paths: Record<string, string> = { planning: "/planning", matrix: "/planning", blueprint: "/sections", sections: "/sections", images: "/images", figures: "/images", "figure-review": "/images", draft: "/draft", final: "/final" };
+  const path = paths[project.current_stage] || (project.discovery_status && project.discovery_status !== "pending" ? "/discovery" : "/library");
+  return `${path}?project=${encodeURIComponent(project.project_id)}`;
+}
 
 function publicTaxonomyProfileId(profile: string) {
   return profile === "allene" ? "chemistry_general" : profile;
@@ -63,7 +70,8 @@ function ProjectCard({ project, deleting, modelUpdating, taxonomyUpdating, taxon
           <button className="button button-danger" type="button" disabled={deleting} onClick={() => onDelete(project)}>
             {deleting ? text("删除中…", "Deleting…") : text("删除项目", "Delete project")}
           </button>
-          <Link className="button button-primary" to={`/library?project=${encodeURIComponent(project.project_id)}`}>{text("进入工作流", "Open workflow")}</Link>
+          <Link className="button button-quiet" to={`/library?project=${encodeURIComponent(project.project_id)}`}>{text("文献库", "Library")}</Link>
+          <Link className="button button-primary" to={continuationPath(project)}>{text("继续项目", "Continue project")}</Link>
         </div>
       </div>
       {pendingTaxonomyProfile ? <div className="message message-warning" role="status"><p>{text("该项目已经进入 Matrix。保存新的分类配置会保留已有产物，但把 Matrix 及后续阶段标记为需更新。", "This project has entered Matrix. Saving the new taxonomy profile preserves existing artifacts but marks Matrix and all downstream stages stale.")}</p><div className="button-row"><button className="button button-danger" type="button" disabled={taxonomyUpdating} onClick={() => onConfirmTaxonomyChange(project, pendingTaxonomyProfile)}>{text("确认修改", "Confirm change")}</button><button className="button button-quiet" type="button" disabled={taxonomyUpdating} onClick={onCancelTaxonomyChange}>{text("取消", "Cancel")}</button></div></div> : null}
@@ -80,9 +88,11 @@ export function ProjectsPage() {
   const projects = useQuery(projectsQuery);
   const modelCatalog = useQuery(modelCatalogQuery);
   const taxonomyProfiles = useQuery(taxonomyProfilesQuery);
-  const { register, handleSubmit, reset, formState } = useForm<ProjectFields>({
-    defaultValues: { slug: "", topic: "", taxonomy_profile: "chemistry_general", model_tier: "" },
-  });
+  const form = useFormDraft<ProjectFields>("new-project", { slug: "", topic: "", taxonomy_profile: taxonomyProfiles.data?.default_profile || "chemistry_general", model_tier: "" });
+  const fields = form.value;
+  const change = (key: keyof ProjectFields, value: string) => form.set({ ...fields, [key]: value });
+  const selectedModel = modelCatalog.data?.items.find(item => item.id === (fields.model_tier || modelCatalog.data.default_tier));
+  const modelUnavailable = Boolean(modelCatalog.data && (!selectedModel || selectedModel.enabled === false));
   const createProject = useMutation({
     mutationFn: (values: ProjectFields) =>
       apiRequest<Project>("/api/v1/projects", {
@@ -95,7 +105,7 @@ export function ProjectsPage() {
         }),
       }),
     onSuccess: async (created) => {
-      reset();
+      form.clear();
       await queryClient.invalidateQueries({ queryKey: queryKeys.projects });
       navigate(`/library?project=${encodeURIComponent(created.project_id)}`);
     },
@@ -178,7 +188,7 @@ export function ProjectsPage() {
         <aside id="create-project" className="surface sticky-card">
           <span className="step-label">{text("创建项目", "Create project")}</span>
           <h2>{text("新建综述项目", "Create review project")}</h2>
-          <form onSubmit={handleSubmit((values) => createProject.mutate(values))}>
+          <form onSubmit={event => { event.preventDefault(); if (!modelUnavailable) createProject.mutate(fields); }}>
             <label>
               {text("项目ID", "Project ID")}
               <input
@@ -186,14 +196,14 @@ export function ProjectsPage() {
                 maxLength={96}
                 pattern="[a-z0-9][a-z0-9-]*"
                 placeholder="copper-mechanochemistry"
-                {...register("slug", { required: true })}
+                value={fields.slug} onChange={event => change("slug", event.target.value)}
               />
               <small>{text("使用小写字母、数字和连字符。", "Use lowercase letters, numbers, and hyphens.")}</small>
             </label>
-            <label>{text("研究主题", "Research topic")}<textarea rows={5} maxLength={10_000} {...register("topic")} /></label>
+            <label>{text("研究主题", "Research topic")}<textarea rows={5} maxLength={10_000} value={fields.topic} onChange={event => change("topic", event.target.value)} /></label>
             <label>
               {text("分类配置", "Taxonomy profile")}
-              <select {...register("taxonomy_profile")}>
+              <select value={fields.taxonomy_profile} onChange={event => change("taxonomy_profile", event.target.value)}>
                 {(taxonomyProfiles.data?.items || []).map((profile) => <option key={profile.id} value={profile.id}>{text(profile.label_zh, profile.label_en)}</option>)}
                 {!taxonomyProfiles.data ? <><option value="general_academic">{text("通用学术", "General Academic")}</option><option value="chemistry_general">{text("通用化学", "General Chemistry")}</option></> : null}
               </select>
@@ -201,13 +211,16 @@ export function ProjectsPage() {
             </label>
             <label>
               {text("文本模型", "Text model")}
-              <select {...register("model_tier")}>
-                <option value="">{text("服务器默认模型", "Server default model")} · {modelCatalog.data?.items.find(item => item.id === modelCatalog.data?.default_tier)?.model || "…"}</option>
+              <select value={fields.model_tier} onChange={event => change("model_tier", event.target.value)}>
+                <option value="">{text("服务器默认模型", "Server default model")} · {modelCatalog.data?.items.find(item => item.id === modelCatalog.data?.default_tier)?.model || "…"}{!fields.model_tier && modelUnavailable ? text("（暂不可用）", " (unavailable)") : ""}</option>
                 <ModelOptions />
               </select>
-              <small>{text("当前用于评估与重写；任务启动时锁定档位，进行中的任务不受后续切换影响。", "Currently used for evaluation and rewriting. The tier is fixed when a job starts, so later changes do not affect a running job.")}</small>
+              <small>{text("用于检索规划、章节写作和修改；运行中的任务不受后续模型切换影响。", "Used for search planning, writing and revision. Changing it does not affect running tasks.")}</small>
             </label>
-            <button className="button button-primary button-block" type="submit" disabled={createProject.isPending || formState.isSubmitting}>
+            <PreparationNotice kind="text" model={fields.model_tier} checkCredit={false} />
+            {form.storageFailed ? <p role="status">{text("浏览器无法暂存，请先复制填写的内容再离开。", "Browser storage is unavailable. Copy your inputs before leaving.")}</p> : null}
+            {form.dirty ? <button className="button button-quiet" type="button" onClick={form.clear}>{text("清空未提交内容", "Discard unsent inputs")}</button> : null}
+            <button className="button button-primary button-block" type="submit" disabled={createProject.isPending || modelUnavailable || modelCatalog.isPending}>
               {createProject.isPending ? text("正在创建…", "Creating…") : text("创建项目", "Create project")}
             </button>
             {createProject.error ? <p className="message message-error" role="alert"><LocalizedError error={createProject.error} /></p> : null}

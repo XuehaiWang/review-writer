@@ -72,7 +72,7 @@ class GatewayProviderError(ModelGatewayError):
     def __init__(self, message: str, *, provider_error: dict | None = None):
         super().__init__(message)
         normalized = provider_error or normalize_provider_error(self.status_code, message)
-        if normalized["category"] == "model_unavailable":
+        if normalized["category"] in {"model_unavailable", "outcome_unknown"}:
             self.status_code = 422
         self.gateway_detail = {"code": normalized["code"], "message": message, "details": normalized}
 
@@ -116,7 +116,6 @@ TEXT_GATEWAY_JOB_TYPES = frozenset(
         "draft.optimize",
         "draft.rewrite",
         "draft.accept-rewrite",
-        "final.build",
         "final.conclusion",
         # Overview uses text planning before image generation (same leased job).
         "final.overview",
@@ -430,11 +429,14 @@ class ModelGatewayService:
 
     def _validate_live_job(self, claims: TaskClaims) -> None:
         with database_session(self.session_factory) as session:
-            job = session.scalar(
-                select(WorkflowJob).where(
+            job = session.execute(
+                select(WorkflowJob.user_id, WorkflowJob.project_id, WorkflowJob.job_type,
+                       WorkflowJob.status, WorkflowJob.cancellation_requested,
+                       WorkflowJob.lease_token, WorkflowJob.lease_generation,
+                       WorkflowJob.lease_expires_at).where(
                     WorkflowJob.id == uuid.UUID(claims.job_id), active_job_project()
                 )
-            )
+            ).first()
             database_now = (
                 session.scalar(select(func.now()))
                 if session.get_bind().dialect.name == "postgresql"
@@ -844,6 +846,7 @@ class ModelGatewayService:
         request_id: str = "",
         claims: TaskClaims | None = None,
         stream: bool = False,
+        stage: str = "",
     ) -> dict[str, Any]:
         runtime = self._text_runtime(tier)
         if not runtime.enabled:
@@ -873,21 +876,31 @@ class ModelGatewayService:
             "Accept": "application/json",
             "Idempotency-Key": idempotency_key,
         }
-        for attempt in range(1, 4):
+        stream_deadline = asyncio.get_running_loop().time() + (300 if stage == "overview-visual-brief" else 900)
+        attempt_limit = 1 if stage == "overview-visual-brief" else 3
+        for attempt in range(1, attempt_limit + 1):
             if claims is not None:
-                self._validate_live_job(claims)
-            counters = self._reserve_text_attempt(request_id, len(prompt)) if request_id else {}
+                await asyncio.to_thread(self._validate_live_job, claims)
+            counters = await asyncio.to_thread(self._reserve_text_attempt, request_id, len(prompt)) if request_id else {}
             try:
                 if stream:
-                    result = await self._stream_text_response(endpoint, payload, headers, request_id, wire, claims)
+                    try:
+                        async with asyncio.timeout(max(0, stream_deadline - asyncio.get_running_loop().time())):
+                            result = await self._stream_text_response(endpoint, payload, headers, request_id, wire, claims)
+                    except TimeoutError as exc:
+                        raise GatewayProviderError(
+                            "The original model request outcome is unknown after its total time limit. It was not sent again.",
+                            provider_error={"category": "outcome_unknown", "code": "MODEL_RESULT_UNKNOWN",
+                                            "retryable": False, "provider_status": None},
+                        ) from exc
                     result["_gateway_metering"] = counters
                     return result
                 response = await self._provider_client.post(endpoint, json=payload, headers=headers)
             except GatewayProviderError as exc:
-                if attempt >= 3 or exc.gateway_detail.get("details", {}).get("category") not in {"transient", "rate_limited"}:
+                if attempt >= attempt_limit or exc.gateway_detail.get("details", {}).get("category") not in {"transient", "rate_limited"}:
                     raise
             except (httpx.TimeoutException, httpx.TransportError) as exc:
-                if attempt >= 3:
+                if attempt >= attempt_limit:
                     raise GatewayProviderError(
                         f"Model provider transport failed after {attempt} attempts."
                     ) from exc
@@ -903,7 +916,7 @@ class ModelGatewayService:
                     return result
                 failure = normalize_provider_error(response.status_code, response.text)
                 if (failure["category"] in {"quota_exhausted", "context_limit", "authentication"}
-                        or response.status_code not in self.TRANSIENT_STATUSES or attempt >= 3):
+                        or response.status_code not in self.TRANSIENT_STATUSES or attempt >= attempt_limit):
                     detail = response.text[:500].replace("\n", " ")
                     raise GatewayProviderError(
                         f"Model provider returned HTTP {response.status_code}: {detail}",
@@ -919,16 +932,19 @@ class ModelGatewayService:
         if chat:
             body["stream_options"] = {"include_usage": True}
         text, usage, provider_id, finished = "", {}, "", False
-        last_update = 0.0
+        last_update = last_check = 0.0
+        published_length = 0
         started = asyncio.get_running_loop().time()
-        diagnostics = {"transport": "sse", "chunks": 0, "first_chunk_ms": None, "last_chunk_ms": None}
+        diagnostics = {"transport": "sse", "chunks": 0, "first_chunk_ms": None, "last_chunk_ms": None,
+                       "events": 0, "reasoning_events": 0, "heartbeats": 0,
+                       "first_event_ms": None, "last_event_ms": None, "first_reasoning_ms": None}
         def publish():
             with database_session(self.session_factory) as session:
                 row = session.get(AIModelRequest, uuid.UUID(request_id))
                 if row is not None and row.status == "running":
                     row.response_json = {**(row.response_json or {}), "partial_reply": partial_reply(text),
                                          "stream_diagnostics": dict(diagnostics)}
-        publish()  # Reset an interrupted attempt before publishing replacement text.
+        await asyncio.to_thread(publish)  # Reset an interrupted attempt without blocking the event loop.
         async with self._provider_client.stream("POST", endpoint, json=body, headers={**headers, "Accept": "text/event-stream"}) as response:
             if response.status_code >= 400:
                 await response.aread()
@@ -937,7 +953,7 @@ class ModelGatewayService:
             if "text/event-stream" not in response.headers.get("content-type", ""):
                 await response.aread()
                 diagnostics["transport"] = "buffered_json"
-                publish()
+                await asyncio.to_thread(publish)
                 try:
                     result = response.json()
                 except ValueError as exc:
@@ -946,6 +962,26 @@ class ModelGatewayService:
                     raise GatewayProviderError("Model provider returned an invalid payload.")
                 return result  # Providers may ignore stream; do not simulate it.
             async for line in response.aiter_lines():
+                # Buffered SSE can yield thousands of lines without awaiting IO.
+                # Explicitly let health requests, cancellation and deadlines run.
+                await asyncio.sleep(0)
+                now = asyncio.get_running_loop().time()
+                if now - last_check >= 1.0:
+                    if claims is not None:
+                        await asyncio.to_thread(self._validate_live_job, claims)
+                    last_check = asyncio.get_running_loop().time()
+                if line:
+                    elapsed = round((now - started) * 1000)
+                    diagnostics["events"] += 1
+                    if diagnostics["first_event_ms"] is None:
+                        diagnostics["first_event_ms"] = elapsed
+                    diagnostics["last_event_ms"] = elapsed
+                    if line.startswith(":"):
+                        diagnostics["heartbeats"] += 1
+                    # Only sparse diagnostics while there is no display text.
+                    if now - last_update >= 5.0:
+                        await asyncio.to_thread(publish)
+                        last_update = asyncio.get_running_loop().time()
                 if not line.startswith("data:"):
                     continue
                 data = line[5:].strip()
@@ -965,34 +1001,39 @@ class ModelGatewayService:
                     raise GatewayProviderError("Model stream failed before completion.",
                         provider_error=normalize_provider_error(502, failure) if failure else None)
                 previous_length = len(text)
+                reasoning = event.get("type") in {"response.reasoning.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta"}
                 if chat:
                     provider_id = event.get("id") or provider_id
                     usage = event.get("usage") or usage
                     for choice in event.get("choices") or []:
                         if choice.get("index", 0) == 0:
+                            reasoning = reasoning or bool((choice.get("delta") or {}).get("reasoning_content") or (choice.get("delta") or {}).get("reasoning"))
                             delta = (choice.get("delta") or {}).get("content")
                             if isinstance(delta, str):
                                 text += delta
                 elif event.get("type") == "response.output_text.delta":
                     text += event.get("delta") or ""
                 elif event.get("type") == "response.completed":
-                    publish()
+                    await asyncio.to_thread(publish)
                     return event["response"]
                 now = asyncio.get_running_loop().time()
+                if reasoning:
+                    diagnostics["reasoning_events"] += 1
+                    if diagnostics["first_reasoning_ms"] is None:
+                        diagnostics["first_reasoning_ms"] = round((now - started) * 1000)
                 if len(text) > previous_length:
                     diagnostics["chunks"] += 1
                     elapsed = round((now - started) * 1000)
                     if diagnostics["first_chunk_ms"] is None:
                         diagnostics["first_chunk_ms"] = elapsed
                     diagnostics["last_chunk_ms"] = elapsed
-                if now - last_update >= 0.25:
-                    if claims is not None:
-                        self._validate_live_job(claims)
-                    publish()
-                    last_update = now
+                if len(text) != published_length and (published_length == 0 or now - last_update >= 1.0):
+                    await asyncio.to_thread(publish)
+                    published_length = len(text)
+                    last_update = asyncio.get_running_loop().time()
         if not finished or not chat:
             raise GatewayProviderError("Model stream ended before completion.")
-        publish()
+        await asyncio.to_thread(publish)
         return {"id": provider_id, "choices": [{"message": {"content": text}}], "usage": usage}
 
     async def _provider_embedding_call(
@@ -1220,6 +1261,7 @@ class ModelGatewayService:
                     request_id=request_id,
                     claims=claims,
                     stream=True,
+                    **({"stage": normalized_stage} if normalized_stage == "overview-visual-brief" else {}),
                 )
             usage = self._usage(provider_data)
             cost = calculate_provider_cost(tier, **{

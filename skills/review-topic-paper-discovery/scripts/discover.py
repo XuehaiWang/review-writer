@@ -1566,7 +1566,11 @@ def resolve_query_ambiguities(topic: str, concepts: list[str], *, translation: b
             "Return JSON only: {\"search_topic\": \"English translation of the entire topic\", "
             "\"keywords\": [\"English translation of each supplied keyword, in the same order\"]}. "
             "AMBIGUOUS CONCEPTS below contains the user keywords in this task. "
-            "Keep existing English keywords verbatim. Do not add or omit keywords."
+            "Keep existing English keywords verbatim. Do not add or omit keywords. "
+            "Use established English academic terminology rather than literal word-by-word wording. "
+            "When the supplied topic explicitly defines a term and its abbreviation, preserve the "
+            "definition in the English search_topic as full term (ABBR). Do not invent an expansion "
+            "for an undefined acronym or broaden the topic with related but different concepts."
         )
     prompt = (
         f"{instructions}\n\n"
@@ -1668,6 +1672,9 @@ def build_bilingual_query_plan(
                     or (not re.search(r"[\u3400-\u9fff]", original) and english != original)):
                 raise ValueError("Invalid translated keyword")
         plan = deterministic_query_plan(search_topic, translated, classification_rules)
+        # Reuse the English path's explicit-definition parser without buying
+        # another concept-resolution call or expanding an ambiguous acronym.
+        plan["resolved_concepts"] = explicit_topic_concepts(search_topic)
         # Explicit dates parsed from the original request take precedence. The
         # model cannot invent an effective year filter through translation.
         plan["filters"] = parse_topic_intent(topic)["filters"]

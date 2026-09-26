@@ -13,7 +13,7 @@ from enum import StrEnum
 from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from .database import ProviderCredential, database_session
 from .security import Permission, Principal
@@ -330,34 +330,7 @@ class ProviderSettingsService:
             session.flush()
             return self._record(row)
 
-    def delete_settings(self, principal: Principal, provider_kind: str) -> bool:
-        principal.require(Permission.PROVIDER_MANAGE)
-        kind = self._kind(provider_kind)
-        user_uuid = uuid.UUID(principal.user_id)
-        with database_session(self.session_factory) as session:
-            result = session.execute(
-                delete(ProviderCredential).where(
-                    ProviderCredential.user_id == user_uuid,
-                    ProviderCredential.provider_kind == kind.value,
-                )
-            )
-            return bool(result.rowcount)
 
-    def reveal_for_worker(self, user_id: str, provider_kind: str) -> str:
-        """Internal worker boundary; never expose this value through a response schema."""
-        kind = self._kind(provider_kind)
-        user_uuid = uuid.UUID(user_id)
-        with database_session(self.session_factory) as session:
-            row = session.scalar(
-                select(ProviderCredential).where(
-                    ProviderCredential.user_id == user_uuid,
-                    ProviderCredential.provider_kind == kind.value,
-                    ProviderCredential.enabled.is_(True),
-                )
-            )
-            if row is None:
-                raise ProviderSettingsError(f"No enabled {kind.value} provider is configured.")
-            return self.cipher.decrypt(user_id, kind.value, row.encrypted_secret)
 
     def runtime_environment(
         self,

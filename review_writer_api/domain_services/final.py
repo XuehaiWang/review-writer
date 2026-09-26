@@ -96,7 +96,9 @@ REFERENCES_HEADING = re.compile(
 )
 CITATION_CALLOUT = CALLOUT_RE
 REFERENCE_ITEM = re.compile(r"(?m)^\s*\[(\d+)\]\s*\.?\s+(.+?)\s*$")
-MARKDOWN_HEADING = re.compile(r"(?m)^\s*(#{1,6})\s+(.+?)\s*$")
+# Match only within a line: consuming newlines here joins adjacent headings
+# and drops parent levels from the PDF's automatic section numbering.
+MARKDOWN_HEADING = re.compile(r"(?m)^[ \t]*(#{1,6})[ \t]+([^\r\n]+?)[ \t]*(?=\r?$)")
 REFERENCE_AFFILIATION_SUP = re.compile(
     r"<sup\b[^>]*>[\s,;:.·•*†‡#∥‖|\[\](){}\-]*</sup>",
     re.IGNORECASE,
@@ -878,6 +880,11 @@ class FinalService(FinalFigureReviewMixin, FinalHistoryMixin, ArtifactBackedServ
     ) -> dict[str, Any]:
         """Validate editable overview labels against the current manuscript axis."""
 
+        if not overview_present:
+            return {"status": "not_applicable", "issues": [], "warnings": [],
+                    "unsupported_labels": [], "traceable_labels": [],
+                    "supported_axis_phrases": [], "title": ""}
+
         title = " ".join(str(overview_text.get("title") or "").split()).strip()
         topic = " ".join(str(discovery.get("topic") or "").split()).strip()
         labels = [
@@ -1293,7 +1300,6 @@ class FinalService(FinalFigureReviewMixin, FinalHistoryMixin, ArtifactBackedServ
         built: dict[str, Any],
     ) -> dict[str, Any]:
         expected_inputs = self.validate_task_inputs(principal, project_id, job_payload)
-        current = self._artifact(principal, project_id, DRAFT_DOCUMENT)
         raw_output = str(built.get("output_path") or "").strip()
         output = Path(raw_output).resolve() if raw_output else None
         user_root = self.artifacts.workspace_manager.user_root(principal.user_id)
@@ -1353,6 +1359,21 @@ class FinalService(FinalFigureReviewMixin, FinalHistoryMixin, ArtifactBackedServ
             "candidate_pending": state is None,
         }
 
+    def overview_state(self, principal, project_id):
+        """Read creative assets without requiring an approved image stage/draft."""
+        self._owned_project(principal, project_id)
+        overview = self._artifact(principal, project_id, FINAL_OVERVIEW_IMAGE)
+        caption, _ = self._read_json(principal, project_id, FINAL_OVERVIEW_TEXT)
+        draft = self._artifact(principal, project_id, DRAFT_DOCUMENT)
+        return {
+            "revision": self._revision(principal, project_id),
+            "overview_figure_exists": bool(overview),
+            "overview_figure_url": f"/api/v1/artifacts/{overview.id}/content" if overview else "",
+            "overview_text": caption,
+            "draft_available": bool(draft),
+            "draft_source_stale": bool(draft and self.drafts._freshness(principal, project_id, draft)["upstream_stale"]),
+        }
+
     def overview_history(self, principal, project_id):
         self._owned_project(principal, project_id)
         current = self._artifact(principal, project_id, FINAL_OVERVIEW_IMAGE)
@@ -1373,7 +1394,7 @@ class FinalService(FinalFigureReviewMixin, FinalHistoryMixin, ArtifactBackedServ
                 "title": value.get("title", ""), "created_at": image.created_at.isoformat() if image.created_at else "",
                 "instructions": image.metadata.get("generation_instructions", ""), "selected": image.id == selected,
                 "structure_references": image.metadata.get("structure_references", []),
-                "source_changed": bool(draft and image.metadata.get("source_draft_artifact_id") != draft.id)})
+                "source_changed": not draft or image.metadata.get("source_draft_artifact_id") != draft.id})
         return result
 
     def adopt_overview(self, principal, project_id, *, image_id, title, revision):
@@ -1646,8 +1667,12 @@ class FinalService(FinalFigureReviewMixin, FinalHistoryMixin, ArtifactBackedServ
                 author_candidate=self._author_candidate(principal),
                 source_draft_artifact_id=draft.id,
             )
+        # A caption left by an unfinished optional Overview is not a publication
+        # dependency. Keep the artifact for later editing but omit it from Final.
+        if overview is None:
+            overview_text, overview_text_artifact = {}, None
         # Final does not append legacy synthesis; the approved Draft owns all prose.
-        if bool(overview) != bool(overview_text_artifact):
+        if overview and not overview_text_artifact:
             raise FinalNotReady("The overview image and editable text are incomplete.")
         reference_match = REFERENCES_HEADING.search(draft_text)
         draft_body = (
@@ -2411,6 +2436,8 @@ class FinalService(FinalFigureReviewMixin, FinalHistoryMixin, ArtifactBackedServ
                                    for pid, artifact_id in reference_versions.items())
         figure_reviews_artifact = self._artifact(principal, project_id, FINAL_FIGURE_REVIEWS)
         figure_review_manifest = self._artifact(principal, project_id, FIGURE_MANIFEST) if figure_reviews_artifact else None
+        if overview is None:
+            overview_text, overview_text_artifact = {}, None
         final_current = bool(
             final_artifact
             and (final_artifact.metadata.get("figure_reviews_artifact_id") or "") == (figure_reviews_artifact.id if figure_reviews_artifact else "")

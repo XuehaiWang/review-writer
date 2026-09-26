@@ -247,6 +247,8 @@ export type LibraryPaper = {
   structured_tags_verified?: boolean;
   human_review_status?: string | null;
   needs_human_check?: boolean | null;
+  content_complete?: boolean;
+  content_missing_fields?: string[];
   index_status?: {
     mineru: "ready" | "unavailable";
     fulltext: "not_indexed" | "queued" | "building" | "ready" | "failed" | "rebuild_required";
@@ -389,6 +391,7 @@ export type UploadBatchSummary = {
 
 export type UploadJobList = {
   items: UploadJob[];
+  archives?: UploadJob[];
   count: number;
   batch_summaries: UploadBatchSummary[];
 };

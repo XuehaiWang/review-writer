@@ -16,6 +16,8 @@ export type DiscoveryRow = Record<string, unknown> & {
   source?: string;
   landing_url?: string;
   pdf_url?: string;
+  availability?: { state: "checking" | "available" | "restricted" | "not_found" | "unknown"; pdf_url?: string; checked_at?: number };
+  fulltext_access?: { state: "acquiring" | "downloaded" | "not_acquired"; reason: string };
   access_status?: "open_access_downloadable" | "institution_required" | "metadata_only" | "downloaded_to_library" | "access_unknown";
   recommendation_status?: "recommended" | "review" | "background" | "excluded";
   retrieval_channels?: string[];
@@ -143,26 +145,6 @@ export function publicPlannerNotice(plan: DiscoveryPayload["query_plan"], text: 
     );
 }
 
-export function groupLabel(group: DiscoveryGroup | undefined, text: TextSelector): string {
-  if (group?.system_group === "__topic_candidates_pending_evidence__") {
-    return text("混合召回的 Topic 候选", "Topic candidates from hybrid retrieval");
-  }
-  return group?.keyword || text("结果", "Results");
-}
-
-export function queryGroupSourceLabel(group: DiscoveryGroup, text: TextSelector): string {
-  if (group.system_group === "__topic_candidates_pending_evidence__") {
-    return text("混合召回补充", "Hybrid retrieval supplement");
-  }
-  const channels = new Set((group.local_results || []).flatMap((row) => row.retrieval_channels || []));
-  const labels: string[] = [];
-  if (channels.has("metadata_rules") || !channels.size) labels.push(text("题录/规则", "Metadata/rules"));
-  if (channels.has("fulltext_lexical")) labels.push(text("全文", "Full text"));
-  if (channels.has("semantic")) labels.push(text("语义", "Semantic"));
-  if ((group.web_results || []).length) labels.push(text("联网", "Online"));
-  return labels.join(" · ") || text("查询规划组", "Planned query group");
-}
-
 export function selectedForMatrix(row: DiscoveryRow): boolean {
   return row.selected_for_matrix === true && row.role !== "excluded";
 }
@@ -177,13 +159,6 @@ export function retrievalChannelLabel(channel: string, text: TextSelector): stri
   };
   const value = labels[channel] || [channel, channel];
   return text(value[0], value[1]);
-}
-
-export function externalActionLabel(status: DiscoveryRow["access_status"], text: TextSelector): string {
-  if (status === "open_access_downloadable") return text("下载并解析", "Download and parse");
-  if (status === "institution_required") return text("需要机构权限", "Institution access");
-  if (status === "metadata_only") return text("仅有题录", "Metadata only");
-  return text("查看来源", "View source");
 }
 
 export function localCandidateId(row: DiscoveryRow): string {
@@ -279,11 +254,4 @@ export function buildDiscoveryPaperLabels(groups: DiscoveryGroup[]): Map<string,
   const selected = [...ranked.values()].sort((left, right) => right.score - left.score || left.order - right.order);
   const selectedIds = new Set(selected.map((row) => row.paper_id));
   return buildPaperDisplayLabels([...selected, ...remaining.filter((row) => !selectedIds.has(row.paper_id))]);
-}
-
-export function orderedQueryGroups(groups: DiscoveryGroup[]): DiscoveryGroup[] {
-  return [
-    ...groups.filter((group) => group.system_group !== "__topic_candidates_pending_evidence__"),
-    ...groups.filter((group) => group.system_group === "__topic_candidates_pending_evidence__"),
-  ];
 }

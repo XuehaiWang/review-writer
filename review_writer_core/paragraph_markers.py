@@ -128,6 +128,7 @@ def ensure_prose_paragraph_markers(markdown: str) -> tuple[str, dict[str, Any]]:
 
     body, references = split_body_and_references(markdown or "")
     existing_ids = set(PARAGRAPH_MARKER_RE.findall(body))
+    existing_ids.update(re.findall(r"<!--\s*deleted_paragraph_id:\s*([A-Za-z0-9_.:-]+)\s*-->", body))
     counters: dict[str, int] = {}
     insertions: list[tuple[int, str, str]] = []
     prose_count = 0

@@ -134,8 +134,9 @@ class FinalJobHandlers:
             env=normal,
             secret_env=secrets,
             cancel_requested=context.cancellation_requested,
-            # Initial generation + at most two corrections, with bounded OCR
-            # and text audits. The shared runner still handles cancellation.
+            # A failed paid Overview must not replay the whole pipeline.
+            # Completed brief/image steps remain available for an explicit retry.
+            max_attempts=1,
             timeout_seconds=60 * 60,
         )
         report = json.loads(report_path.read_text(encoding="utf-8"))

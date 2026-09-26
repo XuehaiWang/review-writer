@@ -106,13 +106,13 @@ class ReactFrontendShellTests(unittest.TestCase):
             / "src"
             / "features"
             / "planning"
-            / "PlanningPage.tsx"
+            / "ChapterPlanningWorkspace.tsx"
         ).read_text(encoding="utf-8")
         request = planning.split("const generateBlueprint", 1)[1].split(
             "const confirmBlueprint", 1
         )[0]
-        self.assertIn("revision: planning.data!.blueprint_revision", request)
-        self.assertNotIn("revision: planning.data!.matrix_revision", request)
+        self.assertIn("revision: payload.blueprint_revision", request)
+        self.assertNotIn("revision: payload.matrix_revision", request)
 
     def test_source_selection_syncs_redraw_without_manual_confirmation(self) -> None:
         images = (

@@ -1,4 +1,4 @@
-from threading import Barrier, Event, get_ident
+from threading import Barrier, Event, Lock, get_ident
 from review_writer_core.stages.sections.execution import run_sections
 from review_writer_core.model_gateway_client import DeferredModelCall
 import pytest
@@ -138,15 +138,74 @@ def test_delegated_chapter_does_not_discard_parallel_completed_result():
     assert saved == [("B", {"output": "completed"})]
 
 
-def test_all_waiting_children_are_retained_and_no_fifth_request_is_started():
-    barrier = Barrier(4)
+def test_model_waits_release_local_slots_and_all_ready_children_are_retained():
+    barrier = Barrier(2)
     called = []
     def generate(task, _emit):
         called.append(task["section_id"])
-        barrier.wait(timeout=3)
+        if task["section_id"] in {"0", "1"}:
+            barrier.wait(timeout=3)
         raise DeferredModelCall("child-" + task["section_id"])
     with pytest.raises(DeferredModelCall) as caught:
-        run_sections([{"section_id": str(i)} for i in range(5)], generate,
-                     lambda *_: None, lambda *_: pytest.fail("Not completed"), concurrency=4)
-    assert set(called) == {"0", "1", "2", "3"}
-    assert set(caught.value.model_job_ids) == {"child-" + str(i) for i in range(4)}
+        run_sections([{"section_id": str(i)} for i in range(7)], generate,
+                     lambda *_: None, lambda *_: pytest.fail("Not completed"), concurrency=2)
+    assert set(called) == {str(i) for i in range(7)}
+    assert set(caught.value.model_job_ids) == {"child-" + str(i) for i in range(7)}
+
+
+def test_waiting_predecessor_blocks_only_its_dependents():
+    called = []
+    def generate(task, _emit):
+        called.append(task["section_id"])
+        raise DeferredModelCall("child-" + task["section_id"])
+    tasks = [{"section_id": "A"}, {"section_id": "B", "depends_on_sections": ["A"]},
+             {"section_id": "C"}, {"section_id": "D", "depends_on_sections": ["B"]}]
+    with pytest.raises(DeferredModelCall) as caught:
+        run_sections(tasks, generate, lambda *_: None,
+                     lambda *_: pytest.fail("Not completed"), concurrency=1)
+    assert called == ["A", "C"]
+    assert set(caught.value.model_job_ids) == {"child-A", "child-C"}
+
+
+def test_local_work_stays_bounded_while_model_waits_accumulate():
+    barrier, lock = Barrier(2), Lock()
+    active = peak = 0
+    def generate(task, _emit):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            barrier.wait(timeout=3)
+            raise DeferredModelCall("child-" + task["section_id"])
+        finally:
+            with lock:
+                active -= 1
+    with pytest.raises(DeferredModelCall) as caught:
+        run_sections([{"section_id": str(i)} for i in range(8)], generate,
+                     lambda *_: None, lambda *_: pytest.fail("Not completed"), concurrency=2)
+    assert peak == 2 and active == 0
+    assert len(caught.value.model_job_ids) == 8
+
+
+def test_resume_saves_ready_chapter_and_unlocks_dependency_despite_other_waits():
+    called, saved = [], {}
+    def generate(task, _emit):
+        sid = task["section_id"]
+        called.append(sid)
+        if sid == "A":
+            raise DeferredModelCall("existing-A")
+        if sid == "C":
+            assert "B" in saved
+            assert task["dependency_context"][0]["claims"] == ["verified"]
+            raise DeferredModelCall("new-C")
+        return {"writing": {"claims": ["verified"]}}
+    tasks = [{"section_id": "cached"}, {"section_id": "A"}, {"section_id": "B"},
+             {"section_id": "C", "depends_on_sections": ["B"]}]
+    with pytest.raises(DeferredModelCall) as caught:
+        run_sections(tasks, generate, lambda *_: None,
+                     lambda t, r: saved.update({t["section_id"]: r}),
+                     completed={"cached": {}}, concurrency=1)
+    assert called == ["A", "B", "C"]
+    assert set(saved) == {"B"}
+    assert set(caught.value.model_job_ids) == {"existing-A", "new-C"}

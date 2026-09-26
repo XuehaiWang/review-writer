@@ -5,17 +5,16 @@ import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "../../api/client";
 import { MarkdownView } from "../../components/MarkdownView";
 import { useUiText } from "../../i18n/useUiText";
-import { ParagraphManualEditor } from "./ParagraphManualEditor";
 import type { DialogueSection } from "./SectionDialogue";
 import { ParagraphDialogue, type DialogueCandidate, type DialogueParagraph } from "./ParagraphDialogue";
 
 type Version = DialogueSection & { artifact_id: string; created_at: string };
 type Versions = { current: Version; initial: Version | null; versions: { artifact_id: string; created_at: string }[] };
 
-export function ChapterVersions({ section, projectId, userId, revision, disabled, candidates, turns, close, restart, refresh }: {
-  section: DialogueSection; projectId: string; userId: string; revision: number; disabled: boolean;
+export function ChapterVersions({ section, projectId, disabled, candidates, turns, close, restart }: {
+  section: DialogueSection; projectId: string; disabled: boolean;
   candidates: DialogueCandidate[]; turns: { id: string; message: string }[];
-  close: () => void; restart: (artifactId: string) => void; refresh: () => Promise<unknown>;
+  close: () => void; restart: (artifactId: string) => void;
 }) {
   const { text } = useUiText();
   const dialog = useRef<HTMLDialogElement>(null);
@@ -43,9 +42,7 @@ export function ChapterVersions({ section, projectId, userId, revision, disabled
       {(versions.data?.versions || []).filter(v => v.artifact_id !== versions.data?.current.artifact_id).map(v => <option key={v.artifact_id} value={v.artifact_id}>{text("历史版本", "Saved version")} · {new Date(v.created_at).toLocaleString(uiLocale())}</option>)}
     </select></label>
     <div className="chapter-version-content">
-      {version === "current" ? section.paragraphs.map(p => <article key={p.paragraph_key}><MarkdownView content={p.text} />
-        <ParagraphManualEditor scratchKey={`${userId}:${projectId}:${p.paragraph_key}:manual`} projectId={projectId} paragraph={p}
-          revision={revision} disabled={disabled} refresh={refresh} /></article>) : version === "history" ? <>
+      {version === "current" ? section.paragraphs.map(p => <article key={p.paragraph_key}><MarkdownView content={p.text} /></article>) : version === "history" ? <>
         {turns.map(t => <details key={t.id}><summary>{t.message}</summary>{candidates.filter(c => (c as DialogueCandidate & { batch_job_id?: string }).batch_job_id === t.id).map(c => <article key={c.candidate_id}><MarkdownView content={c.reply || ""} /><MarkdownView content={c.candidate_text || c.original_text} /></article>)}</details>)}
         {candidates.filter(c => !turns.some(t => t.id === (c as DialogueCandidate & { batch_job_id?: string }).batch_job_id)).map(c => <details key={c.candidate_id}><summary>{c.paragraph_id}</summary><MarkdownView content={c.reply || ""} /><MarkdownView content={c.candidate_text || c.original_text} /></details>)}
         {section.paragraphs.map(p => <ParagraphHistory key={p.paragraph_key} projectId={projectId} paragraph={p} />)}

@@ -736,23 +736,6 @@ class LibraryService:
             updated_at=row.updated_at.isoformat(),
         )
 
-    def stage_upload(
-        self, principal: Principal, filename: str, content: bytes
-    ) -> tuple[Path, str]:
-        principal.require(Permission.PROJECT_WRITE)
-        safe_name = self._safe_filename(filename)
-        if not content:
-            raise WorkflowValidationError("The uploaded PDF is empty.")
-        if len(content) > self.MAX_PDF_BYTES:
-            raise WorkflowValidationError("Each PDF must be 80 MB or smaller.")
-        if not content[:1024].lstrip(b"\xef\xbb\xbf\x00\t\r\n ").startswith(b"%PDF-"):
-            raise WorkflowValidationError("The uploaded file does not contain a PDF signature.")
-        staging = self.workspace_manager.trusted_user_directory(
-            principal.user_id, "review-library", ".upload-staging"
-        )
-        path = staging / f"{uuid.uuid4()}.pdf.part"
-        path.write_bytes(content)
-        return path, safe_name
 
     def begin_upload(self, principal: Principal, filename: str) -> tuple[Path, str]:
         principal.require(Permission.PROJECT_WRITE)

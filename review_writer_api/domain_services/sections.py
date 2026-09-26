@@ -15,6 +15,7 @@ import shutil
 import threading
 import uuid
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -300,11 +301,6 @@ class SectionsService(ArtifactBackedService):
                     required_roles=section.get("required_fact_roles") or []
                 )
             )
-            targeted_fact_gaps = normalize_targeted_fact_gaps(
-                section.get("targeted_fact_gaps"),
-                allowed_paper_ids=primary_papers,
-                allowed_field_ids=section_required_roles,
-            )
             scientific_thesis = section.get("scientific_thesis")
             if isinstance(scientific_thesis, dict):
                 scientific_thesis = scientific_thesis.get("text")
@@ -370,7 +366,6 @@ class SectionsService(ArtifactBackedService):
                     "retrieval_directions": section.get("retrieval_directions") or [],
                     "scientific_claims": [],
                     "argument_order": list(section.get("argument_order") or []),
-                    "paper_roles": list(section.get("paper_roles") or []),
                     "coverage_by_use": list(section.get("coverage_by_use") or []),
                     "writing_requirements": writing_requirements,
                     "single_paper_policy": dict(section.get("single_paper_policy") or {}),
@@ -1769,8 +1764,133 @@ class SectionsService(ArtifactBackedService):
             },
         }
 
+    def _preparation_fingerprint(self, principal, project_id, payload):
+        """Cheap source manifest; never performs retrieval or calls an embedding API.
+
+        Include linked SI and papers with zero hits, not only retrieved passages.
+        Increment the version when evidence-preparation semantics change.
+        """
+        tasks = payload.get("tasks") or []
+        assigned = sorted({paper_id for task in tasks for paper_id in task.get("allowed_papers", [])})
+        catalog = self._catalog(principal, assigned)
+        indexed = self.library_index is not None and self.library_index.enabled
+        summaries = self.library_index.summaries(principal, sorted(catalog)) if indexed else {}
+        project = self._owned_project(principal, project_id)
+        manifest = {
+            "version": 1,
+            "project_id": project_id,
+            "topic": project.topic,
+            "taxonomy_profile": project.taxonomy_profile,
+            "inputs": {key: payload.get(key) for key in (
+                "source_blueprint_artifact_id", "source_matrix_artifact_id", "source_outline_artifact_id")},
+            "tasks": tasks,
+            "indexed": indexed,
+            "sources": {
+                paper_id: {
+                    "content": paper.content_sha256,
+                    "metadata": paper.metadata_json,
+                    "updated_at": str(paper.updated_at),
+                    "index": {key: (summaries.get(paper_id) or {}).get(key) for key in (
+                        "fulltext", "chunk_count", "source_lineage_hash")},
+                }
+                for paper_id, paper in catalog.items()
+            },
+        }
+        return hashlib.sha256(json.dumps(manifest, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+    def _legacy_preparation_matches(self, principal, source, prepared):
+        """Validate old snapshots against owned source versions, without re-retrieval.
+
+        Missing provenance is not permission to trust arbitrary old evidence. All
+        articles (including zero-hit sources) must predate the run, metadata and
+        indexed source lineages must still match, and added SI invalidates reuse.
+        """
+        metadata = prepared.get("library_metadata")
+        if not isinstance(metadata, dict) or not metadata:
+            return False
+        catalog = self._catalog(principal, list(metadata))
+        if set(catalog) != set(metadata):
+            return False
+        project = self._owned_project(principal, str(source.project_id))
+        if ((prepared.get("blueprint") or {}).get("review_topic") != project.topic
+                or prepared.get("taxonomy_profile") != project.taxonomy_profile):
+            return False
+        for paper_id, paper in catalog.items():
+            if (paper.metadata_json != metadata[paper_id]
+                    or paper.updated_at.replace(tzinfo=None) > source.created_at.replace(tzinfo=None)):
+                return False
+        lineages = {}
+        for section in (prepared.get("evidence_package") or {}).get("sections") or []:
+            for row in [*(section.get("hits") or []), *(section.get("primary_paper_states") or [])]:
+                if row.get("chunk_id") == "abstract":
+                    continue
+                lineage = row.get("source_lineage_hash")
+                if lineage:
+                    lineages.setdefault(row.get("source_file_id") or row.get("paper_id"), set()).add(lineage)
+        if self.library_index is None or not self.library_index.enabled:
+            return False  # Legacy prefix-reading has no independently verifiable index lineage.
+        summaries = self.library_index.summaries(principal, list(catalog))
+        if set(lineages) - set(catalog):
+            return False
+        for paper_id in catalog:
+            summary = summaries.get(paper_id) or {}
+            current = summary.get("source_lineage_hash")
+            if current:
+                recorded = lineages.get(paper_id)
+                if recorded and recorded != {current}:
+                    return False
+                if not recorded:
+                    # A supporting paper can legitimately have no retrieved hits.
+                    # Its index must already have existed and remained untouched.
+                    try:
+                        updated = datetime.fromisoformat(summary["updated_at"])
+                    except (KeyError, TypeError, ValueError):
+                        return False
+                    if updated.replace(tzinfo=None) > source.created_at.replace(tzinfo=None):
+                        return False
+            elif lineages.get(paper_id) or summary.get("fulltext") == "ready":
+                return False
+        return True
+
+    def _retry_prepared_input(self, context, payload, fingerprint):
+        """Only adopt verified caches from this user's same-project retry ancestry."""
+        source_id = getattr(context, "retry_of_job_id", None)
+        seen = set()
+        best = None
+        best_count = -1
+        principal = Principal(context.user_id, frozenset({Role.USER}))
+        for _ in range(16):
+            if not source_id or source_id in seen:
+                break
+            seen.add(source_id)
+            source = self.repository.get_job(context.user_id, source_id)
+            if source is None or str(source.project_id) != str(context.project_id) or source.job_type != "sections.generate":
+                break
+            try:
+                directory = self.artifacts.workspace_manager.trusted_user_directory(
+                    context.user_id, ".review-writer", "job-staging", str(uuid.UUID(source_id)))
+                prepared = json.loads((directory / "prepared-section-input.json").read_text(encoding="utf-8"))
+                if (isinstance(prepared, dict)
+                    and prepared.get("project_id") == str(context.project_id)
+                    and all(prepared.get(key) == payload.get(key) for key in (
+                        "source_blueprint_artifact_id", "source_matrix_artifact_id", "source_outline_artifact_id"))
+                    and isinstance(prepared.get("evidence_package", {}).get("sections"), list)
+                    and (prepared.get("preparation_fingerprint") == fingerprint
+                         or (not prepared.get("preparation_fingerprint")
+                             and self._legacy_preparation_matches(principal, source, prepared)))):
+                    count = len(((getattr(source, "result", None) or {}).get("section_checkpoint") or {}).get("entries") or {})
+                    if count > best_count:
+                        best, best_count = prepared, count
+            except (OSError, ValueError, TypeError, AttributeError):
+                # Missing/corrupt or unverifiable legacy caches are not task failures.
+                pass
+            source_id = source.retry_of_job_id
+        if best is not None:
+            best["preparation_fingerprint"] = fingerprint
+        return best
+
     def prepare_generation_job(self, context, payload):
-        """Prepare evidence once per job, in its existing disposable staging area."""
+        """Prepare once, reusing source-validated evidence across explicit retries."""
         principal = Principal(context.user_id, frozenset({Role.USER}))
         project_id = str(context.project_id)
         self.validate_generation_inputs(principal, project_id, payload)
@@ -1782,9 +1902,24 @@ class SectionsService(ArtifactBackedService):
             prepared = json.loads(cache.read_text(encoding="utf-8"))
             self.validate_generation_inputs(principal, project_id, prepared)
         else:
-            context.report_progress(0, len(payload.get("tasks") or []))
-            context.report_partial_result({"section_progress": {"phase": "preparing_evidence"}})
-            prepared = self.generation_payload(principal, project_id)
+            checkpoint = payload.get("resume_checkpoint") or {}
+            entries = checkpoint.get("entries") or {}
+            context.report_progress(len(entries), len(payload.get("tasks") or []))
+            preview = {"section_progress": {"phase": "preparing_evidence", "completed_sections": [
+                {"section_id": sid, "heading": (entry.get("output") or {}).get("heading") or sid}
+                for sid, entry in entries.items()]}}
+            if entries:
+                preview["section_checkpoint"] = checkpoint
+            context.report_partial_result(preview)
+            fingerprint = self._preparation_fingerprint(principal, project_id, payload)
+            prepared = self._retry_prepared_input(context, payload, fingerprint)
+            if prepared is None:
+                prepared = self.generation_payload(principal, project_id)
+                # Index preparation can change index state. Only mark the cache reusable
+                # when its dependencies remained stable over the complete retrieval.
+                after = self._preparation_fingerprint(principal, project_id, payload)
+                if after == fingerprint:
+                    prepared["preparation_fingerprint"] = fingerprint
             self.validate_generation_inputs(principal, project_id, payload)
             context.checkpoint()
             temporary = directory / f"prepared-section-input-{uuid.uuid4().hex}.tmp"

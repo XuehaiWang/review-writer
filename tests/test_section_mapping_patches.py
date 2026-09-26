@@ -20,6 +20,8 @@ def fixture():
 @pytest.mark.parametrize("fault", [None, "stale", "duplicate", "wrong_index", "unsupported", "extra_prose"])
 def test_record_patch_is_bounded_and_cannot_rewrite_prose(fault):
     paragraph, source, record = fixture()
+    invalid_records = [{**record, "result": "99% conversion"}]
+    paragraph["claims"][0]["result_context"] = deepcopy(invalid_records)
     original = {"paragraphs": [paragraph]}
     state = {}
     def call(prompt, schema, label):
@@ -43,18 +45,20 @@ def test_record_patch_is_bounded_and_cannot_rewrite_prose(fault):
         domain_terms=[], call=call, state=state, persist=lambda: None)
     assert result["paragraphs"][0]["text"] == paragraph["text"]
     assert result["paragraphs"][0]["claims"][0]["text"] == paragraph["claims"][0]["text"]
-    assert original["paragraphs"][0]["claims"][0]["result_context"] == []
-    assert bool(result["paragraphs"][0]["claims"][0]["result_context"]) == (fault in {None, "extra_prose"})
+    assert original["paragraphs"][0]["claims"][0]["result_context"] == invalid_records
+    expected = [record] if fault in {None, "extra_prose"} else invalid_records
+    assert result["paragraphs"][0]["claims"][0]["result_context"] == expected
     assert state["mapping_repair_diagnostics"]["record_count"] == 1
     assert state["mapping_repair_diagnostics"]["paragraph_count"] == 0
 
 
-def test_valid_mapping_needs_no_model_repair():
+@pytest.mark.parametrize("paper_roles", [[], [{"paper_id": "A", "presentation": "table"}]])
+def test_valid_mapping_needs_no_model_repair(paper_roles):
     paragraph, source, _ = fixture()
     original = {"paragraphs": [paragraph]}
     def call(*args):
         pytest.fail("Correct mapping must not trigger a model request")
-    result = repair_source_paragraphs(original, task={}, shown={"a": source}, aliases={"E001": "a"},
+    result = repair_source_paragraphs(original, task={"paper_roles": paper_roles}, shown={"a": source}, aliases={"E001": "a"},
         sources=[source], domain_terms=[], call=call, state={}, persist=lambda: None)
     assert result == original
 

@@ -90,7 +90,7 @@ def test_generation_acceptance(tmp_path, chemical, confidence, modules, blank_sl
             return {"supported": confidence >= 70, "confidence": confidence, "reason": "Fixture evidence review."}
         if label == "overview-display-audit":
             return {"passed": True, "uncertain": False, "issues": []}
-        assert "Authoritative Overview contract" in prompt
+        assert "Create a visual abstract" in prompt
         return {
             **(SCHEME if chemical and confidence >= 0 else {}),
             "chemistry_applicable": chemical,
@@ -107,14 +107,16 @@ def test_generation_acceptance(tmp_path, chemical, confidence, modules, blank_sl
         overview.main()
     report = json.loads((project / "03_figure_redraw/overview_template_match.json").read_text(encoding="utf-8"))
     assert report["status"] == "success"
+    # A text-model reaction suggestion is no longer structural evidence.
+    expected_mode = "concept"
     assert report["chemistry_generation"]["mode"] == expected_mode
     if expected_mode == "reaction":
         assert report["template_selection"]["mode"] == "ai"
         assert report["style_generation"]["mode"] == "single-pass"
     else:
-        assert report["template_selection"]["mode"] == "ai"
-        assert report["selected_template_id"] == template_id
-    assert len(report["overview_content_contract"]["modules"]) == modules
+        assert report["template_selection"]["mode"] == "content_score"
+    assert calls == ["overview-visual-brief"]
+    assert len(report["overview_content_contract"]["modules"]) == min(5, modules)
     assert len(report["overview_content_contract_sha256"]) == 64
     assert report["overview_content_contract"]["primary_axis"] == ("substrate" if chemical else "method")
     assert report["features"]["group_by"] == (["substrate"] if chemical else ["method"])
@@ -138,26 +140,33 @@ def test_generation_acceptance(tmp_path, chemical, confidence, modules, blank_sl
 
 def test_reviewed_skeleton_reuses_product_without_keyword_substitution():
     features = {"taxonomy_profile": "allene", "review_title": "Allene synthesis"}
-    with patch.object(overview, "_llm_content_pack", return_value={"reaction": SCHEME}), \
-         patch.object(overview, "_automatic_chemistry_decision", return_value={"mode": "skeleton", "confidence": 50, "reason": "Conservative motif"}):
+    features["overview_structure_contract"] = {"status": "resolved", "role": "target_product", "smiles": SCHEME["product_smiles"]}
+    with patch.object(overview, "_cached_overview_json", return_value={}):
         assert overview.resolve_reaction_scheme(features) is None
     assert overview.resolve_skeleton_smiles(features) == SCHEME["product_smiles"]
 
 
-def test_candidate_cannot_override_blueprint_product_lock():
-    features = {"overview_structure_contract": {
-        "status": "resolved", "role": "target_product", "smiles": "*C=C=C*", "required_smarts": "C=C=C",
-    }}
-    with patch.object(overview, "call_gateway_json") as model:
-        decision = overview._automatic_chemistry_decision(features, {**SCHEME, "product_smiles": "*C#C"})
-    assert decision["mode"] == "concept"
-    model.assert_not_called()
+def test_confirmed_product_generation_uses_one_brief_and_one_image(tmp_path):
+    project = write_project(tmp_path)
+    (project / "01_matrix_outline/literature_matrix.json").write_text(json.dumps({
+        "target_product": {"role": "target_product", "status": "resolved", "smiles": "C=C=C"}
+    }), encoding="utf-8")
+    argv = [str(SPEC.origin), "--review-root", str(tmp_path), "--project-id", "acceptance"]
+    with patch.object(overview.sys, "argv", argv), patch.object(overview, "load_dotenv"), \
+         patch.object(overview, "resolve_api_key", return_value="fixture"), \
+         patch.object(overview, "call_gateway_json", return_value={"directions": [{
+             "label": "Selective construction", "summary": "Catalysis controls product formation.",
+             "claim_ids": ["current-manuscript-excerpt"]}]}) as text_call, \
+         patch.object(overview, "call_image_edit_api", return_value=provider_png(False)) as image_call:
+        overview.main()
+    report = json.loads((project / "03_figure_redraw/overview_template_match.json").read_text(encoding="utf-8"))
+    assert text_call.call_count == image_call.call_count == 1
+    assert report["chemistry_generation"]["mode"] == "skeleton"
+    assert report["skeleton"]["smiles"] == "C=C=C"
+    assert image_call.call_args.kwargs["extra_images"]
+    assert len(report["overview_content_contract"]["modules"]) == 1
 
 
-def test_string_false_cannot_promote_a_reaction():
-    with patch.object(overview, "_text_gateway_configured", return_value=True), \
-         patch.object(overview, "call_gateway_json", return_value={"supported": "false", "confidence": 95}):
-        assert overview._automatic_chemistry_decision({}, SCHEME)["mode"] != "reaction"
 
 
 def test_reference_without_original_slot_can_be_adapted_to_reaction():

@@ -1,5 +1,6 @@
 import type { Job } from "../../api/types";
 import { useUiText } from "../../i18n/useUiText";
+import { diagnosticText } from "../../i18n/diagnostics";
 
 export type FinalAction = "conclusion" | "overview" | "build" | "export" | "pdf";
 
@@ -26,7 +27,7 @@ export function finalActionFromJobType(jobType?: string, fallback: FinalAction =
 }
 
 export function FinalJobStatus({ job, startingAction = "build", submissionError = null, onResume, resuming = false }: FinalJobStatusProps) {
-  const { text } = useUiText();
+  const { text, language } = useUiText();
   const action = finalActionFromJobType(job?.job_type, startingAction);
   const diagnostics = job?.result?.pdf_diagnostics as { total?: number; issues?: PdfCharacterIssue[]; truncated?: boolean } | undefined;
   const status = submissionError ? "failed" : job?.status || "submitting";
@@ -100,8 +101,8 @@ export function FinalJobStatus({ job, startingAction = "build", submissionError 
         ? text("PDF 已通过自动 QA；浏览器将开始下载。", "The PDF passed automatic QA and the browser download will begin.")
       : text("结果已保存并同步到当前终稿阶段。", "The result was saved and synchronized to the current Final stage.");
   } else if (status === "failed") {
-    title = text("任务执行失败", "Job failed");
-    detail = submissionError?.message || job?.error_message || text("请检查服务配置后重试。", "Check the provider configuration and try again.");
+    title = submissionError ? text("未能开始任务", "Could not start task") : text("任务执行失败", "Job failed");
+    detail = diagnosticText(submissionError || job?.error_message || text("请检查服务配置后重试。", "Check the provider configuration and try again."), language);
   } else if (status === "cancelled") {
     title = text("任务已取消", "Job cancelled");
     detail = text("本次任务没有发布新的结果。", "This job did not publish a new result.");

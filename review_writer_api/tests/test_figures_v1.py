@@ -9,6 +9,35 @@ from review_writer_api.workflow_models import WorkflowApproval
 
 
 class FiguresV1Tests(NativeFigureApiTestCase):
+    def test_selection_change_retains_matching_redraws(self):
+        with TestClient(self.app) as client:
+            self.confirm_review(client)
+            self.add_second_confirmed_figure()
+            self.assertEqual("succeeded", self.start_redraw(client, "two-source-redraws")["status"])
+            service = self.app.state.figures_service
+            _, inputs = service._selected_inputs(self.first, self.project_id)
+            old, old_artifact = service._current_manifest(self.first, self.project_id, inputs.id)
+            self.assertEqual(2, len(old["figures"]))
+            state = service.repository.get_stage_state(self.first.user_id, self.project_id, "figure-review")
+            saved = client.put(f"/api/v1/projects/{self.project_id}/figures/review/P001",
+                json={"revision": state.revision, "candidate_index": 0, "review_note": "select first"},
+                headers=self.headers("switch-one-source"))
+            self.assertEqual(200, saved.status_code, saved.text)
+            selected, inputs = service._selected_inputs(self.first, self.project_id)
+            current, artifact = service._current_manifest(self.first, self.project_id, inputs.id)
+            self.assertEqual(old_artifact.id, artifact.id)
+            self.assertEqual(1, len(current["figures"]))
+            row = current["figures"][0]
+            previous = next(x for x in old["figures"] if x["figure_id"] == row["figure_id"])
+            self.assertEqual(previous["output_artifact_id"], row["output_artifact_id"])
+            self.assertEqual(selected[0]["source_image_artifact_id"], row["source_artifact_id"])
+            self.assertEqual(inputs.id, current["source_inputs_artifact_id"])
+            from unittest.mock import patch
+            changed = [{**selected[0], "source_image_artifact_id": "different-source"}]
+            with patch.object(service, "_selected_inputs", return_value=(changed, inputs)):
+                mismatched, _ = service._current_manifest(self.first, self.project_id, inputs.id)
+            self.assertEqual([], mismatched["figures"])
+
     def test_default_review_uses_highest_scoring_anchored_image_backed_candidate(self) -> None:
         with TestClient(self.app) as client:
             response = client.get(

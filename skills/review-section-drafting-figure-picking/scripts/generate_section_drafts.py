@@ -39,13 +39,10 @@ from review_writer_core.providers import (  # noqa: E402
 )
 from review_writer_core.text_safety import make_xml_compatible  # noqa: E402
 from review_writer_core.scientific_facts import (  # noqa: E402
-    REVIEW_COMPARISON_POLICY,
-    build_fact_comparison as build_matrix_comparison_table,
     claim_assertion_ceiling, fact_claim_issues, registered_fact_bindings, writable_evidence_keys,
 )
-from review_writer_core.academic_contracts import mechanism_evidence_types  # noqa: E402
 from review_writer_core.stages.sections.fact_routing import (  # noqa: E402
-    FACT_ROUTING_CONTRACT, FACT_ROUTING_INSTRUCTION, fact_routing_report, unselected_semantic_fact_ids,
+    FACT_ROUTING_CONTRACT,
 )
 from review_writer_core.evidence_integrity import (  # noqa: E402
     normalize_retrieval_mode,
@@ -68,8 +65,6 @@ from review_writer_core.review_fact_readiness import (  # noqa: E402
     negative_claim_eligibility,
 )
 from review_writer_core.claim_contracts import (  # noqa: E402
-    claim_planning_prompt_block,
-    FACT_GROUNDED_BLUEPRINT_SCHEMA_VERSION,
     claim_is_executable,
     argument_projection,
     claim_support_coverage,
@@ -87,11 +82,6 @@ from review_writer_core.section_narrative_contracts import (  # noqa: E402
 from review_writer_core.stages.sections.rule_packs import (  # noqa: E402
     RULE_PACK_PROMPT_VERSION, load_rule_pack_text,
 )
-from review_writer_core.stages.sections.plan_repair import (  # noqa: E402
-    merge_plan_repair,
-    repair_prompt,
-    repair_schema,
-)
 from review_writer_core.stages.sections.evidence_resolution import pending_markdown, resolution_record
 from review_writer_core.stages.sections.execution import run_sections, chapter_responsibilities
 from review_writer_core.stages.sections.source_writing import CONTRACT as SOURCE_CONTRACT, AUTHORING_VERSION, write_from_sources, valid_source_claim, passage_eligible
@@ -103,7 +93,6 @@ from review_writer_core.stages.sections.coverage import (  # noqa: E402
     missing_primary_papers,
     required_primary_papers,
     reusable_section_entries,
-    supported_scientific_claim_ids,
     section_input_fingerprints, matching_section_inputs,
 )
 
@@ -588,10 +577,12 @@ def bounded_evidence_payload(
     evidence: list[dict[str, Any]],
     *,
     char_budget: int = 70_000,
+    primary_papers: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Project once; truncate text only if the complete projection cannot fit."""
 
     rows = [item for item in evidence if isinstance(item, dict)]
+    primary = set(primary_papers or [])
     char_budget = max(2, int(char_budget))
     per_content = max(160, min(1800, char_budget // max(1, len(rows)) - 360))
     compacted: list[dict[str, Any]] = []
@@ -619,14 +610,13 @@ def bounded_evidence_payload(
                     if route.get("method") != "canonical_field"
                 ],
                 "fact_ids": list(row.get("fact_ids") or []),
-                "fact_bindings": [{
-                    **{key: binding.get(key) for key in (
-                        "fact_id", "paper_id", "field_id", "value", "subject", "predicate", "experiment_id",
-                        "qualifiers", "epistemic_status", "assertion_ceiling", "usage")},
-                    "evidence_refs": [{"evidence_key": ref.get("evidence_key"),
-                                       "support_excerpt": ref.get("support_excerpt") or binding.get("support_excerpt") or ""}
-                                      for ref in binding.get("evidence_refs") or []],
-                } for binding in row.get("fact_bindings") or []],
+                # Only fields read by write_from_sources belong in this prompt
+                # projection. Full quotes/refs remain in the authoritative registry;
+                # repeating them here can crowd out the actual primary passages.
+                "fact_bindings": [{key: binding.get(key) for key in (
+                    "fact_id", "paper_id", "field_id", "value", "usage",
+                    "study_ownership", "assertion_ceiling", "evidence_ceiling")}
+                    for binding in row.get("fact_bindings") or []],
                 "epistemic_status": row.get("epistemic_status"),
                 "normalized_fact_value": compact_text(
                     row.get("normalized_fact_value"), limit=500
@@ -652,9 +642,10 @@ def bounded_evidence_payload(
     truncated = 0
     for row in compacted:
         content = row.get("content", "")
-        truncated += len(content) > per_content
+        limit = max(per_content, min(len(content), 6000)) if row.get("paper_id") in primary else per_content
+        truncated += len(content) > limit
         if content:
-            row["content"] = compact_text(content, limit=per_content)
+            row["content"] = compact_text(content, limit=limit)
     # Budget the serialized payload, not only content strings. Fact bindings
     # used to bypass the cap by repeating full quotes and audit records.
     groups: dict[str, list[dict[str, Any]]] = {}
@@ -662,15 +653,20 @@ def bounded_evidence_payload(
         row = {key: value for key, value in row.items() if value is not None and value != "" and value != []}
         groups.setdefault(str(row.get("paper_id") or ""), []).append(row)
     selected, used = [], 2
-    for index in range(max((len(group) for group in groups.values()), default=0)):
-        for group in groups.values():
-            if index >= len(group):
-                continue
-            row = group[index]
-            size = len(json.dumps(row, ensure_ascii=False)) + (2 if selected else 0)
-            if used + size <= char_budget:
-                selected.append(row)
-                used += size
+    # Round-robin within primary studies first; background cannot consume the
+    # budget before a chapter's own results/methods/scope reach the writer.
+    tiers = [[group for pid, group in groups.items() if pid in primary],
+             [group for pid, group in groups.items() if pid not in primary]]
+    for tier in tiers:
+        for index in range(max((len(group) for group in tier), default=0)):
+            for group in tier:
+                if index >= len(group):
+                    continue
+                row = group[index]
+                size = len(json.dumps(row, ensure_ascii=False)) + (2 if selected else 0)
+                if used + size <= char_budget:
+                    selected.append(row)
+                    used += size
     return selected, {
         "input_hit_count": len(rows),
         "output_hit_count": len(selected),
@@ -686,21 +682,6 @@ def bounded_evidence_payload(
     }
 
 
-def request_body_budget_error(error: BaseException) -> bool:
-    message = str(error).casefold()
-    return any(
-        marker in message
-        for marker in (
-            "request_body_budget_exhausted",
-            "request body",
-            "payload too large",
-            "prompt too long",
-            "context length",
-            "http 413",
-        )
-    )
-
-
 def effective_retrieval_mode(section_evidence: dict[str, Any]) -> str:
     """Authorize the legacy prefix reader only for explicitly marked old indexes."""
 
@@ -710,96 +691,6 @@ def effective_retrieval_mode(section_evidence: dict[str, Any]) -> str:
     ):
         return "insufficient_evidence"
     return mode
-
-
-
-
-def build_mechanism_evidence_table(
-    section_id: str,
-    evidence: list[dict[str, Any]],
-) -> dict[str, Any]:
-    rows: list[dict[str, Any]] = []
-    for item in evidence:
-        if not isinstance(item, dict) or not item.get("claim_eligible", True):
-            continue
-        types = list(item.get("mechanism_evidence_types") or [])
-        if not types:
-            types = mechanism_evidence_types(item.get("content"))
-        if not types:
-            continue
-        rows.append(
-            {
-                "paper_id": str(item.get("paper_id") or ""),
-                "evidence_key": str(item.get("evidence_key") or ""),
-                "evidence_level": str(item.get("evidence_level") or "reported_result"),
-                "evidence_types": types,
-                "source_channel": str(item.get("source_channel") or "body"),
-            }
-        )
-    return {
-        "section_id": section_id,
-        "rows": rows,
-        "paper_count": len({row["paper_id"] for row in rows if row["paper_id"]}),
-        "evidence_types": list(
-            dict.fromkeys(
-                value for row in rows for value in row["evidence_types"]
-            )
-        ),
-    }
-
-
-def synthesis_contract_gaps(
-    writing_section: dict[str, Any],
-    synthesis_section: dict[str, Any],
-    requirements: list[dict[str, Any]],
-    comparison_table: dict[str, Any],
-    mechanism_table: dict[str, Any],
-    depth_contract: dict[str, Any] | None = None,
-) -> list[str]:
-    required = {
-        str(item.get("component") or "")
-        for item in requirements
-        if isinstance(item, dict) and str(item.get("necessity") or "") == "required"
-    }
-    claims = [
-        item for item in writing_section.get("claims") or [] if isinstance(item, dict)
-    ]
-    diagnostics = synthesis_section.get("normalization_diagnostics") or {}
-    gaps: list[str] = [f"primary_paper_unrouted:{paper}" for paper in diagnostics.get("missing_primary_papers") or []]
-    if "comparison" in required and comparison_table.get("comparable_fields"):
-        comparison_claim = any(
-            str(claim.get("claim_kind") or "")
-            in {"cross_study_comparison", "review_synthesis"}
-            and len(set(claim.get("citation_group") or [])) >= 2
-            for claim in claims
-        )
-        if not comparison_claim:
-            gaps.append("required_cross_study_comparison_missing")
-    if "mechanism" in required and mechanism_table.get("rows"):
-        mechanism_claim = any(
-            str(claim.get("claim_kind") or "") == "mechanism_interpretation"
-            for claim in claims
-        )
-        if not mechanism_claim:
-            gaps.append("required_mechanism_evidence_synthesis_missing")
-    supported_components = {
-        str(item.get("component_type") or "")
-        for item in synthesis_section.get("components") or []
-        if isinstance(item, dict) and str(item.get("status") or "") == "supported"
-    }
-    for component in required:
-        if component == "comparison" and not comparison_table.get("comparable_fields"):
-            continue
-        if component == "mechanism" and not mechanism_table.get("rows"):
-            continue
-        if component not in supported_components:
-            gaps.append(f"required_{component}_component_not_supported")
-    narrative = derive_narrative_diagnostics(writing_section, depth_contract)
-    for missing in narrative.get("missing_requirements") or []:
-        gaps.append(f"narrative_{missing}_missing")
-    writing_section["depth_contract"] = dict(depth_contract or {})
-    writing_section["narrative_diagnostics"] = narrative
-    return list(dict.fromkeys(gaps))
 
 
 def normalize_section_plan(
@@ -1621,8 +1512,6 @@ def validate_and_realize_section(
     return overview, paragraphs, validations, reviews
 
 
-
-
 def recover_evidence_section(task, package, evidence, citation_map, reason, declared_claims=None):
     """A failed authoring attempt must not turn source quotations into a manuscript."""
     sid = task["section_id"]
@@ -1638,10 +1527,6 @@ def recover_evidence_section(task, package, evidence, citation_map, reason, decl
     return {"heading": output["heading"], "output": output,
         "synthesis": {"section_id": sid, "components": [], "evidence_resolution": record},
         "writing": {"section_id": sid, "paragraphs": [], "claims": []}}
-
-
-
-
 
 
 def main() -> int:
@@ -1956,7 +1841,7 @@ def main() -> int:
         # passages. ``write_from_sources`` exposes only the safe fact fields;
         # the full Evidence Package remains the authoritative registry.
         plan_evidence, plan_evidence_budget = bounded_evidence_payload(
-            evidence, char_budget=55_000
+            evidence, char_budget=55_000, primary_papers=task.get("primary_papers") or []
         )
         plan_recovery = {}
         fallback_reason = ""

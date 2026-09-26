@@ -13,6 +13,7 @@ DOCUMENT_JOB_TYPES = frozenset({"final.export", "final.pdf"})
 INGEST_JOB_TYPES = frozenset(
     {
         "library.upload",
+        "library.archive",
         "library.index",
         "library.semantic-backfill",
         "library.search",

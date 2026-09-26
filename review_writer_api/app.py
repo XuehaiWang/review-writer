@@ -312,6 +312,8 @@ def create_app(
         if workflow_repository is not None and artifact_service is not None
         else None
     )
+    if planning_service is not None:
+        project_service.outline_ready_for_chapter_planning = planning_service.outline_ready_for_chapter_planning
     sections_service = (
         SectionsService(workflow_repository, artifact_service, library_index_service)
         if workflow_repository is not None and artifact_service is not None
@@ -1564,15 +1566,15 @@ def create_app(
     ) -> RedirectResponse:
         query = str(request.url.query or "")
         suffix = f"&{query}" if query else ""
-        return RedirectResponse(f"/planning?tab=matrix{suffix}", status_code=307)
+        return RedirectResponse(f"/planning?view=reading{suffix}", status_code=307)
 
     @app.get("/blueprint", include_in_schema=False)
     def blueprint_redirect(
         request: Request, _workflow: None = Depends(require_native_workflow)
     ) -> RedirectResponse:
         query = str(request.url.query or "")
-        suffix = f"&{query}" if query else ""
-        return RedirectResponse(f"/planning?tab=blueprint{suffix}", status_code=307)
+        suffix = f"?{query}" if query else ""
+        return RedirectResponse(f"/sections{suffix}", status_code=307)
 
     @app.get("/figure-review", include_in_schema=False)
     def figure_review_redirect(

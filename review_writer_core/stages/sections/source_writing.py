@@ -587,6 +587,27 @@ def write_from_sources(*, section_id, task, evidence, context, call, prompt_evid
             persist()
     if not isinstance(proposed, dict) or not isinstance(proposed.get("paragraphs"), list):
         raise RuntimeError("Source writer returned an invalid paragraphs object.")
+    if not proposed["paragraphs"]:
+        # Empty model output is not evidence that the literature has no answer.
+        # One bounded repair uses the same registered passages and schema. A
+        # deferred call resumes by its stable prompt rather than spending again.
+        if not state.get("empty_repair_attempted"):
+            repaired = call(write_prompt + "\nEMPTY-DRAFT RECOVERY: The previous response contained no paragraphs. "
+                "Re-examine the registered passages for the assigned primary papers. Write a concise, source-bound "
+                "account of what they actually establish, even if only a subset of the outline can be answered. "
+                "One supported paragraph is preferable to an empty response; do not invent missing facts, "
+                "force cross-study comparisons for a single study, or copy source prose as the narrative. "
+                "Keep all support spans exact and use the same evidence aliases and JSON schema. "
+                "If no relevant assertion is supported, return an empty array rather than fabricate content.",
+                WRITE_SCHEMA, "section-source-writing")
+            state["empty_repair_attempted"] = True
+            state["proposed"] = proposed = repaired
+            persist()
+        if not isinstance(proposed, dict) or not isinstance(proposed.get("paragraphs"), list) or not proposed["paragraphs"]:
+            state.pop("proposed", None)
+            persist()
+            raise RuntimeError("Source writer returned no paragraphs despite registered passages. "
+                               "The bounded repair did not produce prose; retry this section, not the completed chapters.")
     proposed = repair_source_paragraphs(proposed, task=task, shown=shown, aliases=aliases,
         sources=prompt_sources, domain_terms=domain_terms, call=call, state=state, persist=persist)
     candidates, omitted, paragraph_rows, binding_repairs, prose_issues, record_issues = [], [], [], [], [], []

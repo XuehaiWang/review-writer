@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { applyOutlinePaperRecommendations, OutlineBuilder, buildPaperDisplayLabels, parseOutlineMarkdown, serializeOutlineMarkdown, validateVisualOutline } from "./OutlineBuilder";
+import { applyOutlinePaperRecommendations, buildOutlineTree, changeOutlineLevel, moveOutlineSubtree, OutlineBuilder, buildPaperDisplayLabels, parseOutlineMarkdown, serializeOutlineMarkdown, validateVisualOutline } from "./OutlineBuilder";
 import { displayFigureLabel, replacePaperIdsForDisplay } from "../../utils/paperLabels";
 
 afterEach(cleanup);
@@ -16,6 +16,56 @@ describe("visual outline format", () => {
     const flat = parseOutlineMarkdown("## A\n## B\n");
     flat.sections.reverse();
     expect(parseOutlineMarkdown(serializeOutlineMarkdown(flat)).sections.map(s => s.sectionId)).toEqual(["S02", "S01"]);
+  });
+  it("numbers nested headings and moves a whole subtree with IDs and papers intact", () => {
+    const sections = parseOutlineMarkdown("## A\n<!-- section_id: S-A -->\nAssigned papers: P001.\n### A child\n<!-- section_id: S-A1 -->\nAssigned papers: P002.\n#### A grandchild\n<!-- section_id: S-A11 -->\n## B\n<!-- section_id: S-B -->\n### B child\n<!-- section_id: S-B1 -->").sections;
+    expect(buildOutlineTree(sections).valid).toBe(true);
+    expect(buildOutlineTree(sections).roots[0].children[0].children[0].number).toBe("1.1.1");
+    const moved = moveOutlineSubtree(sections, 0, 1);
+    expect(moved.map(section => section.sectionId)).toEqual(["S-B", "S-B1", "S-A", "S-A1", "S-A11"]);
+    const saved = serializeOutlineMarkdown({ preamble: "", sections: moved });
+    expect(saved).toContain("### 2.1. A child");
+    expect(saved).toContain("#### 2.1.1. A grandchild");
+    expect(parseOutlineMarkdown(saved).sections[3].paperIds).toEqual(["P002"]);
+  });
+
+  it("changes a branch level only when unrelated siblings keep their parents", () => {
+    const sections = parseOutlineMarkdown("## A\n## B\n### B child\n## C\n").sections;
+    const nested = changeOutlineLevel(sections, 1, 3);
+    expect(nested?.map(section => section.headingLevel)).toEqual([2, 3, 4, 2]);
+    expect(changeOutlineLevel(sections, 0, 3)).toBeNull();
+    const withSibling = parseOutlineMarkdown("## A\n### B\n### C\n").sections;
+    expect(changeOutlineLevel(withSibling, 1, 2)).toBeNull();
+  });
+
+  it("warns before removing a parent and preserves deep headings in code mode", () => {
+    function ControlledOutlineBuilder() {
+      const [value, setValue] = useState("## A\n<!-- section_id: S-A -->\n### B\n<!-- section_id: S-B -->\n#### C\n<!-- section_id: S-C -->\n##### D\n<!-- section_id: S-D -->\nAssigned papers: P001.\n");
+      return <><OutlineBuilder value={value} papers={[]} onChange={setValue} /><output data-testid="outline-source">{value}</output></>;
+    }
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<ControlledOutlineBuilder />);
+    const source = screen.getByTestId("outline-source").textContent;
+    expect(screen.getByText("1.1.1.1 D")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("outline-source").textContent).toBe(source);
+    fireEvent.click(screen.getByRole("button", { name: "代码填写" }));
+    expect(screen.getByRole("textbox")).toHaveValue(source);
+    fireEvent.click(screen.getByRole("button", { name: "模块填写" }));
+    expect(screen.getByTestId("outline-source").textContent).toBe(source);
+    confirm.mockRestore();
+  });
+
+  it("keeps unsupported code intact instead of silently rebuilding it as modules", () => {
+    const source = "## Methods\n```md\n### Example heading inside a code block\n```\n";
+    const onChange = vi.fn();
+    render(<OutlineBuilder value={source} papers={[]} onChange={onChange} />);
+    expect(screen.getByText(/模块无法可靠解析/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "添加主章节" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "代码填写" }));
+    expect(screen.getByRole("textbox")).toHaveValue(source);
+    expect(onChange).not.toHaveBeenCalled();
   });
   it("round-trips beginner fields into Blueprint-compatible Markdown", () => {
     const markdown = serializeOutlineMarkdown({
@@ -90,6 +140,20 @@ describe("visual outline format", () => {
     fireEvent.change(titleInput, { target: { value: "" } });
     expect(titleInput).toHaveValue("");
     expect(titleInput).toHaveFocus();
+  });
+
+  it("adds a subsection inside its parent and exposes the organizing-only role", () => {
+    function ControlledOutlineBuilder() {
+      const [value, setValue] = useState("## Routes\n<!-- section_id: S-routes -->\nAssigned papers: P001.\n## Comparison\n<!-- section_id: S-comparison -->\n");
+      return <><OutlineBuilder value={value} papers={[]} onChange={setValue} /><output data-testid="outline-source">{value}</output></>;
+    }
+    render(<ControlledOutlineBuilder />);
+    fireEvent.click(screen.getAllByRole("button", { name: "添加下级" })[0]);
+    const sections = parseOutlineMarkdown(screen.getByTestId("outline-source").textContent || "").sections;
+    expect(sections.map(section => section.headingLevel)).toEqual([2, 3, 2]);
+    expect(sections[0].sectionId).toBe("S-routes");
+    expect(sections[0].paperIds).toEqual(["P001"]);
+    expect(screen.getByText("组织标题，不单独写正文")).toBeInTheDocument();
   });
 
   it("uses compact display numbers without changing internal paper ids", () => {

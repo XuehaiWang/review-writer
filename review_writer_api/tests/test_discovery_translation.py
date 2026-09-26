@@ -32,6 +32,32 @@ class DiscoveryTranslationTests(unittest.TestCase):
         provider.assert_not_called()
         self.assertNotIn("search_topic", plan)
 
+    def test_translated_explicit_acronym_reuses_english_concept_resolution(self):
+        topic = "金属有机框架（MOF）用于二氧化碳捕集"
+        with patch.object(discover, "resolve_query_ambiguities", return_value={
+            "search_topic": "Metal organic frameworks (MOF) for carbon dioxide capture",
+            "keywords": ["MOF"],
+        }) as provider:
+            plan = discover.build_auto_query_plan(topic, ["MOF"], EMPTY_RULES)
+        provider.assert_called_once_with(topic, ["MOF"], translation=True)
+        self.assertEqual(topic, plan["topic"])
+        self.assertEqual(["MOF"], plan["search_keywords"])
+        self.assertEqual("MOF", plan["resolved_concepts"][0]["surface"])
+        self.assertIn("metal organic framework", plan["resolved_concepts"][0]["expanded_name"].lower())
+        self.assertTrue(any("metal organic framework" in item["query"].lower()
+                            for item in plan["semantic_queries"]))
+        self.assertFalse(any(discover.re.search(r"[\u3400-\u9fff]", item["query"])
+                             for item in plan["semantic_queries"]))
+
+    def test_translated_undefined_acronym_is_not_guessed(self):
+        with patch.object(discover, "resolve_query_ambiguities", return_value={
+            "search_topic": "ABC in catalysis", "keywords": ["ABC"],
+        }) as provider:
+            plan = discover.build_auto_query_plan("催化中的ABC", ["ABC"], EMPTY_RULES)
+        provider.assert_called_once()
+        self.assertEqual([], plan["resolved_concepts"])
+        self.assertEqual(["ABC"], plan["search_keywords"])
+
     def test_bad_translation_stops_instead_of_low_recall_fallback(self):
         for response in ({"search_topic": "仍为中文", "keywords": []},
                          {"search_topic": "Allene synthesis", "keywords": ["extra"]},

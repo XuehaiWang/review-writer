@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 
 import feedback_loop as loop
-from review_writer_core.paragraph_revision import revision_prompt, validate_revision_response, revision_sources, author_revision_findings
+from review_writer_core.paragraph_revision import (revision_prompt, validate_revision_response,
+    revision_sources, revision_source_refs_need_repair, revision_source_ref_repair_prompt,
+    author_revision_findings)
 from review_writer_core.manuscript_coherence import plan_manuscript, audit_candidate
 
 
@@ -66,6 +68,14 @@ def revise(project, request):
         evidence = collect(queries)
         response = loop.call_json_model(revision_prompt({**request, "lookup_complete": True}, paragraph, evidence),
                                         label="Paragraph revision after local lookup")
+    if revision_source_refs_need_repair(response, evidence):
+        repaired = loop.call_json_model(revision_source_ref_repair_prompt(response, evidence),
+                                        label="Paragraph source reference correction")
+        if not isinstance(repaired, dict) or not isinstance(repaired.get("source_refs"), list):
+            raise ValueError("The model cited an unknown source passage; the candidate was not saved.")
+        if not repaired["source_refs"] and not response.get("candidate_text"):
+            raise ValueError("The model cited an unknown source passage; the answer was not verified.")
+        response = {**response, "source_refs": repaired.get("source_refs")}
     candidate = validate_revision_response(response, evidence)
     if routing.get("mode") == "question":
         candidate = ""

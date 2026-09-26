@@ -14,7 +14,9 @@ export function useSelectedProject() {
   const [searchParams, setSearchParams] = useSearchParams();
   const requested = searchParams.get("project") || "";
   const selected = useMemo(
-    () => projects.data?.items.find((project) => project.project_id === requested || project.slug === requested) || projects.data?.items[0],
+    () => requested
+      ? projects.data?.items.find((project) => project.project_id === requested || project.slug === requested)
+      : projects.data?.items[0],
     [projects.data?.items, requested],
   );
   useEffect(() => {
@@ -29,13 +31,13 @@ export function useSelectedProject() {
     if (projectId) next.set("project", projectId); else next.delete("project");
     setSearchParams(next, { replace: true });
   };
-  return { projects, selected, selectProject };
+  return { projects, selected, selectProject, unavailable: Boolean(requested && projects.isSuccess && !selected) };
 }
 
 export function ProjectSelector({ label }: { label?: string }) {
   const { text } = useUiText();
   const queryClient = useQueryClient();
-  const { projects, selected, selectProject } = useSelectedProject();
+  const { projects, selected, selectProject, unavailable } = useSelectedProject();
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
   const deleteProject = useMutation({
     mutationFn: (project: Project) => apiRequest<void>(`/api/v1/projects/${encodeURIComponent(project.project_id)}`, { method: "DELETE" }),
@@ -55,9 +57,11 @@ export function ProjectSelector({ label }: { label?: string }) {
       <label className="project-selector">
         <span className="project-selector-label">{label || text("当前项目", "Current project")}</span>
         <select value={selected?.project_id || ""} disabled={!projects.data?.items.length} onChange={(event) => selectProject(event.target.value)}>
+          {!selected ? <option value="" disabled>{text("请选择项目", "Select a project")}</option> : null}
           {projects.data?.items.map((project) => <option key={project.project_id} value={project.project_id}>{project.slug}</option>)}
         </select>
       </label>
+      {unavailable ? <span role="status" className="message message-warning">{text("原项目不存在或不可访问，请选择项目或返回工作台。未自动切换项目。", "The requested project is unavailable. Select a project or return to the workspace; no project was switched automatically.")} <a href="/workspace">{text("返回工作台", "Workspace")}</a></span> : null}
       <button className="button button-danger project-delete" title={text("永久删除当前项目", "Permanently delete the current project")} type="button" disabled={!selected || deleteProject.isPending} onClick={confirmDelete}>
         {deleteProject.isPending ? text("删除中…", "Deleting…") : text("删除项目", "Delete project")}
       </button>

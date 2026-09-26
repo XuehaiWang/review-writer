@@ -4,13 +4,79 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from review_writer_core.paragraph_revision import validate_revision_response, paragraph_keys
+from review_writer_core.paragraph_revision import (validate_revision_response, paragraph_keys,
+    revision_source_refs_need_repair, revision_source_ref_repair_prompt)
 
 
 def test_unknown_source_reference_is_not_accepted():
     with pytest.raises(ValueError, match="unknown source"):
         validate_revision_response({"reply": "Reason", "candidate_text": "Text", "source_refs": ["invented"]},
             {"evidence": [{"original_passages": [{"ref": "P1:b2"}]}]})
+
+
+def test_source_ref_correction_uses_only_retrieved_passages():
+    evidence = {"evidence": [{"paper_id": "P1", "original_passages": [
+        {"ref": "sha256:real", "text": "The reaction afforded the product."}]}]}
+    response = {"reply": "Revision", "candidate_text": "The reaction afforded the product.",
+                "source_refs": ["S02-p3"]}
+    assert revision_source_refs_need_repair(response, evidence)
+    prompt = revision_source_ref_repair_prompt(response, evidence)
+    assert "sha256:real" in prompt and "S02-p3" not in prompt
+    assert not revision_source_refs_need_repair({**response, "source_refs": ["sha256:real"]}, evidence)
+    assert validate_revision_response({**response, "source_refs": ["sha256:real"]}, evidence)
+
+
+def test_invalid_source_ref_is_repaired_once_then_source_check_still_applies(tmp_path, monkeypatch):
+    scripts = Path(__file__).resolve().parents[1] / "skills/review-first-draft-feedback-loop/scripts"
+    monkeypatch.syspath_prepend(str(scripts))
+    spec = importlib.util.spec_from_file_location("source_ref_repair_test", scripts / "revise_paragraph.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    original = "The reaction sometimes works. [1]"
+    first = tmp_path / "04_first_draft"
+    first.mkdir()
+    (first / "first_draft.md").write_text(original, encoding="utf-8")
+    evidence = {"evidence": [{"paper_id": "P1", "original_passages": [
+        {"ref": "sha256:real", "text": "The reaction works in some cases."}]}]}
+    responses = [{"reply": "Improved", "candidate_text": "The reaction works in some cases. [1]",
+                  "source_refs": ["S02-p3"]},
+                 {"source_refs": ["sha256:real"]},
+                 {"status": "supported", "preserves_information": True, "source_refs": ["sha256:real"]}]
+    with patch.object(module.loop, "parse_marked_paragraphs", return_value=[{"paragraph_id": "S1-p1", "text": original}]), \
+         patch.object(module.loop, "matrix_rows", return_value={}), \
+         patch.object(module.loop, "paragraph_metadata", return_value={}), \
+         patch.object(module.loop, "claim_evidence_contract", return_value={}), \
+         patch.object(module.loop, "source_evidence", return_value=evidence), \
+         patch.object(module.loop, "call_json_model", side_effect=responses) as model:
+        result = module.revise(tmp_path, {"paragraph_id": "S1-p1", "discussion_text": original,
+                                          "automatic_batch": True})
+    assert model.call_count == 3
+    assert result["source_refs"] == ["sha256:real"]
+    assert [source["ref"] for source in result["sources"]] == ["sha256:real"]
+    assert result["automatic_source_check"]["status"] == "supported"
+
+
+def test_source_ref_repair_cannot_admit_another_unknown_ref(tmp_path, monkeypatch):
+    scripts = Path(__file__).resolve().parents[1] / "skills/review-first-draft-feedback-loop/scripts"
+    monkeypatch.syspath_prepend(str(scripts))
+    spec = importlib.util.spec_from_file_location("source_ref_repair_failure_test", scripts / "revise_paragraph.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    first = tmp_path / "04_first_draft"
+    first.mkdir()
+    (first / "first_draft.md").write_text("Original.", encoding="utf-8")
+    evidence = {"evidence": [{"paper_id": "P1", "original_passages": [{"ref": "sha256:real", "text": "Real source."}]}]}
+    with patch.object(module.loop, "parse_marked_paragraphs", return_value=[{"paragraph_id": "S1-p1", "text": "Original."}]), \
+         patch.object(module.loop, "matrix_rows", return_value={}), \
+         patch.object(module.loop, "paragraph_metadata", return_value={}), \
+         patch.object(module.loop, "claim_evidence_contract", return_value={}), \
+         patch.object(module.loop, "source_evidence", return_value=evidence), \
+         patch.object(module.loop, "call_json_model", side_effect=[
+             {"reply": "Change", "candidate_text": "Changed.", "source_refs": ["S02-p3"]},
+             {"source_refs": ["fabricated"]}]):
+        with pytest.raises(ValueError, match="unknown source"):
+            module.revise(tmp_path, {"paragraph_id": "S1-p1", "discussion_text": "Original.",
+                                        "automatic_batch": True})
 
 
 @pytest.mark.parametrize("supported", [False, True])

@@ -22,7 +22,7 @@ from review_writer_api.domain_services.base import OwnedProjectService
 from review_writer_api.errors import WorkflowConflict, WorkflowNotFound, WorkflowValidationError
 from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_repository import WorkflowRepository
-from review_writer_api.workflow_models import LibraryPaper
+from review_writer_api.workflow_models import LibraryPaper, WorkflowJob
 from review_writer_core.metadata_fields import unwrap_metadata_value
 from review_writer_core.paper_sources.normalize import normalize_doi, normalize_title
 from review_writer_core.classification_axes import (
@@ -51,6 +51,34 @@ MUTABLE_ROLES = {
     "excluded",
 }
 MATRIX_CLASSIFICATION_POLICY_VERSION = 5
+
+
+def download_access_summary(status: str, entry: dict[str, Any]) -> dict[str, str]:
+    """Public access hints; never expose provider tracebacks or infer a paywall."""
+    if status in {"queued", "running", "waiting"}:
+        return {"state": "acquiring", "reason": ""}
+    outcome = entry.get("status")
+    if outcome in {"downloaded", "already_in_library", "duplicate_file"}:
+        return {"state": "downloaded", "reason": ""}
+    if status in {"cancelled", "interrupted"}:
+        return {"state": "not_acquired", "reason": "interrupted"}
+    errors = " ".join(str(item.get("error") or "") for item in entry.get("provider_attempts") or []
+                      if isinstance(item, dict)).lower()
+    if "429" in errors:
+        reason = "rate_limited"
+    elif "timeout" in errors or "timed out" in errors:
+        reason = "timeout"
+    elif "403" in errors or "401" in errors:
+        reason = "access_restricted"
+    elif "404" in errors or "410" in errors:
+        reason = "broken_link"
+    elif outcome == "no_open_access_pdf":
+        reason = "not_found"
+    elif outcome == "all_sources_failed":
+        reason = "no_valid_pdf"
+    else:
+        reason = "failed"
+    return {"state": "not_acquired", "reason": reason}
 TOPIC_CANDIDATE_POOL_KEY = "__topic_candidates_pending_evidence__"
 LEGACY_DISCOVERY_TAG_FIELDS = {
     "base_tags",
@@ -1006,7 +1034,7 @@ class DiscoveryService(OwnedProjectService):
             principal.user_id, project_id, logical_name
         )
         if artifact is None:
-            raise WorkflowNotFound("Discovery review not found.")
+            raise self._stage_not_ready(principal, project_id, logical_name)
         resolved = self.artifacts.resolve_owned_artifact(principal.user_id, artifact.id)
         try:
             payload = json.loads(resolved.path.read_text(encoding="utf-8"))
@@ -1041,6 +1069,17 @@ class DiscoveryService(OwnedProjectService):
             )
         return payload, artifact
 
+    def check_fulltext(self, principal: Principal, project_id: str, candidate_id: str) -> dict[str, Any]:
+        from review_writer_api.fulltext_probe import cached_check
+
+        # Resolve only server-owned candidates; never accept a client-supplied URL.
+        payload, _ = self._read_current(principal, project_id, DISCOVERY_LOGICAL_NAME)
+        for group in payload.get("results") or []:
+            for row in group.get("web_results") or []:
+                if _candidate_id(row, external=True) == candidate_id:
+                    return cached_check(row)
+        raise WorkflowNotFound("Discovery candidate not found.")
+
     def get(self, principal: Principal, project_id: str) -> dict[str, Any]:
         payload, artifact = self._read_current(principal, project_id, DISCOVERY_LOGICAL_NAME)
         state = self.repository.get_stage_state(principal.user_id, project_id, "discovery")
@@ -1048,6 +1087,29 @@ class DiscoveryService(OwnedProjectService):
             principal.user_id, project_id, MATRIX_LOGICAL_NAME
         )
         review = normalize_review(payload)
+        # Read-only projection of existing durable download jobs. No new
+        # artifact revision, stage invalidation, or per-paper network requests.
+        access: dict[str, dict[str, str]] = {}
+        with database_session(self.repository.session_factory) as session:
+            jobs = session.scalars(select(WorkflowJob).where(
+                WorkflowJob.user_id == uuid.UUID(str(principal.user_id)),
+                WorkflowJob.job_type == "library.download",
+                WorkflowJob.payload_json["acquisition_project_id"].as_string() == str(project_id),
+            ).order_by(WorkflowJob.created_at.desc()).limit(100)).all()
+            for job in jobs:
+                entries = {str(e.get("candidate_id") or ""): e
+                           for e in (job.result_json or {}).get("results") or [] if isinstance(e, dict)}
+                for candidate in (job.payload_json or {}).get("candidates") or []:
+                    if not isinstance(candidate, dict):
+                        continue
+                    cid = _candidate_id(candidate, external=True)
+                    if cid and cid not in access:
+                        access[cid] = download_access_summary(job.status, entries.get(cid, {}))
+        for group in review.get("results") or []:
+            for row in group.get("web_results") or []:
+                summary = access.get(_candidate_id(row, external=True))
+                if summary:
+                    row["fulltext_access"] = summary
         labels = library_paper_labels(self.repository.session_factory, principal.user_id)
         for group in review.get("results") or []:
             for row in group.get("local_results") or []:

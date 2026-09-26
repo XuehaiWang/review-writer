@@ -17,6 +17,27 @@ def _present(value: Any) -> bool:
     return bool(value.strip()) if isinstance(value, str) else bool(value)
 
 
+def missing_library_content_fields(
+    metadata: dict[str, Any], *, has_parsed_content: bool
+) -> list[str]:
+    """Report absent paper content, independently of review and confidence flags.
+
+    DOI and specialized tags are useful but not universal publication fields.
+    A low extraction confidence is a review hint, not missing content.
+    """
+    required = ("title", "authors", "year", "journal", "abstract")
+    def has_content(key: str) -> bool:
+        value = _value(metadata, key)
+        if isinstance(value, (list, tuple)):
+            return any(_present(item) for item in value)
+        return _present(value)
+
+    missing = [key for key in required if not has_content(key)]
+    if not has_parsed_content:
+        missing.append("fulltext")
+    return missing
+
+
 def update_quality(metadata: dict[str, Any]) -> None:
     """Recompute derived flags, preserving unrelated diagnostic warnings."""
 

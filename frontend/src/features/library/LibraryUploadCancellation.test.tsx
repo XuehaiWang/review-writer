@@ -1,3 +1,4 @@
+import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
@@ -19,7 +20,7 @@ it("restores a completed batch older than the former twelve-second timeout", asy
     return Response.json({ items: [], count: 0 });
   }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><LibraryPage /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><MemoryRouter><LibraryPage /></MemoryRouter></QueryClientProvider>);
   expect(await screen.findByText("批量处理已结束，部分文件失败")).toBeInTheDocument();
   fireEvent.click(screen.getByText("查看文件处理结果"));
   expect(within(screen.getByText("查看文件处理结果").closest("details")!).getByText("failed.pdf")).toBeInTheDocument();
@@ -68,9 +69,11 @@ it("stops later uploads even when cancel is clicked while the current upload is 
     return Response.json({ items: [], count: 0 });
   }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const { container } = render(<QueryClientProvider client={client}><LibraryPage /></QueryClientProvider>);
+  const { container } = render(<QueryClientProvider client={client}><MemoryRouter><LibraryPage /></MemoryRouter></QueryClientProvider>);
   const files = ["first.pdf", "second.pdf", "third.pdf"].map((name) => new File(["%PDF-1.4"], name, { type: "application/pdf" }));
   fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files } });
+  container.querySelector("details.library-import-picker")!.setAttribute("open", "");
+  fireEvent.click(screen.getByRole("button", { name: "开始导入" }));
   await waitFor(() => expect(submitted).toHaveLength(1));
   fireEvent.click(screen.getByRole("button", { name: "取消剩余" }));
   await screen.findByText("已取消剩余文件，正在解析的文件将继续完成。");
@@ -94,4 +97,20 @@ it("offers cancellation for server queues after reopening the page and keeps can
   expect(cancel).toHaveBeenCalledOnce();
   expect(screen.getByText("已取消")).toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("shows collecting status and cancellation for an archive after reload before PDF jobs exist", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+    if (String(input).includes("/upload-jobs/recent")) return Response.json({ items: [], batch_summaries: [], archives: [{
+      id: "archive", batch_id: "batch", filename: "papers.zip", status: "running", job_type: "library.archive",
+      progress_current: 0, progress_total: 20, created_at: "2026-09-24T00:00:00Z",
+    }] });
+    return Response.json({ items: [], count: 0 });
+  }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><MemoryRouter><LibraryPage /></MemoryRouter></QueryClientProvider>);
+  await screen.findByText(/正在后台收集 PDF/);
+  expect(screen.getByRole("button", { name: "取消剩余" })).toBeInTheDocument();
+  expect(screen.queryByText("批量上传与解析完成")).not.toBeInTheDocument();
+  client.clear();
 });

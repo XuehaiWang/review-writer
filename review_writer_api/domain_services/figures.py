@@ -1037,15 +1037,33 @@ class FiguresService(ArtifactBackedService):
         manifest, artifact = self._read_json(
             principal, project_id, FIGURE_MANIFEST, required=False
         )
-        if not isinstance(manifest, dict) or manifest.get(
-            "source_inputs_artifact_id"
-        ) != inputs_artifact_id:
+        if artifact is None or not isinstance(manifest, dict):
             return {
                 "project_id": project_id,
                 "source_inputs_artifact_id": inputs_artifact_id,
                 "figures": [],
             }, None
-        return deepcopy(manifest), artifact
+        manifest = deepcopy(manifest)
+        if manifest.get("source_inputs_artifact_id") != inputs_artifact_id:
+            figures, current_inputs = self._selected_inputs(principal, project_id)
+            if current_inputs.id != inputs_artifact_id:
+                raise WorkflowConflict("Source figure selections changed while reading redraws.")
+            selected = {str(row.get("figure_id") or ""): row for row in figures}
+            retained = []
+            for row in manifest.get("figures") or []:
+                current = selected.get(str(row.get("figure_id") or ""))
+                if not current or not row.get("source_artifact_id") or row.get("source_artifact_id") != current.get("source_image_artifact_id"):
+                    continue
+                # Keep output/manual edits/approval bound to the same image,
+                # but use its current manuscript placement, not the old one.
+                for key in ("section_id", "section_heading", "target_paragraph_id", "representative_role"):
+                    row[key] = current.get(key)
+                retained.append(row)
+            manifest["figures"] = retained
+            retained_ids = {str(row.get("figure_id") or "") for row in retained}
+            manifest["excluded_figure_ids"] = [fid for fid in manifest.get("excluded_figure_ids") or [] if fid in retained_ids]
+            manifest["source_inputs_artifact_id"] = inputs_artifact_id
+        return manifest, artifact
 
     def publish_redraw(
         self,

@@ -47,12 +47,6 @@ EMPHASIZED_FRONT_MATTER_LABEL = re.compile(
 )
 TABLE_CAPTION = re.compile(r"^\*{0,2}(?:table|表)\s*\d+\s*[.:：]?\s*.+?\*{0,2}$", re.IGNORECASE)
 FIGURE_LAYOUT_SPANS = frozenset({"auto", "single", "double"})
-WIDE_FIGURE_ROLES = frozenset(
-    {"workflow", "scope_samples", "comparison_ablation", "conceptual_overview"}
-)
-COMPACT_FIGURE_ROLES = frozenset({"quantitative_results", "structure_image"})
-SINGLE_COLUMN_MAX_ASPECT_RATIO = 1.35
-DOUBLE_COLUMN_MIN_ASPECT_RATIO = 1.55
 
 
 def _sha256(text: str) -> str:
@@ -141,12 +135,15 @@ def choose_figure_layout(
     requested_span: Any = "auto",
     review_overview: bool = False,
 ) -> dict[str, Any]:
-    """Choose a stable one- or two-column figure layout without image AI."""
+    """Keep the review overview full-width; default other figures to one column.
+
+    Explicit layout overrides remain supported. Geometry is retained for
+    diagnostics, but no longer silently promotes wide or complex figures.
+    """
 
     requested = str(requested_span or "auto").strip().casefold()
     if requested not in FIGURE_LAYOUT_SPANS:
         requested = "auto"
-    role = str(representative_role or "unknown").strip().casefold()
     try:
         numeric_width = float(width or 0)
         numeric_height = float(height or 0)
@@ -161,16 +158,8 @@ def choose_figure_layout(
         span, reason = "double", "review_overview_required"
     elif requested in {"single", "double"}:
         span, reason = requested, "explicit_override"
-    elif aspect_ratio is not None and aspect_ratio >= DOUBLE_COLUMN_MIN_ASPECT_RATIO:
-        span, reason = "double", "wide_aspect_ratio"
-    elif aspect_ratio is not None and aspect_ratio <= SINGLE_COLUMN_MAX_ASPECT_RATIO:
-        span, reason = "single", "compact_aspect_ratio"
-    elif role in WIDE_FIGURE_ROLES:
-        span, reason = "double", "wide_semantic_role"
-    elif role in COMPACT_FIGURE_ROLES:
-        span, reason = "single", "compact_semantic_role"
     else:
-        span, reason = "single", "conservative_default"
+        span, reason = "single", "single_column_default"
     return {"span": span, "reason": reason, "aspect_ratio": aspect_ratio}
 
 

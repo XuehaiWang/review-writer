@@ -14,7 +14,7 @@ from datetime import timedelta
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from sqlalchemy import and_, case, delete, func, or_, select, text, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from review_writer_api.database import UserCreditAccount, database_session, utc_now
 from review_writer_api.config import RetrievalTuning
 from review_writer_api.errors import WorkflowNotFound, WorkflowValidationError

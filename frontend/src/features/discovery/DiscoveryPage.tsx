@@ -6,24 +6,24 @@ import { useNavigate } from "react-router-dom";
 import { useLocalizedMessage } from "../../i18n/useLocalizedMessage";
 import { ApiError, apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
 import { ACTIVE_JOB_POLL_INTERVAL_MS } from "../../api/polling";
-import { queryKeys } from "../../api/queries";
+import { queryKeys, libraryQuery } from "../../api/queries";
+import { useFormDraft } from "../../hooks/useFormDraft";
+import { PreparationNotice } from "../../components/PreparationNotice";
 import type { Job } from "../../api/types";
 import { ErrorState } from "../../components/ErrorState";
 import { ProjectSelector, useSelectedProject } from "../../components/ProjectSelector";
 import { jobIsActive, useJob } from "../../hooks/useJob";
 import { useUiText } from "../../i18n/useUiText";
 import { DiscoveryJobProgress } from "./DiscoveryJobProgress";
+import { FulltextAccess, articleSourceUrl, fulltextLabel } from "./FulltextAccess";
+import { useFulltextChecks } from "./useFulltextChecks";
 import {
   CANDIDATE_FILTERS,
   buildDiscoveryPaperLabels,
   candidateMatchesFilter,
-  externalActionLabel,
   externalCandidateId,
-  groupLabel,
   localCandidateId,
-  orderedQueryGroups,
   publicPlannerNotice,
-  queryGroupSourceLabel,
   retrievalChannelLabel,
   selectedForMatrix,
   unifyDiscoveryRows,
@@ -38,45 +38,27 @@ import { buildMatrixRecommendation } from "./model/matrixRecommendation";
 function PaperDetail({ row, kind, displayLabel }: { row: DiscoveryRow | null; kind: "local" | "web"; displayLabel?: string }) {
   const { text } = useUiText();
   const paperId = kind === "local" ? String(row?.paper_id || "") : "";
-  const metadata = useQuery({
-    queryKey: queryKeys.libraryMetadata(paperId),
-    queryFn: () => apiRequest<Record<string, unknown>>(`/api/v1/library/papers/${encodeURIComponent(paperId)}/metadata`),
-    enabled: Boolean(paperId),
-  });
-  const markdown = useQuery({
-    queryKey: queryKeys.libraryMarkdown(paperId),
-    queryFn: () => apiRequest<string>(`/api/v1/library/papers/${encodeURIComponent(paperId)}/markdown`),
-    enabled: Boolean(paperId),
-  });
-  if (!row) return <div className="empty-state">{text("点击论文查看Metadata、Markdown和PDF。", "Select a paper to view its metadata, Markdown, and PDF.")}</div>;
+  if (!row) return <div className="empty-state">{text("选择一篇候选论文，查看筛选线索。", "Select a candidate paper to review its screening evidence.")}</div>;
   if (kind === "web") {
     return (
       <div className="external-detail">
         <span className="step-label">{text("外部结果", "External result")}</span>
         <h2>{row.title || text("无标题", "Untitled")}</h2>
+        {row.authors?.length ? <p>{row.authors.join(", ")}</p> : null}
         <p>{[row.year, row.journal, row.source].filter(Boolean).join(" · ")}</p>
         <div className="screening-summary">
           <span>{text("推荐状态", "Recommendation")}：{row.recommendation_status || "review"}</span>
-          <span>{text("获取状态", "Access")}：{row.access_status || "access_unknown"}</span>
-          <span>{text("召回通道", "Retrieval channels")}：{row.retrieval_channels?.join(" · ") || text("外部题录检索", "External metadata search")}</span>
+          <span>{text("获取状态", "Access")}：{fulltextLabel(row, text)}</span>
         </div>
-        <p className="message message-info">{text("这里的标题和摘要只用于筛选论文；正式写作会在论文进入 Matrix 后重新建立问题级科学事实和证据包。", "Title and abstract are used only for paper screening. Question-level scientific facts and evidence packages are rebuilt after the paper enters the matrix.")}</p>
-        {row.landing_url ? <a className="button button-secondary" href={row.landing_url} target="_blank" rel="noreferrer">{text("打开文章页面", "Open article page")}</a> : null}
-        <details><summary>{text("查看完整筛选记录", "View full screening record")}</summary><pre>{JSON.stringify(row, null, 2)}</pre></details>
+        {articleSourceUrl(row) ? <a className="button button-secondary" href={articleSourceUrl(row)} target="_blank" rel="noopener noreferrer">{text("打开文章页面", "Open article page")}</a> : null}
       </div>
     );
   }
   return (
     <div className="discovery-detail">
-      <div className="detail-summary"><span className="step-label" title={paperId}>{displayLabel || paperId}</span><h2>{row.title}</h2><p>{row.authors?.join(", ")}</p></div>
-      <section className="screening-detail">
-        <div className="screening-summary"><span>{text("推荐状态", "Recommendation")}：{row.recommendation_status || "review"}</span><span>{text("召回通道", "Retrieval channels")}：{row.retrieval_channels?.join(" · ") || text("题录与规则", "Metadata and rules")}</span><span>{text("正式分类", "Formal classification")}：{text("进入 Matrix 后生成", "Generated after Matrix entry")}</span></div>
-        {row.screening_chunks?.length ? <details><summary>{text(`查看 ${row.screening_chunks.length} 条筛选片段`, `View ${row.screening_chunks.length} screening excerpts`)}</summary>{row.screening_chunks.map((chunk) => <article key={String(chunk.chunk_id)}><strong>{[chunk.channel, chunk.page_start ? `p.${chunk.page_start}` : "", ...(chunk.section_path || [])].filter(Boolean).join(" · ")}</strong><p>{chunk.excerpt}</p></article>)}</details> : null}
-        <p className="message message-info">{text("第二阶段只负责召回、排序和选择。命中片段与分区查询只作为检索线索；论文确认进入 Matrix 后，系统才会依据可定位的科学事实完成正式分类。", "Stage 02 only retrieves, ranks, and selects papers. Hit excerpts and partition queries remain retrieval hints; formal classification is produced from source-addressable scientific facts after Matrix entry.")}</p>
-      </section>
-      <details open><summary>{text("元数据", "Metadata")}</summary><pre>{metadata.isPending ? text("正在加载…", "Loading…") : JSON.stringify(metadata.data, null, 2)}</pre></details>
-      <details><summary>Markdown</summary><pre className="markdown-preview compact-preview">{markdown.isPending ? text("正在加载…", "Loading…") : markdown.data}</pre></details>
-      <details><summary>PDF</summary><iframe className="pdf-frame" title={`${paperId} PDF`} src={`/api/v1/library/papers/${encodeURIComponent(paperId)}/pdf`} /></details>
+      <div className="detail-summary"><span className="step-label" title={paperId}>{displayLabel || paperId}</span><h2>{row.title}</h2><p>{row.authors?.join(", ")}</p><p>{[row.year, row.journal].filter(Boolean).join(" · ")}</p></div>
+      {row.screening_chunks?.length ? <section className="screening-detail"><details><summary>{text(`查看 ${row.screening_chunks.length} 条筛选片段`, `View ${row.screening_chunks.length} screening excerpts`)}</summary>{row.screening_chunks.map((chunk) => <article key={String(chunk.chunk_id)}><strong>{[chunk.channel, chunk.page_start ? `p.${chunk.page_start}` : "", ...(chunk.section_path || [])].filter(Boolean).join(" · ")}</strong><p>{chunk.excerpt}</p></article>)}</details></section> : null}
+      <a className="button button-secondary" href={`/api/v1/library/papers/${encodeURIComponent(paperId)}/pdf`} target="_blank" rel="noopener noreferrer">{text("查看原文 PDF", "View source PDF")}</a>
     </div>
   );
 }
@@ -86,9 +68,6 @@ export function DiscoveryPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { selected: project, projects } = useSelectedProject();
-  const [topic, setTopic] = useState("");
-  const [keywords, setKeywords] = useState("");
-  const [webSearch, setWebSearch] = useState(false);
   const [selectedJob, setSelectedJob] = useState({ projectId: "", jobId: "" });
   const [candidateFilter, setCandidateFilter] = useState<CandidateFilter>("all");
   const [selectedPaper, setSelectedPaper] = useState<{ row: DiscoveryRow; kind: "local" | "web" } | null>(null);
@@ -109,11 +88,15 @@ export function DiscoveryPage() {
     refetchInterval: (query) => query.state.data?.active_job ? ACTIVE_JOB_POLL_INTERVAL_MS : false,
     refetchIntervalInBackground: true,
   });
+  const input = useFormDraft(`discovery:${project?.project_id || "none"}`, { topic: discovery.data?.topic || project?.topic || "", keywords: "", webSearch: false });
+  const { topic, keywords, webSearch } = input.value;
+  const setTopic = (topic: string) => input.set({ ...input.value, topic });
+  const setKeywords = (keywords: string) => input.set({ ...input.value, keywords });
+  const setWebSearch = (webSearch: boolean) => input.set({ ...input.value, webSearch });
+  const library = useQuery({ ...libraryQuery(""), enabled: Boolean(project) });
   const [groups, setGroups] = useState<DiscoveryGroup[]>([]);
+  const fulltextChecks = useFulltextChecks(project?.project_id || "", discovery.data);
   useEffect(() => {
-    setTopic(project?.topic || "");
-    setKeywords("");
-    setWebSearch(false);
     setSelectedJob({ projectId: "", jobId: "" });
     setGroups([]);
     setCandidateFilter("all");
@@ -127,7 +110,6 @@ export function DiscoveryPage() {
     const payload = discovery.data;
     if (!payload || payload.project_id !== project?.project_id) return;
     setGroups(structuredClone(payload.results || []));
-    setTopic(payload.topic || project?.topic || "");
   }, [discovery.data, project?.project_id, project?.topic]);
   const localJobId = selectedJob.projectId === project?.project_id ? selectedJob.jobId : "";
   const serverActiveJobId = discoveryJobState.data?.active_job?.id || "";
@@ -168,7 +150,7 @@ export function DiscoveryPage() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.projects });
       await queryClient.invalidateQueries({ queryKey: ["planning", project!.project_id] });
-      navigate(`/planning?tab=matrix&project=${encodeURIComponent(project!.project_id)}`);
+      navigate(`/planning?view=reading&project=${encodeURIComponent(project!.project_id)}`);
     },
   });
   const keepLocalCoverage = useMutation({
@@ -197,11 +179,13 @@ export function DiscoveryPage() {
     if (!refreshWatch || !externalDownloadJobId) return;
     const status = externalDownloadJob.data?.status;
     if (status === "failed" || status === "cancelled" || status === "interrupted") {
+      void discovery.refetch();
       setSelectionFeedback(externalDownloadJob.data?.error_message || ["外部论文下载或解析失败。", "External paper download or parsing failed."]);
       setRefreshWatch(null);
       return;
     }
     if (status === "succeeded" && Number(externalDownloadJob.data?.result?.failed_count || 0) > 0) {
+      void discovery.refetch();
       setSelectionFeedback(["没有找到可合法自动下载的开放获取 PDF；可打开来源页面使用机构权限下载后，再到文献库导入 PDF。", "No lawfully downloadable open-access PDF was found. Open the source with institutional access, then import the downloaded PDF in Library."]);
       setRefreshWatch(null);
       return;
@@ -229,8 +213,6 @@ export function DiscoveryPage() {
     ...(group.local_results || []),
     ...(group.web_results || []),
   ].some((row) => row.selected_for_matrix === true));
-  const uniqueCandidateCount = new Set(activeGroups.flatMap((group) => group.local_results || []).map((row) => row.paper_id).filter(Boolean)).size;
-  const keywordHitCount = activeGroups.reduce((sum, group) => sum + (group.local_results?.length || 0), 0);
   const unifiedRows = useMemo(() => unifyDiscoveryRows(groups), [groups]);
   const filterMatches = (entry: (typeof unifiedRows)[number], filter: CandidateFilter): boolean => (
     candidateMatchesFilter(entry, filter, recommendation.recommendedIds, recommendation.reviewIds)
@@ -245,7 +227,6 @@ export function DiscoveryPage() {
       .map((query) => [String(query.query_id), String(query.label || query.partition_id || query.query_id)]),
   ), [discovery.data?.query_plan?.semantic_queries]);
   const coverage = discovery.data?.coverage_diagnostics;
-  const searchRecord = discovery.data?.search_record;
   const showCoverageNotice = Boolean(
     coverage?.online_search_suggested
     && discovery.data?.coverage_decision !== "keep_local"
@@ -258,7 +239,6 @@ export function DiscoveryPage() {
     && !jobIsActive(job.data?.status)
   );
   const paperLabels = useMemo(() => buildDiscoveryPaperLabels(groups), [groups]);
-  const queryGroups = useMemo(() => orderedQueryGroups(groups), [groups]);
 
   function updateRow(target: DiscoveryRow, update: Partial<DiscoveryRow>) {
     const targetPaperId = String(target.paper_id || "");
@@ -267,7 +247,7 @@ export function DiscoveryPage() {
     setGroups((current) => current.map((group) => ({
       ...group,
       local_results: group.local_results?.map((row) => matches(row) ? { ...row, ...update } : row),
-      web_results: group.web_results?.map((row) => row === target ? { ...row, ...update } : row),
+      web_results: group.web_results?.map((row) => externalCandidateId(row) === externalCandidateId(target) ? { ...row, ...update } : row),
     })));
     setSelectionFeedback("");
   }
@@ -334,10 +314,23 @@ export function DiscoveryPage() {
       {!projects.data?.items.length ? <div className="empty-state">{text("请先在首页创建项目。", "Create a project on the home page first.")}</div> : null}
       {project ? (
         <section className="surface discovery-run-card">
-          <div className="run-form discovery-run-primary">
-            <label>{text("综述主题", "Review topic")}<input value={topic} onChange={(event) => setTopic(event.target.value)} /></label>
-            <button className="button button-primary" type="button" disabled={topic.trim().length < 3 || run.isPending || discoveryJobState.isPending || Boolean(discoveryJobState.data?.active_job) || jobIsActive(job.data?.status)} onClick={() => run.mutate({})}>{discovery.data ? text("重新检索", "Run search again") : text("开始检索", "Start search")}</button>
+          <div className="discovery-search-layout">
+            <div className="discovery-search-entry">
+              <label htmlFor="discovery-topic">{text("综述主题 / 检索需求", "Review topic / search request")}</label>
+              <textarea id="discovery-topic" rows={3} value={topic} onChange={(event) => setTopic(event.target.value)} placeholder={text("例如：综述某领域的研究进展，按方法或研究对象组织，并比较代表性结果、适用范围与局限。", "For example: review progress in a field, organize by method or study object, and compare representative results, scope, and limitations.")} />
+              <p>{text("可用中文或英文；写清研究对象、综述范围和希望比较的问题即可，不必输入论文书目信息。", "Chinese or English is fine. Describe the subject, review scope, and questions to compare; bibliographic details are not needed.")}</p>
+              <button className="button button-primary" type="button" disabled={topic.trim().length < 3 || run.isPending || discoveryJobState.isPending || Boolean(discoveryJobState.data?.active_job) || jobIsActive(job.data?.status)} onClick={() => run.mutate({})}>{discovery.data ? text("重新检索", "Run search again") : text("开始检索", "Start search")}</button>
+            </div>
+            <aside className="discovery-topic-example" aria-label={text("标准 Topic 示例", "Example review topic")}>
+              <span className="step-label">{text("标准 Topic 示例", "Example review topic")}</span>
+              <p>{text("请撰写一篇关于轴手性联烯不对称合成的综述，按底物类别组织正文，比较代表性反应的催化体系、底物范围、产率与对映选择性，并讨论机理证据和现有局限。", "Write a review of asymmetric syntheses of axially chiral allenes. Organize the body by substrate class; compare representative catalytic systems, substrate scope, yields, and enantioselectivity; discuss mechanistic evidence and limitations.")}</p>
+              <small>{text("示例展示写法，不限定您的研究领域或分类方式。", "This illustrates the format; your field and organizing axis can differ.")}</small>
+            </aside>
           </div>
+          <PreparationNotice kind="text" model={project.model_tier} />
+          {library.data?.items.length === 0 ? <p className="message message-info">{text("本地文献库还是空的。请先导入论文，或在高级设置中启用联网补充检索。", "Your library is empty. Import papers first, or enable online search in advanced settings.")} <a href={`/library?project=${encodeURIComponent(project.project_id)}`}>{text("前往导入文献", "Import papers")}</a></p> : null}
+          {input.storageFailed ? <p role="status">{text("浏览器无法暂存，请复制检索需求后再离开。", "Browser storage is unavailable. Copy your request before leaving.")}</p> : null}
+          {input.dirty ? <button className="button button-quiet" type="button" onClick={input.clear}>{text("恢复已保存的检索需求", "Restore saved search request")}</button> : null}
           <details className="advanced-panel discovery-search-advanced">
             <summary>{text("高级检索设置（可选）", "Advanced search settings (optional)")}</summary>
             <div className="advanced-panel-body discovery-search-advanced-body">
@@ -349,8 +342,6 @@ export function DiscoveryPage() {
           {(run.isPending || currentJobId) ? <DiscoveryJobProgress job={job.data || discoveryJobState.data?.active_job || undefined} submitting={run.isPending && !currentJobId} /> : null}
           {insufficientCreditStop && discovery.data ? <p className="message message-info">{text("下方保留的是上一次成功检索的结果；本次余额不足的检索未执行，也没有覆盖这些结果。", "The results below are from the last successful search. The current search was not run because of insufficient credit and did not overwrite them.")}</p> : null}
           {!insufficientCreditStop && discovery.data?.query_plan?.planner_notice ? <p className="message message-warning">{publicPlannerNotice(discovery.data.query_plan, text)}</p> : null}
-          {discovery.data?.query_plan?.search_topic ? <details className="advanced-panel"><summary>{text("查看自动转换的英文检索内容", "View translated English search input")}</summary><div className="advanced-panel-body"><p>{discovery.data.query_plan.search_topic}</p><p>{discovery.data.query_plan.search_keywords?.join(" · ")}</p><p className="muted">{text("原始研究需求保持不变。需要调整时，可修改上方主题或补充关键词后重新检索。", "Your original research request is unchanged. To adjust the search, edit the topic or additional keywords above and search again.")}</p></div></details> : null}
-          {!insufficientCreditStop && discovery.data?.query_plan_source === "dashboard_llm" && !discovery.data?.query_plan?.planner_notice ? <p className="message message-info">{text("已使用当前所选文本模型完成查询规划。", "The current selected text model produced the query plan.")}</p> : null}
           {run.error ? <p className="message message-error"><LocalizedError error={run.error} /></p> : null}
         </section>
       ) : null}
@@ -377,23 +368,6 @@ export function DiscoveryPage() {
               <button className="button button-secondary" type="button" disabled={keepLocalCoverage.isPending} onClick={() => keepLocalCoverage.mutate()}>{keepLocalCoverage.isPending ? text("正在保存…", "Saving…") : text("保持当前结果", "Keep current results")}</button>
             </div>
           </section> : null}
-          {searchRecord ? <details className="surface advanced-panel discovery-execution-record">
-            <summary>{text("查看本次检索的实际执行记录", "View actual search execution record")}</summary>
-            <div className="advanced-panel-body">
-              <p><strong>{text("实际执行来源", "Executed sources")}：</strong>{searchRecord.executed_sources?.length ? searchRecord.executed_sources.join("、") : text("仅本地文献库", "Local Library only")}</p>
-              {searchRecord.failed_sources?.length ? <p className="message message-warning"><strong>{text("失败来源", "Failed sources")}：</strong>{searchRecord.failed_sources.join("、")}</p> : null}
-              <p>{text(`本地命中 ${searchRecord.initial_local_hit_count || 0} 次、去重 ${searchRecord.unique_local_candidate_count || 0} 篇；联网命中 ${searchRecord.initial_external_hit_count || 0} 次、去重 ${searchRecord.unique_external_candidate_count || 0} 篇。`, `Local search returned ${searchRecord.initial_local_hit_count || 0} hits (${searchRecord.unique_local_candidate_count || 0} unique); online search returned ${searchRecord.initial_external_hit_count || 0} hits (${searchRecord.unique_external_candidate_count || 0} unique).`)}</p>
-              <small>{text("终稿方法部分只会使用这里记录的实际执行来源，不会把未执行的计划来源写成已使用。", "Final methods use only the executed sources recorded here, never merely requested sources.")}</small>
-            </div>
-          </details> : null}
-          <details className="surface advanced-panel discovery-query-diagnostics">
-            <summary>{text(`查看查询组诊断（${groups.length}组）`, `View query-group diagnostics (${groups.length})`)}</summary>
-            <div className="advanced-panel-body query-diagnostic-list">
-              <p className="muted">{text("查询组只用于解释检索覆盖，不是论文分类，也不决定Matrix章节。", "Query groups explain retrieval coverage only; they are not paper classifications and do not determine Matrix sections.")}</p>
-              {queryGroups.map((group) => <article key={group.keyword}><div><strong>{groupLabel(group, text)}</strong><small>{queryGroupSourceLabel(group, text)} · {group.local_results?.length || 0} {text("篇本地", "local")} · {group.web_results?.length || 0} {text("篇联网", "online")}</small></div><button className="button button-quiet" type="button" onClick={() => setGroups((current) => current.map((item) => item.keyword === group.keyword ? { ...item, keep: item.keep === false } : item))}>{group.keep === false ? text("恢复该查询", "Restore query") : text("排除该查询", "Exclude query")}</button></article>)}
-            </div>
-          </details>
-          <div className="discovery-stats"><span>{text("去重候选论文", "Unique candidate papers")} {uniqueCandidateCount}</span><span>{text("原始查询命中", "Raw query hits")} {keywordHitCount}</span><span>{text("当前显示", "Currently shown")} {rows.length}</span><span className="selected">{text("进入Matrix", "Selected for matrix")} {selectedCount}</span></div>
           <section className="surface matrix-selection-assistant" aria-label={text("Matrix批量选择", "Matrix bulk selection")}>
             <div className="matrix-selection-summary">
               <div><span className="step-label">{text("批量辅助", "Selection assistant")}</span><strong>{text("系统先推荐，用户只需复核例外", "Start from a recommendation and review exceptions")}</strong></div>
@@ -425,7 +399,8 @@ export function DiscoveryPage() {
                 ["semantic", text("语义", "Semantic")],
                 ["online", text("联网", "Online")],
               ] as Array<[CandidateFilter, string]>).map(([filter, label]) => <button key={filter} type="button" className={candidateFilter === filter ? "active" : ""} onClick={() => setCandidateFilter(filter)}>{label}<small>{candidateFilterCounts[filter]}</small></button>)}</div>
-              <div className="result-list">{rows.map(({ row, kind }, index) => {
+              <div className="result-list">{rows.map(({ row: sourceRow, kind }, index) => {
+                const row = kind === "web" ? { ...sourceRow, availability: fulltextChecks[externalCandidateId(sourceRow)] } : sourceRow;
                 const active = selectedPaper?.kind === kind && (kind === "local" ? localCandidateId(selectedPaper.row) === localCandidateId(row) : externalCandidateId(selectedPaper.row) === externalCandidateId(row));
                 const included = selectedForMatrix(row);
                 const id = String(row.paper_id || "");
@@ -448,6 +423,9 @@ export function DiscoveryPage() {
                         <span className={`matrix-recommendation-badge ${recommendationStatus}`}>{recommendationStatus === "recommended" ? text("推荐", "Recommended") : recommendationStatus === "excluded" ? text("建议排除", "Exclude") : text("待复核", "Review")}</span>
                       </div>
                       <h3>{row.title || text("无标题", "Untitled")}</h3>
+                      <div className="result-fulltext-status"><span className={`fulltext-badge ${kind === "local" || row.availability?.state === "available" ? "available" : "pending"}`} role="status">
+                        {text("全文获取：", "Full-text access: ")}{kind === "local" ? text("已入库，无需重新获取", "In library; no acquisition needed") : externalProcessing ? text("正在获取全文", "Acquiring full text") : fulltextLabel(row, text)}
+                      </span></div>
                       <p>{[row.year, row.journal, row.source].filter(Boolean).join(" · ")}</p>
                       {row.retrieval_channels?.length ? <div className="retrieval-badges">{row.retrieval_channels.slice(0, 3).map((channel) => <span key={channel}>{retrievalChannelLabel(channel, text)}</span>)}</div> : null}
                       {retrievalHints.length ? <div className="retrieval-hints" title={text("全文鉴别词命中，仅供复核；正式分类在Matrix生成", "Full-text discriminator hits for review only; formal classifications are generated in the Matrix")}><small>{text("鉴别词命中 · 待Matrix核验", "Discriminator hit · verify in Matrix")}</small>{retrievalHints.map((hint) => <span key={hint}>{hint}</span>)}</div> : null}
@@ -455,22 +433,19 @@ export function DiscoveryPage() {
                     <div className="result-actions">
                       {kind === "local" ? (
                         <>
+                          <a className="button button-secondary" href={`/api/v1/library/papers/${encodeURIComponent(id)}/pdf`} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()}>{text("查看／下载 PDF", "View / download PDF")}</a>
                           <button type="button" className={included ? "button button-primary" : "button button-secondary"} onClick={(event) => { event.stopPropagation(); updateRow(row, { selected_for_matrix: !included, ...(included ? {} : row.role === "excluded" ? { role: "uncertain" } : {}) }); }}>{included ? text("已加入Matrix", "Added to matrix") : text("加入Matrix", "Add to matrix")}</button>
                           <select value={row.role || "uncertain"} onClick={(event) => event.stopPropagation()} onChange={(event) => updateRow(row, { role: event.target.value, ...(event.target.value === "excluded" ? { selected_for_matrix: false } : {}) })}>{["core_candidate", "supporting_candidate", "background", "uncertain", "excluded"].map((role) => <option key={role}>{role}</option>)}</select>
                         </>
-                      ) : row.access_status === "open_access_downloadable" ? (
-                        <button type="button" className="button button-secondary" disabled={externalProcessing || downloadExternal.isPending} onClick={(event) => { event.stopPropagation(); downloadExternal.mutate(row); }}>{externalProcessing ? text("处理中…", "Processing…") : externalActionLabel(row.access_status, text)}</button>
-                      ) : row.landing_url ? (
-                        <a className="button button-secondary" href={row.landing_url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>{externalActionLabel(row.access_status, text)}</a>
                       ) : (
-                        <button type="button" className="button button-secondary" onClick={(event) => { event.stopPropagation(); navigate(`/library?project=${encodeURIComponent(project!.project_id)}`); }}>{text("导入PDF", "Import PDF")}</button>
+                        <FulltextAccess row={row} showStatus={false} processing={externalProcessing} disabled={downloadExternal.isPending || jobIsActive(externalDownloadJob.data?.status) || Boolean(refreshWatch)} libraryUrl={`/library?project=${encodeURIComponent(project!.project_id)}`} onDownload={() => downloadExternal.mutate(row)} />
                       )}
                     </div>
                   </article>
                 );
               })}{!rows.length ? <div className="empty-state compact-empty">{text("当前筛选条件下没有候选论文。", "No candidate papers match the current filter.")}</div> : null}</div>
             </section>
-            <section className="pane discovery-detail-pane"><PaperDetail row={selectedPaper?.row || null} kind={selectedPaper?.kind || "local"} displayLabel={selectedPaper?.kind === "local" ? paperLabels.get(String(selectedPaper.row.paper_id || "")) : undefined} /></section>
+            <section className="pane discovery-detail-pane"><PaperDetail row={selectedPaper?.kind === "web" ? { ...selectedPaper.row, availability: fulltextChecks[externalCandidateId(selectedPaper.row)] } : selectedPaper?.row || null} kind={selectedPaper?.kind || "local"} displayLabel={selectedPaper?.kind === "local" ? paperLabels.get(String(selectedPaper.row.paper_id || "")) : undefined} /></section>
           </div>
           <div className="stage-action-bar"><div><strong>{text("论文选择", "Paper selection")}</strong><p>{text("选择需要进入 Matrix 的论文；确认采用时会自动保存当前选择，并只在输入确实变化时让后续阶段过期。", "Choose papers for the matrix. Adoption automatically saves the current selection and marks later stages stale only when the inputs actually changed.")}</p></div><button className="button button-primary" type="button" disabled={!selectedCount || confirm.isPending} onClick={() => confirm.mutate()}>{confirm.isPending ? text("同步中…", "Syncing…") : text(`确认采用并进入 Matrix（${selectedCount}篇）`, `Adopt and enter matrix (${selectedCount})`)}</button>{confirm.error ? <span className="message message-error"><LocalizedError error={confirm.error} /></span> : null}</div>
         </>

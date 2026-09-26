@@ -31,6 +31,47 @@ def task():
             "allowed_papers": ["A", "B"], "questions_to_answer": ["What was reported?"], "writing_objective": "Compare reported conditions."}
 
 
+def test_empty_source_writer_gets_one_bounded_repair():
+    calls = []
+    claim = "At 25 C, Catalyst A achieved 90% degradation after 60 minutes."
+    def model(prompt, schema, label):
+        calls.append(label)
+        if label == "section-source-writing":
+            if calls.count(label) == 1:
+                return {"paragraphs": []}
+            assert "EMPTY-DRAFT RECOVERY" in prompt
+            return {"paragraphs": [{"claims": [{"text": claim, "claim_kind": "reported_finding",
+                "support_spans": [{"evidence_key": "E001", "quote": source()["content"]}]}]}]}
+        return {"claims": [{"claim_id": "S01-p1-C01", "status": "supported", "text": "", "reason": ""}]}
+    writing, _, report = write_from_sources(section_id="S01", task=task(), evidence=[source()], context="", call=model)
+    assert writing["paragraphs"] and writing["claims"][0]["claim"] == claim
+    assert calls.count("section-source-writing") == 2
+    assert not report["unresolved"]
+
+
+def test_repeated_empty_source_writer_is_not_completed_evidence_notice():
+    calls, saved = [], {}
+    def model(prompt, schema, label):
+        calls.append(label)
+        return {"paragraphs": []}
+    def save(state):
+        saved.clear()
+        saved.update(deepcopy(state))
+    with pytest.raises(RuntimeError, match="no paragraphs despite registered passages"):
+        write_from_sources(section_id="S01", task=task(), evidence=[source()], context="", call=model, save_state=save)
+    assert len(calls) == 2
+    assert "proposed" not in saved
+    assert saved["empty_repair_attempted"]
+
+
+def test_no_registered_sources_does_not_call_empty_repair():
+    def model(*args):
+        pytest.fail("No source evidence must not trigger invented prose")
+    writing, _, report = write_from_sources(section_id="S01", task=task(), evidence=[], context="", call=model)
+    assert writing["paragraphs"] == []
+    assert report["omitted"][0]["reason"] == "no_registered_passage"
+
+
 def test_audited_rewrite_preserves_source_binding_without_an_extra_call():
     replacement = "After 60 minutes at 25 C, Catalyst A achieved 90% pollutant degradation."
     writing, generated, report, calls = write(audit_status="rewritten", replacement=replacement)

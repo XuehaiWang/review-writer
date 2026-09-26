@@ -116,22 +116,6 @@ class DraftsService(
         state = self.repository.get_stage_state(principal.user_id, project_id, "draft")
         return state.revision if state else 0
 
-    def _validate_repair_lineages(self, principal, evidence_repair):
-        expected = evidence_repair.get("fact_agent_source_lineages") or {}
-        if not expected:
-            return
-        from review_writer_api.domain_services.library_index import LibraryIndexService
-        index = LibraryIndexService(self.repository.session_factory, self.artifacts.workspace_manager)
-        expected_parents = evidence_repair.get("fact_agent_source_parents") or {}
-        if expected_parents:
-            parents = sorted(set(expected_parents.values()))
-            actual_parents = self._supporting_source_parents(self._catalog(principal, parents), parents)
-            if actual_parents != expected_parents:
-                raise WorkflowConflict("The linked supporting-information scope changed while the repair was pending.")
-        for paper_id, lineage in expected.items():
-            _paper, _artifacts, _lineage, current = index._paper_and_lineage(principal, paper_id)
-            if not lineage or current != lineage:
-                raise WorkflowConflict("The article or linked SI changed while the fact repair candidate was pending.")
 
     def _publish_files(
         self,
@@ -666,6 +650,7 @@ class DraftsService(
     ) -> dict[str, Any]:
         sections = self._artifact(principal, project_id, SECTION_INDEX)
         figures = self._artifact(principal, project_id, FIGURE_MANIFEST)
+        figure_state = self.repository.get_stage_state(principal.user_id, project_id, "figures")
         matrix = self._artifact(principal, project_id, MATRIX_LOGICAL_NAME)
         evidence = self._artifact(principal, project_id, SECTION_EVIDENCE)
         state = self.repository.get_stage_state(principal.user_id, project_id, "draft")
@@ -673,15 +658,12 @@ class DraftsService(
         source_evidence_id = str(
             metadata.get("source_section_evidence_artifact_id") or ""
         )
-        upstream_stale = bool(
+        content_stale = bool(
             draft
             and (
-                (state is not None and state.status == "stale")
-                or not sections
-                or not figures
+                not sections
                 or not matrix
                 or metadata.get("source_sections_artifact_id") != sections.id
-                or metadata.get("source_figure_manifest_artifact_id") != figures.id
                 or not self._matrix_dependency_matches(principal, project_id, metadata.get("source_matrix_artifact_id"), matrix)
                 or (
                     source_evidence_id
@@ -692,12 +674,22 @@ class DraftsService(
                 )
             )
         )
+        figures_stale = bool(draft and (
+            not figures or metadata.get("source_figure_manifest_artifact_id") != figures.id
+            or (figure_state is not None and figure_state.status != "approved")
+        ))
+        # Unknown explicit invalidation remains conservative; a known figure-only
+        # change must not prevent saving human prose against its existing sources.
+        editing_blocked = content_stale or bool(
+            draft and state and state.status == "stale" and not figures_stale
+        )
+        upstream_stale = editing_blocked or figures_stale
         return {
             "source_stale": upstream_stale,
             "draft_stale": False,
-            "figures_stale": upstream_stale,
+            "figures_stale": figures_stale,
             "upstream_stale": upstream_stale,
-            "editing_blocked": upstream_stale,
+            "editing_blocked": editing_blocked,
             "stale": upstream_stale,
         }
 
@@ -1083,7 +1075,7 @@ class DraftsService(
         current_text, current = self._read_text(principal, project_id, DRAFT_DOCUMENT)
         if expected_draft_artifact_id and current.id != expected_draft_artifact_id:
             raise WorkflowConflict("Draft changed while merging the paragraph edit.")
-        if self._freshness(principal, project_id, current)["upstream_stale"]:
+        if self._freshness(principal, project_id, current)["editing_blocked"]:
             raise DraftNotReady("Draft inputs changed. Reassemble Draft before editing.")
         canonical = str(text).rstrip() + "\n"
         if operation == "full-edit" or operation.startswith("paragraph-edit:"):
@@ -1164,7 +1156,15 @@ class DraftsService(
                 raise WorkflowNotFound("Draft paragraph not found.")
             if base_text_sha256 and hashlib.sha256(paragraph["text"].encode("utf-8")).hexdigest() != base_text_sha256:
                 raise WorkflowConflict("This paragraph changed. Compare the latest saved text before saving.")
-            updated = markdown[:paragraph["start"]] + str(text).strip() + markdown[paragraph["end"]:]
+            if str(text).strip():
+                updated = markdown[:paragraph["start"]] + str(text).strip() + markdown[paragraph["end"]:]
+            else:
+                # Remove exactly the prose and its trailing identity marker.
+                # Adjacent figures/captions/references remain untouched. Reserve
+                # the retired ID so later edits cannot reuse its dialogue identity.
+                updated = (markdown[:paragraph["start"]]
+                           + f"<!-- deleted_paragraph_id: {paragraph_id} -->"
+                           + markdown[paragraph["marker_end"]:])
             try:
                 return self.save_text(
                     principal, project_id, text=updated,
@@ -1371,8 +1371,6 @@ class DraftsService(
                 expected_current_artifacts={DRAFT_DOCUMENT: current.id},
             )
         return {"draft_artifact_id": artifact.id, "revision": state.revision}
-
-
 
 
     @staticmethod
@@ -2617,14 +2615,6 @@ class DraftsService(
             "release_integrity_failure": bool(integrity),
             "release_integrity_failures": integrity,
         }
-
-
-
-
-
-
-
-
 
 
     @staticmethod

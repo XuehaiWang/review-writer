@@ -322,9 +322,9 @@ The reported systems support a bounded comparison [1, 2].
         self.assertEqual(21, rendered.count("evidence0000"))
         self.assertEqual(21, rendered.count("evidence0179"))
 
-    def test_figure_layout_uses_geometry_then_semantic_role(self) -> None:
+    def test_figure_layout_defaults_to_single_regardless_of_geometry_or_role(self) -> None:
         self.assertEqual(
-            "double",
+            "single",
             choose_figure_layout(width=1800, height=900)["span"],
         )
         self.assertEqual(
@@ -343,7 +343,7 @@ The reported systems support a bounded comparison [1, 2].
         self.assertEqual("double", overview["span"])
         self.assertEqual("review_overview_required", overview["reason"])
         self.assertEqual(
-            "double",
+            "single",
             choose_figure_layout(representative_role="conceptual_overview")["span"],
         )
         self.assertEqual(
@@ -351,7 +351,7 @@ The reported systems support a bounded comparison [1, 2].
             choose_figure_layout(representative_role="structure_image")["span"],
         )
 
-    def test_pdf_figures_can_mix_single_and_double_column_layouts(self) -> None:
+    def test_pdf_regular_figures_default_to_single_even_when_wide(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             compact_id = "12345678-1234-1234-1234-123456789abc"
@@ -377,12 +377,11 @@ The reported systems support a bounded comparison [1, 2].
             )
 
         images = [block for block in state["blocks"] if block["kind"] == "image"]
-        self.assertEqual(["single", "double"], [block["layout_span"] for block in images])
+        self.assertEqual(["single", "single"], [block["layout_span"] for block in images])
         rendered = render_tex(state, profile="en", template=self.template)
         self.assertIn(r"\begin{figure}[!htbp]", rendered)
         self.assertIn(r"width=\columnwidth,height=0.42\textheight", rendered)
-        self.assertIn(r"\begin{figure*}[!tbp]", rendered)
-        self.assertIn(r"width=\textwidth,height=0.56\textheight", rendered)
+        self.assertNotIn(r"\begin{figure*}", rendered)
 
     def test_figure_layout_metadata_can_override_automatic_choice(self) -> None:
         artifact_id = "12345678-1234-1234-1234-123456789abc"
@@ -416,6 +415,9 @@ The reported systems support a bounded comparison [1, 2].
         self.assertTrue(image["review_overview"])
         self.assertEqual("double", image["layout_span"])
         self.assertEqual("review_overview_required", image["layout_reason"])
+        rendered = render_tex(state, profile="en", template=self.template)
+        self.assertIn(r"\begin{figure*}[!tbp]", rendered)
+        self.assertIn(r"width=\textwidth,height=0.56\textheight", rendered)
 
     def test_references_drain_figures_without_forcing_a_new_page(self) -> None:
         state = build_manuscript_state(

@@ -16,8 +16,8 @@ def test_matrix_job_yields_after_one_paper_and_resumes_without_publishing():
     planning = Mock()
     partial = {"source_matrix_artifact_id": "matrix-1", "completed_papers": ["P1"], "entries": {"P1": {}}}
     complete = {"source_matrix_artifact_id": "matrix-1", "completed_papers": ["P1", "P2"], "entries": {"P1": {}, "P2": {}}}
-    built = iter([{"matrix_enrichment_checkpoint": partial},
-                  {"matrix_enrichment_checkpoint": complete, "papers": []}])
+    built = iter([{"matrix_enrichment_checkpoint": partial, "papers": [{"paper_id": "P1"}]},
+                  {"matrix_enrichment_checkpoint": complete, "papers": [{"paper_id": "P1"}, {"paper_id": "P2"}]}])
     register_planning_handlers(planning, jobs, {"matrix.enrich": lambda *_: next(built)})
     stored = SimpleNamespace(result={})
     repository = SimpleNamespace(get_job=lambda *_: stored, update_job_progress=Mock())
@@ -46,7 +46,7 @@ def test_matrix_job_waits_for_delegated_model_then_resumes_existing_checkpoint()
     checkpoint = {"source_matrix_artifact_id": "matrix-1", "completed_papers": ["P1"],
                   "entries": {"P1": {}}}
     builder = Mock(side_effect=[ScientificModelDeferred("child-1"),
-                                {"matrix_enrichment_checkpoint": checkpoint, "papers": []}])
+                                {"matrix_enrichment_checkpoint": checkpoint, "papers": [{"paper_id": "P1"}]}])
     register_planning_handlers(planning, jobs, {"matrix.enrich": builder})
     parent = SimpleNamespace(result={})
     child = SimpleNamespace(project_id="project", job_type="model.dispatch", status="queued",

@@ -12,7 +12,7 @@ from review_writer_api.job_handlers.support import (
 )
 from review_writer_core.stages.sections.coverage import reusable_section_entries
 from review_writer_api.job_service import JobYieldRequested
-from review_writer_api.model_concurrency import text_parallelism
+from review_writer_core.stages.sections.execution import DEFAULT_SECTION_CONCURRENCY
 
 
 class SectionJobHandlers:
@@ -173,10 +173,6 @@ class SectionJobHandlers:
         section_timeout_seconds = _section_generation_timeout_seconds(
             payload.get("tasks"), resume_checkpoint
         )
-        gateway = self.model_gateway
-        parallelism = text_parallelism(
-            getattr(gateway, "settings", None), getattr(gateway, "session_factory", None)
-        )
         self.runner.run(
             [
                 sys.executable,
@@ -192,7 +188,7 @@ class SectionJobHandlers:
                 "--project-id",
                 project_id,
                 "--section-concurrency",
-                str(parallelism),
+                str(DEFAULT_SECTION_CONCURRENCY),
             ],
             cwd=self.root,
             staging_directory=staging,

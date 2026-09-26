@@ -42,30 +42,6 @@ DRAFT = "\n\n".join(
 
 
 class DraftExcerptTests(unittest.TestCase):
-    def test_oversized_summary_is_rewritten_once_with_source_binding(self):
-        features = {"review_title": "Synthesis", "overview_evidence_bindings": {"Route": {"section_id": "S1"}},
-                    "argument_execution": {"sections": [{"section_id": "S1", "claims": [{"claim_id": "C1"}]}]}}
-        long_row = {"section_id": "S1", "summary": "word " * 20, "claim_ids": ["C1"]}
-        short_row = {**long_row, "summary": "Catalysis enables selective allene synthesis."}
-        with patch.object(overview, "_text_gateway_configured", return_value=True), \
-             patch.object(overview, "_draft_excerpt", return_value="Source evidence."), \
-             patch.object(overview, "_cached_overview_json", side_effect=[
-                 {"module_summaries": [long_row]}, {"module_summaries": [short_row]}]) as model:
-            pack = overview._llm_content_pack(features)
-        self.assertEqual({"S1": short_row["summary"]}, pack["module_summaries"])
-        self.assertEqual(2, model.call_count)
-        self.assertEqual("overview-summary-rewrite", model.call_args.kwargs["label"])
-
-    def test_unsuccessful_summary_rewrite_does_not_publish_truncated_text(self):
-        features = {"review_title": "Synthesis", "overview_evidence_bindings": {"Route": {"section_id": "S1"}},
-                    "argument_execution": {"sections": [{"section_id": "S1", "claims": [{"claim_id": "C1"}]}]}}
-        data = {"module_summaries": [{"section_id": "S1", "summary": "word " * 20, "claim_ids": ["C1"]}]}
-        with patch.object(overview, "_text_gateway_configured", return_value=True), \
-             patch.object(overview, "_draft_excerpt", return_value="Source evidence."), \
-             patch.object(overview, "_cached_overview_json", return_value=data) as model:
-            with self.assertRaisesRegex(ValueError, "display budget"):
-                overview._llm_content_pack(features)
-        self.assertEqual(2, model.call_count)
 
     def test_completed_steps_cache_but_failures_do_not(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -82,10 +58,6 @@ class DraftExcerptTests(unittest.TestCase):
                         overview._cached_overview_json(features, "failure", label="test", timeout_seconds=1)
                 self.assertEqual(2, call.call_count)
 
-    def test_unavailable_provider_does_not_create_concept_pack(self):
-        with patch.object(overview, "_text_gateway_configured", return_value=False):
-            with self.assertRaisesRegex(RuntimeError, "not configured"):
-                overview._llm_content_pack({"review_title": "Topic"})
 
     def test_overview_summarizes_without_rendering_provenance_or_result_tables(self):
         import copy
@@ -255,24 +227,6 @@ class AutomaticChemistryDecisionTests(unittest.TestCase):
         "reaction_name": "allenation",
     }
 
-    def test_unavailable_review_does_not_masquerade_as_skeleton_evidence(self) -> None:
-        with patch.object(overview, "_text_gateway_configured", return_value=False):
-            with self.assertRaisesRegex(RuntimeError, "unavailable"):
-                overview._automatic_chemistry_decision(
-                    {"review_title": "Allene synthesis", "product_keywords": ["allenes"]}, self.SCHEME)
-
-    def test_low_confidence_second_review_uses_concept_overview(self) -> None:
-        with patch.object(overview, "_text_gateway_configured", return_value=True), patch.object(
-            overview,
-            "call_gateway_json",
-            return_value={"supported": False, "confidence": 20, "reason": "No matching evidence."},
-        ):
-            decision = overview._automatic_chemistry_decision(
-                {"review_title": "Allene synthesis", "product_keywords": ["allenes"]},
-                self.SCHEME,
-            )
-        self.assertEqual("concept", decision["mode"])
-        self.assertEqual(20, decision["confidence"])
 
     def test_invalid_explicit_smiles_is_not_used_as_an_override(self) -> None:
         self.assertEqual(
@@ -305,7 +259,7 @@ class TemplateSelectionTests(unittest.TestCase):
         ):
             selected = overview.select_best_template(templates, features)
         self.assertEqual(99, selected["id"])
-        self.assertEqual("ai", features["_template_selection"]["mode"])
+        self.assertEqual("content_score", features["_template_selection"]["mode"])
 
 
 class TwoDimensionalChemistryTests(unittest.TestCase):

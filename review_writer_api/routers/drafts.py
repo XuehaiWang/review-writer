@@ -38,15 +38,15 @@ def build_drafts_router(
     @router.get("/overview")
     def overview_state(project_id: str, principal: Principal = Depends(principal_dependency)):
         from review_writer_core.workflow.artifacts import DRAFT_MANUSCRIPT, FINAL_OVERVIEW_IMAGE
-        result = final_service.get(principal, project_id)
+        result = final_service.overview_state(principal, project_id)
         draft = drafts_service._artifact(principal, project_id, DRAFT_MANUSCRIPT)
         image = drafts_service._artifact(principal, project_id, FINAL_OVERVIEW_IMAGE)
         jobs = drafts_service.repository.list_project_jobs(principal.user_id, project_id,
             job_type="final.overview", limit=1)
-        return {**{key: result.get(key) for key in ("revision", "overview_figure_url", "overview_figure_exists", "overview_text")},
+        return {**result,
                 "history": final_service.overview_history(principal, project_id),
                 "job": _job_response(jobs[0]) if jobs else None,
-                "source_changed": bool(image and draft and image.metadata.get("source_draft_artifact_id") != draft.id)}
+                "source_changed": bool(image and (not draft or image.metadata.get("source_draft_artifact_id") != draft.id))}
 
     @router.post("/overview-jobs", status_code=status.HTTP_202_ACCEPTED)
     def generate_overview(project_id: str, payload: DraftOverviewGenerateRequest = DraftOverviewGenerateRequest(), idempotency_key: str = Header(default="", alias="Idempotency-Key"),
@@ -163,6 +163,31 @@ def build_drafts_router(
                 "revision_mode": "dialogue_batch", "paragraphs": current["paragraphs"],
                 "manuscript_snapshot": manuscript_snapshot(current["paragraphs"], current.get("sections", [])),
                 "message": "Analyze and improve this paragraph using the available original-source evidence. Keep the original when no defensible improvement is needed."}))
+
+    @router.post("/dialogue-batch/{job_id}/resume", status_code=status.HTTP_202_ACCEPTED)
+    def resume_dialogue_batch(project_id: str, job_id: str,
+                              idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+                              principal: Principal = Depends(principal_dependency)):
+        from review_writer_api.errors import WorkflowConflict, WorkflowValidationError
+        source = job_service.status(principal, job_id)
+        if (source.project_id != project_id or source.job_type != "draft.optimize"
+                or source.payload.get("revision_mode") != "dialogue_batch"):
+            raise WorkflowValidationError("This is not a batch revision for the selected project.")
+        if source.status != "succeeded" or not any(
+                result.get("status") in {"failed", "skipped"}
+                for result in (source.result or {}).get("paragraph_results", {}).values()):
+            raise WorkflowConflict("This batch has no unfinished paragraphs to resume.")
+        current = drafts_service.get(principal, project_id)
+        if current["freshness"]["upstream_stale"]:
+            raise WorkflowConflict("The manuscript evidence changed. Start a new batch analysis.")
+        def identity(paragraph):
+            return paragraph.get("paragraph_key"), paragraph.get("paragraph_id"), paragraph.get("text_sha256")
+        if [identity(p) for p in current["paragraphs"]] != [identity(p) for p in source.payload.get("paragraphs", [])]:
+            raise WorkflowConflict("The saved manuscript changed. Start a new batch analysis.")
+        key = idempotency_key.strip() or str(uuid.uuid4())
+        return _job_response(job_service.submit(principal, scope="project", project_id=project_id,
+            job_type="draft.optimize", idempotency_key=key, payload=source.payload,
+            retry_of_job_id=source.id))
     @router.get("")
     def get_draft(
         project_id: str,

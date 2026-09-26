@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import Callable
+
 from review_writer_core.taxonomy import (
     TaxonomyConfigurationError,
     validate_selectable_taxonomy_profile,
@@ -13,19 +16,50 @@ from .repositories import (
     ProjectTaxonomyUpdateResult,
 )
 from .security import Permission, Principal
+from .errors import WorkflowConflict, WorkflowNotFound
+from .workflow_contracts import COMPLETED_STAGE_STATUSES, current_user_stage
 
 
 class ProjectService:
     def __init__(self, repository: ProjectRepository):
         self.repository = repository
+        self.outline_ready_for_chapter_planning: Callable[[Principal, str], bool] | None = None
+
+    def _visible_stage(self, principal: Principal, record: ProjectRecord) -> ProjectRecord:
+        """Project navigation follows the saved outline, not Matrix's review flag."""
+        states = record.stage_states
+        if not states:
+            return record
+        statuses = {
+            stage: str(value.get("status", "pending") if isinstance(value, dict) else value or "pending")
+            for stage, value in states.items()
+        }
+        discovery_done = statuses.get("discovery", "pending").lower() in COMPLETED_STAGE_STATUSES
+        outline_ready: bool | None = None
+        if discovery_done and self.outline_ready_for_chapter_planning is not None:
+            try:
+                outline_ready = self.outline_ready_for_chapter_planning(principal, record.project_id)
+            except (WorkflowConflict, WorkflowNotFound, OSError, ValueError):
+                # A damaged artifact must not break the entire project list.
+                outline_ready = False
+            # The saved outline, not Matrix's internal approval flag, owns the 03/04 boundary.
+            statuses["matrix"] = "approved" if outline_ready else "review"
+        completed = record.completed_stages
+        if outline_ready is not None:
+            completed = tuple(stage for stage in completed if stage != "matrix")
+            if outline_ready:
+                insert_at = completed.index("discovery") + 1 if "discovery" in completed else 0
+                completed = (*completed[:insert_at], "matrix", *completed[insert_at:])
+        return replace(record, current_stage=current_user_stage(statuses), completed_stages=completed)
 
     def list_projects(self, principal: Principal) -> list[ProjectRecord]:
         principal.require(Permission.PROJECT_READ)
-        return self.repository.list_for_user(principal.user_id)
+        return [self._visible_stage(principal, record) for record in self.repository.list_for_user(principal.user_id)]
 
     def get_project(self, principal: Principal, project_id: str) -> ProjectRecord | None:
         principal.require(Permission.PROJECT_READ)
-        return self.repository.get_for_user(principal.user_id, project_id)
+        record = self.repository.get_for_user(principal.user_id, project_id)
+        return self._visible_stage(principal, record) if record else None
 
     def create_project(
         self,
@@ -88,34 +122,3 @@ class ProjectService:
     def restore_project(self, principal: Principal, project_id: str) -> bool:
         principal.require(Permission.PROJECT_DELETE)
         return self.repository.restore_for_user(principal.user_id, project_id)
-
-    def update_project_topic(
-        self,
-        principal: Principal,
-        project_id: str,
-        *,
-        topic: str,
-        taxonomy_profile: str,
-    ) -> ProjectRecord:
-        principal.require(Permission.PROJECT_WRITE)
-        return self.repository.update_topic_for_user(
-            principal.user_id,
-            project_id,
-            topic=topic,
-            taxonomy_profile=taxonomy_profile,
-        )
-
-    def sync_stage_states(
-        self,
-        principal: Principal,
-        project_id: str,
-        stage_states: dict[str, object],
-        current_stage: str,
-    ) -> None:
-        principal.require(Permission.PROJECT_WRITE)
-        self.repository.sync_stage_states_for_user(
-            principal.user_id,
-            project_id,
-            stage_states,
-            current_stage,
-        )

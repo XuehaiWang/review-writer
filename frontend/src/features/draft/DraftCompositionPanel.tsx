@@ -12,7 +12,7 @@ export type SynthesisJob = { id: string; status: string; error_message?: string;
 type Candidate = { candidate_id: string; paragraph_key: string; original_text: string; candidate_text: string; status: string; base_text_sha256?: string; created_at?: string };
 type StructureReference = { kind: "molecule" | "reaction"; label: string; name: string; smiles: string; role: string; conditions: string };
 type ImageVersion = { id: string; url: string; title: string; instructions: string; created_at: string; selected: boolean; source_changed: boolean; structure_references?: StructureReference[] };
-type Overview = { revision: number; overview_figure_exists?: boolean; overview_text?: { title?: string }; history?: ImageVersion[]; job?: SynthesisJob };
+type Overview = { revision: number; draft_available?: boolean; draft_source_stale?: boolean; overview_figure_exists?: boolean; overview_text?: { title?: string }; history?: ImageVersion[]; job?: SynthesisJob };
 type Kind = "abstract" | "conclusion" | "overview";
 
 export function DraftSynthesisStatus({ job, assembling = false }: { job?: SynthesisJob | null; assembling?: boolean }) {
@@ -31,8 +31,9 @@ export function DraftSynthesisStatus({ job, assembling = false }: { job?: Synthe
   </section>;
 }
 
-export function DraftCompositionPanel({ projectId, markdown, job, refresh, candidates = [], captionOpen = 0 }: {
+export function DraftCompositionPanel({ projectId, markdown, job, refresh, candidates = [], captionOpen = 0, requireSaved }: {
   projectId: string; markdown: string; job?: SynthesisJob | null; refresh: () => Promise<unknown>;
+  requireSaved?: () => void;
   candidates?: Candidate[]; captionOpen?: number;
 }) {
   const { text } = useUiText();
@@ -71,12 +72,14 @@ export function DraftCompositionPanel({ projectId, markdown, job, refresh, candi
     { method: "POST", headers: { "Idempotency-Key": newIdempotencyKey() }, ...(target === "overview" ? jsonBody({ instructions, structure_references: references }) : {}) }),
     onSuccess: async () => { setNotice(["已提交，结果会保留；保存后才更新正文。", "Submitted. Results are retained; save to update the manuscript."]); await refresh(); await overview.refetch(); } });
   const save = useMutation({ mutationFn: async () => {
+    requireSaved?.();
     if (kind === "overview") return apiRequest(base + "/overview/adopt", { method: "POST", ...jsonBody({ image_id: imageId, title: caption, revision: overview.data!.revision }) });
     if (!candidate) throw new Error(text("请先生成候选", "Generate a candidate first"));
     return apiRequest(base + "/synthesis-candidates/" + candidate.candidate_id + "/accept", { method: "POST", ...jsonBody({ text: edited, base_text_sha256: candidate.base_text_sha256 }) });
   }, onSuccess: async () => { setNotice(["已保存到正文", "Saved to manuscript"]); await refresh(); await overview.refetch(); } });
   const active = kind === "overview" ? overview.data?.job : job;
   const busy = run.isPending || jobIsActive(active?.status);
+  const overviewBlocked = kind === "overview" && (overview.isPending || !!overview.error || overview.data?.draft_available === false || !!overview.data?.draft_source_stale);
   const cancel = useMutation({ mutationFn: () => apiRequest("/api/v1/jobs/" + active!.id + "/cancel", { method: "POST" }), onSuccess: async () => { await refresh(); await overview.refetch(); } });
   const label = kind === "overview" ? text("总览图", "Overview") : kind === "abstract" ? text("摘要", "Abstract") : text("结论", "Conclusion");
   const open = (target: Kind) => { setNotice(""); run.reset(); save.reset(); cancel.reset(); setKind(target); if (target === "overview" && !selected && history[0]) chooseImage(history.find(v => v.selected) || history[0]); };
@@ -84,11 +87,12 @@ export function DraftCompositionPanel({ projectId, markdown, job, refresh, candi
     if (candidate && edited !== candidate.candidate_text && !window.confirm(text("尚有未保存的文字修改，确定关闭？", "Discard unsaved text edits and close?"))) return;
     setKind(null);
   };
-  return <section className="draft-composition-panel">
-    <div className="button-row" aria-label={text("完善正文", "Complete manuscript")}>
-      <button className="button button-secondary" disabled={!markdown} onClick={() => open("abstract")}>{text("摘要", "Abstract")}</button>
-      <button className="button button-secondary" disabled={!markdown} onClick={() => open("conclusion")}>{text("结论", "Conclusion")}</button>
-      <button className="button button-secondary" disabled={!markdown} onClick={() => open("overview")}>{text("总览图", "Overview")}</button>
+  return <section className="draft-composition-panel" aria-label={text("完善正文", "Complete manuscript")}>
+    <div className="draft-composition-actions" role="group" aria-label={text("完善正文", "Complete manuscript")}>
+      <span>{text("内容完善", "Refine content")}</span>
+      <button className="button button-quiet" type="button" disabled={!markdown} onClick={() => open("abstract")}>{text("摘要", "Abstract")}</button>
+      <button className="button button-quiet" type="button" disabled={!markdown} onClick={() => open("conclusion")}>{text("结论", "Conclusion")}</button>
+      <button className="button button-quiet" type="button" disabled={!markdown} onClick={() => open("overview")}>{text("总览图", "Overview")}</button>
     </div>
     <dialog ref={dialog} className="draft-composition-dialog" aria-label={label} onCancel={e => { e.preventDefault(); close(); }}>
       {kind && <><header><h2>{label}</h2><button className="button button-quiet" onClick={close}>{text("关闭", "Close")}</button></header>
@@ -116,13 +120,15 @@ export function DraftCompositionPanel({ projectId, markdown, job, refresh, candi
             {selected?.source_changed && <p role="status">{text("这张图基于较早正文生成，请确认仍适用后保存。", "This image uses an earlier manuscript. Confirm it still applies before saving.")}</p>}
             <h3>{text("生成历史", "Generation history")}</h3><div className="draft-overview-history">{history.map(v => <button key={v.id} className={v.id === imageId ? "selected" : ""} aria-pressed={v.id === imageId} onClick={() => chooseImage(v)}><img src={v.url} alt="" /><span>{v.created_at ? new Date(v.created_at).toLocaleString(uiLocale()) : text("历史版本", "Version")}{v.selected ? text(" · 正文使用中", " · In manuscript") : ""}</span></button>)}</div>
           </aside></div> : <div className="draft-synthesis-comparison"><section><h3>{text("当前正文", "Current text")}</h3><MarkdownView content={currentSection(markdown, kind)} /></section><label>{text("新结果（可直接编辑）", "New result (editable)")}<textarea rows={16} value={edited} onChange={e => setEdited(e.target.value)} disabled={!candidate} placeholder={text("点击生成，结果将在这里显示", "Generate to preview a new version here")} /></label></div>}
+        {kind === "overview" && overview.data?.draft_available === false && <p className="message message-warning">{text("请先在图像阶段确认配图，再到初稿组装完整正文。已有总览图历史仍可查看。", "Confirm figures in the Images stage, then assemble the draft. Existing overview history remains available.")}</p>}
+        {kind === "overview" && overview.data?.draft_source_stale && <p className="message message-warning">{text("正文或配图来源已更新，已有内容仍保留。请确认配图并在初稿点击“根据上游重新组装”，同步后再生成或保存总览图。", "Manuscript or figure sources changed; existing content is retained. Confirm figures and reassemble the draft from upstream before generating or saving an overview.")}</p>}
         {busy && <p role="status">{active?.status === "queued" ? text("排队中…", "Queued…") : text("正在生成，完成后将在此展示…", "Generating; the result will appear here…")}</p>}
         {notice && <p role="status">{notice}</p>}
         {active?.status === "failed" && <p role="alert">{active.error_message}</p>}
         {(run.error || save.error || overview.error || cancel.error) && <p role="alert"><LocalizedError error={(run.error || save.error || overview.error || cancel.error)} /></p>}
-        <footer><button className="button button-secondary" disabled={busy || save.isPending} onClick={() => run.mutate(kind)}>{text("生成新版本", "Generate new version")}</button>
+        <footer><button className="button button-secondary" disabled={busy || save.isPending || overviewBlocked} onClick={() => run.mutate(kind)}>{text("生成新版本", "Generate new version")}</button>
           {jobIsActive(active?.status) && <button className="button button-quiet" disabled={cancel.isPending} onClick={() => cancel.mutate()}>{text("取消生成", "Cancel generation")}</button>}
-          <button className="button button-primary" disabled={save.isPending || (kind === "overview" ? !selected || !caption.trim() : !candidate || !edited.trim())} onClick={() => save.mutate()}>{save.isPending ? text("保存中…", "Saving…") : text("保存到正文", "Save to manuscript")}</button></footer>
+          <button className="button button-primary" disabled={save.isPending || overviewBlocked || (kind === "overview" ? !selected || !caption.trim() : !candidate || !edited.trim())} onClick={() => save.mutate()}>{save.isPending ? text("保存中…", "Saving…") : text("保存到正文", "Save to manuscript")}</button></footer>
       </>}
     </dialog>
   </section>;

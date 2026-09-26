@@ -14,9 +14,9 @@ type AppShellProps = {
 
 const workflowLinks: Array<{ href: string; label: MessageKey; stage: string; hintZh: string; hintEn: string }> = [
   { href: "/library", label: "library", stage: "01", hintZh: "文献准备", hintEn: "Sources" },
-  { href: "/discovery", label: "discovery", stage: "02", hintZh: "检索筛选", hintEn: "Screening" },
-  { href: "/planning?tab=matrix", label: "planning", stage: "03", hintZh: "分析规划", hintEn: "Planning" },
-  { href: "/sections", label: "sections", stage: "04", hintZh: "章节生成", hintEn: "Sections" },
+  { href: "/discovery", label: "discovery", stage: "02", hintZh: "文献筛选", hintEn: "Literature screening" },
+  { href: "/planning?view=reading", label: "planning", stage: "03", hintZh: "文献与大纲", hintEn: "Papers & outline" },
+  { href: "/sections", label: "sections", stage: "04", hintZh: "规划与正文", hintEn: "Plan & drafts" },
   { href: "/images?tab=review", label: "images", stage: "05", hintZh: "选图重绘", hintEn: "Figures" },
   { href: "/draft", label: "draft", stage: "06", hintZh: "编辑优化", hintEn: "Revision" },
   { href: "/final", label: "final", stage: "07", hintZh: "审计导出", hintEn: "Release" },

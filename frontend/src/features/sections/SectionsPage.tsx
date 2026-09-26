@@ -1,7 +1,7 @@
 import { sectionErrorMessage } from "./sectionErrorMessage";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { ApiError, apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
 import { queryKeys } from "../../api/queries";
@@ -17,6 +17,9 @@ import { SectionJobProgress } from "./SectionJobProgress";
 import { SectionStageActions } from "./SectionStageActions";
 import { findSectionJobForDisplay, replaceSectionJobSnapshot } from "./sectionJobResume";
 import { sectionReadinessLabel } from "./sectionStatusLabels";
+import type { PlanningPayload } from "../planning/PlanningPage";
+import { ChapterPlanningWorkspace } from "../planning/ChapterPlanningWorkspace";
+import { usePlanningCompletionSync } from "../planning/usePlanningCompletionSync";
 
 type SectionTask = Record<string, unknown> & {
   section_id?: string;
@@ -238,7 +241,7 @@ function taskPaperSummary(task: SectionTask | undefined, text: (zh: string, en: 
 
 function TaskRequirements({ task, paperLabels }: { task?: SectionTask; paperLabels: Map<string, string> }) {
   const { text } = useUiText();
-  if (!task) return <div className="empty-state">{text("当前Blueprint没有可用的章节写作任务。", "The current blueprint has no section-writing tasks.")}</div>;
+  if (!task) return <div className="empty-state">{text("当前章节规划没有可用的写作任务。", "The current chapter plan has no section-writing tasks.")}</div>;
   const figures = Array.isArray(task.figure_need) ? task.figure_need : task.figure_need ? [task.figure_need] : [];
   const scientificClaims = task.scientific_claims || [];
   const writingRequirements = (task.writing_requirements || [])
@@ -324,12 +327,25 @@ export function SectionsPage() {
   const [tab, setTab] = useState<WorkspaceTab>("section");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [jobId, setJobId] = useState("");
+  const [planningView, setPlanningView] = useState<"auto" | "plan" | "drafts">("auto");
+  const planning = useQuery({
+    queryKey: ["planning", project?.project_id || ""],
+    queryFn: () => apiRequest<PlanningPayload>(`/api/v1/projects/${encodeURIComponent(project!.project_id)}/planning`),
+    enabled: Boolean(project),
+    refetchInterval: (query) => (query.state.data?.blueprint_jobs || []).some((job) => jobIsActive(job.status)) ? 1500 : false,
+  });
+  usePlanningCompletionSync(project?.project_id || "", planning.data?.blueprint_jobs || [], planning.refetch);
+  const activeBlueprintApproved = Boolean(planning.data?.active_blueprint_approved ?? planning.data?.blueprint_approved);
+  const showPlanning = planningView === "plan" || (planningView !== "drafts" && (
+    !activeBlueprintApproved || Boolean(planning.data?.blueprint_candidate_pending)
+  ));
+  const showDrafts = activeBlueprintApproved && !showPlanning;
   const sections = useQuery({
     queryKey: ["sections", project?.project_id || ""],
     queryFn: () => apiRequest<SectionsPayload>(`/api/v1/projects/${encodeURIComponent(project!.project_id)}/sections`),
-    enabled: Boolean(project),
+    enabled: Boolean(project) && showDrafts,
   });
-  const payload = sections.data;
+  const payload = showDrafts ? sections.data : undefined;
   const taskOnly = Boolean(payload?.handoff.drafts_stale || !payload?.section_files.length);
   const tasks = payload?.section_tasks || [];
   const files = payload?.section_files || [];
@@ -367,7 +383,12 @@ export function SectionsPage() {
 
   useEffect(() => {
     setJobId("");
+    setPlanningView("auto");
   }, [project?.project_id]);
+
+  useEffect(() => {
+    if (planning.data?.blueprint_approved) setPlanningView("auto");
+  }, [planning.data?.blueprint_approved]);
 
   useEffect(() => {
     if (!payload) return;
@@ -469,11 +490,17 @@ export function SectionsPage() {
 
   return (
     <main className="workspace page-container workspace-page sections-page">
-      <div className="workspace-heading"><div><p className="eyebrow">{text("阶段 4 · 章节撰写", "Stage 4 · Section drafting")}</p><h1>{text("章节撰写", "Section drafting")}</h1><p className="muted">{text("使用当前Blueprint任务生成章节，并在进入图像阶段前人工审核。", "Generate sections from the current blueprint tasks and review them before entering the figure stage.")}</p></div><ProjectSelector /></div>
-      {sections.isPending ? <div className="empty-state">{text("正在加载章节产物…", "Loading section artifacts…")}</div> : null}
-      {sections.error ? <ErrorState error={sections.error} onRetry={() => sections.refetch()} /> : null}
+      <div className="workspace-heading"><div><p className="eyebrow">{text("阶段 4 · 章节写作", "Stage 4 · Chapter writing")}</p><h1>{text("章节规划与正文", "Chapter planning and drafts")}</h1><p className="muted">{text("先确认章节规划，再单独启动章节正文生成；已有结果和检查点会继续保留。", "Confirm the chapter plan, then start drafting separately. Existing results and checkpoints are preserved.")}</p></div><ProjectSelector /></div>
+      {planning.isPending ? <div className="empty-state">{text("正在加载章节写作状态…", "Loading chapter-writing status…")}</div> : null}
+      {planning.error instanceof ApiError && planning.error.status === 404 && planning.error.code === "WORKFLOW_NOT_FOUND" && project
+        ? <p className="message message-info">{text("当前项目尚未准备好论文证据和大纲，请先完成阶段 03。", "This project does not have the paper evidence and outline needed for chapter planning. Complete stage 03 first.")} <Link to={`/planning?view=reading&project=${encodeURIComponent(project.project_id)}`}>{text("返回文献分析", "Go to paper analysis")}</Link></p>
+        : planning.error ? <ErrorState error={planning.error} onRetry={() => planning.refetch()} /> : null}
+      {planning.data && activeBlueprintApproved ? <div className="stage-action-bar"><div><strong>{showPlanning ? text("已有已确认章节", "Confirmed chapters remain available") : text("当前章节正文", "Current chapter drafts")}</strong><p>{showPlanning ? text("正在查看新的或待调整的章节规划；已确认的正文仍保留。", "You are reviewing a new or revised chapter plan; the confirmed drafts remain available.") : planning.data.blueprint_candidate_pending ? text("另有待确认的新规划，当前仍显示已确认版本。", "A new plan is awaiting confirmation; this is the confirmed version.") : text("可返回章节规划查看依据或生成修订版本。", "Review the plan or generate a revised version when needed.")}</p></div><button className="button button-secondary" type="button" onClick={() => setPlanningView(showPlanning ? "drafts" : "plan")}>{showPlanning ? text("查看已确认正文", "View confirmed drafts") : text("查看／调整章节规划", "Review or revise chapter plan")}</button></div> : null}
+      {planning.data && project && showPlanning ? <ChapterPlanningWorkspace payload={planning.data} projectId={project.project_id} refresh={() => planning.refetch({ throwOnError: true })} /> : null}
+      {showDrafts && sections.isPending ? <div className="empty-state">{text("正在加载章节产物…", "Loading section artifacts…")}</div> : null}
+      {showDrafts && sections.error ? <ErrorState error={sections.error} onRetry={() => sections.refetch()} /> : null}
       {payload ? <>
-        {payload.handoff.drafts_stale ? <p className="message message-warning">{text("Blueprint已更新，旧章节草稿保留在磁盘但不会作为当前流程内容显示。请重新生成。", "The blueprint changed. Old section drafts remain on disk but are not current workflow content. Regenerate them.")}</p> : null}
+        {payload.handoff.drafts_stale ? <p className="message message-warning">{text("章节规划已更新，旧章节草稿仍保留，但不会作为当前正文显示。请按需重新生成。", "The chapter plan changed. Old drafts are retained but are not current manuscript content. Regenerate as needed.")}</p> : null}
         {currentJob && currentJobActive && tab !== "report" ? <div className="section-live-progress-banner"><SectionJobProgress job={currentJob} /></div> : null}
         <div className="sections-grid-react">
           <section className="pane section-list-react"><div className="pane-head"><div><span className="step-label">{text("章节", "Sections")}</span><h2>{tasks.length} {text("个章节", "sections")}</h2></div></div><div className="paper-list">{(taskOnly ? tasks : files).map((item) => {

@@ -3,7 +3,7 @@ import { useUiText } from "../i18n/useUiText";
 
 const stages: Record<string, [string, string, string, string]> = {
   discovery: ["检索", "Discovery", "请先检索并确认本项目使用的论文。", "Search and confirm the papers for this project first."],
-  planning: ["分析与大纲", "Analysis & outline", "请先完成大纲选择与章节规划。", "Complete outline selection and chapter planning first."],
+  planning: ["分析与大纲", "Analysis & outline", "请先选择并保存大纲。", "Choose and save an outline first."],
   sections: ["章节", "Sections", "请先生成章节草稿。", "Generate the section drafts first."],
   images: ["图像", "Images", "请先完成当前所需的图像选择。", "Complete the required figure selection first."],
   draft: ["初稿", "Draft", "请先准备初稿并完成所需确认。", "Prepare the draft and complete its required confirmation first."],

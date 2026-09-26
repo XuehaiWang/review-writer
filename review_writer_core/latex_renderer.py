@@ -10,7 +10,7 @@ from typing import Any
 from .chemical_typography import normalize_chemical_typography
 
 
-TEMPLATE_VERSION = "modern-survey/9"
+TEMPLATE_VERSION = "modern-survey/10"
 SUPPORTED_PROFILES = frozenset({"en", "zh-CN"})
 
 

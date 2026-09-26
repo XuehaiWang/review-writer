@@ -24,6 +24,65 @@ from review_writer_core.manuscript_state import build_manuscript_state
 
 
 class FinalV1Tests(NativeFigureApiTestCase):
+    def test_final_without_overview_ignores_orphan_caption_and_keeps_first_figure(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from review_writer_core.workflow.artifacts import FINAL_OVERVIEW_TEXT
+        service = self.app.state.final_service
+        read = service._read_json
+        def with_orphan(principal, project_id, logical):
+            if logical == FINAL_OVERVIEW_TEXT:
+                return {"title": "Please write a review", "labels": ["layout_type"]}, SimpleNamespace(id="orphan-caption")
+            return read(principal, project_id, logical)
+        with TestClient(self.app) as client:
+            self.prepare_approved_draft(client)
+            with patch.object(service, "_read_json", side_effect=with_orphan):
+                built = client.post(f"/api/v1/projects/{self.project_id}/final/build")
+                self.assertEqual(200, built.status_code, built.text)
+                final = client.get(f"/api/v1/projects/{self.project_id}/final").json()
+                self.assertTrue(final["final_current"])
+                self.assertFalse(final["overview_figure_exists"])
+                self.assertNotIn("![Overview figure]", final["final_draft_md"])
+                self.assertIn("Figure 1", final["final_draft_md"])
+
+    def test_absent_overview_has_no_semantic_blockers(self):
+        report = FinalService._overview_semantic_report(
+            {"title": "Please write a review", "labels": ["layout_type"]},
+            {}, {}, overview_present=False)
+        self.assertEqual("not_applicable", report["status"])
+        self.assertEqual([], report["issues"])
+
+    def test_overview_state_is_readable_before_draft_and_is_user_scoped(self):
+        from unittest.mock import patch
+        with TestClient(self.app) as client:
+            with patch.object(self.app.state.final_service, "get", side_effect=AssertionError("must not load final")):
+                response = client.get(f"/api/v1/projects/{self.project_id}/draft/overview")
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertFalse(response.json()["overview_figure_exists"])
+            self.assertFalse(response.json()["draft_available"])
+            self.assertEqual([], response.json()["history"])
+            self.current = self.second
+            self.assertEqual(404, client.get(f"/api/v1/projects/{self.project_id}/draft/overview").status_code)
+
+    def test_figure_selection_preserves_draft_but_invalidates_approval(self):
+        with TestClient(self.app) as client:
+            self.prepare_approved_draft(client)
+            before = self.app.state.drafts_service.get(self.first, self.project_id)
+            state = self.app.state.drafts_service.repository.get_stage_state(self.first.user_id, self.project_id, "figure-review")
+            saved = client.put(f"/api/v1/projects/{self.project_id}/figures/review/P001",
+                json={"revision": state.revision, "candidate_index": 0, "review_note": "changed"},
+                headers=self.headers("keep-prose-on-figure-edit"))
+            self.assertEqual(200, saved.status_code, saved.text)
+            after = self.app.state.drafts_service.get(self.first, self.project_id)
+            self.assertEqual(before["draft_artifact_id"], after["draft_artifact_id"])
+            self.assertEqual(before["first_draft_md"], after["first_draft_md"])
+            self.assertTrue(after["freshness"]["upstream_stale"])
+            self.assertFalse(after["draft_approval_current"])
+            overview = client.get(f"/api/v1/projects/{self.project_id}/draft/overview")
+            self.assertEqual(200, overview.status_code)
+            self.assertTrue(overview.json()["draft_available"])
+            self.assertTrue(overview.json()["draft_source_stale"])
+
     def test_final_figure_review_is_versioned_and_preserves_draft(self):
         from review_writer_api.domain_services.final_figures import figure_blocks
         with TestClient(self.app) as client:

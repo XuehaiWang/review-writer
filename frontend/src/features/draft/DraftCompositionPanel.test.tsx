@@ -33,6 +33,19 @@ it("prevents duplicate generation while the server synthesis job is active", asy
 });
 
 vi.mock("../../api/client", async original => ({ ...await original<object>(), apiRequest: vi.fn() }));
+it("keeps overview history visible and explains changed draft sources", async () => {
+  usePreferences.getState().setLanguage("en");
+  vi.mocked(apiRequest).mockResolvedValue({ revision: 3, draft_available: true, draft_source_stale: true,
+    history: [{ id: "image", url: "/image.png", title: "Old overview", instructions: "", created_at: "", selected: true, source_changed: true }] });
+  render(<QueryClientProvider client={new QueryClient()}><DraftCompositionPanel projectId="p" markdown="# Title" refresh={vi.fn()} /></QueryClientProvider>);
+  await waitFor(() => expect(apiRequest).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+  await waitFor(() => expect(screen.getByText(/Manuscript or figure sources changed/)).toBeInTheDocument());
+  expect(screen.getByRole("img", { name: "Overview preview" })).toHaveAttribute("src", "/image.png");
+  expect(screen.getByRole("button", { name: "Generate new version" })).toBeDisabled();
+  expect(vi.mocked(apiRequest).mock.calls.every(([, options]) => !options?.method)).toBe(true);
+});
+
 it("submits optional reaction references without adopting the image", async () => {
   usePreferences.getState().setLanguage("en");
   vi.mocked(apiRequest).mockResolvedValue({ revision: 0, history: [] });

@@ -121,15 +121,39 @@ def author_revision_findings(errors, warnings, before, after):
 def validate_revision_response(response, evidence):
     if not isinstance(response, dict) or not str(response.get("reply") or "").strip():
         raise ValueError("The model did not return an explanation for this paragraph.")
-    refs = {str(span.get("ref") or "") for paper in evidence.get("evidence") or []
-            for span in paper.get("original_passages") or []}
-    returned = response.get("source_refs") or []
-    if not isinstance(returned, list) or any(not isinstance(ref, str) or not ref or ref not in refs for ref in returned):
+    if revision_source_refs_need_repair(response, evidence):
         raise ValueError("The model cited an unknown source passage; the candidate was not saved.")
     candidate = response.get("candidate_text")
     if candidate is not None and not isinstance(candidate, str):
         raise ValueError("The model returned an invalid candidate paragraph.")
     return str(candidate or "").strip()
+
+
+def revision_source_refs_need_repair(response, evidence):
+    """Detect model-supplied IDs that are not original-source passage refs."""
+    if not isinstance(response, dict):
+        return False
+    refs = {str(span.get("ref") or "") for paper in evidence.get("evidence") or []
+            for span in paper.get("original_passages") or []}
+    returned = response.get("source_refs") or []
+    return not isinstance(returned, list) or any(
+        not isinstance(ref, str) or not ref or ref not in refs for ref in returned)
+
+
+def revision_source_ref_repair_prompt(response, evidence):
+    """Ask for citation identity repair only, without changing the proposed prose."""
+    passages = [{"ref": str(span.get("ref") or ""), "text": str(span.get("text") or "")}
+                for paper in evidence.get("evidence") or []
+                for span in paper.get("original_passages") or [] if span.get("ref")]
+    return (
+        "The prior revision used source_refs that are not original-source passage refs. "
+        "Select only exact ref values from the original passages below that directly support "
+        "the proposed candidate. Paragraph IDs, fact-card IDs, paper IDs and chunk IDs are "
+        "not passage refs. Do not rewrite the candidate or infer support from manuscript text. "
+        "Return JSON {source_refs: [exact ref values]}; use [] if no passage supports the candidate.\n"
+        + json.dumps({"reply": response.get("reply"), "candidate_text": response.get("candidate_text"),
+                      "passages": passages}, ensure_ascii=False)
+    )
 
 
 def revision_sources(refs, evidence):

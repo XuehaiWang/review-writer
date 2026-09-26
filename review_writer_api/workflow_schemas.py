@@ -213,7 +213,7 @@ class DraftTextSaveRequest(BaseModel):
 
 class DraftParagraphSaveRequest(BaseModel):
     revision: StrictInt = Field(ge=0)
-    text: StrictStr = Field(min_length=1, max_length=2_000_000)
+    text: StrictStr = Field(max_length=2_000_000)
     base_text_sha256: StrictStr = Field(default="", pattern=r"^$|^[a-f0-9]{64}$")
 
 

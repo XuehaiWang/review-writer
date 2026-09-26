@@ -12,17 +12,20 @@ export function clearDraftScratch() {
 
 // Mount the owner with a user/project/paragraph key. Never share scratch across identities.
 export function useDraftScratch<T>(key: string | undefined, initial: T) {
-  const [value, setValue] = useState<T>(() => {
+  const read = () => {
     try { const raw = key ? localStorage.getItem(DRAFT_SCRATCH_PREFIX + key) : null; return raw ? JSON.parse(raw) as T : initial; }
     catch { return initial; }
-  });
+  };
+  const [stored, setStored] = useState(() => ({ key, value: read() }));
+  const current = stored.key === key ? stored : { key, value: read() };
+  if (stored.key !== key) setStored(current);
   const [storageFailed, setStorageFailed] = useState(false);
   const update = (next: T) => {
-    setValue(next);
+    setStored({ key, value: next });
     if (!key) return;
     try { if (next === null || next === "") localStorage.removeItem(DRAFT_SCRATCH_PREFIX + key);
       else localStorage.setItem(DRAFT_SCRATCH_PREFIX + key, JSON.stringify(next)); }
     catch { setStorageFailed(true); }
   };
-  return [value, update, storageFailed] as const;
+  return [current.value, update, storageFailed] as const;
 }

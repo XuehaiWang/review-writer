@@ -26,7 +26,10 @@ from review_writer_api.workflow_contracts import (
     current_user_stage,
 )
 from review_writer_api.job_queues import INTERACTIVE_JOB_TYPES, queue_for_job_type
-from review_writer_core.workflow.artifacts import PERSISTENT_PUBLICATION_INPUTS
+from review_writer_core.workflow.artifacts import (
+    PERSISTENT_PUBLICATION_INPUTS, DRAFT_MANUSCRIPT,
+    DRAFT_INITIAL_MANUSCRIPT, DRAFT_REWRITE_OVERLAYS, FIGURE_MANIFEST,
+)
 from review_writer_api.job_lease_context import active_job_lease
 from review_writer_api.job_lifecycle import active_job_project, cancel_project_jobs
 from review_writer_api.workflow_models import (
@@ -365,43 +368,6 @@ class WorkflowRepository:
             )
             return self._stage_record(state) if state else None
 
-    def invalidate_downstream_after_discovery(self, user_id: str, project_id: str) -> None:
-        """Mark Discovery descendants stale while preserving their published artifacts."""
-        user_uuid = self._uuid(user_id, not_found_message="Project not found.")
-        project_uuid = self._uuid(project_id, not_found_message="Project not found.")
-        downstream = tuple(stage for stage in INTERNAL_STAGES if stage != "discovery")
-        with database_session(self.session_factory) as session:
-            project = session.scalar(select(Project).where(Project.id == project_uuid, Project.user_id == user_uuid, Project.deleted_at.is_(None)).with_for_update())
-            if project is None:
-                raise WorkflowNotFound("Project not found.")
-            states = session.scalars(
-                select(WorkflowStageState).where(
-                    WorkflowStageState.project_id == project_uuid,
-                    WorkflowStageState.stage_id.in_(downstream),
-                )
-            ).all()
-            now = utc_now()
-            stored_states = dict(project.stage_states or {})
-            for state in states:
-                state.status = "stale"
-                state.error_code = ""
-                state.error_message = ""
-                state.revision += 1
-                state.updated_at = now
-                stored_states[state.stage_id] = {
-                    "status": "stale",
-                    "revision": state.revision,
-                }
-            project.stage_states = stored_states
-            project.current_stage = current_user_stage(
-                {
-                    stage_id: value.get("status", "pending")
-                    if isinstance(value, dict)
-                    else str(value)
-                    for stage_id, value in stored_states.items()
-                }
-            )
-            project.updated_at = now
 
     def replace_discovery_atomically(
         self,
@@ -1300,6 +1266,17 @@ class WorkflowRepository:
                     "revision": row.revision,
                 }
             if invalidate_stages:
+                # A figure edit invalidates approval, not the user's prose.
+                # Keep editable content visible; freshness still prevents stale
+                # input from being silently approved or used for publication.
+                preserve = PERSISTENT_PUBLICATION_INPUTS
+                if stage_id in {"figure-review", "figures"}:
+                    preserve = (*preserve, DRAFT_MANUSCRIPT,
+                                DRAFT_INITIAL_MANUSCRIPT, DRAFT_REWRITE_OVERLAYS)
+                if stage_id == "figure-review":
+                    # Selection changes are reconciled per source image by
+                    # FiguresService; unrelated redraws remain usable.
+                    preserve = (*preserve, FIGURE_MANIFEST)
                 artifact_owner_stage = case(
                     *(
                         (
@@ -1313,7 +1290,7 @@ class WorkflowRepository:
                 derived_artifacts = select(WorkflowArtifact.id).where(
                     WorkflowArtifact.project_id == project_uuid,
                     artifact_owner_stage.in_(invalidate_stages),
-                    WorkflowArtifact.logical_name.not_in(PERSISTENT_PUBLICATION_INPUTS),
+                    WorkflowArtifact.logical_name.not_in(preserve),
                 )
                 session.execute(
                     delete(WorkflowCurrentArtifact).where(
@@ -1328,14 +1305,14 @@ class WorkflowRepository:
                     )
                 ).all()
                 for stale in stale_states:
-                    stale.status = "pending"
+                    stale.status = "stale" if stale.stage_id == "draft" and stage_id in {"figure-review", "figures"} else "pending"
                     stale.current_run_id = None
                     stale.error_code = ""
                     stale.error_message = ""
                     stale.revision += 1
                     stale.updated_at = now
                     stored[stale.stage_id] = {
-                        "status": "pending",
+                        "status": stale.status,
                         "revision": stale.revision,
                     }
             project.stage_states = stored
@@ -1404,7 +1381,7 @@ class WorkflowRepository:
 
         try:
             with database_session(self.session_factory) as session:
-                if normalized_scope == "library" and normalized_job_type == "library.upload" and requested_payload.get("batch_id"):
+                if normalized_scope == "library" and normalized_job_type in {"library.upload", "library.archive"} and requested_payload.get("batch_id"):
                     batch_uuid = self._uuid(requested_payload["batch_id"], not_found_message="Invalid upload batch.")
                     self._lock_upload_owner(session, user_uuid)
                     if session.get(LibraryUploadBatchCancellation, (user_uuid, batch_uuid)):
@@ -2636,6 +2613,21 @@ class WorkflowRepository:
         if not result.rowcount:
             raise WorkflowNotFound("User not found.")
 
+    def upload_batch_cancelled(self, user_id: str, batch_id: str) -> bool:
+        with database_session(self.session_factory) as session:
+            return session.get(LibraryUploadBatchCancellation, (
+                self._uuid(user_id, not_found_message="User not found."),
+                self._uuid(batch_id, not_found_message="Invalid upload batch."),
+            )) is not None
+
+    def archive_upload_keys(self, user_id: str, archive_id: str) -> set[str]:
+        with database_session(self.session_factory) as session:
+            return set(session.scalars(select(WorkflowJob.idempotency_key).where(
+                WorkflowJob.user_id == self._uuid(user_id, not_found_message="User not found."),
+                WorkflowJob.scope == "library", WorkflowJob.job_type == "library.upload",
+                WorkflowJob.payload_json["archive_id"].as_string() == archive_id,
+            )).all())
+
     def cancel_remaining_uploads(self, user_id: str, batch_id: str) -> list[JobRecord]:
         user_uuid = self._uuid(user_id, not_found_message="User not found.")
         batch_uuid = self._uuid(batch_id, not_found_message="Invalid upload batch.")
@@ -2648,7 +2640,7 @@ class WorkflowRepository:
                 WorkflowJob.user_id == user_uuid,
                 WorkflowJob.scope == "library",
                 WorkflowJob.project_id.is_(None),
-                WorkflowJob.job_type == "library.upload",
+                WorkflowJob.job_type.in_(("library.upload", "library.archive")),
                 WorkflowJob.payload_json["batch_id"].as_string() == str(batch_uuid),
             )
             # Atomic queued-only update: a worker that already claimed a file
@@ -2662,11 +2654,11 @@ class WorkflowRepository:
     def job_cancellation_requested(self, job_id: str) -> bool:
         job_uuid = self._uuid(job_id, not_found_message="Job not found.")
         with database_session(self.session_factory) as session:
-            job = session.scalar(
-                select(WorkflowJob).where(
+            job = session.execute(
+                select(WorkflowJob.status, WorkflowJob.cancellation_requested).where(
                     WorkflowJob.id == job_uuid, active_job_project()
                 )
-            )
+            ).first()
             # Reusing a deleted project slug can cascade-delete the old job.
             # Absence must stop its subprocess just like explicit cancellation.
             return (

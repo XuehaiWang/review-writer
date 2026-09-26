@@ -4,10 +4,12 @@ from unittest.mock import Mock
 import pytest
 
 from review_writer_api.domain_services.base import ArtifactBackedService
+from review_writer_api.domain_services.discovery import DiscoveryService
+from review_writer_api.domain_services.planning import PlanningService
 from review_writer_api.domain_services.sections import SectionsService
 from review_writer_api.domain_services.figures import FiguresService, PAPER_CANDIDATES
 from review_writer_api.domain_services.drafts import DraftsService
-from review_writer_api.errors import ArtifactFileMissing, WorkflowStageNotReady
+from review_writer_api.errors import ArtifactFileMissing, WorkflowStageNotReady, WorkflowNotFound
 from review_writer_core.workflow.artifacts import BLUEPRINT, MATRIX, DISCOVERY_REVIEW, SECTION_DRAFTS
 
 
@@ -28,12 +30,41 @@ def test_missing_output_points_to_first_unfinished_prerequisite():
     assert error.value.payload()["error"]["code"] == "WORKFLOW_STAGE_NOT_READY"
 
 
+@pytest.mark.parametrize("service_type,reader,artifact", [
+    (DiscoveryService, "_read_current", DISCOVERY_REVIEW),
+    (PlanningService, "_read_json", MATRIX),
+])
+def test_first_use_readers_share_the_empty_state_contract(service_type, reader, artifact):
+    service = service_type.__new__(service_type)
+    service.repository = service_with({}).repository
+    service._owned_project = Mock()
+    with pytest.raises(WorkflowStageNotReady) as error:
+        getattr(service, reader)(SimpleNamespace(user_id="u"), "p", artifact)
+    assert error.value.details["next_stage"] == "discovery"
+    service._owned_project.assert_called_once()
+
+
+def test_local_assembly_does_not_require_a_model_but_writing_does():
+    from review_writer_api.model_gateway import TEXT_GATEWAY_JOB_TYPES
+    assert "final.build" not in TEXT_GATEWAY_JOB_TYPES
+    assert "sections.generate" in TEXT_GATEWAY_JOB_TYPES
+
+
+def test_missing_project_is_not_disguised_as_an_empty_stage():
+    service = DiscoveryService.__new__(DiscoveryService)
+    service.repository = Mock()
+    service._owned_project = Mock(side_effect=WorkflowNotFound("Project not found."))
+    with pytest.raises(WorkflowNotFound):
+        service._read_current(SimpleNamespace(user_id="u"), "missing", DISCOVERY_REVIEW)
+    service.repository.get_current_artifact.assert_not_called()
+
+
 def test_running_planning_job_is_visible_without_starting_work():
     service = service_with({DISCOVERY_REVIEW: object(), MATRIX: object()})
     service.repository.list_project_jobs.return_value = [SimpleNamespace(
         job_type="planning.blueprint", status="running", progress_current=2, progress_total=5)]
     error = service._stage_not_ready(SimpleNamespace(user_id="u"), "p", BLUEPRINT)
-    assert error.details["next_stage"] == "planning"
+    assert error.details["next_stage"] == "sections"
     assert error.details["active_job"]["current"] == 2
 
 
@@ -52,7 +83,7 @@ def test_sections_reader_uses_the_same_not_ready_contract():
     principal = SimpleNamespace(user_id="u", require=Mock())
     with pytest.raises(WorkflowStageNotReady) as error:
         sections._read_json_artifact(principal, "p", BLUEPRINT)
-    assert error.value.details["next_stage"] == "planning"
+    assert error.value.details["next_stage"] == "sections"
 
 
 @pytest.mark.parametrize("entrypoint", ["get_review", "get"])

@@ -6,7 +6,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, status
+from fastapi import APIRouter, Depends, Header, Query, status
 
 from review_writer_api.domain_services.discovery import DiscoveryService
 from review_writer_api.domain_services.planning import PlanningService
@@ -107,6 +107,14 @@ def build_discovery_router(
         principal: Principal = Depends(principal_dependency),
     ) -> dict[str, Any]:
         return discovery_service.get(principal, project_id)
+
+    @router.get("/fulltext-check")
+    def check_fulltext(
+        project_id: str,
+        candidate_id: str = Query(min_length=1, max_length=2048),
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        return discovery_service.check_fulltext(principal, project_id, candidate_id)
 
     @router.put("")
     def save_discovery(

@@ -32,6 +32,12 @@ describe("SectionStageActions", () => {
   it("offers a fresh regeneration next to confirmation when drafts are current", () => {
     render(<SectionStageActions {...base} />);
     fireEvent.click(screen.getByRole("button", { name: "重新生成全部章节" }));
+    expect(base.onRegenerate).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "重新生成全部章节？" })).toHaveTextContent("后续图像、初稿和终稿可能需要更新");
+    fireEvent.click(screen.getByRole("button", { name: "保留当前内容" }));
+    expect(base.onRegenerate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "重新生成全部章节" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认重新生成" }));
     expect(base.onRegenerate).toHaveBeenCalledOnce();
     expect(screen.getByRole("button", { name: "确认并进入图像处理" })).toBeEnabled();
   });

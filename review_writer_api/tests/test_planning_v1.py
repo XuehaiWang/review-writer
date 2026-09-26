@@ -371,6 +371,7 @@ class PlanningV1Tests(unittest.TestCase):
             database_url=database_url,
             public_origin="http://testserver",
             credential_encryption_key=TEST_KEY,
+            text_provider_api_key="test-placeholder-not-a-real-key",
             hosted_workspace_root=root / "users",
         )
         self.app = create_app(
@@ -2937,9 +2938,9 @@ class PlanningV1Tests(unittest.TestCase):
     def test_planning_contract_exposes_composite_tabs(self) -> None:
         with TestClient(self.app) as client:
             payload = self.planning(client)
-        self.assertEqual(["matrix", "blueprint"], [tab["id"] for tab in payload["workspace"]["tabs"]])
-        self.assertEqual("文献矩阵", payload["workspace"]["tabs"][0]["labels"]["zh"])
-        self.assertEqual("Blueprint", payload["workspace"]["tabs"][1]["labels"]["en"])
+        self.assertEqual(["reading", "outline"], [tab["id"] for tab in payload["workspace"]["tabs"]])
+        self.assertEqual("文献分析", payload["workspace"]["tabs"][0]["labels"]["zh"])
+        self.assertEqual("Choose outline", payload["workspace"]["tabs"][1]["labels"]["en"])
 
     def test_planning_api_and_container_are_user_isolated(self) -> None:
         self.assertIs(

@@ -46,7 +46,7 @@ USER_STAGES = (
 COMPOSITE_STAGE_BY_INTERNAL_STAGE = {
     "discovery": "discovery",
     "matrix": "planning",
-    "blueprint": "planning",
+    "blueprint": "sections",
     "sections": "sections",
     "figure-review": "images",
     "figures": "images",

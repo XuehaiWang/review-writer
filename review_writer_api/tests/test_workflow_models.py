@@ -44,7 +44,7 @@ class WorkflowContractTests(unittest.TestCase):
 
         self.assertEqual("discovery", contracts.composite_stage("discovery"))
         self.assertEqual("planning", contracts.composite_stage("matrix"))
-        self.assertEqual("planning", contracts.composite_stage("blueprint"))
+        self.assertEqual("sections", contracts.composite_stage("blueprint"))
         self.assertEqual("images", contracts.composite_stage("figure-review"))
         self.assertEqual("images", contracts.composite_stage("figures"))
         self.assertEqual("final", contracts.composite_stage("final"))
@@ -60,6 +60,12 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(
             "planning",
             contracts.current_user_stage({"discovery": "completed", "matrix": "pending"}),
+        )
+        self.assertEqual(
+            "sections",
+            contracts.current_user_stage(
+                {"discovery": "completed", "matrix": "completed", "blueprint": "pending"}
+            ),
         )
         self.assertEqual(
             "sections",

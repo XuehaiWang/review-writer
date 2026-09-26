@@ -136,7 +136,7 @@ def _delegated_text_result(
                 raise _gateway_http_error(exc) from exc
             exc.close()
             snapshot = _recover_delegated_submission(base, token, request_key)
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
             # A lost submission response is not permission to create another
             # paid request. Query the original key; never repeat the POST.
             snapshot = _recover_delegated_submission(base, token, request_key)

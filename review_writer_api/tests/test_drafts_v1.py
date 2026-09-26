@@ -19,6 +19,54 @@ from review_writer_api.workflow_models import WorkflowApproval
 
 
 class DraftsV1Tests(NativeFigureApiTestCase):
+    def test_empty_paragraph_deletes_only_prose_and_preserves_history(self):
+        with TestClient(self.app) as client:
+            self.prepare_draft(client)
+            base = f"/api/v1/projects/{self.project_id}/draft"
+            before = client.get(base).json()
+            paragraph = before["paragraphs"][0]
+            url = base + "/paragraphs/" + paragraph["paragraph_id"]
+            payload = {"revision": before["revision"], "text": "", "base_text_sha256": "0" * 64}
+            self.assertEqual(409, client.put(url, json=payload).status_code)
+            payload["base_text_sha256"] = paragraph["text_sha256"]
+            saved = client.put(url, json=payload)
+            self.assertEqual(200, saved.status_code, saved.text)
+            after = client.get(base).json()
+            self.assertNotIn(paragraph["paragraph_id"], [p["paragraph_id"] for p in after["paragraphs"]])
+            self.assertEqual([p["paragraph_id"] for p in before["paragraphs"][1:]], [p["paragraph_id"] for p in after["paragraphs"]])
+            for line in before["first_draft_md"].splitlines():
+                if line.startswith(("![", "*Figure", "## References")):
+                    self.assertIn(line, after["first_draft_md"])
+            old = client.get(f"/api/v1/artifacts/{before['draft_artifact_id']}/content")
+            self.assertIn(paragraph["text"], old.text)
+            self.assertEqual(404, client.put(url, json=payload).status_code)
+
+    def test_figure_only_change_allows_manual_save_without_approving_stale_draft(self):
+        with TestClient(self.app) as client:
+            self.prepare_draft(client)
+            service = self.app.state.drafts_service
+            before = service.get(self.first, self.project_id)
+            state = service.repository.get_stage_state(self.first.user_id, self.project_id, "figure-review")
+            response = client.put(f"/api/v1/projects/{self.project_id}/figures/review/P001",
+                json={"revision": state.revision, "candidate_index": 0, "review_note": "change image"},
+                headers=self.headers("edit-figure-before-prose"))
+            self.assertEqual(200, response.status_code, response.text)
+            current = service.get(self.first, self.project_id)
+            self.assertTrue(current["freshness"]["upstream_stale"])
+            self.assertFalse(current["freshness"]["editing_blocked"])
+            paragraph = current["paragraphs"][0]
+            payload = {"text": paragraph["text"] + " Manual correction.", "revision": current["revision"],
+                       "base_text_sha256": paragraph["text_sha256"]}
+            url = f"/api/v1/projects/{self.project_id}/draft/paragraphs/{paragraph['paragraph_id']}"
+            saved = client.put(url, json=payload)
+            self.assertEqual(200, saved.status_code, saved.text)
+            after = service.get(self.first, self.project_id)
+            self.assertIn("Manual correction.", after["first_draft_md"])
+            self.assertTrue(after["freshness"]["upstream_stale"])
+            self.assertFalse(after["draft_approval_current"])
+            self.assertEqual(409, client.put(url, json=payload).status_code)
+            self.assertEqual(200, client.get(f"/api/v1/artifacts/{before['draft_artifact_id']}/content").status_code)
+
     def test_empty_draft_guides_to_figure_approval_before_auto_assembly(self):
         with TestClient(self.app) as client:
             response = client.get(f"/api/v1/projects/{self.project_id}/draft")

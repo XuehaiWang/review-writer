@@ -17,7 +17,7 @@ type SectionTurn = { id: string; status: string; message: string; action?: strin
   branch_id?: string; initial_artifact_id?: string; error_message?: string; result?: { paragraph_results?: Record<string, { paragraph_id: string; status: string; reason?: string }> } };
 type Candidate = DialogueCandidate & { batch_job_id?: string };
 
-export function SectionDialogue({ section, projectId, userId, revision, blocked, candidates, activeTask,
+export function SectionDialogue({ section, projectId, userId, blocked, candidates, activeTask,
   decisionPending, decide, refresh }: { section: DialogueSection; projectId: string; userId: string; revision: number;
   blocked: boolean; candidates: Candidate[]; activeTask?: { id: string; status: string };
   decisionPending: boolean; decide: (ids: string[], action: "accept" | "reject") => void; refresh: () => Promise<unknown> }) {
@@ -109,10 +109,10 @@ export function SectionDialogue({ section, projectId, userId, revision, blocked,
   return <section className="section-dialogue chapter-chat">
     <header className="chapter-chat-header">
       <div><span className="step-label">{section.section_id}</span><h2>{section.title}</h2></div>
-      <button type="button" className="button button-secondary" onClick={() => setShowVersions(true)}>{text("查看正文", "View text")}</button>
+      <button type="button" className="button button-secondary" onClick={() => setShowVersions(true)}>{text("章节版本", "Chapter versions")}</button>
     </header>
-    {showVersions ? <ChapterVersions section={section} projectId={projectId} userId={userId} revision={revision}
-      disabled={blocked || decisionPending || !!active || send.isPending} candidates={candidates} turns={allTurns} refresh={sync}
+    {showVersions ? <ChapterVersions section={section} projectId={projectId}
+      disabled={blocked || decisionPending || !!active || send.isPending} candidates={candidates} turns={allTurns}
       close={() => setShowVersions(false)} restart={artifactId => {
         if (section.paragraphs.some(p => hasDraftScratch(`${userId}:${projectId}:${p.paragraph_key}:manual`))) {
           setLocalError(["本章还有未保存的手动编辑，请先保存或取消。", "Save or cancel this chapter's manual edits first."]); return;

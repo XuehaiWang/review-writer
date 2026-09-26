@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
+import os
 from pathlib import Path
+import time
 from typing import Any
 
 from review_writer_core.model_gateway_client import call_json_model, gateway_configured
@@ -56,6 +59,55 @@ def literature_module():
     )
 
 
+def check_literature_candidate_access(module: Any, candidate: dict[str, Any], *, email: str) -> dict[str, Any]:
+    """Check lawful OA sources before offering a Library candidate for download.
+
+    A PDF header is only a preflight check; acquisition still resolves and
+    validates the complete file independently when the user selects it.
+    """
+    from review_writer_api.fulltext_probe import probe
+
+    checked_at = int(time.time())
+    try:
+        sources, attempts = module.resolve_pdf_sources(candidate, email=email, timeout=4)
+    except Exception:
+        return {"state": "unknown", "checked_at": checked_at, "source_found": False}
+    if not sources:
+        has_doi = bool(module.normalize_doi(candidate.get("doi")))
+        provider_failed = any(item.get("status") == "provider_error" for item in attempts)
+        catalog_closed = any(
+            item.get("provider") == "openalex" and item.get("oa_status") == "closed"
+            for item in attempts
+        )
+        return {
+            "state": "unknown" if not has_doi or (provider_failed and not catalog_closed) else "not_found",
+            "checked_at": checked_at,
+            "source_found": False,
+        }
+
+    uncertain = restricted = False
+    for source in sources[:3]:
+        try:
+            result = probe({"pdf_url": source["pdf_url"]})
+        except Exception:
+            result = {"state": "unknown"}
+        if result.get("state") == "available":
+            return {
+                "state": "available",
+                "checked_at": checked_at,
+                "source_found": True,
+                "provider": str(source.get("provider") or ""),
+            }
+        uncertain |= result.get("state") == "unknown"
+        restricted |= result.get("state") == "restricted"
+    return {
+        "state": "unknown" if uncertain else "restricted" if restricted else "not_found",
+        "checked_at": checked_at,
+        "source_found": True,
+        "provider": str(sources[0].get("provider") or ""),
+    }
+
+
 def search(args: argparse.Namespace) -> int:
     module = literature_module()
     module.load_dotenv_if_present(args.review_root)
@@ -66,6 +118,12 @@ def search(args: argparse.Namespace) -> int:
         limit=args.limit,
         mailto=args.mailto,
     )
+    email = args.mailto or os.environ.get("UNPAYWALL_EMAIL") or os.environ.get("CROSSREF_MAILTO") or ""
+    if candidates:
+        with ThreadPoolExecutor(max_workers=min(6, len(candidates)), thread_name_prefix="literature-access") as pool:
+            availability = list(pool.map(lambda row: check_literature_candidate_access(module, row, email=email), candidates))
+        for candidate, access in zip(candidates, availability):
+            candidate["availability"] = access
     _write(args.output, {"candidates": candidates, "candidate_count": len(candidates)})
     return 0
 

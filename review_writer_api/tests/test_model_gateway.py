@@ -56,6 +56,100 @@ def mock_stream_reply(client, reply_mock):
 
 
 class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
+    def test_live_check_does_not_select_large_job_payload(self):
+        from sqlalchemy import event
+        queries = []
+        engine = self.sessions.kw["bind"]
+        def capture(conn, cursor, statement, parameters, context, executemany):
+            queries.append(statement)
+        claims = self.service.verify_task_token(self.token())
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            self.service._validate_live_job(claims)
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+        self.assertTrue(any("workflow_jobs" in q for q in queries))
+        self.assertFalse(any("payload_json" in q or "result_json" in q for q in queries))
+
+    def test_worker_cancellation_check_is_slim_and_detects_deleted_project(self):
+        from sqlalchemy import event
+        from review_writer_api.workflow_repository import WorkflowRepository
+        repository = WorkflowRepository(self.sessions)
+        engine = self.sessions.kw["bind"]
+        queries = []
+        def capture(conn, cursor, statement, parameters, context, executemany):
+            queries.append(statement)
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            self.assertFalse(repository.job_cancellation_requested(str(self.job_id)))
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+        self.assertFalse(any("payload_json" in q or "result_json" in q for q in queries))
+        with database_session(self.sessions) as session:
+            session.get(Project, self.project_id).deleted_at = utc_now()
+        self.assertTrue(repository.job_cancellation_requested(str(self.job_id)))
+
+    async def test_stream_live_validation_runs_outside_event_loop(self):
+        import threading
+        loop_thread = threading.get_ident()
+        checked_threads = []
+        raw = 'data: {"choices":[{"delta":{"content":"{}"}}]}\n\ndata: [DONE]\n\n'
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request:
+                httpx.Response(200, headers={"content-type": "text/event-stream"}, content=raw))) as client:
+            with mock.patch.object(self.service, "_provider_client", client), \
+                 mock.patch.object(self.service, "_validate_live_job", side_effect=lambda claims: checked_threads.append(threading.get_ident())):
+                result = await self.service._stream_text_response("https://test.example/v1", {}, {}, str(uuid.uuid4()), "chat-completions", object())
+        self.assertEqual("{}", result["choices"][0]["message"]["content"])
+        self.assertTrue(checked_threads)
+        self.assertNotIn(loop_thread, checked_threads)
+
+    async def test_total_stream_deadline_does_not_resend_unknown_request(self):
+        from review_writer_api.model_gateway import GatewayProviderError
+        timeout = asyncio.timeout
+        async def slow(*args):
+            await asyncio.sleep(1)
+        with mock.patch.object(self.service, "_stream_text_response", side_effect=slow) as stream, \
+             mock.patch("review_writer_api.model_gateway.asyncio.timeout", side_effect=lambda seconds: timeout(0.01)):
+            with self.assertRaises(GatewayProviderError) as raised:
+                await self.service._provider_call(tier=resolve_model_tier(None, self.sessions),
+                    prompt="brief", idempotency_key="deadline", stream=True, stage="overview-visual-brief")
+        self.assertEqual(1, stream.call_count)
+        self.assertEqual(422, raised.exception.status_code)
+        self.assertEqual("outcome_unknown", raised.exception.gateway_detail["details"]["category"])
+
+    async def test_reasoning_stream_diagnostics_do_not_store_reasoning_text(self):
+        events = [{"choices": [{"delta": {"reasoning_content": "private thought"}}]},
+                  {"choices": [{"delta": {"content": '{"reply":"Done"}'}}]}]
+        raw = ': heartbeat\n\n' + ''.join('data: ' + json.dumps(e) + '\n\n' for e in events) + 'data: [DONE]\n\n'
+        tier = replace(resolve_model_tier(None, self.sessions), wire_api="chat-completions")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request:
+                httpx.Response(200, headers={"content-type": "text/event-stream"}, content=raw))) as client:
+            with mock.patch.object(self.service, "_provider_client", client), mock.patch.object(self.service, "_claims_model", return_value=tier):
+                await self.service.complete(self.token(), request_key="reasoning-diagnostics", stage="test", prompt="reply")
+        with database_session(self.sessions) as session:
+            row = session.scalar(select(AIModelRequest))
+            diag = row.response_json["stream_diagnostics"]
+            self.assertEqual(1, diag["reasoning_events"])
+            self.assertEqual(1, diag["heartbeats"])
+            self.assertEqual(1, diag["chunks"])
+            self.assertIsNotNone(diag["first_reasoning_ms"])
+            self.assertNotIn("private thought", json.dumps(row.response_json))
+
+    async def test_overview_does_not_starve_reasoning_models_with_a_small_shared_budget(self):
+        for wire, field in (("chat-completions", "max_tokens"), ("responses", "max_output_tokens")):
+            captured = []
+            def provider(request):
+                captured.append(json.loads(request.content))
+                return httpx.Response(200, json={"output_text": "{}"})
+            tier = replace(resolve_model_tier(None, self.sessions), wire_api=wire)
+            async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
+                with mock.patch.object(self.service, "_provider_client", client):
+                    for stage in ("overview-visual-brief", "section-writing"):
+                        await self.service._provider_call(tier=tier, prompt="Brief", idempotency_key=stage, stage=stage)
+            self.assertNotIn(field, captured[0])
+            self.assertNotIn(field, captured[1])
+            self.assertNotIn("thinking", captured[0])
+
     def test_standalone_matrix_can_delegate_without_changing_the_parent_model(self) -> None:
         with database_session(self.sessions) as session:
             session.get(WorkflowJob, self.job_id).job_type = "matrix.enrich"

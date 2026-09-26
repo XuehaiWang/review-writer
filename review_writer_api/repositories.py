@@ -94,21 +94,11 @@ class ProjectRepository(Protocol):
         confirm_downstream_invalidation: bool = False,
     ) -> ProjectTaxonomyUpdateResult: ...
 
-    def update_topic_for_user(
-        self, user_id: str, project_id: str, *, topic: str, taxonomy_profile: str
-    ) -> ProjectRecord: ...
 
     def delete_for_user(self, user_id: str, project_id: str) -> bool: ...
 
     def restore_for_user(self, user_id: str, project_id: str) -> bool: ...
 
-    def sync_stage_states_for_user(
-        self,
-        user_id: str,
-        project_id: str,
-        stage_states: dict[str, object],
-        current_stage: str,
-    ) -> None: ...
 
 
 class LocalProjectRepository:
@@ -248,38 +238,7 @@ class LocalProjectRepository:
     def restore_for_user(self, user_id: str, project_id: str) -> bool:
         return self.get_for_user(user_id, project_id) is not None
 
-    def update_topic_for_user(
-        self, user_id: str, project_id: str, *, topic: str, taxonomy_profile: str
-    ) -> ProjectRecord:
-        if user_id != self.user_id:
-            raise ProjectOperationError("Project owner does not match the local workspace user.")
-        try:
-            safe_project_id = validate_project_id(project_id)
-        except WorkspaceConfigurationError as exc:
-            raise ProjectOperationError(str(exc)) from exc
-        if not WorkspacePaths(self.review_root).project(safe_project_id).is_dir():
-            raise ProjectOperationError("Project not found.")
-        save_project_config(
-            self.review_root,
-            safe_project_id,
-            topic=str(topic or "").strip(),
-            taxonomy_profile=validate_taxonomy_profile(
-                taxonomy_profile or DEFAULT_TAXONOMY_PROFILE
-            ),
-        )
-        payload = project_summary(self.review_root, safe_project_id)
-        if payload is None:
-            raise ProjectOperationError("Project not found.")
-        return self._record(payload)
 
-    def sync_stage_states_for_user(
-        self,
-        user_id: str,
-        project_id: str,
-        stage_states: dict[str, object],
-        current_stage: str,
-    ) -> None:
-        return None
 
 
 class HostedProjectRepository:
@@ -527,35 +486,3 @@ class HostedProjectRepository:
             project.deleted_at = None
             project.updated_at = utc_now()
             return True
-
-    def update_topic_for_user(
-        self, user_id: str, project_id: str, *, topic: str, taxonomy_profile: str
-    ) -> ProjectRecord:
-        with database_session(self.session_factory) as session:
-            project = self._owned_project(session, user_id, project_id)
-            if project is None:
-                raise ProjectOperationError("Project not found.")
-            project.topic = str(topic or "").strip()
-            project.taxonomy_profile = validate_taxonomy_profile(
-                taxonomy_profile or project.taxonomy_profile or DEFAULT_TAXONOMY_PROFILE
-            )
-            project.current_stage = "discovery"
-            project.stage_states = {}
-            project.updated_at = utc_now()
-            session.flush()
-            return self._record(project)
-
-    def sync_stage_states_for_user(
-        self,
-        user_id: str,
-        project_id: str,
-        stage_states: dict[str, object],
-        current_stage: str,
-    ) -> None:
-        with database_session(self.session_factory) as session:
-            project = self._owned_project(session, user_id, project_id)
-            if project is None:
-                raise ProjectOperationError("Project not found.")
-            project.stage_states = dict(stage_states)
-            project.current_stage = current_stage or current_stage_from_states(stage_states)
-            project.updated_at = utc_now()

@@ -44,8 +44,8 @@ export function TopicRecommendationPending({ projectId, state, refresh }: {
   }, [active]);
   const elapsed = state?.job?.created_at ? Math.max(0, Math.floor((now - Date.parse(state.job.created_at)) / 1000)) : 0;
   const progress = state?.model_progress;
-  return <article className="topic-outline-recommendation">
-    <div className="topic-outline-recommendation-copy"><h3>{text("主题驱动的组合大纲", "Topic-guided hybrid outline")}</h3>
+  return <article className="outline-card topic-outline-recommendation">
+    <div className="topic-outline-recommendation-copy"><span className="outline-card-icon">★</span><h3>{text("主题推荐", "Topic recommendation")}</h3>
       <p role="status">{active ? text("正在根据主题和入选论文推荐章节结构，无需等待事实卡全部完成。", "Recommending an outline from your topic and selected papers; complete fact cards are not required.")
         : text("推荐尚未就绪。系统会分析主题和论文内容，不使用固定模板替代推荐，也不会覆盖已保存的大纲。", "The recommendation is not ready. It uses your topic and papers, not a fixed template, and will not overwrite your saved outline.")}</p>
       {active ? <progress aria-label={text("正在推荐大纲", "Generating outline recommendation")} /> : null}

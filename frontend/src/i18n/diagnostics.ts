@@ -6,8 +6,20 @@ export function diagnosticText(error: unknown, language: Language): string {
   const code = typeof error === "object" && error ? String((error as { code?: string }).code || "") : "";
   const value = `${code} ${raw}`;
   const rules: [RegExp, string, string][] = [
+    [/Encrypted ZIP/i, "不支持加密 ZIP，请先解压，再选择文件夹或 PDF 导入。", "Encrypted ZIPs are not supported. Extract them and import the folder or PDFs."],
+    [/No PDF files were found in the ZIP/i, "压缩包内没有 PDF，嵌套压缩包不会展开。", "No PDFs found; nested archives are not expanded."],
+    [/ZIP.*(unsafe path|linked file|compression ratio|safety limits|unsupported format)/i, "压缩包未通过安全检查，请先在本机解压，再选择文件夹导入。", "ZIP safety checks failed. Extract it locally and import the folder."],
+    [/Invalid or damaged ZIP/i, "ZIP 文件损坏或格式不受支持，请先解压后直接上传 PDF。", "The ZIP is damaged or unsupported. Extract and upload PDFs directly."],
+    [/ZIP files must be 256 MB/i, "ZIP 最大支持 256 MB，请拆分上传或选择文件夹。", "ZIP limit: 256 MB. Split the archive or import a folder."],
+    [/ZIP expanded size exceeds/i, "压缩包展开后超过 1 GB，请拆分后导入。", "Expanded ZIP exceeds 1 GB. Split it before importing."],
+    [/ZIP contains too many/i, "压缩包最多包含 1000 个条目、300 个 PDF，请拆分导入。", "ZIP limit: 1000 entries and 300 PDFs. Split the archive."],
+    [/ZIP collection timed out|ZIP entry exceeded/i, "压缩包处理超过大小或耗时限制，请拆分导入；已提交的论文不受影响。", "ZIP processing exceeded size or time limits. Split the archive; submitted papers are unaffected."],
+    [/ZIP is no longer available/i, "压缩包临时文件已清理，请重新上传，已有论文会自动去重。", "The temporary ZIP has been cleaned up. Upload it again; existing papers will be deduplicated."],
+    [/Each PDF must be 80 MB/i, "单个 PDF 不能超过 80 MB。", "Each PDF must be 80 MB or smaller."],
+    [/does not contain a PDF signature/i, "文件不是有效 PDF，请检查文件内容后重新上传。", "The file is not a valid PDF. Check it before uploading again."],
     [/QUERY_TRANSLATION_FAILED/, "未能生成英文检索词，本次检索未开始。请重试，或使用英文主题和关键词。", "English search terms could not be prepared. Search has not started. Retry or use an English topic and keywords."],
-    [/INSUFFICIENT_CREDIT|余额不足|额度不足|insufficient.credit/i, "余额不足，请补充余额后重试。", "Insufficient credit. Add credit and try again."],
+    [/INSUFFICIENT_CREDIT|余额不足|额度不足|insufficient.credit/i, "余额不足，请联系管理员补充额度后重试。已保存内容不会丢失。", "Insufficient credit. Ask an administrator to add credit, then retry. Saved work is retained."],
+    [/selected model.*(?:disabled|unavailable)|service connection is disabled/i, "所选文本模型暂不可用，请选择其他可用模型，或联系管理员恢复服务后重试。", "The selected text model is unavailable. Choose an available model or ask an administrator to restore the service."],
     [/原论文图号尚未确认/, "原论文图号尚未确认，请在图像阶段核对来源，不能直接标记通过。", "The source figure number is unconfirmed. Check the source in Images before confirming."],
     [/图片来源记录与当前稿件不一致/, "图片来源记录与当前稿件不一致，请在图像阶段核对后重新同步。", "Figure source records differ from the manuscript. Check Images and sync again."],
     [/原图来源不可用/, "原图来源不可用，请在图像阶段补全来源或重新选择图片。", "The original image is unavailable. Restore its source or select another image in Images."],

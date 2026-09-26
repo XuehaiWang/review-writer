@@ -12,6 +12,27 @@ def test_recommendation_keeps_domain_specific_questions_without_a_fixed_taxonomy
     assert result["topic_outline_intent"]["system_recommended"]
 
 
+def test_recommended_title_and_classification_label_use_the_same_normalized_title():
+    result = validate_recommendation({"organization": "Synthesis routes", "sections": [
+        {"title": "Copper-catalyzed   alkyne routes", "role": "body",
+         "question": "How do ligands affect selectivity and substrate scope?",
+         "paper_ids": ["P1"], "rationale": "Compare supported results and boundaries."},
+    ]}, [{"paper_id": "P1"}])
+    assert "## Copper-catalyzed alkyne routes" in result["outline_md"]
+    assert "Purpose: How do ligands affect selectivity and substrate scope?" in result["outline_md"]
+    assert result["topic_outline_intent"]["classification_contract"]["axes"][0]["partitions"][0]["label"] == "Copper-catalyzed alkyne routes"
+
+
+def test_duplicate_recommended_titles_keep_a_distinct_supported_question():
+    result = validate_recommendation({"organization": "Methods", "sections": [
+        {"title": "Catalysis", "role": "body", "question": "What is established for copper?", "paper_ids": ["P1"], "rationale": "Copper evidence."},
+        {"title": "Catalysis", "role": "body", "question": "What is established for palladium?", "paper_ids": ["P2"], "rationale": "Palladium evidence."},
+    ]}, [{"paper_id": "P1"}, {"paper_id": "P2"}])
+    assert "## What is established for palladium?" in result["outline_md"]
+    labels = [partition["label"] for partition in result["topic_outline_intent"]["classification_contract"]["axes"][0]["partitions"]]
+    assert labels == ["Catalysis", "What is established for palladium?"]
+
+
 def test_recommendation_rejects_unknown_papers_instead_of_inventing_a_template():
     with pytest.raises(ValueError):
         validate_recommendation({"sections": [{"title": "Results", "role": "body", "question": "Why?", "paper_ids": ["unknown"]}]}, [{"paper_id": "P1"}])

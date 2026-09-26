@@ -298,7 +298,7 @@ class PlanningService(
         )
         if artifact is None:
             if required:
-                raise WorkflowNotFound("Planning artifact not found.")
+                raise self._stage_not_ready(principal, project_id, logical_name)
             return None, None
         resolved = self.artifacts.resolve_owned_artifact(principal.user_id, artifact.id)
         try:
@@ -3522,6 +3522,41 @@ class PlanningService(
             )
         return text + "\n"
 
+    def _outline_is_current(self, principal, project_id, outline, outline_artifact, matrix, matrix_artifact) -> bool:
+        if not isinstance(outline, dict) or outline_artifact is None or matrix_artifact is None:
+            return False
+        source_id = str(outline.get("source_matrix_artifact_id") or "")
+        compatible_ids = {
+            str(artifact_id)
+            for artifact_id in matrix.get("outline_compatible_matrix_artifact_ids") or []
+            if str(artifact_id)
+        }
+        enrichment_source_id = str((matrix.get("fact_enrichment_summary") or {}).get("source_matrix_artifact_id") or "")
+        if enrichment_source_id:
+            compatible_ids.add(enrichment_source_id)
+        return bool(
+            source_id == matrix_artifact.id
+            or source_id in compatible_ids
+            or self._matrix_dependency_matches(principal, project_id, source_id, matrix_artifact)
+        )
+
+    def outline_ready_for_chapter_planning(self, principal: Principal, project_id: str) -> bool:
+        """Project-navigation readiness, independent of internal Matrix approval."""
+        principal.require(Permission.PROJECT_READ)
+        matrix_state = self.repository.get_stage_state(principal.user_id, project_id, "matrix")
+        if matrix_state is None or matrix_state.status in {"pending", "stale", "failed"}:
+            return False
+        outline, outline_artifact = self._read_json(principal, project_id, OUTLINE_LOGICAL_NAME, required=False)
+        if not isinstance(outline, dict) or not outline.get("outline_complete") or not str(outline.get("outline_md") or "").strip():
+            return False
+        matrix_artifact = self.repository.get_current_artifact(principal.user_id, project_id, MATRIX_LOGICAL_NAME)
+        if matrix_artifact is None:
+            return False
+        if str(outline.get("source_matrix_artifact_id") or "") == matrix_artifact.id:
+            return True
+        matrix, matrix_artifact = self._matrix(principal, project_id)
+        return self._outline_is_current(principal, project_id, outline, outline_artifact, matrix, matrix_artifact)
+
     def get(self, principal: Principal, project_id: str) -> dict[str, Any]:
         matrix, matrix_artifact = self._matrix(principal, project_id)
         refresh_matrix_fact_summary(matrix)
@@ -3551,7 +3586,7 @@ class PlanningService(
         blueprint_state = self.repository.get_stage_state(
             principal.user_id, project_id, "blueprint"
         )
-        active_blueprint_artifact = blueprint_artifact
+        active_blueprint, active_blueprint_artifact = blueprint, blueprint_artifact
         candidate, candidate_artifact = self.latest_blueprint_candidate(
             principal, project_id, blueprint_artifact, blueprint_state.revision if blueprint_state else 0
         )
@@ -3659,30 +3694,8 @@ class PlanningService(
             for candidate in all_reference_candidates
             if self._reference_candidate_is_isolated(candidate)
         ]
-        outline_compatible_ids = {
-            str(artifact_id)
-            for artifact_id in matrix.get("outline_compatible_matrix_artifact_ids") or []
-            if str(artifact_id)
-        }
-        # Backward compatibility for enrichment artifacts created before the
-        # explicit compatibility lineage was introduced.
-        enrichment_source_id = str(
-            (matrix.get("fact_enrichment_summary") or {}).get(
-                "source_matrix_artifact_id"
-            )
-            or ""
-        )
-        if enrichment_source_id:
-            outline_compatible_ids.add(enrichment_source_id)
-        outline_source_id = str((outline or {}).get("source_matrix_artifact_id") or "")
-        outline_current = bool(
-            outline is not None
-            and outline_artifact is not None
-            and (
-                outline_source_id == matrix_artifact.id
-                or outline_source_id in outline_compatible_ids
-                or self._matrix_dependency_matches(principal, project_id, outline_source_id, matrix_artifact)
-            )
+        outline_current = self._outline_is_current(
+            principal, project_id, outline, outline_artifact, matrix, matrix_artifact
         )
         blueprint_current = bool(
             blueprint is not None
@@ -3697,6 +3710,33 @@ class PlanningService(
         )
         if candidate_inputs is not None:
             blueprint_current = True
+        outline_ready_for_chapter_planning = bool(
+            outline_current
+            and matrix_state is not None
+            and matrix_state.status not in {"pending", "stale", "failed"}
+            and isinstance(outline, dict)
+            and outline.get("outline_complete")
+            and str(outline.get("outline_md") or "").strip()
+        )
+        blueprint_approved = bool(
+            candidate is None
+            and blueprint_current
+            and outline_ready_for_chapter_planning
+            and blueprint_state is not None
+            and blueprint_state.status == "approved"
+        )
+        active_blueprint_approved = bool(
+            active_blueprint_artifact is not None
+            and isinstance(active_blueprint, dict)
+            and outline_ready_for_chapter_planning
+            and outline_artifact is not None
+            and blueprint_state is not None
+            and blueprint_state.status == "approved"
+            and self._matrix_dependency_matches(
+                principal, project_id, active_blueprint.get("source_matrix_artifact_id"), matrix_artifact
+            )
+            and str(active_blueprint.get("source_outline_artifact_id") or "") == outline_artifact.id
+        )
         public_outline = deepcopy(outline) if isinstance(outline, dict) else None
         if public_outline is not None:
             public_outline["outline_md"] = _sanitize_outline_markdown_headings(
@@ -3809,6 +3849,7 @@ class PlanningService(
                 else None
             ),
             "outline_current": outline_current,
+            "outline_ready_for_chapter_planning": outline_ready_for_chapter_planning,
             "scope_contract": scope_contract,
             "scope_diagnostics": dict(
                 (blueprint or {}).get("scope_diagnostics")
@@ -3833,6 +3874,8 @@ class PlanningService(
             "blueprint_artifact_id": blueprint_artifact.id if blueprint_artifact else None,
             "blueprint_revision": blueprint_state.revision if blueprint_state else 0,
             "blueprint_current": blueprint_current,
+            "blueprint_approved": blueprint_approved,
+            "active_blueprint_approved": active_blueprint_approved,
             "blueprint_candidate_pending": candidate is not None,
             "blueprint_candidate_inputs": candidate_inputs,
             "active_blueprint_artifact_id": active_blueprint_artifact.id if active_blueprint_artifact else None,
@@ -3846,12 +3889,12 @@ class PlanningService(
                 "active_stage": "planning",
                 "tabs": [
                     {
-                        "id": "matrix",
-                        "labels": {"en": "Literature Matrix", "zh": "文献矩阵"},
+                        "id": "reading",
+                        "labels": {"en": "Paper analysis", "zh": "文献分析"},
                     },
                     {
-                        "id": "blueprint",
-                        "labels": {"en": "Blueprint", "zh": "章节蓝图"},
+                        "id": "outline",
+                        "labels": {"en": "Choose outline", "zh": "选择大纲"},
                     },
                 ],
             },

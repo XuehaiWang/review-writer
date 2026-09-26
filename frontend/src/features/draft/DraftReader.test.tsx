@@ -43,3 +43,18 @@ it("reading navigation does not open a discussion unless requested", async () =>
   expect(within(nav).getByRole("button", { name: "Discuss current chapter" })).toHaveClass("button-primary", "draft-discuss-button");
   expect(choose).toHaveBeenCalledWith("Methods");
 });
+
+it("marks only chapters with unsaved paragraphs and clears the dot after saving", async () => {
+  usePreferences.getState().setLanguage("en");
+  const manuscript = <article><h2>Introduction</h2><section data-paragraph-key="intro-p1">Intro text</section>
+    <h2>Methods</h2><h3>Catalysis</h3><section data-paragraph-key="method-p1">Method text</section></article>;
+  const { rerender } = render(<DraftReader content={content} dirtyParagraphKeys={new Set(["method-p1"])}>{manuscript}</DraftReader>);
+  const nav = screen.getByRole("navigation", { name: "Manuscript contents" });
+  const methods = await within(nav).findByRole("button", { name: "Methods · Unsaved changes" });
+  expect(methods).toHaveClass("draft-toc-pending");
+  expect(within(nav).getByRole("button", { name: "Catalysis · Unsaved changes" })).toHaveClass("draft-toc-pending");
+  expect(within(nav).getByRole("button", { name: "Introduction" })).not.toHaveClass("draft-toc-pending");
+  rerender(<DraftReader content={content} dirtyParagraphKeys={new Set()}>{manuscript}</DraftReader>);
+  await waitFor(() => expect(within(nav).getByRole("button", { name: "Methods" })).not.toHaveClass("draft-toc-pending"));
+  expect(within(nav).getByRole("button", { name: "Catalysis" })).not.toHaveClass("draft-toc-pending");
+});
